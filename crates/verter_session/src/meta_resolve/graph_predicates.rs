@@ -778,6 +778,16 @@ pub(crate) fn body_contains_recursive_ref_to_name(
                     stack.push(arg);
                 }
             }
+            // Carrier `type_args` are descended (args-only): a carrier's
+            // applied arguments can carry an `Opaque(RecursiveRef)` back-edge.
+            // The carrier head is not inspected (head resolution is separate).
+            SemanticNodeData::BareRef(_)
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::ImportType(_) => {
+                for &arg in data.carrier_type_args().iter() {
+                    stack.push(arg);
+                }
+            }
             _ => {}
         }
     }
@@ -960,7 +970,171 @@ pub(crate) fn collect_ref_identities_node(
                     stack.push(expr);
                 }
             }
+            // Carrier `type_args` are descended (args-only): a `BareRef` /
+            // `TypeOf` / `ImportType` carrier applies its arguments at the
+            // reference site, and an arg can carry a `DeclRef` /
+            // `InstantiationRef` (a declaration edge). The carrier HEAD is NOT
+            // collected here — a `BareRef` / `ImportType` head is unresolved
+            // (no decl identity) and a `TypeOf` head is a value root (no decl
+            // identity); head resolution is a separate concern.
+            SemanticNodeData::BareRef(_)
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::ImportType(_) => {
+                for &arg in data.carrier_type_args().iter() {
+                    stack.push(arg);
+                }
+            }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod carrier_descent_tests {
+    //! Carrier-arg descent for the cycle-BFS ref/recursive-ref walkers.
+    //!
+    //! `collect_ref_identities_node` and `body_contains_recursive_ref_to_name`
+    //! walk a lowered body's structural children to discover declaration
+    //! references and recursive-ref back-edges. A `BareRef` / `TypeOf` /
+    //! `ImportType` carrier applies its `type_args` at the reference site; those
+    //! args can themselves carry a `DeclRef` / `InstantiationRef` (a real
+    //! cross-decl edge) or an `Opaque(RecursiveRef)` (a cycle back-edge). The
+    //! walkers MUST descend `SemanticNodeData::carrier_type_args` so those
+    //! identities / back-edges are not silently dropped — a missed edge would
+    //! under-collect the cycle graph and let a genuine cycle escape the guard.
+    //!
+    //! Each test DIRECT-CONSTRUCTS a carrier (no head resolution — that is the
+    //! producer's job) and asserts only the DESCENT into its args. Discrimination
+    //! is the negative assertion: against the pre-descent `_ => {}` arm the
+    //! identity / back-edge is missed.
+
+    use std::sync::Arc;
+
+    use crate::semantic_query::{
+        DeclIdentity, NodeScopeId, QueryError, ScopeId, SemanticNodeData, SemanticNodeId,
+        ValueRootKey,
+    };
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    use super::{body_contains_recursive_ref_to_name, collect_ref_identities_node};
+
+    fn decl_identity(canonical: &str, name: &str) -> DeclIdentity {
+        DeclIdentity::from_scope(
+            &NodeScopeId::File {
+                canonical_id: Arc::from(canonical),
+                whole_hash: [7u8; 16],
+                local_scope: None,
+            },
+            Arc::from(name),
+        )
+    }
+
+    /// Build the three carriers, each wrapping `arg` as its single `type_args`
+    /// entry, so a single descent assertion covers all three carrier kinds.
+    fn carriers_wrapping(graph: &SemanticGraphStore, arg: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![arg].into_boxed_slice());
+        vec![
+            graph.intern_node(SemanticNodeData::new_bare_ref(
+                Arc::from("Foo"),
+                NodeScopeId::Global,
+                Arc::clone(&args),
+            )),
+            graph.intern_node(SemanticNodeData::new_typeof(
+                ValueRootKey {
+                    scope: ScopeId {
+                        canonical_id: Arc::from("/v.ts"),
+                        local_scope: None,
+                    },
+                    name: Arc::from("factory"),
+                },
+                Arc::from(Vec::new().into_boxed_slice()),
+                Arc::clone(&args),
+            )),
+            graph.intern_node(SemanticNodeData::new_import_type(
+                Arc::from("./m"),
+                Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+                Arc::clone(&args),
+                false,
+            )),
+        ]
+    }
+
+    // ── D1 — collect_ref_identities_node descends carrier args ──────────────
+    //
+    // A `DeclRef` (and an `InstantiationRef`) inside a carrier's `type_args` IS
+    // a declaration edge. `collect_ref_identities_node` must collect it.
+    // NEGATIVE: with the unchanged `_ => {}` arm the carrier is a leaf and the
+    // identity is missed (the collected set would be empty).
+    #[test]
+    fn collect_ref_identities_descends_carrier_args() {
+        let graph = SemanticGraphStore::new();
+        let inner_id = decl_identity("/dep.ts", "Inner");
+        let decl_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: inner_id.clone(),
+        });
+
+        for carrier in carriers_wrapping(&graph, decl_ref) {
+            let mut out: Vec<(DeclIdentity, bool)> = Vec::new();
+            collect_ref_identities_node(&graph, carrier, &mut out, 0);
+            assert!(
+                out.iter().any(|(id, _)| *id == inner_id),
+                "a DeclRef inside a carrier's type_args must be collected; got {out:?} for \
+                 carrier {:?}",
+                graph.node_data(carrier).as_deref()
+            );
+        }
+
+        // InstantiationRef arg variant — the base identity is collected with
+        // `has_type_args = true`.
+        let inst_base = decl_identity("/dep.ts", "Box");
+        let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: inst_base.clone(),
+            args: Arc::from(Vec::new().into_boxed_slice()),
+        });
+        for carrier in carriers_wrapping(&graph, inst_ref) {
+            let mut out: Vec<(DeclIdentity, bool)> = Vec::new();
+            collect_ref_identities_node(&graph, carrier, &mut out, 0);
+            assert!(
+                out.iter().any(|(id, _)| *id == inst_base),
+                "an InstantiationRef inside a carrier's type_args must be collected; got {out:?}"
+            );
+        }
+    }
+
+    // ── D2 — body_contains_recursive_ref_to_name descends carrier args ──────
+    //
+    // An `Opaque(RecursiveRef { name })` inside a carrier's `type_args` is a
+    // cycle back-edge to `name`. NEGATIVE: with the unchanged `_ => {}` arm the
+    // carrier is a leaf and the predicate returns `false`.
+    #[test]
+    fn body_contains_recursive_ref_descends_carrier_args() {
+        let graph = SemanticGraphStore::new();
+        let target: Arc<str> = Arc::from("SelfRef");
+        let rec = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+            name: Arc::clone(&target),
+        }));
+
+        for carrier in carriers_wrapping(&graph, rec) {
+            assert!(
+                body_contains_recursive_ref_to_name(&graph, carrier, &target, 0),
+                "a RecursiveRef back-edge inside a carrier's type_args must be found for `{}`; \
+                 carrier {:?}",
+                target,
+                graph.node_data(carrier).as_deref()
+            );
+        }
+
+        // NEGATIVE control: a carrier whose args contain a RecursiveRef to a
+        // DIFFERENT name does NOT match the target (proving the descent reads
+        // the actual name, not a blanket true).
+        let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+            name: Arc::from("OtherName"),
+        }));
+        for carrier in carriers_wrapping(&graph, other) {
+            assert!(
+                !body_contains_recursive_ref_to_name(&graph, carrier, &target, 0),
+                "a carrier whose args reference a DIFFERENT name must NOT match the target"
+            );
         }
     }
 }

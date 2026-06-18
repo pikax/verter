@@ -19318,3 +19318,74 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
          completeness, not the request-global suppress sticky"
     );
 }
+
+/// **Carrier-subject normalization runs INSIDE a fact tracer; a fenced serve
+/// during head resolution suppresses caching (cache-poisoning fix).** The
+/// carrier head resolution can serve `IndexedReady` / scan augmentations at the
+/// canonical query entry, BEFORE the build's own fact tracer. Pre-fix that ran
+/// UNTRACED, so a FENCED (ReturnOnly) serve consumed while resolving the head
+/// went unobserved and the rewrite's enclosing read could still be admitted warm
+/// — a result whose carrier rewrite depended on a served-without-publication
+/// artifact (cache poisoning). Post-fix the normalization runs inside a traced
+/// prelude whose `fenced_serve_observed` forces `cache_suppress`, which is OR-ed
+/// into the returned `CacheRead`.
+///
+/// Discriminating: arm the per-host fence knob so the prelude observes a fenced
+/// serve, then drive a `BareRef` carrier-subject `ProjectPath`. The returned
+/// `CacheRead.cache_suppress` MUST be `true`. The control (knob OFF) over the
+/// SAME query MUST be `false` — so the assertion discriminates the prelude's
+/// suppress wiring from ordinary (cacheable) carrier resolution. Pre-fix the
+/// untraced normalization could not observe the fence, so the read would NOT be
+/// suppressed.
+#[test]
+fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
+    let host = host();
+    upsert_ts(&host, "/dep.ts", "export type Foo = { a: string };\n");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let shallow = dispatch
+        .ctx
+        .shallow_file_state("/dep.ts")
+        .expect("/dep.ts must index");
+    let scope = crate::semantic_query::NodeScopeId::File {
+        canonical_id: Arc::from("/dep.ts"),
+        whole_hash: shallow.whole_hash,
+        local_scope: None,
+    };
+    let make_key = || {
+        let carrier = graph.intern_node_with_scope(
+            SemanticNodeData::new_bare_ref(
+                Arc::from("Foo"),
+                scope.clone(),
+                Arc::from(Vec::new().into_boxed_slice()),
+            ),
+            scope.clone(),
+        );
+        SemanticQueryKey::ProjectPath {
+            base: carrier,
+            path: Arc::from(Vec::new().into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
+        }
+    };
+
+    // CONTROL (knob OFF): an ordinary carrier-subject read is NOT suppressed.
+    let clean_read = dispatch.execute_read(make_key());
+    assert!(
+        !clean_read.cache_suppress,
+        "control (no fence): an ordinary carrier-subject read must NOT be cache-suppressed;          a false-positive here would make the fence assertion meaningless"
+    );
+
+    // FENCED (knob ON): the prelude observes a fenced serve → cache_suppress.
+    host.carrier_normalization_force_fence_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let fenced_read = dispatch.execute_read(make_key());
+    host.carrier_normalization_force_fence_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    assert!(
+        fenced_read.cache_suppress,
+        "a fenced serve observed by the traced carrier-normalization prelude MUST set          cache_suppress on the returned CacheRead (the rewrite computed from a          served-without-publication artifact must refuse warm admission). Pre-fix the untraced          normalization could not observe the fence and this read would NOT be suppressed."
+    );
+}

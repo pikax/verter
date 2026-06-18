@@ -378,16 +378,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 SemanticNodeData::TypeOf(_) => {
-                    // TODO(carrier-resolution): apply TypeOf.type_args
-                    // (apply_typeof_instantiation_args) once the structural
-                    // lowerer is wired; carriers are dormant today so no
-                    // non-empty type_args reaches here. See
-                    // docs/arch/parselower-design.md (demand-time
-                    // carrier-resolution debt note).
-                    // The enclosing evaluation's demand rides the key —
-                    // operator recursion never widens a deferred typeof
-                    // carrier past the caller's mode.
+                    // `typeof value.path<args>`: resolve the value root through
+                    // the single typeof query, PROJECT the carrier's dotted
+                    // path, THEN apply the carrier's instantiation `type_args`
+                    // to the projected signature (resolve → project → apply,
+                    // mirroring the eager lowering order). The enclosing
+                    // evaluation's demand rides the key — operator recursion
+                    // never widens a deferred typeof carrier past the caller's
+                    // mode.
                     let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+                    // Read the carrier args from the SAME borrow (owned copy so
+                    // the borrow is not held across the apply call).
+                    let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
                     let read = self
                         .execute_read(self.typeof_key_for(value_root.clone(), reduction_context));
                     result_is_partial |= read.result_is_partial;
@@ -396,7 +398,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         QueryResult::Value(id) => id,
                         _ => break self.opaque(QueryError::Miss),
                     };
-                    if path.is_empty() {
+                    let projected = if path.is_empty() {
                         root
                     } else {
                         let projection_path: Arc<[PathSegment]> = Arc::from(
@@ -418,6 +420,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             QueryResult::Value(id) => id,
                             _ => break self.opaque(QueryError::Miss),
                         }
+                    };
+                    // Instantiation expression (`typeof C.make<string>`): apply
+                    // the lowered type arguments to the projected generic
+                    // signature. An arity/shape mismatch composes an honest
+                    // `Opaque(Miss)` from `apply_typeof_instantiation_args`
+                    // AFTER the projection.
+                    if type_args.is_empty() {
+                        projected
+                    } else {
+                        self.apply_typeof_instantiation_args(projected, &type_args)
                     }
                 }
                 SemanticNodeData::Conditional {

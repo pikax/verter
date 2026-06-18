@@ -959,3 +959,113 @@ fn pathological_engine_state_promotion_recursion() {
          stack-overflow signature; got {dbg}"
     );
 }
+
+// ── context-different EAGER re-entry caught ONLY by the active-instantiate
+//    stack (a key-based dedup would miss it) ─────────────────────────────────
+//
+// `type CtxLoop<T> = { inner: CtxLoop<T> }` is a self-referential generic alias.
+// Instantiating `CtxLoop` under `Expanded` reduces its body; the body's
+// `inner: CtxLoop<T>` re-references the SAME `(/ctx.vue, CtxLoop)` identity, but
+// the re-entry rides a DIFFERENT reduction context than the outer call (the
+// intermediate member-value reduction demotes its mode per the path-precision
+// rule). The `Instantiate` query KEY therefore differs between the outer and
+// inner calls — so a purely key-based dedup table would NOT recognise the
+// re-entry. The engine's `push_instantiate_active` same-identity stack keys on
+// `(canonical, name)` ONLY (context-free), so it DOES catch the re-entry and
+// mints `Opaque(RecursiveRef)` at the back-edge.
+//
+// Discrimination: termination is the load-bearing signal — the 32 MiB worker
+// stack surfaces a guard regression (the active stack failing to catch a
+// context-different re-entry, leaving only key-dedup which misses it) as a join
+// error rather than a process crash. Orthogonally, the published `root` surface
+// is the SHALLOW `CtxLoop<string>` ref (the recursion is contained internally;
+// the outer prop publishes shallow per the shallow-by-default contract): a
+// forged whole-surface materialization or a leaked `RecursiveRef` sentinel would
+// surface a different published shape and fail the terminal assertion.
+const PATHOLOGICAL_CONTEXT_DIFFERENT_REENTRY_VUE: &str = r#"<script setup lang="ts">
+type CtxLoop<T> = { inner: CtxLoop<T> };
+defineProps<{ root: CtxLoop<string> }>();
+</script>
+<template><div /></template>
+"#;
+
+/// `pathological_context_different_reentry_active_stack`.
+///
+/// A self-referential generic alias whose inner re-reference re-enters the same
+/// `(canonical, name)` under a DIFFERENT reduction context. Only the
+/// context-free `instantiate_active` same-identity stack catches it — a
+/// key-based dedup keyed on the full `Instantiate` query key (which includes the
+/// context) would treat the inner re-entry as a fresh key and recurse. The test
+/// asserts bounded termination (the worker thread joins — NOT stack overflow)
+/// AND the exact published terminal: the shallow `CtxLoop<string>` ref (NOT an
+/// inlined recursive body, NOT a leaked `RecursiveRef`, NOT a forged
+/// whole-surface Value).
+#[test]
+fn pathological_context_different_reentry_active_stack() {
+    let host = build_hermetic_host(&[("/ctx.vue", PATHOLOGICAL_CONTEXT_DIFFERENT_REENTRY_VUE)]);
+    let host_for_thread = Arc::clone(&host);
+    let join = std::thread::Builder::new()
+        .name("pathological_context_different_reentry_active_stack".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || host_for_thread.get_component_meta("/ctx.vue"))
+        .expect("spawn worker thread for the context-different re-entry fixture");
+    let result = join.join().expect(
+        "worker thread MUST terminate without panic; a regression in the context-free \
+         `instantiate_active` same-identity stack (leaving only context-bearing key dedup, which \
+         a context-different re-entry slips past) would surface here as a join error",
+    );
+    let analysis = result.expect("get_component_meta must produce a result for CtxLoop");
+    // The outer `root` prop must surface (the cycle is contained at the inner
+    // `CtxLoop<T>` re-reference, not at the outermost prop).
+    let root_prop = analysis
+        .props
+        .iter()
+        .find(|p| p.name == "root")
+        .unwrap_or_else(|| {
+            panic!(
+                "outer `root` prop must surface even with the self-referential CtxLoop; \
+                 got props {:?}",
+                analysis.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+            )
+        });
+    // DISCRIMINATING TERMINAL. The published `root` surface is the SHALLOW
+    // carrier `CtxLoop<string>` — the bare `Ref { name: "CtxLoop",
+    // type_arguments: [string] }`, NOT an inlined `{ inner: CtxLoop<T> }` body.
+    // This is the shallow-by-default contract for a true recursive alias: its
+    // published surface stays the bare ref (the recursion is contained
+    // INTERNALLY at the active-stack back-edge, which mints `RecursiveRef`; the
+    // outer prop never demands the body, so it publishes shallow). Asserting the
+    // EXACT shape discriminates a forged result two ways: (1) a forged
+    // whole-surface materialization would inline the recursive body (an `Object`
+    // / structural shape) here and FAIL; (2) a leaked recursion sentinel would
+    // surface as `TypeExpr::RecursiveRef` (the materialiser stop node) and FAIL.
+    // The worker-thread `join().expect(...)` above is the orthogonal
+    // anti-OVERFLOW discriminator (a guard regression overflows the 32 MiB stack
+    // → join error); this assertion is the anti-FORGERY discriminator.
+    {
+        use verter_type_expr::{PrimitiveName, TypeExpr};
+        match &root_prop.type_expr {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                assert_eq!(
+                    name.as_ref(),
+                    "CtxLoop",
+                    "the published `root` surface must be the shallow `CtxLoop` ref"
+                );
+                assert_eq!(
+                    type_arguments.as_ref(),
+                    &[TypeExpr::Primitive(PrimitiveName::String)],
+                    "the shallow ref must carry the `<string>` type-argument verbatim, \
+                     not an inlined / dropped argument"
+                );
+            }
+            other => panic!(
+                "context-different re-entry must publish the shallow `CtxLoop<string>` ref \
+                 (a forged whole-surface materialization or a leaked `RecursiveRef` sentinel \
+                 would surface a different shape); got {other:?}"
+            ),
+        }
+    }
+}

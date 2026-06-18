@@ -126,6 +126,21 @@ pub(super) type InstantiateIdentity = (Arc<str>, Arc<str>);
 pub struct ProjectSemanticDispatch<'a> {
     pub(super) ctx: &'a dyn ResolverContext,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    /// Carrier-normalization visited set — the small PRE-MEMO cycle guard for
+    /// carrier-subject head resolution at the canonical query entry.
+    ///
+    /// When a `BareRef` / `ImportType` carrier is a query SUBJECT, the entry
+    /// resolves its head BEFORE cooperative-memo admission (so dedup keys on the
+    /// real semantic subject). That resolution is NOT yet behind a memo
+    /// sentinel — a carrier whose head re-normalizes to another carrier-subject
+    /// (a `BareRef` → resolve → `BareRef` chain reached OUTSIDE any
+    /// `build_instantiate` window, so the `instantiate_active` back-edge cannot
+    /// catch it) could loop. This records the carrier node ids currently being
+    /// normalized; a re-entry on the same id returns the carrier unchanged (the
+    /// downstream `ResolveDecl` / `Instantiate` / `ProjectPath` memo sentinels +
+    /// the active-instantiation back-edge are the PRIMARY termination mechanism,
+    /// this is only the pre-memo guard). NOT an arbitrary depth budget.
+    pub(super) carrier_normalizing: std::cell::RefCell<smallvec::SmallVec<[SemanticNodeId; 8]>>,
     /// Cold-build-LOCAL taint accumulator stack (universal read-boundary
     /// fold).
     ///
@@ -251,6 +266,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Self {
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
         }
     }
@@ -984,6 +1000,66 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // arch test parses `crates/verter_session/src/**/*.rs` (excluding
     // tests, stripping cfg(test) regions) and asserts exactly one
     // match.
+    /// Run carrier-subject normalization INSIDE its own fact tracer when (and
+    /// only when) the key's subject is a `BareRef` / `ImportType` carrier;
+    /// capture the facts its head resolution observed so they can be merged into
+    /// the build admission's read-set signature.
+    ///
+    /// The non-carrier common case (the overwhelming majority of keys) takes the
+    /// cheap probe and returns `(key, CarrierNormalizationPrelude::none())` with
+    /// NO tracer allocation. The carrier case installs a tracer around
+    /// [`Self::normalize_carrier_subject_key`], finalises it, and records the
+    /// traced facts plus whether the prelude overflowed / observed a fenced
+    /// serve (either ⇒ `cache_suppress`).
+    ///
+    /// Re-entrancy is sound: nested dispatch inside the normalization installs
+    /// its OWN tracer (a TLS stack), and tracer fan-out records into every
+    /// active level; the carrier-normalization cycle guard (`carrier_normalizing`)
+    /// already bounds a carrier → carrier loop.
+    fn trace_carrier_subject_normalization_if_needed(
+        &self,
+        key: SemanticQueryKey,
+    ) -> (SemanticQueryKey, CarrierNormalizationPrelude) {
+        // Cheap subject-shape probe — a non-carrier key skips the tracer.
+        if !self.key_subject_is_carrier(&key) {
+            return (key, CarrierNormalizationPrelude::none());
+        }
+        let host = self.ctx.host_for_fact_tracer_install();
+        let (normalized, finalise, fenced_serve_observed) =
+            crate::fact_signature_helpers::install_fact_tracer(host, || {
+                let normalized = self.normalize_carrier_subject_key(key);
+                // Test-only: force a fenced (ReturnOnly) serve observation onto
+                // the prelude tracer so the suppress wiring is exercisable
+                // without a superseded-artifact fixture. Zero-cost when unset.
+                #[cfg(test)]
+                if host
+                    .carrier_normalization_force_fence_for_tests
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+                }
+                normalized
+            });
+        let prelude = match finalise {
+            crate::resolver_core::FactReadSetFinalise::Ok(facts) => CarrierNormalizationPrelude {
+                facts: Some(facts),
+                // A FENCED (ReturnOnly) `IndexedReady` serve observed while
+                // resolving the carrier head means the rewrite's value basis came
+                // from a served-without-publication artifact — refuse warm
+                // admission of any enclosing entry that rode this rewrite.
+                cache_suppress: fenced_serve_observed,
+            },
+            crate::resolver_core::FactReadSetFinalise::Overflow => CarrierNormalizationPrelude {
+                // An overflowed prelude yields no bounded fact list — the rewrite
+                // cannot be soundly rooted, so suppress caching (the value still
+                // flows; the memo refuses).
+                facts: None,
+                cache_suppress: true,
+            },
+        };
+        (normalized, prelude)
+    }
+
     fn execute_via_cold_build_helper(
         &self,
         key: SemanticQueryKey,
@@ -1042,6 +1118,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             other => other,
         };
+
+        // Carrier-subject normalization: when the query SUBJECT is a `BareRef`
+        // / `ImportType` carrier (the base of a base-bearing key — `ProjectPath`
+        // / `ProjectMember` / `IndexedAccess` / `KeyOf` / `MappedType`), resolve
+        // its head through the ONE shared resolver and REWRITE the key to the
+        // resolved subject BEFORE cooperative-memo admission, so singleflight /
+        // dedup keys on the real semantic subject (not the unresolved carrier).
+        // The eager `Ref` / `ImportType` lowering arm reaches the SAME
+        // `resolve_bare_ref_head` / `resolve_import_type_head` — one resolver,
+        // two entrances. A non-carrier subject is returned verbatim (cheap
+        // node-data shape check). Nested carriers inside Intersection / Union /
+        // heritage surfaces re-enter this normalization through the
+        // shallow-synthesis worklist's re-dispatch.
+        //
+        // The normalization runs INSIDE its own fact tracer (the carrier-
+        // normalization prelude): its head resolution can serve `IndexedReady` /
+        // scan augmentations, and those facts MUST land on the published memo
+        // entry's read-set or a memoized resolved key could be admitted whose
+        // rewrite depended on UNTRACKED state (cache poisoning). The non-carrier
+        // common case allocates NO tracer. The captured facts merge into the
+        // build admission's signature; an overflowed / fenced-serve prelude
+        // suppresses caching (the value still flows, the memo refuses).
+        let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
 
         // Post-trip fast-path early-exit. Once the request's
         // projection-op fuse has already tripped, every subsequent
@@ -1356,6 +1455,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let cold_build_ran_for_closure = Arc::clone(&cold_build_ran);
         let host = self.ctx.host_for_fact_tracer_install();
         let provenance = Arc::clone(&host.provenance);
+        let carrier_prelude_for_build = carrier_prelude.clone();
         let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             cold_build_ran_for_closure.store(true, std::sync::atomic::Ordering::Relaxed);
             // Open a cold-build-local taint frame for the duration of THIS
@@ -1391,7 +1491,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            finalise_traced_build_output(output, finalise, &provenance)
+            finalise_traced_build_output(output, finalise, &provenance, &carrier_prelude_for_build)
         };
         let cache_read = graph.execute_cooperative(self.ctx, key.clone(), sentinel, traced_build);
         // Attribute the dispatch by `SemanticQueryKey` kind +
@@ -1485,6 +1585,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // returned metadata here propagates it exactly one level up. A
         // top-level read with no active build frame naturally no-ops
         // (`fold_into_top_build_local_taint` finds an empty stack).
+        // A WARM resolved-key hit short-circuits `traced_build`, so the prelude
+        // never reached `finalise_traced_build_output`. OR its suppress into the
+        // returned `CacheRead` here so a warm hit on the resolved key cannot let
+        // an ENCLOSING cache admit a result whose carrier rewrite was
+        // ReturnOnly / overflow / fenced-serve. (On a cold build the same OR
+        // already landed via `finalise_traced_build_output`; OR-ing again is
+        // idempotent.)
+        let mut cache_read = cache_read;
+        if carrier_prelude.cache_suppress() {
+            cache_read.cache_suppress = true;
+        }
         self.fold_cache_read_rails(cache_read.result_is_partial, cache_read.cache_suppress);
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
@@ -1515,13 +1626,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// the recursive cold-build call chain (a deeply-nested type resolution
 /// nests one cold build per hop), so a fat closure frame multiplies
 /// across the recursion depth.
+/// Facts + suppress signal captured by the carrier-subject normalization
+/// prelude (the traced head resolution that runs at the canonical query entry
+/// BEFORE the build admission's own tracer). `facts` are merged into the
+/// build's read-set signature so a content edit to a dependency the carrier
+/// rewrite observed misses the warm read; `cache_suppress` (an overflowed or
+/// fenced-serve prelude) forces the entry out of the memo.
+#[derive(Clone)]
+struct CarrierNormalizationPrelude {
+    facts: Option<Arc<[crate::resolver_core::FactVersionRef]>>,
+    cache_suppress: bool,
+}
+
+impl CarrierNormalizationPrelude {
+    /// The no-op prelude for a non-carrier subject — no facts, no suppression.
+    fn none() -> Self {
+        Self {
+            facts: None,
+            cache_suppress: false,
+        }
+    }
+
+    /// Whether the prelude forces the enclosing entry out of the memo (an
+    /// overflowed or fenced-serve carrier rewrite).
+    fn cache_suppress(&self) -> bool {
+        self.cache_suppress
+    }
+}
+
 #[inline(never)]
 fn finalise_traced_build_output(
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
     finalise: crate::resolver_core::FactReadSetFinalise,
     provenance: &crate::types::MetaProvenance,
+    carrier_prelude: &CarrierNormalizationPrelude,
 ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
     let mut output = output;
+    // The carrier-normalization prelude can independently suppress caching (an
+    // overflowed / fenced-serve carrier rewrite) regardless of the build's own
+    // finalise arm.
+    output.cache_suppress |= carrier_prelude.cache_suppress();
     match finalise {
         crate::resolver_core::FactReadSetFinalise::Ok(traced_facts) => {
             // Record the self-root canonicals (deduplicated) for the
@@ -1552,20 +1696,29 @@ fn finalise_traced_build_output(
             let fence_facts = crate::fact_signature_helpers::dep_signature_to_fact_signature(
                 &output.dep_signature,
             );
-            let merged_facts: Vec<crate::resolver_core::FactVersionRef> = if fence_facts.is_empty()
-            {
-                traced_facts.iter().cloned().collect()
-            } else {
-                let mut merged: Vec<crate::resolver_core::FactVersionRef> =
-                    Vec::with_capacity(traced_facts.len() + fence_facts.len());
-                merged.extend(traced_facts.iter().cloned());
-                for fact in fence_facts {
-                    if !merged.iter().any(|existing| existing == &fact) {
-                        merged.push(fact);
+            // The carrier-normalization prelude facts (the dependencies the
+            // carrier head resolution observed at the query entry, BEFORE this
+            // build's own tracer) merge into the signature so a content edit to
+            // any of them misses the warm read — without them a memoized resolved
+            // key could be admitted whose rewrite depended on untracked indexed /
+            // augmentation state (cache poisoning).
+            let prelude_facts: &[crate::resolver_core::FactVersionRef] =
+                carrier_prelude.facts.as_deref().unwrap_or(&[]);
+            let merged_facts: Vec<crate::resolver_core::FactVersionRef> =
+                if fence_facts.is_empty() && prelude_facts.is_empty() {
+                    traced_facts.iter().cloned().collect()
+                } else {
+                    let mut merged: Vec<crate::resolver_core::FactVersionRef> = Vec::with_capacity(
+                        traced_facts.len() + fence_facts.len() + prelude_facts.len(),
+                    );
+                    merged.extend(traced_facts.iter().cloned());
+                    for fact in fence_facts.into_iter().chain(prelude_facts.iter().cloned()) {
+                        if !merged.iter().any(|existing| existing == &fact) {
+                            merged.push(fact);
+                        }
                     }
-                }
-                merged
-            };
+                    merged
+                };
             match crate::semantic_query_memo::semantic_graph_read_set_signature(
                 &output.observed_self_roots,
                 &merged_facts,
@@ -2432,3 +2585,9 @@ mod tests;
 
 #[cfg(test)]
 mod carrier_materialize_tests;
+
+#[cfg(test)]
+mod carrier_reduction_tests;
+
+#[cfg(test)]
+mod carrier_head_resolution_tests;

@@ -751,6 +751,19 @@ pub struct VerterHost {
     /// returned to the caller but refused memo admission). Set directly in
     /// the inline relation tests.
     pub(crate) relation_force_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Per-host test-injection knob for the carrier-subject normalization
+    /// prelude. When `true`, the traced carrier-normalization prelude
+    /// (`trace_carrier_subject_normalization_if_needed`) fans a synthetic
+    /// FENCED (ReturnOnly) serve onto its active tracer, so the prelude
+    /// finalises with `fenced_serve_observed = true` and forces
+    /// `cache_suppress` — exercising the prelude's no-poison suppress wiring
+    /// (a carrier rewrite computed from a served-without-publication artifact
+    /// must refuse warm admission) without a superseded-artifact fixture. Set
+    /// directly in the inline carrier-normalization test. `#[cfg(test)]`-gated:
+    /// the only reader is the `#[cfg(test)]` fence injection in
+    /// `trace_carrier_subject_normalization_if_needed`.
+    #[cfg(test)]
+    pub(crate) carrier_normalization_force_fence_for_tests: std::sync::atomic::AtomicBool,
     /// Per-host invocation counter for
     /// [`VerterHost::prefetch_compile_tier_observation_targets`].
     /// Incremented once per actual call to the prefetch. The cold-compute

@@ -25,7 +25,7 @@ use crate::resolver_core::component_meta_query_engine::{
     SEMANTIC_OBJECT_SURFACE,
 };
 use crate::semantic_query::{
-    DepSignature, HotTypeRef, IndexKey, MapperKey, OptionalityMod,
+    DepSignature, HotTypeRef, IndexKey, MapperKey, OptionalityMod, PathSegment,
     PrimitiveKind as SemanticPrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
     QueryResult, ReadonlyMod, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
@@ -1467,17 +1467,83 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::TypeOf(_) => {
-                // TODO(carrier-resolution): apply TypeOf.type_args
-                // (apply_typeof_instantiation_args) once the structural lowerer
-                // is wired; carriers are dormant today so no non-empty
-                // type_args reaches here. This arm dispatches the typeof key
-                // for SEMANTIC reduction (not the structural raise/round-trip,
-                // which preserves type_args at raise_node_to_type_expr_inner).
-                // See docs/arch/parselower-design.md (demand-time
-                // carrier-resolution debt note).
-                let (value_root, _path) = data.typeof_head().expect("TypeOf carrier head");
-                let typeof_key = self.typeof_key_for(value_root.clone(), context);
-                self.dispatch_operator_with_recurse(node, typeof_key, context, state)
+                // `typeof value.path<args>`: resolve the value root through the
+                // single typeof query, PROJECT the carrier's dotted path, THEN
+                // apply the carrier's instantiation `type_args` to the projected
+                // signature (resolve → project → apply, mirroring the eager
+                // lowering order and the evaluate/walk arms). This is the
+                // SEMANTIC reduction path (the structural raise/round-trip
+                // preserves `type_args` separately at
+                // `raise_node_to_type_expr_inner`); the final reduced node is
+                // driven through the demand reducer below.
+                let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+                let value_root = value_root.clone();
+                let path = Arc::clone(path);
+                // Read the carrier args from the SAME borrow (owned copy so the
+                // `data` borrow is not held across the apply call).
+                let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
+
+                // 1. Resolve the typeof value root.
+                let typeof_key = self.typeof_key_for(value_root, context);
+                let root_read = self.execute_read(typeof_key);
+                state.merge_dep_signature(&root_read.dep_signature);
+                if root_read.result_is_partial {
+                    state.result_is_partial = true;
+                    crate::request_context::mark_request_materialization_cache_suppress();
+                }
+                let root = match root_read.value {
+                    QueryResult::Value(id) => id,
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => return node,
+                };
+
+                // 2. Project the carrier's dotted path (intermediate hops run in
+                //    Navigate per the path-precision rule, mirroring evaluate).
+                let projected = if path.is_empty() {
+                    root
+                } else {
+                    let projection_path: Arc<[PathSegment]> = Arc::from(
+                        path.iter()
+                            .map(|segment| PathSegment::Member(Arc::clone(segment)))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
+                    let path_read = self.execute_read(SemanticQueryKey::ProjectPath {
+                        base: root,
+                        path: projection_path,
+                        context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                    });
+                    state.merge_dep_signature(&path_read.dep_signature);
+                    if path_read.result_is_partial {
+                        state.result_is_partial = true;
+                        crate::request_context::mark_request_materialization_cache_suppress();
+                    }
+                    match path_read.value {
+                        QueryResult::Value(id) => id,
+                        QueryResult::Recursive(_) | QueryResult::Error(_) => return node,
+                    }
+                };
+
+                // 3. Apply the instantiation `type_args` to the projected
+                //    signature. An arity/shape mismatch composes an honest
+                //    `Opaque(Miss)` AFTER the projection.
+                let final_node = if type_args.is_empty() {
+                    projected
+                } else {
+                    self.apply_typeof_instantiation_args(projected, &type_args)
+                };
+
+                // 4. Drive the reduced node through the demand reducer (same
+                //    result-threading as `dispatch_operator_with_recurse`):
+                //    a self-identity result stays put; an already-reduced node
+                //    is reused; otherwise its demanded children reduce under
+                //    `context`.
+                if final_node == node {
+                    node
+                } else if let Some(&already_reduced) = state.mapping.get(&(final_node, context)) {
+                    already_reduced
+                } else {
+                    self.reduce_subtree(final_node, context, state)
+                }
             }
 
             // --- lazy carriers ---

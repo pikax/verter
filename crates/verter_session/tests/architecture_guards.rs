@@ -15846,7 +15846,7 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-            390,
+            401,
             "fn read_surface_members(",
         ),
     ];

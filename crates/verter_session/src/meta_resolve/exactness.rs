@@ -84,9 +84,10 @@ pub(crate) fn classify_type_expr(expr: &TypeExpr) -> ExpansionExactness {
 
 /// Returns `true` when `node` resolves to an `Object` whose members'
 /// values are all concrete — i.e. none of them are
-/// `InstantiationRef`, `IndexedAccess`, `Conditional`, or
-/// `TypeParam`. Used by [`classify_node`] to distinguish closed
-/// objects from open ones.
+/// `InstantiationRef`, `IndexedAccess`, `Conditional`, `TypeParam`, or a
+/// `BareRef` / `TypeOf` / `ImportType` carrier (a carrier applies type arguments
+/// at its reference site and is symbolic until resolved). Used by
+/// [`classify_node`] to distinguish closed objects from open ones.
 fn object_is_closed_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
     let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
         return false;
@@ -105,7 +106,14 @@ fn object_is_closed_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticN
             SemanticNodeData::InstantiationRef { .. }
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::Conditional { .. }
-            | SemanticNodeData::TypeParam { .. } => return false,
+            | SemanticNodeData::TypeParam { .. }
+            // A `BareRef` / `TypeOf` / `ImportType` carrier-valued member is
+            // symbolic — the carrier applies type arguments at its reference
+            // site and has not been resolved — so the enclosing object is OPEN
+            // (not closed/concrete).
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::ImportType(_) => return false,
             _ => continue,
         }
     }
@@ -324,6 +332,133 @@ mod tests {
         assert_eq!(
             classify_type_expr(&outer),
             ExpansionExactness::ExactSymbolic,
+        );
+    }
+}
+
+#[cfg(test)]
+mod carrier_exactness_tests {
+    //! Carrier-valued object members are NOT closed/concrete.
+    //!
+    //! `classify_node` / `object_is_closed_node` decide whether a synthesised
+    //! binding's value is `ExactConcrete` (a fully-resolved shape) or
+    //! `ExactSymbolic` (still carries open/unresolved variables). An object
+    //! member whose VALUE is a `TypeOf` / `BareRef` / `ImportType` carrier is
+    //! symbolic — the carrier applies type arguments at its reference site and
+    //! has not been resolved — so the enclosing object must NOT be classified
+    //! closed/concrete. A bare carrier ROOT is already `ExactSymbolic` (the
+    //! wildcard arm); this fixture pins the OBJECT-MEMBER case, which routes
+    //! through `object_is_closed_node`'s open-member set.
+
+    use std::sync::Arc;
+
+    use verter_type_expr::MemberVisibility;
+
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        NodeScopeId, PrimitiveKind, ScopeId, SemanticNodeData, SemanticNodeId, SurfaceMember,
+        SurfaceView, ValueRootKey,
+    };
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+    use verter_semantic::analysis::type_expand::ExpansionExactness;
+
+    fn object_with_member_value(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        member_value: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let view = SurfaceView {
+            members: Arc::from(
+                vec![SurfaceMember {
+                    name: Arc::from("m"),
+                    value: member_value,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                    visibility: MemberVisibility::Public,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                    declared_in_macro_type_arg: false,
+                    merge_role: Default::default(),
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        graph.intern_node(SemanticNodeData::Object(view))
+    }
+
+    fn carriers(graph: &crate::semantic_query_memo::SemanticGraphStore) -> Vec<SemanticNodeId> {
+        let empty: Arc<[SemanticNodeId]> = Arc::from(Vec::new().into_boxed_slice());
+        vec![
+            graph.intern_node(SemanticNodeData::new_bare_ref(
+                Arc::from("Foo"),
+                NodeScopeId::Global,
+                Arc::clone(&empty),
+            )),
+            graph.intern_node(SemanticNodeData::new_typeof(
+                ValueRootKey {
+                    scope: ScopeId {
+                        canonical_id: Arc::from("/v.ts"),
+                        local_scope: None,
+                    },
+                    name: Arc::from("factory"),
+                },
+                Arc::from(Vec::new().into_boxed_slice()),
+                Arc::clone(&empty),
+            )),
+            graph.intern_node(SemanticNodeData::new_import_type(
+                Arc::from("./m"),
+                Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+                Arc::clone(&empty),
+                false,
+            )),
+        ]
+    }
+
+    // ── E2 — an object with a carrier-valued member is NOT concrete ─────────
+    //
+    // NEGATIVE: with the unchanged `object_is_closed_node` open-member set
+    // (which lists `InstantiationRef` / `IndexedAccess` / `Conditional` /
+    // `TypeParam` but NOT the carriers), an object whose member value is a
+    // carrier is wrongly treated as closed → `ExactConcrete`.
+    #[test]
+    fn object_with_carrier_valued_member_is_symbolic() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        for carrier in carriers(&graph) {
+            let obj = object_with_member_value(&graph, carrier);
+            assert_eq!(
+                super::classify_node(&dispatch, obj),
+                ExpansionExactness::ExactSymbolic,
+                "an object whose member value is a carrier must be ExactSymbolic (open), not \
+                 ExactConcrete; member carrier {:?}",
+                graph.node_data(carrier).as_deref()
+            );
+        }
+    }
+
+    // Positive control: an object whose member value is a concrete primitive IS
+    // ExactConcrete — proving the open-member-set widening does not over-broaden
+    // and mis-classify a genuinely closed object.
+    #[test]
+    fn object_with_primitive_member_stays_concrete() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let prim = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let obj = object_with_member_value(&graph, prim);
+        assert_eq!(
+            super::classify_node(&dispatch, obj),
+            ExpansionExactness::ExactConcrete,
+            "an object whose member value is a concrete primitive must stay ExactConcrete"
         );
     }
 }

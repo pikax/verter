@@ -360,15 +360,26 @@ fn accumulate_lowered_node_carrier_deps(
             SemanticNodeData::Mapped { source, .. } => {
                 stack.push(*source);
             }
+            // Carrier `type_args` ARE descended via the shared accessor: a
+            // `BareRef` / `TypeOf` / `ImportType` carrier applies its arguments
+            // at the reference site, and an arg can carry a cross-file
+            // `DeclRef` / `InstantiationRef` whose declaring file is a dep. The
+            // carrier head is not resolved here (args-only).
+            SemanticNodeData::BareRef(_)
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::ImportType(_) => {
+                for arg in data.carrier_type_args().iter() {
+                    stack.push(*arg);
+                }
+            }
             // Object / Function surface bodies, primitives, literals,
-            // type-params, infer placeholders, opaques, typeof shells,
-            // and Vue macro elements have no further carrier-bearing
-            // children for the purpose of dep-signature carrier
-            // discovery from the lowered macro arg. Object/Function
-            // surfaces only appear here when they are inline structural
-            // types in the SFC's own scope; nested cross-file refs
-            // surface as `DeclRef` / `InstantiationRef` carriers and
-            // are picked up directly when the walker reaches them.
+            // type-params, infer placeholders, and Vue macro elements have no
+            // further carrier-bearing children for the purpose of dep-signature
+            // carrier discovery from the lowered macro arg. Object/Function
+            // surfaces only appear here when they are inline structural types in
+            // the SFC's own scope; nested cross-file refs surface as `DeclRef` /
+            // `InstantiationRef` carriers and are picked up directly when the
+            // walker reaches them.
             _ => {}
         }
     }
@@ -554,12 +565,14 @@ pub(crate) fn slot_param_root_is_symbolic_only(
 ///
 /// Walks the compound shapes a substituted check can take (Tuple / Array /
 /// Union / Intersection / Object members / KeyOf / IndexedAccess), resolving
-/// one-level `Alias` hops. `Infer` shells inside the conditional's EXTENDS
-/// clause are intentionally NOT inspected here (this predicate is applied to the
-/// CHECK only) — an `infer U` in `extends` is the binding mechanism, not an open
-/// check parameter. Carrier shells (`DeclRef` / `InstantiationRef`) are treated
-/// as NOT-free (they are concrete declaration references, resolved elsewhere).
-/// Depth-fused at 256.
+/// one-level `Alias` hops, and descends the `type_args` of the structural
+/// carriers (`BareRef` / `TypeOf` / `ImportType`) — a free `TypeParam` inside a
+/// carrier's applied arguments keeps the check open. `Infer` shells inside the
+/// conditional's EXTENDS clause are intentionally NOT inspected here (this
+/// predicate is applied to the CHECK only) — an `infer U` in `extends` is the
+/// binding mechanism, not an open check parameter. The lazy declaration carriers
+/// (`DeclRef` / `InstantiationRef`) are treated as NOT-free (they are concrete
+/// declaration references, resolved elsewhere). Depth-fused at 256.
 fn node_contains_free_type_param(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -595,8 +608,18 @@ fn node_contains_free_type_param(
         SemanticNodeData::IndexedAccess { object, .. } => {
             node_contains_free_type_param(dispatch, *object, depth + 1)
         }
-        // Primitives, literals, functions, carriers, opaque, etc. carry no free
-        // open parameter on the check path.
+        // A `BareRef` / `TypeOf` / `ImportType` carrier applies its arguments at
+        // the reference site; a free `TypeParam` inside those args makes the
+        // node contain a free param (the check stays open). Descend the args via
+        // the shared accessor (args-only; the carrier head is not resolved).
+        SemanticNodeData::BareRef(_)
+        | SemanticNodeData::TypeOf(_)
+        | SemanticNodeData::ImportType(_) => data
+            .carrier_type_args()
+            .iter()
+            .any(|&a| node_contains_free_type_param(dispatch, a, depth + 1)),
+        // Primitives, literals, functions, opaque, etc. carry no free open
+        // parameter on the check path.
         _ => false,
     }
 }
@@ -1404,3 +1427,7 @@ pub(crate) fn publish_merged_bindings(
         });
     }
 }
+
+#[cfg(test)]
+#[path = "slot_binding_graph_carrier_tests.rs"]
+mod carrier_descent_tests;

@@ -27,9 +27,9 @@ use crate::resolver_core::bare_name_resolve::{
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     DeclIdentity, HashValue, IndexSignature, NodeScopeId, PathSegment, PrimitiveKind,
-    ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-    SurfaceMember, SurfaceView, TupleElement, ValueRootKey,
+    ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
+    SurfaceView, TupleElement, ValueRootKey,
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -51,7 +51,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `Ns` — a namespace, not an enum — and returns `None` (a miss). Projecting
     /// `Ns.Enum.Member` would require first walking the namespace to its inner
     /// `Enum` binding.
-    fn resolve_enum_member_value(
+    pub(super) fn resolve_enum_member_value(
         &self,
         scope_canonical: &str,
         name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
@@ -95,111 +95,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .find(|(name, _)| name == member)
             .map(|(_, value)| value.projected_type().clone())
-    }
-
-    /// Resolve `import("./m").Member` (a dynamic-import reference in TYPE
-    /// position) to the named TYPE export `Member` of the module
-    /// `dep_canonical`. The qualifier's FIRST segment resolves through the
-    /// SHARED `Ref` resolution path (carrier in Navigate/Skeleton/Shallow,
-    /// `ResolveDecl` / `Instantiate` in Expanded) by injecting a synthetic
-    /// name-resolution entry over a clone of the caller's map; any remaining
-    /// qualifier segments project as a member path. A bare `import("./m")`
-    /// with no qualifier is the whole module-namespace TYPE — not a single
-    /// addressable declaration — and resolves to an honest `Miss`.
-    ///
-    /// A MULTI-SEGMENT qualifier carrying generic arguments
-    /// (`import("./m").NS.Box<string>`) resolves to an honest
-    /// `Opaque(QueryError::Other(..))` carrier rather than silently dropping
-    /// `<string>` — the terminal-segment instantiation is a documented
-    /// follow-up (see the guard below).
-    #[allow(clippy::too_many_arguments)]
-    fn lower_import_type_member(
-        &self,
-        dep_canonical: &str,
-        qualifier: &Arc<[Arc<str>]>,
-        type_arguments: &Arc<[TypeExpr]>,
-        env: &FxHashMap<String, SemanticNodeId>,
-        scope: &NodeScopeId,
-        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
-        scope_payload: Option<&DeclarationScopePayload>,
-        shadowing: &ScopeShadowing,
-        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        reduction_context: ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        let Some((first, rest)) = qualifier.split_first() else {
-            return self.opaque(QueryError::Miss);
-        };
-        // Fail-loud on a MULTI-SEGMENT qualifier carrying generic arguments
-        // (`import("./m").NS.Box<string>` — qualifier `["NS","Box"]`, args
-        // `[string]`). Those args bind to the TERMINAL segment (`Box`), but the
-        // multi-hop tail below projects through `ProjectPath`, which models only
-        // plain member projection — it has no slot to carry `<string>` onto the
-        // terminal hop. Routing the bare `import("./m").NS.Box` here would
-        // SILENTLY DROP `<string>` and collapse two distinct typed-IR
-        // identities onto one semantic node. Per
-        // `macro_impacting_constructs_fail_lowering_not_silent_skip`, emit an
-        // HONEST error carrier rather than the uninstantiated member.
-        //
-        // TODO(follow-up): full terminal-segment generic instantiation for
-        // multi-segment import types requires ProjectPath to model
-        // member-with-type-args projection (currently plain member projection);
-        // see codex ADOPT-NOW ruling 2026-06-14.
-        if !rest.is_empty() && !type_arguments.is_empty() {
-            return self.opaque(QueryError::Other(Arc::from(
-                "import-type generic args on a multi-segment qualifier are not yet instantiated",
-            )));
-        }
-        // Inject `first -> (dep, first)` over a CLONE of the caller's map so any
-        // type-argument references still resolve in the caller's scope, then
-        // route the head segment through the shared `Ref` path (its
-        // `name_resolution.get(first)` short-circuit targets the module's
-        // TYPE-export space directly).
-        let mut injected = name_resolution.clone();
-        injected.insert(
-            first.as_ref().to_string(),
-            ResolvedRootIdentity::new(dep_canonical, first.as_ref()),
-        );
-        // The instantiation arguments bind to the TERMINAL segment only: a
-        // single-segment qualifier carries them on the head; a multi-hop
-        // resolves the head bare and projects the tail as a member path.
-        let head_args = if rest.is_empty() {
-            Arc::clone(type_arguments)
-        } else {
-            verter_type_expr::empty_type_args()
-        };
-        let head = TypeExpr::Ref {
-            name: Arc::clone(first),
-            type_arguments: head_args,
-        };
-        let head_node = self.shallow_lower_type_expr_with_context(
-            &head,
-            env,
-            scope,
-            &injected,
-            scope_payload,
-            shadowing,
-            substitutions,
-            reduction_context,
-        );
-        if rest.is_empty() {
-            return head_node;
-        }
-        let path: Arc<[PathSegment]> = Arc::from(
-            rest.iter()
-                .map(|seg| PathSegment::Member(Arc::clone(seg)))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
-        match self.execute_type_node(SemanticQueryKey::ProjectPath {
-            base: head_node,
-            path,
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Navigate,
-            ),
-        }) {
-            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-            _ => self.opaque(QueryError::Miss),
-        }
     }
 
     /// Shallow-lower a [`TypeExpr`] under `env` (type-parameter bindings)
@@ -255,7 +150,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let mode = reduction_context.mode;
         // Watchdog hooks for hang investigation. Both calls are inert
         // when the watchdog has not been spawned (single relaxed atomic
         // load + early return). When active, they advance a heartbeat
@@ -438,474 +332,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope.clone(),
                 )
             }
-            // Named type reference (`type Foo<T> = { y: Other<T> }` →
-            // `Other<T>` at `y`'s position). Resolve through
-            // dispatch:
-            //   - 0-arg refs → execute(ResolveDecl(...)).
-            //   - n-arg refs → execute(ResolveDecl(...)) then
-            //     execute(Instantiate(decl_identity, lowered_args)) →
-            //     a sub-Instantiate shell. Self-referential types are
-            //     bounded by the memo's same-path recursion sentinel.
+            // Named type reference (`type Foo<T> = { y: Other<T> }` ->
+            // `Other<T>` at `y`'s position). The head resolves FIRST through the
+            // shared `resolve_bare_ref_head` resolver -- the ONE bare-name
+            // resolver, equally reached from carrier-subject normalization --
+            // which performs builtin-shadowing-aware utility / Promise carriers,
+            // the bare-name + augmentation + enum resolution, the recursive-ref
+            // back-edge, and the route through `DeclRef` / `InstantiationRef`
+            // (carrier modes) or `ResolveDecl` / `Instantiate` (eager modes).
+            // The type-args lower LAZILY through the passed closure: an
+            // unresolvable head never lowers dead args; the closure fires only on
+            // the branches that consume the args (substituting INTO the resolved
+            // decl body, never the macro-T own body), keeping the helper
+            // typed-IR-only. Self-referential types are bounded by the memo's
+            // same-path recursion sentinel.
             TypeExpr::Ref {
                 name,
                 type_arguments,
             } => {
-                // Built-in utility fast path: recognised names (`Partial`,
-                // `Pick`, `ReturnType`, string intrinsics, etc.) that are
-                // NOT in `name_resolution` (they are global TS builtins,
-                // not imported or locally declared) construct a
-                // `DeclIdentity` with the sentinel canonical id
-                // `"__builtin__"` and dispatch through
-                // [`SemanticQueryKey::Instantiate`]. The builder
-                // recognises the name via
-                // [`DispatchHost::utility_source`] → `Builtin` and hands
-                // off to [`Self::build_builtin_utility`].
-                //
-                // Userland types that shadow a builtin name (e.g.
-                // `type Partial<T> = ...` in the user's scope) live in
-                // `name_resolution` OR in the
-                // [`ScopeShadowing`](ScopeShadowing) context built once
-                // per resolver context from the owner scope's
-                // `scope_type_names` + `scope_type_bindings` (
-                // §5.10 r15/F11 — the second source covers callers
-                // that lower with an empty `name_resolution` map but
-                // still hand a populated `scope_payload`, e.g.
-                // [`Self::lower_type_expr_in_scope_with_mode`]). In
-                // both cases the builtin fast-path is suppressed and
-                // the bare-name walk below resolves the userland
-                // alias via the standard `ResolveDecl` path —
-                // preserving the "user shadowing wins" rule across
-                // BOTH lowering entry points (the materialise path's
-                // `extract_route_root_identity_node` callers consume
-                // the same `ScopeShadowing` value).
-                // Global lib-type fast path: an unshadowed `Promise<...>`
-                // reference interns a nominal `InstantiationRef` carrier in
-                // EVERY mode. `Promise` has no structural reducer arm — the
-                // carrier preserves the declaration identity + type
-                // arguments so demand points (the `Awaited` reducer arm, the
-                // raise layer's `Ref { name, args }` projection) can consume
-                // them. Classification is the registry lookup on the
-                // declaration name (`IntrinsicRegistry` → `PromiseGlobal`),
-                // not a resolver-local name match; userland shadowing wins
-                // via the same `name_resolution` / `ScopeShadowing` gates the
-                // builtin utilities use. Without the carrier the bare-name
-                // walk below misses (no lib file backs the global) and the
-                // type arguments are erased into `Opaque(Miss)`.
-                if !name_resolution.contains_key(name.as_ref())
-                    && !shadowing.is_shadowing_lib(name.as_ref())
-                    && self.is_promise_global_name(name.as_ref())
-                {
-                    let arg_ids: Vec<SemanticNodeId> = type_arguments
-                        .iter()
-                        .map(|arg| {
-                            self.shallow_lower_type_expr_with_context(
-                                arg,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            )
-                        })
-                        .collect();
-                    return graph.intern_node_with_scope(
-                        SemanticNodeData::InstantiationRef {
-                            base: DeclIdentity {
-                                canonical_id: Arc::from("__builtin__"),
-                                whole_hash: HashValue::default(),
-                                decl_name: Arc::clone(name),
-                            },
-                            args: Arc::from(arg_ids.into_boxed_slice()),
-                        },
-                        scope.clone(),
-                    );
-                }
-
-                if !name_resolution.contains_key(name.as_ref())
-                    && !shadowing.is_shadowing_lib(name.as_ref())
-                    && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                        name.as_ref(),
-                    )
-                    .is_some()
-                {
-                    let builtin_identity = DeclIdentity {
-                        canonical_id: Arc::from("__builtin__"),
-                        whole_hash: HashValue::default(),
-                        decl_name: Arc::clone(name),
-                    };
-                    let arg_ids: Vec<SemanticNodeId> = type_arguments
-                        .iter()
-                        .map(|arg| {
-                            self.shallow_lower_type_expr_with_context(
-                                arg,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            )
-                        })
-                        .collect();
-
-                    // Builtin carrier gate (LOWERING entrance). The
-                    // `InstantiationRef` shell is preserved WHEN any of:
-                    //   - the lowering mode is `Shallow` — for ALL builtins.
-                    //     Shallow decl-body lowering is carrier-preserving
-                    //     exactly like Navigate / Skeleton: member-value
-                    //     utilities (`Partial<Col<T>>`, `Omit<…>`, …) stay
-                    //     carriers and materialise only at a demand point
-                    //     (the shallow-surface synthesiser's carrier unwrap,
-                    //     PathWalker hops, closed object-filter surface
-                    //     reads). Eager execution here compounds
-                    //     member-value instantiation recursion across large
-                    //     transitive decl graphs (the expansion-storm
-                    //     class).
-                    //   - the mode is `Navigate` and the name is an
-                    //     object-filter builtin (`Pick`/`Omit` — the
-                    //     reducer's L1 decides closed→materialise
-                    //     downstream, and the materialiser's registry-route
-                    //     guard can apply cycle / package gates on the
-                    //     wrapped root identity BEFORE dispatch's
-                    //     `build_builtin_utility` projects), OR
-                    //   - the name is an object-filter builtin and the
-                    //     enumeration domain (lowered argument 0) is OPEN —
-                    //     in ANY mode. An open `Pick`/`Omit` must never
-                    //     build the `Instantiate` query that would
-                    //     materialise the open source (the ChatMessages.vue
-                    //     `Pick<PropsBase<T>, …>` storm class).
-                    // A CLOSED object-filter domain in `Expanded`/`Identity`
-                    // falls through to execute the `Instantiate` query and
-                    // materialise path-precisely; non-object-filter builtins
-                    // keep the eager-resolve path in those modes only.
-                    // Family membership is decided by the ONE registry
-                    // helper (`raise::is_l1_object_filter_utility`, backed
-                    // by the `BuiltinUtility` registry — never a local name
-                    // string match) and the shared open-domain predicate
-                    // (`raise::utility_enumeration_domain_is_open_or_unknown`)
-                    // is reused — no second walker.
-                    // Carrier-mode open-argument rule: under `Navigate` /
-                    // `Skeleton` a builtin over an OPEN argument (an
-                    // unbound `TypeParam` — including a mapper binder
-                    // substituted later at a demand point — or an open
-                    // carrier over one) interns the carrier too. Eagerly
-                    // executing `NonNullable<ChatSlots[K]>` with unbound
-                    // `K` bakes `Opaque(Miss)` into the produced
-                    // conditional check and destroys the structure the
-                    // per-key realization demand point needs.
-                    // Closed-argument builtins under Navigate / Skeleton
-                    // keep the eager execute, byte-for-byte.
-                    let build_carrier = mode == ProjectionMode::Shallow
-                        || (crate::project_semantic_dispatch::raise::is_l1_object_filter_utility(
-                            name.as_ref(),
-                        ) && (mode == ProjectionMode::Navigate
-                            || crate::project_semantic_dispatch::raise::
-                                utility_enumeration_domain_is_open_or_unknown(
-                                    self.ctx,
-                                    &builtin_identity,
-                                    &arg_ids,
-                                )))
-                        || (matches!(
-                            mode,
-                            ProjectionMode::Navigate | ProjectionMode::Skeleton
-                        ) && arg_ids.iter().any(|arg| {
-                            crate::project_semantic_dispatch::raise::
-                                builtin_lowering_argument_is_open(self.ctx, *arg)
-                        }));
-                    if build_carrier {
-                        return graph.intern_node_with_scope(
-                            SemanticNodeData::InstantiationRef {
-                                base: builtin_identity,
-                                args: Arc::from(arg_ids.into_boxed_slice()),
-                            },
-                            scope.clone(),
-                        );
-                    }
-                    return match self.execute_type_node(SemanticQueryKey::Instantiate {
-                        base: self.type_slot_for(
-                            Arc::clone(&builtin_identity.canonical_id),
-                            Arc::clone(&builtin_identity.decl_name),
-                        ),
-                        args: Arc::from(arg_ids.into_boxed_slice()),
-                        context: self.instantiate_context_for(
-                            &builtin_identity.canonical_id,
-                            reduction_context,
-                        ),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                        _ => self.opaque(QueryError::Miss),
-                    };
-                }
-
-                // Primary: the prepared decl's name_resolution map
-                // carries already-resolved imports from the body-file
-                // scope. This is the fast path for names that the
-                // prepared-decl builder has already walked.
-                //
-                // Fallback: when the name is NOT in name_resolution
-                // (common for bare types in re-exported declarations or
-                // helpers that cross a package boundary but aren't
-                // cached by the body-file's prepared-decl scope), fall
-                // through to the host-owned bare-name resolver. It
-                // consults the declaration-scope payload + the host's
-                // `shallow_file_state` import_targets / exports maps +
-                // `resolve_named_type_export_target`, the same substrate
-                // `SessionSolverHost::root_identity` wraps (
-                // step 3 — dispatch no longer routes through
-                // `SessionSolverHost`).
-                let resolved_root = if let Some(direct) = name_resolution.get(name.as_ref()) {
-                    Some((
-                        Arc::<str>::from(direct.canonical_id.as_str()),
-                        Arc::<str>::from(direct.symbol_name.as_str()),
-                    ))
-                } else if let NodeScopeId::File { canonical_id, .. } = scope {
-                    resolve_bare_name_in_scope(
-                        self.ctx,
-                        canonical_id.as_ref(),
-                        scope_payload,
-                        name.as_ref(),
-                    )
-                    .map(|ri| {
-                        (
-                            Arc::<str>::from(ri.canonical_id.as_str()),
-                            Arc::<str>::from(ri.symbol_name.as_str()),
-                        )
-                    })
-                } else {
-                    None
-                };
-                // Macro Type Traversal Rule (CRITICAL) — unresolved
-                // imports short-circuit to `Opaque(QueryError::Miss)`.
-                // When a bare type name cannot be resolved through
-                // EITHER the prepared-decl `name_resolution` map NOR
-                // the bare-name resolver fall-through chain in
-                // `resolver_core::bare_name_resolve` (shallow facts →
-                // scope payload → prepared-decl bundle), the lowering
-                // emits an opaque sentinel. **No synthetic placeholder
-                // root is invented for the unresolved specifier.**
-                // Downstream projection observes the sentinel,
-                // publishes a partial result for the field whose type
-                // transitively depended on the unresolved name, and
-                // other fields continue to resolve normally — the
-                // component-meta payload stays well-formed.
-                //
-                // This is the explicit Macro Type Traversal contract
-                // from `CLAUDE.md`: only follow the import graph
-                // reachable from the requested type's declaration
-                // graph; never treat plain imports as implicit exports
-                // or synthesise external roots for absent specifiers.
-                // Cross-file EXTERNAL string-literal module augmentation (the
-                // canonical Vue/Vite `vite/client` pattern): `name` is imported
-                // from a bare specifier that resolves to NO workspace file —
-                // either `resolve_bare_name_in_scope` returned `None`, or the
-                // pre-resolved `name_resolution` map / bare-name walk resolved it
-                // to the empty non-file canonical. In both cases there is no
-                // file-scope declaration, but `declare module "<spec>"` blocks
-                // across files form an ambient module whose peers merge. Build
-                // the peer-merged `MergedDecl` PURELY from the
-                // `ExternalSpecifier(spec)` augmentation index (the SAME
-                // augmenter-fold path + carrier as the relative stitch). Falls
-                // through to the existing behaviour when no `declare module`
-                // block contributes.
-                // A resolution "reaches a real declaration" only when its
-                // canonical names a LOADABLE workspace file. An unresolved bare
-                // specifier resolves to the empty non-file canonical OR to the
-                // specifier string itself (e.g. `"external-spec"`), neither of
-                // which `ensure_indexed_ready_serve` can load — that is the external
-                // ambient-module case the augmentation hook below handles.
-                let resolves_to_file = match resolved_root.as_ref() {
-                    Some((canonical, _)) if !canonical.is_empty() => self
-                        .ctx
-                        .ensure_indexed_ready_serve(canonical.as_ref())
-                        .is_some(),
-                    _ => false,
-                };
-                if !resolves_to_file {
-                    if let NodeScopeId::File { canonical_id, .. } = scope {
-                        if let Some(merged) = self.resolve_external_module_augmentation(
-                            canonical_id.as_ref(),
-                            name.as_ref(),
-                            scope,
-                            reduction_context,
-                        ) {
-                            return merged;
-                        }
-                    }
-                }
-                let Some((resolved_canonical, resolved_name)) = resolved_root else {
-                    // Enum-member projection (typed, GATED fallback). A dotted
-                    // type-position reference `Enum.Member` whose PREFIX
-                    // resolves to an enum value declaration carrying
-                    // `enum_members` projects the named member's projected type
-                    // (folded literal or degraded primitive).
-                    // The gate is the typed `ValueDeclKind::Enum` fact — NOT a
-                    // dotted-name string heuristic: exact qualified resolution
-                    // (namespace member, etc.) already ran above and won for
-                    // every non-enum `Ns.Member`, so this only fires once that
-                    // missed and the prefix is proven to be an enum.
-                    if let NodeScopeId::File { canonical_id, .. } = scope {
-                        if let Some(member_value) = self.resolve_enum_member_value(
-                            canonical_id.as_ref(),
-                            name_resolution,
-                            scope_payload,
-                            name.as_ref(),
-                        ) {
-                            return self.shallow_lower_type_expr_with_context(
-                                &member_value,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            );
-                        }
-                    }
-                    return self.opaque(QueryError::Miss);
-                };
-                // Recursive-ref guard: if the resolved root is
-                // currently being materialised by an enclosing
-                // `build_instantiate` frame, emit `Opaque(RecursiveRef)`
-                // as the back-edge. This handles `type T = { kids: T[] }`
-                // — the inner `Ref{T}` short-circuits to a back-edge
-                // instead of recursing into another Instantiate. The
-                // dispatcher-local `instantiate_active` stack records the
-                // (canonical, name) identity before body lowering; see
-                // `build_instantiate` for the push / pop wiring.
-                if type_arguments.is_empty()
-                    && self
-                        .is_instantiate_active(resolved_canonical.as_ref(), resolved_name.as_ref())
-                {
-                    return self.opaque(QueryError::RecursiveRef {
-                        name: Arc::clone(&resolved_name),
-                    });
-                }
-                let resolved_canonical_clone = Arc::clone(&resolved_canonical);
-                let resolved_name_clone = Arc::clone(&resolved_name);
-
-                // Lazy carriers: in `Navigate` mode, intern a
-                // `DeclRef` / `InstantiationRef` carrier rather than
-                // executing `ResolveDecl` / `Instantiate` eagerly. The
-                // interned carrier node carries the versioned `DeclIdentity`
-                // (canonical_id + whole_hash + decl_name) as its value-side
-                // payload — this is the node identity, not a query-identity
-                // key. (The eager `Instantiate` path keys instead on the
-                // env-bearing, content-free `ResolvedDeclSlotIdentity` slot
-                // derived via `type_slot_for` + `InstantiateContext`.) The
-                // walker treats `DeclRef` as transparent through alias
-                // chains and `InstantiationRef` as terminal.
-                let whole_hash = self
-                    .ctx
-                    .shallow_file_state(resolved_canonical_clone.as_ref())
-                    .map_or(HashValue::default(), |s| s.whole_hash);
-                let decl_identity = DeclIdentity {
-                    canonical_id: Arc::clone(&resolved_canonical_clone),
-                    whole_hash,
-                    decl_name: Arc::clone(&resolved_name_clone),
-                };
-                if matches!(
-                    mode,
-                    ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
-                ) {
-                    // Skeleton mode preserves carriers
-                    // (like Navigate) so the cycle-BFS can see recursive refs
-                    // as DeclRef/InstantiationRef in the lowered graph rather
-                    // than collapsed Opaque(RecursiveRef) sentinels. Without
-                    // this, body lowering of DotPathKeys's recursive
-                    // `DotPathKeys<NonNullable<T[K]>>` arm would go eager,
-                    // hit the instantiate_active guard, and emit
-                    // Opaque(RecursiveRef) — which collect_ref_identities_node
-                    // doesn't walk as a DeclRef/InstantiationRef. The
-                    // carrier-preservation makes the recursive identity
-                    // visible to the graph walk.
-                    //
-                    // Shallow mode preserves carriers for the same reason
-                    // Navigate does: decl-body lowering collects and
-                    // indexes, it never eagerly evaluates. Member-value
-                    // generic refs intern `DeclRef` / `InstantiationRef`
-                    // shells; the shallow-surface synthesiser, PathWalker
-                    // hops, and the relation/conditional oracle are the
-                    // demand points that materialise them. Eager
-                    // `ResolveDecl` / `Instantiate` at lowering time is
-                    // `Expanded` / `Identity` only — an eager Shallow path
-                    // is the member-value recursion storm class.
-                    if type_arguments.is_empty() {
-                        return graph.intern_node_with_scope(
-                            SemanticNodeData::DeclRef {
-                                identity: decl_identity,
-                            },
-                            scope.clone(),
-                        );
-                    } else {
-                        // Type arguments are NOT the macro-T own body
-                        // (by design): `defineProps<Foo<Bar>>()`
-                        // has `Bar` as a generic argument substituted into
-                        // `Foo`'s body — `Foo`'s own members are own-body,
-                        // `Bar`'s members are not. Lower args structurally.
-                        let arg_context = reduction_context.into_structural_provenance();
-                        let arg_ids: Vec<SemanticNodeId> = type_arguments
-                            .iter()
-                            .map(|arg| {
-                                self.shallow_lower_type_expr_with_context(
-                                    arg,
-                                    env,
-                                    scope,
-                                    name_resolution,
-                                    scope_payload,
-                                    shadowing,
-                                    substitutions,
-                                    arg_context,
-                                )
-                            })
-                            .collect();
-                        return graph.intern_node_with_scope(
-                            SemanticNodeData::InstantiationRef {
-                                base: decl_identity,
-                                args: Arc::from(arg_ids.into_boxed_slice()),
-                            },
-                            scope.clone(),
-                        );
-                    }
-                }
-
-                let anchor =
-                    match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                        scope: ScopeId {
-                            canonical_id: resolved_canonical,
-                            local_scope: None,
-                        },
-                        name: resolved_name,
-                    })) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                        _ => return self.opaque(QueryError::Miss),
-                    };
-                // Route through Instantiate when the caller supplied
-                // type arguments OR when the decl has type parameters
-                // (defaults must apply). Non-generic declarations with
-                // no args short-circuit to the bare ResolveDecl result.
-                let decl_routes_through_instantiate = self
-                    .ctx
-                    .prepared_type_decl(
-                        resolved_canonical_clone.as_ref(),
-                        resolved_name_clone.as_ref(),
-                    )
-                    .is_some_and(|prepared| !prepared.type_parameters.is_empty());
-                if type_arguments.is_empty() && !decl_routes_through_instantiate {
-                    anchor
-                } else {
-                    // Type arguments lower structurally — they are
-                    // substituted INTO the decl body, never the macro-T
-                    // own body themselves (by design). The
-                    // `Instantiate` itself keeps the caller's provenance:
-                    // `build_instantiate` stamps the (non-utility) decl's
-                    // OWN-body members with it and downgrades to
-                    // structural for builtin-utility targets
-                    // (`Omit`/`Pick` sources are never own-body).
-                    let arg_context = reduction_context.into_structural_provenance();
+                let ctx = crate::project_semantic_dispatch::carrier::CarrierResolverContext::new(
+                    env,
+                    scope,
+                    name_resolution,
+                    scope_payload,
+                    shadowing,
+                    reduction_context,
+                );
+                // Lower the type-args LAZILY — only on the branch the head
+                // resolves to (the helper invokes this closure exactly on a
+                // Promise / builtin / carrier-mode / eager `Instantiate`
+                // branch). An UNRESOLVABLE head misses without lowering +
+                // dispatching dead args. The closure routes through the SAME
+                // structural lowering (typed-IR-only); the carrier-substituted
+                // args carry `Structural` provenance.
+                let arg_context = reduction_context.into_structural_provenance();
+                self.resolve_bare_ref_head(&ctx, name, type_arguments.len(), || {
                     let arg_ids: Vec<SemanticNodeId> = type_arguments
                         .iter()
                         .map(|arg| {
@@ -921,21 +382,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             )
                         })
                         .collect();
-                    match self.execute_type_node(SemanticQueryKey::Instantiate {
-                        base: self.type_slot_for(
-                            Arc::clone(&decl_identity.canonical_id),
-                            Arc::clone(&decl_identity.decl_name),
-                        ),
-                        args: Arc::from(arg_ids.into_boxed_slice()),
-                        context: self.instantiate_context_for(
-                            &decl_identity.canonical_id,
-                            reduction_context,
-                        ),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                        _ => self.opaque(QueryError::Miss),
-                    }
-                }
+                    Arc::from(arg_ids.into_boxed_slice())
+                })
             }
             TypeExpr::Union(arms) => {
                 let mut arm_ids: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
@@ -2222,6 +1670,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // SHARED module resolver, then route to the value-namespace
             // (`typeof_query`) or TYPE-export (bare import) rail. No raw-text
             // reparsing — the typed-IR carrier drives the whole resolution.
+            // `import("specifier").qualifier<args>` / `typeof import("...")`.
+            // Lower the args structurally HERE, then route through the shared
+            // `resolve_import_type_head` resolver, whose TYPE-position qualifier
+            // head segment delegates to the ONE `resolve_bare_ref_head` (over an
+            // injected name-resolution entry) -- no parallel import resolver. The
+            // owner canonical (which resolves the relative specifier) is the
+            // file scope; a non-file scope is an honest miss.
             TypeExpr::ImportType {
                 specifier,
                 qualifier,
@@ -2235,49 +1690,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 else {
                     return self.opaque(QueryError::Miss);
                 };
-                let Some(dep_canonical) = self.ctx.resolve_type_dependency_canonical(
+                let ctx = crate::project_semantic_dispatch::carrier::CarrierResolverContext::new(
+                    env,
+                    scope,
+                    name_resolution,
+                    scope_payload,
+                    shadowing,
+                    reduction_context,
+                );
+                // Lower the type-args LAZILY — only when the import head actually
+                // consumes them (a resolvable specifier + terminal qualifier).
+                // An unresolvable specifier / multi-segment-with-args misses
+                // without lowering + dispatching dead args. The import-type arm
+                // lowers args under the caller's `reduction_context` (NOT
+                // `into_structural_provenance`) — the import-type args stay tied
+                // to the caller's evaluation mode/provenance.
+                self.resolve_import_type_head(
+                    &ctx,
                     owner_canonical.as_ref(),
-                    specifier.as_ref(),
-                ) else {
-                    return self.opaque(QueryError::Miss);
-                };
-                if *typeof_query {
-                    // `typeof import("./m")` — the module's VALUE-export
-                    // namespace. A trailing qualifier (`typeof import("m").x`)
-                    // projects a member path INTO that namespace.
-                    let namespace =
-                        self.build_import_value_namespace(&dep_canonical, reduction_context);
-                    let mut result = if qualifier.is_empty() {
-                        namespace
-                    } else {
-                        let path: Arc<[PathSegment]> = Arc::from(
-                            qualifier
-                                .iter()
-                                .map(|seg| PathSegment::Member(Arc::clone(seg)))
-                                .collect::<Vec<_>>()
-                                .into_boxed_slice(),
-                        );
-                        match self.execute_type_node(SemanticQueryKey::ProjectPath {
-                            base: namespace,
-                            path,
-                            context: crate::semantic_query::ProjectionReductionContext::published(
-                                ProjectionMode::Navigate,
-                            ),
-                        }) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                            _ => self.opaque(QueryError::Miss),
-                        }
-                    };
-                    // Instantiation expression: `typeof import("./m").make<string>`
-                    // applies the lowered type arguments to the resolved generic
-                    // value signature — the SAME positional binder substitution the
-                    // `TypeExpr::TypeOf(ValueRef)` arm performs for
-                    // `typeof C.make<string>`. A non-generic target or an arity
-                    // failure returns an honest miss/opaque from
-                    // `apply_typeof_instantiation_args`; an empty `type_arguments`
-                    // is a no-op (the common `typeof import("m").x` shape).
-                    if !type_arguments.is_empty() {
-                        let arg_nodes: Vec<SemanticNodeId> = type_arguments
+                    specifier,
+                    qualifier,
+                    *typeof_query,
+                    type_arguments.len(),
+                    || {
+                        let arg_ids: Vec<SemanticNodeId> = type_arguments
                             .iter()
                             .map(|arg| {
                                 self.shallow_lower_type_expr_with_context(
@@ -2292,25 +1728,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 )
                             })
                             .collect();
-                        result = self.apply_typeof_instantiation_args(result, &arg_nodes);
-                    }
-                    result
-                } else {
-                    // `import("./m").Member` in TYPE position — resolve the
-                    // qualifier as a TYPE export of the module.
-                    self.lower_import_type_member(
-                        &dep_canonical,
-                        qualifier,
-                        type_arguments,
-                        env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context,
-                    )
-                }
+                        Arc::from(arg_ids.into_boxed_slice())
+                    },
+                )
             }
             // Conditionals, rest, recursive-ref, and unknown
             // constructs remain out of this pass's scope — they route

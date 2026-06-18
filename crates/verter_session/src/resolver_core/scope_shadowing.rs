@@ -77,11 +77,19 @@ impl ScopeShadowing {
 
     /// Build a shadow set from a [`DeclarationScopePayload`] —
     /// dispatch-path entry point. The payload's `scope_type_names`
-    /// (covering script-setup type params + scope-local type aliases)
-    /// AND `scope_type_bindings` (covering script-setup generics) are
-    /// merged into the shadow set; both sources independently shadow
-    /// a same-named ambient-lib builtin per the foundation
-    /// (`524f469d`) gate.
+    /// (covering script-setup type params + scope-local type aliases),
+    /// `scope_type_bindings` (covering script-setup generics), AND
+    /// `import_bindings` (covering imported names) are merged into the
+    /// shadow set; each source independently shadows a same-named
+    /// ambient-lib builtin per the foundation (`524f469d`) gate.
+    ///
+    /// `import_bindings` membership is load-bearing for the carrier
+    /// head-resolution path, which rehydrates an EMPTY `name_resolution`
+    /// from the scope payload: the eager `Ref` path suppresses the builtin
+    /// fast-path because an imported name (e.g. `import type { Partial }`)
+    /// lives in `name_resolution`, but the carrier path has none — so the
+    /// import binding must shadow the builtin THROUGH this set instead, or
+    /// an imported `Partial` would wrongly resolve to `__builtin__.Partial`.
     pub(crate) fn from_scope_payload(payload: Option<&DeclarationScopePayload>) -> Self {
         let Some(payload) = payload else {
             return Self::empty();
@@ -89,6 +97,7 @@ impl ScopeShadowing {
         Self::from_payload_parts(
             payload.scope_type_names.iter(),
             payload.scope_type_bindings.keys(),
+            payload.import_bindings.keys(),
         )
     }
 
@@ -123,6 +132,7 @@ impl ScopeShadowing {
         Self::from_payload_parts(
             bundle.scope_type_names.iter(),
             bundle.script_setup_type_bindings.keys(),
+            bundle.import_bindings.keys(),
         )
     }
 
@@ -140,20 +150,28 @@ impl ScopeShadowing {
     }
 
     /// Internal — merge a `scope_type_names` set with the keys of
-    /// `scope_type_bindings` into a deduplicated shadow set. Both
-    /// sources independently shadow ambient-lib builtins per the
-    /// foundation gate; this keeps the merge in one place so any
+    /// `scope_type_bindings` and `import_bindings` into a deduplicated
+    /// shadow set. Each source independently shadows ambient-lib builtins
+    /// per the foundation gate; this keeps the merge in one place so any
     /// future shadow-source addition lands here once.
-    fn from_payload_parts<'a, S, K>(scope_type_names: S, type_binding_keys: K) -> Self
+    fn from_payload_parts<'a, S, K, I>(
+        scope_type_names: S,
+        type_binding_keys: K,
+        import_binding_keys: I,
+    ) -> Self
     where
         S: IntoIterator<Item = &'a String>,
         K: IntoIterator<Item = &'a String>,
+        I: IntoIterator<Item = &'a String>,
     {
         let mut set: FxHashSet<Arc<str>> = FxHashSet::default();
         for name in scope_type_names {
             set.insert(Arc::from(name.as_str()));
         }
         for binding in type_binding_keys {
+            set.insert(Arc::from(binding.as_str()));
+        }
+        for binding in import_binding_keys {
             set.insert(Arc::from(binding.as_str()));
         }
         Self {
@@ -178,17 +196,36 @@ mod tests {
     }
 
     fn payload_with(names: &[&str], type_bindings: &[&str]) -> DeclarationScopePayload {
+        payload_with_imports(names, type_bindings, &[])
+    }
+
+    fn payload_with_imports(
+        names: &[&str],
+        type_bindings: &[&str],
+        import_names: &[&str],
+    ) -> DeclarationScopePayload {
+        use crate::resolver_core::prepared_decl::ImportBinding;
         let scope_type_names: rustc_hash::FxHashSet<String> =
             names.iter().map(|s| s.to_string()).collect();
         let mut bindings: FxHashMap<String, TypeParamBinding> = FxHashMap::default();
         for (i, name) in type_bindings.iter().enumerate() {
             bindings.insert(name.to_string(), make_binding(name, i as u16));
         }
+        let mut import_bindings: FxHashMap<String, ImportBinding> = FxHashMap::default();
+        for name in import_names {
+            import_bindings.insert(
+                name.to_string(),
+                ImportBinding {
+                    canonical_id: "/import-src.ts".to_string(),
+                    exported_name: (*name).to_string(),
+                },
+            );
+        }
         DeclarationScopePayload {
             scope_type_names,
             scope_value_names: rustc_hash::FxHashSet::default(),
             scope_type_bindings: bindings,
-            import_bindings: FxHashMap::default(),
+            import_bindings,
         }
     }
 
@@ -234,6 +271,26 @@ mod tests {
     }
 
     #[test]
+    fn from_scope_payload_includes_import_bindings() {
+        // An imported name (`import type { Partial } from "./x"`) lands in
+        // `import_bindings` (NOT scope_type_names / scope_type_bindings) — the
+        // carrier head-resolution path rehydrates an EMPTY `name_resolution`, so
+        // the import binding must shadow the builtin THROUGH this set or an
+        // imported `Partial` would wrongly resolve to `__builtin__.Partial`.
+        let payload = payload_with_imports(&[], &[], &["Partial"]);
+        let shadow = ScopeShadowing::from_scope_payload(Some(&payload));
+        // Discriminating positive: the imported `Partial` shadows the builtin.
+        assert!(
+            shadow.is_shadowing_lib("Partial"),
+            "an imported name colliding with a builtin must shadow it (the carrier path's \
+             empty name_resolution relies on this)"
+        );
+        // Discriminating negative: a different builtin with no import remains
+        // unshadowed (so the fix does not over-shadow).
+        assert!(!shadow.is_shadowing_lib("Pick"));
+    }
+
+    #[test]
     fn from_scope_payload_none_returns_empty_set() {
         let shadow = ScopeShadowing::from_scope_payload(None);
         // Discriminating: a `None` payload (e.g. global lowering)
@@ -272,8 +329,9 @@ mod tests {
         // sub-test asserts the merge logic itself is identical to the
         // payload path's handling of the same `(names, bindings)`
         // input).
+        let empty_imports: FxHashMap<String, ()> = FxHashMap::default();
         let shadow_from_payload_again =
-            ScopeShadowing::from_payload_parts(names.iter(), bindings.keys());
+            ScopeShadowing::from_payload_parts(names.iter(), bindings.keys(), empty_imports.keys());
         assert_eq!(
             shadow_from_payload.is_shadowing_lib("Pick"),
             shadow_from_payload_again.is_shadowing_lib("Pick"),

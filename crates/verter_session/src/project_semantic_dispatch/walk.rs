@@ -43,6 +43,76 @@ pub fn probe_max_walker_frame_depth(
     LAST_SHALLOW_WALKER_MAX_FRAMES.load(Ordering::Relaxed)
 }
 
+// Test-only capture of the node the PathWalker's `TypeOf` carrier arm
+// produces after resolving the value root, projecting the carrier's path,
+// and applying its `type_args`. A `TypeOf` carrier reduced mid-walk to a
+// `Function` is a non-projectable terminal, so a remaining path segment
+// always misses and the walk's RETURN value cannot witness the
+// args-application; this capture exposes the arm's resolved node so a unit
+// test can assert the instantiation happened. Reset per probe invocation.
+#[cfg(test)]
+thread_local! {
+    static LAST_WALK_TYPEOF_RESOLVED: std::cell::Cell<Option<SemanticNodeId>> =
+        const { std::cell::Cell::new(None) };
+}
+
+// Test-only capture of the `ProjectionMode` the PathWalker's `TypeOf` carrier
+// arm dispatches its INTERNAL `typeof v.path` projection under. The
+// intermediate-hop rule (matching `evaluate.rs` / `raise.rs`) requires this
+// internal projection to run in `Navigate` regardless of the caller's outer
+// mode; this capture lets a unit test assert the mode directly. Reset per probe
+// invocation.
+#[cfg(test)]
+thread_local! {
+    static LAST_WALK_TYPEOF_INTERNAL_PATH_MODE: std::cell::Cell<Option<ProjectionMode>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Drive a `ProjectPath` over `base`/`path` and return the `ProjectionMode` the
+/// PathWalker's `TypeOf` carrier arm used for its INTERNAL `typeof v.path`
+/// projection, or `None` if the arm did not fire / the carrier had an empty
+/// internal path. Test-only entry point.
+#[cfg(test)]
+#[doc(hidden)]
+#[must_use]
+pub(crate) fn probe_walk_typeof_internal_path_mode(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    base: SemanticNodeId,
+    path: Arc<[crate::semantic_query::PathSegment]>,
+    context: crate::semantic_query::ProjectionReductionContext,
+) -> Option<ProjectionMode> {
+    LAST_WALK_TYPEOF_INTERNAL_PATH_MODE.with(|c| c.set(None));
+    let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path,
+        context,
+    });
+    LAST_WALK_TYPEOF_INTERNAL_PATH_MODE.with(std::cell::Cell::get)
+}
+
+/// Drive a `ProjectPath` over `base`/`path` and return the node the
+/// PathWalker's `TypeOf` carrier arm produced after applying the carrier's
+/// `type_args` (the post-resolution, post-projection, post-instantiation
+/// node), or `None` if the arm did not fire. Test-only entry point mirroring
+/// [`probe_max_walker_frame_depth`].
+#[cfg(test)]
+#[doc(hidden)]
+#[must_use]
+pub(crate) fn probe_walk_typeof_resolved(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    base: SemanticNodeId,
+    path: Arc<[crate::semantic_query::PathSegment]>,
+    context: crate::semantic_query::ProjectionReductionContext,
+) -> Option<SemanticNodeId> {
+    LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(None));
+    let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path,
+        context,
+    });
+    LAST_WALK_TYPEOF_RESOLVED.with(std::cell::Cell::get)
+}
+
 /// Diagnostic emitted by the shallow-mode terminal-surface walker. The
 /// memo replays diagnostics on warm reads via `CacheRead.walker_diagnostics`.
 /// Variants describe non-fatal observations (cycle short-circuits, open
@@ -1879,22 +1949,28 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     current = resolved;
                 }
                 SemanticNodeData::TypeOf(_) => {
-                    // TODO(carrier-resolution): apply TypeOf.type_args
-                    // (apply_typeof_instantiation_args) once the structural
-                    // lowerer is wired; carriers are dormant today so no
-                    // non-empty type_args reaches here. See
-                    // docs/arch/parselower-design.md (demand-time
-                    // carrier-resolution debt note).
+                    // `typeof value.path<args>`: resolve the value root, PROJECT
+                    // the carrier's dotted path, THEN apply the carrier's
+                    // instantiation `type_args` to the projected signature
+                    // (resolve → project → apply). The transparent unwrap does
+                    // not consume a walker segment; the resolved+instantiated
+                    // node re-enters the per-segment loop as `current`.
                     let (value_root, typeof_path) =
                         data.typeof_head().expect("TypeOf carrier head");
                     let value_root = value_root.clone();
                     let typeof_path = typeof_path.clone();
+                    // Read the carrier args from the SAME borrow (owned copy so
+                    // the `data` borrow is not held across the apply call).
+                    let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
                     // PathWalker hop = a demand point: the typeof root
                     // resolves under the walker's OWN full reduction
                     // context (mode + demand + provenance + merge_role) —
                     // a transit walk crossing `typeof` stays a transit
-                    // subquery; the trailing `ProjectPath` rides the same
-                    // context below.
+                    // subquery. The carrier's INTERNAL dotted-path projection
+                    // (below) is an INTERMEDIATE hop and runs in `Navigate`
+                    // (matching the evaluate / raise `TypeOf` arms), NOT this
+                    // caller context — an Expanded/Identity outer demand must
+                    // not over-expand the internal typeof-path hop.
                     let typeof_context = self.context;
                     let typeof_key = self.dispatch.typeof_key_for(value_root, typeof_context);
                     let mut resolved = match self.execute_read_folding_partial(typeof_key) {
@@ -1912,11 +1988,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
                         );
+                        // The internal `typeof v.path` projection is an
+                        // INTERMEDIATE hop — project it in `Navigate` (matching
+                        // the evaluate / raise `TypeOf` arms), NOT the caller's
+                        // outer mode (`typeof_context`). The TERMINAL/outer
+                        // demand stays the caller's; only this typeof-internal
+                        // path projection is Navigate.
+                        let internal_path_context =
+                            crate::semantic_query::ProjectionReductionContext::published(
+                                ProjectionMode::Navigate,
+                            );
+                        #[cfg(test)]
+                        LAST_WALK_TYPEOF_INTERNAL_PATH_MODE
+                            .with(|c| c.set(Some(internal_path_context.mode)));
                         resolved =
                             match self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
                                 base: resolved,
                                 path: projection_path,
-                                context: typeof_context,
+                                context: internal_path_context,
                             }) {
                                 QueryResult::Value(id) => id,
                                 _ => {
@@ -1925,6 +2014,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 }
                             };
                     }
+                    // Instantiation expression (`typeof C.make<string>`): apply
+                    // the lowered type arguments to the projected generic
+                    // signature AFTER the path projection reached it. An
+                    // arity/shape mismatch composes an honest `Opaque(Miss)`.
+                    if !type_args.is_empty() {
+                        resolved = self.dispatch.apply_typeof_instantiation_args(resolved, &type_args);
+                    }
+                    #[cfg(test)]
+                    LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(Some(resolved)));
                     if resolved == current {
                         results.push(current);
                         return;
@@ -2219,6 +2317,30 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         }
                     }
                 }
+                // Unresolved-reference carriers reached MID-WALK (behind an
+                // alias / placeholder / instantiation body, not as the
+                // top-level query subject) RE-ENTER the SAME shared
+                // `resolve_carrier_subject_node` normalization the canonical
+                // query entry + the shallow-synthesis worklist use — then
+                // continue the walk from the resolved node. The top-level entry
+                // normalization alone cannot reach a carrier buried behind a
+                // body; this is its in-walk counterpart. NO walker-local
+                // resolver. A carrier that does not resolve (normalization
+                // returns it unchanged) keeps the terminal `Opaque(Miss)`
+                // fallback below.
+                SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                    drop(data);
+                    let resolved = self.dispatch.resolve_carrier_subject_node(
+                        current,
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                    );
+                    if resolved == current {
+                        // Genuinely-unresolvable carrier — honest terminal miss.
+                        results.push(self.opaque_miss());
+                        return;
+                    }
+                    current = resolved;
+                }
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
@@ -2227,12 +2349,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::Function { .. }
-                // Unresolved bare-name / dynamic-import / raw-fallback /
-                // constructor / synthetic-binding carriers cannot be
-                // path-navigated as-is — they are resolved by the dispatch
-                // before a walk descends. Return Opaque(Miss).
-                | SemanticNodeData::BareRef(_)
-                | SemanticNodeData::ImportType(_)
+                // Raw-fallback / constructor / synthetic-binding carriers
+                // cannot be path-navigated as-is and have no head-resolution
+                // rail. Return Opaque(Miss).
                 | SemanticNodeData::RawFallback { .. }
                 | SemanticNodeData::ConstructorType { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => {
@@ -3504,6 +3623,41 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                 }
             }
+            // Nested unresolved-reference carriers (`Foo` / `import("m").G`)
+            // inside an Intersection / Union / heritage surface RE-ENTER the
+            // shared dispatch carrier-subject normalization — the SAME
+            // `resolve_carrier_subject_node` the canonical query entry runs —
+            // rather than resolving locally in the walker. The resolved
+            // `DeclRef` / `InstantiationRef` is then RE-VISITED so its own arm
+            // materialises the surface. A carrier that does not resolve (or
+            // resolves to itself / an opaque) contributes nothing — the honest
+            // unresolvable fallback. This is the nested counterpart of the
+            // top-level entry normalization; top-level normalization alone
+            // cannot reach a carrier buried inside a composite.
+            SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                drop(data);
+                let resolved = self.dispatch.resolve_carrier_subject_node(
+                    cur,
+                    crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                );
+                if resolved == cur {
+                    self.contribute_surface(
+                        target,
+                        root_contribution,
+                        intersection_buffers,
+                        union_buffers,
+                        None,
+                    );
+                } else {
+                    work.push(Frame::Visit {
+                        node: resolved,
+                        target,
+                        member_role_override,
+                        heritage_overlay_body,
+                        provenance_override,
+                    });
+                }
+            }
             // Non-Object terminals contribute nothing to the merged
             // surface — under TS rules a primitive arm in an
             // intersection drops out (the contributor rule), and a
@@ -3522,12 +3676,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             | SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::TypeOf(_)
-            // Unresolved bare-name / dynamic-import / raw-fallback /
-            // constructor / synthetic-binding carriers contribute no shallow
-            // surface members (they are resolved by the dispatch before a
-            // surface synthesis descends).
-            | SemanticNodeData::BareRef(_)
-            | SemanticNodeData::ImportType(_)
+            // Raw-fallback / constructor / synthetic-binding carriers contribute
+            // no shallow surface members (a raw-fallback holds no surface; a
+            // constructor / synthetic binding is its own terminal).
             | SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::ConstructorType { .. }
             | SemanticNodeData::SyntheticBinding { .. } => {
