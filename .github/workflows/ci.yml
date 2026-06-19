@@ -38,6 +38,8 @@ jobs:
               - '.cargo/**'
               - 'rust-toolchain.toml'
               - 'scripts/v5-process/**'
+              - 'scripts/check-integration-test-layout.mjs'
+              - 'scripts/integration-test-layout-allowlist.json'
               - '.github/workflows/ci.yml'
             js:
               - 'packages/**'

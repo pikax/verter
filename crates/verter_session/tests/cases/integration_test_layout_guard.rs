@@ -18,8 +18,8 @@
 //!   * exactly 1 integration-test target whose `src_path` normalizes to
 //!     `<pkg>/tests/main.rs`, PLUS any EXACTLY-allowlisted targets.
 //!
-//! PLUS the GOV-D4 structural checks (so the bare "exactly 1 main.rs" rule
-//! cannot be evaded):
+//! PLUS the structural checks (so the bare "exactly 1 main.rs" rule cannot be
+//! evaded):
 //!   1. `<pkg>/tests/main.rs` on disk ⇒ metadata MUST report that target.
 //!   2. immediate `<pkg>/tests/*.rs` present AND zero metadata test targets ⇒
 //!      FAIL (catches `autotests = false` hiding tests).
@@ -29,6 +29,13 @@
 //!      than an allowlisted src file) ⇒ FAIL. Files UNDER `tests/cases/` (or
 //!      any subdir) are fine — only the immediate `tests/*.rs` level is
 //!      constrained.
+//!   5. MORE THAN ONE metadata test target whose src is `<pkg>/tests/main.rs`
+//!      ⇒ FAIL (two `[[test]]` blocks both pointing at `tests/main.rs` still
+//!      compile two binaries).
+//!   6. every cargo-AUTO-DISCOVERABLE position (immediate `tests/*.rs` AND
+//!      `tests/<dir>/main.rs` one subdir deep) without a matching metadata
+//!      target ⇒ FAIL (catches a hidden nested `tests/rogue/main.rs` under
+//!      `autotests = false`, even when another valid target exists).
 //!
 //! The allowlist is EXACT (package + target + repo-relative forward-slash
 //! `src_path`), with NO globs / prefixes / package-wide switches, and is
@@ -84,13 +91,28 @@ fn load_allowlist() -> Vec<AllowEntry> {
     let path = workspace_root().join("scripts/integration-test-layout-allowlist.json");
     let raw = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read allowlist {}: {e}", repo_rel_posix(&path)));
-    let json: serde_json::Value = serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("allowlist {} is not valid JSON: {e}", repo_rel_posix(&path)));
+    parse_allowlist(&raw)
+}
+
+/// Pure allowlist parser/validator (no I/O) so the duplicate-key rejection is
+/// unit-testable. PANICS on a malformed or duplicate-keyed allowlist — a broken
+/// allowlist must not silently degrade into "no exceptions", and a duplicate
+/// `(package, target)` would let a STALE duplicate hide behind a correct one in
+/// the matched-set bookkeeping below.
+fn parse_allowlist(raw: &str) -> Vec<AllowEntry> {
+    let json: serde_json::Value =
+        serde_json::from_str(raw).unwrap_or_else(|e| panic!("allowlist is not valid JSON: {e}"));
     let arr = json
         .get("allow")
         .and_then(|v| v.as_array())
-        .unwrap_or_else(|| panic!("allowlist {} missing `allow` array", repo_rel_posix(&path)));
+        .unwrap_or_else(|| panic!("allowlist missing `allow` array"));
     let mut out = Vec::new();
+    // Reject duplicate keys at load: a duplicate `(package, target)` would let a
+    // stale duplicate be masked by a correct one (the matched-set is keyed by
+    // `(package, target)`); we also reject an exact `(package, target, src_path)`
+    // triplet duplicate for full hygiene.
+    let mut seen_pkg_target: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut seen_triplet: BTreeSet<(String, String, String)> = BTreeSet::new();
     for e in arr {
         let package = e.get("package").and_then(|v| v.as_str());
         let target = e.get("target").and_then(|v| v.as_str());
@@ -101,6 +123,22 @@ fn load_allowlist() -> Vec<AllowEntry> {
                 assert!(
                     !src_path.contains('\\') && !src_path.starts_with('/'),
                     "allowlist src_path must be repo-relative + forward-slash: {src_path:?}"
+                );
+                let triplet = (
+                    package.to_string(),
+                    target.to_string(),
+                    src_path.to_string(),
+                );
+                assert!(
+                    seen_triplet.insert(triplet),
+                    "duplicate allowlist entry (package `{package}`, target `{target}`, \
+                     src_path `{src_path}`): each exception must appear exactly once"
+                );
+                assert!(
+                    seen_pkg_target.insert((package.to_string(), target.to_string())),
+                    "duplicate allowlist (package, target) key (package `{package}`, target \
+                     `{target}`): a `(package, target)` may appear at most once, otherwise a \
+                     stale duplicate could be masked by a correct one"
                 );
                 out.push(AllowEntry {
                     package: package.to_string(),
@@ -131,6 +169,15 @@ struct PackageLayout {
     test_targets: Vec<(String, String)>,
     /// IMMEDIATE (non-recursive) `tests/*.rs` files: repo-rel-posix paths.
     immediate_test_files: Vec<String>,
+    /// Cargo-AUTO-DISCOVERABLE integration-test source positions:
+    /// every immediate `tests/*.rs` PLUS every `tests/*/main.rs` exactly one
+    /// subdirectory deep (repo-rel-posix). These are the positions cargo turns
+    /// into a compiled test binary on its own; a candidate WITHOUT a matching
+    /// `test_targets` src is a binary `cargo metadata` does not report (the
+    /// `autotests = false` hiding case), even if the package has other targets.
+    /// Files deeper than one level, or wired as modules under `tests/main.rs`,
+    /// are NOT auto-discoverable and are deliberately excluded.
+    auto_discoverable_candidates: Vec<String>,
 }
 
 /// Pure checker: given the per-package layouts + the allowlist, return the
@@ -149,6 +196,35 @@ fn compute_failures(packages: &[PackageLayout], allowlist: &[AllowEntry]) -> Vec
     let mut matched_allow: BTreeSet<(String, String)> = BTreeSet::new();
 
     for pkg in packages {
+        // ---- Exactly ONE tests/main.rs binary. Two `[[test]]` blocks both
+        //      `path = "tests/main.rs"` make cargo metadata report TWO targets
+        //      with identical src; each individually `continue`s on the
+        //      sanctioned-main path below, so without this count the second
+        //      compiled binary slips past.
+        let main_targets: Vec<&String> = pkg
+            .test_targets
+            .iter()
+            .filter(|(_, src)| *src == pkg.expected_main_src_posix)
+            .map(|(name, _)| name)
+            .collect();
+        if main_targets.len() > 1 {
+            let names = main_targets
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            failures.push((
+                pkg.name.clone(),
+                format!(
+                    "package `{}` has {} tests/main.rs integration-test targets ({names}) — \
+                     exactly one tests/main.rs binary is allowed; a second [[test]] pointing \
+                     at tests/main.rs still compiles a separate binary.",
+                    pkg.name,
+                    main_targets.len(),
+                ),
+            ));
+        }
+
         // ---- metadata test targets: each must be tests/main.rs OR allowlisted.
         for (tname, tsrc_rel) in &pkg.test_targets {
             let tsrc_posix = tsrc_rel.clone();
@@ -253,6 +329,36 @@ fn compute_failures(packages: &[PackageLayout], allowlist: &[AllowEntry]) -> Vec
                 ),
             ));
         }
+
+        // ---- HIDDEN AUTO-DISCOVERABLE BINARY: every cargo-auto-discoverable
+        //      position (`tests/*.rs` and `tests/*/main.rs` one subdir deep)
+        //      must correspond to a metadata test target. A candidate WITHOUT a
+        //      matching target is a binary cargo compiles but metadata does not
+        //      report — the `autotests = false` hiding case. This fires PER
+        //      CANDIDATE even when the package has OTHER metadata targets, so it
+        //      catches a hidden `tests/rogue/main.rs` next to a valid
+        //      `tests/main.rs` (which the GOV-D4(2) zero-targets rule cannot).
+        let reported_srcs: BTreeSet<&str> = pkg
+            .test_targets
+            .iter()
+            .map(|(_, src)| src.as_str())
+            .collect();
+        for cand in &pkg.auto_discoverable_candidates {
+            if reported_srcs.contains(cand.as_str()) {
+                continue;
+            }
+            failures.push((
+                pkg.name.clone(),
+                format!(
+                    "{cand} is a cargo-auto-discoverable integration-test position \
+                     (tests/*.rs or tests/<dir>/main.rs) but cargo metadata reports no \
+                     integration-test target for it — `autotests = false` (or an explicit \
+                     [[test]] that omits it) is hiding a separately-compiled test binary. \
+                     Wire it through tests/main.rs (e.g. as a module under tests/cases/) or \
+                     remove it."
+                ),
+            ));
+        }
     }
 
     // ---- STALE-FAILING: every allowlist entry must have matched a real target.
@@ -299,6 +405,34 @@ fn immediate_test_rs_files(tests_dir: &Path) -> Vec<String> {
         let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
         if is_file && p.extension().and_then(|e| e.to_str()) == Some("rs") {
             out.push(repo_rel_posix(&p));
+        }
+    }
+    out
+}
+
+/// Enumerate every cargo-AUTO-DISCOVERABLE integration-test source position
+/// under `tests_dir`, as repo-rel-posix paths: every immediate `tests/*.rs`
+/// PLUS every `tests/*/main.rs` exactly one subdirectory deep. Cargo compiles
+/// each of these into its OWN test binary, so each is a candidate the metadata
+/// targets must account for. Files deeper than one level (e.g.
+/// `tests/cases/correctness/foo.rs`) and non-`main.rs` files inside a
+/// subdirectory (e.g. `tests/cases/architecture_guards.rs`) are NOT
+/// auto-discovered — they only compile when wired as modules under
+/// `tests/main.rs` — so they are deliberately excluded.
+fn auto_discoverable_test_candidates(tests_dir: &Path) -> Vec<String> {
+    let mut out = immediate_test_rs_files(tests_dir);
+    let Ok(read_dir) = fs::read_dir(tests_dir) else {
+        return out;
+    };
+    for entry in read_dir.flatten() {
+        let sub = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if !is_dir {
+            continue;
+        }
+        let nested_main = sub.join("main.rs");
+        if nested_main.is_file() {
+            out.push(repo_rel_posix(&nested_main));
         }
     }
     out
@@ -395,6 +529,7 @@ fn collect_package_layouts() -> Vec<PackageLayout> {
             main_rs_exists: main_rs.is_file(),
             test_targets,
             immediate_test_files: immediate_test_rs_files(&tests_dir),
+            auto_discoverable_candidates: auto_discoverable_test_candidates(&tests_dir),
         });
     }
     layouts
@@ -474,6 +609,7 @@ fn layout_checker_discriminates_stray_and_stale() {
         main_rs_exists: true,
         test_targets: vec![("main".to_string(), main_src.clone())],
         immediate_test_files: vec![main_src.clone()],
+        auto_discoverable_candidates: vec![main_src.clone()],
     };
     let no_allow: Vec<AllowEntry> = Vec::new();
     assert!(
@@ -546,6 +682,9 @@ fn layout_checker_discriminates_stray_and_stale() {
             "crates/demo/tests/allocator_canaries.rs".to_string(),
         )],
         immediate_test_files: vec!["crates/demo/tests/allocator_canaries.rs".to_string()],
+        // The auto-discoverable candidate (the allowlisted canary) HAS a matching
+        // metadata target, so the only signal that fires here is missing-main.
+        auto_discoverable_candidates: vec!["crates/demo/tests/allocator_canaries.rs".to_string()],
         ..conformant.clone()
     };
     // allowlist the canary so ONLY the missing-main signal fires.
@@ -572,4 +711,114 @@ fn layout_checker_discriminates_stray_and_stale() {
         "an exactly-allowlisted target must be exempt from the 'not allowlisted' \
          failure; got: {missing_failures:?}"
     );
+
+    // (e) DUPLICATE MAIN: two `[[test]]` blocks both `path = "tests/main.rs"`
+    // make cargo metadata report TWO targets, both with src == tests/main.rs.
+    // Each one individually `continue`s on the sanctioned-main path, so without
+    // a count check the second binary slips past. Exactly one tests/main.rs
+    // binary is allowed.
+    let duplicate_main = PackageLayout {
+        test_targets: vec![
+            ("main_a".to_string(), main_src.clone()),
+            ("main_b".to_string(), main_src.clone()),
+        ],
+        ..conformant.clone()
+    };
+    let dup_main_failures = compute_failures(std::slice::from_ref(&duplicate_main), &no_allow);
+    assert!(
+        dup_main_failures.iter().any(
+            |(_, m)| m.contains("tests/main.rs integration-test targets")
+                && m.contains("exactly one")
+        ),
+        "two [[test]] blocks both pointing at tests/main.rs MUST be flagged — a \
+         second binary still compiles even though both share the sanctioned src; \
+         got: {dup_main_failures:?}"
+    );
+    // The single-main baseline must NOT trip the duplicate-main check.
+    assert!(
+        !compute_failures(std::slice::from_ref(&conformant), &no_allow)
+            .iter()
+            .any(|(_, m)| m.contains("tests/main.rs integration-test targets")),
+        "a single tests/main.rs target must not be flagged as a duplicate"
+    );
+
+    // (f) HIDDEN NESTED MAIN: `tests/rogue/main.rs` is cargo-auto-discovered as
+    // its OWN binary, but with `autotests = false` + an explicit
+    // `[[test]] path = "tests/main.rs"` it is INVISIBLE to cargo metadata. The
+    // package has a valid main target, so GOV-D4(2) (which needs ZERO targets)
+    // never fires; only the per-candidate auto-discoverable check catches it.
+    let hidden_nested_main_src = "crates/demo/tests/rogue/main.rs".to_string();
+    let hidden_nested_main = PackageLayout {
+        // metadata reports ONLY the sanctioned main target (the nested-main is hidden).
+        test_targets: vec![("main".to_string(), main_src.clone())],
+        immediate_test_files: vec![main_src.clone()],
+        // disk has the sanctioned main PLUS a nested rogue main — both are
+        // cargo-auto-discoverable positions.
+        auto_discoverable_candidates: vec![main_src.clone(), hidden_nested_main_src.clone()],
+        ..conformant.clone()
+    };
+    let hidden_failures = compute_failures(std::slice::from_ref(&hidden_nested_main), &no_allow);
+    assert!(
+        hidden_failures
+            .iter()
+            .any(|(_, m)| m.contains(&hidden_nested_main_src)
+                && m.contains("cargo metadata reports no integration-test target")),
+        "a hidden nested tests/<dir>/main.rs (autotests=false) MUST be flagged as a \
+         compiled-but-unreported binary even when another target exists; \
+         got: {hidden_failures:?}"
+    );
+    // The conformant baseline (its sole candidate IS reported) must NOT trip the
+    // auto-discoverable check.
+    assert!(
+        !compute_failures(std::slice::from_ref(&conformant), &no_allow)
+            .iter()
+            .any(|(_, m)| m.contains("cargo metadata reports no integration-test target")),
+        "an auto-discoverable candidate that HAS a matching metadata target must not \
+         be flagged as hidden"
+    );
+}
+
+/// G5 LOAD-LEVEL DISCRIMINATION: a duplicate `(package, target)` allowlist entry
+/// must be rejected at parse time (it would otherwise let a STALE duplicate hide
+/// behind a correct one in the matched-set bookkeeping).
+#[test]
+#[should_panic(expected = "duplicate allowlist")]
+fn parse_allowlist_rejects_duplicate_package_target_key() {
+    // Same (package, target) twice, differing only in src_path — must panic on
+    // the `(package, target)` duplicate.
+    let raw = r#"{
+      "allow": [
+        { "package": "p", "target": "t", "src_path": "crates/p/tests/a.rs", "reason": "x" },
+        { "package": "p", "target": "t", "src_path": "crates/p/tests/b.rs", "reason": "y" }
+      ]
+    }"#;
+    let _ = parse_allowlist(raw);
+}
+
+/// G5 (exact-triplet): a fully-identical duplicate entry is also rejected.
+#[test]
+#[should_panic(expected = "duplicate allowlist entry")]
+fn parse_allowlist_rejects_exact_duplicate_entry() {
+    let raw = r#"{
+      "allow": [
+        { "package": "p", "target": "t", "src_path": "crates/p/tests/a.rs", "reason": "x" },
+        { "package": "p", "target": "t", "src_path": "crates/p/tests/a.rs", "reason": "x" }
+      ]
+    }"#;
+    let _ = parse_allowlist(raw);
+}
+
+/// A well-formed, duplicate-free allowlist parses cleanly (negative control for
+/// the duplicate-rejection tests above — proves the panic is the duplicate, not
+/// the parse).
+#[test]
+fn parse_allowlist_accepts_distinct_entries() {
+    let raw = r#"{
+      "allow": [
+        { "package": "p", "target": "t1", "src_path": "crates/p/tests/a.rs", "reason": "x" },
+        { "package": "p", "target": "t2", "src_path": "crates/p/tests/b.rs", "reason": "y" }
+      ]
+    }"#;
+    let entries = parse_allowlist(raw);
+    assert_eq!(entries.len(), 2, "two distinct entries must both load");
 }
