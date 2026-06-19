@@ -181,10 +181,11 @@ tempfile = "3.27"
 walkdir = "2.5"
 regex = "1.12"
 # Named per-resource serialization for integration tests that contend a
-# process-global resource (parse-fact injection slot, per-host provenance
-# counters, sampler thread counts). `#[serial(<group>)]` coordinates the
-# annotated tests across the shared test process so a future single-binary
-# layout keeps the deltas stable; finer than one global lock.
+# process-global resource. Two groups: `fact_counter_provenance` (the
+# fact-counter provenance discriminators) and `parse_fact_injection` (the
+# parse-fact injection slot). `#[serial(<group>)]` coordinates the
+# annotated tests across the shared test process so a single-binary layout
+# keeps the deltas stable; finer than one global lock.
 serial_test = { workspace = true }
 # Phase 6b sub-plan §6b.D2b — T11 compile-fail trybuild target verifies
 # that `VerterHost::workspace()` is gated behind `pub(crate)` and is not
