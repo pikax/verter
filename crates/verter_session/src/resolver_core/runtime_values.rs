@@ -7,6 +7,21 @@ use verter_semantic::analysis::types::{AnalyzedImport, ImportBindingKind};
 pub trait ImportedRuntimeValueResolver {
     fn dependency_eval_env(&self, canonical_id: &str) -> Option<Arc<EvalEnv>>;
 
+    /// Bounded, graph-native per-name value-symbol reader (graph-native consumer-reader readiness
+    /// readiness): the equivalent of `dependency_eval_env(src)` followed
+    /// by `value_symbols.get(name).primary().clone()`, but resolved
+    /// through the per-symbol lazy memo WITHOUT materialising the
+    /// dependency's whole env. The default returns `None` (test resolvers
+    /// / callers without a host-backed per-symbol reader fall back to the
+    /// whole-env oracle below).
+    fn dependency_value_symbol_graph_native(
+        &self,
+        _source_canonical_id: &str,
+        _source_name: &str,
+    ) -> Option<ValueDeclInfo> {
+        None
+    }
+
     fn prepared_value_decl(
         &self,
         _canonical_id: &str,
@@ -95,7 +110,48 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
                 continue;
             };
 
-            let mut alias = dep_group.primary().clone();
+            let primary = dep_group.primary();
+            // Non-breaking readiness cross-check (debug/test only): the
+            // bounded graph-native per-name reader must reproduce the
+            // whole-env value read field-for-field (modulo the opaque
+            // `declaration_id`). A resolver without a host-backed reader
+            // returns `None` and skips the check. Release builds skip this
+            // entirely; the oracle below stays authoritative.
+            #[cfg(debug_assertions)]
+            if let Some(graph_native) =
+                resolver.dependency_value_symbol_graph_native(&source_canonical_id, &source_name)
+            {
+                debug_assert_eq!(
+                    graph_native.kind, primary.kind,
+                    "graph-native consumer-reader readiness: C4 graph-native value reader kind diverged for \
+                     ({source_canonical_id}, {source_name})"
+                );
+                debug_assert_eq!(
+                    graph_native.type_annotation, primary.type_annotation,
+                    "graph-native consumer-reader readiness: C4 graph-native value reader type_annotation diverged for \
+                     ({source_canonical_id}, {source_name})"
+                );
+                // `FunctionSignature` does not implement `PartialEq`;
+                // compare via the structural debug projection.
+                debug_assert_eq!(
+                    format!("{:?}", graph_native.signatures),
+                    format!("{:?}", primary.signatures),
+                    "graph-native consumer-reader readiness: C4 graph-native value reader signatures diverged for \
+                     ({source_canonical_id}, {source_name})"
+                );
+                debug_assert_eq!(
+                    graph_native.object_shape, primary.object_shape,
+                    "graph-native consumer-reader readiness: C4 graph-native value reader object_shape diverged for \
+                     ({source_canonical_id}, {source_name})"
+                );
+                debug_assert_eq!(
+                    graph_native.enum_members, primary.enum_members,
+                    "graph-native consumer-reader readiness: C4 graph-native value reader enum_members diverged for \
+                     ({source_canonical_id}, {source_name})"
+                );
+            }
+
+            let mut alias = primary.clone();
             alias.name = binding.name.clone();
             env.add_value(alias);
         }

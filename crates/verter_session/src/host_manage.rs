@@ -1322,6 +1322,15 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
         self.host.base_eval_env_arc(canonical_id)
     }
 
+    fn dependency_value_symbol_graph_native(
+        &self,
+        source_canonical_id: &str,
+        source_name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+        self.host
+            .dependency_value_symbol_graph_native(source_canonical_id, source_name)
+    }
+
     fn prepared_value_decl(
         &self,
         canonical_id: &str,

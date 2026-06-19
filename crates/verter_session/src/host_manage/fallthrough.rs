@@ -370,6 +370,24 @@ impl VerterHost {
         if !required_runtime_value_names.is_empty() {
             let local_value_names: rustc_hash::FxHashSet<String> =
                 env.value_symbols.keys().cloned().collect();
+
+            // The graph-native dep extractor
+            // (`fallthrough_runtime_value_deps_graph_native`) enumerates the
+            // cross-file runtime-value sources the materializer hydrates,
+            // WITHOUT a whole-env clone of any dependency, so a future
+            // whole-env-free builder can drive hydration off the per-name
+            // value readers. Its equivalence with the materializer is proved
+            // OFFLINE on full `(source_canonical, source_name)` pairs by
+            // `c3_fallthrough_runtime_value_deps_graph_native_equals_\
+            // materializer_touched_full_pairs`. No in-production cross-check
+            // runs here: the only faithful in-production touched-pair recompute
+            // would route through the legacy `resolve_value_export_target`
+            // whole-env peel (materialising every dependency's whole env) —
+            // the exact cost the readiness work removes — and a name-count
+            // proxy is unsound (legal double-alias-onto-one-source hydrates two
+            // bindings from one dep pair). The offline pair-equality test is
+            // the authoritative equivalence rail.
+
             self.materialize_imported_runtime_values_into_env(
                 snapshot,
                 &local_value_names,
@@ -384,6 +402,102 @@ impl VerterHost {
         }
 
         Some(env)
+    }
+
+    /// Graph-native dep-extraction reader for the lightweight fallthrough
+    /// env consumer: enumerates the cross-file runtime-value DEP SET the
+    /// hydration touches WITHOUT a whole-env clone of any dependency, so a
+    /// whole-env-free builder can drive hydration off the per-name value
+    /// readers instead of a dependency `whole_env()`.
+    ///
+    /// Returns the deterministic, deduplicated set of
+    /// `(source_canonical_id, source_name)` pairs the materializer
+    /// resolves for the owner's required runtime-value bindings — the
+    /// EXACT selection `materialize_imported_runtime_values_into_env`
+    /// makes (skip type-only imports/bindings + namespace bindings, skip
+    /// owner-shadowed locals, filter to the required names), routed
+    /// graph-natively (no dependency whole-env). The
+    /// `owner_local_value_names` shadow set is read from the per-symbol
+    /// value-header index (PRESENCE, no whole-env), matching the
+    /// materializer's `env.value_symbols.keys()` shadow set for
+    /// file-scope value symbols.
+    ///
+    /// Its equivalence with the materializer is proved on full
+    /// `(source_canonical, source_name)` pairs by the C3 dep-equivalence
+    /// tests; its presence is pinned by
+    /// `whole_env_consumer_graph_native_inventory.rs`.
+    #[allow(dead_code)]
+    pub(super) fn fallthrough_runtime_value_deps_graph_native(
+        &self,
+        canonical_id: &str,
+        snapshot: &FileAnalysisSnapshot,
+        root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
+    ) -> std::collections::BTreeSet<(String, String)> {
+        use verter_semantic::analysis::types::ImportBindingKind;
+
+        let required_runtime_value_names = match root_reachability {
+            Some(root_reachability) => {
+                collect_required_root_fallthrough_runtime_value_names(snapshot, root_reachability)
+            }
+            None => collect_required_template_runtime_value_names(snapshot),
+        };
+
+        let mut deps = std::collections::BTreeSet::new();
+        if required_runtime_value_names.is_empty() {
+            return deps;
+        }
+
+        // Owner-local value-symbol shadow set via the per-symbol header
+        // index — NO whole-env clone. A binding whose name is an owner
+        // file-scope value symbol is shadowed and never hydrated, exactly
+        // as the materializer's `local_value_names` filter requires.
+        let owner_local_value_names: rustc_hash::FxHashSet<String> = self
+            .routed_shallow_state(canonical_id)
+            .map(|state| {
+                state
+                    .decl_bodies()
+                    .header_index()
+                    .value_headers
+                    .keys()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for import in &snapshot.imports {
+            if import.is_type_only {
+                continue;
+            }
+            let Some(dep_canonical_id) = import.resolved_canonical_id.as_deref() else {
+                continue;
+            };
+            for binding in &import.bindings {
+                if binding.is_type_only
+                    || matches!(binding.kind, ImportBindingKind::Namespace)
+                    || owner_local_value_names.contains(&binding.name)
+                    || !required_runtime_value_names.contains(&binding.name)
+                {
+                    continue;
+                }
+                let imported_name = binding
+                    .imported_name
+                    .as_deref()
+                    .unwrap_or(binding.name.as_str());
+                // Graph-native export-target + alias peel: NEVER reaches
+                // `base_eval_env_arc`/`whole_env()` on the dependency, so
+                // this reader does not materialise the dependency's whole
+                // env. The materializer's selection identity is preserved
+                // — same `resolve_named_export` walk, same single-segment
+                // alias chain, peeled per-symbol instead of via the env.
+                let (source_canonical_id, source_name) = self
+                    .resolve_value_export_target_graph_native(dep_canonical_id, imported_name)
+                    .map(|target| (target.canonical_id, target.name))
+                    .unwrap_or_else(|| (dep_canonical_id.to_string(), imported_name.to_string()));
+                deps.insert((source_canonical_id, source_name));
+            }
+        }
+
+        deps
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]

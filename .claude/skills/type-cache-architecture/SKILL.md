@@ -1483,6 +1483,10 @@ The `TypeExpr`→handle migration carries graph handles on the hot path but keep
 
 Guard: `synthetic_binding_identity_is_content_free`. See `/type-resolution` for the full carrier set + `materialize_type_expr` boundary.
 
+## whole_env() consumer graph-native readers (Stage 6-prep readiness)
+
+The `DeclBodyMemo::whole_env()` whole-file env product (the lazy, lease-pinned env materialised once per content generation through the retained parse snapshot) has four consumers reaching it via `VerterHost::base_eval_env_arc`: `local_type_declaration_id` (C1), `peel_value_decl_alias` (C2), `build_fallthrough_eval_env_lightweight` (C3), `dependency_eval_env` (C4). Each now carries a NON-BREAKING bounded graph-native per-symbol reader routing through `ShallowFileState::{type_decl, value_decl, header_index}` instead of the whole env, while the legacy whole-env path is RETAINED as the equivalence oracle (the producer flip + storage flip + `EvalEnv` removal are Stage 6). The readers never raise→re-lower (no new hot `materialize_type_expr` bridge — `handle_capable_consumer_guards.rs` G-A still polices the global allowlist; `whole_env_consumer_graph_native_inventory.rs` adds the per-consumer presence inventory + a reader-file `materialize_type_expr` ban). C1's `DeclarationId` stays an OPAQUE in-process token (never a cache key, never wire-serialized — `FfiResolvedTypeDeclaration` has no `declaration_id`); its contract is stable-and-unique, not equal-to-oracle. Full per-consumer contract + the SFC-generic / svelte-rune oracle-divergence note: `/type-resolution` → IndexedReady Target Contract → whole_env() consumer graph-native readers.
+
 ## Related skills
 
 - `/architecture` — high-level module map

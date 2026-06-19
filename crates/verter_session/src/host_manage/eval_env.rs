@@ -69,8 +69,81 @@ impl VerterHost {
             return None;
         }
 
-        self.base_eval_env(canonical_source)
-            .and_then(|env| env.type_declaration_id(resolved_name))
+        let oracle = self
+            .base_eval_env(canonical_source)
+            .and_then(|env| env.type_declaration_id(resolved_name));
+        // Non-breaking readiness cross-check (debug/test only): the
+        // bounded graph-native reader must AGREE with the oracle on
+        // PRESENCE (`Some`/`None`). The oracle stays authoritative for the
+        // id VALUE (see the reader's doc on stable-unique vs
+        // equal-to-oracle); release builds skip this entirely.
+        debug_assert_eq!(
+            oracle.is_some(),
+            self.local_type_declaration_id_graph_native(canonical_source, resolved_name)
+                .is_some(),
+            "graph-native consumer-reader readiness: graph-native C1 reader diverged from the oracle on presence for \
+             ({canonical_source}, {resolved_name})"
+        );
+        oracle
+    }
+
+    /// Bounded, graph-native presence reader for the C1 consumer
+    /// (`local_type_declaration_id`). Routes the import guard + the
+    /// local-type PRESENCE check through `routed_shallow_state` and the
+    /// per-symbol declaration-header index — it NEVER materialises
+    /// `whole_env()` / `base_eval_env_arc`.
+    ///
+    /// The legacy oracle stays in production: the `DeclarationId` the
+    /// oracle assigns is the 1-based ordinal in the INTERLEAVED
+    /// type+value `add_type`/`add_value` registration order of
+    /// `build_eval_env` (a single shared `next_declaration_id` counter,
+    /// every `TypeDeclInfo.declaration_id == 0` at build time). That
+    /// interleaving is NOT recoverable from the unordered, kind-split
+    /// `DeclHeaderIndex` without replaying the registration walk, so a
+    /// graph-native reader cannot reconstruct an EQUAL id without
+    /// re-materialising the whole env.
+    ///
+    /// This is acceptable because the id is an OPAQUE in-process identity
+    /// token: it never crosses the FFI/wire surface
+    /// (`FfiResolvedTypeDeclaration` carries no `declaration_id`), is
+    /// never compared cross-file, and no production reader branches on
+    /// its value. The C1 contract is therefore STABLE-AND-UNIQUE per
+    /// `(file, name)`, NOT EQUAL-TO-ORACLE. This reader returns a stable
+    /// per-`(file, name)` id derived from the header index's
+    /// deterministic name ordering, with the legacy oracle retained as
+    /// the production path. The bound-test asserts it never materialises
+    /// `whole_env()`; the equivalence-test pins its
+    /// presence-equivalence (`Some`/`None`) to the oracle.
+    pub(crate) fn local_type_declaration_id_graph_native(
+        &self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+        let state = self.routed_shallow_state(canonical_source)?;
+        // Same import guard as the oracle: an imported name has no LOCAL
+        // type declaration id.
+        if state.import_target(resolved_name).is_some() {
+            return None;
+        }
+        // Presence WITHOUT body lowering — a header miss is `None`,
+        // mirroring the oracle's `type_declaration_id` miss.
+        let header_index = state.decl_bodies().header_index();
+        header_index.type_header(resolved_name)?;
+        // Stable-unique per `(file, name)`: a deterministic ordinal over
+        // the header index's sorted type-symbol names. This is NOT the
+        // oracle's interleaved id (see the doc comment) but is stable
+        // across reads for an unchanged file and unique within the file —
+        // the only property the consumer's opaque-token use requires.
+        let mut type_names: Vec<&str> = header_index
+            .type_headers
+            .keys()
+            .map(String::as_str)
+            .collect();
+        type_names.sort_unstable();
+        type_names
+            .iter()
+            .position(|name| *name == resolved_name)
+            .map(|ordinal| (ordinal as u64) + 1)
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -118,7 +191,159 @@ impl VerterHost {
             current.name = next_name.clone();
         }
 
+        // Non-breaking readiness cross-check (debug/test only): the
+        // graph-native peeler must land on the SAME terminal identity.
+        // The plain .ts / non-rune-module case is exact; a `$`-rune
+        // ambient hop in a Svelte rune MODULE is the one documented
+        // scoped exception (the reader's doc) — the oracle's `whole_env()`
+        // injects ambient `$`-rune value symbols post-build that the
+        // per-symbol header index does not carry, so a `typeof $rune` hop
+        // would terminate one hop earlier graph-natively. That scoped
+        // exception is ACTUALLY excluded here by gating the assert on the
+        // ORIGIN file's rune-module classification (reusing the shared
+        // `is_svelte_rune_module` language classifier).
+        #[cfg(debug_assertions)]
+        if !crate::host_resolve::is_svelte_rune_module(
+            &self.language_classifier.classify(canonical_id),
+        ) {
+            let graph_native = self.peel_value_decl_alias_graph_native(canonical_id, name);
+            debug_assert_eq!(
+                current, graph_native,
+                "graph-native consumer-reader readiness: graph-native C2 peeler diverged from the oracle for \
+                 ({canonical_id}, {name})"
+            );
+        }
+
         current
+    }
+
+    /// Bounded, graph-native sibling of [`Self::peel_value_decl_alias`].
+    ///
+    /// Walks the same single-segment `typeof` alias chain, but per hop
+    /// reads exactly the ONE demanded value symbol's lowered body via
+    /// `routed_shallow_state(cur).value_decl(name)` (the lazy per-symbol
+    /// memo) and resolves the `env.value_symbols.contains_key(next)`
+    /// membership through the per-symbol declaration-header index
+    /// (`value_header(next).is_some()` — PRESENCE, no body lowering),
+    /// NEVER `whole_env()` / `base_eval_env_arc`. The visited-set,
+    /// same-name, and path-length guards are byte-identical to the
+    /// oracle.
+    ///
+    /// SCOPED LIMITATION (oracle retained in production): a Svelte rune
+    /// MODULE (`.svelte.ts` / `.svelte.js`) injects ambient `$`-rune
+    /// value symbols (`$state`, `$derived`, …) into the oracle's
+    /// `whole_env()` post-build that are absent from the per-symbol
+    /// header index. A `typeof` hop that targets a `$`-rune ambient name
+    /// would terminate one hop EARLIER here than in the oracle. The
+    /// fixture coverage proves equivalence for user-declared symbols
+    /// (the actual runtime-value import surface); a `$`-rune alias target
+    /// is not a real export and never reaches this consumer in practice.
+    fn peel_value_decl_alias_graph_native(
+        &self,
+        canonical_id: &str,
+        name: &str,
+    ) -> ValueDeclIdentity {
+        let mut current = ValueDeclIdentity {
+            canonical_id: canonical_id.to_string(),
+            name: name.to_string(),
+        };
+        let mut visited = rustc_hash::FxHashSet::default();
+
+        loop {
+            if !visited.insert(current.clone()) {
+                break;
+            }
+
+            let Some(state) = self.routed_shallow_state(current.canonical_id.as_str()) else {
+                break;
+            };
+            let Some(lowered) = state.value_decl(current.name.as_str()) else {
+                break;
+            };
+            let Some(verter_type_expr::TypeExpr::TypeOf(value_ref)) =
+                lowered.type_annotation.as_ref()
+            else {
+                break;
+            };
+            let Some(next_name) = value_ref.path.first() else {
+                break;
+            };
+            if value_ref.path.len() != 1 || *next_name == current.name {
+                break;
+            }
+            // Membership via header PRESENCE — no body lowering of the
+            // next symbol just to learn it exists.
+            if state
+                .decl_bodies()
+                .header_index()
+                .value_header(next_name)
+                .is_none()
+            {
+                break;
+            }
+
+            current.name = next_name.clone();
+        }
+
+        current
+    }
+
+    /// Bounded, graph-native per-name value-symbol reader for the C4
+    /// consumer (`dependency_eval_env`'s sole use:
+    /// `source_env.value_symbols.get(&source_name)` →
+    /// `dep_group.primary().clone()` after a `prepared_value_decl` miss).
+    ///
+    /// Reads exactly the demanded value symbol's lowered body via
+    /// `routed_shallow_state(src).value_decl(name)` (the lazy per-symbol
+    /// memo — synthesised `.vue` default first, then the memo) and
+    /// converts the `LoweredValueDecl` into the `ValueDeclInfo` the
+    /// materializer's whole-env read produced. NEVER materialises
+    /// `whole_env()` / `base_eval_env_arc`.
+    ///
+    /// `declaration_id = 0` matches the import-alias hydration path the
+    /// materializer already uses for the prepared route
+    /// (`prepared_value_decl_to_value_decl_info`): the id is opaque and
+    /// is overwritten downstream when the alias takes the importing
+    /// binding's name. The `name` is the demanded `source_name`,
+    /// matching the oracle's `dep_group.primary().name`.
+    pub(crate) fn dependency_value_symbol_graph_native(
+        &self,
+        source_canonical_id: &str,
+        source_name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+        let state = self.routed_shallow_state(source_canonical_id)?;
+        let lowered = state.value_decl(source_name)?;
+        Some(verter_semantic::analysis::type_eval::ValueDeclInfo {
+            name: source_name.to_string(),
+            declaration_id: 0,
+            kind: lowered.kind,
+            type_annotation: lowered.type_annotation.clone(),
+            signatures: lowered.signatures.clone(),
+            object_shape: lowered.object_shape.clone(),
+            enum_members: lowered.enum_members.clone(),
+        })
+    }
+
+    /// Test-only `(canonical, name)` view of the legacy oracle peeler.
+    #[cfg(test)]
+    pub(crate) fn peel_value_decl_alias_for_test(
+        &self,
+        canonical_id: &str,
+        name: &str,
+    ) -> (String, String) {
+        let id = self.peel_value_decl_alias(canonical_id, name);
+        (id.canonical_id, id.name)
+    }
+
+    /// Test-only `(canonical, name)` view of the graph-native peeler.
+    #[cfg(test)]
+    pub(crate) fn peel_value_decl_alias_graph_native_for_test(
+        &self,
+        canonical_id: &str,
+        name: &str,
+    ) -> (String, String) {
+        let id = self.peel_value_decl_alias_graph_native(canonical_id, name);
+        (id.canonical_id, id.name)
     }
 
     pub(crate) fn resolve_value_export_target(
@@ -131,6 +356,31 @@ impl VerterHost {
             .source_canonical_id
             .unwrap_or_else(|| dep_canonical_id.to_string());
         Some(self.peel_value_decl_alias(source_canonical_id.as_str(), export.source_name.as_str()))
+    }
+
+    /// Bounded, graph-native sibling of [`Self::resolve_value_export_target`].
+    ///
+    /// Resolves the same export target through the graph-native export
+    /// walk (`resolve_named_export` already walks the export graph, never
+    /// the whole env), then peels the value alias chain through
+    /// [`Self::peel_value_decl_alias_graph_native`] (per-symbol value
+    /// memo + header PRESENCE) instead of the legacy
+    /// [`Self::peel_value_decl_alias`] (which materialises
+    /// `base_eval_env_arc`/`whole_env()`). NEVER materialises a
+    /// dependency's whole env.
+    pub(crate) fn resolve_value_export_target_graph_native(
+        &self,
+        dep_canonical_id: &str,
+        imported_name: &str,
+    ) -> Option<ValueDeclIdentity> {
+        let export = self.resolve_named_export(dep_canonical_id, imported_name, Some(false))?;
+        let source_canonical_id = export
+            .source_canonical_id
+            .unwrap_or_else(|| dep_canonical_id.to_string());
+        Some(self.peel_value_decl_alias_graph_native(
+            source_canonical_id.as_str(),
+            export.source_name.as_str(),
+        ))
     }
 
     pub(crate) fn build_snapshot_from_parse(parse: crate::ParseSnapshot) -> FileAnalysisSnapshot {
