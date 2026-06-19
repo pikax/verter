@@ -38,9 +38,8 @@ use std::thread::JoinHandle;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
-/// Sampler tick interval. 50 ms strikes the plan-§5 balance between
-/// responsiveness (bounded peak under-reporting) and CPU cost
-/// (~0.1% of one core at this rate).
+/// Sampler tick interval. 50 ms bounds peak under-reporting while keeping
+/// sampler CPU overhead low (~0.1% of one core at this rate).
 #[cfg(not(target_arch = "wasm32"))]
 const SAMPLER_TICK: Duration = Duration::from_millis(50);
 
@@ -583,11 +582,11 @@ mod seed_tests {
         // ensure_sampler_started), so a non-zero slot can come ONLY from
         // the seed.
         //
-        // Discrimination contract:
-        // - Pre-fix tree (register_active_request does not seed): the
-        //   slot stays at exactly 0 → the `> 0` assertion FAILS.
-        // - Post-fix tree: the seed writes the start-of-request RSS →
-        //   `> 0` PASSES.
+        // Discrimination contract: with no sampler thread, the only
+        // writer of the per-request peak slot is the registration seed.
+        // If `register_active_request` failed to seed, the slot would
+        // stay at exactly 0 and the `> 0` assertion would fail; the seed
+        // writes the start-of-request RSS, so `> 0` passes.
         let runtime = HostAuditRuntime::new(
             AuditConfig {
                 audit_timing_capture: true,
@@ -609,7 +608,7 @@ mod seed_tests {
             seeded > 0,
             "register_active_request must seed the per-request peak slot with an \
              immediate RSS sample when audit_timing_capture is on; got {seeded} \
-             (pre-fix this is 0 because nothing writes the slot at registration)",
+             (a 0 here means nothing wrote the slot at registration)",
         );
         // The seed reads real process RSS, so it must land in a
         // realistic range for a debug test process — not a sentinel.

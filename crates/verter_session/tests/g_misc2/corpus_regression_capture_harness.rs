@@ -122,9 +122,8 @@ fn fixture(name: &str) -> CorpusFixture {
 fn fast_fixture_returns_ok_and_writes_no_capture() {
     // Discriminating: a healthy fixture with a generous timeout MUST
     // return Ok(HarnessOutcome::Completed) AND must NOT write a capture
-    // file. Would falsely pass on the pre-change tree only if the
-    // harness module did not exist — which is exactly the negative we
-    // are guarding.
+    // file. The negative half — no capture directory for a passing
+    // fixture — is the property this asserts.
     let temp = tempfile::tempdir().expect("capture-dir tempdir");
     let root = temp.path();
 
@@ -162,17 +161,11 @@ fn slow_fixture_emits_audit_capture_with_full_record_json() {
     // slow, populate a structured AuditCapture, and persist the full
     // RequestAuditRecord JSON to the deterministic dump path.
     //
-    // Fails on the pre-change tree because:
-    //   - `run_corpus_fixture_with_audit_capture` does not exist
-    //   - `AuditCapture` does not exist
-    //   - The dump-path layout (`<root>/<base>/<id>.json`)
-    //     is undefined
-    //
-    // Passes on the post-change tree because:
-    //   - The harness completes the resolution synchronously, observes
-    //     the elapsed time exceeded the threshold, populates AuditCapture
-    //     fields from the captured record, and writes the JSON file at
-    //     the documented path.
+    // The asserted contract: the harness completes the resolution
+    // synchronously, observes the elapsed time exceeded the threshold,
+    // populates the AuditCapture fields from the captured record, and
+    // writes the JSON file at the documented `<root>/<base>/<id>.json`
+    // layout.
     let temp = tempfile::tempdir().expect("capture-dir tempdir");
     let root = temp.path();
 
@@ -243,11 +236,10 @@ fn slow_fixture_emits_audit_capture_with_full_record_json() {
 fn capture_path_lives_under_explicit_capture_root() {
     // Discriminating: the dump location MUST be the EXPLICIT
     // capture-root the caller threaded in — not a hard-coded default
-    // and not the process env. Pre-change tree fails because the
-    // harness does not exist; a faulty post-change implementation that
-    // ignored the explicit `capture_root` argument (e.g. still read the
-    // env / hard-coded `target/audit-captures`) would also fail this
-    // test because the dump would land elsewhere.
+    // and not the process env. A faulty implementation that ignored the
+    // explicit `capture_root` argument (e.g. still read the env /
+    // hard-coded `target/audit-captures`) fails this test because the
+    // dump would land elsewhere.
     let temp = tempfile::tempdir().expect("capture-dir tempdir");
     let explicit_root = temp.path().to_path_buf();
 

@@ -293,8 +293,8 @@ fn run_audited(
 /// callers pass an explicit `capture_root` so concurrent fixtures do
 /// not race on the process-global env var. This resolver exists for a
 /// production runner that wants the env / workspace-default behaviour,
-/// and is the single seam the env-fallback tests exercise (under
-/// `#[serial(audit_capture_env)]`).
+/// and is the single seam the env-fallback tests exercise in subprocess
+/// probes with child-scoped environment overrides.
 pub fn capture_root_dir() -> PathBuf {
     if let Some(custom) = std::env::var_os("VERTER_AUDIT_CAPTURE_DIR") {
         return PathBuf::from(custom);
