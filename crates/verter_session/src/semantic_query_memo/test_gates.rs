@@ -267,10 +267,18 @@ impl SemanticGraphStore {
     /// NOT held during validation. Returns an RAII guard that disarms
     /// the probe when dropped.
     ///
-    /// The probe is process-global because the test thread arms it
-    /// while a worker thread runs the validate. Tests using this
-    /// probe must serialise on the
-    /// [`VALIDATE_RUNNING_PROBE_TEST_LOCK`] mutex.
+    /// The probe is process-global and fires from EVERY
+    /// `MemoEntry::validate` in the process — not only the arming
+    /// test's worker. [`VALIDATE_RUNNING_PROBE_TEST_LOCK`] serialises
+    /// the probe ARMERS against each other, but does NOT stop an
+    /// unrelated test that runs a warm read CONCURRENTLY (as happens in
+    /// the consolidated single-binary integration suite) from invoking
+    /// the armed closure on its own thread. A blocking probe (one that
+    /// waits on a `Barrier`/condvar) MUST therefore gate its body to the
+    /// arming test's intended worker thread — e.g. compare
+    /// `std::thread::current().id()` against the worker's id and no-op on
+    /// any other thread — or it will deadlock unrelated co-resident
+    /// tests. Holding the lock alone is insufficient.
     #[doc(hidden)]
     pub fn arm_validate_running_probe_for_tests<F>(probe: F) -> ValidateRunningProbeGuard
     where

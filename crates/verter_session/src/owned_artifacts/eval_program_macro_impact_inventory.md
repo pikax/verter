@@ -165,7 +165,7 @@ The Tier 1A architecture guard `macro_impacting_constructs_fail_lowering_not_sil
 2. Every row marked **Diagnostic-only** corresponds to a `LoweredStmt::Unsupported`
    or `LoweredExpr::Unsupported` instance with no `LoweringError`.
 3. Every row marked **Supported** has at least one fixture in
-   `crates/verter_session/tests/fixtures/macro_impact/` that resolves successfully
+   `crates/verter_session/tests/cases/fixtures/macro_impact/` that resolves successfully
    post-Tier-1A.
 
 ## Source provenance (D116)

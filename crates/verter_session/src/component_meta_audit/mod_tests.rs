@@ -397,6 +397,7 @@ fn chat_messages_attribution_sheet_has_dominant_cost_arm_and_bridge_max_depth_re
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set during cargo test");
     let path = std::path::Path::new(&manifest_dir)
         .join("tests")
+        .join("cases")
         .join("perf_bounds")
         .join("cold-path-attribution-baseline.md");
     assert!(

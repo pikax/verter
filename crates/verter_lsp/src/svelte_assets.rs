@@ -383,7 +383,7 @@ mod tests {
     /// in-repo session-gate vendor (hermetic; no npm install).
     fn vendor_svelte_into(root: &Path) {
         let src = workspace_root()
-            .join("crates/verter_session/tests/svelte_typecheck_gate/vendor_svelte");
+            .join("crates/verter_session/tests/cases/svelte_typecheck_gate/vendor_svelte");
         let dst = root.join("node_modules/svelte");
         std::fs::create_dir_all(&dst).unwrap();
         for f in [

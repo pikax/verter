@@ -3,11 +3,11 @@
 
 Emits three checked-in, generated-not-hand-maintained files:
 
-1. `crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs`
+1. `crates/verter_session/tests/cases/manifest_data/typeinfo_ignored_test_manifest_rows.rs`
    — the 362 `IgnoredTestRow`s, each with the full 13-column schema.
-2. `crates/verter_session/tests/manifest_data/typeinfo_additional_proof_rows.rs`
+2. `crates/verter_session/tests/cases/manifest_data/typeinfo_additional_proof_rows.rs`
    — the CLOSED set of 7 coverage-only `AdditionalProofRow`s.
-3. `crates/verter_session/tests/manifest_data/typeinfo_parity_blocks.rs`
+3. `crates/verter_session/tests/cases/manifest_data/typeinfo_parity_blocks.rs`
    — the `TYPEINFO_PARITY_BLOCKS` DAG (every block + prereqs +
    dominant mechanism + consumed mechanisms).
 
@@ -2074,7 +2074,7 @@ def main(check_only: bool = False) -> int:
     if not src_dir.is_dir():
         print(f"typeinfo_tests dir missing: {src_dir}", file=sys.stderr)
         return 2
-    out_dir = repo_root / "crates/verter_session/tests/manifest_data"
+    out_dir = repo_root / "crates/verter_session/tests/cases/manifest_data"
     if not check_only:
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2263,7 +2263,7 @@ def main(check_only: bool = False) -> int:
                 file=sys.stderr,
             )
             for name in drifted:
-                print(f"  - crates/verter_session/tests/manifest_data/{name}", file=sys.stderr)
+                print(f"  - crates/verter_session/tests/cases/manifest_data/{name}", file=sys.stderr)
             print(
                 "Regenerate with `pnpm gen:typeinfo-manifest` and commit the result.",
                 file=sys.stderr,

@@ -753,7 +753,7 @@ fn no_off_store_host_caches_allow_list_shrunk() {
     use std::path::PathBuf;
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR must be set during cargo test");
-    let guards_path = PathBuf::from(manifest).join("tests/architecture_guards.rs");
+    let guards_path = PathBuf::from(manifest).join("tests/cases/architecture_guards.rs");
     let src = std::fs::read_to_string(&guards_path)
         .unwrap_or_else(|e| panic!("read {guards_path:?}: {e}"));
 
