@@ -50,8 +50,8 @@
 //!   traced signature over the legacy fence bridge.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
+use serial_test::serial;
 use verter_semantic::facts::registry::InternedName;
 use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 
@@ -62,10 +62,6 @@ use verter_session::for_tests::{
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, ParseFactRef};
 use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 use verter_session::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
-
-// Serialise this test against any concurrent test that arms the same
-// process-global Parse-fact injection slot.
-static MUTEX: Mutex<()> = Mutex::new(());
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -116,9 +112,11 @@ fn injected_parse_fact() -> FactVersionRef {
     })
 }
 
+// Serialise against any concurrent test that arms the same
+// process-global Parse-fact injection slot.
 #[test]
+#[serial(parse_fact_injection)]
 fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
-    let _serial = MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let host = host();
 
     // Seed a tiny TS file so the dispatch has a real ResolveDecl key

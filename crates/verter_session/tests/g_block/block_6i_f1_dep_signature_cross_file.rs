@@ -29,14 +29,10 @@
 #![cfg(test)]
 
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::Mutex;
 
+use serial_test::serial;
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{CompileErrorPolicy, HostConfig, UpsertRequest};
-
-/// Serialise the test so the per-host provenance counter deltas are
-/// stable. Mirrors `component_meta_result_eager_invalidation_defeating`.
-static F1_DEP_SIGNATURE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn metahost() -> ComponentMetaHost {
     ComponentMetaHost::new_standalone(HostConfig {
@@ -46,10 +42,12 @@ fn metahost() -> ComponentMetaHost {
     })
 }
 
+// Serialise so the per-host provenance counter deltas are stable.
+// Shares the `component_meta_provenance` resource with
+// `component_meta_result_eager_invalidation_defeating`.
 #[test]
+#[serial(component_meta_provenance)]
 fn admit_threads_cross_file_dep_signature_for_imported_helper() {
-    let _guard = F1_DEP_SIGNATURE_TEST_LOCK.lock().unwrap();
-
     let mh = metahost();
 
     // Setup: a helper file with a type that the owner references. The

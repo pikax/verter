@@ -139,12 +139,21 @@ pub enum HarnessOutcome {
 /// threshold but completed — capture written), or `ResolveError`
 /// (resolution failed for a non-timeout reason).
 ///
+/// `capture_root` is the directory the slow-fixture JSON dump is
+/// written under (`<capture_root>/<basename>/<request_id>.json`).
+/// Callers pass it EXPLICITLY — the harness never reads the
+/// process-global `VERTER_AUDIT_CAPTURE_DIR` env var on this path, so
+/// concurrent fixtures can target disjoint roots without serialising
+/// on a shared process env. A production runner that wants the env /
+/// workspace-default behaviour passes [`capture_root_dir()`].
+///
 /// Aborts the test process if the worker fails to return within
 /// the hang deadline (`max(timeout * 2, MIN_HARD_DEADLINE)`).
 /// **No thread is ever abandoned.**
 pub fn run_corpus_fixture_with_audit_capture(
     fixture: CorpusFixture,
     timeout: Duration,
+    capture_root: &Path,
 ) -> HarnessOutcome {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_worker = Arc::clone(&cancel);
@@ -168,7 +177,7 @@ pub fn run_corpus_fixture_with_audit_capture(
                     // Successful resolution that exceeded the
                     // timeout — treat as a regression, dump the
                     // record, return the structured capture.
-                    let capture = write_capture(&record)
+                    let capture = write_capture(&record, capture_root)
                         .unwrap_or_else(|e| panic!("harness failed to persist audit capture: {e}"));
                     HarnessOutcome::Slow { capture }
                 } else {
@@ -276,9 +285,16 @@ fn run_audited(
     Ok(record)
 }
 
-/// Resolve the capture root directory. Honours
+/// Production-fallback capture-root resolver. Honours
 /// `VERTER_AUDIT_CAPTURE_DIR` when set, otherwise falls back to the
 /// workspace-local `target/audit-captures/` directory.
+///
+/// [`run_corpus_fixture_with_audit_capture`] does NOT call this —
+/// callers pass an explicit `capture_root` so concurrent fixtures do
+/// not race on the process-global env var. This resolver exists for a
+/// production runner that wants the env / workspace-default behaviour,
+/// and is the single seam the env-fallback tests exercise (under
+/// `#[serial(audit_capture_env)]`).
 pub fn capture_root_dir() -> PathBuf {
     if let Some(custom) = std::env::var_os("VERTER_AUDIT_CAPTURE_DIR") {
         return PathBuf::from(custom);
@@ -300,10 +316,12 @@ pub fn default_capture_root_dir() -> PathBuf {
         .join("audit-captures")
 }
 
-fn write_capture(record: &RequestAuditRecord) -> std::io::Result<AuditCapture> {
-    let root = capture_root_dir();
+fn write_capture(
+    record: &RequestAuditRecord,
+    capture_root: &Path,
+) -> std::io::Result<AuditCapture> {
     let basename = derive_basename(&record.canonical_id);
-    let dir = root.join(&basename);
+    let dir = capture_root.join(&basename);
     std::fs::create_dir_all(&dir)?;
     let file_path = dir.join(format!("{}.json", record.request_id));
     let json = serde_json::to_string_pretty(record).map_err(std::io::Error::other)?;

@@ -5,81 +5,31 @@
 //! its declared timeout MUST produce a structured [`AuditCapture`]
 //! AND dump the full
 //! [`verter_session::component_meta_audit::RequestAuditRecord`] JSON
-//! to
-//! `${VERTER_AUDIT_CAPTURE_DIR:-target/audit-captures}/<basename>/<request_id>.json`,
-//! rather than hanging the test process or losing data via thread
-//! abandonment.
+//! to `<capture_root>/<basename>/<request_id>.json`, rather than
+//! hanging the test process or losing data via thread abandonment.
+//!
+//! The dump root is threaded EXPLICITLY into
+//! `run_corpus_fixture_with_audit_capture` — these tests pass a
+//! per-test tempdir directly and NEVER mutate the process-global
+//! `VERTER_AUDIT_CAPTURE_DIR` env var, so they run fully in parallel
+//! with no shared-process serialization. The env-fallback resolver
+//! (`capture_root_dir()`) is a separate production seam; the two tests
+//! that exercise it carry `#[serial(audit_capture_env)]` so every
+//! reader/writer of the process env participates in one group.
 
 #[path = "../component_meta_audit_corpus/harness.rs"]
 mod harness;
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
+
+use serial_test::serial;
 
 use harness::{
     capture_root_dir, default_capture_root_dir, run_corpus_fixture_with_audit_capture,
     AuditCapture, CorpusFixture, HarnessOutcome,
 };
-
-/// Tests in this target mutate `VERTER_AUDIT_CAPTURE_DIR` to redirect
-/// capture artifacts into per-test tempdirs. cargo runs `#[test]`
-/// functions in parallel, so we serialize env-var manipulation behind
-/// a process-wide mutex to keep the redirection observed by each test
-/// scoped to that test only.
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    &LOCK
-}
-
-/// RAII guard that scopes `VERTER_AUDIT_CAPTURE_DIR` to a tempdir for
-/// the lifetime of the guard, restoring the previous value (or
-/// unsetting) on drop. Holds [`env_lock`] for the same scope so a
-/// concurrent test cannot observe a different binding.
-struct ScopedCaptureDir {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    prev: Option<std::ffi::OsString>,
-    _temp: tempfile::TempDir,
-    root: PathBuf,
-}
-
-impl ScopedCaptureDir {
-    fn new() -> Self {
-        let lock = env_lock().lock().unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var_os("VERTER_AUDIT_CAPTURE_DIR");
-        let temp = tempfile::tempdir().expect("scoped capture-dir tempdir");
-        let root = temp.path().to_path_buf();
-        // SAFETY: env_lock() serialises this with every other test
-        // that mutates the same variable; we restore on drop.
-        unsafe {
-            std::env::set_var("VERTER_AUDIT_CAPTURE_DIR", &root);
-        }
-        Self {
-            _lock: lock,
-            prev,
-            _temp: temp,
-            root,
-        }
-    }
-
-    fn root(&self) -> &PathBuf {
-        &self.root
-    }
-}
-
-impl Drop for ScopedCaptureDir {
-    fn drop(&mut self) {
-        // SAFETY: lock held by `_lock` field protects the env-var
-        // mutation; restore the prior value verbatim.
-        unsafe {
-            match self.prev.take() {
-                Some(prev) => std::env::set_var("VERTER_AUDIT_CAPTURE_DIR", prev),
-                None => std::env::remove_var("VERTER_AUDIT_CAPTURE_DIR"),
-            }
-        }
-    }
-}
 
 /// A minimal valid Vue SFC that resolves quickly through a hermetic
 /// [`AuditedRequest`]. Used both for the "fast" path (under threshold,
@@ -103,10 +53,14 @@ fn fast_fixture_returns_ok_and_writes_no_capture() {
     // file. Would falsely pass on the pre-change tree only if the
     // harness module did not exist — which is exactly the negative we
     // are guarding.
-    let scoped = ScopedCaptureDir::new();
+    let temp = tempfile::tempdir().expect("capture-dir tempdir");
+    let root = temp.path();
 
-    let outcome =
-        run_corpus_fixture_with_audit_capture(fixture("fast_fixture"), Duration::from_secs(60));
+    let outcome = run_corpus_fixture_with_audit_capture(
+        fixture("fast_fixture"),
+        Duration::from_secs(60),
+        root,
+    );
 
     match outcome {
         HarnessOutcome::Completed { record } => {
@@ -122,7 +76,7 @@ fn fast_fixture_returns_ok_and_writes_no_capture() {
 
     // The capture directory MUST NOT exist for a passing fixture — the
     // dump path is reserved for regressions.
-    let dir = scoped.root().join("fast_fixture");
+    let dir = root.join("fast_fixture");
     assert!(
         !dir.exists(),
         "harness must not create a capture directory for a passing fixture; found {dir:?}",
@@ -147,10 +101,14 @@ fn slow_fixture_emits_audit_capture_with_full_record_json() {
     //     the elapsed time exceeded the threshold, populates AuditCapture
     //     fields from the captured record, and writes the JSON file at
     //     the documented path.
-    let scoped = ScopedCaptureDir::new();
+    let temp = tempfile::tempdir().expect("capture-dir tempdir");
+    let root = temp.path();
 
-    let outcome =
-        run_corpus_fixture_with_audit_capture(fixture("slow_fixture"), Duration::from_nanos(1));
+    let outcome = run_corpus_fixture_with_audit_capture(
+        fixture("slow_fixture"),
+        Duration::from_nanos(1),
+        root,
+    );
 
     let capture: AuditCapture = match outcome {
         HarnessOutcome::Slow { capture } => capture,
@@ -183,11 +141,11 @@ fn slow_fixture_emits_audit_capture_with_full_record_json() {
     }
 
     // Capture path layout: <root>/<basename>/<id>.json
-    let expected_dir = scoped.root().join("slow_fixture");
+    let expected_dir = root.join("slow_fixture");
     let expected_file = expected_dir.join(format!("{}.json", capture.request_id));
     assert_eq!(
         capture.capture_path, expected_file,
-        "capture_path must equal <VERTER_AUDIT_CAPTURE_DIR>/<basename>/<request_id>.json",
+        "capture_path must equal <capture_root>/<basename>/<request_id>.json",
     );
     assert!(
         capture.capture_path.exists(),
@@ -210,30 +168,33 @@ fn slow_fixture_emits_audit_capture_with_full_record_json() {
 }
 
 #[test]
-fn capture_dir_overridable_via_env_var() {
-    // Discriminating: setting `VERTER_AUDIT_CAPTURE_DIR` MUST redirect
-    // the dump location. Validates the CI-redirect contract from the
-    // plan. Pre-change tree fails because the harness does not exist;
-    // a faulty post-change implementation that hard-codes the directory
-    // would also fail this test.
-    let scoped = ScopedCaptureDir::new();
-    let override_root = scoped.root().clone();
+fn capture_path_lives_under_explicit_capture_root() {
+    // Discriminating: the dump location MUST be the EXPLICIT
+    // capture-root the caller threaded in — not a hard-coded default
+    // and not the process env. Pre-change tree fails because the
+    // harness does not exist; a faulty post-change implementation that
+    // ignored the explicit `capture_root` argument (e.g. still read the
+    // env / hard-coded `target/audit-captures`) would also fail this
+    // test because the dump would land elsewhere.
+    let temp = tempfile::tempdir().expect("capture-dir tempdir");
+    let explicit_root = temp.path().to_path_buf();
 
     let outcome = run_corpus_fixture_with_audit_capture(
-        fixture("env_override_fixture"),
+        fixture("explicit_root_fixture"),
         Duration::from_nanos(1),
+        &explicit_root,
     );
 
     let capture = match outcome {
         HarnessOutcome::Slow { capture } => capture,
-        other => panic!("expected Slow with env override; got {other:?}"),
+        other => panic!("expected Slow with explicit capture root; got {other:?}"),
     };
 
     assert!(
-        capture.capture_path.starts_with(&override_root),
-        "capture_path {:?} must live under VERTER_AUDIT_CAPTURE_DIR override {:?}",
+        capture.capture_path.starts_with(&explicit_root),
+        "capture_path {:?} must live under the explicit capture_root {:?}",
         capture.capture_path,
-        override_root,
+        explicit_root,
     );
     assert!(
         capture.capture_path.exists(),
@@ -248,14 +209,15 @@ fn capture_dir_overridable_via_env_var() {
 #[test]
 fn default_capture_root_lives_under_workspace_target_audit_captures() {
     // Discriminating: when `VERTER_AUDIT_CAPTURE_DIR` is unset the
-    // harness MUST default to `<workspace>/target/audit-captures/`.
-    // The workspace `target/` directory is gitignored, so the default
-    // does not pollute the source tree.
+    // production-fallback resolver MUST default to
+    // `<workspace>/target/audit-captures/`. The workspace `target/`
+    // directory is gitignored, so the default does not pollute the
+    // source tree.
     //
     // We verify the path computation directly (no resolution) so the
     // test is hermetic and does not race with concurrent env-var
     // tests. This is a pure-function unit assertion on
-    // `default_capture_root_dir` which the harness uses when
+    // `default_capture_root_dir` which `capture_root_dir()` uses when
     // `VERTER_AUDIT_CAPTURE_DIR` is unset.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let expected = PathBuf::from(manifest_dir)
@@ -267,13 +229,56 @@ fn default_capture_root_lives_under_workspace_target_audit_captures() {
 }
 
 #[test]
-fn capture_root_dir_returns_default_when_env_var_unset() {
-    // Companion to the env-var override test: with the var explicitly
-    // unset, `capture_root_dir()` MUST equal `default_capture_root_dir()`.
-    let lock = env_lock().lock().unwrap_or_else(|p| p.into_inner());
-    // SAFETY: holding `env_lock` serialises this with every test that
-    // mutates the same variable.
+#[serial(audit_capture_env)]
+fn capture_root_dir_honours_env_override() {
+    // Discriminating: the production-fallback resolver `capture_root_dir()`
+    // MUST honour `VERTER_AUDIT_CAPTURE_DIR` when set. This is the
+    // CI-redirect contract: a production runner reads `capture_root_dir()`
+    // and passes the result as the harness `capture_root`. A resolver
+    // that ignored the env override (hard-coded the default) would fail
+    // this assertion.
+    //
+    // This is the ONLY env-mutating test path; `#[serial(audit_capture_env)]`
+    // serialises it against every other reader/writer of the process env
+    // so a concurrent test never observes a different binding.
+    let temp = tempfile::tempdir().expect("env-override tempdir");
+    let override_root = temp.path().to_path_buf();
+
     let prev = std::env::var_os("VERTER_AUDIT_CAPTURE_DIR");
+    // SAFETY: `#[serial(audit_capture_env)]` serialises this with every
+    // test that reads/mutates the same variable; we restore on the way
+    // out (including on a failed assertion via catch_unwind).
+    unsafe {
+        std::env::set_var("VERTER_AUDIT_CAPTURE_DIR", &override_root);
+    }
+    let resolved = capture_root_dir();
+    let result = std::panic::catch_unwind(|| {
+        assert_eq!(
+            resolved, override_root,
+            "capture_root_dir must return the VERTER_AUDIT_CAPTURE_DIR override when set",
+        );
+    });
+    // SAFETY: still inside the serial group; restore the prior value.
+    unsafe {
+        match prev {
+            Some(prev) => std::env::set_var("VERTER_AUDIT_CAPTURE_DIR", prev),
+            None => std::env::remove_var("VERTER_AUDIT_CAPTURE_DIR"),
+        }
+    }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+#[serial(audit_capture_env)]
+fn capture_root_dir_returns_default_when_env_var_unset() {
+    // Companion to the env-override test: with the var explicitly
+    // unset, `capture_root_dir()` MUST equal `default_capture_root_dir()`.
+    // `#[serial(audit_capture_env)]` serialises this with every test
+    // that reads/mutates the same variable.
+    let prev = std::env::var_os("VERTER_AUDIT_CAPTURE_DIR");
+    // SAFETY: serialised within the `audit_capture_env` group.
     unsafe {
         std::env::remove_var("VERTER_AUDIT_CAPTURE_DIR");
     }
@@ -285,14 +290,13 @@ fn capture_root_dir_returns_default_when_env_var_unset() {
             "capture_root_dir must default to workspace target/audit-captures",
         );
     });
-    // SAFETY: lock still held; restore var before releasing.
+    // SAFETY: still inside the serial group; restore var before returning.
     unsafe {
         match prev {
             Some(prev) => std::env::set_var("VERTER_AUDIT_CAPTURE_DIR", prev),
             None => std::env::remove_var("VERTER_AUDIT_CAPTURE_DIR"),
         }
     }
-    drop(lock);
     if let Err(payload) = result {
         std::panic::resume_unwind(payload);
     }
@@ -315,10 +319,11 @@ fn cooperative_cancellation_does_not_abandon_threads() {
     // The harness MUST return synchronously; if a future refactor
     // switches to fire-and-forget, this test fails because the
     // record cannot be observed without a join.
-    let _scoped = ScopedCaptureDir::new();
+    let temp = tempfile::tempdir().expect("capture-dir tempdir");
     let outcome = run_corpus_fixture_with_audit_capture(
         fixture("no_thread_leak_fixture"),
         Duration::from_secs(60),
+        temp.path(),
     );
     let record = match outcome {
         HarnessOutcome::Completed { record } => *record,

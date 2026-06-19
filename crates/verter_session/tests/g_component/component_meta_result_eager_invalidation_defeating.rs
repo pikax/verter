@@ -27,21 +27,10 @@
 #![cfg(test)]
 
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::Mutex;
 
+use serial_test::serial;
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{CompileErrorPolicy, HostConfig, UpsertRequest};
-
-/// The eager-invalidation-defeating test mutates the
-/// host-level fact registry via a plain `upsert` of the dep, then
-/// asserts a specific delta on the per-host
-/// `component_meta_result_cache_misses` provenance counter. Because
-/// the host is process-local (constructed inside the test) but the
-/// `MemoryWorkspace` overlay storage may be shared across concurrent
-/// tests through internal counters / file-id allocators, serialise
-/// at this test's granularity so the counter delta assertion is
-/// stable.
-static EAGER_INVALIDATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn metahost() -> ComponentMetaHost {
     ComponentMetaHost::new_standalone(HostConfig {
@@ -51,10 +40,14 @@ fn metahost() -> ComponentMetaHost {
     })
 }
 
+// The host is process-local (constructed inside the test) but the
+// `MemoryWorkspace` overlay storage may be shared across concurrent
+// tests through internal counters / file-id allocators, so serialise
+// against the same per-host `component_meta_result_cache_misses`
+// provenance resource the F1 cross-file dep-signature test contends.
 #[test]
+#[serial(component_meta_provenance)]
 fn fact_validation_alone_invalidates_warm_hit_without_eviction() {
-    let _guard = EAGER_INVALIDATION_TEST_LOCK.lock().unwrap();
-
     let mh = metahost();
 
     // Setup: owner imports a type from a dep file.

@@ -24,11 +24,6 @@
 //! flag state.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-// `AtomicU64` backs the peak-RSS sampler thread-count statics, which only
-// exist on native targets; the WASM build excludes those statics, so the
-// import would otherwise be unused there.
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
 
 use parking_lot::RwLock;
@@ -48,42 +43,6 @@ use std::time::Duration;
 /// (~0.1% of one core at this rate).
 #[cfg(not(target_arch = "wasm32"))]
 const SAMPLER_TICK: Duration = Duration::from_millis(50);
-
-/// Process-static spawn counter. Bumped exactly once for every
-/// peak-RSS sampler thread the runtime starts, regardless of which
-/// `HostAuditRuntime` instance owns the thread. The companion
-/// counter [`SAMPLER_THREAD_JOIN_COUNT`] tracks successful joins;
-/// the
-/// `tests/sampler_thread_joined_at_host_drop.rs` test asserts the
-/// two stay in lock-step across host drops to discriminate against
-/// a non-joining `Drop` impl.
-#[cfg(not(target_arch = "wasm32"))]
-static SAMPLER_THREAD_SPAWN_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Process-static join counter. See [`SAMPLER_THREAD_SPAWN_COUNT`].
-#[cfg(not(target_arch = "wasm32"))]
-static SAMPLER_THREAD_JOIN_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Test-only accessor — total number of peak-RSS sampler threads
-/// the process has spawned across every `HostAuditRuntime`
-/// instance. Bumped inside [`HostAuditRuntime::ensure_sampler_started`]
-/// after `thread::spawn` returns. Discriminates "sampler did not
-/// spawn" from "sampler spawned but Drop did not join".
-#[cfg(not(target_arch = "wasm32"))]
-#[must_use]
-pub fn sampler_thread_spawn_count() -> u64 {
-    SAMPLER_THREAD_SPAWN_COUNT.load(Ordering::Relaxed)
-}
-
-/// Test-only accessor — total number of peak-RSS sampler threads
-/// the process has joined across every `HostAuditRuntime`
-/// instance. Bumped inside `Drop for HostAuditRuntime` after the
-/// `JoinHandle::join()` call returns.
-#[cfg(not(target_arch = "wasm32"))]
-#[must_use]
-pub fn sampler_thread_join_count() -> u64 {
-    SAMPLER_THREAD_JOIN_COUNT.load(Ordering::Relaxed)
-}
 
 /// Host-owned audit-runtime concrete type. Wraps the records store,
 /// the audit-config snapshot, and the active-request registry.
@@ -122,6 +81,18 @@ pub struct HostAuditRuntime {
     /// otherwise. The `Drop` impl takes this and calls `join()`.
     #[cfg(not(target_arch = "wasm32"))]
     sampler_thread: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    /// Host-owned join observable. Set to `true` by THIS runtime's
+    /// `Drop` impl after — and only after — `JoinHandle::join()` on the
+    /// owned sampler returns. Held behind an `Arc` so a test can clone
+    /// the observable (via [`Self::sampler_join_observer`]) BEFORE
+    /// dropping the host and read it AFTER the host (and thus the
+    /// runtime) is gone. This is the per-host successor to the retired
+    /// process-global spawn/join counters: it discriminates a
+    /// non-joining `Drop` (observable stays `false`) from a clean join
+    /// (observable flips `true`) for THIS host alone — immune to
+    /// concurrent samplers spawned/joined by sibling tests.
+    #[cfg(not(target_arch = "wasm32"))]
+    sampler_join_observed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for HostAuditRuntime {
@@ -151,7 +122,31 @@ impl HostAuditRuntime {
             sampler_started: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
             sampler_thread: parking_lot::Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            sampler_join_observed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Test-only — `true` once THIS runtime has spawned its peak-RSS
+    /// sampler thread (the `sampler_started` latch has fired). Used by
+    /// the host-drop test to assert the sampler spawned for an
+    /// audit-enabled host without consulting any process-global state.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn sampler_spawned(&self) -> bool {
+        self.sampler_started.load(Ordering::Acquire)
+    }
+
+    /// Test-only — a clone of THIS runtime's join observable. Clone it
+    /// BEFORE dropping the host; after the host (and runtime) drop, the
+    /// observable reads `true` iff this runtime's `Drop` joined its
+    /// sampler thread. A non-joining `Drop` leaves it `false`. Immune
+    /// to concurrent samplers in sibling tests because it observes only
+    /// this host's join.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn sampler_join_observer(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.sampler_join_observed)
     }
 
     /// Borrow the audit-config snapshot. Read-only — the host
@@ -315,7 +310,8 @@ impl HostAuditRuntime {
             .name("verter-audit-rss-sampler".to_string())
             .spawn(move || sampler_loop(weak))
             .expect("spawning the verter-audit-rss-sampler thread must succeed");
-        SAMPLER_THREAD_SPAWN_COUNT.fetch_add(1, Ordering::Relaxed);
+        // The `sampler_started` latch above is THIS host's spawn signal
+        // (read via `sampler_spawned()`); no process-global counter.
         let mut slot = self.sampler_thread.lock();
         debug_assert!(
             slot.is_none(),
@@ -341,7 +337,13 @@ impl Drop for HostAuditRuntime {
             // surface it from Drop, and a panicked sampler does
             // not threaten the host.
             let _ = handle.join();
-            SAMPLER_THREAD_JOIN_COUNT.fetch_add(1, Ordering::Relaxed);
+            // Flip the host-owned observable AFTER the join returns, so
+            // a test holding a clone (taken before the host dropped)
+            // can confirm THIS host joined its sampler. `Release`
+            // pairs with the test's `Acquire` load. A non-joining Drop
+            // would never reach this store — the observable stays
+            // `false` and the test fails (discrimination preserved).
+            self.sampler_join_observed.store(true, Ordering::Release);
         }
     }
 }

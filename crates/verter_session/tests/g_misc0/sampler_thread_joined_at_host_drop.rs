@@ -6,29 +6,33 @@
 //! the thread terminates. The runtime's `Drop` impl explicitly joins
 //! the thread handle so we never leak threads across host drops.
 //!
-//! Discrimination contract:
-//! - The runtime exposes process-static
-//!   `sampler_thread_spawn_count()` /
-//!   `sampler_thread_join_count()` test-only accessors. After the
-//!   host is constructed AND a request runs, spawn-count >= 1.
-//!   After the host drops, join-count must equal spawn-count for the
-//!   delta we owned in this test. Pre-change tree (no join in Drop)
-//!   leaves join-count behind by 1 — assertion FAILS.
+//! Discrimination contract (host-owned, NOT process-global):
+//! - The runtime exposes a per-host `sampler_spawned()` accessor. After
+//!   the host is constructed AND a request runs, it is `true`.
+//!   Pre-change tree (sampler never spawned) leaves it `false` —
+//!   assertion FAILS.
+//! - The runtime exposes a per-host `sampler_join_observer()` — an
+//!   `Arc<AtomicBool>` the test clones BEFORE dropping the host. The
+//!   runtime's `Drop` flips it to `true` ONLY after `JoinHandle::join()`
+//!   returns. After the host drops, the observable must read `true`.
+//!   Pre-change tree (no join in Drop) never reaches the flip — the
+//!   observable stays `false` and the assertion FAILS.
 //! - Drop must also return promptly (`< 5s`). A leaked thread that
-//!   blocks on join would hang the test harness; a leaked thread
-//!   that's never joined would still mutate the (now freed) runtime
-//!   through `weak.upgrade()` returning the stale Arc — but Weak
-//!   semantics prevent this UB by returning `None` once the strong
-//!   count reaches zero.
+//!   blocks on join would hang the test harness.
+//!
+//! This per-host probe replaces the retired process-global
+//! spawn/join counters: it observes ONLY this host's sampler, so a
+//! concurrent in-binary test that spawns-but-has-not-yet-joined its
+//! own sampler cannot perturb the measurement.
 //!
 //! Skipped on WASM (sampler does not exist there).
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use verter_session::host_audit_runtime::{sampler_thread_join_count, sampler_thread_spawn_count};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const SFC: &str = r#"<script setup lang="ts">
@@ -39,11 +43,9 @@ defineProps<{ a: string }>()
 
 #[test]
 fn sampler_thread_joins_cleanly_on_host_drop() {
-    // Snapshot the global spawn/join counts BEFORE constructing the
-    // host. Other tests in the suite may have spawned and joined
-    // their own samplers; we only assert on the delta we created.
-    let spawn_before = sampler_thread_spawn_count();
-    let join_before = sampler_thread_join_count();
+    // Hold the host-owned join observable across the host drop so we
+    // can read it AFTER the runtime is gone.
+    let join_observer: Arc<std::sync::atomic::AtomicBool>;
 
     {
         let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -65,7 +67,7 @@ fn sampler_thread_joins_cleanly_on_host_drop() {
 
         // Drive a request so the sampler is guaranteed to have
         // spawned (the runtime spawns lazily on first audit-enabled
-        // request when timing flag is on).
+        // request when the timing flag is on).
         let (_analysis, resolution) = host
             .get_component_meta_with_resolution(canonical)
             .expect("component-meta resolution must succeed");
@@ -74,16 +76,22 @@ fn sampler_thread_joins_cleanly_on_host_drop() {
             .take_record(resolution.request_id)
             .expect("record must be present after the request finalises");
 
-        // The sampler should have spawned exactly once for this
-        // host. Pre-change tree (sampler never spawned) would leave
-        // the spawn delta at 0; post-change wires the spawn at first
-        // active registration.
-        let spawn_during = sampler_thread_spawn_count();
+        // The sampler must have spawned for THIS host. Pre-change tree
+        // (sampler never spawned) leaves the per-host latch `false`;
+        // post-change wires the spawn at first active registration.
         assert!(
-            spawn_during > spawn_before,
-            "sampler must have spawned at least one thread for the audit-enabled \
-             host with audit_timing_capture=true; got spawn_before={spawn_before}, \
-             spawn_during={spawn_during}"
+            host.host_audit_runtime().sampler_spawned(),
+            "sampler must have spawned for the audit-enabled host with \
+             audit_timing_capture=true (per-host `sampler_spawned()` was false)"
+        );
+
+        // Clone the host-owned join observable BEFORE dropping the
+        // host. It is `false` now; the runtime's `Drop` flips it to
+        // `true` only after joining the sampler thread.
+        join_observer = host.host_audit_runtime().sampler_join_observer();
+        assert!(
+            !join_observer.load(Ordering::Acquire),
+            "join observable must be false before the host drops"
         );
 
         // Drop the host below — measured timing wraps the join.
@@ -104,22 +112,16 @@ fn sampler_thread_joins_cleanly_on_host_drop() {
         );
     }
 
-    // Post-drop: spawn delta must equal join delta. A leaked thread
-    // (spawned but never joined) shows spawn > join here.
-    let spawn_after = sampler_thread_spawn_count();
-    let join_after = sampler_thread_join_count();
-    let spawn_delta = spawn_after - spawn_before;
-    let join_delta = join_after - join_before;
+    // Post-drop: THIS host's join observable must have flipped to
+    // `true`. A leaked thread (spawned but never joined) never reaches
+    // the `Drop` flip, so the observable stays `false`. This is the
+    // host-scoped discriminator against a non-joining `Drop` impl —
+    // immune to concurrent samplers in sibling tests.
     assert!(
-        spawn_delta >= 1,
-        "expected at least one sampler spawn during this test; \
-         spawn_delta={spawn_delta} (spawn_before={spawn_before}, \
-         spawn_after={spawn_after})"
-    );
-    assert_eq!(
-        spawn_delta, join_delta,
-        "thread leak suspected: spawn_delta={spawn_delta}, join_delta={join_delta}. \
-         Pre-change tree (no Drop join) would show spawn_delta > join_delta because \
-         the spawned thread is never explicitly joined when the runtime drops."
+        join_observer.load(Ordering::Acquire),
+        "thread leak suspected: this host's sampler join observable is \
+         still false after the host dropped. Pre-change tree (no Drop \
+         join) never reaches the post-join flip because the spawned \
+         thread is never explicitly joined when the runtime drops."
     );
 }

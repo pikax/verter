@@ -10,14 +10,13 @@
 //! process-global static counters (overflow refusal, fact-tracer
 //! installs, etc.) which must be serialized between tests to prevent
 //! cross-test interference under `cargo test --test-threads > 1`.
-//! Each test acquires `DISCRIMINATOR_MUTEX` before touching counters.
+//! Each test carries `#[serial(fact_counter_provenance)]` so it owns
+//! the shared counters exclusively across the whole test process.
 
 #![cfg(test)]
 
-use std::sync::Mutex;
+use serial_test::serial;
 use verter_session::for_tests::ReadSetSignature;
-
-static DISCRIMINATOR_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Discriminator — `execute_read_cold_build_persists_traced_facts`.
 ///
@@ -37,11 +36,8 @@ static DISCRIMINATOR_MUTEX: Mutex<()> = Mutex::new(());
 /// `arch-guard:single-execute-cooperative-call` marker AND
 /// `execute_read` delegates to it.
 #[test]
+#[serial(fact_counter_provenance)]
 fn execute_read_cold_build_persists_traced_facts() {
-    let _serial = DISCRIMINATOR_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     // The architectural witness: the shared cold-build helper exists
     // and `execute_read` routes through it. Without the helper, a
     // cold build started via `execute_read` would publish a memo
@@ -97,11 +93,8 @@ fn execute_read_cold_build_persists_traced_facts() {
 /// Discriminating assertion: the predicate function exists and is
 /// invoked in the invalidate loop with the path-precise fact rail.
 #[test]
+#[serial(fact_counter_provenance)]
 fn semantic_memo_fact_only_invalidation_drops_slot() {
-    let _serial = DISCRIMINATOR_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     let memo_family_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/semantic_query_memo/family.rs"),
@@ -212,11 +205,8 @@ fn semantic_memo_fact_only_invalidation_drops_slot() {
 /// `None`. A `register_reverse_index` that failed to register the
 /// entry under a `Parse`-fact canonical would leave it `Some(...)`.
 #[test]
+#[serial(fact_counter_provenance)]
 fn semantic_memo_invalidate_drains_fact_canonical_entry() {
-    let _serial = DISCRIMINATOR_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     use std::sync::Arc;
     use verter_session::for_tests::{ReadSetSignature, SemanticGraphStore};
     use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
@@ -309,11 +299,8 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
 /// Discriminating assertion: `get_validated` exists and is invoked
 /// from production callers.
 #[test]
+#[serial(fact_counter_provenance)]
 fn semantic_memo_warm_hit_validates_before_bubble() {
-    let _serial = DISCRIMINATOR_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     let memo_mod_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/semantic_query_memo/mod.rs"),
     )
@@ -382,11 +369,8 @@ fn semantic_memo_warm_hit_validates_before_bubble() {
 /// Discriminating assertions: peek strict-validates via the carrier
 /// and register_post_publish uses the carrier.
 #[test]
+#[serial(fact_counter_provenance)]
 fn materialize_structure_peek_and_register_use_carrier() {
-    let _serial = DISCRIMINATOR_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     let caches_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/component_meta_caches.rs"),
     )
@@ -484,11 +468,8 @@ fn materialize_structure_peek_and_register_use_carrier() {
 /// arm does not broadcast a value; the materialiser uses the API
 /// (the legacy side channel is retired).
 #[test]
+#[serial(fact_counter_provenance)]
 fn cooperative_return_only_not_shared_to_joiners() {
-    let _serial = DISCRIMINATOR_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     let ca_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/cache_runtime/singleflight.rs"),
@@ -620,11 +601,8 @@ fn cooperative_return_only_not_shared_to_joiners() {
 /// exercises construction so the variant cannot be dead-removed by
 /// future refactors.
 #[test]
+#[serial(fact_counter_provenance)]
 fn compute_admission_failed_variant_is_constructible() {
-    let _serial = DISCRIMINATOR_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     use verter_session::for_tests::cooperative_admission_failed_variant_for_tests;
     // The for_tests helper returns
     // `ComputeAdmission<(), ()>::Failed`; the test consumes the
@@ -647,11 +625,8 @@ fn compute_admission_failed_variant_is_constructible() {
 /// registration would skip entries whose canonicals are only
 /// reachable through specific fact variants.
 #[test]
+#[serial(fact_counter_provenance)]
 fn read_set_signature_carrier_canonical_ids_covers_fact_rail() {
-    let _serial = DISCRIMINATOR_MUTEX
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     use std::sync::Arc;
     use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
 

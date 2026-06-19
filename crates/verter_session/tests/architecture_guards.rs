@@ -16240,28 +16240,19 @@ mod single_resolution_engine_guards {
     // =======================================================================
 
     /// Helper: returns `true` iff `f` panicked (i.e. the guard reported a
-    /// violation). Suppresses the default panic hook so the planted-failure
-    /// output does not clutter the test log.
+    /// violation). The panicking `f` is a planted-failure guard call whose
+    /// only observable signal is whether `catch_unwind` caught a panic —
+    /// `result.is_err()` IS the discriminator.
     ///
-    /// [P3] The panic hook is PROCESS-WIDE. `cargo test` runs the discriminator
-    /// tests in parallel, so two concurrent calls would otherwise interleave —
-    /// one restoring the previous hook while another is still inside
-    /// `catch_unwind` — leaving the silent hook installed for an UNRELATED
-    /// failing test (nondeterministic, swallowed panic output). The whole
-    /// swap -> `catch_unwind` -> restore is serialized under a process-global
-    /// mutex so only one discriminator owns the hook at a time. A poisoned lock
-    /// (a prior `lock()` holder panicked OUTSIDE `catch_unwind`, which does not
-    /// happen here) is recovered via `into_inner` — the guarded data is unit, so
-    /// there is no invariant to uphold, and we must not abort the suite.
+    /// The process-wide panic hook is intentionally left INSTALLED: swapping
+    /// it (take -> silent -> restore) mutates global process state that a
+    /// concurrent, unrelated panicking test would observe (the silent hook
+    /// could swallow a genuine failure's backtrace, and a restore racing an
+    /// in-flight `catch_unwind` is nondeterministic). The default hook printing
+    /// a planted-failure backtrace here is expected, harmless noise — the
+    /// assertions below still discriminate purely on `catch_unwind`.
     fn guard_reports_violation(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
-        static HOOK_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _hook_lock = HOOK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let result = std::panic::catch_unwind(f);
-        std::panic::set_hook(prev);
-        result.is_err()
+        std::panic::catch_unwind(f).is_err()
     }
 
     #[test]
