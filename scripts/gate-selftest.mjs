@@ -1,12 +1,23 @@
 #!/usr/bin/env node
-// gate-selftest.mjs — proves the safety properties of gate.mjs using ONLY sleep/echo stand-ins.
+// gate-selftest.mjs — proves the safety properties of the gate using ONLY sleep/echo stand-ins.
 //
-// NO workspace cargo runs here. Every gate command is a `sleep`/`echo` stand-in, so the build lock is
+// HOW IT DRIVES THE GATE PRIMITIVES (no magic flag on the production gate).
+//   The classifier / verdict / sweep-matcher / suite-selection scenarios call the REAL gate functions
+//   DIRECTLY, imported in-process from `gate-internals.mjs` (the same code `gate.mjs` composes) — NOT by
+//   invoking `gate.mjs` with a test-seam flag (the production gate has none). The mutex / process-
+//   containment / timeout / stall / teardown / seam scenarios — which genuinely need a real subprocess and
+//   a real process group — spawn the SELF-TEST-ONLY runner `gate-selftest-runner.mjs`, which imports the
+//   same gate primitives and runs them against `sleep`/`echo` stand-ins. The production gate (`gate.mjs`)
+//   is exercised ONLY where the test asserts it has NO bypass mode (scenario U-P0).
+//
+// NO workspace cargo runs here. Every contained command is a `sleep`/`echo` stand-in, so the build lock is
 // never touched. Each test uses a UNIQUE lock dir (an os.tmpdir() mkdtemp) so a developer's real lock is
-// safe. The whole harness is POSIX-only (it asserts the process-group containment that only exists on
-// POSIX); on Windows it prints a clear skip notice and exits 0 (the gate.mjs Windows kill path —
-// taskkill — is statically reviewed, not exercised here, because there is no portable `sleep`/argv-rename
-// stand-in on Windows).
+// safe. The process-containment scenarios are POSIX-only (they assert the process-group containment that
+// only exists on POSIX); the PLATFORM-INDEPENDENT classifier/sweep-matcher/argv/sentinel scenarios run on
+// EVERY platform including Windows. On Windows, the POSIX-only process-management scenarios emit a TRUE
+// skip that is NOT counted in the pass total (so a green Windows run never falsely implies process-mgmt
+// runtime coverage); the gate.mjs Windows kill path — taskkill — is statically reviewed, not exercised
+// here, because there is no portable `sleep`/argv-rename stand-in on Windows.
 //
 // ARGV-TAGGED SLEEPS (critical for honest, PORTABLE discrimination).
 //   Every sleep stand-in is launched as `exec -a sleep_${RUN_TAG}_<role> sleep <n>` (via a `bash -c`
@@ -37,15 +48,16 @@
 //                           PASS-WITH-TOLERATED (0); allowlisted+non-allowlisted => FAIL (1); a
 //                           non-allowlisted name that CONTAINS an allowlisted substring => FAIL; a name
 //                           that is an ENTIRE allowlisted name PLUS a suffix => FAIL (exact-equality).
-//   (viii) WHOLE-GATE TIMEOUT — a multi-step seam run (the EXPLICIT `--internal-selftest-seam` subcommand)
-//                           whose cumulative time exceeds the WHOLE-gate budget TIMEOUTs at the budget, not
-//                           at N×. The inverse (a fitting sequence) PASSes, so the test discriminates.
-//   (xvi)  NO ENV GATE-BYPASS — the NORMAL gate path (no `--internal-selftest-seam` flag) is NOT divertible
-//                           to the no-op multi-step seam by ANY ambient environment variable. With the old
-//                           VERTER_GATE_SELFTEST(_STEPS) vars set AND a fast-failing `cargo` stub on PATH,
-//                           `node gate.mjs` (no seam flag) runs the REAL archive path (it invokes the stub
-//                           cargo and exits on its failure), NOT the seam (which would PASS/TIMEOUT on the
-//                           stand-in steps). The flag form, by contrast, DOES run the seam (discrimination).
+//   (viii) WHOLE-GATE TIMEOUT — a multi-step seam run (via the SELF-TEST-ONLY runner, `--st-seam`) whose
+//                           cumulative time exceeds the WHOLE-gate budget TIMEOUTs at the budget, not at
+//                           N×. The inverse (a fitting sequence) PASSes, so the test discriminates.
+//   (U-P0) NO PRODUCTION-GATE BYPASS MODE — EVERY removed mode on the production CLI (`gate.mjs`) — the
+//                           `--internal-selftest-seam` seam (incl. the empty-step case), each `--selftest-*`
+//                           classifier hook, and the `-- <cmd>` custom-command path — now EXITS NON-ZERO
+//                           (unknown-flag / usage, code 127), NEVER 0. With the legacy VERTER_GATE_SELFTEST
+//                           env set, NO `node gate.mjs` argv returns the gate success contract without
+//                           running the real gate. The discriminating control: a removed flag exits 127,
+//                           while `--help` (a legitimate non-gate mode) still exits 0.
 //   (ix)   SURFACE-1 NON-FAIL — a crash/leak (SIGABRT/LEAK) or a setup/harness error (non-zero exit, no
 //                           `FAIL [` line) classifies FAIL on both the classifier and the live-aggregation
 //                           hook; the tolerated baseline stays PASS-WITH-TOLERATED.
@@ -67,17 +79,52 @@
 //                           recognized (a quote is an exec-name boundary), and the runner target matches on
 //                           a path-SEGMENT boundary so a SIBLING `…\target\gate-runner2` does NOT spuriously
 //                           match `…\target\gate-runner`. Pre-fix: quoted paths missed; the sibling matched.
+//   (P-1)  FOREIGN-SENTINEL RECLAIM REFUSE — a lockdir carrying ONLY the gate sentinel whose stored repo
+//                           realpath is FOREIGN (differs from ours) and NO owner.json, past the init grace,
+//                           is REFUSED (126) and its decoy file SURVIVES. Proves the sentinel-repo-realpath
+//                           validation runs on the owner==null reclaim path too (pre-fix: `_reclaim(null)`
+//                           renamed/removed a foreign checkout's mid-init sentinel-only lock).
+//   (xix)  STUB-INVOKED side-effect — the A1 "no env bypass" assertion proves the failing-cargo STUB WAS
+//                           ACTUALLY INVOKED by checking a marker FILE the stub writes (not merely that the
+//                           exit was non-zero) — so a non-zero exit for an UNRELATED reason cannot vacuously
+//                           pass the assertion.
+//   (xx)   TEARDOWN VERIFIED REAP — a contained child that traps+ignores SIGTERM (so only SIGKILL ends it)
+//                           is reaped on TIMEOUT and the tree is CONFIRMED dead (0 survivors) — proving the
+//                           reap verifies death (poll past SIGKILL), not merely that the kill was issued.
 //
 // Exit non-zero if any property fails.
 
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  realpathSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+// The REAL gate primitives — imported in-process so the classifier/verdict/sweep-matcher/suite-selection
+// scenarios drive the ACTUAL gate code, not a re-implementation and not a magic flag on the production CLI.
+import {
+  classifyNextestFailures,
+  analyzeNextestSurface,
+  analyzeLibtestSurface,
+  selectSessionSuites,
+  isBuildTool,
+  targetDirMatches,
+} from "./gate-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
+// The PRODUCTION gate CLI — exercised ONLY by the U-P0 "no bypass mode" scenario (to assert every removed
+// mode exits non-zero). All contained-command / seam / mutex scenarios use the self-test-only runner below.
 const GATE = join(SELFTEST_DIR, "gate.mjs");
+// The SELF-TEST-ONLY subprocess runner (mutex + containment + timeout/stall + teardown + seam, against
+// sleep/echo stand-ins). It imports the same gate primitives; production never runs it.
+const RUNNER = join(SELFTEST_DIR, "gate-selftest-runner.mjs");
 
 // The gate-owned lock sentinel file name — must match GATE_LOCK_SENTINEL in gate.mjs. A lockdir is
 // reclaimable ONLY if it carries this marker (proving the gate created it); the crafted-lock scenarios
@@ -117,6 +164,7 @@ const EXIT_LOCK_REFUSED = 126;
 
 let PASS_COUNT = 0;
 let FAIL_COUNT = 0;
+let SKIP_COUNT = 0;
 const RESULTS = [];
 
 function pass(msg) {
@@ -128,6 +176,13 @@ function fail(msg) {
   RESULTS.push(`FAIL  ${msg}`);
   FAIL_COUNT++;
   process.stderr.write(`  FAIL: ${msg}\n`);
+}
+// A TRUE skip — recorded separately and NOT counted in the pass total, so a green Windows run never
+// falsely implies runtime coverage of a scenario that did not run.
+function skip(msg) {
+  RESULTS.push(`SKIP  ${msg}`);
+  SKIP_COUNT++;
+  process.stderr.write(`  SKIP: ${msg}\n`);
 }
 function note(msg) {
   process.stderr.write(`  ... ${msg}\n`);
@@ -171,7 +226,9 @@ function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Run the gate.mjs CLI synchronously with the given argv + env; return { code }.
+// Run the PRODUCTION gate.mjs CLI synchronously with the given argv + env; return { code }. Used ONLY by
+// the U-P0 "no bypass mode" scenario (to assert removed modes exit non-zero) — every contained-command /
+// seam scenario uses the self-test runner helpers below, NOT this.
 function runGate(args, env) {
   const r = spawnSync(process.execPath, [GATE, ...args], {
     env: { ...process.env, ...env },
@@ -182,13 +239,37 @@ function runGate(args, env) {
   return { code: r.status === null ? 1 : r.status };
 }
 
-// Spawn the gate.mjs CLI detached in the background (so we can hold a lock while probing it). detached:true
-// gives the holder its OWN process group (PGID==PID), so we can SIGKILL its whole group with
-// `process.kill(-pid, …)` for the STALE-reclaim scenario WITHOUT touching the harness's own group.
-// Returns the ChildProcess.
-function spawnGate(args, env) {
-  const child = spawn(process.execPath, [GATE, ...args], {
-    env: { ...process.env, ...env },
+// Run the SELF-TEST-ONLY runner synchronously in single-command mode (`--st-cmd`): the given shell command
+// runs under the REAL mutex + process containment + whole-gate budget + stall + teardown (the same
+// primitives gate.mjs composes), against `sleep`/`echo` stand-ins. `flags` are runner flags (e.g.
+// ["--timeout","5s"]). Returns { code }.
+function runContainedCmd(cmdString, env, flags = []) {
+  const r = spawnSync(process.execPath, [RUNNER, "--st-cmd", ...flags], {
+    env: { ...process.env, ...env, VERTER_SELFTEST_CMD: cmdString },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  if (r.status === null && r.signal) return { code: 128, signal: r.signal };
+  return { code: r.status === null ? 1 : r.status };
+}
+
+// Run the SELF-TEST-ONLY runner synchronously in multi-step seam mode (`--st-seam`): the "\n"-joined
+// "name|cmd" steps run under the SHARED whole-gate budget. `flags` are runner flags. Returns { code }.
+function runSeam(stepsString, env, flags = []) {
+  const r = spawnSync(process.execPath, [RUNNER, "--st-seam", ...flags], {
+    env: { ...process.env, ...env, VERTER_GATE_SELFTEST_STEPS: stepsString },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  if (r.status === null && r.signal) return { code: 128, signal: r.signal };
+  return { code: r.status === null ? 1 : r.status };
+}
+
+// Spawn the SELF-TEST-ONLY runner DETACHED in the background (so we can hold a lock while probing it).
+// detached:true gives the holder its OWN process group (PGID==PID), so we can SIGKILL its whole group with
+// `process.kill(-pid, …)` for the STALE-reclaim scenario WITHOUT touching the harness's own group. The
+// runner runs the given shell command under the mutex (single-command mode). Returns the ChildProcess.
+function spawnContainedCmd(cmdString, env, flags = []) {
+  const child = spawn(process.execPath, [RUNNER, "--st-cmd", ...flags], {
+    env: { ...process.env, ...env, VERTER_SELFTEST_CMD: cmdString },
     stdio: ["ignore", "ignore", "ignore"],
     detached: true,
   });
@@ -203,6 +284,61 @@ async function waitLockHeld(lk) {
     await delay(100);
   }
   return false;
+}
+
+// ----------------------------------------------------------------------------------------------------
+// In-process verdict helpers — call the REAL imported gate functions directly and return the SAME
+// PASS | PASS-WITH-TOLERATED | FAIL verdict string the old gate.mjs `--selftest-*` hooks emitted (now
+// removed from the production CLI). These drive the actual classifier/verdict code in-process; no
+// subprocess and no magic flag.
+// ----------------------------------------------------------------------------------------------------
+
+// nextest classifier (log content only, no exit code) — mirrors the old `--selftest-classify-nextest`.
+function verdictClassifyNextest(text) {
+  const cls = classifyNextestFailures(text);
+  if (cls === "regression") return "FAIL";
+  if (cls === "tolerated") return "PASS-WITH-TOLERATED";
+  return "PASS";
+}
+function verdictClassifyNextestFile(file) {
+  return verdictClassifyNextest(readFileSync(file, "utf8"));
+}
+
+// nextest LIVE-aggregation verdict (with exit code) — mirrors the old `--selftest-classify-nextest-run`.
+function verdictNextestRun(code, text) {
+  const r = analyzeNextestSurface(text, code);
+  if (r.failures.length > 0) return "FAIL";
+  if (r.toleratedCount > 0) return "PASS-WITH-TOLERATED";
+  return "PASS";
+}
+function verdictNextestRunFile(code, file) {
+  return verdictNextestRun(code, readFileSync(file, "utf8"));
+}
+
+// SURFACE-2 libtest verdict — mirrors the old `--selftest-libtest`.
+function verdictLibtest(code, binaryId, text) {
+  const r = analyzeLibtestSurface(text, code, binaryId);
+  if (r.verdict === "fail") return "FAIL";
+  if (r.verdict === "tolerated") return "PASS-WITH-TOLERATED";
+  return "PASS";
+}
+function verdictLibtestFile(code, binaryId, file) {
+  return verdictLibtest(code, binaryId, readFileSync(file, "utf8"));
+}
+
+// SURFACE-2 suite-selection gate — mirrors the old `--selftest-surface2`. Returns the same { code, out }
+// shape the hook produced: 127 (USAGE/SETUP) on a tripped integrity gate, 0 + "OK lib=<n> test=<n>" else.
+function verdictSurface2(allSuites) {
+  const sel = selectSessionSuites(allSuites);
+  if (sel.error) return { code: 127, out: "" };
+  return { code: 0, out: `OK lib=${sel.lib} test=${sel.test}` };
+}
+
+// Provenance sweep matcher — mirrors the old `--selftest-sweep-match`. Returns "MATCH" | "NOMATCH" for the
+// REAL predicate `isBuildTool(cmd) && targetDirMatches(cmd, targetDir, windows)`.
+function verdictSweepMatch(plat, targetDir, cmd) {
+  const windows = plat === "windows";
+  return isBuildTool(cmd) && targetDirMatches(cmd, targetDir, windows) ? "MATCH" : "NOMATCH";
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -287,24 +423,39 @@ async function main() {
     return;
   }
 
+  // Platform split (U-P2 honesty): the PLATFORM-INDEPENDENT scenarios — the in-process classifier / verdict
+  // / sweep-matcher / suite-selection / removed-mode-argv units — run on EVERY platform INCLUDING Windows
+  // (they are pure function calls + argv probes, no `sleep`/`exec -a`/process-group primitives). The
+  // POSIX-process-management scenarios (the mutex / containment / timeout / stall / teardown / seam ones
+  // that spawn the runner with `sleep`/`exec -a` stand-ins and assert process-group reaping) are guarded by
+  // `if (!IS_WINDOWS)` below; on Windows they emit a TRUE skip (NOT counted in the pass total) so a green
+  // Windows run never falsely implies process-management RUNTIME coverage. The Windows kill path (taskkill
+  // /T /F + CIM start-identity) is covered by static review + the Windows sweep-MATCHER regex units (xii,
+  // xv), not by a `sleep`/argv-rename stand-in (there is none on Windows).
   if (IS_WINDOWS) {
     process.stderr.write(
-      "\n[skip] This harness exercises POSIX process-group containment with sleep/argv-rename\n" +
-        "stand-ins; those primitives do not exist on Windows. The gate.mjs Windows kill path\n" +
-        "(taskkill /PID <pid> /T /F + CIM creation-date identity) is covered by static review, not\n" +
-        "by this harness. Skipping on Windows (exit 0).\n",
+      "\n[platform] Windows: running the PLATFORM-INDEPENDENT scenarios (classifier / verdict / sweep-\n" +
+        "matcher / suite-selection / removed-mode-argv); the POSIX process-group containment scenarios\n" +
+        "(mutex / timeout / stall / teardown / seam with sleep/exec-a stand-ins) emit a TRUE skip below and\n" +
+        "are NOT counted as passes. The Windows kill path (taskkill /T /F + CIM start-identity) is covered\n" +
+        "by static review + the Windows sweep-MATCHER regex units (xii, xv).\n",
     );
-    process.exit(0);
   }
+  // Each POSIX-only scenario below opens a LABELED block and, on Windows, emits a TRUE skip (not counted in
+  // the pass total) then `break`s out — so the platform-independent scenarios still run on Windows.
 
   // --------------------------------------------------------------------------------------------------
   // (i) MUTEX — a second concurrent run must REFUSE with LOCK-REFUSED (126).
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(i) MUTEX\n");
-  {
+  posix_i: {
+    if (IS_WINDOWS) {
+      skip("(i) MUTEX — POSIX process-group containment (no Windows sleep/exec-a stand-in)");
+      break posix_i;
+    }
     const lk = freshLock();
     const tgt1 = freshTmpDir("gatetest-target-");
-    const holder = spawnGate(["--", singleSleepCmd("hold_i", 30)], {
+    const holder = spawnContainedCmd(singleSleepCmd("hold_i", 30), {
       VERTER_GATE_LOCK: lk,
       VERTER_GATE_TARGET_DIR: tgt1,
     });
@@ -315,7 +466,7 @@ async function main() {
     } else {
       note(`holder acquired lock (pid=${holder.pid})`);
       const tgt2 = freshTmpDir("gatetest-target-");
-      const second = runGate(["--", singleSleepCmd("second_i", 30)], {
+      const second = runContainedCmd(singleSleepCmd("second_i", 30), {
         VERTER_GATE_LOCK: lk,
         VERTER_GATE_TARGET_DIR: tgt2,
       });
@@ -356,10 +507,16 @@ async function main() {
   // (ii) STALE reclaim — SIGKILL a holder (cleanup never runs), fresh run reclaims and PASSes.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(ii) STALE reclaim\n");
-  {
+  posix_ii: {
+    if (IS_WINDOWS) {
+      skip(
+        "(ii) STALE reclaim — POSIX process-group containment (no Windows sleep/exec-a stand-in)",
+      );
+      break posix_ii;
+    }
     const lk = freshLock();
     const tgt = freshTmpDir("gatetest-target-");
-    const holder = spawnGate(["--", singleSleepCmd("hold_ii", 60)], {
+    const holder = spawnContainedCmd(singleSleepCmd("hold_ii", 60), {
       VERTER_GATE_LOCK: lk,
       VERTER_GATE_TARGET_DIR: tgt,
     });
@@ -389,7 +546,7 @@ async function main() {
       } else {
         note("lockdir survived SIGKILL (as required for the stale path)");
         const tgt2 = freshTmpDir("gatetest-target-");
-        const reclaim = runGate(["--", `echo reclaimed_ii_${RUN_TAG}`], {
+        const reclaim = runContainedCmd(`echo reclaimed_ii_${RUN_TAG}`, {
           VERTER_GATE_LOCK: lk,
           VERTER_GATE_TARGET_DIR: tgt2,
         });
@@ -419,15 +576,22 @@ async function main() {
   //       only the wrapper (the bash that did `wait`) would orphan both sleeps and FAIL this test.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(iii) TIMEOUT + ORPHAN-FIX (headline)\n");
-  {
+  posix_iii: {
+    if (IS_WINDOWS) {
+      skip(
+        "(iii) TIMEOUT+ORPHAN — POSIX process-group containment (no Windows sleep/exec-a stand-in)",
+      );
+      break posix_iii;
+    }
     const lk = freshLock();
     const tgt = freshTmpDir("gatetest-target-");
     note(`before: argv-tagged-sleep count = ${countArgvSleeps(`${RUN_TAG}_orphan`)}`);
     const t0 = Date.now();
-    const r = runGate(["--timeout", "5s", "--", orphanCmd(600)], {
-      VERTER_GATE_LOCK: lk,
-      VERTER_GATE_TARGET_DIR: tgt,
-    });
+    const r = runContainedCmd(
+      orphanCmd(600),
+      { VERTER_GATE_LOCK: lk, VERTER_GATE_TARGET_DIR: tgt },
+      ["--timeout", "5s"],
+    );
     const elapsed = Math.round((Date.now() - t0) / 1000);
     await delay(2000);
     const after = countArgvSleeps(`${RUN_TAG}_orphan`);
@@ -470,14 +634,19 @@ async function main() {
   //      custom-step phase override (a custom `--` gate is treated as a TEST phase: byte-growth only).
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(iv) STALL (test-phase: byte-growth-only liveness)\n");
-  {
+  posix_iv: {
+    if (IS_WINDOWS) {
+      skip("(iv) STALL — POSIX process-group containment (no Windows sleep/exec-a stand-in)");
+      break posix_iv;
+    }
     const lk = freshLock();
     const tgt = freshTmpDir("gatetest-target-");
     const t0 = Date.now();
-    const r = runGate(["--stall", "5s", "--timeout", "600s", "--", singleSleepCmd("stall", 600)], {
-      VERTER_GATE_LOCK: lk,
-      VERTER_GATE_TARGET_DIR: tgt,
-    });
+    const r = runContainedCmd(
+      singleSleepCmd("stall", 600),
+      { VERTER_GATE_LOCK: lk, VERTER_GATE_TARGET_DIR: tgt },
+      ["--stall", "5s", "--timeout", "600s"],
+    );
     const elapsed = Math.round((Date.now() - t0) / 1000);
     await delay(2000);
     let ok = true;
@@ -518,7 +687,13 @@ async function main() {
   //      SURVIVES, target-dir decoy is SWEPT.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(vi) SWEEP provenance scoping\n");
-  {
+  posix_vi: {
+    if (IS_WINDOWS) {
+      skip(
+        "(vi) SWEEP provenance scoping — POSIX process spawn/kill (no Windows sleep/exec-a stand-in; the matcher itself is unit-covered by xii/xv)",
+      );
+      break posix_vi;
+    }
     const repoRoot = (() => {
       try {
         return execFileSync("git", ["-C", SELFTEST_DIR, "rev-parse", "--show-toplevel"], {
@@ -549,7 +724,7 @@ async function main() {
       } else {
         const lk = freshLock();
         // A trivial gate run whose teardown provenance sweep keys on THIS runner target dir.
-        runGate(["--", `echo sweep_probe_${RUN_TAG}`], {
+        runContainedCmd(`echo sweep_probe_${RUN_TAG}`, {
           VERTER_GATE_LOCK: lk,
           VERTER_GATE_TARGET_DIR: gateTarget,
         });
@@ -590,11 +765,11 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
-  // (vii) EXACT-name tolerated allowlist. Drives the REAL classifier + verdict mapping via the gate's
-  //       `--selftest-classify-nextest <fixture>` hook on canned nextest-style fixtures (no cargo). FOUR
-  //       cases — the last two are lookalikes that a substring/prefix match would WRONGLY tolerate but
-  //       exact-equality must FAIL: (c) the allowlisted token as a SUBSTRING inside a different path, and
-  //       (d) the ENTIRE allowlisted name PLUS a suffix.
+  // (vii) EXACT-name tolerated allowlist. Drives the REAL classifier + verdict mapping IN-PROCESS
+  //       (`classifyNextestFailures`) on canned nextest-style fixtures (no cargo). FOUR cases — the last two
+  //       are lookalikes that a substring/prefix match would WRONGLY tolerate but exact-equality must FAIL:
+  //       (c) the allowlisted token as a SUBSTRING inside a different path, and (d) the ENTIRE allowlisted
+  //       name PLUS a suffix.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(vii) EXACT-name tolerated allowlist\n");
   {
@@ -625,13 +800,7 @@ async function main() {
       D,
       "    FAIL [   0.044s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output_extra\n",
     );
-    const classify = (file) => {
-      const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest", file], {
-        env: { ...process.env },
-        encoding: "utf8",
-      });
-      return (r.stdout || "").trim();
-    };
+    const classify = (file) => verdictClassifyNextestFile(file);
     const va = classify(A);
     const vb = classify(B);
     const vc = classify(C);
@@ -672,14 +841,20 @@ async function main() {
 
   // --------------------------------------------------------------------------------------------------
   // (viii) WHOLE-GATE TIMEOUT. The --timeout is a WHOLE-gate budget for the ENTIRE multi-step sequence,
-  //        NOT per-step (per-step would allow ~N×--timeout). We drive the REAL multi-step loop via the
-  //        gate's `--selftest-steps` seam: THREE separate steps, each a 4s argv-tagged sleep (12s of work
+  //        NOT per-step (per-step would allow ~N×--timeout). We drive the REAL multi-step seam via the
+  //        self-test runner (`--st-seam`): THREE separate steps, each a 4s argv-tagged sleep (12s of work
   //        if each got the full budget). Under a WHOLE-gate --timeout 6s the sequence MUST TIMEOUT after
   //        ~6-9s having run only ~1.5 steps, NOT ~12s (which would be per-step). It must also reap the
   //        running step's group. ALSO assert the inverse: a fitting sequence PASSes (discrimination).
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(viii) WHOLE-GATE TIMEOUT (cumulative budget bound)\n");
-  {
+  posix_viii: {
+    if (IS_WINDOWS) {
+      skip(
+        "(viii) WHOLE-GATE TIMEOUT — POSIX seam with sleep/exec-a stand-ins (no Windows equivalent)",
+      );
+      break posix_viii;
+    }
     let ok = true;
     const lk = freshLock();
     const tgt = freshTmpDir("gatetest-target-");
@@ -689,11 +864,12 @@ async function main() {
       `seqC|exec -a sleep_${RUN_TAG}_seqC sleep 4`,
     ].join("\n");
     const t0 = Date.now();
-    const r = runGate(["--internal-selftest-seam", "--timeout", "6s", "--stall", "600s"], {
-      VERTER_GATE_SELFTEST_STEPS: stepsOver,
-      VERTER_GATE_LOCK: lk,
-      VERTER_GATE_TARGET_DIR: tgt,
-    });
+    const r = runSeam(stepsOver, { VERTER_GATE_LOCK: lk, VERTER_GATE_TARGET_DIR: tgt }, [
+      "--timeout",
+      "6s",
+      "--stall",
+      "600s",
+    ]);
     const elapsed = Math.round((Date.now() - t0) / 1000);
     await delay(2000);
     note(
@@ -728,11 +904,12 @@ async function main() {
       `fitB|exec -a sleep_${RUN_TAG}_fitB sleep 1`,
       `fitC|exec -a sleep_${RUN_TAG}_fitC sleep 1`,
     ].join("\n");
-    const rf = runGate(["--internal-selftest-seam", "--timeout", "30s", "--stall", "600s"], {
-      VERTER_GATE_SELFTEST_STEPS: stepsFit,
-      VERTER_GATE_LOCK: lk2,
-      VERTER_GATE_TARGET_DIR: tgt2,
-    });
+    const rf = runSeam(stepsFit, { VERTER_GATE_LOCK: lk2, VERTER_GATE_TARGET_DIR: tgt2 }, [
+      "--timeout",
+      "30s",
+      "--stall",
+      "600s",
+    ]);
     note(`within-budget: rc=${rf.code} (3 steps x1s=3s under a 30s budget)`);
     if (rf.code !== EXIT_PASS) {
       fail(
@@ -753,9 +930,9 @@ async function main() {
   //      nextest status (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) and a nextest setup/harness error exits non-zero
   //      with NO `FAIL [` line at all. Both MUST fail the gate; the pre-fix classifier (which printed PASS
   //      whenever no `FAIL [` line was present, and tolerated when only a tolerated `FAIL` name parsed)
-  //      swallowed them. We drive BOTH the classifier hook (`--selftest-classify-nextest`, no exit code)
-  //      AND the LIVE-aggregation hook (`--selftest-classify-nextest-run <exit> <fixture>`, the EXACT code
-  //      runGate's SURFACE-1 path runs) so the testable and live paths are proven to AGREE. Each crash
+  //      swallowed them. We drive BOTH the content classifier (`classifyNextestFailures`, no exit code) AND
+  //      the LIVE-aggregation analyzer (`analyzeNextestSurface(text, code)`, the EXACT code runGate's
+  //      SURFACE-1 path runs) IN-PROCESS, so the testable and live paths are proven to AGREE. Each crash
   //      fixture asserts FAIL; the tolerated baseline still asserts PASS-WITH-TOLERATED (discrimination).
   // --------------------------------------------------------------------------------------------------
   process.stderr.write(
@@ -794,26 +971,10 @@ async function main() {
         "    FAIL [   0.207s] verter_protocol::main cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide\n" +
         "     Summary [  62.968s] 15543 tests run: 15541 passed, 2 failed, 547 skipped\n",
     );
-    const classify = (file) => {
-      const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest", file], {
-        env: { ...process.env },
-        encoding: "utf8",
-      });
-      return (r.stdout || "").trim();
-    };
-    const classifyRun = (code, file) => {
-      const r = spawnSync(
-        process.execPath,
-        [GATE, "--selftest-classify-nextest-run", String(code), file],
-        {
-          env: { ...process.env },
-          encoding: "utf8",
-        },
-      );
-      return (r.stdout || "").trim();
-    };
+    const classify = (file) => verdictClassifyNextestFile(file);
+    const classifyRun = (code, file) => verdictNextestRunFile(code, file);
     let ok = true;
-    // Classifier hook (no exit code) — classifies the LOG CONTENT. SIGABRT/LEAK carry a content signal (a
+    // Classifier (no exit code) — classifies the LOG CONTENT. SIGABRT/LEAK carry a content signal (a
     // non-`FAIL` status line + a summary failure count) so the no-code classifier catches them. A pure
     // setup/harness error has NO content markers and is indistinguishable from a clean log WITHOUT the exit
     // code, so it is asserted ONLY on the live-aggregation hook below (which has the code).
@@ -881,7 +1042,13 @@ async function main() {
   //     holder, not a blanket refusal (discrimination).
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(x) FAIL-CLOSED MUTEX (alive holder, empty start-identity)\n");
-  {
+  posix_x: {
+    if (IS_WINDOWS) {
+      skip(
+        "(x) FAIL-CLOSED MUTEX — POSIX pid liveness + process spawn (CIM start-identity path is static-reviewed)",
+      );
+      break posix_x;
+    }
     let ok = true;
     // A DEAD pid number for the control/reclaim cases (a very high, almost-certainly-unused pid).
     let deadCandidate = 999_999;
@@ -904,7 +1071,7 @@ async function main() {
       }),
     );
     const tgtA = freshTmpDir("gatetest-target-");
-    const rA = runGate(["--", `echo never_runs_${RUN_TAG}`], {
+    const rA = runContainedCmd(`echo never_runs_${RUN_TAG}`, {
       VERTER_GATE_LOCK: lkA,
       VERTER_GATE_TARGET_DIR: tgtA,
     });
@@ -947,7 +1114,7 @@ async function main() {
       `control: dead-pid ${deadCandidate} (alive=${pidAlive(deadCandidate)}) + empty identity, gate-owned => expect reclaim+PASS`,
     );
     const tgtB = freshTmpDir("gatetest-target-");
-    const rB = runGate(["--", `echo reclaimed_x_${RUN_TAG}`], {
+    const rB = runContainedCmd(`echo reclaimed_x_${RUN_TAG}`, {
       VERTER_GATE_LOCK: lkB,
       VERTER_GATE_TARGET_DIR: tgtB,
     });
@@ -981,7 +1148,13 @@ async function main() {
   //                not ours to delete). Both place a real decoy file inside the dir and assert it remains.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(x-safe) SAFE LOCK RECLAIM (never delete a non-gate / foreign dir)\n");
-  {
+  posix_xsafe: {
+    if (IS_WINDOWS) {
+      skip(
+        "(x-safe) SAFE LOCK RECLAIM — POSIX pid liveness + process spawn (the reclaim logic itself is platform-shared; this exercises the runner subprocess)",
+      );
+      break posix_xsafe;
+    }
     let ok = true;
     let deadCandidate = 999_999;
     while (pidAlive(deadCandidate) && deadCandidate > 100_000) deadCandidate--;
@@ -1003,7 +1176,7 @@ async function main() {
       }),
     );
     const tgtNS = freshTmpDir("gatetest-target-");
-    const rNS = runGate(["--", `echo never_runs_${RUN_TAG}`], {
+    const rNS = runContainedCmd(`echo never_runs_${RUN_TAG}`, {
       VERTER_GATE_LOCK: lkNoSentinel,
       VERTER_GATE_TARGET_DIR: tgtNS,
     });
@@ -1044,7 +1217,7 @@ async function main() {
       }),
     );
     const tgtF = freshTmpDir("gatetest-target-");
-    const rF = runGate(["--", `echo never_runs_${RUN_TAG}`], {
+    const rF = runContainedCmd(`echo never_runs_${RUN_TAG}`, {
       VERTER_GATE_LOCK: lkForeign,
       VERTER_GATE_TARGET_DIR: tgtF,
     });
@@ -1076,12 +1249,90 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
+  // (P-1) FOREIGN-SENTINEL RECLAIM REFUSE ON THE owner==null PATH (HEADLINE A3 HOLE). A lockdir carrying
+  //       ONLY the gate sentinel — whose stored repo realpath is FOREIGN (differs from ours) — and NO
+  //       owner.json, PAST the init grace (so it is treated as a crashed mid-init lock, the `_reclaim(null)`
+  //       path), must be REFUSED (126) and its decoy file MUST SURVIVE. This is the exact hole the prior
+  //       code had: `_reclaim(null)` keyed only on the sentinel's PRESENCE (proving the gate created some
+  //       dir) but did NOT validate the sentinel's stored repo realpath, so past the init grace it
+  //       renamed/removed a FOREIGN checkout's mid-init sentinel-only lock. The fix validates the sentinel
+  //       repo realpath on EVERY reclaim path including owner==null. We craft a foreign sentinel, NO
+  //       owner.json, and backdate the lockdir mtime past the init grace, then assert REFUSE + SURVIVE.
+  //       Discriminating control (already covered by scenario (ii)): a SAME-REPO sentinel-only crashed
+  //       mid-init lock IS reclaimable — so this is not a blanket refusal of all owner-less locks.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(P-1) FOREIGN-SENTINEL reclaim refuse on the owner==null path (no owner.json)\n",
+  );
+  posix_p1: {
+    if (IS_WINDOWS) {
+      skip(
+        "(P-1) FOREIGN-SENTINEL owner-less reclaim refuse — uses POSIX touch -t + the runner subprocess (the sentinel-repo validation is platform-shared)",
+      );
+      break posix_p1;
+    }
+    let ok = true;
+    // A foreign-sentinel lockdir with NO owner.json. To reach the `_reclaim(null)` path (not the init-grace
+    // refusal), the lockdir's mtime must be OLDER than the 5s init grace. We create it, write the foreign
+    // sentinel + a decoy, then backdate the dir's mtime well past the grace via `touch -t`.
+    const lkForeignNoOwner = freshLock();
+    mkdirSync(lkForeignNoOwner, { recursive: true });
+    // Sentinel stores a FOREIGN repo realpath (NOT this checkout). NO owner.json is written.
+    writeSentinel(lkForeignNoOwner, "crafted-foreign-no-owner", "/some/other/checkout/of/verter");
+    const decoyFN = join(lkForeignNoOwner, "DECOY_foreign_mid_init.txt");
+    writeFileSync(decoyFN, "a foreign checkout's mid-init lock — never ours to delete\n");
+    // Backdate the lockdir mtime past the 5s init grace so the gate treats it as crashed-mid-init, not
+    // initializing. `touch -d '60 seconds ago'` (GNU) / `touch -A -000100` is non-portable; use a fixed old
+    // timestamp via `touch -t` (POSIX: [[CC]YY]MMDDhhmm[.ss]). 2020-01-01 00:00 is comfortably past grace.
+    try {
+      execFileSync("touch", ["-t", "202001010000.00", lkForeignNoOwner], { stdio: "ignore" });
+    } catch {
+      // Fallback: if `touch -t` is unavailable, the dir was just created (age < grace) and the gate would
+      // refuse with the init-grace reason instead — still a refusal (126), still no deletion, so the
+      // SURVIVE assertion holds; only the "reached the _reclaim(null) path" nuance is softened.
+      note("touch -t unavailable; relying on init-grace refusal (still 126 + survive)");
+    }
+    const tgtFN = freshTmpDir("gatetest-target-");
+    const rFN = runContainedCmd(`echo never_runs_${RUN_TAG}`, {
+      VERTER_GATE_LOCK: lkForeignNoOwner,
+      VERTER_GATE_TARGET_DIR: tgtFN,
+    });
+    note(
+      `foreign sentinel + NO owner.json + past init-grace => rc=${rFN.code} (expect LOCK-REFUSED ${EXIT_LOCK_REFUSED}); decoy survives?`,
+    );
+    if (rFN.code !== EXIT_LOCK_REFUSED) {
+      fail(
+        `(P-1) a FOREIGN-sentinel, owner-less, past-grace lockdir returned ${rFN.code}, expected LOCK-REFUSED ` +
+          `(${EXIT_LOCK_REFUSED}) — the owner==null reclaim path must validate the sentinel repo realpath and ` +
+          "refuse a foreign checkout's mid-init lock, never delete it",
+      );
+      ok = false;
+    }
+    if (!existsSync(lkForeignNoOwner) || !existsSync(decoyFN)) {
+      fail(
+        `(P-1) the foreign owner-less lockdir was DELETED (dir=${existsSync(lkForeignNoOwner)} ` +
+          `decoy=${existsSync(decoyFN)}) — A3 hole: \`_reclaim(null)\` renamed/removed a foreign checkout's ` +
+          "mid-init sentinel-only lock",
+      );
+      ok = false;
+    }
+    rmSync(dirname(lkForeignNoOwner), { recursive: true, force: true });
+    if (ok) {
+      pass(
+        "(P-1) FOREIGN-SENTINEL owner-less REFUSE: a foreign-repo sentinel-only lockdir with NO owner.json, " +
+          "past the init grace, => REFUSED (126) and its decoy SURVIVED (the owner==null reclaim path validates " +
+          "the sentinel repo realpath; a foreign mid-init lock is never reclaimed/deleted)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
   // (xi) SURFACE-2 ZERO-SUITES / PARTIAL-FILTER SETUP GATE. If the verter_session lib/test suite filter
   //      finds nothing (a filter regression / archive-shape change) the gate must FAIL SETUP (127), NOT
-  //      pass on surface 1 alone. We drive the REAL selectSessionSuites() gate via `--selftest-surface2
-  //      <suites.json>`. Zero session suites => 127; a lib-only filter (missing the integration `test`
-  //      kind) => 127; a proper 1-lib + N-test listing => OK/0 (discrimination). Pre-fix: runGate had NO
-  //      zero-suite guard — an empty filter produced an empty loop and reached the green aggregate verdict.
+  //      pass on surface 1 alone. We drive the REAL selectSessionSuites() gate IN-PROCESS. Zero session
+  //      suites => 127; a lib-only filter (missing the integration `test` kind) => 127; a proper 1-lib +
+  //      N-test listing => OK/0 (discrimination). Pre-fix: runGate had NO zero-suite guard — an empty
+  //      filter produced an empty loop and reached the green aggregate verdict.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(xi) SURFACE-2 zero-suites / partial-filter setup gate\n");
   {
@@ -1112,13 +1363,7 @@ async function main() {
         { "package-name": "verter_session", kind: "bin" },
       ]),
     );
-    const surface2 = (file) => {
-      const r = spawnSync(process.execPath, [GATE, "--selftest-surface2", file], {
-        env: { ...process.env },
-        encoding: "utf8",
-      });
-      return { code: r.status === null ? 1 : r.status, out: (r.stdout || "").trim() };
-    };
+    const surface2 = (file) => verdictSurface2(JSON.parse(readFileSync(file, "utf8")));
     let ok = true;
     const zr = surface2(zero);
     const lr = surface2(libOnly);
@@ -1162,17 +1407,7 @@ async function main() {
   process.stderr.write("\n(xii) Windows .exe provenance-sweep matcher (pure unit)\n");
   {
     const RT = "C:\\Users\\dev\\repo\\target\\gate-runner";
-    const sweep = (plat, targetDir, cmd) => {
-      const r = spawnSync(
-        process.execPath,
-        [GATE, "--selftest-sweep-match", plat, targetDir, "--", cmd],
-        {
-          env: { ...process.env },
-          encoding: "utf8",
-        },
-      );
-      return (r.stdout || "").trim();
-    };
+    const sweep = (plat, targetDir, cmd) => verdictSweepMatch(plat, targetDir, cmd);
     // The discriminating positives: standalone rustc.exe / cargo-nextest.exe (pre-fix NOMATCH) referencing
     // the runner target dir.
     const rustcExe = sweep(
@@ -1257,7 +1492,13 @@ async function main() {
   //        masked as PASS. We assert rc=124 (discriminates) AND that the tagged sleep was reaped.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(xiii) WATCHDOG reason survives a trapped-SIGTERM exit-0\n");
-  {
+  posix_xiii: {
+    if (IS_WINDOWS) {
+      skip(
+        "(xiii) WATCHDOG trapped-SIGTERM-exit-0 — POSIX SIGTERM trap + sleep stand-in (no Windows equivalent)",
+      );
+      break posix_xiii;
+    }
     const lk = freshLock();
     const tgt = freshTmpDir("gatetest-target-");
     // bash installs a TERM trap that exits 0, backgrounds an argv-tagged sleep 600, and waits for it. On
@@ -1265,10 +1506,12 @@ async function main() {
     const trapCmd =
       `trap 'exit 0' TERM; ( exec -a sleep_${RUN_TAG}_trapsig sleep 600 ) & ` + `c=$!; wait $c`;
     const t0 = Date.now();
-    const r = runGate(["--timeout", "4s", "--stall", "600s", "--", trapCmd], {
-      VERTER_GATE_LOCK: lk,
-      VERTER_GATE_TARGET_DIR: tgt,
-    });
+    const r = runContainedCmd(trapCmd, { VERTER_GATE_LOCK: lk, VERTER_GATE_TARGET_DIR: tgt }, [
+      "--timeout",
+      "4s",
+      "--stall",
+      "600s",
+    ]);
     const elapsed = Math.round((Date.now() - t0) / 1000);
     await delay(2000);
     let ok = true;
@@ -1342,17 +1585,7 @@ async function main() {
       "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
         "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n",
     );
-    const classifyRun = (code, file) => {
-      const r = spawnSync(
-        process.execPath,
-        [GATE, "--selftest-classify-nextest-run", String(code), file],
-        {
-          env: { ...process.env },
-          encoding: "utf8",
-        },
-      );
-      return (r.stdout || "").trim();
-    };
+    const classifyRun = (code, file) => verdictNextestRunFile(code, file);
     let ok = true;
     const rNoSum100 = classifyRun(100, tolNoSummary);
     const rNoSum1 = classifyRun(1, tolNoSummary);
@@ -1409,17 +1642,7 @@ async function main() {
   process.stderr.write("\n(xv) Windows sweep: quoted exec paths + path-token target match\n");
   {
     const RT = "C:\\Users\\dev\\repo\\target\\gate-runner";
-    const sweep = (plat, targetDir, cmd) => {
-      const r = spawnSync(
-        process.execPath,
-        [GATE, "--selftest-sweep-match", plat, targetDir, "--", cmd],
-        {
-          env: { ...process.env },
-          encoding: "utf8",
-        },
-      );
-      return (r.stdout || "").trim();
-    };
+    const sweep = (plat, targetDir, cmd) => verdictSweepMatch(plat, targetDir, cmd);
     // (a) Quoted cargo.exe — the ONLY build-tool token is the quoted exe (the closing `"` follows it, and
     //     `.cargo` in the path is `.`-prefixed so it is not a bare token). Pre-fix: NOMATCH (the opening `"`
     //     blocked the boundary). Post-fix: MATCH.
@@ -1499,122 +1722,206 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
-  // (xvi) NO ENV GATE-BYPASS. The NORMAL gate path must NEVER be divertible to the no-op multi-step seam by
-  //       an ambient environment variable. We put a fast-FAILING `cargo` stub first on PATH and run the
-  //       normal gate (NO `--internal-selftest-seam` flag) with the legacy VERTER_GATE_SELFTEST(_STEPS)
-  //       vars set. If the env could still divert to the seam, the trivial `echo` steps would make the gate
-  //       return PASS (0) WITHOUT building anything — the exact gate-bypass. Post-fix the gate runs the REAL
-  //       archive path: it invokes the stub `cargo nextest archive`, the stub exits non-zero, and a build
-  //       failure maps to exit 1 (per the build-fail contract). So the normal path returns 1 (real-gate
-  //       build failure), NOT 0 (seam success). The discriminating control: the SAME steps WITH the explicit
-  //       `--internal-selftest-seam` flag DO run the seam and return 0 (the seam path is intact, only the
-  //       AMBIENT divert is closed).
+  // (U-P0) NO PRODUCTION-GATE BYPASS MODE + (xix) STUB-INVOKED. The production gate CLI (`gate.mjs`) must
+  //        have NO mode that returns the success contract (exit 0 as a gate PASS) without running the real
+  //        gate. We assert TWO things:
+  //          (1) EVERY removed mode EXITS NON-ZERO (unknown-flag / usage, code 127), with NO output that
+  //              looks like a gate PASS: the `--internal-selftest-seam` seam (with AND without a step list,
+  //              incl. the empty-step case that used to return EXIT_PASS doing no work); each `--selftest-*`
+  //              classifier hook; the `-- <cmd>` custom-command path. Even with the legacy
+  //              VERTER_GATE_SELFTEST(_STEPS) env set, NO `node gate.mjs <anything>` returns 0-as-gate-pass.
+  //          (2) STUB-INVOKED (xix): the REAL gate path (no flag) with a failing `cargo` stub first on PATH
+  //              that WRITES A MARKER FILE on invocation proves the gate ACTUALLY RAN the archive step (the
+  //              marker exists) and treated the build failure as a gate FAILURE (exit 1) — NOT a no-op
+  //              success. We assert the marker file EXISTS (the stub was invoked), not merely that the exit
+  //              was non-zero (which an unrelated failure could satisfy vacuously).
+  //        Discriminating control: a removed flag exits 127 while `--help` (a legitimate non-gate mode)
+  //        still exits 0. The reusable seam itself is exercised by scenario (viii) via the self-test runner.
   // --------------------------------------------------------------------------------------------------
-  process.stderr.write(
-    "\n(xvi) NO ENV GATE-BYPASS (the normal path is not env-divertible to the seam)\n",
-  );
+  process.stderr.write("\n(U-P0/xix) NO production-gate bypass mode + stub-invoked\n");
   {
     let ok = true;
-    // A fast-failing cargo stub: any invocation exits 3 immediately (models a build that the gate must
-    // treat as a real failure). Placed first on PATH so the gate's `cargo` resolves to it.
-    const stubDir = freshTmpDir("gatetest-cargostub-");
-    const stubPath = join(stubDir, "cargo");
-    writeFileSync(stubPath, "#!/usr/bin/env bash\nexit 3\n", { mode: 0o755 });
-    // Belt-and-suspenders: ensure the exec bit is set even if the mode option is ignored on this FS.
-    try {
-      spawnSync("chmod", ["+x", stubPath], { stdio: "ignore" });
-    } catch {
-      /* ignore */
-    }
-    const stubPATH = `${stubDir}:${process.env.PATH || ""}`;
-    const steps = [`bypassA|echo bypass_${RUN_TAG}_A`, `bypassB|echo bypass_${RUN_TAG}_B`].join(
-      "\n",
-    );
 
-    // NORMAL path (no seam flag) + the legacy env vars set + the failing cargo stub first on PATH.
-    const lk = freshLock();
-    const tgt = freshTmpDir("gatetest-target-");
-    const rNormal = runGate(["--timeout", "120s", "--stall", "60s"], {
-      PATH: stubPATH,
-      VERTER_GATE_SELFTEST: "1",
-      VERTER_GATE_SELFTEST_STEPS: steps,
-      VERTER_GATE_LOCK: lk,
-      VERTER_GATE_TARGET_DIR: tgt,
-    });
-    note(
-      `normal path + legacy env + failing cargo stub => rc=${rNormal.code} (expect REAL build-fail 1, NOT seam 0)`,
-    );
-    if (rNormal.code === EXIT_PASS) {
+    // (1) Every removed mode must EXIT NON-ZERO (never 0-as-gate-pass). We probe the production gate.mjs CLI
+    // directly. Each removed flag is an unknown argument => usage exit 127. The empty-step seam case — which
+    // used to return EXIT_PASS doing no work — is now just an unknown `--internal-selftest-seam` flag.
+    const removedModes = [
+      { argv: ["--internal-selftest-seam"], env: {}, why: "seam flag (no steps)" },
+      {
+        argv: ["--internal-selftest-seam"],
+        env: { VERTER_GATE_SELFTEST: "1", VERTER_GATE_SELFTEST_STEPS: "" },
+        why: "seam flag + EMPTY steps (the old EXIT_PASS-no-work path)",
+      },
+      {
+        argv: ["--internal-selftest-seam"],
+        env: { VERTER_GATE_SELFTEST_STEPS: `a|echo ${RUN_TAG}` },
+        why: "seam flag + steps",
+      },
+      {
+        argv: ["--selftest-classify-nextest", "/nonexistent"],
+        env: {},
+        why: "classify-nextest hook",
+      },
+      {
+        argv: ["--selftest-classify-nextest-run", "0", "/nonexistent"],
+        env: {},
+        why: "classify-nextest-run hook",
+      },
+      { argv: ["--selftest-surface2", "/nonexistent"], env: {}, why: "surface2 hook" },
+      { argv: ["--selftest-libtest", "0", "bin", "/nonexistent"], env: {}, why: "libtest hook" },
+      {
+        argv: ["--selftest-sweep-match", "posix", "/x", "--", "cargo"],
+        env: {},
+        why: "sweep-match hook",
+      },
+      { argv: ["--", "true"], env: {}, why: "custom-command path (`-- true`)" },
+      {
+        argv: ["--", `echo ${RUN_TAG}`],
+        env: { VERTER_GATE_SELFTEST: "1" },
+        why: "custom-command path + legacy env",
+      },
+    ];
+    for (const m of removedModes) {
+      const r = runGate(m.argv, m.env);
+      if (r.code === EXIT_PASS) {
+        fail(
+          `(U-P0) BYPASS: \`node gate.mjs ${m.argv.join(" ")}\` (${m.why}) returned 0-as-gate-pass — a ` +
+            "production-CLI mode must NEVER return the success contract without running the real gate.",
+        );
+        ok = false;
+      } else if (r.code !== 127) {
+        // Not a bypass, but a removed mode should be a clean USAGE error (127), not some other code.
+        fail(
+          `(U-P0) \`node gate.mjs ${m.argv.join(" ")}\` (${m.why}) returned ${r.code}; expected USAGE (127) ` +
+            "for a removed/unknown mode (it did NOT return 0, which is the load-bearing property).",
+        );
+        ok = false;
+      }
+    }
+    // Discriminating control: --help (a legitimate non-gate mode) still exits 0.
+    const help = runGate(["--help"], {});
+    if (help.code !== EXIT_PASS) {
       fail(
-        "(xvi) GATE-BYPASS: the normal gate path returned PASS (0) with the legacy VERTER_GATE_SELFTEST env " +
-          "set — the env DIVERTED it to the no-op seam (it did NOT build anything). This is the gate-bypass.",
+        `(U-P0) CONTROL: --help returned ${help.code}, expected 0 (the legit non-gate mode must work)`,
       );
       ok = false;
-    } else if (rNormal.code !== EXIT_FAIL) {
-      // Not the bypass, but flag the unexpected code (a stub cargo build-fail must map to 1, not 124/125/127).
-      fail(
-        `(xvi) normal path returned ${rNormal.code}; expected 1 (a stub-cargo build failure mapped to a gate ` +
-          "failure). It did NOT divert to the seam (good), but the build-fail exit mapping is unexpected.",
-      );
-      ok = false;
-    } else {
-      note(
-        "normal path ran the REAL archive (invoked the stub cargo, which failed) => build-failure exit 1",
-      );
     }
 
-    // CONTROL (discrimination): the SAME steps WITH the explicit seam flag DO run the seam => PASS (0). This
-    // proves the seam itself still works; only the ambient divert was removed.
-    const lk2 = freshLock();
-    const tgt2 = freshTmpDir("gatetest-target-");
-    const rFlag = runGate(["--internal-selftest-seam", "--timeout", "120s", "--stall", "60s"], {
-      VERTER_GATE_SELFTEST_STEPS: steps,
-      VERTER_GATE_LOCK: lk2,
-      VERTER_GATE_TARGET_DIR: tgt2,
-    });
-    note(`explicit --internal-selftest-seam + steps => rc=${rFlag.code} (expect seam PASS 0)`);
-    if (rFlag.code !== EXIT_PASS) {
-      fail(
-        `(xvi) CONTROL: the explicit --internal-selftest-seam flag returned ${rFlag.code}, expected PASS (0) ` +
-          "— the seam path must remain reachable via the explicit flag (only the ambient env divert is removed)",
-      );
-      ok = false;
-    }
+    // The removed-mode argv probes + --help control above are PLATFORM-INDEPENDENT — they run on Windows
+    // too. Record their result now so a Windows run still asserts the no-bypass property.
     if (ok) {
       pass(
-        "(xvi) NO ENV GATE-BYPASS: the normal gate path with the legacy VERTER_GATE_SELFTEST env ran the REAL " +
-          "build (failing-stub cargo => exit 1), NOT the no-op seam; the explicit --internal-selftest-seam flag " +
-          "still runs the seam (=> 0) (discriminating)",
+        "(U-P0) NO PRODUCTION-GATE BYPASS MODE: every removed production-CLI mode (the seam flag incl. the " +
+          "empty-step case, all --selftest-* hooks, `-- <cmd>`) exits 127 (never 0-as-gate-pass), even with the " +
+          "legacy VERTER_GATE_SELFTEST env; --help (the legit non-gate mode) still exits 0 (discriminating)",
       );
+    }
+
+    // (2) STUB-INVOKED (xix) — POSIX-only: the stub is a `#!/usr/bin/env bash` script. A failing cargo stub
+    // that WRITES A MARKER FILE on invocation. The REAL gate path (no flag) must invoke it (marker exists)
+    // and map the build failure to exit 1.
+    posix_xix: {
+      if (IS_WINDOWS) {
+        skip(
+          "(xix) STUB-INVOKED — POSIX bash cargo-stub + PATH override (no portable Windows cargo-stub stand-in here)",
+        );
+        break posix_xix;
+      }
+      let okStub = true;
+      const stubDir = freshTmpDir("gatetest-cargostub-");
+      const marker = join(stubDir, `cargo_invoked_${RUN_TAG}.marker`);
+      const stubPath = join(stubDir, "cargo");
+      // The stub records that it ran (touch the marker) and then fails — modelling a build the gate must
+      // treat as a real failure. `printf >> marker` so a multi-invocation still leaves the marker present.
+      writeFileSync(
+        stubPath,
+        `#!/usr/bin/env bash\nprintf 'invoked %s\\n' "$*" >> "${marker}"\nexit 3\n`,
+        { mode: 0o755 },
+      );
+      try {
+        spawnSync("chmod", ["+x", stubPath], { stdio: "ignore" });
+      } catch {
+        /* ignore */
+      }
+      const stubPATH = `${stubDir}:${process.env.PATH || ""}`;
+      const lk = freshLock();
+      const tgt = freshTmpDir("gatetest-target-");
+      const rNormal = runGate(["--timeout", "120s", "--stall", "60s"], {
+        PATH: stubPATH,
+        // Legacy env set: it must have ZERO effect (no divert to a no-op).
+        VERTER_GATE_SELFTEST: "1",
+        VERTER_GATE_SELFTEST_STEPS: `a|echo ${RUN_TAG}`,
+        VERTER_GATE_LOCK: lk,
+        VERTER_GATE_TARGET_DIR: tgt,
+      });
+      const stubWasInvoked = existsSync(marker);
+      note(
+        `real gate + failing cargo stub => rc=${rNormal.code} (expect build-fail 1); stub-invoked marker exists=${stubWasInvoked}`,
+      );
+      if (!stubWasInvoked) {
+        fail(
+          "(xix) STUB-INVOKED: the failing cargo stub was NOT invoked (no marker file) — the gate did NOT " +
+            "run the real archive step. A non-zero exit WITHOUT the stub running would be a vacuous pass; the " +
+            "gate must actually invoke cargo.",
+        );
+        okStub = false;
+      }
+      if (rNormal.code === EXIT_PASS) {
+        fail(
+          "(xix) the real gate path returned PASS (0) with a FAILING cargo stub — it did not run/observe the " +
+            "build (gate-bypass).",
+        );
+        okStub = false;
+      } else if (rNormal.code !== EXIT_FAIL) {
+        fail(
+          `(xix) the real gate path returned ${rNormal.code}; expected 1 (a stub-cargo build failure maps to ` +
+            "a gate FAILURE, not 124/125/127).",
+        );
+        okStub = false;
+      }
+      if (okStub) {
+        pass(
+          "(xix) STUB-INVOKED: the real gate path with a failing cargo stub ACTUALLY INVOKED cargo (marker " +
+            "present — proving the gate ran the archive step, not a no-op) and mapped the build failure to " +
+            "exit 1 (discriminating; a non-zero exit without the stub running would be vacuous)",
+        );
+      }
     }
   }
 
   // --------------------------------------------------------------------------------------------------
-  // (xvii) SIGNAL TEARDOWN REAPS THE ACTIVE CHILD TREE. A SIGINT/SIGTERM to ONLY the gate pid (NOT the whole
-  //        process group) must reap the active step's WHOLE tree (the argv-tagged sleep) BEFORE releasing
-  //        the lock. Pre-fix, the signal handler ran only the provenance sweep — which skips a plain `sleep`
-  //        (not a build tool, no runner-target reference) — so the test child SURVIVED while the lock was
-  //        released, letting a second gate start over a still-running test. We spawn the gate DETACHED (its
-  //        own group), in custom mode running a wrapper that backgrounds an argv-tagged `sleep 600` and
-  //        waits; once the lock is held and the sleep is live we `kill(gatePid, SIGTERM)` — the GATE PID
-  //        ONLY (a positive pid, never the negative group) — and assert: 0 surviving argv-tagged sleeps
-  //        (the tree was reaped) AND the lockdir was released. Discriminates: the pre-fix sweep-only path
-  //        leaves the sleep alive.
+  // (xvii) SIGNAL TEARDOWN REAPS THE ACTIVE CHILD TREE. A SIGINT/SIGTERM to ONLY the gate-process pid (NOT
+  //        the whole process group) must reap the active step's WHOLE tree (the argv-tagged sleep) BEFORE
+  //        releasing the lock. Pre-fix, the signal handler ran only the provenance sweep — which skips a
+  //        plain `sleep` (not a build tool, no runner-target reference) — so the test child SURVIVED while
+  //        the lock was released, letting a second gate start over a still-running test. We spawn the
+  //        self-test runner DETACHED (its own group — it composes the SAME teardown lifecycle gate.mjs
+  //        uses), running a wrapper that backgrounds an argv-tagged `sleep 600` and waits; once the lock is
+  //        held and the sleep is live we `kill(runnerPid, SIGTERM)` — the RUNNER PID ONLY (a positive pid,
+  //        never the negative group) — and assert: 0 surviving argv-tagged sleeps (the tree was reaped) AND
+  //        the lockdir was released. Discriminates: the pre-fix sweep-only path leaves the sleep alive.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write(
-    "\n(xvii) SIGNAL teardown reaps the active child tree (SIGTERM to the gate pid only)\n",
+    "\n(xvii) SIGNAL teardown reaps the active child tree (SIGTERM to the gate-process pid only)\n",
   );
-  {
+  posix_xvii: {
+    if (IS_WINDOWS) {
+      skip(
+        "(xvii) SIGNAL teardown reaps active tree — POSIX SIGTERM-to-pid + process-group reap (no Windows stand-in)",
+      );
+      break posix_xvii;
+    }
     let ok = true;
     const lk = freshLock();
     const tgt = freshTmpDir("gatetest-target-");
     // A wrapper that backgrounds ONE argv-tagged sleep 600 and waits. The sleep is a non-build-tool child
     // with NO runner-target reference, so ONLY a real tree-reap (not the provenance sweep) can kill it.
     const childCmd = `( exec -a sleep_${RUN_TAG}_sigchild sleep 600 ) & c=$!; wait $c`;
-    const gate = spawnGate(["--timeout", "600s", "--stall", "600s", "--", childCmd], {
-      VERTER_GATE_LOCK: lk,
-      VERTER_GATE_TARGET_DIR: tgt,
-    });
+    const gate = spawnContainedCmd(
+      childCmd,
+      { VERTER_GATE_LOCK: lk, VERTER_GATE_TARGET_DIR: tgt },
+      ["--timeout", "600s", "--stall", "600s"],
+    );
     // Wait for the lock to be held AND the argv-tagged sleep to be live.
     const held = await waitLockHeld(lk);
     let sawChild = false;
@@ -1675,7 +1982,7 @@ async function main() {
     }
     if (ok) {
       pass(
-        "(xvii) SIGNAL TEARDOWN: a SIGTERM to the gate pid ONLY reaped the active step's whole tree " +
+        "(xvii) SIGNAL TEARDOWN: a SIGTERM to the gate-process pid ONLY reaped the active step's whole tree " +
           "(0 surviving children) and released the lock — no orphan survives, lock freed only after reaping",
       );
     }
@@ -1684,10 +1991,84 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
+  // (xx) TEARDOWN VERIFIED REAP — death is CONFIRMED, not merely signaled. The reap must POLL past SIGKILL
+  //      and confirm the tree is actually gone before treating teardown as clean (not just fire the kill
+  //      and return). We stage a child that TRAPS + IGNORES SIGTERM (`trap '' TERM`) so the grace-window
+  //      SIGTERM does NOTHING — only the subsequent SIGKILL ends it. Under a whole-gate `--timeout`, the
+  //      watchdog must SIGTERM (no-op), then SIGKILL, then VERIFY the group is dead. We assert: the gate
+  //      returns TIMEOUT (124) AND, after it returns, ZERO argv-tagged children survive — i.e. the reap did
+  //      not return while a SIGTERM-immune child was still live. If the reap only issued the kill without a
+  //      verification poll, a slow-to-die child could outlive the gate's return; the confirmed-dead poll
+  //      closes that. Discriminating: a SIGTERM-immune child that survived would leave a non-zero survivor
+  //      count.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(xx) TEARDOWN verified reap (confirmed-dead poll past SIGKILL)\n");
+  posix_xx: {
+    if (IS_WINDOWS) {
+      skip(
+        "(xx) TEARDOWN verified reap — POSIX SIGTERM-trap + SIGKILL + group-death poll (no Windows stand-in)",
+      );
+      break posix_xx;
+    }
+    let ok = true;
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-target-");
+    // A wrapper that IGNORES SIGTERM, backgrounds ONE argv-tagged sleep 600 (also SIGTERM-immune via the
+    // inherited trap is not guaranteed for the child sleep, so we make the WRAPPER ignore TERM and `wait`;
+    // the negative-PGID SIGTERM hits the whole group — the wrapper ignores it, the sleep may or may not —
+    // but the SIGKILL ends both). The point: SIGTERM does not end the wrapper, so only the verified SIGKILL
+    // path tears the tree down.
+    const immuneCmd = `trap '' TERM; ( exec -a sleep_${RUN_TAG}_immune sleep 600 ) & c=$!; wait $c`;
+    const t0 = Date.now();
+    const r = runContainedCmd(immuneCmd, { VERTER_GATE_LOCK: lk, VERTER_GATE_TARGET_DIR: tgt }, [
+      "--timeout",
+      "4s",
+      "--stall",
+      "600s",
+    ]);
+    const elapsed = Math.round((Date.now() - t0) / 1000);
+    await delay(1500);
+    const survivors = countArgvSleeps(`${RUN_TAG}_immune`);
+    note(
+      `SIGTERM-immune wrapper under --timeout 4s => rc=${r.code} after ${elapsed}s; surviving children=${survivors}`,
+    );
+    if (r.code !== EXIT_TIMEOUT) {
+      fail(`(xx) SIGTERM-immune wrapper => rc=${r.code}, expected TIMEOUT (${EXIT_TIMEOUT})`);
+      ok = false;
+    }
+    if (elapsed >= 60) {
+      fail(`(xx) took ${elapsed}s — the watchdog did not bound the immune run near 4s`);
+      ok = false;
+    }
+    if (survivors !== 0) {
+      fail(
+        `(xx) ${survivors} argv-tagged child(ren) SURVIVED after the gate returned — the reap did NOT confirm ` +
+          "the SIGTERM-immune tree dead before returning (it must SIGKILL then POLL past the kill until ESRCH).",
+      );
+      spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_immune`], { stdio: "ignore" });
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(xx) TEARDOWN VERIFIED REAP: a SIGTERM-immune child under --timeout was SIGKILL'd and CONFIRMED dead " +
+          "(0 survivors after the gate returned) in ~" +
+          elapsed +
+          "s — the reap polls past SIGKILL, it does not merely issue the kill (discriminating)",
+      );
+    }
+    // teardown lockdir wait + belt-and-suspenders cleanup.
+    for (let w = 0; w < 40; w++) {
+      if (!existsSync(lk)) break;
+      await delay(100);
+    }
+    spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_immune`], { stdio: "ignore" });
+  }
+
+  // --------------------------------------------------------------------------------------------------
   // (xviii) SURFACE-2 CRASHED/ABNORMAL LIBTEST IS A HARD FAIL. A direct-libtest failure is tolerated ONLY
   //         under NORMAL libtest failure semantics: exit 101 + a parsed `test result: FAILED` summary whose
   //         `failed` count EXACTLY equals the parsed FAILED names + every name allowlisted. We drive the REAL
-  //         `analyzeLibtestSurface` via `--selftest-libtest <exit> <binaryId> <fixture>`. Discriminators —
+  //         `analyzeLibtestSurface` IN-PROCESS. Discriminators —
   //         each FAILs the pre-fix "non-zero exit + ≥1 tolerated FAILED line => tolerate" logic:
   //           (a) a SIGABRT crash (exit 134) whose output names a TOLERATED test + an abort message but NO
   //               `test result:` summary => HARD FAIL (a signal is never tolerated);
@@ -1741,17 +2122,7 @@ async function main() {
     // (f) a clean run: exit 0, no FAILED, summary ok => PASS.
     writeFileSync(cleanPass, `running 5 tests\n\ntest result: ok. 5 passed; 0 failed; 0 ignored\n`);
 
-    const libtest = (code, binaryId, file) => {
-      const r = spawnSync(
-        process.execPath,
-        [GATE, "--selftest-libtest", String(code), binaryId, file],
-        {
-          env: { ...process.env },
-          encoding: "utf8",
-        },
-      );
-      return (r.stdout || "").trim();
-    };
+    const libtest = (code, binaryId, file) => verdictLibtestFile(code, binaryId, file);
     const vSig = libtest(134, BIN, sigabrt);
     const vNoSum = libtest(101, BIN, noSummary);
     const vMism = libtest(101, BIN, countMismatch);
@@ -1807,13 +2178,16 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
-  // Windows process-management coverage — HONEST GAP. The (xii) and (xv) cases above are pure regex/classify
-  // UNITS of the Windows sweep MATCHER (exercised here via the matcher's `windows` flag on this POSIX host).
-  // The Windows RUNTIME process-management path — the `taskkill /PID <pid> /T /F` tree kill, the CIM
-  // CreationDate start-identity, and the lock/timeout/stall behavior under a real Windows process group — is
-  // NOT exercised by this harness on a non-Windows host (there is no portable `sleep`/argv-rename stand-in
-  // for Windows here). It is covered by static review only. This is stated explicitly so a non-Windows run
-  // does NOT report Windows runtime process-management as covered.
+  // HONEST PLATFORM-COVERAGE GAP — stated both ways, so neither a POSIX nor a Windows green run overclaims:
+  //   - On a NON-Windows host: the Windows RUNTIME process-management path — `taskkill /PID <pid> /T /F`
+  //     tree kill, CIM CreationDate start-identity, and the lock/timeout/stall behavior under a real Windows
+  //     process group — is NOT exercised (no portable `sleep`/argv-rename stand-in for Windows here). Only
+  //     the Windows sweep-MATCHER regex units (xii, xv) run (via the matcher's `windows` flag). It is
+  //     covered by static review; it is NOT counted as a passing Windows runtime process-management test.
+  //   - On a WINDOWS host: the POSIX process-management scenarios above each emit a TRUE skip (counted in
+  //     SKIP, never in PASS), so a green Windows run does NOT falsely imply POSIX process-group coverage.
+  //     The platform-independent classifier / verdict / sweep-matcher / suite-selection / removed-mode-argv
+  //     scenarios DO run on Windows and ARE counted.
   // --------------------------------------------------------------------------------------------------
   if (!IS_WINDOWS) {
     process.stderr.write(
@@ -1822,6 +2196,12 @@ async function main() {
         "portable Windows sleep/argv-rename stand-in here. Only the Windows sweep-MATCHER regex units (xii,\n" +
         "xv) are exercised (via the matcher's `windows` flag). The Windows runtime path is covered by static\n" +
         "review; it is NOT counted as a passing process-management test on a non-Windows run.\n",
+    );
+  } else {
+    process.stderr.write(
+      "\n[honest-skip] On this Windows host the POSIX process-management scenarios were SKIPPED (counted in\n" +
+        "SKIP, NOT in PASS) — there is no portable Windows sleep/argv-rename stand-in. The platform-\n" +
+        "independent classifier/verdict/sweep-matcher/suite-selection/removed-mode-argv scenarios DID run.\n",
     );
   }
 
@@ -1832,7 +2212,7 @@ function finish() {
   process.stderr.write("\n=== SELF-TEST SUMMARY ===\n");
   for (const r of RESULTS) process.stderr.write(`${r}\n`);
   process.stderr.write("-------------------------\n");
-  process.stderr.write(`PASS=${PASS_COUNT}  FAIL=${FAIL_COUNT}\n`);
+  process.stderr.write(`PASS=${PASS_COUNT}  FAIL=${FAIL_COUNT}  SKIP=${SKIP_COUNT}\n`);
   if (FAIL_COUNT === 0) {
     process.stderr.write("ALL SELF-TESTS PASSED\n");
     process.exit(0);

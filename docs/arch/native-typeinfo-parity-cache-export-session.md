@@ -161,7 +161,7 @@ Required new guards (PART 1 §§1.2–1.5; parent Guards index → Type IR — `
 - `no_infer_not_type_parameter_metadata`, `diagnostics_only_on_typeinfo_graph_payload`.
 - `typeinfo_graph_response_payload_arm_is_additive_not_retyped`, `framework_surface_payload_graph_payload_is_additive_not_retyped`, `all_public_semantic_type_graph_embeddings_are_payload_wrapped`.
 
-Critical-rule guards: this block implements the parent's `(CRITICAL)` Typeinfo Wire Contract — the four invariants (closed-enum discipline, wire-compat, additive-audit, validate-before-execute). The wire-purity + embedding + additive-audit + validation guards above ARE their R6 guards: proto/TS oneof parity (`crates/verter_session/tests/g_block/typeinfo_graph_taxonomy.rs`), byte-equal TS freshness (`crates/verter_protocol/tests/typeinfo_proto_ts_freshness.rs::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output`), audit-parity (`crates/verter_audit/tests/request_kind_payload_parity.rs`), and request validation (`crates/verter_session/tests/g_type/typeinfo_request_validation.rs`). Any new `(CRITICAL)` rule text added to docs in this change registers its guard here in the same change.
+Critical-rule guards: this block implements the parent's `(CRITICAL)` Typeinfo Wire Contract — the four invariants (closed-enum discipline, wire-compat, additive-audit, validate-before-execute). The wire-purity + embedding + additive-audit + validation guards above ARE their R6 guards: proto/TS oneof parity (`crates/verter_session/tests/cases/g_block/typeinfo_graph_taxonomy.rs`), byte-equal TS freshness (`crates/verter_protocol/tests/cases/typeinfo_proto_ts_freshness.rs::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output`), audit-parity (`crates/verter_audit/tests/cases/request_kind_payload_parity.rs`), and request validation (`crates/verter_session/tests/cases/g_type/typeinfo_request_validation.rs`). Any new `(CRITICAL)` rule text added to docs in this change registers its guard here in the same change.
 
 Proof requirement: structural guards (the wire-purity, embedding, additive-audit, and validation guards above), all default-suite tests. The discriminating property: every retired concept appears ONLY in its message's `reserved` list (or behind a registered versioned downgrade encoder); no field number is reused; `GraphTypeNode` carries only the closed type-value allowlist; every public `SemanticTypeGraph` embedding except the canonical `TypeInfoGraphPayload.graph` is payload-wrapped; the regenerated TS bindings are byte-equal.
 
@@ -172,11 +172,11 @@ Exit acceptance:
 - The proto/TS taxonomy + byte-equal freshness + audit-parity + request-validation guards green; the schema version is bumped; no field number reused.
 
 Verification commands:
-- `cargo test --package verter_session --test g_block typeinfo_graph_taxonomy` (proto/TS oneof parity).
-- `cargo test --package verter_session --test g_block typeinfo_wire_surface_guards` and `--test g_block typeinfo_graph_contract_guards` (wire-purity / embedding closure).
-- `cargo test --package verter_protocol --test typeinfo_proto_ts_freshness` (byte-equal regenerated TS bindings) and `--test typeinfo_proto_roundtrip`.
-- `cargo test --package verter_audit --test request_kind_payload_parity` (additive audit envelope).
-- `cargo test --package verter_session --test g_type typeinfo_request_validation` (closed schema-version + exhaustive structured-expression).
+- `cargo test --package verter_session --test main typeinfo_graph_taxonomy` (proto/TS oneof parity).
+- `cargo test --package verter_session --test main typeinfo_wire_surface_guards` and `--test main typeinfo_graph_contract_guards` (wire-purity / embedding closure).
+- `cargo test --package verter_protocol --test main typeinfo_proto_ts_freshness` (byte-equal regenerated TS bindings) and `--test main typeinfo_proto_roundtrip`.
+- `cargo test --package verter_audit --test main request_kind_payload_parity` (additive audit envelope).
+- `cargo test --package verter_session --test main typeinfo_request_validation` (closed schema-version + exhaustive structured-expression).
 - Regenerate the TS bindings via the workspace `buf` + `oxfmt` binaries before the freshness test.
 - The full workspace gate (the CI gate — the complete Rust **AND** JavaScript gate, green only when BOTH pass; PART 2 §11.2): `cargo nextest run --workspace` + `cargo test -p verter_session --tests` (the canonical Rust pair — bare `cargo test --workspace --tests` silently skips the verter_session integration suite and is NOT the gate); `cargo clippy --workspace -- -D warnings`; `cargo fmt --all --check`; `pnpm test`; `pnpm install --frozen-lockfile`.
 - `node scripts/gen-corpus-audit-tests.mjs` (idempotent; audit-record schema/fixtures changed).
@@ -258,7 +258,7 @@ Exit acceptance:
 
 Verification commands:
 - `cargo test --package verter_session` cross-file / route / budget / cache-discipline tests (`semantic_query_memo`, `cache_schema`, `owner_import_surface`).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite for this block's rows).
+- `cargo test --package verter_session --test main typeinfo_ignored_test_manifest` (manifest guard suite for this block's rows).
 - The block's lifted-row proofs via the generated wrapper (or `cargo test … -- --ignored` before the branch strips the `#[ignore]`s).
 - Full workspace gate (as U8); `node scripts/gen-corpus-audit-tests.mjs` if audit fixtures change.
 
@@ -344,7 +344,7 @@ Exit acceptance:
 
 Verification commands:
 - `cargo test --package verter_session` mode-boundary / expansion / demand / result-DB tests (`project_type_store`, `cache_schema`, the typeinfo mode-boundary tests) and the framework-surface consolidation / singleflight tests.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
+- `cargo test --package verter_session --test main typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U8).
 
@@ -420,7 +420,7 @@ Exit acceptance:
 
 Verification commands:
 - `cargo test --package verter_session` footprint / cache-invalidation / demand-boundary / relation-payload tests; the audit-contract guards (`typeinfo_audit_contract_guards`).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
+- `cargo test --package verter_session --test main typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U8); `node scripts/gen-corpus-audit-tests.mjs` (audit footprint fixtures changed).
 
@@ -482,8 +482,8 @@ Exit acceptance:
 
 Verification commands:
 - `cargo test --package verter_session` typeinfo surface / raise / evaluate / framework-surface graph-export tests; the wire-surface guards (`typeinfo_wire_surface_guards`, `typeinfo_graph_contract_guards`).
-- `cargo test --package verter_protocol --test typeinfo_proto_roundtrip` (the exporter's payload round-trips).
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite — the exporter enables the U13 published-surface rows).
+- `cargo test --package verter_protocol --test main typeinfo_proto_roundtrip` (the exporter's payload round-trips).
+- `cargo test --package verter_session --test main typeinfo_ignored_test_manifest` (manifest guard suite — the exporter enables the U13 published-surface rows).
 - Full workspace gate (as U8).
 
 Docs updated: keep the recovered-doc §8 exporter `TypeNode::ModuleAugmentation` DTO wording as a live `GraphTypeNode` augmentation arm (relocation rejected — no `DeclarationAnalysisGraph` side surface); keep the `/type-cache-architecture` exporter / payload notes current; update the `/framework-adapters` skill's graph-export note (the merged `graph_export.rs` is folded to the post-U8 `TypeInfoGraphPayload` carrier — no old-shape `SemanticTypeGraph` producer).
@@ -541,9 +541,9 @@ Exit acceptance:
 - U13 lifts no `IgnoredTestRow` of its own; every published type-value row stays owned by its computing U2/U6 block (§10.4.1). The published projection of every owning block's rows passes through the closed `GraphTypeNode` surface with the wire-purity guards green, and no published-surface row is mapped to U13.
 
 Verification commands:
-- `cargo test --package verter_session` published-surface tests; `cargo test --package verter_audit --test published_surface_constants_match_ts_port` (Rust/TS published-surface parity).
+- `cargo test --package verter_session` published-surface tests; `cargo test --package verter_audit --test main published_surface_constants_match_ts_port` (Rust/TS published-surface parity).
 - `pnpm vitest --run packages/component-meta/tests/no-rawtype-reads.spec.ts` and the `@verter/component-meta` type-graph / native-projection / compat checker+schema spec suites.
-- `cargo test --package verter_session --test typeinfo_ignored_test_manifest` (manifest guard suite).
+- `cargo test --package verter_session --test main typeinfo_ignored_test_manifest` (manifest guard suite).
 - The block's lifted-row proofs via the generated wrapper.
 - Full workspace gate (as U8) PLUS `pnpm test` (the TS projection is exercised).
 
