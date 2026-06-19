@@ -147,10 +147,15 @@ fn define_props_shape(
     ) {
         return None;
     }
-    let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
+    let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineProps),
     );
+    // Fold a genuine partial macro surface into the request-result
+    // completeness so the enclosing component-meta result is refused warm
+    // promotion (the no-poison invariant).
+    dtos_read.observe_partial();
+    let dtos = dtos_read.dtos;
 
     let mut exactness = SolverExactness::ExactConcrete;
     let mut execution_status = ExecutionStatus::Completed;
@@ -235,10 +240,12 @@ fn define_emits_shape(
     ) {
         return None;
     }
-    let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
+    let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits),
     );
+    dtos_read.observe_partial();
+    let dtos = dtos_read.dtos;
 
     let mut exactness = SolverExactness::ExactConcrete;
     let mut execution_status = ExecutionStatus::Completed;
@@ -323,10 +330,12 @@ fn define_slots_shape(
     ) {
         return None;
     }
-    let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
+    let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots),
     );
+    dtos_read.observe_partial();
+    let dtos = dtos_read.dtos;
 
     let properties = dtos
         .slot_fields()

@@ -834,28 +834,58 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 }
 
 // ===========================================================================
-// Dormant-producer guard is UNTOUCHED — the dual-read work does NOT flip the
-// producer or remove the ordering gate. This is a witness assertion, not
-// a re-definition of that guard.
+// Macro hot-mirror producer guard SET — the single-engine macro-arg producer
+// is defended by four guards: the module-visibility privacy-shape guard
+// (`structural_lowerer_production_entry_is_macro_hot_mirror_private`), the
+// file-scope ordering tripwire
+// (`no_production_macro_arg_eager_lowering_outside_mirror`), the purity guard
+// (`macro_hot_mirror_producer_is_pure_no_route_resolution`), and the
+// entry-surface guard
+// (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`). The witness
+// below pins that set into the registry; it does not re-define those guards.
 // ===========================================================================
 
 #[test]
-fn dormant_producer_guard_remains_registered() {
-    // The structural-lowerer dormancy guard pins the producer dormant
-    // until the (later, breaking) producer wiring. The dual-read work must NOT
-    // remove it. This witness fails if the guard name disappears from
-    // its registry row, catching an accidental premature removal in this
-    // change.
+fn macro_hot_mirror_producer_privacy_guard_remains_registered() {
+    // The macro hot-mirror producer wiring landed: the structural lowerer's
+    // production entry is now `pub(in crate::macro_hot_mirror)` ancestor-private,
+    // and the dormancy guard was REPLACED by the privacy-shape guard. This
+    // witness pins the new guard name into BOTH the registry and the assertion
+    // file, catching an accidental removal of the single-engine producer
+    // defense.
     let registry = read_rel("tests/g_misc0/critical_rules_have_guards.rs");
     assert!(
-        registry.contains("structural_lowerer_has_no_production_caller_until_carrier_resolution"),
-        "the dormant-producer guard must remain registered while the consumers are made handle-capable — its removal is the \
-         later breaking producer wiring, not this dual-read work"
+        registry.contains("structural_lowerer_production_entry_is_macro_hot_mirror_private"),
+        "the macro-hot-mirror producer-privacy guard must remain registered — it is the \
+         compiler-enforced single-engine producer defense (ancestor-private entry)"
     );
     let guards = read_rel("tests/architecture_guards.rs");
     assert!(
-        guards.contains("structural_lowerer_has_no_production_caller_until_carrier_resolution"),
-        "the dormant-producer guard's assertion must remain in architecture_guards.rs while the \
-         consumers are made handle-capable"
+        guards.contains("structural_lowerer_production_entry_is_macro_hot_mirror_private"),
+        "the producer-privacy guard's assertion must remain in architecture_guards.rs"
+    );
+    assert!(
+        guards.contains("no_production_macro_arg_eager_lowering_outside_mirror"),
+        "the secondary ordering tripwire (no production macro-arg eager lowering outside the \
+         mirror) must remain in architecture_guards.rs"
+    );
+    assert!(
+        registry.contains("macro_hot_mirror_producer_is_pure_no_route_resolution"),
+        "the macro-hot-mirror PURITY guard must remain registered — the producer must not \
+         route-resolve imports / read the prepared-decl bundle (pure structural-carrier \
+         lowering; seeding re-sources from the route-free IndexedReady)"
+    );
+    assert!(
+        guards.contains("macro_hot_mirror_producer_is_pure_no_route_resolution"),
+        "the macro-hot-mirror purity guard's assertion must remain in architecture_guards.rs"
+    );
+    assert!(
+        registry.contains("macro_hot_mirror_exposes_single_crate_visible_producer_entry"),
+        "the macro-hot-mirror ENTRY-SURFACE guard must remain registered — `macro_type_arg_hot_ref` \
+         is the SOLE crate-visible module-level producer entry of the mirror module"
+    );
+    assert!(
+        guards.contains("macro_hot_mirror_exposes_single_crate_visible_producer_entry"),
+        "the macro-hot-mirror entry-surface guard's assertion must remain in architecture_guards.rs"
     );
 }

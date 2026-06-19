@@ -26,13 +26,18 @@
 //! [`NodeScopeId`]. It never touches `ProjectSemanticDispatch`, a resolver
 //! context, a `SemanticQueryKey`, or any host / type-provider state — the
 //! `session_graph_lowerer_makes_no_query` guard locks that statically.
-
-// The query-free structural lowerer is a standalone producer of the
-// unresolved graph carriers, exercised end-to-end by the test suite below.
-// `dead_code` is allowed because the lowerer is dormant: it has no production
-// caller yet; its eventual demand-time consumer (carrier resolution) lands as
-// later carrier-resolution work.
-#![allow(dead_code)]
+//!
+//! ## Visibility boundary
+//!
+//! [`lower_type_expr_structural`] is `pub(in crate::macro_hot_mirror)` — its
+//! SOLE production entry is the macro hot-mirror builder
+//! ([`super::macro_type_arg_hot_ref`]). The mirror is the single-entry
+//! producer of macro-type-argument graph handles; making the lowerer entry
+//! ancestor-private to `crate::macro_hot_mirror` makes a second production
+//! caller UNREPRESENTABLE by construction (no other module can name the fn),
+//! so the single-engine producer rule needs no source scanner here. Raw
+//! lowerer access for cross-module tests goes through
+//! [`super::for_tests`](super) only.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -64,7 +69,14 @@ pub(crate) struct BinderScope {
 
 impl BinderScope {
     /// Bind a syntactic type-parameter name to its interned binder node.
-    pub(crate) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
+    ///
+    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
+    /// this is a mirror-internal binder-frame BUILDER used by `mod.rs`'s
+    /// script-setup seed construction, never an outward macro-arg producer
+    /// entry. The mirror's SOLE crate-visible producer entry is the free
+    /// `macro_type_arg_hot_ref`; the entry-surface guard pins that, so any
+    /// helper a foreign module does not need stays module-private.
+    pub(in crate::macro_hot_mirror) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
         self.names.insert(name, node);
     }
 
@@ -112,7 +124,11 @@ impl<'a> StructuralLowerContext<'a> {
     /// A root context over `binders` (innermost last) with default
     /// provenance: an `Authored` merge role and not-a-macro-own-body. The
     /// empty slice is the no-binders-in-scope root.
-    pub(crate) fn new(binders: &'a [BinderScope]) -> Self {
+    ///
+    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
+    /// a mirror-internal CONTEXT constructor used by `mod.rs`'s builder, never a
+    /// producer entry.
+    pub(in crate::macro_hot_mirror) fn new(binders: &'a [BinderScope]) -> Self {
         Self {
             binders,
             merge_role: MemberMergeRole::Authored,
@@ -143,13 +159,18 @@ impl<'a> StructuralLowerContext<'a> {
 
     /// Replace the surface-merge role (the owner stamps `OwnBody` on an
     /// interface/class own-body arm and `Heritage` on a heritage arm).
+    #[cfg(test)]
     pub(crate) fn with_merge_role(mut self, merge_role: MemberMergeRole) -> Self {
         self.merge_role = merge_role;
         self
     }
 
     /// Mark whether this context lowers the macro type-argument's own body.
-    pub(crate) fn with_macro_own_body(mut self, macro_own_body: bool) -> Self {
+    ///
+    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
+    /// a mirror-internal CONTEXT builder used by `mod.rs`'s builder, never a
+    /// producer entry.
+    pub(in crate::macro_hot_mirror) fn with_macro_own_body(mut self, macro_own_body: bool) -> Self {
         self.macro_own_body = macro_own_body;
         self
     }
@@ -213,7 +234,7 @@ pub(crate) enum StructuralLowerError {
 ///
 /// Returns a [`HotTypeRef`] wrapping the interned root node, or a typed
 /// [`StructuralLowerError`] for a shape with no unresolved representation.
-pub(crate) fn lower_type_expr_structural(
+pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(
     graph: &SemanticGraphStore,
     expr: &TypeExpr,
     scope: NodeScopeId,
@@ -240,7 +261,9 @@ fn lower_node(
     match expr {
         // -- Structural terminals (no resolution) --
         TypeExpr::Primitive(name) => Ok(graph.intern_node_with_scope(
-            SemanticNodeData::Primitive(super::map_primitive_name(*name)),
+            SemanticNodeData::Primitive(crate::project_semantic_dispatch::map_primitive_name(
+                *name,
+            )),
             scope.clone(),
         )),
         TypeExpr::Literal(value) => {
@@ -320,8 +343,7 @@ fn lower_node(
                     IndexKey::String(Arc::from(s.as_str()))
                 }
                 TypeExpr::Literal(LiteralValue::Number(n)) => {
-                    match crate::project_semantic_dispatch::build::integer_convention_index_key(*n)
-                    {
+                    match crate::semantic_query::index_key::integer_convention_index_key(*n) {
                         Some(i) => IndexKey::Number(i),
                         None => IndexKey::TypeNode(lower_node(graph, index, scope, ctx)?),
                     }

@@ -784,49 +784,208 @@ fn batch_over_overlay_session_applies_overlay_o1_not_per_job() {
 
 // ── Per-result completeness through the fixed-view batch executor ──
 
-/// A budget-exhausted PARTIAL driven through the FIXED-VIEW BATCH executor
-/// is returned to the caller but NEVER admitted/promoted, while a COMPLETE
-/// sibling in the SAME batch is admitted and stays warm.
+/// Sorted distinct prop names of a resolved component-meta analysis. Used by
+/// the unbounded-oracle arm to assert the COMPLETE distinct surface (96
+/// non-overlapping members). Name discovery is shallow/Navigate-owned, so a
+/// budget trip does NOT shrink this set — see the test's contract comment.
+fn prop_names(
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) -> std::collections::BTreeSet<String> {
+    meta.props.iter().map(|p| p.name.clone()).collect()
+}
+
+/// 32 non-overlapping interfaces `S01..S32`, each `{ aNN: string; bNN:
+/// number; cNN: boolean }`. Every member name is distinct across all 32
+/// interfaces, so the full intersected surface is exactly 96 distinct props.
+fn partial_helper_ts() -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    for n in 1..=32u32 {
+        let _ = writeln!(
+            s,
+            "export interface S{n:02} {{ a{n:02}: string; b{n:02}: number; c{n:02}: boolean }}"
+        );
+    }
+    s
+}
+
+/// SFC whose `defineProps` type argument is `Partial<S01> & ... &
+/// Partial<S32>` — a 32-arm intersection over the non-overlapping helper
+/// interfaces. Enumerating prop names walks all 32 arms; under a tight
+/// projection-op budget the cold materialisation trips the fuse and flags
+/// the WHOLE result `completeness = Partial`.
+fn partial_sfc() -> String {
+    use std::fmt::Write as _;
+    let mut names = String::new();
+    let mut arms = String::new();
+    for n in 1..=32u32 {
+        if n > 1 {
+            names.push_str(", ");
+            arms.push_str(" & ");
+        }
+        let _ = write!(names, "S{n:02}");
+        let _ = write!(arms, "Partial<S{n:02}>");
+    }
+    format!(
+        "<script setup lang=\"ts\">\n\
+         import type {{ {names} }} from './helper'\n\
+         defineProps<{arms}>();\n\
+         </script>\n\
+         <template><div /></template>\n"
+    )
+}
+
+/// Per-slot typed-completeness facts recovered through the fixed-view batch
+/// PAYLOAD path. `get_component_meta_batch` does not expose the resolved
+/// sidecar, so the batch's typed completeness is observed via
+/// `get_component_meta_batch_payloads` with the encoder below, which records
+/// `resolved.completeness.is_partial()` and `resolved.synthesis_should_suppress`
+/// for the ACTUAL fixed-view batch result (not a separate scalar read).
+struct SlotCompleteness {
+    is_partial: bool,
+    synthesis_should_suppress: bool,
+    prop_count: usize,
+}
+
+/// Encoder for `get_component_meta_batch_payloads`: serialises the typed
+/// completeness flags + prop count of the batch result so the test can
+/// recover them per slot.
+fn encode_completeness(
+    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> Vec<u8> {
+    format!(
+        "is_partial={} suppress={} props={}",
+        resolved.completeness.is_partial(),
+        resolved.synthesis_should_suppress,
+        analysis.props.len(),
+    )
+    .into_bytes()
+}
+
+fn parse_completeness(slot: &Option<Vec<u8>>) -> SlotCompleteness {
+    let bytes = slot
+        .as_ref()
+        .expect("slot returns a payload (not swallowed)");
+    let text = std::str::from_utf8(bytes).expect("payload is utf8");
+    let mut is_partial = None;
+    let mut synthesis_should_suppress = None;
+    let mut prop_count = None;
+    for field in text.split_whitespace() {
+        let (key, val) = field.split_once('=').expect("field is key=value");
+        match key {
+            "is_partial" => is_partial = Some(val == "true"),
+            "suppress" => synthesis_should_suppress = Some(val == "true"),
+            "props" => prop_count = Some(val.parse().expect("props is a number")),
+            other => panic!("unexpected payload field {other}"),
+        }
+    }
+    SlotCompleteness {
+        is_partial: is_partial.expect("is_partial present"),
+        synthesis_should_suppress: synthesis_should_suppress.expect("suppress present"),
+        prop_count: prop_count.expect("props present"),
+    }
+}
+
+/// A budget-exhausted, UNCERTIFIED PARTIAL driven through the FIXED-VIEW
+/// BATCH executor is returned to the caller but NEVER admitted/promoted to
+/// the shared resolved-meta cache, while a COMPLETE sibling in the SAME
+/// batch is admitted and stays warm.
 ///
-/// This pins the conjunction of the per-result completeness rail (admission
-/// refuses a partial value — the partial-metadata invariant) with the
-/// fixed-view executor's promotion fence: the fixed view is an OPTIMIZATION
-/// for view acquisition, never an admission bypass. The two rails are
-/// conjunctive — a result must be BOTH complete AND token-stable/current to
-/// promote — and the completeness rail is PER-RESULT: one job's genuine
-/// partial must not poison its complete sibling's admission, and the
-/// sibling's admitted entry must warm a follow-up batch.
+/// THE CONTRACT (the no-poison / completion fence): a budget trip during the
+/// cold materialisation makes the result UNCERTIFIED — the fuse interrupted
+/// materialisation before natural completion — so the WHOLE result is flagged
+/// `completeness = Partial` (and its bool projection
+/// `synthesis_should_suppress = true`). An uncertified `Partial` is REFUSED
+/// warm admission, REGARDLESS of whether the published prop-NAME surface
+/// happens to be complete. Prop-name discovery is shallow/Navigate-owned and
+/// budget-INDEPENDENT here, so the constrained result still enumerates all 96
+/// names; the name surface being complete is incidental and is NOT a
+/// certification of completeness. The discriminator is therefore TYPED
+/// COMPLETENESS, not a name/prop count.
 ///
-/// Fixture: the per-request projection-op budget is capped so the
-/// Omit-intersection owner trips it mid-materialisation (the TOP-LEVEL
-/// defineProps type argument must be EXPANDED to enumerate prop names — an
-/// intersection of Omit<> arms cannot stay a deferred carrier — and each
-/// distinct arm is a distinct projection dispatch cold build), while the
-/// plain-literal sibling completes within the same budget.
+/// The two promotion rails are conjunctive (a result must be BOTH complete
+/// AND token-stable/current to promote) and the completeness rail is
+/// PER-RESULT: one job's genuine partial must not poison its complete
+/// sibling's admission, and the sibling's admitted entry must warm a
+/// follow-up batch.
+///
+/// REPEAT-BATCH semantics (per-result, not "stays partial forever"): the
+/// projection-op budget trip is NON-deterministic across warm-cache repeats
+/// BY DESIGN — the first cold compute warms the shared resolver memos (the
+/// content-addressed macro-hot mirror + per-arm Instantiate/structure
+/// memos), so a repeat recompute charges far fewer projection ops and may
+/// complete UNDER the same budget, yielding a GENUINE Complete result. That
+/// is valid healing, not laundering. The repeat-batch invariant is therefore
+/// per-result: if the repeat result is STILL observed Partial it must STILL
+/// be refused admission; if it recomputes Complete, admitting it is correct.
+///
+/// Fixture: a 32-arm `Partial<S01> & ... & Partial<S32>` intersection over
+/// non-overlapping interfaces (96 distinct props) under a tight
+/// `projection_op_budget = 6` — the top-level defineProps type argument must
+/// be expanded to enumerate the surface, each distinct arm is a distinct
+/// projection-dispatch cold build, and the budget trips mid-materialisation.
+/// The plain-literal sibling completes within the same budget. The unbounded
+/// oracle (`projection_op_budget = 100_000`) resolves the same owner as a
+/// genuine Complete result — proving the constrained Partial is a real budget
+/// trip, not a structurally-incomplete source.
 #[test]
 fn batch_partial_returned_never_admitted_while_complete_sibling_warms() {
     use crate::types::AnalysisLevel;
 
-    const HELPER_TS: &str = r#"
-export interface S1 { a1: string; b1: number; q: boolean }
-export interface S2 { a2: string; b2: number; q: boolean }
-export interface S3 { a3: string; b3: number; q: boolean }
-export interface S4 { a4: string; b4: number; q: boolean }
-export interface S5 { a5: string; b5: number; q: boolean }
-export interface S6 { a6: string; b6: number; q: boolean }
-"#;
-    const PARTIAL_SFC: &str = r#"<script setup lang="ts">
-import type { S1, S2, S3, S4, S5, S6 } from './helper'
-defineProps<Partial<S1> & Partial<S2> & Partial<S3> & Partial<S4> & Partial<S5> & Partial<S6>>();
-</script>
-<template><div /></template>
-"#;
+    let helper_ts = partial_helper_ts();
+    let partial_sfc = partial_sfc();
     const SIMPLE_SFC: &str = r#"<script setup lang="ts">
 defineProps<{ icon: string; label: number }>();
 </script>
 <template><div /></template>
 "#;
 
+    // ── Unbounded oracle: the SAME owner resolves as a genuine COMPLETE
+    // result (96 distinct props, not Partial). This proves the constrained
+    // host's Partial below is a real budget trip — not a structurally
+    // incomplete source. The scalar `get_component_meta_with_resolution` is
+    // the correct probe HERE because the unbounded host never trips the
+    // fuse, so it returns Ok (the constrained host would return Err for the
+    // partial slot — hence the batch-payload encoder for that one).
+    let oracle_host = VerterHost::new_standalone_with_scheduler_config(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            projection_op_budget: 100_000,
+            ..HostConfig::default()
+        },
+        test_scheduler_config(),
+    );
+    let oracle_project = MetaProject::new(oracle_host);
+    oracle_project
+        .upsert_base("/src/helper.ts", &helper_ts)
+        .unwrap();
+    oracle_project
+        .upsert_base("/src/Partial.vue", &partial_sfc)
+        .unwrap();
+    let oracle_session = oracle_project
+        .open_session_batch()
+        .expect("oracle batch session");
+    let (complete_meta, complete_resolution) = oracle_session
+        .get_component_meta_with_resolution("/src/Partial.vue")
+        .expect("oracle query ok")
+        .expect("oracle resolves");
+    let complete_names = prop_names(&complete_meta);
+    assert_eq!(
+        complete_names.len(),
+        96,
+        "the non-overlapping 32-arm intersection has exactly 96 distinct props",
+    );
+    assert!(
+        !complete_resolution.completeness.is_partial(),
+        "unbounded oracle must be Complete",
+    );
+    assert!(
+        !complete_resolution.synthesis_should_suppress,
+        "bool projection must agree with the Complete oracle",
+    );
+
+    // ── Constrained host: a tight projection-op budget. ──
     let host = VerterHost::new_standalone_with_scheduler_config(
         HostConfig {
             analysis_level: AnalysisLevel::Full,
@@ -836,9 +995,9 @@ defineProps<{ icon: string; label: number }>();
         test_scheduler_config(),
     );
     let project = MetaProject::new(host);
-    project.upsert_base("/src/helper.ts", HELPER_TS).unwrap();
+    project.upsert_base("/src/helper.ts", &helper_ts).unwrap();
     project
-        .upsert_base("/src/Partial.vue", PARTIAL_SFC)
+        .upsert_base("/src/Partial.vue", &partial_sfc)
         .unwrap();
     project.upsert_base("/src/Simple.vue", SIMPLE_SFC).unwrap();
     let ids = vec![
@@ -861,40 +1020,46 @@ defineProps<{ icon: string; label: number }>();
 
     let session = project.open_session_batch().expect("batch session");
 
-    // ── Batch 1 (cold): both slots RETURN; only the complete one admits. ──
-    let batch1 = session
-        .get_component_meta_batch(&ids)
-        .expect("batch 1 dispatch");
-    let partial1 = batch1[0]
-        .as_ref()
-        .expect("partial slot returns Ok")
-        .as_ref()
-        .expect("partial owner resolves (returned, not swallowed)")
-        .clone();
-    let simple1 = batch1[1]
-        .as_ref()
-        .expect("simple slot returns Ok")
-        .as_ref()
-        .expect("simple owner resolves")
-        .clone();
+    // ── Batch 1 (cold): observe typed completeness on the ACTUAL fixed-view
+    // batch path via the payload encoder; only the complete one admits. ──
+    let payloads1 = session
+        .get_component_meta_batch_payloads(&ids, encode_completeness)
+        .expect("batch 1 payload dispatch");
+    let partial1 = parse_completeness(&payloads1[0]);
+    let simple1 = parse_completeness(&payloads1[1]);
+
     assert_eq!(
-        simple1.props.len(),
-        2,
+        simple1.prop_count, 2,
         "the complete sibling resolves its full 2-prop surface",
     );
+    assert_eq!(
+        partial1.prop_count, 96,
+        "the constrained partial still publishes the full 96-name surface — \
+         name discovery is shallow/Navigate-owned and budget-independent; \
+         this is a typed-completeness fixture, NOT a name-count one",
+    );
     assert!(
-        partial1.props.len() < 18,
-        "fixture invariant: the tight projection-op budget must trip the \
-         Omit-intersection owner mid-materialisation (a GENUINE partial — \
-         fewer than its 18 authored props); got {} props. If this resolves \
-         fully the fixture no longer exercises the budget-fail-closed \
-         producer.",
-        partial1.props.len(),
+        partial1.is_partial,
+        "the tight projection-op budget must trip the 32-arm intersection \
+         mid-materialisation — an UNCERTIFIED, budget-tripped Partial result. \
+         The published name surface staying complete (all 96 props) is \
+         incidental: name discovery is shallow/Navigate-owned and \
+         budget-independent. If this is not Partial the fuse no longer trips \
+         and the fixture stops exercising the no-poison producer.",
+    );
+    assert_eq!(
+        partial1.synthesis_should_suppress, partial1.is_partial,
+        "synthesis_should_suppress must remain the bool projection of typed \
+         completeness",
     );
     assert!(
         !result_admitted("/src/Partial.vue"),
-        "a budget-exhausted PARTIAL through the fixed-view batch executor \
-         must be returned but NEVER admitted to the shared resolved-meta cache",
+        "an uncertified PARTIAL through the fixed-view batch executor must be \
+         returned but NEVER admitted to the shared resolved-meta cache",
+    );
+    assert!(
+        !simple1.is_partial,
+        "the complete sibling must stay Complete",
     );
     assert!(
         result_admitted("/src/Simple.vue"),
@@ -902,34 +1067,43 @@ defineProps<{ icon: string; label: number }>();
          partial must not poison the sibling's per-result completeness",
     );
 
-    // ── Batch 2: the complete sibling warm-hits; the partial re-runs and is
-    // STILL refused admission (no laundered replay). ──
-    let batch2 = session
-        .get_component_meta_batch(&ids)
-        .expect("batch 2 dispatch");
-    let partial2 = batch2[0]
-        .as_ref()
-        .expect("partial slot returns Ok")
-        .as_ref()
-        .expect("partial owner resolves again")
-        .clone();
-    let simple2 = batch2[1]
-        .as_ref()
-        .expect("simple slot returns Ok")
-        .as_ref()
-        .expect("simple owner resolves warm")
-        .clone();
+    // ── Batch 2 (repeat): the per-result no-poison invariant. The complete
+    // sibling stays warm. The partial re-runs; because batch 1 warmed the
+    // shared resolver memos the recompute MAY complete under the same budget
+    // (valid healing). The invariant is per-result: a result STILL observed
+    // Partial must STILL be refused admission; a genuine Complete recompute
+    // may be admitted — that is NOT partial laundering. ──
+    let payloads2 = session
+        .get_component_meta_batch_payloads(&ids, encode_completeness)
+        .expect("batch 2 payload dispatch");
+    let partial2 = parse_completeness(&payloads2[0]);
+    let simple2 = parse_completeness(&payloads2[1]);
+
     assert_eq!(
-        partial2.props.len(),
-        partial1.props.len(),
-        "the repeat batch must reproduce the partial's shape — a laundered \
-         complete replay would yield a different (larger) prop count",
+        partial2.prop_count, 96,
+        "the repeat partial slot keeps the full 96-name surface regardless of \
+         its typed completeness",
     );
-    assert_eq!(simple2.props.len(), 2, "warm sibling keeps its surface");
-    assert!(
-        !result_admitted("/src/Partial.vue"),
-        "the partial must STILL be refused admission on the repeat batch",
+    assert_eq!(
+        partial2.synthesis_should_suppress, partial2.is_partial,
+        "synthesis_should_suppress stays the bool projection of typed \
+         completeness on the repeat batch",
     );
+    if partial2.is_partial {
+        assert!(
+            !result_admitted("/src/Partial.vue"),
+            "a repeat-batch result that is STILL Partial must STILL be refused \
+             admission — the no-poison invariant",
+        );
+    } else {
+        assert!(
+            result_admitted("/src/Partial.vue"),
+            "a repeat-batch GENUINE Complete recompute may be admitted; this is \
+             valid healing through shared resolver memo warmth, NOT partial \
+             laundering",
+        );
+    }
+    assert!(!simple2.is_partial, "the warm sibling stays Complete");
     assert!(
         result_admitted("/src/Simple.vue"),
         "the complete sibling's admitted entry must survive the repeat batch \

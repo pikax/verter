@@ -290,6 +290,47 @@ impl crate::framework::surface_store::FrameworkSurfaceDtoBundle for MacroSurface
     }
 }
 
+/// A resolved macro DTO bundle PLUS the per-result completeness the cold
+/// compute observed.
+///
+/// `vue_macro_dtos_with_ctx` hands this back instead of a bare
+/// `Arc<MacroSurfaceDtos>` so every consumer can fold the surface's
+/// partiality into its own request-result completeness. A `Partial` bundle
+/// (a budget exhaustion / fatal `QueryError` tripped the surface
+/// resolution mid-materialisation) is RETURNED to the caller but is NEVER
+/// admitted into the host's `vue_surface_store` — a partial surface in the
+/// store would launder a warm complete replay on the next request (the
+/// no-poison invariant). Consumers fold `completeness` via
+/// [`crate::request_context::mark_request_materialization_cache_suppress`]
+/// (see [`Self::observe_partial`]) so the enclosing component-meta result's
+/// warm promotion is refused too.
+#[derive(Debug, Clone)]
+pub struct MacroDtosRead {
+    /// The resolved (possibly partial) DTO bundle.
+    pub dtos: std::sync::Arc<MacroSurfaceDtos>,
+    /// The completeness of the cold compute that produced `dtos`. `Complete`
+    /// when the bundle was served from a warm store hit (only `Complete`
+    /// bundles ever enter the store) or resolved without tripping a fuse.
+    pub completeness: crate::semantic_query::ResultCompleteness,
+}
+
+impl MacroDtosRead {
+    /// Whether the resolved surface is a genuine partial.
+    #[must_use]
+    pub fn is_partial(&self) -> bool {
+        self.completeness.is_partial()
+    }
+
+    /// Fold a partial surface into the active request-result completeness so
+    /// the enclosing component-meta result's warm promotion is refused. A
+    /// no-op when the surface is `Complete`.
+    pub fn observe_partial(&self) {
+        if self.completeness.is_partial() {
+            crate::request_context::mark_request_materialization_cache_suppress();
+        }
+    }
+}
+
 /// The per-surface resolution outcome the executor produces.
 ///
 /// Maps DIRECTLY onto the wire `FrameworkSurfaceKindSupport` — `None` can NOT

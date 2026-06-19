@@ -726,10 +726,13 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         if mac.kind != AnalyzedMacroKind::DefineSlots || !mac.is_type_based {
             continue;
         }
-        let parsed_arg = match mac.parsed_type_argument.as_ref() {
-            Some(t) => t,
-            None => continue,
-        };
+        // Presence guard: skip a `defineSlots` macro with no type argument.
+        // The argument itself is NOT lowered here — the mirror handle
+        // (`macro_type_arg_hot_ref` below) is the ONE producer — so the
+        // presence check does not bind the value.
+        if mac.parsed_type_argument.is_none() {
+            continue;
+        }
         let macro_span = tracing::info_span!(
             "synthesize_macro",
             macro_index,
@@ -746,9 +749,9 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             "synthesize_macro",
         );
 
-        // Step 1: lower macro arg via Navigate. Navigate keeps any
-        // imported carrier types as lazy shells — the shallow walker
-        // will materialise the surface when the dispatch reads it.
+        // Step 1: read the macro arg's mode-neutral mirror handle (the ONE
+        // producer). The carrier stays a lazy shell — the shallow walker
+        // materialises the surface when the dispatch reads it downstream.
         if consume_synthesis_step(&mut synthesis_steps_executed) {
             should_suppress = true;
             diag_sink.push(macro_expansion_for_budget_exceeded(
@@ -761,14 +764,12 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             ));
             break 'macro_loop;
         }
-        let type_args: Arc<[SemanticNodeId]> = match dispatch.lower_type_expr_in_scope_with_context(
+        let type_args: Arc<[SemanticNodeId]> = match crate::macro_hot_mirror::macro_type_arg_hot_ref(
+            ctx.ctx,
             owner_canonical,
-            parsed_arg,
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                ProjectionMode::Navigate,
-            ),
+            macro_index,
         ) {
-            Some(node) => Arc::from(vec![node].into_boxed_slice()),
+            Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
             None => continue,
         };
         // Carrier-fact propagation: walk the lowered macro arg and
@@ -1172,7 +1173,7 @@ fn typeinfo_macro_dtos(
     macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
 ) -> std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos> {
     let root_identity = ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]);
-    crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
+    let read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         &crate::typeinfo::types::VueMacroSurfaceRequest {
             owner_canonical: std::sync::Arc::from(owner_canonical),
@@ -1181,7 +1182,11 @@ fn typeinfo_macro_dtos(
             root_identity,
             level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
         },
-    )
+    );
+    // Fold a genuine partial surface into the request-result completeness so
+    // the enclosing component-meta result's warm promotion is refused.
+    read.observe_partial();
+    read.dtos
 }
 
 pub(crate) fn publish_merged_bindings(

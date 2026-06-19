@@ -205,6 +205,19 @@ pub struct IndexedReady {
     /// snapshot. Mirrored at materialization time from
     /// [`verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG`].
     pub declares_interface_app_config: bool,
+    /// Lazy, singleflight, content-addressed mirror of this file's Vue SFC
+    /// MACRO type-argument graph handles — the
+    /// [`MacroHotMirror`](crate::macro_hot_mirror::MacroHotMirror).
+    ///
+    /// A FILE-ARTIFACT child (mirrors the [`DeclBodyMemo`](crate::decl_body_memo::DeclBodyMemo)
+    /// shape): keyed per `macro_index`, the mode-NEUTRAL `HotTypeRef` is
+    /// produced on FIRST demand through the shared query-free structural
+    /// lowerer, NOT eagerly at publish. Its identity is the owning
+    /// artifact's `(canonical, whole_hash)` plus the `macro_index` — content-
+    /// addressed by construction, so a fresh `IndexedReady` carries a fresh
+    /// empty mirror and a superseded one can never answer a new-content
+    /// demand. Publishing an artifact produces ZERO mirror handles.
+    pub(crate) macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror,
 }
 
 impl IndexedReady {
@@ -264,6 +277,7 @@ impl IndexedReady {
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis,
             declares_interface_app_config: false,
+            macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror::default(),
         }
     }
 
@@ -304,6 +318,7 @@ impl IndexedReady {
             snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
             external_type_analysis: analysis,
             declares_interface_app_config: false,
+            macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror::default(),
         }
     }
 }
@@ -2280,6 +2295,7 @@ mod tests {
                     verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
                 ),
                 declares_interface_app_config: false,
+                macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror::default(),
             }),
         );
         assert!(db.get("/w/a.ts", hash_v1).is_some());
@@ -2333,6 +2349,7 @@ mod tests {
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
                 external_type_analysis: Arc::clone(&analysis),
                 declares_interface_app_config: false,
+                macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror::default(),
             })
         };
 
@@ -2421,6 +2438,7 @@ mod tests {
                         fact_versions: Vec::new(),
                         surface_identities: None,
                         origin_graph: None,
+                        completeness: crate::semantic_query::ResultCompleteness::Complete,
                     },
                     canonical_id: Arc::from("/w/o.vue"),
                     whole_hash: hash,

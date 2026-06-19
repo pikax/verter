@@ -380,7 +380,7 @@ impl VerterHost {
             });
         }
 
-        let type_arg = mac.parsed_type_argument.as_ref()?;
+        let _ = mac.parsed_type_argument.as_ref()?;
 
         // Provenance per macro axis. Props request the macro-T own-body
         // provenance on the terminal surface synthesis so the author-declared
@@ -416,23 +416,35 @@ impl VerterHost {
         // lowering and cross-file carrier projection below read overlay content.
         let dispatch = ctx.dispatch();
 
-        // Path-precise decomposition of a deep indexed-access type argument
-        // (`defineProps<DeepConfig['ui']['header']>()`). The base is lowered as
-        // the carrier and the string-literal hops become the `ProjectPath`
-        // selector. The shared path walker runs intermediate hops in `Navigate`
-        // and the TERMINAL hop under `terminal_context` (Shallow). A non-indexed
-        // type argument decomposes to `(type_arg, [])`.
-        let (base_expr, path) =
-            crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain(type_arg);
-
-        // Lower the carrier base in the SFC scope under structural-transit
-        // Navigate (member values stay shallow); the path-precise `Shallow`
-        // projection then synthesises the one-level surface of the terminal hop.
-        let base = dispatch.lower_type_expr_in_scope_with_context(
+        // Read the macro arg's mode-neutral mirror handle (the ONE producer),
+        // then decompose its indexed-access structure GRAPH-NATIVE. A deep
+        // indexed-access type argument (`defineProps<DeepConfig['ui']['header']>()`)
+        // lowered to nested `IndexedAccess` carrier shells; this walks those
+        // shells into `(base_node, path)` WITHOUT lowering the base a second
+        // time — the base node IS a different DEMAND on the same handle. The
+        // shared path walker runs intermediate hops in `Navigate` and the
+        // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
+        // argument decomposes to `(handle_node, [])`.
+        let handle = crate::macro_hot_mirror::macro_type_arg_hot_ref(
+            ctx,
             request.owner_canonical.as_ref(),
-            base_expr,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+            request.macro_index,
         )?;
+        let (base_carrier, path) =
+            crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain_node(
+                ctx,
+                handle.node(),
+            );
+        // Resolve the carrier base ONE Navigate hop through the shared dispatch
+        // (carrier head resolution — a `BareRef` head routes to its `DeclRef`,
+        // a `TypeOf` shell executes its value root, member values stay shallow),
+        // reproducing the eager structural-transit-Navigate base lowering. The
+        // path-precise `Shallow` projection then synthesises the one-level
+        // surface of the terminal hop.
+        let base = dispatch.resolve_hot_handle_with_context(
+            crate::semantic_query::HotTypeRef::new(base_carrier),
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        );
 
         let surface =
             self.project_shallow_surface_from_base(ctx, &dispatch, base, path, terminal_context)?;
@@ -471,7 +483,10 @@ impl VerterHost {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
-        vue_macro_dtos_with_ctx(&host_ctx, request)
+        // Base-view returner: hand back the DTO bundle. A partial surface is
+        // already refused store admission inside `vue_macro_dtos_with_ctx`;
+        // this bare-host entry has no request-result completeness to fold.
+        vue_macro_dtos_with_ctx(&host_ctx, request).dtos
     }
 }
 
@@ -701,7 +716,10 @@ pub(super) fn raise_realized_callable_member_value(
 pub(crate) fn vue_macro_dtos_with_ctx(
     ctx: &dyn crate::resolver_core::ResolverContext,
     request: &VueMacroSurfaceRequest,
-) -> Arc<MacroSurfaceDtos> {
+) -> crate::typeinfo::framework_surface::MacroDtosRead {
+    use crate::semantic_query::ResultCompleteness;
+    use crate::typeinfo::framework_surface::MacroDtosRead;
+
     let host = ctx.host_for_fact_tracer_install();
 
     // Load the CURRENT (overlay-aware) `IndexedReady` BEFORE touching the
@@ -717,11 +735,18 @@ pub(crate) fn vue_macro_dtos_with_ctx(
     else {
         // SFC not loaded — no surface, no cache entry. Returning the default
         // bundle WITHOUT publishing (we have no validated key) keeps the cache
-        // free of entries keyed on an unvalidated identity.
-        return Arc::new(MacroSurfaceDtos::default());
+        // free of entries keyed on an unvalidated identity. A default bundle is
+        // a COMPLETE empty surface (no fuse tripped), not a partial.
+        return MacroDtosRead {
+            dtos: Arc::new(MacroSurfaceDtos::default()),
+            completeness: ResultCompleteness::Complete,
+        };
     };
     let Some(mac) = indexed.snapshot.macros.get(request.macro_index) else {
-        return Arc::new(MacroSurfaceDtos::default());
+        return MacroDtosRead {
+            dtos: Arc::new(MacroSurfaceDtos::default()),
+            completeness: ResultCompleteness::Complete,
+        };
     };
     let whole_hash = indexed.whole_hash;
     let macro_kind = mac.kind;
@@ -754,7 +779,12 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         // active outer fact tracer so an outer component-meta cold trace inherits
         // the DTO's carrier facts on this warm hit.
         cached.read_set_signature.bubble_via_tls();
-        return Arc::clone(&cached.dto_bundle);
+        // Only `Complete` bundles ever enter the store (see the cold-compute
+        // gate below), so a warm hit is always complete.
+        return MacroDtosRead {
+            dtos: Arc::clone(&cached.dto_bundle),
+            completeness: ResultCompleteness::Complete,
+        };
     }
 
     // Resolve the surface through a request carrying the VALIDATED identity
@@ -768,6 +798,19 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         root_identity: whole_hash,
         level: request.level,
     };
+    // Per-cold-compute completeness scope: the surface resolution re-enters
+    // the shared dispatch (`resolve_vue_macro_surface_with_ctx` →
+    // `project_shallow_surface_from_base` → `execute_read`), whose
+    // `fold_cache_read_rails` folds any genuine partial (a tripped projection
+    // budget / fatal `QueryError`) into the active scope. Reading the scope
+    // AFTER the compute gives this surface's OWN completeness — so a PARTIAL
+    // surface bundle is returned to the caller but NEVER admitted into
+    // `vue_surface_store` (the no-poison invariant; a partial in the store
+    // would launder a warm complete replay on the next request). Single-thread
+    // by construction (the calling flight's thread); on drop the scope bubbles
+    // its completeness into any enclosing compute scope, so an outer
+    // component-meta cold compute inherits this surface's partiality.
+    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     let (dtos, finalise, fenced_serve_observed) =
         crate::fact_signature_helpers::install_fact_tracer(host, || {
             match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
@@ -868,27 +911,55 @@ pub(crate) fn vue_macro_dtos_with_ctx(
             }
         });
 
+    // This surface's OWN completeness — folded from the cold compute's
+    // contributing reads via the scope entered above. A genuine partial (a
+    // tripped projection budget / fatal `QueryError`) is refused store
+    // admission below; the bundle still returns to the caller.
+    let completeness = crate::request_context::current_cold_compute_completeness();
+
     // ReturnOnly never publishes — fenced-serve arm: DTOs resolved from
     // a served-without-publication artifact must not enter the shared
     // metadata store (their carrier facts validate against the live
     // view). Return the freshly-computed bundle WITHOUT caching.
     if fenced_serve_observed {
-        return std::sync::Arc::new(dtos);
+        return MacroDtosRead {
+            dtos: Arc::new(dtos),
+            completeness,
+        };
     }
     match finalise {
-        crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
+        // A `Complete` result with a sound fact signature is the ONLY bundle
+        // admitted into the store. A `Partial` (budget exhaustion / fatal
+        // `QueryError` mid-surface-resolution) is returned but NEVER cached —
+        // caching a partial would launder a warm complete replay (re-running
+        // the budget-constrained owner against warm per-arm memos no longer
+        // re-trips the fuse).
+        crate::resolver_core::FactReadSetFinalise::Ok(facts) if !completeness.is_partial() => {
             let entry = StoredSurfaceDto {
                 dto_bundle: Arc::new(dtos),
                 read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
                 validated_at_generation: generation,
             };
-            Arc::clone(&store.insert(key, entry).dto_bundle)
+            MacroDtosRead {
+                dtos: Arc::clone(&store.insert(key, entry).dto_bundle),
+                completeness,
+            }
         }
+        // Genuine partial (`Ok` finalise but partial completeness): valid
+        // bundle, refused store admission. A repeat request recomputes against
+        // the fresh budget.
+        crate::resolver_core::FactReadSetFinalise::Ok(_) => MacroDtosRead {
+            dtos: Arc::new(dtos),
+            completeness,
+        },
         // Tracer overflowed: the DTOs are valid but cannot be admitted safely
         // (the observation set was truncated). Return the freshly-computed
         // bundle WITHOUT caching — a repeat request recomputes, never serves an
         // under-validated entry.
-        crate::resolver_core::FactReadSetFinalise::Overflow => Arc::new(dtos),
+        crate::resolver_core::FactReadSetFinalise::Overflow => MacroDtosRead {
+            dtos: Arc::new(dtos),
+            completeness,
+        },
     }
 }
 

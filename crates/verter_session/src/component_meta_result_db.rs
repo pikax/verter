@@ -154,6 +154,12 @@ pub struct ResolutionTemplate {
     pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     pub surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
+    /// Per-result completeness preserved across the template round-trip.
+    /// Only `Complete` results are admitted to `ComponentMetaResultDb` (the
+    /// publication gate refuses partials), so a cached template is `Complete`
+    /// in production; preserving the typed value keeps rehydrate honest
+    /// rather than independently resetting the suppression bool to `false`.
+    pub completeness: crate::semantic_query::ResultCompleteness,
 }
 
 /// Cached component-meta payload AND its sanitized
@@ -191,6 +197,7 @@ impl ResolutionTemplate {
             fact_versions: resolved.fact_versions.clone(),
             surface_identities: resolved.surface_identities.clone(),
             origin_graph: resolved.origin_graph.clone(),
+            completeness: resolved.completeness,
         }
     }
 
@@ -236,7 +243,13 @@ impl ResolutionTemplate {
             // already applied at publish time. Synthesis diagnostics live
             // on the cached `ComponentMetaAnalysis.macro_expansion_diagnostics`.
             synthesis_diagnostics: Vec::new(),
-            synthesis_should_suppress: false,
+            // Preserve the cached completeness; do NOT independently reset
+            // suppression to `false`. `synthesis_should_suppress` is the bool
+            // projection of `completeness` (a cached template is `Complete` in
+            // production — only complete results admit — but rehydrate stays
+            // honest to the stored value rather than fabricating one).
+            completeness: self.completeness,
+            synthesis_should_suppress: self.completeness.is_partial(),
         })
     }
 }

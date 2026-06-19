@@ -5244,6 +5244,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
             fact_versions: Vec::new(),
             surface_identities: None,
             origin_graph: None,
+            completeness: crate::semantic_query::ResultCompleteness::Complete,
         },
         canonical_id: Arc::from(owner),
         whole_hash: owner_whole_hash,

@@ -193,6 +193,21 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         }
     }
 
+    // Snapshot the request-scoped materialization suppress sticky BEFORE
+    // this compute lowers/reduces. A `typeof <unresolved import>` is a
+    // genuine `MissingDependency` partial whose only invalidation rail is the
+    // owner's `ImportRoute` derived fact — a rail the build-layer fence cannot
+    // carry and the consuming `raise_and_reduce`'s eager TypeOf lowering path
+    // resolves through a partial-dropping `execute_type_node`. The producer
+    // (`build_typeof`) marks THIS request's materialization suppress sticky for
+    // such a miss, so a sticky that transitions from unset→set DURING this
+    // compute is the precise signal that this materialisation observed a
+    // MissingDependency. Such a result MUST be `ReturnOnly` (refused warm
+    // admission) so the next request after the dependency appears recomputes
+    // cold and recovers. (Per the architecture ruling: an unrootable
+    // MissingDependency is `ReturnOnly`.)
+    let suppress_sticky_before = crate::request_context::current_materialization_cache_suppress();
+
     // Step 1.5 thin dispatch wrapper. Build NodeScopeId for the file
     // scope, then lower → raise_and_reduce in the caller's mode.
     let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
@@ -344,7 +359,44 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // complete-but-non-cacheable materialisation still warms the shape
     // cache here. The freshly-computed value is always returned to the
     // caller; only the shared-cache admission is refused for a partial.
-    if !materialized.result_is_partial {
+    //
+    // Cross-batch budget determinism is enforced by COMPLETENESS-based macro
+    // admission, NOT by charging warm cache hits: a budget-exhausted macro
+    // surface carries `ResultCompleteness::Partial` and is refused admission at
+    // EVERY shared cache boundary — the `vue_surface_store` DTO boundary AND the
+    // `ComponentMetaResultDb` / resolved-meta final-result caches. A repeat
+    // batch therefore re-resolves the partial owner cold (no laundered warm
+    // replay through the surface store), so its per-result completeness is
+    // re-observed even though its per-arm `Instantiate` memos are warm.
+    //
+    // A MissingDependency observed DURING this compute (the suppress sticky
+    // transitioned unset→set) makes this materialisation a `ReturnOnly`
+    // partial: refuse the shared-cache admission so a stale miss cannot be
+    // served after the dependency appears. A request whose sticky was ALREADY
+    // set on entry (an unrelated earlier miss) does not taint this entry.
+    let observed_missing_dependency =
+        !suppress_sticky_before && crate::request_context::current_materialization_cache_suppress();
+    // A `typeof <X>` materialisation whose RESULT ROOT is the unmaterialised /
+    // semanticMiss sentinel is a `MissingDependency` (an `import X from
+    // './missing'` whose specifier does not yet resolve): its only invalidation
+    // rail is the owner's `ImportRoute` derived fact — a rail the build-layer
+    // fence cannot carry — so admitting the miss-rooted value into the shared
+    // `ShapeCacheDb` would stale-serve it after the dependency appears. (The
+    // request's materialization suppress sticky may have been set by an EARLIER
+    // `build_typeof` sub-read in the SAME request, so the unset→set transition
+    // check alone misses this.) The check is SCOPED to a `TypeOf`-rooted expr:
+    // an unresolved value-reference is the MissingDependency class; a
+    // miss-rooted `Pick`/`Omit`/`Ref` materialisation is a DIFFERENT class
+    // (genuine unresolved symbol / closed-source path-precise miss) the
+    // surrounding gates already handle, and refusing those here would regress
+    // the closed-source path-precise admission. Refuse only the typeof miss so
+    // the next request recomputes cold and recovers. The value still flows.
+    let typeof_result_root_is_miss = matches!(expr, verter_type_expr::TypeExpr::TypeOf(_))
+        && crate::resolver_core::type_expr_root_is_unmaterialized_sentinel(&materialized.type_expr);
+    if !materialized.result_is_partial
+        && !observed_missing_dependency
+        && !typeof_result_root_is_miss
+    {
         if let Some(captured_scope_observation) = observed_scope {
             // Loop-5 instrumentation — count every publish attempt. The
             // get_or_compute path is a no-op on a concurrent winner but

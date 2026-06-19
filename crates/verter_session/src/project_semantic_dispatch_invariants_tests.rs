@@ -1902,6 +1902,14 @@ fn count_def_in_crates(needle: &str) -> usize {
                 if filename == "tests.rs" || filename.ends_with("_tests.rs") {
                     continue;
                 }
+                // Skip integration-test files (anything under a `tests/`
+                // directory): a guard's assertion / self-test fixtures may name
+                // a definition needle (`fn lower_type_expr_structural(`) as a
+                // string literal, which is not a production definition.
+                let p_str = p.to_string_lossy().replace('\\', "/");
+                if p_str.contains("/tests/") {
+                    continue;
+                }
                 if let Ok(content) = std::fs::read_to_string(&p) {
                     for line in content.lines() {
                         let trimmed = line.trim_start();
@@ -1959,9 +1967,11 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
     //      the demand to `Published` is forbidden (it is exactly how a transit /
     //      skeleton caller would silently lower at a publication demand it never
     //      asked for); and
-    //   2. the QUERY-FREE structural producer `lower_type_expr_structural`,
-    //      which emits the dormant graph carriers from the owned `TypeExpr`
-    //      without performing any name / import / type resolution.
+    //   2. the QUERY-FREE structural producer `lower_type_expr_structural`
+    //      (re-housed under `crate::macro_hot_mirror::structural_lower` as the
+    //      macro hot mirror's `pub(in crate::macro_hot_mirror)` entry), which
+    //      emits the dormant graph carriers from the owned `TypeExpr` without
+    //      performing any name / import / type resolution.
     // The two are distinct and non-overlapping; neither may grow a second
     // definition, and the retired bare-`mode` eager wrapper stays absent.
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");

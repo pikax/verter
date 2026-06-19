@@ -674,6 +674,55 @@ pub(crate) fn decompose_indexed_access_chain(
     (base, Arc::from(path.into_boxed_slice()))
 }
 
+/// Graph-native sibling of [`decompose_indexed_access_chain`]: decompose a
+/// lowered `IndexedAccess` carrier GRAPH node into `(base_node, path)`.
+///
+/// The macro hot mirror produces a mode-neutral structural carrier graph for
+/// the macro type argument; an indexed-access type argument
+/// (`DeepConfig['ui']['header']`) lowers to nested
+/// [`SemanticNodeData::IndexedAccess`] shells. This walks those shells —
+/// collecting each string-literal / canonical-number index hop into a
+/// `ProjectPath` selector — until it reaches the base node, so a deep
+/// indexed-access decomposes to `(base, [Index("ui"), Index("header")])`
+/// WITHOUT lowering the base a second time (it IS the same handle). A
+/// non-indexed carrier decomposes to `(node, [])`.
+pub(crate) fn decompose_indexed_access_chain_node(
+    ctx: &dyn ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+) -> (
+    crate::semantic_query::SemanticNodeId,
+    Arc<[crate::semantic_query::PathSegment]>,
+) {
+    use crate::semantic_query::{IndexKey, PathSegment, SemanticNodeData};
+
+    // Collect outer→inner, then reverse so the path reads base→terminal.
+    let mut rev_path: Vec<PathSegment> = Vec::new();
+    let mut current = node;
+    loop {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, current) else {
+            break;
+        };
+        match data.as_ref() {
+            SemanticNodeData::IndexedAccess { object, index } => match index {
+                IndexKey::String(s) => {
+                    rev_path.push(PathSegment::Index(IndexKey::String(Arc::clone(s))));
+                    current = *object;
+                }
+                IndexKey::Number(n) => {
+                    rev_path.push(PathSegment::Index(IndexKey::Number(*n)));
+                    current = *object;
+                }
+                // A type-node index is not a path-precise string/number hop —
+                // stop and let the dispatch resolve the whole indexed-access.
+                IndexKey::TypeNode(_) => break,
+            },
+            _ => break,
+        }
+    }
+    rev_path.reverse();
+    (current, Arc::from(rev_path.into_boxed_slice()))
+}
+
 // Class B helpers (dispatch-only surface projection) resolve a root
 // symbol's surface through the shared dispatch surface projector. They
 // have regressed in the past on transitive heritage chains and

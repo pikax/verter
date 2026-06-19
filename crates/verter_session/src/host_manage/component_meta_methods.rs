@@ -1209,6 +1209,18 @@ impl VerterHost {
         // budget.
         let synthesis_should_suppress = synthesis_should_suppress
             || crate::request_context::current_materialization_cache_suppress();
+        // Typed per-result completeness: the partial signal is the union of
+        // the synthesis-suppress producer signal and the request-result
+        // partiality accumulator (a partial macro DTO surface / budget-tripped
+        // materialize read folds in here). `synthesis_should_suppress` is the
+        // bool projection of this — keep the two in lock-step.
+        let completeness = if synthesis_should_suppress {
+            crate::semantic_query::ResultCompleteness::partial(
+                crate::semantic_query::PartialReasonSet::PROPAGATED,
+            )
+        } else {
+            crate::semantic_query::ResultCompleteness::Complete
+        };
 
         let state = ResolvedComponentMetaState {
             snapshot,
@@ -1221,6 +1233,7 @@ impl VerterHost {
             fact_versions: merged_fact_versions,
             surface_identities,
             synthesis_diagnostics,
+            completeness,
             synthesis_should_suppress,
             compute_audit: audit_enabled.then_some(ResolvedComponentMetaComputeAudit {
                 timings: audit_timings,

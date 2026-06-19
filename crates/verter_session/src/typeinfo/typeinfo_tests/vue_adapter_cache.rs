@@ -619,3 +619,180 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     surface.surface.hash(&mut h);
     let _ = h.finish();
 }
+
+// ---------------------------------------------------------------------------
+// (12) DTO-STORE no-poison boundary — a budget-tripped PARTIAL macro surface is
+//      returned to the caller but NEVER admitted into `vue_surface_store`, while
+//      a COMPLETE sibling macro DOES grow the store.
+//
+//      This guards the SECOND admission boundary the resolved-meta fixture
+//      (`batch_partial_returned_never_admitted_while_complete_sibling_warms`)
+//      does NOT cover: the Vue DTO store. Warm DTO hits are unconditionally
+//      marked `Complete` (vue_exec/mod.rs:777 — "only Complete bundles ever
+//      enter the store"), so the only thing standing between a Partial bundle
+//      and a laundered warm-Complete replay is the `!completeness.is_partial()`
+//      admission gate (vue_exec/mod.rs:937). If that gate were weakened to admit
+//      a Partial bundle, this test reddens: the partial macro's store entry
+//      appears (`len` grows) even though its read came back `is_partial()`.
+//
+//      Discriminating: weakening the vue_exec:937 gate to admit a Partial
+//      bundle makes `partial_len_after > partial_len_before` (store grows on a
+//      partial) — reddening the no-poison assertion. The complete sibling's
+//      growth proves the store is otherwise live (the test is not vacuously
+//      green because nothing ever admits).
+// ---------------------------------------------------------------------------
+
+/// 32 non-overlapping interfaces `S01..S32`. The full intersected surface is
+/// exactly 96 distinct members, so enumerating it walks all 32 arms — under a
+/// tight projection-op budget the cold DTO materialisation trips the fuse and
+/// flags the macro-surface read `Partial`.
+fn dto_partial_helper_ts() -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    for n in 1..=32u32 {
+        let _ = writeln!(
+            s,
+            "export interface S{n:02} {{ a{n:02}: string; b{n:02}: number; c{n:02}: boolean }}"
+        );
+    }
+    s
+}
+
+/// SFC carrying TWO defineProps-style macros driven through the DTO store: a
+/// budget-tripping `defineProps<Partial<S01> & ... & Partial<S32>>()` props
+/// macro and a complete `defineEmits<{ (e: 'ok'): void }>()` sibling. The
+/// constrained budget trips the 32-arm intersection mid-materialisation; the
+/// 1-event emits surface completes within the same budget.
+fn dto_partial_sfc() -> String {
+    use std::fmt::Write as _;
+    let mut names = String::new();
+    let mut arms = String::new();
+    for n in 1..=32u32 {
+        if n > 1 {
+            names.push_str(", ");
+            arms.push_str(" & ");
+        }
+        let _ = write!(names, "S{n:02}");
+        let _ = write!(arms, "Partial<S{n:02}>");
+    }
+    format!(
+        "<script setup lang=\"ts\">\n\
+         import type {{ {names} }} from './dto_helper'\n\
+         defineProps<{arms}>();\n\
+         defineEmits<{{ (e: 'ok'): void }}>();\n\
+         </script>\n\
+         <template><div /></template>\n"
+    )
+}
+
+#[test]
+fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
+    use crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx;
+
+    const HELPER: &str = "/w/dto_helper.ts";
+    const FILE: &str = "/w/DtoPartial.vue";
+
+    // A TIGHT projection-op budget so the 32-arm intersection trips the fuse
+    // mid-materialisation. The 1-event emits sibling completes within it.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        projection_op_budget: 6,
+        ..HostConfig::default()
+    }));
+    upsert(&host, HELPER, &dto_partial_helper_ts());
+    upsert(&host, FILE, &dto_partial_sfc());
+
+    // Build a request-bound ctx so `vue_macro_dtos_with_ctx` can read
+    // `ctx.store_view()` and observe its OWN per-request completeness (the bare
+    // `host.vue_macro_dtos` returner drops `.completeness`, so we drive the
+    // ctx-bound entry directly to assert the partial flag).
+    host.ensure_indexed_ready(FILE).expect("indexed");
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::new(&host, &store_view, overlay);
+
+    // The projection-op fuse lives on the per-request `RequestContext` TLS slot
+    // (the executor installs it from `HostConfig::projection_op_budget`). A
+    // direct `vue_macro_dtos_with_ctx` call does NOT pass through the executor,
+    // so we install a budgeted context per call here — otherwise the fuse is
+    // never armed and the surface always resolves Complete. The budget counter
+    // is CUMULATIVE per `RequestContext`, so each call gets its OWN fresh
+    // context (the partial call must not exhaust the sibling's budget).
+    let install_budget = |budget: usize| {
+        RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from(FILE),
+            verter_audit::RequestKind::TypeInfoGraph,
+            false,
+            false,
+            None,
+            budget,
+        ))
+    };
+
+    let store = host.vue_surface_store();
+    assert_eq!(store.len(), 0, "the DTO store starts empty");
+
+    // ── The budget-tripping props macro: PARTIAL, returned but NOT admitted. ──
+    let partial_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
+    let partial_len_before = store.len();
+    let partial_read = {
+        // Tight budget 6 → the 32-arm intersection trips the fuse.
+        let _g = install_budget(6);
+        vue_macro_dtos_with_ctx(&ctx, &partial_request)
+    };
+    let partial_len_after = store.len();
+
+    assert!(
+        partial_read.completeness.is_partial(),
+        "the tight projection-op budget must trip the 32-arm intersection \
+         mid-materialisation — the DTO read must come back Partial. If this is \
+         not Partial the fuse no longer trips and the fixture stops exercising \
+         the DTO-store no-poison boundary."
+    );
+    // The bundle is still RETURNED (a valid `MacroDtosRead`, even if the
+    // budget tripped early enough to leave the props surface empty — a
+    // budget-tripped partial legitimately may publish an empty surface; the
+    // load-bearing contract is "returned but not admitted", asserted via the
+    // store-len delta below, not via a non-empty field set).
+    let _returned = &partial_read.dtos;
+    // THE NO-POISON CONTRACT: the partial bundle is NOT admitted to the store.
+    // Weakening the vue_exec:937 `!completeness.is_partial()` admission gate
+    // makes this grow (the partial is admitted) → reddens.
+    assert_eq!(
+        partial_len_after, partial_len_before,
+        "a budget-tripped PARTIAL DTO bundle must be returned but NEVER admitted \
+         to vue_surface_store — a stored partial would launder a warm-Complete \
+         replay on the next request (warm DTO hits are unconditionally Complete)"
+    );
+
+    // ── The complete sibling macro DOES grow the store (the store is live; the
+    //    no-poison assertion above is not vacuously green). ──
+    let complete_request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
+    let complete_len_before = store.len();
+    let complete_read = {
+        // A generous budget for the sibling so its completeness reflects its
+        // own (trivial) surface, never the partial call's exhausted counter.
+        let _g = install_budget(100_000);
+        vue_macro_dtos_with_ctx(&ctx, &complete_request)
+    };
+    let complete_len_after = store.len();
+
+    assert!(
+        !complete_read.completeness.is_partial(),
+        "the 1-event emits sibling completes within the same budget (Complete)"
+    );
+    assert_eq!(
+        complete_read.dtos.emit_fields().len(),
+        1,
+        "the complete emits sibling resolves its single event"
+    );
+    assert_eq!(
+        complete_len_after,
+        complete_len_before + 1,
+        "a COMPLETE sibling macro IS admitted and grows the store — proving the \
+         store is live and the partial's non-admission above is the no-poison \
+         gate, not a dead store"
+    );
+}

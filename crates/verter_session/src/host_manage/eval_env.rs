@@ -715,14 +715,27 @@ impl VerterHost {
                                 macro_kind,
                                 Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
                             ) {
-                                if let Some(macro_type_arg) = macro_type_arg.as_ref() {
+                                if macro_type_arg.is_some() {
                                     let dispatch = ProjectSemanticDispatch::new(engine.ctx());
-                                    if let Some(base_id) = dispatch
-                                        .lower_type_expr_in_scope_with_mode(
+                                    // Read the macro arg's mode-neutral mirror
+                                    // handle (the ONE producer) and resolve it
+                                    // through the shared dispatch at this
+                                    // demand's mode (`Expanded` — the model
+                                    // value type IS the field's type). A
+                                    // different DEMAND on the same handle, not
+                                    // a second lowering of the macro arg.
+                                    if let Some(base_id) =
+                                        crate::macro_hot_mirror::macro_type_arg_hot_ref(
+                                            engine.ctx(),
                                             canonical,
-                                            macro_type_arg.as_ref(),
-                                            ProjectionMode::Expanded,
+                                            ctx.macro_index,
                                         )
+                                        .map(|handle| {
+                                            dispatch.resolve_hot_handle_at_mode(
+                                                handle,
+                                                ProjectionMode::Expanded,
+                                            )
+                                        })
                                     {
                                         // Capture
                                         // production node id for the audit
@@ -813,11 +826,26 @@ impl VerterHost {
                                                 ProjectionMode::Expanded
                                             }
                                         };
-                                        let lowered = dispatch.lower_type_expr_in_scope_with_mode(
-                                            canonical,
-                                            macro_type_arg.as_ref(),
-                                            carrier_lower_mode,
-                                        );
+                                        // Read the macro arg's mode-neutral
+                                        // mirror handle (the ONE producer) and
+                                        // resolve it through the shared dispatch
+                                        // at `carrier_lower_mode` (a different
+                                        // DEMAND on the same handle, never a
+                                        // second lowering of the macro arg).
+                                        let lowered =
+                                            crate::macro_hot_mirror::macro_type_arg_hot_ref(
+                                                engine.ctx(),
+                                                canonical,
+                                                ctx.macro_index,
+                                            )
+                                            .map(
+                                                |handle| {
+                                                    dispatch.resolve_hot_handle_at_mode(
+                                                        handle,
+                                                        carrier_lower_mode,
+                                                    )
+                                                },
+                                            );
                                         match lowered {
                                             None => {
                                                 component_meta_trace_custom!(

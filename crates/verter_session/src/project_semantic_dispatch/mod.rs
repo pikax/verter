@@ -95,7 +95,6 @@ pub(crate) mod lower;
 pub(crate) mod raise;
 pub(crate) mod relation;
 pub(crate) mod relation_predicates;
-pub(crate) mod structural_lower;
 pub(crate) mod substitute;
 pub(crate) mod walk;
 
@@ -773,6 +772,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         Some(id)
     }
+
+    /// Re-enter the ONE shared dispatch over a macro hot-mirror
+    /// [`HotTypeRef`](crate::semantic_query::HotTypeRef) at `mode`, returning
+    /// the resolved subject node.
+    ///
+    /// This is the macro-arg consumer's re-entry boundary: the mirror is a
+    /// query-free producer of the mode-neutral structural carrier; a consumer
+    /// resolves that carrier at its OWN demand by driving it as the base of an
+    /// empty-path `ProjectPath` query through the shared dispatch (carrier head
+    /// resolution + the requested-mode reduction). It is a DIFFERENT DEMAND on
+    /// the producer's handle, never a second lowering of the macro argument.
+    pub(crate) fn resolve_hot_handle_at_mode(
+        &self,
+        handle: crate::semantic_query::HotTypeRef,
+        mode: crate::semantic_query::ProjectionMode,
+    ) -> SemanticNodeId {
+        self.resolve_hot_handle_with_context(
+            handle,
+            crate::semantic_query::ProjectionReductionContext::published(mode),
+        )
+    }
+
+    /// Context-explicit sibling of [`Self::resolve_hot_handle_at_mode`] — the
+    /// consumer supplies the EXACT reduction context the eager macro-arg
+    /// lowering it replaced used (e.g. `structural_transit_with_mode(Navigate)`
+    /// for the publication carrier-base re-entry, or `published(mode)` for a
+    /// per-field demand).
+    pub(crate) fn resolve_hot_handle_with_context(
+        &self,
+        handle: crate::semantic_query::HotTypeRef,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let read = self.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
+            base: handle.node(),
+            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            context,
+        });
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        match read.value {
+            QueryResult::Value(id) => id,
+            QueryResult::Recursive(id) => id,
+            QueryResult::Error(_) => handle.node(),
+        }
+    }
 }
 
 pub(super) fn empty_signature() -> DepSignature {
@@ -902,7 +945,7 @@ pub(super) enum InferPatternSelection {
 /// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
 /// [`PrimitiveKind`]. Kept colocated with `build_instantiate` because no
 /// other dispatch builder produces primitive nodes from `TypeExpr`.
-pub(super) fn map_primitive_name(name: PrimitiveName) -> PrimitiveKind {
+pub(crate) fn map_primitive_name(name: PrimitiveName) -> PrimitiveKind {
     match name {
         PrimitiveName::String => PrimitiveKind::String,
         PrimitiveName::Number => PrimitiveKind::Number,

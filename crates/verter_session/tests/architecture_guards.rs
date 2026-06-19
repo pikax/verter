@@ -4648,6 +4648,11 @@ mod foundations_guards {
         // Crate-private: the materialise closure and the memo are its
         // only callers.
         "pub(crate) mod decl_lowering",
+        // Macro hot mirror — the single-entry producer of a Vue SFC macro
+        // type-argument's mode-neutral graph handle (owns the re-housed
+        // query-free structural lowerer, ancestor-private). Crate-private: the
+        // four macro graph-lowering sites read it; no downstream crate touches it.
+        "pub(crate) mod macro_hot_mirror",
         // R3/R26/R28 — fact-validation helpers shared by the inner
         // component-meta caches (Family A/B). Carries
         // `validate_fact_signature`, `bubble_fact_signature`, and the
@@ -15841,7 +15846,7 @@ mod single_resolution_engine_guards {
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            430,
+            431,
             "fn read_surface_members(",
         ),
         (
@@ -20671,9 +20676,7 @@ fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
 /// concern; the lowerer only emits typed carriers.
 #[test]
 fn session_graph_lowerer_makes_no_query() {
-    let src = read_workspace_file(
-        "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs",
-    );
+    let src = read_workspace_file("crates/verter_session/src/macro_hot_mirror/structural_lower.rs");
     let production = carrier_production_code(&src);
     // Anti-vacuity: the extractor found the real lowerer production code.
     assert!(
@@ -20740,9 +20743,7 @@ fn session_graph_lowerer_makes_no_query() {
 /// carrier.
 #[test]
 fn unresolved_carriers_not_materialized_during_emission() {
-    let src = read_workspace_file(
-        "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs",
-    );
+    let src = read_workspace_file("crates/verter_session/src/macro_hot_mirror/structural_lower.rs");
     let production = carrier_production_code(&src);
     assert!(
         production.contains("fn lower_type_expr_structural"),
@@ -20933,97 +20934,1387 @@ fn carrier_production_code_scans_post_cfg_test_and_strips_block_comments() {
     );
 }
 
-/// The lowerer's defining module — the one production file that may NAME
-/// `lower_type_expr_structural` (its definition + rustdoc). Any OTHER
-/// production file naming it is a caller, i.e. a wiring of the dormant lowerer.
-const STRUCTURAL_LOWERER_DEFINING_MODULE: &str = "project_semantic_dispatch/structural_lower.rs";
+/// The structural lowerer's defining module after the macro-hot-mirror
+/// re-housing: the entry lives under `crate::macro_hot_mirror::structural_lower`
+/// and is `pub(in crate::macro_hot_mirror)` — ancestor-private to the mirror, so
+/// no other production module can NAME it. This makes a second production
+/// producer of a macro-arg graph node UNREPRESENTABLE by construction
+/// (compiler-enforced single-engine producer rule), which is why the primary
+/// guard here is a PRIVACY-SHAPE assertion on the moved file, not a caller
+/// scanner.
+const STRUCTURAL_LOWERER_DEFINING_MODULE: &str = "macro_hot_mirror/structural_lower.rs";
 
-/// Production references to the structural lowerer's public entry that are NOT
-/// in its defining module — callers that would wake the dormant lowerer.
-/// `hits` is the `(loc, ident)` list from [`session_production_ident_hits`]
-/// (which already strips comments, `#[cfg(test)]` items, and `*_tests.rs`).
-fn structural_lowerer_foreign_callers(hits: &[(String, String)]) -> Vec<(String, String)> {
-    hits.iter()
-        .filter(|(loc, _)| !loc.contains(STRUCTURAL_LOWERER_DEFINING_MODULE))
-        .cloned()
+/// Classify the visibility shape of the `lower_type_expr_structural` definition
+/// in the given source body. Returns the offending reason when the entry is NOT
+/// the required `pub(in crate::macro_hot_mirror)` ancestor-private shape (the
+/// shape that makes a second production producer unrepresentable), or `None`
+/// when the shape is correct. Looks at the DEFINITION line only.
+fn structural_lowerer_privacy_violation(body: &str) -> Option<String> {
+    let needle = "fn lower_type_expr_structural(";
+    let def_line = body.lines().find(|l| l.contains(needle))?;
+    let trimmed = def_line.trim_start();
+    if trimmed.starts_with("pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(") {
+        return None;
+    }
+    // Any broader visibility (`pub`, `pub(crate)`, `pub(super)`, bare) lets a
+    // second production module name the entry — the forbidden second-producer
+    // shape.
+    Some(format!(
+        "the structural lowerer's production entry must be \
+         `pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(` (ancestor-private to the \
+         macro hot mirror, so no other production module can name it); found: `{}`",
+        trimmed
+    ))
+}
+
+/// PRIMARY single-engine producer guard (make-unrepresentable): the
+/// production structural-lowering entry `lower_type_expr_structural` lives
+/// under `crate::macro_hot_mirror::structural_lower` and is
+/// `pub(in crate::macro_hot_mirror)`. Its SOLE production caller is the macro
+/// hot mirror builder; ancestor-privacy makes a second production producer
+/// UNREPRESENTABLE (a foreign module cannot name the fn — a compile error, not
+/// a lint), so the single-engine producer rule needs no caller scanner here.
+#[test]
+fn structural_lowerer_production_entry_is_macro_hot_mirror_private() {
+    let rel = "crates/verter_session/src/macro_hot_mirror/structural_lower.rs";
+    let body = std::fs::read_to_string(workspace_path(rel))
+        .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
+    // Anti-vacuity: the defining module must exist at the re-housed path and
+    // carry the definition — its absence means the move regressed.
+    assert!(
+        body.contains("fn lower_type_expr_structural("),
+        "anti-vacuity: the structural lowerer definition must live at `{rel}` \
+         (`{STRUCTURAL_LOWERER_DEFINING_MODULE}`) — its absence means the macro-hot-mirror \
+         re-housing regressed"
+    );
+    if let Some(reason) = structural_lowerer_privacy_violation(&body) {
+        panic!(
+            "single-engine producer rule violated: {reason}. The entry must stay \
+             ancestor-private to `crate::macro_hot_mirror` so a second macro-arg graph \
+             producer is unrepresentable by construction."
+        );
+    }
+}
+
+/// Self-test for [`structural_lowerer_privacy_violation`]: the correct
+/// `pub(in crate::macro_hot_mirror)` shape passes; a `pub(crate)` (or any
+/// broader) shape reddens.
+#[test]
+fn structural_lowerer_privacy_classifier_discriminates() {
+    // CORRECT — ancestor-private to the mirror.
+    let ok = "    pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(\n";
+    assert!(
+        structural_lowerer_privacy_violation(ok).is_none(),
+        "the ancestor-private `pub(in crate::macro_hot_mirror)` shape must PASS"
+    );
+    // WRONG — `pub(crate)` lets any production module name the entry.
+    let wrong = "    pub(crate) fn lower_type_expr_structural(\n";
+    assert!(
+        structural_lowerer_privacy_violation(wrong).is_some(),
+        "a `pub(crate)` entry shape must be reported as a single-engine violation"
+    );
+    // WRONG — bare `pub`.
+    let wrong_pub = "pub fn lower_type_expr_structural(\n";
+    assert!(
+        structural_lowerer_privacy_violation(wrong_pub).is_some(),
+        "a bare `pub` entry shape must be reported as a single-engine violation"
+    );
+}
+
+/// SECONDARY ordering tripwire (codex-flagged distinct migration invariant):
+/// a NON-TEST `verter_session` production FILE that BOTH reads an
+/// `AnalyzedMacro.parsed_type_argument` AND lowers via
+/// `lower_type_expr_in_scope_with_*` OUTSIDE the macro hot mirror
+/// producer/accessor is a forbidden second macro-arg eager-lowering path. The
+/// four converted macro sites now read the ONE mirror; the out-of-scope sites
+/// lower OTHER exprs (not `parsed_type_argument`).
+///
+/// This is a FILE-SCOPE ORDERING TRIPWIRE, NOT a dataflow proof — the primary
+/// mechanism is the visibility on the structural lowerer above. It catches a
+/// forbidden pairing in EITHER of two shapes:
+///
+///  1. WHOLE-FUNCTION conjunction: both tokens inside ONE function body
+///     (catches a pairing split more than 12 lines apart within a function the old
+///     adjacency window missed).
+///  2. CROSS-FUNCTION binding-flow (the GOV-flagged helper split): a binding
+///     bound from `parsed_type_argument` in one function is later handed to an
+///     eager `lower_type_expr_in_scope_with_*` call ANYWHERE in the file
+///     (regardless of which function). This catches a helper split that the
+///     whole-function conjunction misses, WITHOUT false-positiving on a file
+///     (e.g. `vue_exec/mod.rs`) where a `parsed_type_argument` presence-guard
+///     read in one fn co-exists with an UNRELATED eager lowering of a non-macro
+///     `param_ty` in another fn — the flow check requires the lowered subject
+///     to be the macro-arg-derived binding, not merely co-present.
+fn macro_arg_eager_lowering_violations(rel: &str, body: &str) -> bool {
+    // The mirror module is the sanctioned producer/accessor home.
+    if rel.contains("macro_hot_mirror/") {
+        return false;
+    }
+    // Comment-stripped, cfg(test)-stripped production body (mirrors
+    // `session_production_ident_hits`' scan precision so a stale doc-comment
+    // mention or a test-gated body is not a hit). Comments are blanked FIRST so
+    // a brace inside a doc comment cannot corrupt the function-extent brace
+    // scan below.
+    let production_body = carrier_strip_comments(&strip_cfg_test_gated_source(body));
+
+    // SHAPE 1 — WHOLE-FUNCTION CONJUNCTION: both tokens co-present inside ONE
+    // function body.
+    let whole_fn = fn_bodies_in_stripped_source(&production_body)
+        .iter()
+        .any(|fn_body| {
+            let has_macro_arg = fn_body.contains("parsed_type_argument");
+            let has_eager = fn_body.contains("lower_type_expr_in_scope_with_mode(")
+                || fn_body.contains("lower_type_expr_in_scope_with_context(");
+            has_macro_arg && has_eager
+        });
+    if whole_fn {
+        return true;
+    }
+
+    // SHAPE 2 — CROSS-FUNCTION binding-flow (file-scope): a `let X = …
+    // parsed_type_argument …` binding whose name `X` is later an argument to an
+    // eager `lower_type_expr_in_scope_with_*(…)` call anywhere in the file.
+    macro_arg_binding_flows_to_eager_lowering(&production_body)
+}
+
+/// Detect the GOV-flagged helper-split evasion at FILE SCOPE: an identifier
+/// bound from a `parsed_type_argument` read (`let X … = … parsed_type_argument
+/// …;`) that is later passed as an argument to an eager
+/// `lower_type_expr_in_scope_with_*( … X … )` call ANYWHERE in the
+/// (comment/cfg-test-stripped) file.
+///
+/// This is the precise discriminator between the violation and the legitimate
+/// `vue_exec/mod.rs` collision: there, the eager call lowers a function
+/// parameter `param_ty` that is NEVER bound from `parsed_type_argument`, so no
+/// macro-arg-derived binding flows into it.
+fn macro_arg_binding_flows_to_eager_lowering(stripped_src: &str) -> bool {
+    // 1) Collect identifiers bound from a `parsed_type_argument` read. The read
+    //    can flow into a binding through several common shapes — ALL of which
+    //    GOV P0 #2 requires the extractor to catch:
+    //      * a plain `let X = … parsed_type_argument …;`
+    //      * a let-else `let Some(arg) = …parsed_type_argument….as_ref() else {…};`
+    //      * an `if let Some(arg) = …parsed_type_argument…` / `while let …`
+    //      * a `match …parsed_type_argument… { … }` whose ARM patterns bind the
+    //        macro-arg value (e.g. `Some(arg) => …`)
+    //      * any `.as_ref()` / `.clone()` / `?`-chained read of the field
+    //    The binding identifiers are extracted from the LHS pattern (every
+    //    binder in it, so `Some(arg)` / `(a, b)` are covered, not just the first
+    //    token), and match-arm binders are pulled from the arms of a match whose
+    //    scrutinee reads `parsed_type_argument`.
+    let mut macro_arg_bindings: Vec<String> = Vec::new();
+    let src_lines: Vec<&str> = stripped_src.lines().collect();
+    for (line_idx, line) in src_lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+
+        // (a) match over a `parsed_type_argument` read: collect arm-pattern
+        //     binders from the following lines until the match block closes (a
+        //     simple brace-depth walk over arm lines). The value the arms bind
+        //     IS the macro-arg value.
+        if trimmed.starts_with("match ")
+            && line_before_block_brace(trimmed).contains("parsed_type_argument")
+        {
+            collect_match_arm_binders(&src_lines, line_idx, &mut macro_arg_bindings);
+            continue;
+        }
+
+        if !line.contains("parsed_type_argument") {
+            continue;
+        }
+
+        // (b) binding forms: `let …`, `let … else`, `if let …`, `while let …`.
+        //     Extract the LHS pattern (everything between the `let`/`if let`/
+        //     `while let` keyword and the FIRST top-level `=` that opens the
+        //     RHS) and pull EVERY binder identifier from it.
+        let pattern_region = trimmed
+            .strip_prefix("let ")
+            .or_else(|| trimmed.strip_prefix("if let "))
+            .or_else(|| trimmed.strip_prefix("while let "));
+        let Some(pattern_region) = pattern_region else {
+            continue;
+        };
+        // The pattern is everything up to the first `=` (the binding operator).
+        // A `==` would not appear in a binding LHS, and a type annotation `:`
+        // also terminates the pattern.
+        let pat = pattern_region
+            .split('=')
+            .next()
+            .unwrap_or("")
+            .split(':')
+            .next()
+            .unwrap_or("");
+        collect_pattern_binders(pat, &mut macro_arg_bindings);
+    }
+    if macro_arg_bindings.is_empty() {
+        return false;
+    }
+
+    // 2) Extract the argument text of every eager-lowering call in the file and
+    //    check whether any macro-arg binding appears as a whole-ident argument.
+    for call_args in eager_lowering_call_arg_spans(stripped_src) {
+        for binding in &macro_arg_bindings {
+            if ident_appears_whole(&call_args, binding) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Return the portion of a `match …` line BEFORE the block-opening `{` (the
+/// scrutinee expression). `match foo.parsed_type_argument.as_ref() {` →
+/// `match foo.parsed_type_argument.as_ref() `. Used so a `match` whose
+/// scrutinee reads `parsed_type_argument` is recognised even when the `{` is on
+/// the same line.
+fn line_before_block_brace(line: &str) -> &str {
+    line.split_once('{').map(|(head, _)| head).unwrap_or(line)
+}
+
+/// From a `match` at `match_line_idx` whose scrutinee reads
+/// `parsed_type_argument`, collect the binder identifiers introduced by its arm
+/// patterns (`Some(arg) => …`, `Ok(v) => …`, `(a, b) => …`). The arms bind the
+/// MACRO-ARG value, so those binders are macro-arg-derived. A brace-depth walk
+/// scopes collection to the match block (the `{` after the scrutinee through its
+/// matching `}`); each arm line's pattern is the text left of `=>`.
+fn collect_match_arm_binders(lines: &[&str], match_line_idx: usize, out: &mut Vec<String>) {
+    // Find the block-opening `{` (this line or a following one) and walk to the
+    // matching close, collecting `PAT =>` binders inside depth 1.
+    let mut depth = 0i32;
+    let mut started = false;
+    for line in lines.iter().skip(match_line_idx) {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    started = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        // Inside the match block (depth ≥ 1): an arm line is `PATTERN => …`.
+        if started && depth >= 1 {
+            if let Some((pat, _)) = line.split_once("=>") {
+                collect_pattern_binders(pat, out);
+            }
+        }
+        if started && depth <= 0 {
+            break;
+        }
+    }
+}
+
+/// Extract every binder identifier from a Rust pattern fragment, skipping
+/// keywords (`mut` / `ref`) and PascalCase constructor / variant names
+/// (`Some` / `Ok` / `None` — a leading uppercase letter marks a constructor,
+/// not a binder). `Some(arg)` → `["arg"]`; `(a, b)` → `["a", "b"]`;
+/// `Some(ref mut x)` → `["x"]`; `_` is dropped. Over-collection of a
+/// lowercase variant-less token is harmless: the value-flow check only fires
+/// when that token also appears as a whole-ident eager-call argument.
+fn collect_pattern_binders(pat: &str, out: &mut Vec<String>) {
+    // Tokenise into ident-runs; keep lowercase/underscore-leading binders.
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut Vec<String>| {
+        if token.is_empty() {
+            return;
+        }
+        let t = std::mem::take(token);
+        // Skip keywords and the `_` wildcard.
+        if matches!(t.as_str(), "mut" | "ref" | "_") {
+            return;
+        }
+        // A PascalCase leading char marks a constructor / variant / struct
+        // name (e.g. `Some`, `Ok`, `RowApi`), never a binder.
+        if t.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            return;
+        }
+        out.push(t);
+    };
+    for c in pat.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            token.push(c);
+        } else {
+            flush(&mut token, out);
+        }
+    }
+    flush(&mut token, out);
+}
+
+/// Return the parenthesised argument text of every
+/// `lower_type_expr_in_scope_with_mode(` / `..._with_context(` call in the
+/// (already comment/cfg-test-stripped) source. Paren-depth + string/char-literal
+/// aware so a `)` inside a nested call or a literal does not truncate the span.
+fn eager_lowering_call_arg_spans(src: &str) -> Vec<String> {
+    const CALLS: &[&str] = &[
+        "lower_type_expr_in_scope_with_mode(",
+        "lower_type_expr_in_scope_with_context(",
+    ];
+    let bytes = src.as_bytes();
+    let mut spans: Vec<String> = Vec::new();
+    for call in CALLS {
+        let mut from = 0usize;
+        while let Some(rel_idx) = src[from..].find(call) {
+            let open = from + rel_idx + call.len(); // first byte INSIDE the parens
+                                                    // Walk to the matching close paren (literal-aware), depth starts at 1.
+            let mut depth = 1i32;
+            let mut k = open;
+            let mut in_str = false;
+            let mut in_char = false;
+            while k < bytes.len() {
+                let c = bytes[k];
+                if in_str {
+                    if c == b'\\' {
+                        k += 2;
+                        continue;
+                    }
+                    if c == b'"' {
+                        in_str = false;
+                    }
+                } else if in_char {
+                    if c == b'\\' {
+                        k += 2;
+                        continue;
+                    }
+                    if c == b'\'' {
+                        in_char = false;
+                    }
+                } else {
+                    match c {
+                        b'"' => in_str = true,
+                        b'\'' => in_char = true,
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                k += 1;
+            }
+            let end = k.min(bytes.len());
+            spans.push(src[open..end].to_string());
+            from = open;
+        }
+    }
+    spans
+}
+
+/// Whole-identifier (word-boundary) containment: `needle` appears in `haystack`
+/// not as a substring of a larger identifier.
+fn ident_appears_whole(haystack: &str, needle: &str) -> bool {
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    if nb.is_empty() {
+        return false;
+    }
+    let mut i = 0usize;
+    while let Some(rel) = haystack[i..].find(needle) {
+        let start = i + rel;
+        let end = start + nb.len();
+        let before_ok = start == 0 || !is_ident_byte(hb[start - 1]);
+        let after_ok = end >= hb.len() || !is_ident_byte(hb[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        i = start + 1;
+    }
+    false
+}
+
+/// Split a comment/cfg-test-stripped Rust source into per-function bodies by
+/// brace-depth tracking (string/char-literal aware). Each returned slice spans
+/// one top-level-or-nested `fn` from its `{` through its matching `}`. A
+/// presence-guard read and an eager lowering in DIFFERENT functions therefore
+/// land in DIFFERENT slices. Used by the macro-arg ordering tripwire to scope
+/// the conjunction to one function body.
+fn fn_bodies_in_stripped_source(src: &str) -> Vec<String> {
+    let bytes = src.as_bytes();
+    let mut bodies: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    // A simple literal-aware brace scanner. On finding an `fn` keyword
+    // boundary, locate its opening `{` and capture through the matching `}`.
+    while i < bytes.len() {
+        // Detect an `fn` token at a word boundary (byte-level, UTF-8 safe — the
+        // body may carry multibyte chars inside doc comments / string
+        // literals).
+        let is_fn = bytes[i] == b'f'
+            && bytes.get(i + 1) == Some(&b'n')
+            && (i == 0 || !is_ident_byte(bytes[i - 1]))
+            && bytes.get(i + 2).is_none_or(|&b| !is_ident_byte(b));
+        if !is_fn {
+            i += 1;
+            continue;
+        }
+        // Find the opening brace of this fn (skip its signature; bail if a `;`
+        // at paren-depth 0 ends a bodiless fn decl before any `{`).
+        let mut j = i + 2;
+        let mut paren = 0i32;
+        let mut open = None;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'(' => paren += 1,
+                b')' => paren -= 1,
+                b'{' if paren <= 0 => {
+                    open = Some(j);
+                    break;
+                }
+                b';' if paren <= 0 => break,
+                _ => {}
+            }
+            j += 1;
+        }
+        let Some(open) = open else {
+            i += 2;
+            continue;
+        };
+        // Capture through the matching close brace (string/char-literal aware).
+        let mut depth = 0i32;
+        let mut k = open;
+        let mut in_str = false;
+        let mut in_char = false;
+        let mut end = bytes.len();
+        while k < bytes.len() {
+            let c = bytes[k];
+            if in_str {
+                if c == b'\\' {
+                    k += 2;
+                    continue;
+                }
+                if c == b'"' {
+                    in_str = false;
+                }
+            } else if in_char {
+                if c == b'\\' {
+                    k += 2;
+                    continue;
+                }
+                if c == b'\'' {
+                    in_char = false;
+                }
+            } else {
+                match c {
+                    b'"' => in_str = true,
+                    b'\'' => in_char = true,
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = k + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            k += 1;
+        }
+        bodies.push(src[open..end].to_string());
+        i = end;
+    }
+    bodies
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Walk every non-test `verter_session/src/**.rs` production file, returning
+/// `(workspace-relative path, body)` pairs. Skips `*_tests.rs` / `tests.rs` /
+/// `typeinfo_tests/` (mirrors the production scan scope in
+/// [`session_production_ident_hits`]).
+fn session_production_src_files() -> Vec<(String, String)> {
+    let crate_root = workspace_path("crates/verter_session/src");
+    let mut out: Vec<(String, String)> = Vec::new();
+    for entry in walkdir::WalkDir::new(&crate_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_file())
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        if path_str.ends_with("_tests.rs")
+            || path_str.ends_with("/tests.rs")
+            || path_str.contains("/typeinfo_tests/")
+        {
+            continue;
+        }
+        if let Ok(body) = std::fs::read_to_string(path) {
+            let rel = path_str
+                .rsplit_once("crates/verter_session/src/")
+                .map(|(_, s)| format!("crates/verter_session/src/{s}"))
+                .unwrap_or(path_str);
+            out.push((rel, body));
+        }
+    }
+    assert!(
+        out.len() > 100,
+        "guard scanner found only {} production files — the walk is broken",
+        out.len()
+    );
+    out
+}
+
+#[test]
+fn no_production_macro_arg_eager_lowering_outside_mirror() {
+    let mut violations: Vec<String> = Vec::new();
+    for (rel, src) in session_production_src_files() {
+        if macro_arg_eager_lowering_violations(&rel, &src) {
+            violations.push(rel);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "ordering tripwire: a non-test verter_session production file co-locates \
+         `parsed_type_argument` with an eager `lower_type_expr_in_scope_with_*` call OUTSIDE the \
+         macro hot mirror — a forbidden second macro-arg lowering path. The four macro sites must \
+         read `crate::macro_hot_mirror::macro_type_arg_hot_ref`; only the mirror builder lowers \
+         the macro arg. Files: {violations:#?}"
+    );
+}
+
+/// Self-test for [`macro_arg_eager_lowering_violations`]: WHOLE-FUNCTION
+/// co-presence of both tokens outside the mirror is a violation (including the
+/// more-than-12-lines-apart case WITHIN a function the old adjacency window missed);
+/// the CROSS-FUNCTION-SAME-FILE helper split (a `parsed_type_argument`-derived
+/// binding handed to an eager lowering in another function) is now ALSO a
+/// violation; either token alone is not; two UNRELATED functions (a
+/// presence-guard read in one, an unrelated eager lowering of a non-macro
+/// `param_ty` in another) are not; the mirror module itself is exempt;
+/// test-gated co-presence is not.
+#[test]
+fn macro_arg_eager_lowering_tripwire_discriminates() {
+    let both = "fn f() { let a = mac.parsed_type_argument; dispatch.lower_type_expr_in_scope_with_mode(x); }\n";
+    assert!(
+        macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", both),
+        "co-presence of `parsed_type_argument` + eager lowering in ONE function outside the mirror \
+         is a violation"
+    );
+    // STRENGTHENED: the forbidden pairing split >12 lines apart WITHIN ONE
+    // function (a shape the old 12-line adjacency window let through) is now
+    // caught.
+    let mut far = String::from("fn one_fn() {\n    let a = mac.parsed_type_argument;\n");
+    for n in 0..40 {
+        far.push_str(&format!("    let _filler_{n} = {n};\n"));
+    }
+    far.push_str("    dispatch.lower_type_expr_in_scope_with_mode(x);\n}\n");
+    assert!(
+        macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", &far),
+        "a `parsed_type_argument` read >40 lines from the eager lowering call WITHIN ONE function \
+         must STILL trip — the >12-line case the old window missed"
+    );
+    // STRENGTHENED (GOV cross-function-same-file): a `parsed_type_argument`-
+    // derived binding `arg` produced in `reader()` and lowered eagerly in a
+    // SEPARATE `helper()` — the whole-function conjunction misses this, the
+    // file-scope binding-flow catch does NOT.
+    let cross_fn = "fn reader() {\n    let arg = mac.parsed_type_argument.clone();\n    helper(scope, arg);\n}\nfn helper(scope: &str, arg: TypeExpr) {\n    let base = dispatch.lower_type_expr_in_scope_with_context(scope, arg, ctx);\n}\n";
+    assert!(
+        macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", cross_fn),
+        "a `parsed_type_argument`-derived binding lowered eagerly in ANOTHER function in the same \
+         file (the GOV helper-split evasion) MUST trip the file-scope binding-flow catch"
+    );
+    // The same evasion with `_with_mode` and a `mut` binding is also caught.
+    let cross_fn_mode = "fn r() {\n    let mut a2 = mac.parsed_type_argument;\n}\nfn h() {\n    dispatch.lower_type_expr_in_scope_with_mode(s, a2, m);\n}\n";
+    assert!(
+        macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", cross_fn_mode),
+        "the helper-split evasion via `_with_mode` + a `mut` macro-arg binding must also trip"
+    );
+    // STRENGTHENED (GOV P0 #2): the let-else + helper-split shape the round-2
+    // extractor MISSED — `let Some(arg) = …parsed_type_argument….as_ref()
+    // else {…};` binds `arg` from the macro-arg read, and a SEPARATE helper
+    // eager-lowers it. The binder lives INSIDE the `Some(…)` pattern (not the
+    // first token), and the read is `.as_ref()`-chained.
+    let let_else_split = "fn reader() {\n    let Some(arg) = mac.parsed_type_argument.as_ref() else { return None };\n    helper(scope, arg);\n}\nfn helper(scope: &str, arg: &TypeExpr) {\n    let base = dispatch.lower_type_expr_in_scope_with_context(scope, arg, ctx);\n}\n";
+    assert!(
+        macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", let_else_split),
+        "a let-else binder for `Some(arg)` over a `parsed_type_argument` `.as_ref()` read lowered \
+         eagerly in another fn MUST trip — the binder lives inside the `Some(...)` pattern and the \
+         read is `.as_ref()`-chained (the GOV P0 #2 missed shape)"
+    );
+    // STRENGTHENED (GOV P0 #2): the `if let Some(arg) = …parsed_type_argument…`
+    // shape feeding an eager lowering in the SAME branch.
+    let if_let = "fn f() {\n    if let Some(arg) = mac.parsed_type_argument.clone() {\n        dispatch.lower_type_expr_in_scope_with_mode(scope, arg, m);\n    }\n}\n";
+    assert!(
+        macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", if_let),
+        "an `if let Some(arg) = …parsed_type_argument…` binder lowered eagerly must trip"
+    );
+    // STRENGTHENED (GOV P0 #2): a `match …parsed_type_argument… { Some(arg) =>
+    // … }` whose arm binder feeds an eager lowering (in a helper here).
+    let match_split = "fn reader() {\n    match mac.parsed_type_argument.as_ref() {\n        Some(arg) => helper(scope, arg),\n        None => {}\n    }\n}\nfn helper(scope: &str, arg: &TypeExpr) {\n    dispatch.lower_type_expr_in_scope_with_context(scope, arg, ctx);\n}\n";
+    assert!(
+        macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", match_split),
+        "a match arm binder over a `parsed_type_argument` scrutinee lowered eagerly MUST trip — \
+         the match scrutinee reads the macro arg and the `Some(arg)` arm binds its value"
+    );
+    // SOUNDNESS: a presence-guard read in one function and an UNRELATED eager
+    // lowering (of a non-macro-arg `param_ty`) in ANOTHER function is NOT a
+    // violation — the real `vue_exec/mod.rs` shape (line 383 presence guard +
+    // `navigate_param_to_object_surface`'s unrelated lowering). The
+    // binding-flow catch does NOT fire because `param_ty` is a fn parameter,
+    // never bound from `parsed_type_argument`, and the `_` presence-guard
+    // binding is excluded.
+    let unrelated = "fn reader() {\n    let _ = mac.parsed_type_argument.as_ref()?;\n    let h = macro_type_arg_hot_ref(ctx, o, i)?;\n}\nfn navigate_param_to_object_surface() {\n    let base = dispatch.lower_type_expr_in_scope_with_context(scope, param_ty, c)?;\n}\n";
+    assert!(
+        !macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", unrelated),
+        "a presence-guard `parsed_type_argument` read in one fn + an unrelated eager lowering in \
+         another fn is NOT a violation (the real vue_exec shape)"
+    );
+    assert!(
+        !macro_arg_eager_lowering_violations(
+            "crates/verter_session/src/foo.rs",
+            "fn f() { let _ = mac.parsed_type_argument; }"
+        ),
+        "naming `parsed_type_argument` alone is not a violation"
+    );
+    assert!(
+        !macro_arg_eager_lowering_violations(
+            "crates/verter_session/src/foo.rs",
+            "fn f() { dispatch.lower_type_expr_in_scope_with_context(x); }"
+        ),
+        "an eager lowering of a non-macro-arg expr alone is not a violation"
+    );
+    assert!(
+        !macro_arg_eager_lowering_violations(
+            "crates/verter_session/src/macro_hot_mirror/mod.rs",
+            both
+        ),
+        "the mirror module is the sanctioned producer/accessor — exempt"
+    );
+    // A test-gated co-presence is NOT a production violation (cfg(test) strip).
+    let gated = "#[cfg(test)]\nmod t {\n    fn f() { let a = mac.parsed_type_argument; dispatch.lower_type_expr_in_scope_with_mode(x); }\n}\n";
+    assert!(
+        !macro_arg_eager_lowering_violations("crates/verter_session/src/foo.rs", gated),
+        "co-presence inside a #[cfg(test)] module is not a production violation"
+    );
+}
+
+/// The macro hot mirror is a PURE producer: it lowers a macro
+/// `parsed_type_argument` into the dormant structural carrier graph with NO
+/// host route lookup and NO dependency emission — resolution + dep recording
+/// happen at the resolving DEMAND, never as a side-band preflight on the
+/// producer. A route-resolving host call inside the mirror module (the
+/// owner's prepared-decl bundle, an import-route resolution, a route type-edge
+/// resolution) would route-resolve imports inside the builder, re-introducing
+/// the dep-omission regression class. Script-setup generic seeding therefore
+/// re-sources its binders from the owner's ROUTE-FREE local `IndexedReady`
+/// data (`raw_source` + `framework_parse` via `sfc_script_setup_type_params`),
+/// never from the prepared-decl bundle.
+///
+/// This is a source-scan tripwire over the mirror module's non-test
+/// production source (mirroring `session_production_ident_hits` precision:
+/// comment-stripped, cfg(test)-stripped).
+fn macro_hot_mirror_impurity_hits(body: &str) -> Vec<String> {
+    // The full route/import/cross-file-symbol-resolution surface a future
+    // impurity could use to route-resolve inside the pure producer. These are
+    // the `ResolverContext` / host methods that resolve imports, routes,
+    // cross-file symbols, dependency canonicals, OR carrier heads — NOT the
+    // route-free shallow reads the mirror legitimately uses
+    // (`indexed_ready*` / `shallow_file_state` / `sfc_script_setup_type_params`
+    // / `local_type_declaration_id` same-file lookup / `dispatch_node_data`
+    // arena read). `contains`-matching means a banned prefix also catches its
+    // `_shallow` sibling (e.g. `resolve_named_type_export_target` ⇒
+    // `resolve_named_type_export_target_shallow`).
+    const ROUTE_RESOLVING_IDENTS: &[&str] = &[
+        // host route/import-route bundles + the per-symbol prepared-decl cache
+        // accessors (`ResolverContext::prepared_type_decl` /
+        // `prepared_value_decl`): these route through the SAME prepared-decl
+        // context path `prepared_decl_bundle` reaches, so a producer touching
+        // any of them re-introduces the route-resolution-inside-the-builder
+        // regression class. The route-free shallow reads the mirror DOES use
+        // (`indexed_ready*` / `shallow_file_state` / `sfc_script_setup_type_params`
+        // / `local_type_declaration_id` / arena `dispatch_node_data`) are NOT
+        // here.
+        "prepared_decl_bundle",
+        "prepared_type_decl",
+        "prepared_value_decl",
+        "cached_import_route_resolution",
+        "resolve_route_type_edge",
+        // ResolverContext "Symbol / route resolution" surface
+        "resolve_imported_type_root",
+        "resolve_named_type_export_target",
+        "resolve_owner_direct_import",
+        "resolve_type_dependency_canonical",
+        "routed_shallow_state",
+        "resolve_type_declaration_for_dep",
+        "resolve_value_export_target",
+        // carrier-head / bare-name resolution (a producer must NOT resolve)
+        "resolve_bare_ref_head",
+        "resolve_import_type_head",
+        "resolve_carrier_subject_node",
+        "resolve_bare_name_in_scope",
+    ];
+    ident_hits_in_production_body(body, ROUTE_RESOLVING_IDENTS)
+        .into_iter()
+        .map(|(_, ident)| ident)
         .collect()
 }
 
-/// DORMANT-WIRING: the query-free structural lowerer (`structural_lower.rs`)
-/// stays DORMANT — its public entry `lower_type_expr_structural` has ZERO
-/// production call sites until the carrier-resolution work wires it. The
-/// emit-only / no-query guards cannot catch OMISSION (a consumer walker that
-/// root-kind-matches a carrier and silently drops its `type_args`); the
-/// deferred consumer-walker carrier-arg descent (the `meta_resolve`
-/// ref/cycle/dep walkers, the `build.rs` type-param collector, the exactness
-/// classifiers) is owed BEFORE the lowerer may feed those walkers non-empty
-/// carrier args. This guard pins that ordering: the lowerer cannot be wired
-/// (and thus cannot feed non-empty carriers to the still-naive walkers)
-/// without removing this guard — which the carrier-resolution work does in the
-/// SAME change that lands the consumer-walker descent and its integration
-/// tests. `lower_type_expr_structural` is the sole `pub(crate)` entry, so any
-/// caller necessarily references it by name; an external crate cannot reach a
-/// `pub(crate)` fn, so the `verter_session` production scan is the complete scope.
 #[test]
-fn structural_lowerer_has_no_production_caller_until_carrier_resolution() {
-    let hits = session_production_ident_hits(&["lower_type_expr_structural"]);
-    // Anti-vacuity: the scan must SEE the lowerer's defining-module definition,
-    // else the scanner / scan root regressed and the guard is decorative.
+fn macro_hot_mirror_producer_is_pure_no_route_resolution() {
+    let mut violations: Vec<String> = Vec::new();
+    for (rel, src) in session_production_src_files() {
+        if !rel.contains("macro_hot_mirror/") {
+            continue;
+        }
+        for ident in macro_hot_mirror_impurity_hits(&src) {
+            violations.push(format!("{rel}: {ident}"));
+        }
+    }
     assert!(
-        hits.iter()
-            .any(|(loc, _)| loc.contains(STRUCTURAL_LOWERER_DEFINING_MODULE)),
-        "anti-vacuity: the production scan must see the lowerer's defining module \
-         (`{STRUCTURAL_LOWERER_DEFINING_MODULE}`) — its absence means the scanner regressed. \
-         Hits: {hits:#?}"
-    );
-    let foreign = structural_lowerer_foreign_callers(&hits);
-    assert!(
-        foreign.is_empty(),
-        "the query-free structural lowerer `lower_type_expr_structural` has a PRODUCTION \
-         caller outside its defining module — it must stay DORMANT until the carrier-resolution \
-         work wires it TOGETHER with the deferred consumer-walker carrier-arg descent and the \
-         carrier-resolution integration tests. Wiring it earlier feeds non-empty carrier \
-         `type_args` into walkers that silently drop them. Remove this guard only in the same \
-         change that lands the consumer-walker descent + integration tests: {foreign:#?}"
+        violations.is_empty(),
+        "purity violation: the macro hot mirror producer (`macro_hot_mirror/**`) must NOT route-\
+         resolve imports or read the prepared-decl bundle — resolution + dep recording belong at \
+         the resolving DEMAND. Script-setup seeding re-sources from the owner's route-free \
+         `IndexedReady` (`raw_source` + `framework_parse`). Found: {violations:#?}"
     );
 }
 
-/// Self-test for the dormancy classifier ([`structural_lowerer_foreign_callers`]):
-/// the defining-module DEFINITION is not a caller (dormant → no violation), and a
-/// SYNTHETIC production caller in any other module IS reported (early wiring → fail).
+/// Self-test for [`macro_hot_mirror_impurity_hits`]: a route-resolving ident in
+/// production source is reported; a comment / test-gated mention is not;
+/// injecting one reddens, reverting greens.
 #[test]
-fn structural_lowerer_dormancy_detector_discriminates() {
-    // DORMANT — only the defining-module definition is present; not a caller.
-    let dormant = vec![(
-        "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs:216".to_string(),
-        "lower_type_expr_structural".to_string(),
-    )];
-    assert!(
-        structural_lowerer_foreign_callers(&dormant).is_empty(),
-        "dormant: the defining-module definition line is not a foreign caller"
-    );
-    // WIRED — a SYNTHETIC production caller in another module (a carrier-resolution
-    // consumer walker wired prematurely) is the SOLE reported violation; the
-    // defining-module definition is correctly NOT reported.
-    let wired = vec![
-        (
-            "crates/verter_session/src/project_semantic_dispatch/structural_lower.rs:216"
-                .to_string(),
-            "lower_type_expr_structural".to_string(),
-        ),
-        (
-            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs:512".to_string(),
-            "lower_type_expr_structural".to_string(),
-        ),
-    ];
-    let foreign = structural_lowerer_foreign_callers(&wired);
+fn macro_hot_mirror_purity_scanner_discriminates() {
+    // Inject one forbidden route-resolving ident → reddens.
+    let injected =
+        "fn build() {\n    let bundle = ctx.prepared_decl_bundle(owner);\n    let _ = bundle;\n}\n";
     assert_eq!(
-        foreign.len(),
-        1,
-        "a synthetic foreign caller must be the SOLE reported dormancy violation"
+        macro_hot_mirror_impurity_hits(injected),
+        vec!["prepared_decl_bundle".to_string()],
+        "a production `prepared_decl_bundle` call in the mirror module must be flagged"
+    );
+    // GOV P0 #3: the per-symbol prepared-decl accessors route through the same
+    // prepared-decl context path and MUST now be flagged too. Injecting either
+    // reddens.
+    assert_eq!(
+        macro_hot_mirror_impurity_hits(
+            "fn build() {\n    let d = ctx.prepared_type_decl(owner, name);\n    let _ = d;\n}\n"
+        ),
+        vec!["prepared_type_decl".to_string()],
+        "a production `prepared_type_decl` call (the per-symbol prepared-decl cache accessor that \
+         routes through the prepared-decl path) inside the producer must be flagged"
+    );
+    assert_eq!(
+        macro_hot_mirror_impurity_hits("fn f() { ctx.prepared_value_decl(owner, name); }\n"),
+        vec!["prepared_value_decl".to_string()],
+        "a production `prepared_value_decl` call (the per-symbol prepared-decl value accessor) \
+         inside the producer must be flagged"
+    );
+    // The other original banned idents are also caught.
+    assert_eq!(
+        macro_hot_mirror_impurity_hits("fn f() { cached_import_route_resolution(x); }\n"),
+        vec!["cached_import_route_resolution".to_string()],
+        "a production `cached_import_route_resolution` call must be flagged"
+    );
+    assert_eq!(
+        macro_hot_mirror_impurity_hits("fn f() { resolve_route_type_edge(e); }\n"),
+        vec!["resolve_route_type_edge".to_string()],
+        "a production `resolve_route_type_edge` call must be flagged"
+    );
+    // BROADENED set: the wider `ResolverContext` route/symbol-resolution
+    // surface a future impurity could reach for is now banned. Injecting any
+    // one reddens.
+    assert_eq!(
+        macro_hot_mirror_impurity_hits(
+            "fn f() { let c = ctx.resolve_type_dependency_canonical(owner, src); }\n"
+        ),
+        vec!["resolve_type_dependency_canonical".to_string()],
+        "a production `resolve_type_dependency_canonical` call (a route/dep resolution) must be \
+         flagged by the broadened set"
+    );
+    assert_eq!(
+        macro_hot_mirror_impurity_hits("fn f() { ctx.resolve_owner_direct_import(o, n); }\n"),
+        vec!["resolve_owner_direct_import".to_string()],
+        "a production `resolve_owner_direct_import` call must be flagged"
+    );
+    assert_eq!(
+        macro_hot_mirror_impurity_hits("fn f() { ctx.routed_shallow_state(c); }\n"),
+        vec!["routed_shallow_state".to_string()],
+        "a production `routed_shallow_state` (cross-file routed read) call must be flagged"
+    );
+    assert_eq!(
+        macro_hot_mirror_impurity_hits("fn f() { self.resolve_bare_ref_head(ctx, n, a, l); }\n"),
+        vec!["resolve_bare_ref_head".to_string()],
+        "a production carrier-head resolution (`resolve_bare_ref_head`) inside the producer must \
+         be flagged — the producer must not resolve carriers"
+    );
+    // `contains`-matching catches the `_shallow` sibling via its prefix.
+    assert_eq!(
+        macro_hot_mirror_impurity_hits(
+            "fn f() { ctx.resolve_named_type_export_target_shallow(d, n); }\n"
+        ),
+        vec!["resolve_named_type_export_target".to_string()],
+        "the `_shallow` sibling is caught by the banned prefix `resolve_named_type_export_target`"
+    );
+    // ROUTE-FREE reads the mirror legitimately uses must NOT be flagged.
+    assert!(
+        macro_hot_mirror_impurity_hits(
+            "fn f() { let p = ctx.sfc_script_setup_type_params(file); let s = ctx.shallow_file_state(c); let i = ctx.indexed_ready(c); let l = ctx.local_type_declaration_id(c, n); }\n"
+        )
+        .is_empty(),
+        "the route-free shallow reads the mirror needs (`sfc_script_setup_type_params`, \
+         `shallow_file_state`, `indexed_ready`, `local_type_declaration_id`) must NOT be flagged"
+    );
+    // A comment mention is NOT a hit (route-free seeding, see the doc above).
+    assert!(
+        macro_hot_mirror_impurity_hits(
+            "// does NOT call prepared_decl_bundle anymore\nfn f() {}\n"
+        )
+        .is_empty(),
+        "a comment mention of a route-resolving ident must not be a hit"
+    );
+    // A test-gated mention is NOT a production hit (cfg(test) strip).
+    assert!(
+        macro_hot_mirror_impurity_hits(
+            "#[cfg(test)]\nmod t {\n    fn f() { ctx.prepared_decl_bundle(o); }\n}\n"
+        )
+        .is_empty(),
+        "a #[cfg(test)]-gated route-resolving call is not a production violation"
+    );
+    // The REAL mirror module source is clean (revert proof: the production
+    // `macro_hot_mirror/mod.rs` carries none of the banned idents).
+    let mirror_src = std::fs::read_to_string(workspace_path(
+        "crates/verter_session/src/macro_hot_mirror/mod.rs",
+    ))
+    .expect("the mirror module source must be readable");
+    assert!(
+        macro_hot_mirror_impurity_hits(&mirror_src).is_empty(),
+        "the production `macro_hot_mirror/mod.rs` must be route-free (pure producer)"
+    );
+}
+
+/// The SANCTIONED sole crate-visible production producer entry of the macro hot
+/// mirror module.
+const MIRROR_SOLE_PRODUCER_ENTRY: &str = "macro_type_arg_hot_ref";
+
+/// Whether an attribute list test-gates an item — `#[cfg(test)]`,
+/// `#[cfg(any(test, …))]`, or `#[cfg(any(…, test))]`. The mirror's `for_tests`
+/// facade is `#[cfg(test)]`. ONLY a positive (un-negated) `test` predicate is a
+/// test gate; `debug_assertions` is a PRODUCTION predicate (compiled in debug
+/// production builds), so a bare `#[cfg(debug_assertions)]` item is COUNTED,
+/// never excluded. Such a test-gated item is compiled only under test builds,
+/// so it never widens the crate-visible PRODUCTION producer surface and is
+/// excluded from the scan.
+///
+/// KNOWN CONSERVATIVE BLIND SPOT (recorded P1 debt — see the design's Stage 5A
+/// secondary-tripwire exotic-shape residual): a positive `test` ARM inside an
+/// `any(...)` is treated as test-gating even though `#[cfg(any(test, X))]`
+/// (e.g. `X = debug_assertions` or `feature = "…"`) is PRODUCTION-satisfiable
+/// in a non-test build that satisfies `X`. This classifier deliberately
+/// over-excludes that exotic shape; it is NOT relied on as the load-bearing
+/// single-entry guarantee (the by-construction `pub(in crate::macro_hot_mirror)`
+/// visibility is). The narrowing of this `any`-arm exclusion is tracked debt,
+/// out of scope for the producer-entry surface guard's current contract.
+///
+/// GOV (round 5): the gate must match ONLY genuine test-gating. A naive
+/// `rendered.contains("test")` over the whole attribute FALSELY excluded
+/// `#[cfg(not(test))]` — a PRODUCTION-only item that MUST be COUNTED. The gate
+/// now walks the cfg predicate tokens structurally and treats a bare `test`
+/// ident as test-gating ONLY when it is not the operand of a `not(...)`
+/// predicate, so `cfg(not(test))` stays a production item.
+fn attrs_test_gate(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let path = attr.path();
+        if !(path.is_ident("cfg") || path.is_ident("cfg_attr")) {
+            return false;
+        }
+        // Parse the cfg-predicate token stream (the `(...)` inside the
+        // attribute) and walk it for a positive `test` predicate, descending
+        // into `any(...)`/`all(...)` but treating any `not(...)` operand as a
+        // NEGATION boundary that flips test-gating off — a `not(test)` operand
+        // is a production gate, never a test gate. `debug_assertions` is NOT a
+        // test gate: it is a PRODUCTION predicate (compiled in debug production
+        // builds), so a `debug_assertions`-gated producer entry is COUNTED.
+        let tokens = match &attr.meta {
+            syn::Meta::List(list) => list.tokens.clone(),
+            // `#[cfg]` / `#[cfg = …]` with no predicate list: never test-gating.
+            _ => return false,
+        };
+        cfg_tokens_test_gate(tokens, false)
+    })
+}
+
+/// Walk a cfg-predicate token stream for a positive `test` predicate.
+/// `negated` is `true` when the stream is the operand of a `not(...)`. Only a
+/// bare, positive (un-negated) `test` ident counts as test-gating;
+/// `debug_assertions` is a PRODUCTION predicate (compiled in debug production
+/// builds) and is NOT a test gate. `any(...)` / `all(...)` recurse with the
+/// SAME polarity; `not(...)` recurses with FLIPPED polarity (so `not(test)`
+/// does not test-gate, while `not(not(test))` does).
+fn cfg_tokens_test_gate(tokens: proc_macro2::TokenStream, negated: bool) -> bool {
+    use proc_macro2::TokenTree;
+    let mut iter = tokens.into_iter().peekable();
+    while let Some(tt) = iter.next() {
+        match tt {
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                // Look ahead: is this ident followed by a parenthesised group
+                // (i.e. it is `not(...)` / `any(...)` / `all(...)`)?
+                if let Some(TokenTree::Group(group)) = iter.peek() {
+                    let inner = group.stream();
+                    match name.as_str() {
+                        "not" => {
+                            if cfg_tokens_test_gate(inner, !negated) {
+                                return true;
+                            }
+                        }
+                        "any" | "all" => {
+                            if cfg_tokens_test_gate(inner, negated) {
+                                return true;
+                            }
+                        }
+                        // A function-call-shaped predicate we do not model
+                        // (e.g. `feature = "…"` would not reach here as an
+                        // ident+group): walk its inner with the same polarity
+                        // defensively.
+                        _ => {
+                            if cfg_tokens_test_gate(inner, negated) {
+                                return true;
+                            }
+                        }
+                    }
+                    // Consume the peeked group.
+                    iter.next();
+                } else if !negated && name == "test" {
+                    // Bare positive `test` predicate. `debug_assertions` is NOT
+                    // a test gate: it is a PRODUCTION predicate (compiled in
+                    // debug production builds), so a bare `#[cfg(debug_assertions)]`
+                    // item MUST be counted as a crate-visible production producer
+                    // (single-entry must hold in debug builds too).
+                    return true;
+                }
+            }
+            TokenTree::Group(group) => {
+                // A bare parenthesised group (e.g. the outer wrapper) — recurse
+                // with the same polarity.
+                if cfg_tokens_test_gate(group.stream(), negated) {
+                    return true;
+                }
+            }
+            // Punctuation (commas, `=`) and literals carry no predicate name.
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether a [`syn::Visibility`] is crate-visible OUTWARD — reachable by a
+/// caller in an arbitrary OTHER module of THIS crate. A bare `pub` (in fact
+/// wider) is crate-visible; so is a restricted path of EXACTLY `crate`, spelled
+/// `pub(crate)` OR `pub(in crate)` — Rust treats the two as identical crate-wide
+/// visibility. An inherited (module-private) visibility and any DEEPER restricted
+/// form (`pub(in crate::macro_hot_mirror)` / other `pub(in crate::…)` subtree
+/// path / `pub(super)` / `pub(self)`) are NOT crate-visible: they cannot be named
+/// from an arbitrary other production module to act as a second outward entry.
+fn visibility_is_crate_visible(vis: &syn::Visibility) -> bool {
+    match vis {
+        // Bare `pub` — crate-visible (and wider).
+        syn::Visibility::Public(_) => true,
+        // A restricted path of EXACTLY `crate` is crate-wide visibility WHETHER
+        // spelled `pub(crate)` (no `in` token) or `pub(in crate)` (with the `in`
+        // token) — both name the crate root, so both are crate-visible. Any
+        // DEEPER path (`pub(in crate::macro_hot_mirror)`, `pub(in crate::a::b)`),
+        // `pub(super)`, and `pub(self)` are restricted BELOW crate scope and are
+        // NOT crate-visible.
+        syn::Visibility::Restricted(r) => r.path.is_ident("crate"),
+        // Inherited (module-private) — not crate-visible.
+        syn::Visibility::Inherited => false,
+    }
+}
+
+/// Collect crate-visible (`pub` / `pub(crate)` / `pub(in crate)`)
+/// PRODUCER-CAPABLE function names in a Rust source — BOTH module-level FREE
+/// functions (`ItemFn`) AND ASSOCIATED functions inside INHERENT `impl` blocks
+/// (`ImplItemFn`), recursing through inline `mod` blocks. Either shape is an
+/// outward producer entry a foreign crate-scope caller can reach, so the mirror
+/// entry-surface guard must enumerate both.
+///
+/// TRAIT-impl methods are NOT a producer-entry vector and are intentionally
+/// SKIPPED: a trait-impl method inherits the trait's visibility and cannot carry
+/// its own `pub` / `pub(crate)` (`impl T for X { pub(crate) fn … }` is not valid
+/// Rust), so it can never be an INDEPENDENTLY crate-visible outward producer
+/// entry. The guard's real exposure surface is therefore crate-visible FREE fns
+/// + crate-visible INHERENT-impl associated fns.
+///
+/// Exclusions:
+/// - A `pub(in crate::…)`-subtree / `pub(super)` / `pub(self)` restricted entry
+///   is NOT crate-visible (see [`visibility_is_crate_visible`]); `pub(in crate)`
+///   (exact crate root) IS.
+/// - A `#[cfg(test)]`-gated (or `#[cfg(any(test, …))]`, gated via the `test`
+///   arm) item, impl, or module is test-only and never widens the production
+///   producer surface (see [`attrs_test_gate`]). A bare `#[cfg(debug_assertions)]`
+///   item is PRODUCTION (compiled in debug builds) and IS counted.
+///
+/// GOV P0 (round 4): the previous line-scanner only saw module-level FREE fns
+/// (brace-depth 0) and MISSED a crate-visible ASSOCIATED fn — e.g.
+/// `impl Foo { pub(crate) fn second_entry(...) { … } }` — which is equally a
+/// second outward producer entry. The `syn`-based walk recognises a producer
+/// entry regardless of whether it is free or associated, and regardless of any
+/// `unsafe` / `async` / `const` / `extern "…"` modifier (carried structurally
+/// on `sig`, so no modifier text-skipping is needed).
+fn crate_visible_producer_fn_names(src: &str) -> Vec<String> {
+    let file = syn::parse_file(src).unwrap_or_else(|e| panic!("crate-visible scan parse: {e}"));
+    let mut names: Vec<String> = Vec::new();
+    collect_crate_visible_fns_in_items(&file.items, &mut names);
+    names
+}
+
+/// Recursive worker for [`crate_visible_producer_fn_names`]: walk a slice of
+/// items, collecting crate-visible free fns + `impl`-block associated fns and
+/// descending into non-test inline modules.
+fn collect_crate_visible_fns_in_items(items: &[syn::Item], names: &mut Vec<String>) {
+    for item in items {
+        match item {
+            // A module-level free function.
+            syn::Item::Fn(f) => {
+                if attrs_test_gate(&f.attrs) {
+                    continue;
+                }
+                if visibility_is_crate_visible(&f.vis) {
+                    names.push(f.sig.ident.to_string());
+                }
+            }
+            // INHERENT `impl` block — every crate-visible associated fn inside
+            // is an outward producer entry. A TRAIT `impl` (`imp.trait_` set) is
+            // SKIPPED: its methods inherit the trait's visibility and can never
+            // be an independently crate-visible producer entry, so they are not
+            // a producer-entry vector. A test-gated impl is skipped wholesale.
+            syn::Item::Impl(imp) => {
+                if imp.trait_.is_some() {
+                    continue;
+                }
+                if attrs_test_gate(&imp.attrs) {
+                    continue;
+                }
+                for impl_item in &imp.items {
+                    if let syn::ImplItem::Fn(m) = impl_item {
+                        if attrs_test_gate(&m.attrs) {
+                            continue;
+                        }
+                        if visibility_is_crate_visible(&m.vis) {
+                            names.push(m.sig.ident.to_string());
+                        }
+                    }
+                }
+            }
+            // Inline module — descend (skipping a test-gated module such as the
+            // `for_tests` facade) so a producer entry can't hide one level in.
+            syn::Item::Mod(m) => {
+                if attrs_test_gate(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    collect_crate_visible_fns_in_items(inner, names);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// GOV finding (c) + round-4/5 extension: assert `macro_type_arg_hot_ref` is the
+/// SOLE crate-visible (`pub(crate)` / `pub(in crate)` / bare `pub`) PRODUCTION
+/// producer entry of the `macro_hot_mirror` module — covering BOTH module-level
+/// FREE functions AND ASSOCIATED functions inside INHERENT `impl` blocks
+/// (trait-impl methods inherit the trait's visibility and cannot be independently
+/// crate-visible, so they are not a producer-entry vector). No OTHER
+/// crate-visible fn (free or associated) in `macro_hot_mirror/**` may expose a
+/// second macro-arg producer entry. The `#[cfg(test)]` test facade
+/// (`for_tests::lower_type_expr_structural_for_tests`) and the `#[cfg(test)]`
+/// `MacroHotMirror::demanded_count` test accessor are excluded by attribute, and
+/// the raw structural lowerer is `pub(in crate::macro_hot_mirror)` (restricted
+/// visibility — NOT crate-visible), so none widens the crate-visible producer
+/// surface. This complements
+/// `structural_lowerer_production_entry_is_macro_hot_mirror_private` (which pins
+/// the lowerer ancestor-private — the PRIMARY by-construction guarantee); this
+/// one SECONDARILY pins the mirror's outward producer entry to exactly one
+/// crate-visible symbol, now including associated fns.
+#[test]
+fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
+    let mut crate_visible: Vec<(String, String)> = Vec::new();
+    let mut scanned_mirror_files = 0usize;
+    for (rel, src) in session_production_src_files() {
+        if !rel.contains("macro_hot_mirror/") {
+            continue;
+        }
+        scanned_mirror_files += 1;
+        for name in crate_visible_producer_fn_names(&src) {
+            crate_visible.push((rel.clone(), name));
+        }
+    }
+    // Anti-vacuity: the module must exist and the scan must have found the
+    // sanctioned entry — its absence means the producer-entry move regressed.
+    assert!(
+        scanned_mirror_files >= 2,
+        "anti-vacuity: expected at least the `mod.rs` + `structural_lower.rs` mirror production \
+         files, found {scanned_mirror_files}"
     );
     assert!(
-        foreign[0].0.contains("meta_resolve/slot_binding_graph.rs"),
-        "the reported violation is the synthetic foreign caller, not the definition"
+        crate_visible
+            .iter()
+            .any(|(_, name)| name == MIRROR_SOLE_PRODUCER_ENTRY),
+        "anti-vacuity: the sanctioned sole producer entry `{MIRROR_SOLE_PRODUCER_ENTRY}` must be \
+         present as a crate-visible fn in `macro_hot_mirror/**`"
+    );
+    let extra: Vec<&(String, String)> = crate_visible
+        .iter()
+        .filter(|(_, name)| name != MIRROR_SOLE_PRODUCER_ENTRY)
+        .collect();
+    assert!(
+        extra.is_empty(),
+        "mirror entry-surface violation (GOV finding c + round-4/5): `{MIRROR_SOLE_PRODUCER_ENTRY}` \
+         must be the SOLE crate-visible (`pub(crate)`/`pub(in crate)`/`pub`) PRODUCTION producer \
+         entry of `macro_hot_mirror/**` (beyond the cfg-gated test facade) — covering BOTH \
+         module-level FREE functions AND ASSOCIATED functions inside INHERENT `impl` blocks. A second \
+         crate-visible producer fn (free OR associated) re-opens a second outward entry into the \
+         single-entry mirror. Found extra entries: {extra:#?}. If the module legitimately needs \
+         another crate-visible fn for a NON-producer reason, scope it to a non-producer surface \
+         and add it to the sanctioned set with justification."
+    );
+}
+
+/// Self-test for [`crate_visible_producer_fn_names`] + the entry-surface guard:
+/// the sole `pub(crate)` entry passes; an INJECTED second crate-visible producer
+/// — `pub(crate)` OR `pub(in crate)`, FREE or ASSOCIATED (inside an INHERENT
+/// `impl`) — reddens; reverting greens. A `pub(in crate::…)`-subtree /
+/// `pub(super)` restricted entry is NOT crate-visible; a `#[cfg(test)]`-gated
+/// (or `#[cfg(any(test, …))]`, via the `test` arm) item is excluded, while a
+/// `#[cfg(not(test))]` PRODUCTION item and a bare `#[cfg(debug_assertions)]`
+/// PRODUCTION item are COUNTED.
+#[test]
+fn mirror_entry_surface_classifier_discriminates() {
+    // Baseline: one sanctioned free entry + a restricted lowerer + an impl-block
+    // method/associated-fn (BOTH module-private — `new` has inherited visibility,
+    // `demanded_count` is `#[cfg(test)]`) → only the sanctioned entry is
+    // reported. The restricted lowerer (`pub(in …)`) is not crate-visible.
+    let ok = "pub(crate) fn macro_type_arg_hot_ref(ctx: &C) -> Option<H> { None }\n\
+              pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+              impl Ctx {\n    fn new(b: &[B]) -> Self { Self }\n    #[cfg(test)]\n    pub(crate) fn demanded_count(&self) -> usize { 0 }\n}\n";
+    assert_eq!(
+        crate_visible_producer_fn_names(ok),
+        vec!["macro_type_arg_hot_ref".to_string()],
+        "only the `pub(crate)` free fn is a crate-visible entry; the restricted lowerer, the \
+         module-private `impl`-block `new`, and the `#[cfg(test)]` `demanded_count` are not"
+    );
+    // INJECT a second module-level `pub(crate)` FREE producer → now TWO entries.
+    let two = "pub(crate) fn macro_type_arg_hot_ref(ctx: &C) -> Option<H> { None }\n\
+               pub(crate) fn macro_type_arg_hot_ref_v2(ctx: &C) -> Option<H> { None }\n";
+    let names = crate_visible_producer_fn_names(two);
+    assert!(
+        names.contains(&"macro_type_arg_hot_ref".to_string())
+            && names.contains(&"macro_type_arg_hot_ref_v2".to_string()),
+        "an injected second module-level `pub(crate) fn` producer must be reported as an extra \
+         crate-visible entry (reddening the guard)"
+    );
+    // ROUND-4 GOV P0 — the heart of this fix. INJECT a second crate-visible
+    // ASSOCIATED fn inside an `impl` block (the exact gap the old line-scanner
+    // missed: it only saw module-level free fns at brace-depth 0). It MUST be
+    // reported as an extra crate-visible producer entry, reddening the guard.
+    let assoc_second = "pub(crate) fn macro_type_arg_hot_ref(c: &C) -> Option<H> { None }\n\
+                        impl MacroHotMirror {\n    pub(crate) fn second_entry(c: &C) -> Option<H> { None }\n}\n";
+    let assoc_names = crate_visible_producer_fn_names(assoc_second);
+    assert!(
+        assoc_names.contains(&"macro_type_arg_hot_ref".to_string())
+            && assoc_names.contains(&"second_entry".to_string()),
+        "an injected `impl Foo {{ pub(crate) fn second_entry … }}` associated producer MUST be \
+         reported as a crate-visible entry — the guard now sees `impl`-block associated fns, not \
+         only module-level free fns (got {assoc_names:?})"
+    );
+    // ROUND-5 GOV — `pub(in crate)` is EXACTLY equivalent crate-wide visibility,
+    // so an injected `pub(in crate)` producer MUST redden, FREE or ASSOCIATED.
+    // FREE: a second `pub(in crate) fn` is a second outward entry.
+    let pub_in_crate_free = "pub(crate) fn macro_type_arg_hot_ref(c: &C) -> Option<H> { None }\n\
+         pub(in crate) fn second_entry(c: &C) -> Option<H> { None }\n";
+    let pic_free = crate_visible_producer_fn_names(pub_in_crate_free);
+    assert!(
+        pic_free.contains(&"macro_type_arg_hot_ref".to_string())
+            && pic_free.contains(&"second_entry".to_string()),
+        "an injected `pub(in crate) fn` FREE producer must be reported as a crate-visible entry — \
+         `pub(in crate)` is identical crate-wide visibility to `pub(crate)` (got {pic_free:?})"
+    );
+    // ASSOCIATED: a `pub(in crate) fn` inside an INHERENT `impl` is equally a
+    // second outward entry.
+    let pub_in_crate_assoc =
+        "pub(crate) fn macro_type_arg_hot_ref(c: &C) -> Option<H> { None }\n\
+         impl MacroHotMirror {\n    pub(in crate) fn second_entry(c: &C) -> Option<H> { None }\n}\n";
+    let pic_assoc = crate_visible_producer_fn_names(pub_in_crate_assoc);
+    assert!(
+        pic_assoc.contains(&"macro_type_arg_hot_ref".to_string())
+            && pic_assoc.contains(&"second_entry".to_string()),
+        "an injected `impl MacroHotMirror {{ pub(in crate) fn second_entry … }}` associated \
+         producer must be reported as a crate-visible entry (got {pic_assoc:?})"
+    );
+    // A TRAIT-impl method is NOT a producer-entry vector and is SKIPPED: a
+    // trait-impl method inherits the trait's visibility and cannot carry its own
+    // `pub` / `pub(crate)` (the spelling below is rejected by rustc; `syn` still
+    // parses it). The collector ignores trait-impl methods entirely, so it
+    // reports NOTHING here and never errors.
+    let trait_assoc =
+        "impl SomeTrait for MacroHotMirror {\n    pub(crate) fn via_trait(&self) {}\n}\n";
+    assert!(
+        crate_visible_producer_fn_names(trait_assoc).is_empty(),
+        "a trait-impl method is not an independently crate-visible producer entry — the collector \
+         must skip trait impls (and not panic on the syn-parsed body)"
+    );
+    // A bare-trait-impl method WITHOUT a `pub` (the only valid Rust form) is also
+    // skipped — confirming the trait-impl branch is taken on the realistic shape.
+    let trait_assoc_valid = "impl SomeTrait for MacroHotMirror {\n    fn via_trait(&self) {}\n}\n";
+    assert!(
+        crate_visible_producer_fn_names(trait_assoc_valid).is_empty(),
+        "a (valid) trait-impl method is not a crate-visible producer entry — the collector skips \
+         trait impls"
+    );
+    // A `pub(in crate::macro_hot_mirror)` ASSOCIATED fn is module-private
+    // (restricted BELOW crate scope) → NOT crate-visible → guard stays GREEN.
+    let restricted_assoc =
+        "impl MacroHotMirror {\n    pub(in crate::macro_hot_mirror) fn inner(&self) {}\n}\n";
+    assert!(
+        crate_visible_producer_fn_names(restricted_assoc).is_empty(),
+        "a `pub(in crate::macro_hot_mirror)` associated fn is restricted (not crate-visible) and \
+         must stay green"
+    );
+    // A `pub(in crate::macro_hot_mirror)` FREE fn is likewise module-private →
+    // NOT crate-visible → stays GREEN (distinct from `pub(in crate)`).
+    assert!(
+        crate_visible_producer_fn_names(
+            "pub(in crate::macro_hot_mirror) fn inner(g: &G) -> R { todo!() }\n"
+        )
+        .is_empty(),
+        "a `pub(in crate::macro_hot_mirror)` FREE fn is restricted below crate scope and must stay \
+         green — only an EXACT `crate` restricted path is crate-visible"
+    );
+    // A bare `pub fn` module-level entry is also crate-visible (wider).
+    assert_eq!(
+        crate_visible_producer_fn_names("pub fn another_producer(x: u8) -> u8 { x }\n"),
+        vec!["another_producer".to_string()],
+        "a bare `pub fn` module-level entry is crate-visible (in fact wider)"
+    );
+    // GOV P0 #1 (carried forward): the classifier MUST see through fn modifiers.
+    // A second crate-visible producer hiding behind `unsafe` / `async` / `const`
+    // / `extern "C"` is STILL a crate-visible producer entry. `syn` carries the
+    // modifiers structurally on `sig`, so the fn name is recognised regardless.
+    let unsafe_second = "pub(crate) fn macro_type_arg_hot_ref(c: &C) -> Option<H> { None }\n\
+                         pub(crate) unsafe fn second_producer(c: &C) -> Option<H> { None }\n";
+    let unsafe_names = crate_visible_producer_fn_names(unsafe_second);
+    assert!(
+        unsafe_names.contains(&"macro_type_arg_hot_ref".to_string())
+            && unsafe_names.contains(&"second_producer".to_string()),
+        "an injected `pub(crate) unsafe fn` second producer must be reported as a crate-visible \
+         entry — the classifier sees through the `unsafe` modifier (got {unsafe_names:?})"
+    );
+    assert_eq!(
+        crate_visible_producer_fn_names("pub(crate) async fn async_producer() {}\n"),
+        vec!["async_producer".to_string()],
+        "a `pub(crate) async fn` module-level entry is crate-visible (modifier-aware)"
+    );
+    assert_eq!(
+        crate_visible_producer_fn_names("pub(crate) const fn const_producer() -> u8 { 0 }\n"),
+        vec!["const_producer".to_string()],
+        "a `pub(crate) const fn` module-level entry is crate-visible (modifier-aware)"
+    );
+    assert_eq!(
+        crate_visible_producer_fn_names("pub(crate) unsafe extern \"C\" fn extern_producer() {}\n"),
+        vec!["extern_producer".to_string()],
+        "a `pub(crate) unsafe extern \"C\" fn` module-level entry is crate-visible"
+    );
+    // A `pub(in …)` restricted FREE entry is NOT crate-visible even WITH a
+    // modifier.
+    assert!(
+        crate_visible_producer_fn_names(
+            "pub(in crate::macro_hot_mirror) unsafe fn restricted() {}\n"
+        )
+        .is_empty(),
+        "a `pub(in …) unsafe fn` restricted-visibility entry is NOT crate-visible"
+    );
+    // A `#[cfg(test)]`-gated module (the real `for_tests` facade shape) is
+    // test-only and excluded — its `pub fn` inside does NOT widen the
+    // production producer surface.
+    let facade =
+        "#[cfg(test)]\nmod for_tests {\n    pub fn lower_type_expr_structural_for_tests() {}\n}\n";
+    assert!(
+        crate_visible_producer_fn_names(facade).is_empty(),
+        "a `#[cfg(test)]`-gated module's `pub fn` must be excluded (it does not widen the \
+         production producer surface)"
+    );
+    // STRENGTHENING (F1): a bare `#[cfg(debug_assertions)] pub(crate) fn` is
+    // COMPILED in debug production builds, so it MUST be counted as a production
+    // producer entry — `debug_assertions` is NOT a test gate. Single-entry must
+    // hold in debug builds too, so a debug-only crate-visible producer reddens.
+    assert_eq!(
+        crate_visible_producer_fn_names("#[cfg(debug_assertions)]\npub(crate) fn debug_only() {}\n"),
+        vec!["debug_only".to_string()],
+        "a `#[cfg(debug_assertions)] pub(crate) fn` is COMPILED in debug production builds and MUST \
+         be counted — `debug_assertions` is NOT a test gate (single-entry must hold in debug too)"
+    );
+    // A `#[cfg(any(test, debug_assertions))] pub(crate) fn` is STILL excluded:
+    // CONSERVATIVE OVER-EXCLUSION (recorded P1 debt): a positive `test` ARM
+    // inside `any(...)` is treated as test-gating, so this stays excluded —
+    // even though `#[cfg(any(test, debug_assertions))]` IS production-satisfiable
+    // in a debug non-test build (via `debug_assertions`). This characterizes the
+    // classifier's current `any`-arm behavior (the load-bearing single-entry
+    // guarantee is the by-construction visibility, not this scan); narrowing the
+    // `any`-arm exclusion is tracked debt, not in scope here.
+    assert!(
+        crate_visible_producer_fn_names(
+            "#[cfg(any(test, debug_assertions))]\npub(crate) fn t() {}\n"
+        )
+        .is_empty(),
+        "a `#[cfg(any(test, debug_assertions))]` item stays excluded under the classifier's \
+         conservative `any`-arm test-gating (recorded P1 over-exclusion debt)"
+    );
+    // ROUND-5 GOV — `#[cfg(not(test))]` is a PRODUCTION-only item (compiled in
+    // non-test builds), NOT a test gate. It MUST be COUNTED: a `pub(crate)` fn
+    // gated `#[cfg(not(test))]` is a genuine crate-visible producer entry. The
+    // previous `rendered.contains("test")` gate FALSELY excluded it.
+    assert_eq!(
+        crate_visible_producer_fn_names("#[cfg(not(test))]\npub(crate) fn prod_only() {}\n"),
+        vec!["prod_only".to_string()],
+        "a `#[cfg(not(test))] pub(crate) fn` is a PRODUCTION item and MUST be counted — \
+         `not(test)` is not a test gate"
+    );
+    // Conversely a bare `#[cfg(test)]` `pub(crate) fn` is excluded (test-only).
+    assert!(
+        crate_visible_producer_fn_names("#[cfg(test)]\npub(crate) fn test_only() {}\n").is_empty(),
+        "a `#[cfg(test)] pub(crate) fn` is test-only and must be excluded"
+    );
+    // `#[cfg(any(feature = \"x\", test))]` — `test` as the SECOND any-arm still
+    // gates (positive `test` predicate anywhere in `any`/`all`).
+    assert!(
+        crate_visible_producer_fn_names(
+            "#[cfg(any(feature = \"x\", test))]\npub(crate) fn maybe_test() {}\n"
+        )
+        .is_empty(),
+        "a `#[cfg(any(feature = \"x\", test))] pub(crate) fn` is test-gated (positive `test` in \
+         an `any` arm) and must be excluded"
+    );
+    // `#[cfg(all(unix, not(test)))]` — production (the only test mention is under
+    // `not`), so it MUST be counted.
+    assert_eq!(
+        crate_visible_producer_fn_names(
+            "#[cfg(all(unix, not(test)))]\npub(crate) fn unix_prod() {}\n"
+        ),
+        vec!["unix_prod".to_string()],
+        "a `#[cfg(all(unix, not(test)))] pub(crate) fn` is production (test only under `not`) and \
+         MUST be counted"
+    );
+    // The REAL mirror source exposes exactly the one sanctioned entry (revert
+    // proof: the production tree is pristine — free + associated coverage).
+    let mut real: Vec<String> = Vec::new();
+    for rel in [
+        "crates/verter_session/src/macro_hot_mirror/mod.rs",
+        "crates/verter_session/src/macro_hot_mirror/structural_lower.rs",
+    ] {
+        let src = std::fs::read_to_string(workspace_path(rel))
+            .unwrap_or_else(|e| panic!("could not read {rel}: {e}"));
+        real.extend(crate_visible_producer_fn_names(&src));
+    }
+    assert_eq!(
+        real,
+        vec![MIRROR_SOLE_PRODUCER_ENTRY.to_string()],
+        "the REAL mirror module must expose EXACTLY `{MIRROR_SOLE_PRODUCER_ENTRY}` as its \
+         crate-visible producer entry (free OR associated)"
     );
 }

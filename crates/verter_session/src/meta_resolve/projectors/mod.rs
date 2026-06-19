@@ -8,9 +8,10 @@
 //!
 //! Authority chain:
 //!
-//! 1. `dispatch.lower_type_expr_in_scope_with_mode(file, parsed_arg, Navigate)`
-//!    lowers the parsed type argument to a `SemanticNodeId` so the
-//!    dispatch can resolve the macro payload.
+//! 1. `crate::macro_hot_mirror::macro_type_arg_hot_ref(ctx, file, macro_index)`
+//!    reads the macro arg's mode-neutral hot-mirror handle (the ONE producer)
+//!    so the dispatch can resolve the macro payload from the structural
+//!    carrier.
 //! 2. `dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload { .. })`
 //!    yields the macro payload's semantic node (the resolved type that
 //!    backs the macro instance).
@@ -514,9 +515,12 @@ pub(crate) fn macro_payload_surface_provenance(
 
 /// Resolve a type-based macro's payload through `ResolveMacroPayload`.
 ///
-/// Lowers the macro's `parsed_type_argument` to a [`SemanticNodeId`] in
-/// `Navigate` mode, then dispatches `ResolveMacroPayload` and returns
-/// the macro payload node on success.
+/// Reads the macro arg's ONE mode-neutral mirror handle
+/// (`crate::macro_hot_mirror::macro_type_arg_hot_ref`) — the producer lowered
+/// the `parsed_type_argument` once — then RE-ENTERS the shared dispatch with
+/// `ResolveMacroPayload` (Navigate) for the terminal demand over that carrier
+/// handle and returns the macro payload node on success. This is a different
+/// DEMAND on the same producer, NOT a second lowering of the macro arg.
 ///
 /// On `Recursive` or `Error`, appends a diagnostic to `diag_sink` and
 /// returns `None`. Dep-signature is accumulated unconditionally.
@@ -535,33 +539,26 @@ pub(crate) fn resolve_macro_payload(
     expansion_kind: MacroExpansionKind,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<SemanticNodeId> {
-    let parsed_arg = mac.parsed_type_argument.as_ref()?;
-    // Surface-provenance for the macro type argument's own body (by
-    // design). Props / withDefaults carry the macro-T own-body
-    // provenance so members written directly in `defineProps<T>()`'s `T`
-    // surface with `declared_in_macro_type_arg = true`. Emits / slots /
-    // options / model / expose are structural — their
-    // `declared_in_macro_type_arg` is always `false` downstream (the bit
-    // is a props-axis concern consumed by `PublishedSurfacePolicy::Refined`).
-    let macro_provenance = macro_payload_surface_provenance(macro_kind);
-    let type_args: Arc<[SemanticNodeId]> = match dispatch.lower_type_expr_in_scope_with_context(
-        file,
-        parsed_arg,
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-            ProjectionMode::Navigate,
-        )
-        .with_provenance(macro_provenance),
-    ) {
-        Some(node) => Arc::from(vec![node].into_boxed_slice()),
-        None => {
-            diag_sink.push(macro_expansion_for_query_error(
-                macro_index,
-                expansion_kind,
-                format!("macro-payload-lowering-failed@{:?}", macro_kind),
-            ));
-            return None;
-        }
-    };
+    let _ = mac.parsed_type_argument.as_ref()?;
+    // The macro type-argument graph node is the ONE mode-neutral mirror
+    // handle (its macro-T own-body provenance is baked at production time —
+    // `defineProps` / `withDefaults` own-body members carry
+    // `declared_in_macro_type_arg = true`). The terminal demand below
+    // (`ResolveMacroPayload`, Navigate) re-enters the ONE shared dispatch
+    // from the carrier handle — a different DEMAND on the same producer, NOT
+    // a second lowering of the macro arg.
+    let type_args: Arc<[SemanticNodeId]> =
+        match crate::macro_hot_mirror::macro_type_arg_hot_ref(dispatch.ctx, file, macro_index) {
+            Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
+            None => {
+                diag_sink.push(macro_expansion_for_query_error(
+                    macro_index,
+                    expansion_kind,
+                    format!("macro-payload-lowering-failed@{:?}", macro_kind),
+                ));
+                return None;
+            }
+        };
 
     let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
         owner: dispatch.type_slot_for(
@@ -653,14 +650,55 @@ pub(crate) fn resolve_macro_payload(
         payload_data.as_deref(),
         Some(SemanticNodeData::DeclRef { .. })
     );
+    // An unresolved-reference carrier (`BareRef` / `ImportType` / `TypeOf`)
+    // surviving as the macro payload is the carrier-preserving counterpart of
+    // the `DeclRef` case: under the query-free macro hot mirror a single-arg
+    // props payload (`defineProps<MissingImport>()`) returns the macro arg's
+    // structural carrier verbatim, so a payload whose declaration does not
+    // exist arrives here as a `BareRef`/`ImportType`/`TypeOf` carrier rather
+    // than a pre-resolved `DeclRef`. The structural probe below resolves it ONE
+    // Navigate hop through the shared dispatch (which records the value-root
+    // `ImportRoute` / `FileWholeHash` facts) and discriminates a genuine miss.
+    let payload_is_unresolved_ref_carrier = matches!(
+        payload_data.as_deref(),
+        Some(data) if data.bare_ref_head().is_some()
+            || data.import_type_head().is_some()
+            || data.typeof_head().is_some()
+    );
     drop(payload_data);
-    if payload_is_empty_surface || payload_is_decl_ref_carrier {
-        if let Some(parsed_arg) = mac.parsed_type_argument.as_ref() {
-            if let Some(probe_node) = dispatch.lower_type_expr_in_scope_with_mode(
+    if (payload_is_empty_surface
+        || payload_is_decl_ref_carrier
+        || payload_is_unresolved_ref_carrier)
+        && mac.parsed_type_argument.is_some()
+    {
+        {
+            // Probe the SAME mirror handle (a different DEMAND on the one
+            // producer — never a second lowering). Resolve its carrier head
+            // ONE Navigate hop through the shared dispatch so the structural
+            // root carrier becomes the resolved `DeclRef` / `Opaque(Miss)`
+            // the discrimination below inspects.
+            let probe_node = crate::macro_hot_mirror::macro_type_arg_hot_ref(
+                dispatch.ctx,
                 file,
-                parsed_arg,
-                ProjectionMode::Navigate,
-            ) {
+                macro_index,
+            )
+            .map(|handle| {
+                let probe_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+                    base: handle.node(),
+                    path: empty_path(),
+                    context:
+                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                            ProjectionMode::Navigate,
+                        ),
+                });
+                emit_dispatch_dep_signature_facts(dispatch.ctx, &probe_read.dep_signature);
+                match probe_read.value {
+                    QueryResult::Value(id) => id,
+                    QueryResult::Recursive(id) => id,
+                    QueryResult::Error(_) => handle.node(),
+                }
+            });
+            if let Some(probe_node) = probe_node {
                 let unresolved: Option<String> =
                     match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, probe_node)
                         .as_deref()
@@ -1664,6 +1702,26 @@ fn resolve_member_value_for_classification(
     value: SemanticNodeId,
     carrier_mode: bool,
 ) -> SemanticNodeId {
+    // Under the query-free macro hot mirror an inline-object member value
+    // (`defineProps<{ msg: MyStr }>()`) is interned as an unresolved-reference
+    // carrier (`BareRef("MyStr")`), not a pre-resolved `DeclRef`. Resolve the
+    // carrier head ONE hop through the shared carrier-subject normalization so
+    // an alias-to-primitive (`type MyStr = string`) reaches its concrete body
+    // and classifies `ExactConcrete` — the same hop the path-walker / query
+    // entry run. Done in `Navigate` (carrier-preserving for deeper structure);
+    // the alias unwrap below then proceeds on the resolved `DeclRef`.
+    let value =
+        match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value).as_deref() {
+            Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
+                dispatch.resolve_carrier_subject_node(
+                    value,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
+                )
+            }
+            _ => value,
+        };
     let should_expand =
         match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, value).as_deref() {
             Some(SemanticNodeData::DeclRef { .. }) => true,

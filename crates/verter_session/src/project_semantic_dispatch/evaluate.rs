@@ -513,6 +513,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         _ => break self.opaque(QueryError::Miss),
                     }
                 }
+                // `BareRef` / `ImportType` are UNRESOLVED-reference carriers
+                // produced by the query-free macro hot mirror — a `Pick<C, K>`
+                // source `C`, a mapped-type source, etc. arrive here as a bare
+                // `BareRef` carrier rather than a pre-resolved `DeclRef`.
+                // Re-enter the SHARED carrier-subject normalization
+                // (`resolve_carrier_subject_node`) — the SAME hop the
+                // path-walker (walk.rs) runs for a mid-walk carrier and the
+                // canonical query entry runs for a subject carrier — under
+                // `StructuralTransit(Navigate)` so operator heads resolve enough
+                // to reach the real declaration while the body stays
+                // carrier-preserving. This is the one-hop reference resolution,
+                // NOT the over-evaluation the `DeclRef` / `InstantiationRef`
+                // carriers warned about below: a bare/import reference carries
+                // no symbolic-form preservation policy. A reference that does not
+                // resolve (normalization returns it unchanged) breaks to the
+                // input node.
+                SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                    drop(data);
+                    let resolved = self.resolve_carrier_subject_node(
+                        node,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                            ProjectionMode::Navigate,
+                        ),
+                    );
+                    if resolved == node {
+                        break node;
+                    }
+                    resolved
+                }
                 // `DeclRef`/`InstantiationRef`
                 // arms are deliberately NOT added to the deferred-
                 // shell evaluator. The path-walker (walk.rs) and the

@@ -94,11 +94,28 @@ pub struct ResolvedComponentMetaState {
     /// [`crate::host_audit_bridge::macro_expansion_to_audit_entries`].
     pub synthesis_diagnostics:
         Vec<verter_semantic::analysis::component_meta::MacroExpansionDiagnostics>,
+    /// Typed per-result completeness — `Complete` when this resolved state is
+    /// the full surface, `Partial` (with its reason set) when a budget
+    /// exhaustion / fatal `QueryError` / partial macro surface produced a
+    /// structurally-incomplete result during the cold compute. This is the
+    /// AUTHORITATIVE partial-result signal; [`Self::synthesis_should_suppress`]
+    /// is a compatibility projection derived from
+    /// `completeness.is_partial()` (do not duplicate the truth — set
+    /// `completeness`, read `synthesis_should_suppress`). A `Partial` result
+    /// is RETURNED to the caller but is refused warm admission to the
+    /// `ComponentMetaResultDb` / resolved-meta caches (the no-poison
+    /// invariant).
+    pub completeness: crate::semantic_query::ResultCompleteness,
     /// `true` when graph-native slot-binding synthesis observed a fatal
     /// `QueryError` (`BudgetExceeded`, `UnstableState`, walker
     /// `cache_suppress`) during the cold compute. Gates
     /// `ComponentMetaResultDb` publication so partially-populated
     /// results never warm the shared final-result cache.
+    ///
+    /// COMPATIBILITY PROJECTION of [`Self::completeness`]: equals
+    /// `completeness.is_partial()`. Kept as a bool field so the many existing
+    /// consumers read it directly; the typed `completeness` is the single
+    /// source of truth.
     pub synthesis_should_suppress: bool,
 }
 

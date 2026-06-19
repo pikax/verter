@@ -953,6 +953,7 @@ impl VerterHost {
             snapshot,
             external_type_analysis: Arc::clone(&external_type_analysis),
             declares_interface_app_config,
+            macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror::default(),
         });
 
         // Publish via the multi-candidate surface — base candidate (if

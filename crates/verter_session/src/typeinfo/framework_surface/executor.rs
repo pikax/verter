@@ -557,6 +557,7 @@ impl ExecutorResolveCtx<'_> {
         // all of them into one aggregate bundle.
         let mut aggregate = MacroSurfaceDtos::default();
         let mut any = false;
+        let mut any_partial = false;
         for (macro_index, mac) in indexed.snapshot.macros.iter().enumerate() {
             if !contributes(mac.kind) {
                 continue;
@@ -569,15 +570,28 @@ impl ExecutorResolveCtx<'_> {
                 root_identity: indexed.whole_hash,
                 level: TypeInfoQueryLevel::FullMetadata,
             };
-            let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
+            let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
                 self.ctx, &request,
             );
-            fold_requested_slot(&mut aggregate, requested_kind, &dtos);
+            any_partial |= dtos_read.is_partial();
+            fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);
         }
         if !any {
             // No macro of the requested kind (nor a model contributing to props)
             // — the selector has no such surface.
             return ResolvedOutcome::Missing;
+        }
+        if any_partial {
+            // A contributing macro surface tripped a fuse mid-resolution: the
+            // aggregate carries a usable subset but is structurally incomplete.
+            // Surface PARTIAL (maps to the wire `PARTIAL` support status) rather
+            // than masquerading as a fully-resolved surface.
+            return ResolvedOutcome::Partial {
+                value: Arc::new(aggregate),
+                diagnostics: vec!["macro surface resolution hit a budget / fatal diagnostic; \
+                     surface is partial"
+                    .to_string()],
+            };
         }
         ResolvedOutcome::Resolved(Arc::new(aggregate))
     }

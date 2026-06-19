@@ -577,14 +577,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Resolve a carrier SUBJECT node to its real semantic node when `node` is a
-    /// `BareRef` / `ImportType` carrier, returning the rewritten node id; returns
-    /// `node` UNCHANGED for any non-carrier (or a re-entrant carrier already
-    /// being normalized — the pre-memo cycle guard).
+    /// `BareRef` / `ImportType` / `TypeOf` carrier, returning the rewritten node
+    /// id; returns `node` UNCHANGED for any non-carrier (or a re-entrant carrier
+    /// already being normalized — the pre-memo cycle guard).
     ///
-    /// This is the carrier-subject side of the ONE shared resolver: it rehydrates
-    /// a value-side [`CarrierResolverContext`] from the carrier's own
-    /// node-level scope (the body file) — an EMPTY `name_resolution` plus the
-    /// scope's `DeclarationScopePayload` + `ScopeShadowing` derived from
+    /// This is the carrier-subject side of the ONE shared resolver. For a
+    /// `BareRef` / `ImportType` carrier it rehydrates a value-side
+    /// [`CarrierResolverContext`] from the carrier's own node-level scope (the
+    /// body file) — an EMPTY `name_resolution` plus the scope's
+    /// `DeclarationScopePayload` + `ScopeShadowing` derived from
     /// `prepared_decl_bundle`, exactly the shape
     /// [`Self::lower_type_expr_in_scope_with_context`] uses in production — then
     /// calls [`Self::resolve_bare_ref_head`] / [`Self::resolve_import_type_head`]
@@ -592,7 +593,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `name_resolution` map (that map is a lowering-time local), so this path
     /// recovers the resolution through the `resolve_bare_name_in_scope` fallback;
     /// the import-type head re-injects its own head binding.
-    pub(super) fn resolve_carrier_subject_node(
+    ///
+    /// For a `TypeOf` carrier (`typeof value.path<args>`) it re-enters the shared
+    /// dispatch through [`Self::typeof_key_for`] (-> `build_typeof`), projects the
+    /// carrier's internal dotted path in `Navigate`, then applies the carrier's
+    /// instantiation `type_args` — resolve -> project -> apply, the same chain
+    /// the PathWalker's mid-walk `TypeOf` arm runs. This is what resolves an
+    /// empty-path `typeof` macro payload, whose carrier never reaches the
+    /// walker's per-segment arm; the `build_typeof` subquery records the
+    /// value-root `FileWholeHash` / `ImportRoute` facts into the active tracer so
+    /// they bubble into the outer component-meta result signature.
+    pub(crate) fn resolve_carrier_subject_node(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -601,11 +612,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(data) = graph.node_data(node) else {
             return node;
         };
-        // Fast reject: only the two unresolved reference carriers are
+        // Fast reject: only the three unresolved-reference carriers are
         // head-resolvable as a query subject.
         let is_bare = data.bare_ref_head().is_some();
         let is_import = data.import_type_head().is_some();
-        if !is_bare && !is_import {
+        let is_typeof = data.typeof_head().is_some();
+        if !is_bare && !is_import && !is_typeof {
             return node;
         }
         drop(data);
@@ -620,6 +632,72 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return node;
         }
         self.carrier_normalizing.borrow_mut().push(node);
+
+        // TypeOf carrier subject: `typeof value.path<args>`. The empty-path
+        // entry points (a macro payload `defineProps<typeof config>()`, an
+        // imported `typeof imported.value`) reach the PathWalker with an EMPTY
+        // path, so the walker's per-segment `TypeOf` arm never fires — the
+        // carrier must resolve HERE, at the query subject, exactly as the
+        // walker's mid-walk arm does. This re-enters the ONE shared dispatch
+        // (`typeof_key_for` -> `build_typeof`), which roots the value name
+        // through the shared bare-name / import path and records its
+        // `FileWholeHash` (resolved file) / `ImportRoute` (unresolved import)
+        // facts into the active tracer so they bubble into the outer
+        // component-meta result signature. NO side-band dep preflight: the
+        // mirror stays query-free; resolution + dep recording happen at THIS
+        // resolving demand. The carrier's internal dotted path projects in
+        // `Navigate` (an intermediate hop) and the carrier's instantiation
+        // `type_args` apply AFTER the projection — resolve -> project -> apply,
+        // mirroring the walker's `TypeOf` arm.
+        if is_typeof {
+            let (value_root, typeof_path) = {
+                let data = graph.node_data(node).expect("TypeOf carrier data");
+                let (value_root, typeof_path) = data.typeof_head().expect("TypeOf head");
+                (value_root.clone(), typeof_path.clone())
+            };
+            let type_args: Vec<SemanticNodeId> = {
+                let data = graph.node_data(node).expect("TypeOf carrier data");
+                data.carrier_type_args().to_vec()
+            };
+            // The typeof value-root resolves under the caller's reduction
+            // context (the demand point); the carrier-internal dotted path is
+            // an INTERMEDIATE hop and projects in `Navigate`. Use `execute_read`
+            // (NOT `execute_type_node`) so a budget-exhausted / partial subquery
+            // folds its `result_is_partial` + `cache_suppress` into the request
+            // (`observe_component_meta_read_suppress`) — the no-poison rail: a
+            // partial carrier resolution must not warm any enclosing cache.
+            let typeof_key = self.typeof_key_for(value_root, context);
+            let root_read = self.execute_read(typeof_key);
+            crate::request_context::observe_component_meta_read_suppress(&root_read);
+            let mut resolved = match root_read.value {
+                QueryResult::Value(id) => id,
+                _ => self.opaque(QueryError::Miss),
+            };
+            if resolved != node && !typeof_path.is_empty() {
+                let projection_path: Arc<[PathSegment]> = Arc::from(
+                    typeof_path
+                        .iter()
+                        .map(|seg| PathSegment::Member(Arc::clone(seg)))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let path_read = self.execute_read(SemanticQueryKey::ProjectPath {
+                    base: resolved,
+                    path: projection_path,
+                    context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                });
+                crate::request_context::observe_component_meta_read_suppress(&path_read);
+                resolved = match path_read.value {
+                    QueryResult::Value(id) => id,
+                    _ => self.opaque(QueryError::Miss),
+                };
+            }
+            if resolved != node && !type_args.is_empty() {
+                resolved = self.apply_typeof_instantiation_args(resolved, &type_args);
+            }
+            self.carrier_normalizing.borrow_mut().pop();
+            return resolved;
+        }
 
         // The carrier's already-lowered args (read through the SOLE sanctioned
         // descent accessor) and node-level scope (the owner/body file).
@@ -727,7 +805,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 path,
                 context,
             } => {
-                let base = self.resolve_carrier_subject_node(base, context);
+                // A `TypeOf` carrier subject with a NON-EMPTY path is left for the
+                // PathWalker's per-segment `TypeOf` arm, which runs the path-precise
+                // resolve -> project (Navigate intermediate hop) -> apply chain.
+                // Pre-resolving it here would over-resolve the internal carrier path
+                // under the caller's outer mode and bypass the walker's
+                // intermediate-hop demotion. The EMPTY-path case (a `typeof config`
+                // macro payload) has no walker segment to fire the arm, so it MUST
+                // resolve here. `BareRef` / `ImportType` subjects normalize in both
+                // cases (the walker only re-enters this same helper for them).
+                let base = if !path.is_empty()
+                    && self
+                        .graph()
+                        .node_data(base)
+                        .is_some_and(|d| d.typeof_head().is_some())
+                {
+                    base
+                } else {
+                    self.resolve_carrier_subject_node(base, context)
+                };
                 SemanticQueryKey::ProjectPath {
                     base,
                     path,
@@ -793,7 +889,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(data) = graph.node_data(subject) else {
             return false;
         };
-        data.bare_ref_head().is_some() || data.import_type_head().is_some()
+        data.bare_ref_head().is_some()
+            || data.import_type_head().is_some()
+            || data.typeof_head().is_some()
     }
 }
 

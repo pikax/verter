@@ -413,16 +413,32 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "carrier_module_has_no_public_type_args_surface",
             "carrier_type_args_accessor_is_exhaustive_and_wildcard_free",
             "map_carrier_type_args_is_exhaustive_and_wildcard_free",
-            // DORMANT-WIRING: the structural lowerer's public entry
-            // `lower_type_expr_structural` has ZERO production call sites — it
-            // stays dormant until the carrier-resolution work wires it together
-            // with the deferred consumer-walker carrier-arg descent and its
-            // integration tests. This blocks the recorded carrier-resolution
-            // debt (the `meta_resolve` ref/cycle/dep walkers etc. that still
-            // drop carrier `type_args`) from being silently bypassed: the
-            // lowerer cannot feed non-empty carriers to those walkers without
-            // removing this guard.
-            "structural_lowerer_has_no_production_caller_until_carrier_resolution",
+            // MACRO HOT MIRROR — single-engine producer (make-unrepresentable):
+            // the structural lowerer's production entry `lower_type_expr_structural`
+            // is re-housed under `crate::macro_hot_mirror::structural_lower` and is
+            // `pub(in crate::macro_hot_mirror)` ancestor-private, so its SOLE
+            // production caller is the macro hot-mirror builder and a second
+            // macro-arg graph producer is unrepresentable by construction. The
+            // PRIVACY-SHAPE guard pins that visibility; the ENTRY-SURFACE guard
+            // pins `macro_type_arg_hot_ref` as the SOLE crate-visible module-level
+            // producer entry of the module (no second outward producer fn beyond
+            // the cfg-gated test facade); the ORDERING TRIPWIRE bans a production
+            // macro-arg eager-lowering path outside the mirror (a FILE-SCOPE catch:
+            // whole-function co-presence PLUS the cross-function-same-file
+            // binding-flow helper split); the PURITY guard bans the full
+            // route/import/cross-file-symbol/carrier-head resolution surface
+            // (`prepared_decl_bundle`, `cached_import_route_resolution`,
+            // `resolve_route_type_edge`, `resolve_type_dependency_canonical`,
+            // `resolve_owner_direct_import`, `routed_shallow_state`,
+            // `resolve_*_head`, …) inside the mirror producer — resolution + dep
+            // recording belong at the resolving DEMAND, so the producer stays a
+            // pure structural-carrier lowering and script-setup seeding re-sources
+            // from the owner's route-free `IndexedReady` (`raw_source` +
+            // `framework_parse`).
+            "structural_lowerer_production_entry_is_macro_hot_mirror_private",
+            "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
+            "no_production_macro_arg_eager_lowering_outside_mirror",
+            "macro_hot_mirror_producer_is_pure_no_route_resolution",
             // HANDLE-CAPABLE DUAL-READ (additive, ahead of the producer
             // flip): the listed component-meta consumers accept BOTH a
             // parser-produced `TypeExpr` and an already-lowered handle,

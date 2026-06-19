@@ -9412,7 +9412,8 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &request_for(overlay_hash),
-    );
+    )
+    .dtos;
     let overlay_props = prop_names(&overlay_dtos);
     assert!(
         overlay_props.contains(&"a".to_string()),
@@ -9534,7 +9535,8 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &request_for(overlay_hash),
-    );
+    )
+    .dtos;
     let overlay_props = prop_names(&overlay_dtos);
     assert!(
         overlay_props.contains(&"fresh".to_string()),
@@ -9677,7 +9679,8 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &request_for(overlay_hash),
-    );
+    )
+    .dtos;
     let overlay_bindings = default_binding_names(&overlay_dtos);
     assert_eq!(
         overlay_bindings,

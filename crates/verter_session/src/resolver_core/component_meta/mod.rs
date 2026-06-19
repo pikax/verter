@@ -167,7 +167,7 @@ pub(crate) fn component_meta_resolved_macros(
         let Some(mac) = snapshot_macros.get(resolved.macro_index) else {
             continue;
         };
-        let dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
+        let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
             ctx,
             &crate::typeinfo::types::VueMacroSurfaceRequest {
                 owner_canonical: std::sync::Arc::from(owner_canonical),
@@ -177,6 +177,11 @@ pub(crate) fn component_meta_resolved_macros(
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             },
         );
+        // Fold a genuine partial macro surface into the request-result
+        // completeness so the enclosing component-meta result is refused warm
+        // promotion (the no-poison invariant).
+        dtos_read.observe_partial();
+        let dtos = dtos_read.dtos;
         inputs.push(
             verter_semantic::analysis::component_meta::ResolvedMacroInput {
                 macro_index: resolved.macro_index,

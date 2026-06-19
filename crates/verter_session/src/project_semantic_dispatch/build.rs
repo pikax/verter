@@ -415,7 +415,84 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 value_root.name.as_ref(),
             ) {
                 Some(identity) => identity,
-                None => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
+                None => {
+                    // `typeof name` where `name` is an IMPORT whose specifier
+                    // does not (yet) resolve — `import theme from './theme'`
+                    // before `/theme.ts` exists. The miss is a MissingDependency
+                    // result: it MUST invalidate the moment the dependency
+                    // appears. The build-layer fence (`WholeHash` /
+                    // `RouteGeneration` / `ProjectGeneration`) carries NO
+                    // `DerivedFactKind::ImportRoute` rail — the only rail whose
+                    // hash shifts when a known-miss specifier resolves (a
+                    // synthetic project-generation dep is the wrong correctness
+                    // rail, per the architecture ruling). So when the name is
+                    // import-backed we OBSERVE the owner's `ImportRoute` fact
+                    // into the active tracer (`generation_current_import_route_hash`
+                    // re-resolves the owner's known-miss specifiers against the
+                    // live workspace, so the recorded hash shifts the moment the
+                    // dependency appears) — bubbling it into the outer
+                    // component-meta result signature so the warm read misses
+                    // after the dependency is added. When the route fact cannot
+                    // be produced (no import-route surface to root on), the
+                    // miss is unrootable and MUST be cache-suppressed
+                    // (`ReturnOnly`): the value still flows, but no warm entry
+                    // publishes, so the next request recomputes cold and
+                    // recovers. A non-import miss (a genuinely absent LOCAL
+                    // symbol) stays the ordinary unrooted Miss.
+                    let is_import_backed = has_import_local
+                        || has_namespace_prefix
+                        || scope_payload.as_ref().is_some_and(|p| {
+                            p.import_bindings.contains_key(value_root.name.as_ref())
+                        });
+                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                        (QueryResult::Error(QueryError::Miss), empty_signature()).into();
+                    if is_import_backed {
+                        let owner_canonical = value_root.scope.canonical_id.as_ref();
+                        // Best-effort: observe the owner's `ImportRoute` derived
+                        // fact into the active tracer so any consumer cache whose
+                        // validity rail consults import-route facts re-validates
+                        // when the specifier resolves.
+                        if let Some(route_hash) = self
+                            .ctx
+                            .host_for_fact_tracer_install()
+                            .generation_current_import_route_hash(owner_canonical)
+                        {
+                            crate::fact_signature_helpers::observe_fact_signature(&[
+                                crate::resolver_core::FactVersionRef::DerivedFactHash {
+                                    canonical_id: owner_canonical.to_string(),
+                                    kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                                    hash: route_hash,
+                                },
+                            ]);
+                        }
+                        // The build-layer fence cannot carry the `ImportRoute`
+                        // rail (no `DepVersion` variant expresses a derived-fact
+                        // hash) and a value-import known-miss may not even surface
+                        // in the owner's type-import route table — so the route
+                        // fact above is NOT a guaranteed invalidation rail for
+                        // EVERY consuming memo (the `TypeOf` memo, the
+                        // `evaluate_deferred` memo, the field-materialize memo, the
+                        // resolved-meta result cache). A `typeof <unresolved
+                        // import>` is a genuine `MissingDependency` PARTIAL: the
+                        // resolution is structurally incomplete because a dependency
+                        // is absent. Marking it `result_is_partial` makes EVERY
+                        // consuming cache refuse warm admission (the no-poison
+                        // invariant — `result_is_partial` folds through every
+                        // nested read and the finalisation boundary forces
+                        // `cache_suppress`), so the next request after the
+                        // dependency appears recomputes cold and recovers. Also
+                        // mark the request-scoped materialization suppress sticky
+                        // (which OR-folds into the resolved-meta result's
+                        // `synthesis_should_suppress` gate) for the no-`RequestContext`
+                        // belt-and-braces. (Per the architecture ruling: when the
+                        // route fact cannot guarantee invalidation, the degraded
+                        // MissingDependency result is `ReturnOnly`.)
+                        output.result_is_partial = true;
+                        output.cache_suppress = true;
+                        crate::request_context::mark_request_materialization_cache_suppress();
+                    }
+                    return output;
+                }
             };
         // Effective post-fallback identity: when the resolved root names a
         // re-exporting canonical with no local prepared VALUE decl, the

@@ -146,6 +146,7 @@ pub(crate) mod decl_body_memo;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
 pub mod framework;
+pub(crate) mod macro_hot_mirror;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
 // implementation detail. The only externally-needed type is
 // `ReadSetSignature` — the return type of the public inspector

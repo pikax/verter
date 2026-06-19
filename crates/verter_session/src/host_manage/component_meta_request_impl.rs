@@ -328,7 +328,9 @@ impl ComponentMetaRequestHost for VerterHost {
     }
 
     fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
-        result.synthesis_should_suppress
+        // Read the typed completeness (the authoritative partial signal);
+        // `synthesis_should_suppress` is its bool projection.
+        result.completeness.is_partial()
     }
 }
 
@@ -508,7 +510,9 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
     }
 
     fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
-        result.synthesis_should_suppress
+        // Read the typed completeness (the authoritative partial signal);
+        // `synthesis_should_suppress` is its bool projection.
+        result.completeness.is_partial()
     }
 }
 
@@ -713,7 +717,9 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
     }
 
     fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
-        result.synthesis_should_suppress
+        // Read the typed completeness (the authoritative partial signal);
+        // `synthesis_should_suppress` is its bool projection.
+        result.completeness.is_partial()
     }
 }
 

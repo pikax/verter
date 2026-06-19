@@ -236,6 +236,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         request_id: 0,
         surface_identities: None,
         synthesis_diagnostics: Vec::new(),
+        completeness: host::semantic_query::ResultCompleteness::Complete,
         synthesis_should_suppress: false,
     };
 
@@ -346,6 +347,7 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
         request_id: 0,
         surface_identities: None,
         synthesis_diagnostics: Vec::new(),
+        completeness: host::semantic_query::ResultCompleteness::Complete,
         synthesis_should_suppress: false,
     };
 
@@ -1782,6 +1784,7 @@ fn ffi_payload_contains_origin_field_when_resolved_state_has_origin_graph() {
         request_id: 0,
         surface_identities: None,
         synthesis_diagnostics: Vec::new(),
+        completeness: host::semantic_query::ResultCompleteness::Complete,
         synthesis_should_suppress: false,
     };
 
@@ -1811,6 +1814,7 @@ fn ffi_origin_subgraph_is_empty_when_resolved_state_has_no_origin_graph() {
         request_id: 0,
         surface_identities: None,
         synthesis_diagnostics: Vec::new(),
+        completeness: host::semantic_query::ResultCompleteness::Complete,
         synthesis_should_suppress: false,
     };
 
@@ -1868,6 +1872,7 @@ fn ffi_edge_meta_strings_deduplicated() {
         request_id: 0,
         surface_identities: None,
         synthesis_diagnostics: Vec::new(),
+        completeness: host::semantic_query::ResultCompleteness::Complete,
         synthesis_should_suppress: false,
     };
 
@@ -1901,6 +1906,7 @@ fn ffi_projection_mode_wire_format() {
         request_id: 0,
         surface_identities: None,
         synthesis_diagnostics: Vec::new(),
+        completeness: host::semantic_query::ResultCompleteness::Complete,
         synthesis_should_suppress: false,
     };
 
@@ -1962,6 +1968,7 @@ fn ffi_payload_contains_instantiate_edge_for_generic_component() {
         request_id: 0,
         surface_identities: None,
         synthesis_diagnostics: Vec::new(),
+        completeness: host::semantic_query::ResultCompleteness::Complete,
         synthesis_should_suppress: false,
     };
 
