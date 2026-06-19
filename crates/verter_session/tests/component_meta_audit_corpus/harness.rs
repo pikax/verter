@@ -21,8 +21,8 @@
 //! - The hang deadline is `max(timeout * 2, MIN_HARD_DEADLINE)`. The
 //!   floor exists so tests of the harness itself can pass tiny
 //!   timeouts without racing into a spurious abort, while real
-//!   corpus runs with multi-second timeouts get the plan's
-//!   `timeout * 2` semantics directly.
+//!   corpus runs with multi-second timeouts use the standard
+//!   `timeout * 2` hard-deadline semantics directly.
 //! - If the worker still has not finished after the hang deadline,
 //!   the harness aborts the test process via [`std::process::abort`]
 //!   rather than abandoning the worker thread. A detached worker
