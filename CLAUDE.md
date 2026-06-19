@@ -236,6 +236,14 @@ Review-enforced (the guard does not cover these):
 
 Guards: `tracked_paths_are_portable`.
 
+### Anti-Binary-Growth Integration-Test Layout (CRITICAL)
+
+Each crate exposes AT MOST one `tests/main.rs` integration-test binary; extra cases live under `tests/cases/` and are wired through `main.rs`. A second top-level `tests/*.rs` auto-becomes its own test binary and re-balloons the gate, so it is forbidden unless EXACTLY allowlisted. The only sanctioned exceptions are genuine "needs a separate test process" cases (process-global state that must be isolated): `verter_session` `allocator_canaries` (a counting `#[global_allocator]`) and `verter_lsp` `lsp_audit_trace_out_env_var` (a process-global env mutation). The allowlist (`scripts/integration-test-layout-allowlist.json`) is the single source of truth shared by both guards, is EXACT (package + target + repo-relative `src_path`, no globs/prefixes), and is STALE-FAILING — an allowlisted target that no longer exists in `cargo metadata` (or whose `src_path` moved) FAILS the guard.
+
+Dual guard: the fast-fail CI Node check `scripts/check-integration-test-layout.mjs` (runs before the Rust gate) and the in-gate Rust mirror (`crates/verter_session/tests/cases/integration_test_layout_guard.rs`), both reading the same allowlist.
+
+Guards: `integration_test_layout_is_consolidated`, `layout_checker_discriminates_stray_and_stale`, `allowlist_is_the_two_known_process_isolated_targets`.
+
 ### Framework Adapter Substrate (CRITICAL)
 
 Multi-framework component support is ONE shared adapter substrate, not a per-framework semantic fork. `verter_session::framework` owns the `FrameworkAdapterRegistry` (built once at `VerterHost` construction), the per-adapter `FrameworkAdapterDescriptor` (identity, supported surface kinds, carrier language, the `VirtualFileNaming` column), the facts/carrier-only `FrameworkAdapterCtx`, the `ComponentDefaultSynth` seam, and the two-pass script-fact seam. Vue is the REFERENCE adapter — re-housed as a true plan/normalize adapter (`VueFrameworkAdapter` + the relocated `vue_exec` resolution delegates), NOT a privileged hardcoded path.

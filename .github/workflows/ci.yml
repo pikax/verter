@@ -195,6 +195,8 @@ jobs:
           node-version: lts/*
       - name: Validate v5/process parity manifest
         run: node scripts/v5-process/validate_manifest.mjs
+      - name: Anti-binary-growth integration-test layout
+        run: node scripts/check-integration-test-layout.mjs
       - name: Prewarm tsgo cache
         run: npx -y @typescript/native-preview@latest --version
       - name: Install cargo-nextest

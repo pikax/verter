@@ -534,6 +534,30 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // Anti-binary-growth: each crate exposes AT MOST one
+        // `tests/main.rs` integration-test binary (extra cases live
+        // under `tests/cases/` wired through `main.rs`), plus the two
+        // EXACTLY-allowlisted process-isolated targets. A DUAL guard:
+        // the fast-fail CI Node check
+        // (`scripts/check-integration-test-layout.mjs`) and the in-gate
+        // Rust mirror below both read the SAME committed allowlist
+        // (`scripts/integration-test-layout-allowlist.json`), so the
+        // exception set is a single source of truth and stale-failing.
+        "Anti-Binary-Growth Integration-Test Layout",
+        &[
+            // The guard: the real consolidated workspace must be
+            // conformant (mirror of the Node CI check).
+            "integration_test_layout_is_consolidated",
+            // Discrimination self-test: the pure checker FAILS on a
+            // second top-level `tests/*.rs`, a stale allowlist entry,
+            // an `autotests=false` hide, and a missing `tests/main.rs`.
+            "layout_checker_discriminates_stray_and_stale",
+            // Allowlist parity: exactly the two known process-isolated
+            // exceptions, agreeing with the Node guard's expectation.
+            "allowlist_is_the_two_known_process_isolated_targets",
+        ],
+    ),
+    (
         "Stub Prevention",
         &[
             "macro_impacting_constructs_fail_lowering_not_silent_skip",

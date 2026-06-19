@@ -38,6 +38,7 @@ mod g_route;
 mod g_session;
 mod g_type;
 mod handle_capable_consumer_guards;
+mod integration_test_layout_guard;
 mod oracle_driver;
 mod oracle_query_specs_shared;
 mod oracle_tsgo_forbidden;
