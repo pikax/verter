@@ -1747,6 +1747,29 @@ fn build_workspace_components_enumerates_svelte_and_strips_extension() {
     })
     .unwrap();
 
+    // A dotted filename stem (`Model.Named.vue`) must sanitize to a VALID JS
+    // identifier (`ModelNamed`) — the `.` is a word separator feeding PascalCase,
+    // NOT a literal character carried into the component name. Pre-fix this
+    // yielded `Model.Named`, an invalid identifier that produced the syntax error
+    // `import Model.Named from './Model.Named.vue'`.
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/Model.Named.vue".to_string()),
+        input_id: "/workspace/src/Model.Named.vue".to_string(),
+        source: "<script setup lang=\"ts\"></script>".into(),
+        file_language: verter_session::FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    // Parity: the same sanitization must hold for the Svelte carrier.
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/Dotted.Svelte.Name.svelte".to_string()),
+        input_id: "/workspace/src/Dotted.Svelte.Name.svelte".to_string(),
+        source: "<script>let x = 1;</script>".into(),
+        file_language: verter_session::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
     let components = build_workspace_components(&host, "/workspace/src/App.svelte");
     let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
     assert!(
@@ -1760,6 +1783,269 @@ fn build_workspace_components_enumerates_svelte_and_strips_extension() {
     assert!(
         !names.iter().any(|n| n.contains(".svelte")),
         "the carrier extension must be stripped from the component name, got: {names:?}"
+    );
+    // Dotted Vue stem → valid identifier (discriminating: pre-fix `Model.Named`).
+    assert!(
+        names.contains(&"ModelNamed"),
+        "a dotted Vue carrier stem `Model.Named.vue` must sanitize to the valid \
+         identifier `ModelNamed`, got: {names:?}"
+    );
+    // Dotted Svelte stem → valid identifier (parity).
+    assert!(
+        names.contains(&"DottedSvelteName"),
+        "a dotted Svelte carrier stem must sanitize to the valid identifier \
+         `DottedSvelteName`, got: {names:?}"
+    );
+    // Negative: NO derived component name may contain a `.` — every name must be
+    // a valid JS identifier usable verbatim as both the tag and import binding.
+    assert!(
+        !names.iter().any(|n| n.contains('.')),
+        "no derived component name may contain a `.` (invalid identifier), got: {names:?}"
+    );
+    // Non-dotted names must NOT regress.
+    assert!(
+        names.contains(&"MyButton"),
+        "non-dotted PascalCase stem must remain unchanged, got: {names:?}"
+    );
+}
+
+#[test]
+fn build_workspace_components_sanitizes_dotted_and_special_chars() {
+    // Identifier-formatting contract for `build_workspace_components`:
+    // - `.` and any char outside `[A-Za-z0-9_$]` act as word separators feeding
+    //   PascalCase (`Model.Named` → `ModelNamed`, `my-comp` → `MyComp`).
+    // - `_` is a valid identifier char but ALSO behaves as a separator (existing
+    //   kebab/snake behavior is preserved: `my_comp` → `MyComp`).
+    // - `$` is a valid identifier char and is NOT a separator: it is kept verbatim
+    //   (`My$Comp` → `My$Comp`).
+    // - A name that would otherwise begin with a digit is prefixed with `_`.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for stem in [
+        "Model.Named",
+        "my-comp",
+        "2cool",
+        "weird@name!here",
+        "MyComponent",
+    ] {
+        host.upsert(verter_session::UpsertRequest {
+            canonical_id: Some(format!("/ws/src/{stem}.vue")),
+            input_id: format!("/ws/src/{stem}.vue"),
+            source: "<script setup lang=\"ts\"></script>".into(),
+            file_language: verter_session::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    let components = build_workspace_components(&host, "/ws/src/App.vue");
+    let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(names.contains(&"ModelNamed"), "got: {names:?}");
+    assert!(names.contains(&"MyComp"), "got: {names:?}");
+    // Leading-digit guard: `2cool` → `_2cool` (PascalCase capitalizes nothing
+    // before the digit, so the `_` guard is the only mutation).
+    assert!(names.contains(&"_2cool"), "got: {names:?}");
+    // Non-identifier chars are separators: `weird@name!here` → `WeirdNameHere`.
+    assert!(names.contains(&"WeirdNameHere"), "got: {names:?}");
+    assert!(names.contains(&"MyComponent"), "got: {names:?}");
+    // Every derived name is a valid JS identifier start + body.
+    for n in &names {
+        let mut chars = n.chars();
+        let first = chars.next().expect("non-empty name");
+        assert!(
+            first.is_ascii_alphabetic() || first == '_' || first == '$',
+            "name {n:?} must start with a valid identifier char, got: {names:?}"
+        );
+        assert!(
+            n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$'),
+            "name {n:?} must contain only valid identifier chars, got: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn to_pascal_case_pins_dollar_unicode_and_double_extension_behavior() {
+    // Direct, exhaustive pin of the filename→identifier formatter contract.
+    // (`build_workspace_components` is the only caller; this isolates the
+    // edge cases the helper itself owns.) `to_pascal_case` is in scope via the
+    // module's `use self::server_utils::*` glob.
+
+    // Baseline / regression cases.
+    assert_eq!(to_pascal_case("my-button"), "MyButton");
+    assert_eq!(to_pascal_case("my_comp"), "MyComp");
+    assert_eq!(to_pascal_case("MyComponent"), "MyComponent");
+    assert_eq!(to_pascal_case("index"), "Index");
+    assert_eq!(to_pascal_case("Model.Named"), "ModelNamed");
+
+    // `$` GAP — `$` is a VALID identifier char and is NOT a separator: it is
+    // kept verbatim. The doc explicitly excludes `$` from the separator set.
+    assert_eq!(
+        to_pascal_case("My$Comp"),
+        "My$Comp",
+        "`$` is a valid identifier char and must be preserved, not split on"
+    );
+    // A LEADING `$` is a valid identifier start and must survive (NOT prefixed
+    // with `_`, NOT dropped). PascalCase capitalizes the first ALPHA char after
+    // it; `$` itself has no uppercase form.
+    assert_eq!(
+        to_pascal_case("$special"),
+        "$special",
+        "a leading `$` is a valid identifier start and must be preserved verbatim"
+    );
+    assert_eq!(to_pascal_case("$my-comp"), "$myComp");
+
+    // `.vue.ts` / double-carrier-extension GAP. `strip_carrier_extension`
+    // strips ONLY a registered carrier suffix, so a `.vue.ts` sidecar yields the
+    // stem `"Model.Named.vue"` (the `.ts` is not a carrier). Such files are
+    // EXCLUDED upstream by `is_framework_carrier()`, but if the stem ever
+    // reached the formatter it must still produce a VALID identifier — the inner
+    // `.vue` is just another `.` separator. No invalid identifier can result.
+    let double_ext_stem = verter_workspace::strip_carrier_extension("Model.Named.vue.ts");
+    assert_eq!(
+        double_ext_stem, "Model.Named.vue.ts",
+        "`.ts` is not a carrier extension, so the `.vue.ts` suffix is not stripped"
+    );
+    assert_eq!(
+        to_pascal_case(double_ext_stem),
+        "ModelNamedVueTs",
+        "every `.` is a separator, so the double-extension stem stays a valid identifier"
+    );
+    // And on a genuine carrier-stripped stem the result is clean.
+    assert_eq!(
+        to_pascal_case(verter_workspace::strip_carrier_extension("Model.Named.vue")),
+        "ModelNamed"
+    );
+
+    // Non-ASCII GAP — ASCII-only by documented design: non-ASCII chars are
+    // separators (dropped). `café` → `Caf` (the `é` splits, nothing follows).
+    assert_eq!(
+        to_pascal_case("café"),
+        "Caf",
+        "non-ASCII chars are treated as separators (ASCII-only by design)"
+    );
+    assert_eq!(to_pascal_case("über-comp"), "BerComp");
+    // A stem with NO ASCII identifier chars yields the empty string (the carrier
+    // is then skipped upstream rather than emitting a bad name).
+    assert_eq!(to_pascal_case("日本語"), "");
+    assert_eq!(to_pascal_case("---"), "");
+
+    // The leading-digit guard.
+    assert_eq!(to_pascal_case("2cool"), "_2cool");
+    assert_eq!(to_pascal_case("3d-view"), "_3dView");
+}
+
+#[test]
+fn build_workspace_components_preserves_dollar_and_skips_non_ascii_only() {
+    // End-to-end through `build_workspace_components`: a `$`-bearing carrier
+    // keeps its `$`; a non-ASCII-only stem is SKIPPED (empty sanitized name).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for stem in ["My$Comp", "$Leading", "日本語", "MyButton"] {
+        host.upsert(verter_session::UpsertRequest {
+            canonical_id: Some(format!("/ws/src/{stem}.vue")),
+            input_id: format!("/ws/src/{stem}.vue"),
+            source: "<script setup lang=\"ts\"></script>".into(),
+            file_language: verter_session::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    let components = build_workspace_components(&host, "/ws/src/App.vue");
+    let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"My$Comp"),
+        "`$` must be preserved, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"$Leading"),
+        "a leading `$` carrier must enumerate, got: {names:?}"
+    );
+    assert!(names.contains(&"MyButton"), "got: {names:?}");
+    // The non-ASCII-only carrier sanitizes to `""` and is SKIPPED — no empty or
+    // invalid name leaks into the component list.
+    assert!(
+        !names.iter().any(|n| n.is_empty()),
+        "no empty component name may be emitted, got: {names:?}"
+    );
+    for n in &names {
+        assert!(
+            n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$'),
+            "every emitted name must be a valid identifier, got: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn build_workspace_components_dotted_collision_is_deterministic() {
+    // Collision case: `Model.Named.vue` and `ModelNamed.vue` BOTH sanitize to
+    // `ModelNamed`. `host.list_files()` is DashMap-backed (non-deterministic
+    // iteration order), so without a tie-break the candidate ORDER — and the
+    // collision winner the downstream label-dedup keeps — would flap run-to-run.
+    // `build_workspace_components` sorts by canonical file id, so the order and
+    // the collision winner are STABLE. This test asserts DETERMINISM: repeated
+    // calls yield byte-identical `(name, import_path)` sequences, the order is
+    // canonical-path-sorted, and the lexicographically-first canonical path
+    // (`Model.Named.vue` < `ModelNamed.vue`) is the first `ModelNamed` candidate.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/ws/src/Model.Named.vue".to_string()),
+        input_id: "/ws/src/Model.Named.vue".to_string(),
+        source: "<script setup lang=\"ts\"></script>".into(),
+        file_language: verter_session::FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/ws/src/ModelNamed.vue".to_string()),
+        input_id: "/ws/src/ModelNamed.vue".to_string(),
+        source: "<script setup lang=\"ts\"></script>".into(),
+        file_language: verter_session::FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    // Run the enumeration several times; every run must produce byte-identical
+    // output (name + path, in the same order).
+    let baseline: Vec<(String, String)> = build_workspace_components(&host, "/ws/src/App.vue")
+        .into_iter()
+        .map(|c| (c.name, c.import_path))
+        .collect();
+    for _ in 0..8 {
+        let again: Vec<(String, String)> = build_workspace_components(&host, "/ws/src/App.vue")
+            .into_iter()
+            .map(|c| (c.name, c.import_path))
+            .collect();
+        assert_eq!(
+            again, baseline,
+            "enumeration must be deterministic run-to-run, got {again:?} vs {baseline:?}"
+        );
+    }
+
+    let model_named: Vec<&str> = baseline
+        .iter()
+        .filter(|(name, _)| name == "ModelNamed")
+        .map(|(_, path)| path.as_str())
+        .collect();
+    // Both carriers surface under the same sanitized name, each preserving its
+    // OWN real import path (the path is never sanitized).
+    assert_eq!(
+        model_named.len(),
+        2,
+        "both colliding carriers must be enumerated, got paths: {model_named:?}"
+    );
+    // DETERMINISTIC WINNER: candidates are ordered by canonical path, so the
+    // lexicographically-first path `…/Model.Named.vue` is the FIRST `ModelNamed`
+    // candidate (the one the downstream first-wins label dedup keeps).
+    assert!(
+        model_named[0].ends_with("Model.Named.vue"),
+        "the canonical-path-first carrier must be the first collision candidate, got: {model_named:?}"
+    );
+    assert!(
+        model_named[1].ends_with("ModelNamed.vue"),
+        "the second collision candidate must be the later canonical path, got: {model_named:?}"
     );
 }
 
@@ -2242,6 +2528,221 @@ async fn goto_definition_component_event_name_reaches_child_define_emits() {
         target.range.start.line,
         line_for_snippet(child_source, "custom: [payload: string]"),
         "definition should point to the child defineEmits declaration"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn dotted_component_auto_import_edit_is_valid_end_to_end() {
+    // DISCRIMINATING END-TO-END: drive the REAL synthesis path rather than
+    // handing `build_auto_import_edit` a pre-sanitized name. The dotted carrier
+    // `Model.Named.vue` goes through `build_workspace_components` (the single
+    // source of truth for the binding name) → the synthesized completion `data`
+    // → `build_auto_import_edit`, exactly as the live resolve handler does
+    // (`nav_features.rs::handle_completion_resolve` reads `data.component_name`).
+    //
+    // Pre-fix, `build_workspace_components` produced `component_name = "Model.Named"`,
+    // so the emitted statement was the syntax error
+    // `import Model.Named from './Model.Named.vue'`. This test FAILS on that
+    // behavior and PASSES only with the sanitizer in place.
+    let child_source = "<script setup lang=\"ts\"></script>\n<template><div /></template>\n";
+    // App has an existing `<script setup>` (required anchor) and does NOT yet
+    // import the component.
+    let parent_source =
+        "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template>\n  <div />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/Model.Named.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let app_canonical = format!("{workspace_id}/src/App.vue");
+    let server = service.inner();
+
+    // 1. The REAL enumeration: derive the binding name + import path from disk.
+    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let model = ws_components
+        .iter()
+        .find(|c| c.import_path.ends_with("Model.Named.vue"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the dotted carrier must be enumerated, got: {:?}",
+                ws_components
+                    .iter()
+                    .map(|c| (&c.name, &c.import_path))
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    // The synthesized binding name must already be the sanitized identifier —
+    // this is the value the completion `data.component_name` carries.
+    assert_eq!(
+        model.name, "ModelNamed",
+        "the enumerated binding name must be the sanitized identifier (drives the import)"
+    );
+    assert!(
+        model.import_path.ends_with("Model.Named.vue"),
+        "the import PATH must keep the real on-disk `.Named.vue` stem, got: {:?}",
+        model.import_path
+    );
+
+    // 2. Feed the REAL synthesized name + path through the edit builder, exactly
+    //    as the resolve handler does.
+    let edit = server
+        .build_auto_import_edit(app_uri.as_str(), &model.name, &model.import_path)
+        .expect("auto-import edit should be produced for an existing <script setup>");
+
+    assert_eq!(
+        edit.new_text.trim_end(),
+        format!("import ModelNamed from '{}'", model.import_path),
+        "import must use the sanitized identifier with the real module path"
+    );
+    // Negative: must NOT emit the invalid dotted identifier form (the pre-fix bug).
+    assert!(
+        !edit.new_text.contains("import Model.Named "),
+        "import statement must NOT contain the invalid `Model.Named` identifier, got: {:?}",
+        edit.new_text
+    );
+    // The binding token must be a single valid identifier with no `.`.
+    let binding = edit
+        .new_text
+        .trim_start()
+        .strip_prefix("import ")
+        .and_then(|s| s.split_whitespace().next())
+        .expect("import statement shape");
+    assert!(
+        !binding.contains('.') && binding == "ModelNamed",
+        "the import binding must be the valid identifier `ModelNamed`, got: {binding:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn nested_dir_dotted_component_keeps_real_path_and_sanitized_binding() {
+    // GAP: a dotted component in a NESTED directory must keep its correct real
+    // relative import PATH while the binding is the sanitized identifier.
+    // `src/a/b/Dotted.Name.vue` imported into `src/App.vue` →
+    // `import DottedName from './a/b/Dotted.Name.vue'`.
+    let child_source = "<script setup lang=\"ts\"></script>\n<template><div /></template>\n";
+    let parent_source =
+        "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template>\n  <div />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/a/b/Dotted.Name.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let app_canonical = format!("{workspace_id}/src/App.vue");
+    let server = service.inner();
+
+    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let nested = ws_components
+        .iter()
+        .find(|c| c.name == "DottedName")
+        .unwrap_or_else(|| {
+            panic!(
+                "nested dotted carrier must enumerate as `DottedName`, got: {:?}",
+                ws_components
+                    .iter()
+                    .map(|c| (&c.name, &c.import_path))
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    // The PATH is never sanitized: it must be the correct nested relative path
+    // with the real dotted filename preserved.
+    assert_eq!(
+        nested.import_path, "./a/b/Dotted.Name.vue",
+        "nested dotted carrier must keep its real relative path"
+    );
+
+    let edit = server
+        .build_auto_import_edit(app_uri.as_str(), &nested.name, &nested.import_path)
+        .expect("auto-import edit for nested dotted component");
+    assert_eq!(
+        edit.new_text.trim_end(),
+        "import DottedName from './a/b/Dotted.Name.vue'",
+        "nested import must pair the sanitized binding with the real nested path"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_dotted_component_completion_is_sanitized_but_edit_placement_defers() {
+    // GAP (Svelte parity, honest): the SHARED completion path sanitizes a dotted
+    // `.svelte` carrier exactly like a `.vue` one — a valid tag + CLASS kind. The
+    // auto-import EDIT placement, however, is a PRE-EXISTING gap: it only targets
+    // a Vue `<script setup>`, so for a Svelte `<script>` block it returns `None`.
+    // This test pins BOTH facts so the Svelte completion stays covered and the
+    // placement deferral is explicit (not silently broken).
+    let child_source = "<script lang=\"ts\"></script>\n<div />\n";
+    // A Svelte component uses a plain `<script>` (NOT `<script setup>`).
+    let parent_source = "<script lang=\"ts\">\n  let x = 1;\n</script>\n<div />\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/Dotted.Svelte.Name.svelte", "svelte", child_source),
+        ("src/App.svelte", "svelte", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let app_canonical = format!("{workspace_id}/src/App.svelte");
+    let server = service.inner();
+
+    // (1) SHARED completion path: the dotted Svelte carrier sanitizes to a valid
+    //     identifier with the real `.svelte` path preserved.
+    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let svelte = ws_components
+        .iter()
+        .find(|c| c.import_path.ends_with("Dotted.Svelte.Name.svelte"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the dotted Svelte carrier must enumerate, got: {:?}",
+                ws_components
+                    .iter()
+                    .map(|c| (&c.name, &c.import_path))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        svelte.name, "DottedSvelteName",
+        "Svelte parity: a dotted `.svelte` stem must sanitize identically to Vue"
+    );
+
+    // The shared COMPLETION ITEM synthesis (tag insert + CLASS kind) is the
+    // user-visible shared surface — assert it produces a valid tag + CLASS.
+    let analysis = verter_session::FileAnalysisSnapshot::default();
+    let items = crate::features::completion::tag_name_completions(
+        &analysis,
+        Some(&ws_components),
+        Some(app_uri.as_str()),
+    );
+    let item = items
+        .iter()
+        .find(|i| i.label == "DottedSvelteName")
+        .expect("Svelte dotted component must appear as a sanitized tag completion");
+    assert_eq!(
+        item.kind,
+        Some(tower_lsp_server::ls_types::CompletionItemKind::CLASS),
+        "Svelte component tag item must use CLASS (shared with Vue)"
+    );
+
+    // (2) HONEST deferral: the auto-import EDIT placement only targets a Vue
+    //     `<script setup>`. For a Svelte plain `<script>` it returns `None` —
+    //     a SEPARATE, already-tracked placement gap, NOT a regression of this
+    //     fix. (The sanitized name + CLASS kind above already apply to Svelte.)
+    let edit = server.build_auto_import_edit(app_uri.as_str(), &svelte.name, &svelte.import_path);
+    assert!(
+        edit.is_none(),
+        "Svelte auto-import EDIT placement is a pre-existing deferral (no `<script setup>` anchor); \
+         got an unexpected edit: {edit:?}"
     );
 
     drain_handle.abort();

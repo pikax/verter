@@ -458,7 +458,7 @@ const VUE_BUILTINS: &[&str] = &[
 ];
 
 /// Build tag name completions: HTML elements + Vue built-ins + imported components + workspace components.
-fn tag_name_completions(
+pub(crate) fn tag_name_completions(
     analysis: &FileAnalysisSnapshot,
     workspace_components: Option<&[WorkspaceComponent]>,
     doc_uri: Option<&str>,
@@ -491,8 +491,10 @@ fn tag_name_completions(
     if let Some(template) = &analysis.template {
         for comp in &template.components {
             items.push(CompletionItem {
+                // Confirmed component used in the template, offered in tag position:
+                // CLASS (component icon).
                 label: comp.name.clone(),
-                kind: Some(CompletionItemKind::MODULE),
+                kind: Some(CompletionItemKind::CLASS),
                 detail: comp.import_source.as_ref().map(|s| format!("from '{}'", s)),
                 sort_text: Some(format!("0{}", comp.name)),
                 ..Default::default()
@@ -512,6 +514,10 @@ fn tag_name_completions(
             if !items.iter().any(|i| i.label == binding.name) {
                 items.push(CompletionItem {
                     label: binding.name.clone(),
+                    // Heuristic uppercase-name binding (may NOT be a component): keep
+                    // MODULE, not CLASS — only confirmed component tags earn the
+                    // component (CLASS) icon, so an arbitrary `const Foo = ...` does
+                    // not get a misleading component glyph.
                     kind: Some(CompletionItemKind::MODULE),
                     detail: Some("component binding".to_string()),
                     sort_text: Some(format!("0{}", binding.name)),
@@ -539,6 +545,9 @@ fn tag_name_completions(
             {
                 items.push(CompletionItem {
                     label: binding.name.clone(),
+                    // Heuristic uppercase-name import (may NOT be a component): keep
+                    // MODULE, not CLASS — the uppercase-first-char guess is not a
+                    // confirmed component, so it must not claim the component icon.
                     kind: Some(CompletionItemKind::MODULE),
                     detail: Some(format!("from '{}'", import.source)),
                     sort_text: Some(format!("0{}", binding.name)),
@@ -550,10 +559,17 @@ fn tag_name_completions(
 
     // Workspace components (auto-import)
     if let Some(ws_components) = workspace_components {
-        let existing: std::collections::HashSet<String> =
+        let mut existing: std::collections::HashSet<String> =
             items.iter().map(|i| i.label.clone()).collect();
         for comp in ws_components {
-            if existing.contains(&comp.name) {
+            // Skip names already declared/imported in this file AND dedup
+            // workspace-vs-workspace label collisions: two carriers can sanitize
+            // to the same identifier (e.g. `Model.Named.vue` and `ModelNamed.vue`
+            // both → `ModelNamed`). `build_workspace_components` sorts candidates
+            // by canonical path, so the first-inserted label wins (the
+            // lexicographically-first carrier); later collisions are dropped so the
+            // user never sees two indistinguishable items.
+            if !existing.insert(comp.name.clone()) {
                 continue;
             }
             let mut data = serde_json::json!({
@@ -566,7 +582,9 @@ fn tag_name_completions(
             }
             items.push(CompletionItem {
                 label: comp.name.clone(),
-                kind: Some(CompletionItemKind::MODULE),
+                // Confirmed workspace component file, offered in tag position
+                // (auto-import on accept): CLASS (component icon).
+                kind: Some(CompletionItemKind::CLASS),
                 detail: Some(format!("Auto import from '{}'", comp.import_path)),
                 sort_text: Some(format!("3{}", comp.name)),
                 data: Some(data),
@@ -971,10 +989,14 @@ fn template_completions(
     // Workspace components available for auto-import.
     // Only add components not already imported/declared in this file.
     if let Some(ws_components) = workspace_components {
-        let existing_labels: std::collections::HashSet<String> =
+        let mut existing_labels: std::collections::HashSet<String> =
             items.iter().map(|i| i.label.clone()).collect();
         for comp in ws_components {
-            if existing_labels.contains(&comp.name) {
+            // Skip names already in scope AND dedup workspace-vs-workspace label
+            // collisions first-wins (lex-first carrier, since
+            // `build_workspace_components` sorts by canonical path) — same contract
+            // as `tag_name_completions`.
+            if !existing_labels.insert(comp.name.clone()) {
                 continue;
             }
             let mut data = serde_json::json!({
@@ -987,6 +1009,11 @@ fn template_completions(
             }
             items.push(CompletionItem {
                 label: comp.name.clone(),
+                // This auto-import item is offered in EXPRESSION / INTERPOLATION
+                // scope ({{ }} / bound attr value), NOT a component-tag position, so
+                // it is referenced as a value binding, not inserted as a `<Tag>`.
+                // Keep MODULE — CLASS is reserved for genuine tag-position component
+                // completions (see `tag_name_completions`).
                 kind: Some(CompletionItemKind::MODULE),
                 detail: Some(format!("Auto import from '{}'", comp.import_path)),
                 sort_text: Some(format!("z{}", comp.name)), // Sort after local items
@@ -1414,7 +1441,22 @@ fn to_kebab_case(s: &str) -> String {
     result
 }
 
-/// Convert kebab-case to PascalCase.
+/// Convert kebab-case to PascalCase for tag-name MATCHING (`my-comp` ↔ `MyComp`).
+///
+/// Intentionally narrower than `server_utils::to_pascal_case`: it splits ONLY on
+/// `-`/`_` and applies no identifier sanitization (no `.`/non-ident separator,
+/// no leading-digit guard). This is a kebab↔name casing normalizer for matching
+/// an existing tag against a binding name, NOT a filename→import-binding
+/// synthesizer, so it must not rewrite `.` or guard digits (that would change
+/// match keys).
+//
+// TODO(follow-up): consolidating the three `to_pascal_case` copies
+// (server_utils.rs — the sanitizing import-binding synthesizer; here and
+// definition.rs — the narrower kebab↔name matchers) onto one shared helper is a
+// nice cleanup but NOT low-risk: the matchers deliberately have different
+// separator/digit semantics, so a naive merge would alter match keys. Defer
+// until a shared helper can express both modes (e.g. a `sanitize: bool` axis)
+// without entangling matching with import synthesis.
 fn to_pascal_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;

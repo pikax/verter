@@ -101,11 +101,21 @@ pub(super) fn build_workspace_components(
     host: &verter_session::VerterHost,
     current_file_id: &str,
 ) -> Vec<crate::features::completion::WorkspaceComponent> {
-    let files = host.list_files();
+    let mut files = host.list_files();
     let current_dir = current_file_id
         .rsplit_once('/')
         .map(|(dir, _)| dir)
         .unwrap_or("");
+
+    // DETERMINISTIC ENUMERATION ORDER. `host.list_files()` is backed by a DashMap,
+    // so its iteration order is non-deterministic run-to-run. Two files can
+    // sanitize to the SAME identifier (e.g. `Model.Named.vue` and `ModelNamed.vue`
+    // → `ModelNamed`); the downstream completion synthesizers dedup by label and
+    // keep the FIRST candidate, so a non-deterministic order would make collision
+    // resolution AND completion-item ordering flap between runs. Sorting by the
+    // canonical file id gives a single stable precedence: the first canonical path
+    // wins a collision, and emitted candidates are in a fixed order.
+    files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut components = Vec::new();
 
@@ -132,8 +142,15 @@ pub(super) fn build_workspace_components(
             continue;
         }
 
-        // Convert to PascalCase: `my-button` → `MyButton`, `index` stays `Index`
+        // Convert the filename stem to a VALID JS identifier in PascalCase:
+        // `my-button` → `MyButton`, `Model.Named` → `ModelNamed`, `index` → `Index`.
+        // This is identifier FORMATTING of a filename (the single source of truth
+        // for both the tag insert text and the auto-import binding), NOT semantic
+        // type logic — string ops are appropriate here.
         let component_name = to_pascal_case(stem);
+        if component_name.is_empty() {
+            continue;
+        }
 
         // Prefer alias-based path (e.g. @/components/Foo.vue) over relative
         let import_path = host
@@ -149,12 +166,35 @@ pub(super) fn build_workspace_components(
     components
 }
 
-/// Convert a kebab-case or mixed-case filename stem to PascalCase.
+/// Convert a filename stem to a valid JS-identifier PascalCase name.
+///
+/// `-`, `_`, `.`, and any character outside the ASCII identifier set
+/// `[A-Za-z0-9_$]` act as word separators feeding PascalCase
+/// (`my-button` → `MyButton`, `Model.Named` → `ModelNamed`,
+/// `weird@name` → `WeirdName`). `$` is kept verbatim (a valid ASCII identifier
+/// char that is NOT a separator: `My$Comp` → `My$Comp`). If the result would
+/// begin with a digit it is prefixed with `_` so it remains a valid identifier
+/// start (`2cool` → `_2cool`). Empty/all-separator input yields `""`.
+///
+/// ASCII-only by design: a non-ASCII char (e.g. `café`'s `é`, a CJK glyph) is
+/// treated as a separator and dropped from the derived name, even though JS
+/// permits Unicode identifiers. This keeps the helper free of the Unicode
+/// `ID_Start`/`ID_Continue` property tables; the on-disk component-name domain
+/// is overwhelmingly ASCII, and the result is ALWAYS a valid ASCII identifier
+/// usable verbatim as both the tag insert text and the auto-import binding. A
+/// stem with no ASCII identifier chars yields `""` and the carrier is skipped
+/// upstream in `build_workspace_components` rather than emitting a bad name.
+///
+/// This is identifier formatting of a filename, not semantic type logic.
 pub(super) fn to_pascal_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;
     for ch in s.chars() {
-        if ch == '-' || ch == '_' {
+        // `_` is identifier-valid but ALSO acts as a word separator, so the
+        // existing snake_case behavior (`my_comp` → `MyComp`) is preserved. `$`
+        // is identifier-valid and is NOT a separator: it is kept verbatim
+        // (`My$Comp` → `My$Comp`).
+        if ch == '-' || ch == '_' || ch == '.' || !is_ident_char(ch) {
             capitalize_next = true;
         } else if capitalize_next {
             result.extend(ch.to_uppercase());
@@ -163,7 +203,17 @@ pub(super) fn to_pascal_case(s: &str) -> String {
             result.push(ch);
         }
     }
+    // A valid identifier must not start with a digit.
+    if result.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        result.insert(0, '_');
+    }
     result
+}
+
+/// Whether `ch` is valid inside a JS identifier (ASCII-only, matching the
+/// component-name domain produced from on-disk filenames).
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'
 }
 
 /// Compute a relative path from `from_dir` to `to_file`.
