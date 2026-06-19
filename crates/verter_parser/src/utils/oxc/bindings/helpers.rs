@@ -9,442 +9,6 @@ use rustc_hash::FxHashSet;
 use super::keywords::{is_global, is_keyword};
 use crate::common::Span;
 
-/// Collect which setup binding names are referenced as free variables in a program.
-///
-/// Walks all statements in the program, tracking inner scopes (function params,
-/// block-scoped variables) to avoid false positives from shadowed identifiers.
-/// Top-level declarations are the setup bindings themselves and are NOT treated
-/// as inner-scope shadows.
-///
-/// Returns the subset of `setup_names` that appear as free references.
-pub fn collect_setup_binding_refs<'a>(
-    program: &'a Program<'a>,
-    setup_names: &FxHashSet<&str>,
-) -> FxHashSet<&'a str> {
-    let mut collector = SetupRefCollector {
-        setup_names,
-        local_scopes: Vec::new(),
-        refs: FxHashSet::default(),
-    };
-    for stmt in &program.body {
-        collector.visit_statement(stmt, /* top_level */ true);
-    }
-    collector.refs
-}
-
-struct SetupRefCollector<'a, 'b> {
-    setup_names: &'b FxHashSet<&'b str>,
-    local_scopes: Vec<FxHashSet<&'a str>>,
-    refs: FxHashSet<&'a str>,
-}
-
-impl<'a, 'b> SetupRefCollector<'a, 'b> {
-    fn is_locally_declared(&self, name: &str) -> bool {
-        self.local_scopes.iter().any(|scope| scope.contains(name))
-    }
-
-    fn check_identifier(&mut self, name: &'a str) {
-        if self.setup_names.contains(name)
-            && !self.is_locally_declared(name)
-            && !is_keyword(name.as_bytes())
-            && !is_global(name.as_bytes())
-        {
-            self.refs.insert(name);
-        }
-    }
-
-    fn visit_statement(&mut self, stmt: &'a Statement<'a>, top_level: bool) {
-        match stmt {
-            Statement::ExpressionStatement(expr_stmt) => {
-                self.visit_expression(&expr_stmt.expression);
-            }
-            Statement::VariableDeclaration(var_decl) => {
-                if !top_level {
-                    // Inner scope: add declared names as locals
-                    let scope = self
-                        .local_scopes
-                        .last_mut()
-                        .expect("inner var decl requires a scope");
-                    for decl in &var_decl.declarations {
-                        collect_pattern_locals_into_set(&decl.id, scope);
-                    }
-                }
-                // Visit initializers (they can reference setup bindings)
-                for decl in &var_decl.declarations {
-                    if let Some(init) = &decl.init {
-                        self.visit_expression(init);
-                    }
-                }
-            }
-            Statement::ReturnStatement(ret) => {
-                if let Some(arg) = &ret.argument {
-                    self.visit_expression(arg);
-                }
-            }
-            Statement::IfStatement(if_stmt) => {
-                self.visit_expression(&if_stmt.test);
-                self.visit_statement(&if_stmt.consequent, false);
-                if let Some(alt) = &if_stmt.alternate {
-                    self.visit_statement(alt, false);
-                }
-            }
-            Statement::BlockStatement(block) => {
-                self.local_scopes.push(FxHashSet::default());
-                for s in &block.body {
-                    self.visit_statement(s, false);
-                }
-                self.local_scopes.pop();
-            }
-            Statement::ForStatement(for_stmt) => {
-                self.local_scopes.push(FxHashSet::default());
-                if let Some(init) = &for_stmt.init {
-                    match init {
-                        ForStatementInit::VariableDeclaration(vd) => {
-                            {
-                                let scope = self.local_scopes.last_mut().unwrap();
-                                for decl in &vd.declarations {
-                                    collect_pattern_locals_into_set(&decl.id, scope);
-                                }
-                            }
-                            for decl in &vd.declarations {
-                                if let Some(init_expr) = &decl.init {
-                                    self.visit_expression(init_expr);
-                                }
-                            }
-                        }
-                        _ => {
-                            if let Some(expr) = init.as_expression() {
-                                self.visit_expression(expr);
-                            }
-                        }
-                    }
-                }
-                if let Some(test) = &for_stmt.test {
-                    self.visit_expression(test);
-                }
-                if let Some(update) = &for_stmt.update {
-                    self.visit_expression(update);
-                }
-                self.visit_statement(&for_stmt.body, false);
-                self.local_scopes.pop();
-            }
-            Statement::ForInStatement(for_in) => {
-                self.local_scopes.push(FxHashSet::default());
-                if let ForStatementLeft::VariableDeclaration(vd) = &for_in.left {
-                    let scope = self.local_scopes.last_mut().unwrap();
-                    for decl in &vd.declarations {
-                        collect_pattern_locals_into_set(&decl.id, scope);
-                    }
-                }
-                self.visit_expression(&for_in.right);
-                self.visit_statement(&for_in.body, false);
-                self.local_scopes.pop();
-            }
-            Statement::ForOfStatement(for_of) => {
-                self.local_scopes.push(FxHashSet::default());
-                if let ForStatementLeft::VariableDeclaration(vd) = &for_of.left {
-                    let scope = self.local_scopes.last_mut().unwrap();
-                    for decl in &vd.declarations {
-                        collect_pattern_locals_into_set(&decl.id, scope);
-                    }
-                }
-                self.visit_expression(&for_of.right);
-                self.visit_statement(&for_of.body, false);
-                self.local_scopes.pop();
-            }
-            Statement::WhileStatement(while_stmt) => {
-                self.visit_expression(&while_stmt.test);
-                self.visit_statement(&while_stmt.body, false);
-            }
-            Statement::DoWhileStatement(do_while) => {
-                self.visit_statement(&do_while.body, false);
-                self.visit_expression(&do_while.test);
-            }
-            Statement::SwitchStatement(switch) => {
-                self.visit_expression(&switch.discriminant);
-                for case in &switch.cases {
-                    if let Some(test) = &case.test {
-                        self.visit_expression(test);
-                    }
-                    for s in &case.consequent {
-                        self.visit_statement(s, false);
-                    }
-                }
-            }
-            Statement::ThrowStatement(throw) => {
-                self.visit_expression(&throw.argument);
-            }
-            Statement::TryStatement(try_stmt) => {
-                self.local_scopes.push(FxHashSet::default());
-                for s in &try_stmt.block.body {
-                    self.visit_statement(s, false);
-                }
-                self.local_scopes.pop();
-                if let Some(handler) = &try_stmt.handler {
-                    self.local_scopes.push(FxHashSet::default());
-                    if let Some(param) = &handler.param {
-                        let scope = self.local_scopes.last_mut().unwrap();
-                        collect_pattern_locals_into_set(&param.pattern, scope);
-                    }
-                    for s in &handler.body.body {
-                        self.visit_statement(s, false);
-                    }
-                    self.local_scopes.pop();
-                }
-                if let Some(finalizer) = &try_stmt.finalizer {
-                    self.local_scopes.push(FxHashSet::default());
-                    for s in &finalizer.body {
-                        self.visit_statement(s, false);
-                    }
-                    self.local_scopes.pop();
-                }
-            }
-            Statement::FunctionDeclaration(func) => {
-                self.visit_function_body(func);
-            }
-            _ => {}
-        }
-    }
-
-    fn visit_function_body(&mut self, func: &'a Function<'a>) {
-        self.local_scopes.push(FxHashSet::default());
-        let scope = self.local_scopes.last_mut().unwrap();
-        // Add function name to its own scope (for recursion)
-        if let Some(id) = &func.id {
-            scope.insert(id.name.as_str());
-        }
-        // Add params
-        for param in &func.params.items {
-            collect_pattern_locals_into_set(&param.pattern, scope);
-        }
-        if let Some(rest) = &func.params.rest {
-            collect_pattern_locals_into_set(&rest.rest.argument, scope);
-        }
-        // Visit param defaults
-        for param in &func.params.items {
-            if let Some(init) = &param.initializer {
-                self.visit_expression(init);
-            }
-        }
-        if let Some(body) = &func.body {
-            for s in &body.statements {
-                self.visit_statement(s, false);
-            }
-        }
-        self.local_scopes.pop();
-    }
-
-    fn visit_arrow_function(&mut self, arrow: &'a ArrowFunctionExpression<'a>) {
-        self.local_scopes.push(FxHashSet::default());
-        let scope = self.local_scopes.last_mut().unwrap();
-        for param in &arrow.params.items {
-            collect_pattern_locals_into_set(&param.pattern, scope);
-        }
-        if let Some(rest) = &arrow.params.rest {
-            collect_pattern_locals_into_set(&rest.rest.argument, scope);
-        }
-        // Visit param defaults
-        for param in &arrow.params.items {
-            if let Some(init) = &param.initializer {
-                self.visit_expression(init);
-            }
-        }
-        for s in &arrow.body.statements {
-            self.visit_statement(s, false);
-        }
-        self.local_scopes.pop();
-    }
-
-    fn visit_expression(&mut self, expr: &'a Expression<'a>) {
-        match expr {
-            Expression::Identifier(ident) => {
-                self.check_identifier(ident.name.as_str());
-            }
-            Expression::BinaryExpression(binary) => {
-                self.visit_expression(&binary.left);
-                self.visit_expression(&binary.right);
-            }
-            Expression::LogicalExpression(logical) => {
-                self.visit_expression(&logical.left);
-                self.visit_expression(&logical.right);
-            }
-            Expression::ConditionalExpression(cond) => {
-                self.visit_expression(&cond.test);
-                self.visit_expression(&cond.consequent);
-                self.visit_expression(&cond.alternate);
-            }
-            Expression::CallExpression(call) => {
-                self.visit_expression(&call.callee);
-                for arg in &call.arguments {
-                    if let Some(e) = arg.as_expression() {
-                        self.visit_expression(e);
-                    }
-                }
-            }
-            Expression::StaticMemberExpression(member) => {
-                self.visit_expression(&member.object);
-            }
-            Expression::ComputedMemberExpression(member) => {
-                self.visit_expression(&member.object);
-                self.visit_expression(&member.expression);
-            }
-            Expression::ArrayExpression(arr) => {
-                for elem in &arr.elements {
-                    if let Some(e) = elem.as_expression() {
-                        self.visit_expression(e);
-                    }
-                }
-            }
-            Expression::ObjectExpression(obj) => {
-                for prop in &obj.properties {
-                    match prop {
-                        ObjectPropertyKind::ObjectProperty(p) => {
-                            if p.shorthand {
-                                if let PropertyKey::StaticIdentifier(ident) = &p.key {
-                                    self.check_identifier(ident.name.as_str());
-                                }
-                            } else {
-                                if p.computed {
-                                    if let Some(key_expr) = p.key.as_expression() {
-                                        self.visit_expression(key_expr);
-                                    }
-                                }
-                                self.visit_expression(&p.value);
-                            }
-                        }
-                        ObjectPropertyKind::SpreadProperty(spread) => {
-                            self.visit_expression(&spread.argument);
-                        }
-                    }
-                }
-            }
-            Expression::ParenthesizedExpression(paren) => {
-                self.visit_expression(&paren.expression);
-            }
-            Expression::UnaryExpression(unary) => {
-                self.visit_expression(&unary.argument);
-            }
-            Expression::UpdateExpression(update) => {
-                if let SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) = &update.argument
-                {
-                    self.check_identifier(ident.name.as_str());
-                }
-            }
-            Expression::AssignmentExpression(assign) => {
-                self.visit_expression(&assign.right);
-                if let AssignmentTarget::AssignmentTargetIdentifier(ident) = &assign.left {
-                    self.check_identifier(ident.name.as_str());
-                }
-            }
-            Expression::TemplateLiteral(template) => {
-                for e in &template.expressions {
-                    self.visit_expression(e);
-                }
-            }
-            Expression::TaggedTemplateExpression(tagged) => {
-                self.visit_expression(&tagged.tag);
-                for e in &tagged.quasi.expressions {
-                    self.visit_expression(e);
-                }
-            }
-            Expression::ArrowFunctionExpression(arrow) => {
-                self.visit_arrow_function(arrow);
-            }
-            Expression::FunctionExpression(func) => {
-                self.visit_function_body(func);
-            }
-            Expression::TSAsExpression(ts_as) => {
-                self.visit_expression(&ts_as.expression);
-            }
-            Expression::TSNonNullExpression(non_null) => {
-                self.visit_expression(&non_null.expression);
-            }
-            Expression::TSSatisfiesExpression(sat) => {
-                self.visit_expression(&sat.expression);
-            }
-            Expression::TSTypeAssertion(assertion) => {
-                self.visit_expression(&assertion.expression);
-            }
-            Expression::AwaitExpression(await_expr) => {
-                self.visit_expression(&await_expr.argument);
-            }
-            Expression::YieldExpression(yield_expr) => {
-                if let Some(arg) = &yield_expr.argument {
-                    self.visit_expression(arg);
-                }
-            }
-            Expression::SequenceExpression(seq) => {
-                for e in &seq.expressions {
-                    self.visit_expression(e);
-                }
-            }
-            Expression::NewExpression(new_expr) => {
-                self.visit_expression(&new_expr.callee);
-                for arg in &new_expr.arguments {
-                    if let Some(e) = arg.as_expression() {
-                        self.visit_expression(e);
-                    }
-                }
-            }
-            Expression::ChainExpression(chain) => match &chain.expression {
-                ChainElement::CallExpression(call) => {
-                    self.visit_expression(&call.callee);
-                    for arg in &call.arguments {
-                        if let Some(e) = arg.as_expression() {
-                            self.visit_expression(e);
-                        }
-                    }
-                }
-                ChainElement::StaticMemberExpression(member) => {
-                    self.visit_expression(&member.object);
-                }
-                ChainElement::ComputedMemberExpression(member) => {
-                    self.visit_expression(&member.object);
-                    self.visit_expression(&member.expression);
-                }
-                ChainElement::PrivateFieldExpression(pfe) => {
-                    self.visit_expression(&pfe.object);
-                }
-                ChainElement::TSNonNullExpression(non_null) => {
-                    self.visit_expression(&non_null.expression);
-                }
-            },
-            _ => {}
-        }
-    }
-}
-
-/// Helper to collect binding pattern locals into a FxHashSet<&str>.
-fn collect_pattern_locals_into_set<'a>(
-    pattern: &'a BindingPattern<'a>,
-    set: &mut FxHashSet<&'a str>,
-) {
-    match pattern {
-        BindingPattern::BindingIdentifier(ident) => {
-            set.insert(ident.name.as_str());
-        }
-        BindingPattern::ObjectPattern(obj) => {
-            for prop in &obj.properties {
-                collect_pattern_locals_into_set(&prop.value, set);
-            }
-            if let Some(rest) = &obj.rest {
-                collect_pattern_locals_into_set(&rest.argument, set);
-            }
-        }
-        BindingPattern::ArrayPattern(arr) => {
-            for elem in arr.elements.iter().flatten() {
-                collect_pattern_locals_into_set(elem, set);
-            }
-            if let Some(rest) = &arr.rest {
-                collect_pattern_locals_into_set(&rest.argument, set);
-            }
-        }
-        BindingPattern::AssignmentPattern(assign) => {
-            collect_pattern_locals_into_set(&assign.left, set);
-        }
-    }
-}
-
 /// Collect local binding names from a binding pattern.
 ///
 /// This extracts all identifiers declared by the pattern itself.
@@ -938,38 +502,66 @@ pub fn collect_pattern_local_spans(pattern: &BindingPattern<'_>, locals: &mut Ve
 /// Collect reference spans from a binding pattern (default values).
 ///
 /// This extracts spans of identifiers that are referenced in default value expressions.
+/// Applies the `is_global` filter (runtime `_ctx`-prefixing semantics).
 pub fn collect_pattern_reference_spans(
+    pattern: &BindingPattern<'_>,
+    ignored: &FxHashSet<&[u8]>,
+    references: &mut FxHashSet<Span>,
+) {
+    collect_pattern_reference_spans_inner(pattern, ignored, references);
+}
+
+fn collect_pattern_reference_spans_inner(
     pattern: &BindingPattern<'_>,
     ignored: &FxHashSet<&[u8]>,
     references: &mut FxHashSet<Span>,
 ) {
     match pattern {
         BindingPattern::AssignmentPattern(assign) => {
-            collect_expression_reference_spans(&assign.right, ignored, references);
-            collect_pattern_reference_spans(&assign.left, ignored, references);
+            collect_expression_reference_spans_inner(&assign.right, ignored, references);
+            collect_pattern_reference_spans_inner(&assign.left, ignored, references);
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
-                collect_pattern_reference_spans(&prop.value, ignored, references);
+                collect_pattern_reference_spans_inner(&prop.value, ignored, references);
             }
             if let Some(rest) = &obj.rest {
-                collect_pattern_reference_spans(&rest.argument, ignored, references);
+                collect_pattern_reference_spans_inner(&rest.argument, ignored, references);
             }
         }
         BindingPattern::ArrayPattern(arr) => {
             for elem in arr.elements.iter().flatten() {
-                collect_pattern_reference_spans(elem, ignored, references);
+                collect_pattern_reference_spans_inner(elem, ignored, references);
             }
             if let Some(rest) = &arr.rest {
-                collect_pattern_reference_spans(&rest.argument, ignored, references);
+                collect_pattern_reference_spans_inner(&rest.argument, ignored, references);
             }
         }
         BindingPattern::BindingIdentifier(_) => {}
     }
 }
 
-/// Collect identifier reference spans from an expression (excluding ignored identifiers).
+/// Collect identifier reference spans from an expression (excluding ignored
+/// identifiers). Applies the `is_global` filter (runtime `_ctx`-prefixing
+/// semantics): a global-named identifier is NOT recorded.
 pub fn collect_expression_reference_spans(
+    expr: &Expression<'_>,
+    ignored: &FxHashSet<&[u8]>,
+    references: &mut FxHashSet<Span>,
+) {
+    collect_expression_reference_spans_inner(expr, ignored, references);
+}
+
+/// Shared recursion for the RUNTIME span collectors: it always drops
+/// global-named identifiers (the `is_global` `_ctx`-prefixing filter). Unused-
+/// binding LIVENESS does NOT use this collector — it routes through the complete
+/// `Visit` span collector ([`collect_expression_free_ref_spans`]) so a reference
+/// inside a nested callback / function body is never silently dropped (this
+/// walker has a `_ => {}` catch-all that does not recurse into function bodies,
+/// which is correct for runtime reference collection but unsound for liveness).
+///
+/// [`collect_expression_free_ref_spans`]: crate::utils::oxc::bindings::collect_expression_free_ref_spans
+fn collect_expression_reference_spans_inner(
     expr: &Expression<'_>,
     ignored: &FxHashSet<&[u8]>,
     references: &mut FxHashSet<Span>,
@@ -982,37 +574,37 @@ pub fn collect_expression_reference_spans(
             }
         }
         Expression::BinaryExpression(binary) => {
-            collect_expression_reference_spans(&binary.left, ignored, references);
-            collect_expression_reference_spans(&binary.right, ignored, references);
+            collect_expression_reference_spans_inner(&binary.left, ignored, references);
+            collect_expression_reference_spans_inner(&binary.right, ignored, references);
         }
         Expression::LogicalExpression(logical) => {
-            collect_expression_reference_spans(&logical.left, ignored, references);
-            collect_expression_reference_spans(&logical.right, ignored, references);
+            collect_expression_reference_spans_inner(&logical.left, ignored, references);
+            collect_expression_reference_spans_inner(&logical.right, ignored, references);
         }
         Expression::ConditionalExpression(cond) => {
-            collect_expression_reference_spans(&cond.test, ignored, references);
-            collect_expression_reference_spans(&cond.consequent, ignored, references);
-            collect_expression_reference_spans(&cond.alternate, ignored, references);
+            collect_expression_reference_spans_inner(&cond.test, ignored, references);
+            collect_expression_reference_spans_inner(&cond.consequent, ignored, references);
+            collect_expression_reference_spans_inner(&cond.alternate, ignored, references);
         }
         Expression::CallExpression(call) => {
-            collect_expression_reference_spans(&call.callee, ignored, references);
+            collect_expression_reference_spans_inner(&call.callee, ignored, references);
             for arg in &call.arguments {
                 if let Some(expr) = arg.as_expression() {
-                    collect_expression_reference_spans(expr, ignored, references);
+                    collect_expression_reference_spans_inner(expr, ignored, references);
                 }
             }
         }
         Expression::StaticMemberExpression(member) => {
-            collect_expression_reference_spans(&member.object, ignored, references);
+            collect_expression_reference_spans_inner(&member.object, ignored, references);
         }
         Expression::ComputedMemberExpression(member) => {
-            collect_expression_reference_spans(&member.object, ignored, references);
-            collect_expression_reference_spans(&member.expression, ignored, references);
+            collect_expression_reference_spans_inner(&member.object, ignored, references);
+            collect_expression_reference_spans_inner(&member.expression, ignored, references);
         }
         Expression::ArrayExpression(arr) => {
             for elem in &arr.elements {
                 if let Some(expr) = elem.as_expression() {
-                    collect_expression_reference_spans(expr, ignored, references);
+                    collect_expression_reference_spans_inner(expr, ignored, references);
                 }
             }
         }
@@ -1030,89 +622,98 @@ pub fn collect_expression_reference_spans(
                             }
                         }
                     } else {
-                        collect_expression_reference_spans(&p.value, ignored, references);
+                        collect_expression_reference_spans_inner(&p.value, ignored, references);
                     }
                 }
             }
         }
         Expression::ParenthesizedExpression(paren) => {
-            collect_expression_reference_spans(&paren.expression, ignored, references);
+            collect_expression_reference_spans_inner(&paren.expression, ignored, references);
         }
         Expression::UnaryExpression(unary) => {
-            collect_expression_reference_spans(&unary.argument, ignored, references);
+            collect_expression_reference_spans_inner(&unary.argument, ignored, references);
         }
         Expression::TSAsExpression(ts_as) => {
-            collect_expression_reference_spans(&ts_as.expression, ignored, references);
+            collect_expression_reference_spans_inner(&ts_as.expression, ignored, references);
         }
         Expression::TSNonNullExpression(non_null) => {
-            collect_expression_reference_spans(&non_null.expression, ignored, references);
+            collect_expression_reference_spans_inner(&non_null.expression, ignored, references);
         }
         Expression::ChainExpression(chain) => {
-            collect_chain_element_reference_spans(&chain.expression, ignored, references);
+            collect_chain_element_reference_spans_inner(&chain.expression, ignored, references);
         }
         Expression::AwaitExpression(await_expr) => {
-            collect_expression_reference_spans(&await_expr.argument, ignored, references);
+            collect_expression_reference_spans_inner(&await_expr.argument, ignored, references);
         }
         Expression::SequenceExpression(seq) => {
             for expr in &seq.expressions {
-                collect_expression_reference_spans(expr, ignored, references);
+                collect_expression_reference_spans_inner(expr, ignored, references);
             }
         }
         Expression::AssignmentExpression(assign) => {
-            collect_expression_reference_spans(&assign.right, ignored, references);
+            collect_expression_reference_spans_inner(&assign.right, ignored, references);
         }
         Expression::NewExpression(new_expr) => {
-            collect_expression_reference_spans(&new_expr.callee, ignored, references);
+            collect_expression_reference_spans_inner(&new_expr.callee, ignored, references);
             for arg in &new_expr.arguments {
                 if let Some(expr) = arg.as_expression() {
-                    collect_expression_reference_spans(expr, ignored, references);
+                    collect_expression_reference_spans_inner(expr, ignored, references);
                 }
             }
         }
         Expression::TemplateLiteral(template) => {
             for expr in &template.expressions {
-                collect_expression_reference_spans(expr, ignored, references);
+                collect_expression_reference_spans_inner(expr, ignored, references);
             }
         }
         Expression::TaggedTemplateExpression(tagged) => {
-            collect_expression_reference_spans(&tagged.tag, ignored, references);
+            collect_expression_reference_spans_inner(&tagged.tag, ignored, references);
             for expr in &tagged.quasi.expressions {
-                collect_expression_reference_spans(expr, ignored, references);
+                collect_expression_reference_spans_inner(expr, ignored, references);
             }
         }
         Expression::YieldExpression(yield_expr) => {
             if let Some(arg) = &yield_expr.argument {
-                collect_expression_reference_spans(arg, ignored, references);
+                collect_expression_reference_spans_inner(arg, ignored, references);
             }
         }
         _ => {}
     }
 }
 
-/// Collect reference spans from chain elements (optional chaining).
+/// Collect reference spans from chain elements (optional chaining). Applies the
+/// `is_global` filter (runtime `_ctx`-prefixing semantics).
 pub fn collect_chain_element_reference_spans(
+    element: &ChainElement<'_>,
+    ignored: &FxHashSet<&[u8]>,
+    references: &mut FxHashSet<Span>,
+) {
+    collect_chain_element_reference_spans_inner(element, ignored, references);
+}
+
+fn collect_chain_element_reference_spans_inner(
     element: &ChainElement<'_>,
     ignored: &FxHashSet<&[u8]>,
     references: &mut FxHashSet<Span>,
 ) {
     match element {
         ChainElement::CallExpression(call) => {
-            collect_expression_reference_spans(&call.callee, ignored, references);
+            collect_expression_reference_spans_inner(&call.callee, ignored, references);
             for arg in &call.arguments {
                 if let Some(expr) = arg.as_expression() {
-                    collect_expression_reference_spans(expr, ignored, references);
+                    collect_expression_reference_spans_inner(expr, ignored, references);
                 }
             }
         }
         ChainElement::StaticMemberExpression(member) => {
-            collect_expression_reference_spans(&member.object, ignored, references);
+            collect_expression_reference_spans_inner(&member.object, ignored, references);
         }
         ChainElement::ComputedMemberExpression(member) => {
-            collect_expression_reference_spans(&member.object, ignored, references);
-            collect_expression_reference_spans(&member.expression, ignored, references);
+            collect_expression_reference_spans_inner(&member.object, ignored, references);
+            collect_expression_reference_spans_inner(&member.expression, ignored, references);
         }
         ChainElement::PrivateFieldExpression(field) => {
-            collect_expression_reference_spans(&field.object, ignored, references);
+            collect_expression_reference_spans_inner(&field.object, ignored, references);
         }
         _ => {}
     }
@@ -1392,118 +993,106 @@ mod tests {
         assert!(references.contains("b"));
     }
 
-    // ── collect_setup_binding_refs tests ────────────────────────────
-
-    fn parse_setup_refs<'a>(
-        alloc: &'a Allocator,
-        source: &'a str,
-        setup_names: &FxHashSet<&str>,
-    ) -> FxHashSet<String> {
-        let ret = Parser::new(alloc, source, SourceType::tsx()).parse();
-        assert!(ret.errors.is_empty(), "Parse errors: {:?}", ret.errors);
-        let refs = collect_setup_binding_refs(&ret.program, setup_names);
-        refs.into_iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
-    fn test_setup_refs_basic_reference() {
-        let alloc = Allocator::default();
-        let source = "const count = ref(0);\nconst doubled = computed(() => count.value * 2);";
-        let mut names = FxHashSet::default();
-        names.insert("count");
-        names.insert("doubled");
-        let refs = parse_setup_refs(&alloc, source, &names);
+    fn liveness_span_collector_retains_globals_runtime_drops_them() {
+        // The RUNTIME span collector drops `Date` (global); the LIVENESS collector
+        // (the complete `Visit` span walker) keeps it. A setup binding may shadow a
+        // global, so liveness must not lose it. Discriminating: would FAIL if
+        // liveness reused the `is_global`-filtering runtime collector.
+        use super::super::collect_expression_free_ref_spans;
+        let allocator = Allocator::default();
+        let source = "Date";
+        let parser = Parser::new(&allocator, source, SourceType::tsx());
+        let expr = parser.parse_expression().unwrap();
+        let ignored = FxHashSet::default();
+
+        let mut runtime = FxHashSet::default();
+        collect_expression_reference_spans(&expr, &ignored, &mut runtime);
         assert!(
-            refs.contains("count"),
-            "count should be referenced in computed arrow"
+            runtime.is_empty(),
+            "runtime collector must drop the global-named `Date`"
         );
-        assert!(
-            !refs.contains("doubled"),
-            "doubled is not referenced by anyone"
+
+        let mut liveness = FxHashSet::default();
+        collect_expression_free_ref_spans(&expr, &ignored, &mut liveness);
+        assert_eq!(
+            liveness.len(),
+            1,
+            "liveness collector must RETAIN the global-named `Date` (a setup binding may shadow it)"
         );
     }
 
     #[test]
-    fn test_setup_refs_shadowed_by_param() {
-        let alloc = Allocator::default();
-        let source = "const count = ref(0);\nfunction foo(count: number) { return count; }";
-        let mut names = FxHashSet::default();
-        names.insert("count");
-        let refs = parse_setup_refs(&alloc, source, &names);
+    fn liveness_span_collector_still_drops_keywords_and_locals() {
+        // Globals are re-included for liveness, but genuine scope locals (ignored)
+        // and keywords stay excluded.
+        use super::super::collect_expression_free_ref_spans;
+        let allocator = Allocator::default();
+        let source = "Date + item + null";
+        let parser = Parser::new(&allocator, source, SourceType::tsx());
+        let expr = parser.parse_expression().unwrap();
+        let mut ignored = FxHashSet::default();
+        ignored.insert(b"item" as &[u8]);
+
+        let mut liveness = FxHashSet::default();
+        collect_expression_free_ref_spans(&expr, &ignored, &mut liveness);
+        let names: Vec<&str> = liveness.iter().map(|s| s.slice(source)).collect();
+        assert!(names.contains(&"Date"), "global re-included for liveness");
+        assert!(!names.contains(&"item"), "scope local stays excluded");
+        assert!(!names.contains(&"null"), "keyword stays excluded");
+    }
+
+    #[test]
+    fn liveness_span_collector_recurses_into_nested_callback_body() {
+        // THE structural fix: the complete `Visit` span collector descends into a
+        // callback BODY inside a call argument (`rows.map(r => fmt(r))`), recording
+        // `fmt`. The retired hand-rolled span walker dropped the arrow-function
+        // argument at `_ => {}`. Discriminating: would FAIL on the partial walker.
+        use super::super::collect_expression_free_ref_spans;
+        let allocator = Allocator::default();
+        let source = "rows.map(r => fmt(r))";
+        let parser = Parser::new(&allocator, source, SourceType::tsx());
+        let expr = parser.parse_expression().unwrap();
+        let ignored = FxHashSet::default();
+
+        let mut liveness = FxHashSet::default();
+        collect_expression_free_ref_spans(&expr, &ignored, &mut liveness);
+        let names: Vec<&str> = liveness.iter().map(|s| s.slice(source)).collect();
+        assert!(names.contains(&"rows"), "bare call-receiver root recorded");
         assert!(
-            !refs.contains("count"),
-            "count is shadowed by function param"
+            names.contains(&"fmt"),
+            "a reference inside the `.map(..)` callback BODY must be recorded; got {names:?}"
         );
+        // `r` is the callback param (an inner-scope local) and must NOT leak as an
+        // outer-binding reference.
+        assert!(!names.contains(&"r"), "callback param `r` stays excluded");
     }
 
     #[test]
-    fn test_setup_refs_partially_shadowed() {
-        let alloc = Allocator::default();
-        let source = "const count = ref(0);\nconst d = count.value;\nfunction foo(count: number) { return count; }";
+    fn liveness_pattern_default_collector_recurses_into_nested_callback() {
+        // The v-slot pattern-default liveness path (`{ x = list.map(r => fmt(r)) }`)
+        // hands each default expression to the complete `Visit` NAME walker, so
+        // `fmt` (inside the callback body) is recorded. Discriminating: FAILS on a
+        // partial pattern-default walker.
+        use super::super::collect_pattern_default_free_ref_names;
+        use oxc_ast::ast::Expression;
+        let allocator = Allocator::default();
+        // Wrap as arrow params so the binding-pattern default is parsed.
+        let source = "({ x = list.map(r => fmt(r)) }) => {}";
+        let parser = Parser::new(&allocator, source, SourceType::tsx());
+        let expr = parser.parse_expression().unwrap();
+        let Expression::ArrowFunctionExpression(arrow) = expr else {
+            panic!("expected arrow function");
+        };
+        let pattern = &arrow.params.items[0].pattern;
+
         let mut names = FxHashSet::default();
-        names.insert("count");
-        let refs = parse_setup_refs(&alloc, source, &names);
+        collect_pattern_default_free_ref_names(pattern, &mut names);
+        assert!(names.contains("list"), "default-value receiver recorded");
         assert!(
-            refs.contains("count"),
-            "count is freely referenced in `d` initializer"
+            names.contains("fmt"),
+            "a reference inside the pattern-default callback BODY must be recorded; got {names:?}"
         );
-    }
-
-    #[test]
-    fn test_setup_refs_inner_variable_shadow() {
-        let alloc = Allocator::default();
-        let source = "const count = ref(0);\nfunction foo() { const count = 42; return count; }";
-        let mut names = FxHashSet::default();
-        names.insert("count");
-        let refs = parse_setup_refs(&alloc, source, &names);
-        assert!(!refs.contains("count"), "count is shadowed by inner const");
-    }
-
-    #[test]
-    fn test_setup_refs_arrow_param_shadow() {
-        let alloc = Allocator::default();
-        let source = "const count = ref(0);\nconst fn2 = (count: number) => count * 2;";
-        let mut names = FxHashSet::default();
-        names.insert("count");
-        let refs = parse_setup_refs(&alloc, source, &names);
-        assert!(!refs.contains("count"), "count is shadowed by arrow param");
-    }
-
-    #[test]
-    fn test_setup_refs_truly_unused() {
-        let alloc = Allocator::default();
-        let source = "const count = ref(0);\nconst unused = ref(42);";
-        let mut names = FxHashSet::default();
-        names.insert("count");
-        names.insert("unused");
-        let refs = parse_setup_refs(&alloc, source, &names);
-        assert!(refs.is_empty(), "neither binding is referenced: {:?}", refs);
-    }
-
-    #[test]
-    fn test_setup_refs_block_scope_shadow() {
-        let alloc = Allocator::default();
-        let source = "const x = ref(0);\n{ const x = 1; console.log(x); }";
-        let mut names = FxHashSet::default();
-        names.insert("x");
-        let refs = parse_setup_refs(&alloc, source, &names);
-        assert!(!refs.contains("x"), "x is shadowed by block-scoped const");
-    }
-
-    #[test]
-    fn test_setup_refs_multiple_bindings() {
-        let alloc = Allocator::default();
-        let source = "const a = ref(1);\nconst b = ref(2);\nconst c = ref(3);\nconst sum = computed(() => a.value + c.value);";
-        let mut names = FxHashSet::default();
-        names.insert("a");
-        names.insert("b");
-        names.insert("c");
-        names.insert("sum");
-        let refs = parse_setup_refs(&alloc, source, &names);
-        assert!(refs.contains("a"), "a is referenced in computed");
-        assert!(!refs.contains("b"), "b is not referenced");
-        assert!(refs.contains("c"), "c is referenced in computed");
-        assert!(!refs.contains("sum"), "sum is not referenced by anyone");
     }
 
     #[test]

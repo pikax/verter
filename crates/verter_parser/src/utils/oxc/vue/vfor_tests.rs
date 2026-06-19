@@ -492,6 +492,80 @@ fn test_bindings_references_sorted_by_position() {
     }
 }
 
+/// The runtime `references` set DROPS a global-named source (`Date`) so it is not
+/// `_ctx`-prefixed, while `liveness_reference_names` RETAINS it so a `const Date`
+/// setup binding shadowing the global is not falsely reported unused. Discriminating:
+/// would FAIL if liveness reused the runtime filter, or if runtime stopped filtering.
+#[test]
+fn test_global_named_source_dropped_from_runtime_kept_for_liveness() {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    let source = "x in Date";
+    let wb = parse_vfor_with_bindings(allocator, source, SourceType::tsx(), &[]);
+
+    assert!(wb.is_ok());
+    assert!(
+        wb.references.is_empty(),
+        "runtime references must DROP the global-named `Date` source, got: {:?}",
+        wb.references
+            .iter()
+            .map(|s| s.slice(source))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        wb.liveness_reference_names,
+        vec!["Date".to_string()],
+        "liveness names must RETAIN the global-named `Date` source"
+    );
+}
+
+/// A non-global source (`items`) appears in BOTH the runtime references and the
+/// liveness names — the liveness set is a superset, never a replacement.
+#[test]
+fn test_non_global_source_present_in_both_reference_sets() {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    let source = "x in items";
+    let wb = parse_vfor_with_bindings(allocator, source, SourceType::tsx(), &[]);
+
+    assert!(wb.is_ok());
+    let rt: Vec<&str> = wb.references.iter().map(|s| s.slice(source)).collect();
+    assert_eq!(rt, vec!["items"]);
+    assert_eq!(wb.liveness_reference_names, vec!["items".to_string()]);
+}
+
+/// A binding referenced ONLY inside a nested callback in the v-for SOURCE
+/// (`x in rows.map(r => fmt(r))`) is recorded in `liveness_reference_names`. The
+/// retired partial liveness span walker dropped the arrow-function argument body,
+/// missing `fmt`. Discriminating: would FAIL on the partial walker.
+#[test]
+fn test_nested_callback_source_reference_recorded_for_liveness() {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    let source = "x in rows.map(r => fmt(r))";
+    let wb = parse_vfor_with_bindings(allocator, source, SourceType::tsx(), &[]);
+
+    assert!(wb.is_ok());
+    assert!(
+        wb.liveness_reference_names.contains(&"rows".to_string()),
+        "bare source receiver `rows` recorded; got {:?}",
+        wb.liveness_reference_names
+    );
+    assert!(
+        wb.liveness_reference_names.contains(&"fmt".to_string()),
+        "a reference inside the `.map(..)` callback BODY must be recorded; got {:?}",
+        wb.liveness_reference_names
+    );
+    // `x` (the v-for local) and `r` (the callback param) must NOT leak.
+    assert!(
+        !wb.liveness_reference_names.contains(&"x".to_string()),
+        "v-for local `x` stays excluded; got {:?}",
+        wb.liveness_reference_names
+    );
+    assert!(
+        !wb.liveness_reference_names.contains(&"r".to_string()),
+        "callback param `r` stays excluded; got {:?}",
+        wb.liveness_reference_names
+    );
+}
+
 // ── Exact absolute-span characterization (refactor must not shift any span) ──
 
 fn label_offsets(errs: &[oxc_diagnostics::OxcDiagnostic]) -> Vec<usize> {

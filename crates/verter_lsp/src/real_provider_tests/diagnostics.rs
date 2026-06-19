@@ -228,3 +228,155 @@ real_provider_test!(
         );
     }
 );
+
+// ---------------------------------------------------------------------------
+// ISSUE-7: an unused `<script setup>` local surfaces TS6133 on its decl range
+// ---------------------------------------------------------------------------
+//
+// These open the EXACT IDE-codegen TSX shape the Vue script-setup lowering
+// produces, directly in the provider, and prove the unused-binding liveness
+// fix end to end against a real backend:
+//
+//  - The POST-fix unused shape OMITS the binding from the `___VERTER___unwrapped`
+//    object AND the destructure block entirely. The original `const foo` is then
+//    its sole occurrence and never value-read, so TS6133 fires at its decl range.
+//  - The control shape keeps `foo` value-read (`foo: foo as unknown as typeof
+//    foo`, the shape used for a binding that IS used somewhere) → NO TS6133.
+//  - A regression guard pins the ROOT CAUSE: the retired type-only entry
+//    (`foo: undefined as unknown as typeof foo`) does NOT fire TS6133 on the
+//    source decl, because `typeof foo` is itself a use of `foo` — so that shape
+//    silently dropped the diagnostic (it landed instead on the unmapped
+//    destructure copy and collapsed to line 1). The omission shape is the only
+//    one that lands TS6133 on the source decl.
+//
+// Vacuous-skip aware: the generated test returns early when the backend binary
+// is unavailable (no `node_modules`); when present, assertions are fail-closed.
+
+real_provider_test!(
+    vue_unused_script_setup_local_omitted_from_unwrap_flags_6133,
+    fixture = "single-project",
+    async fn run(session) {
+        // Faithful reduction of the IDE script-setup lowering for an unused
+        // top-level `const foo = 1` (used in neither template nor script). The
+        // binding is OMITTED from the unwrapped object + destructure block, so
+        // `const foo` is genuinely unused and TS6133 fires at its declaration.
+        // `___VERTER___unwrapped` is kept live by `void` (the all-omitted case).
+        let source = "\
+export function ___VERTER___TemplateBindingFN() {
+const foo = 1
+const ___VERTER___unwrapped = ___VERTER___shallowUnwrapRef({});
+void ___VERTER___unwrapped;
+return {};
+}
+declare function ___VERTER___shallowUnwrapRef<T>(o: T): T;
+";
+        let path = session
+            .open_in_provider("src/__diag_vue_unused_local.tsx", source)
+            .await;
+
+        let diags = diagnostics_until_nonempty(session, &path).await;
+
+        let foo_decl = source.find("const foo").expect("decl present") as u32;
+        let foo_decl_end = foo_decl + "const foo = 1".len() as u32;
+
+        let unused_foo = diags.iter().find(|d| {
+            (matches!(d.code.as_deref(), Some("6133"))
+                || d.message.contains("is declared but its value is never read")
+                || d.message.contains("never used"))
+                // The diagnostic must land on the `foo` decl, not elsewhere.
+                && d.start < foo_decl_end
+                && d.end > foo_decl
+        });
+        assert!(
+            unused_foo.is_some(),
+            "omitting the unused binding from the unwrap surface must surface TS6133 \
+             at the `const foo` decl range; got: {diags:?}"
+        );
+        // The keep-alive temp must NOT itself be flagged.
+        let unused_temp = diags.iter().any(|d| {
+            matches!(d.code.as_deref(), Some("6133"))
+                && d.message.contains("___VERTER___unwrapped")
+        });
+        assert!(
+            !unused_temp,
+            "the `void ___VERTER___unwrapped` keep-alive must prevent a spurious \
+             TS6133 on the temp; got: {diags:?}"
+        );
+    }
+);
+
+real_provider_test!(
+    vue_value_read_unwrap_does_not_flag_used_local,
+    fixture = "single-project",
+    async fn run(session) {
+        // Control: the value-read unwrap entry (`foo: foo as ...`, the shape used
+        // for a binding that IS used somewhere) keeps `foo` live, so no unused
+        // diagnostic for `foo` is produced — proving the fix discriminates.
+        let source = "\
+export function ___VERTER___TemplateBindingFN() {
+const foo = 1
+const ___VERTER___unwrapped = { foo: foo as unknown as typeof foo };
+void ___VERTER___unwrapped;
+return {};
+}
+";
+        let path = session
+            .open_in_provider("src/__diag_vue_used_local.tsx", source)
+            .await;
+
+        // Allow the project to warm; we expect NO unused-foo diagnostic.
+        let diags = diagnostics_until_nonempty(session, &path).await;
+
+        let foo_decl = source.find("const foo").expect("decl present") as u32;
+        let foo_decl_end = foo_decl + "const foo = 1".len() as u32;
+        let unused_foo = diags.iter().any(|d| {
+            matches!(d.code.as_deref(), Some("6133"))
+                && d.start < foo_decl_end
+                && d.end > foo_decl
+        });
+        assert!(
+            !unused_foo,
+            "value-read unwrap entry must keep `foo` live (no TS6133 on its decl); got: {diags:?}"
+        );
+    }
+);
+
+real_provider_test!(
+    vue_type_only_unwrap_does_not_flag_source_decl_regression,
+    fixture = "single-project",
+    async fn run(session) {
+        // ROOT-CAUSE regression guard: the RETIRED type-only entry
+        // (`foo: undefined as unknown as typeof foo`) does NOT fire TS6133 on the
+        // SOURCE `const foo`, because `typeof foo` is a type-query REFERENCE to
+        // `foo` that keeps the decl live. This is exactly why that shape failed:
+        // the diagnostic never landed on the source decl. If a future change
+        // re-introduces the `typeof foo` keep-alive for an unused binding, this
+        // test FAILS — proving the omission shape is load-bearing.
+        let source = "\
+export function ___VERTER___TemplateBindingFN() {
+const foo = 1
+const ___VERTER___unwrapped = { foo: undefined as unknown as typeof foo };
+void ___VERTER___unwrapped;
+return {};
+}
+";
+        let path = session
+            .open_in_provider("src/__diag_vue_typeonly_local.tsx", source)
+            .await;
+
+        let diags = diagnostics_until_nonempty(session, &path).await;
+
+        let foo_decl = source.find("const foo").expect("decl present") as u32;
+        let foo_decl_end = foo_decl + "const foo = 1".len() as u32;
+        let flags_source_decl = diags.iter().any(|d| {
+            matches!(d.code.as_deref(), Some("6133"))
+                && d.start < foo_decl_end
+                && d.end > foo_decl
+        });
+        assert!(
+            !flags_source_decl,
+            "the retired `typeof foo` keep-alive must NOT flag the source decl \
+             (it keeps `foo` live) — this is the bug the omission shape fixes; got: {diags:?}"
+        );
+    }
+);

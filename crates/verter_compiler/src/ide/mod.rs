@@ -68,13 +68,37 @@ pub struct IdeScriptOptions<'a> {
     /// When a root v-if references a prop, the component's type signature
     /// narrows based on the prop value passed by the parent.
     pub conditional_root_narrowing: bool,
-    /// Binding names referenced in style `v-bind()` expressions.
-    /// Used to emit `void(name)` and prevent false unused diagnostics.
+    /// Binding names referenced in style `v-bind()` expressions, derived SOUNDLY
+    /// from the typed AST (each `v-bind()` expression parsed and its identifier
+    /// roots collected — never a `.split('.')` string heuristic). Used to emit
+    /// `void(name)` and to keep a style-used binding's value-read unwrap entry.
     pub style_v_bind_vars: Vec<String>,
+    /// Whether [`Self::style_v_bind_vars`] is a COMPLETE, sound usage set. `false`
+    /// when any discovered `v-bind()` expression failed to parse (or no style
+    /// scan ran), in which case unused-binding liveness fails open (every binding
+    /// is treated as used — no TS6133 demotion).
+    pub style_usage_complete: bool,
     /// CSS module info: `(module_name, class_names)` pairs.
     /// `module_name` is `"$style"` for `<style module>` or the custom name
     /// from `<style module="classes">`.
     pub css_modules: Vec<CssModuleInfo>,
+    /// AST-driven set of identifier names referenced by the `<template>`.
+    ///
+    /// Built from the typed template IR (expression bindings ∪ v-for sources ∪
+    /// component tag names), never a raw-source scan. A setup binding present
+    /// here is "used in template" and keeps its value-read unwrap entry so it is
+    /// not falsely flagged unused; a binding absent here AND absent from the
+    /// script body / style `v-bind` is genuinely unused and emits a type-only
+    /// unwrap entry so TypeScript surfaces TS6133 at its source declaration.
+    ///
+    /// `None` when no template parse was available (parse errors, template-less
+    /// SFC) — in that case the lowering conservatively keeps every value read.
+    ///
+    /// Built from the `ide_completion = false` template-expression overlay (the
+    /// COMPLETE liveness overlay), NOT the `ide_completion = true` IDE/completion
+    /// overlay, which intentionally suppresses real references for completion and
+    /// would mis-report a genuinely-used binding as unused.
+    pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
 }
 
 /// CSS module information for IDE codegen.

@@ -16,8 +16,9 @@
 
 mod helpers;
 pub mod macro_dto;
+pub(crate) mod style_usage;
 pub mod template_data;
-mod template_expr_overlay;
+pub(crate) mod template_expr_overlay;
 pub mod types;
 
 pub use helpers::*;
@@ -34,7 +35,6 @@ use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
-use crate::ast::types::{AstNodeKind, TagType};
 use crate::code_transform::{CodeTransform, SourceMapOptions};
 use crate::common::Span;
 use crate::css::{process_style, types::ProcessStyleOptions};
@@ -665,63 +665,29 @@ fn compile_inner(
         // Parse template expressions early so we can collect the set of identifiers
         // actually used in the template (for import elision in script codegen).
         // This avoids the text-based heuristic and correctly handles TS type positions.
-        let template_used_vars: Option<FxHashSet<String>> =
-            if let (false, Some(template_ast_ref)) = (has_parse_errors, parsed.template_ast()) {
-                // Runtime / script-import-elision lane — completion-prefix
-                // matching off so partial identifiers stay real references.
-                let oxc_ast = expr_store.get_or_build(
-                    template_ast_ref,
-                    input,
-                    allocator,
-                    template_region_span(template_ast_ref),
-                    &parse_options,
-                    source_type,
-                    false,
-                );
-                let mut vars = FxHashSet::default();
-
-                // 1. Collect identifiers from all expression bindings
-                //    (interpolations, v-if conditions, directive values, dynamic args)
-                for expr in oxc_ast.iter_expressions() {
-                    if let Some(ref bindings) = expr.bindings {
-                        for name in bindings.non_ignored_binding_names() {
-                            vars.insert(name.to_string());
-                        }
-                    }
-                }
-
-                // 2. Collect identifiers from v-for source expressions
-                for node_data in &oxc_ast.data {
-                    if let crate::template::oxc::types::OxcNodeData::Element(el) = node_data {
-                        if let Some(ref v_for) = el.v_for {
-                            for span in &v_for.parsed.references {
-                                let name = &input[span.start as usize..span.end as usize];
-                                vars.insert(name.to_string());
-                            }
-                        }
-                    }
-                }
-
-                // 3. Collect component tag names from the template AST
-                for node in &template_ast_ref.nodes {
-                    if let AstNodeKind::Element(el) = &node.kind {
-                        if el.tag_type == TagType::Component {
-                            // Tag name is between '<' and name_end
-                            let tag_name = &input
-                                [(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
-                            vars.insert(tag_name.to_string());
-                            // Also add PascalCase version for kebab-case tags
-                            if tag_name.contains('-') {
-                                vars.insert(to_pascal_case(tag_name));
-                            }
-                        }
-                    }
-                }
-
-                Some(vars)
-            } else {
-                None
-            };
+        let template_used_vars: Option<FxHashSet<String>> = if let (false, Some(template_ast_ref)) =
+            (has_parse_errors, parsed.template_ast())
+        {
+            // Runtime / script-import-elision lane — completion-prefix
+            // matching off so partial identifiers stay real references.
+            let oxc_ast = expr_store.get_or_build(
+                template_ast_ref,
+                input,
+                allocator,
+                template_region_span(template_ast_ref),
+                &parse_options,
+                source_type,
+                false,
+            );
+            // Import elision only needs the used-name set (it is already
+            // best-effort and conservative); completeness is irrelevant here,
+            // so the per-expression completeness flag is dropped on this lane.
+            let (used, _complete) =
+                template_expr_overlay::collect_template_used_vars(oxc_ast, template_ast_ref, input);
+            Some(used)
+        } else {
+            None
+        };
 
         let script_options = ScriptCodeGenOptions {
             component_name: &component_name,
@@ -1139,6 +1105,69 @@ fn compile_inner(
             })
             .collect();
 
+        // AST-driven inventory of identifiers the template references. Drives
+        // unused-binding liveness in the script-setup lowering: a setup binding
+        // used NOWHERE (not template, not script body, not style v-bind) must
+        // emit a type-only unwrap entry so TS6133 fires at its source decl.
+        //
+        // Liveness MUST use the `ide_completion = false` overlay, NOT the IDE
+        // template-codegen lane's `ide_completion = true` overlay: completion
+        // mode intentionally suppresses real references (`BindingContext::
+        // completion_prefixes`), so a genuinely-used binding would be reported
+        // as unused and false-positive a TS6133. The zero-extra-parse
+        // optimisation is therefore abandoned — `TemplateExprStore` reuses the
+        // `false` overlay if the runtime/template-data lane already built it,
+        // otherwise an extra parse is the accepted correctness cost.
+        //
+        // `None` is the conservative case (parse errors / template-less SFC):
+        // every binding is treated as template-used so no false unused
+        // diagnostic fires.
+        let tsx_template_used_vars: Option<FxHashSet<String>> =
+            if let (false, Some(template_ast_ref)) = (has_parse_errors, parsed.template_ast()) {
+                let tsx_source_type = if is_jsx {
+                    SourceType::jsx()
+                } else {
+                    SourceType::tsx()
+                };
+                let usage_oxc = expr_store.get_or_build(
+                    template_ast_ref,
+                    input,
+                    allocator,
+                    template_region_span(template_ast_ref),
+                    &parse_options,
+                    tsx_source_type,
+                    false,
+                );
+                // Liveness REQUIRES completeness: a template-expression parse
+                // error makes its references unknowable, so an incomplete result
+                // collapses to `None` (fail open — no TS6133 demotion).
+                let (used, complete) = template_expr_overlay::collect_template_used_vars(
+                    usage_oxc,
+                    template_ast_ref,
+                    input,
+                );
+                if complete {
+                    Some(used)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        // SOUND style `v-bind()` usage, parsed from the raw `<style>` bodies (the
+        // typed-AST path, not the host's `.split('.')` heuristic). Computed here
+        // regardless of `target.needs_style()` because the IDE/TSX target does
+        // not run full style codegen yet still needs sound style liveness. A
+        // single unparseable `v-bind()` marks the set incomplete → fail open.
+        let style_usage = style_usage::extract_style_v_bind_usage(
+            parsed
+                .style_nodes()
+                .iter()
+                .filter_map(|s| s.content.as_ref())
+                .map(|c| &input[c.start as usize..c.end as usize]),
+        );
+
         let tsx_script_opts = ide::IdeScriptOptions {
             component_name: &component_name,
             js_component_name: &js_component_name,
@@ -1154,8 +1183,10 @@ fn compile_inner(
             embed_ambient_types: options.embed_ambient_types,
             is_jsx,
             conditional_root_narrowing: options.conditional_root_narrowing,
-            style_v_bind_vars: verter_options.style_v_bind_vars.clone(),
+            style_v_bind_vars: style_usage.used.iter().cloned().collect(),
+            style_usage_complete: style_usage.complete,
             css_modules,
+            template_used_vars: tsx_template_used_vars,
         };
 
         // Unified single CodeTransform for both script and template.

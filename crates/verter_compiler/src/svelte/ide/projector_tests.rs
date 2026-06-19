@@ -2812,3 +2812,41 @@ fn fragment_dynamic_slot_store_sub_is_rewritten() {
         "the dynamic-slot store-sub is rewritten through the text path: {body}"
     );
 }
+
+// ── ISSUE-7 parity: an unused Svelte top-level `let` is NOT kept artificially
+// live ────────────────────────────────────────────────────────────────────
+//
+// Unlike Vue's `<script setup>` lowering (which built a `___VERTER___unwrapped`
+// object that value-read every binding and suppressed TS6133), the Svelte IDE
+// projector keeps script bodies as ORIGINAL chunks at their source spans and
+// never synthesises a per-binding value-read. So an unused top-level `let foo`
+// stays a plain module-level decl that TypeScript naturally flags as unused —
+// no Vue-style keep-alive. This pins that parity; no Svelte codegen change is
+// expected for ISSUE-7.
+#[test]
+fn unused_top_level_let_is_not_value_read_kept_alive() {
+    let code = project("<script lang=\"ts\">let foo = 1;</script>\n<div>hello</div>");
+
+    // The decl stays at its source span (mapped chunk), not rewritten.
+    assert!(
+        code.contains("let foo = 1;"),
+        "the unused top-level `let foo` must stay a plain source decl: {code}"
+    );
+
+    // No Vue-style synthetic value-read keep-alive of `foo`.
+    assert!(
+        !code.contains("foo: foo as unknown as typeof foo"),
+        "Svelte must NOT emit a Vue-style value-read keep-alive for `foo`: {code}"
+    );
+    assert!(
+        !code.contains("shallowUnwrapRef"),
+        "Svelte projection has no shallowUnwrapRef unwrap object: {code}"
+    );
+    // `foo` is used nowhere — the template references nothing, so the render
+    // body must not reference `foo` either (no synthetic use).
+    let body = render_body(&code);
+    assert!(
+        !body.contains("foo"),
+        "an unused `foo` must not be referenced by the render body: {body}"
+    );
+}

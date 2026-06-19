@@ -37,7 +37,9 @@ fn types_module_custom_override() {
             is_jsx: false,
             conditional_root_narrowing: false,
             style_v_bind_vars: vec![],
+            style_usage_complete: true,
             css_modules: vec![],
+            template_used_vars: None,
         },
     );
     assert!(
