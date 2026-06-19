@@ -6,6 +6,11 @@
 //!
 //! See [`harness`] for the shared helpers + fixture constants.
 
+// Each entry module intentionally gets its own copy of this stateless
+// fixture helper (no statics/atomics/OnceCell), so the per-entry scopes
+// stay disjoint and share no state. The "duplicate mod" the lint reports
+// is the intended layout, not an accident — keep the allow at every site.
+#[allow(clippy::duplicate_mod)]
 #[path = "component_meta_audit/harness.rs"]
 mod harness;
 

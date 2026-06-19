@@ -14,6 +14,11 @@
 //! a regression is caught even when the umbrella `architecture_guards`
 //! integration test binary is filtered out of a CI run by name.
 
+// Each entry module intentionally gets its own copy of this stateless
+// denylist helper (no statics/atomics/OnceCell), so the per-entry scopes
+// stay disjoint and share no state. The "duplicate mod" the lint reports
+// is the intended layout, not an accident — keep the allow at every site.
+#[allow(clippy::duplicate_mod)]
 #[path = "../support/audit_hot_loop_denylist.rs"]
 mod audit_hot_loop_denylist;
 

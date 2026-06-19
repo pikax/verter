@@ -79,6 +79,11 @@ mod compile_slots_encapsulation;
 mod finalise_signature_or_empty_is_gone;
 #[path = "g_block/framework_surface_executor.rs"]
 mod framework_surface_executor;
+// Each entry module intentionally gets its own copy of this stateless
+// fixture helper (no statics/atomics/OnceCell), so the per-entry scopes
+// stay disjoint and share no state. The "duplicate mod" the lint reports
+// is the intended layout, not an accident — keep the allow at every site.
+#[allow(clippy::duplicate_mod)]
 #[path = "component_meta_audit/harness.rs"]
 mod harness;
 #[path = "g_block/r6_query_identity_keys_content_free.rs"]

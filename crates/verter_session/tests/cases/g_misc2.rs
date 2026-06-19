@@ -18,6 +18,11 @@ mod derived_raw_state_cached_meta_payload_matrix_module_aug_index_shape;
 mod derived_raw_state_cached_resolved_meta_matrix_member;
 #[path = "g_misc2/dispatch_cold_build_has_one_call_site.rs"]
 mod dispatch_cold_build_has_one_call_site;
+// Each entry module intentionally gets its own copy of this stateless
+// fixture helper (no statics/atomics/OnceCell), so the per-entry scopes
+// stay disjoint and share no state. The "duplicate mod" the lint reports
+// is the intended layout, not an accident — keep the allow at every site.
+#[allow(clippy::duplicate_mod)]
 #[path = "component_meta_audit/harness.rs"]
 mod harness;
 #[path = "g_misc2/host_store_view_validates_real.rs"]
