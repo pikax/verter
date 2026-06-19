@@ -1113,6 +1113,102 @@ fn v_on_long_form_hover_canonicalizes_provenance_to_at_form() {
     );
 }
 
+/// Build a `v-model` directive over a source `v-model:<arg>="..."` fixture.
+fn v_model_directive(source: &str, arg: &str) -> TemplateDirective {
+    let dir_start = source.find("v-model").unwrap() as u32;
+    let arg_pos = source.find(&format!(":{arg}")).unwrap() as u32 + 1; // after the `:`
+    let arg_span = verter_span::Span::new(arg_pos, arg_pos + arg.len() as u32);
+    TemplateDirective {
+        name: "model".into(),
+        raw_name: format!("v-model:{arg}"),
+        argument: Some(arg.into()),
+        modifiers: vec![],
+        expression: Some("x".into()),
+        span: verter_span::Span::new(dir_start, arg_pos + arg.len() as u32),
+        name_end: dir_start + "v-model".len() as u32,
+        arg_span: Some(arg_span),
+        expression_span: None,
+        modifier_spans: vec![],
+    }
+}
+
+fn component_with_directive(tag: &str, dir: TemplateDirective) -> TemplateElement {
+    TemplateElement {
+        tag: tag.into(),
+        is_component: true,
+        directives: vec![dir],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn v_model_directive_name_hover_shows_vue_source_token() {
+    // Hovering on the `v-model` directive NAME (before the arg) must return a
+    // SOURCE-OWNED hover naming the Vue token. The generated TSX renames the prop,
+    // so the TypeProvider can never describe the source `v-model` token; and the
+    // `is_on_attribute_name` suppression would otherwise return None. The
+    // source-owned hover runs BEFORE that suppression.
+    let source = r#"<template><ModelNamed v-model:show="x" /></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let dir = v_model_directive(source, "show");
+    let analysis = template_only_analysis(component_with_directive("ModelNamed", dir));
+
+    // Hover inside `v-model` (the directive name, before the arg).
+    let name_pos = source.find("v-model").unwrap() as u32 + 2; // inside `v-model`
+    let pos = line_index.offset_to_position(name_pos).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
+        .expect("v-model directive name hover should exist");
+    let contents = markup(&hover);
+    assert!(
+        contents.contains("v-model"),
+        "v-model name hover must name the Vue token `v-model`, got: {contents}"
+    );
+    // No merge-layer provenance for v-model now — source_token stays None.
+    assert_eq!(
+        hover.source_token, None,
+        "v-model hover must NOT carry typed provenance (source_token: None)"
+    );
+}
+
+#[test]
+fn v_model_arg_hover_shows_vue_source_token() {
+    // Hovering on the `:show` ARG of `v-model:show` must return a source-owned
+    // hover naming the arg (`show`) as the bound model prop. (TSGO supplies the
+    // real prop type via the mapped prop-name codegen; this hover supplies the Vue
+    // source context.)
+    let source = r#"<template><ModelNamed v-model:show="x" /></template>"#;
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+
+    let dir = v_model_directive(source, "show");
+    let analysis = template_only_analysis(component_with_directive("ModelNamed", dir));
+
+    // Hover inside `show` (the arg, after `v-model:`).
+    let arg_pos = source.find(":show").unwrap() as u32 + 2; // inside `show`
+    let pos = line_index.offset_to_position(arg_pos).unwrap();
+    let hover = hover_at_position(&pos, source, &blocks, Some(&analysis), &line_index, false)
+        .expect("v-model arg hover should exist");
+    let contents = markup(&hover);
+    assert!(
+        contents.contains("show"),
+        "v-model arg hover must name the bound model prop `show`, got: {contents}"
+    );
+    assert_eq!(
+        hover.source_token, None,
+        "v-model arg hover must NOT carry typed provenance (source_token: None)"
+    );
+    // The hover range must stay on the source `v-model:show` directive token.
+    let dir_start = source.find("v-model").unwrap() as u32;
+    let expected_start = line_index.offset_to_position(dir_start).unwrap();
+    assert_eq!(
+        hover.hover.range.expect("hover range").start,
+        expected_start,
+        "v-model arg hover range must start on the source `v-model` token"
+    );
+}
+
 #[test]
 fn event_modifier_stop_hover() {
     // Hovering on a `.stop` modifier token must return a source-owned modifier

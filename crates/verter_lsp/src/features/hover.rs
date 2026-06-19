@@ -12,7 +12,7 @@ use crate::documents::sfc_scanner::{
 };
 use crate::features::hover_event_tokens::{
     camelize_event_name, capitalize_first, event_directive_hover, hyphenate_event_name,
-    vue_event_attr_label,
+    v_model_hover, vue_event_attr_label,
 };
 
 /// Hover result from verter's own analysis, optionally carrying a Vue-specific
@@ -511,6 +511,14 @@ fn hover_in_template(
     // source token. We reconstruct the hover label/range from the existing
     // `TemplateDirective` / `TemplateAttribute` spans instead.
     if let Some(hover) = event_directive_hover(offset as u32, source, analysis, line_index) {
+        return Some(hover);
+    }
+    // Source-owned `v-model` directive-name + arg hover. Runs BEFORE the
+    // attribute-name suppression: the `v-model` name and its `:show` arg are Vue
+    // syntax tokens the generated TSX renames/overwrites, so the TypeProvider can
+    // never describe the source token. TSGO supplies the bound prop TYPE (via the
+    // mapped prop-name codegen); this hover supplies the Vue source context.
+    if let Some(hover) = v_model_hover(offset as u32, source, analysis, line_index) {
         return Some(hover);
     }
     if let Some(hover) = template_ref_hover(offset as u32, source, analysis, line_index) {

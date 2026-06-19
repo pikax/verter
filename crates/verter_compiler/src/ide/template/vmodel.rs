@@ -132,13 +132,37 @@ pub(super) fn process_v_model<'alloc>(
     let is_native = el.tag_type.is_element();
     let event_param = if is_jsx { "$event" } else { "$event: any" };
 
+    // The static-arg COMPONENT prop name (`show` / camelCased `myArg`) is emitted
+    // as a MAPPED piece anchored at the source arg span, so the generated prop-name
+    // token maps back to `v-model:show`'s `show` and a TypeProvider resolves the
+    // child component's `$props['show']` for hover/go-to-definition. This applies
+    // ONLY to the component static-arg branch — a default `modelValue` (no arg) and
+    // native-element DOM props (`value`/`checked`, compiler-synthesized — NOT a
+    // `$props` surface) carry NO arg provenance.
+    let static_arg_span: Option<SourceByteRange> =
+        if !is_dynamic_arg && !is_native && !value_prop.is_empty() {
+            prop.arg_start
+                .zip(prop.arg_end)
+                .map(|(a, b)| SourceByteRange::new(SourceByteOffset(a), SourceByteOffset(b)))
+        } else {
+            None
+        };
+
     // A generated piece: unmapped synthetic text, one mapped emission of the
-    // value expression / the dynamic-arg expression, or a mapped modifier name.
+    // value expression / the dynamic-arg expression, a mapped modifier name, or
+    // the mapped static-arg component prop name.
     enum Piece {
         Syn(String),
         Value,
         Arg,
         Modifier(SourceByteRange),
+        /// A static mapped model prop name: the generated camelCased prop name
+        /// (`show` / `myArg`) maps back to the source arg span (`arg_span.start`).
+        /// `name` is the owned generated text; `arg` is the source span it owns.
+        MappedStaticModelPropName {
+            name: String,
+            arg: SourceByteRange,
+        },
     }
 
     // Build the ordered piece list for the active branch (preserving every branch
@@ -233,7 +257,23 @@ pub(super) fn process_v_model<'alloc>(
         }
     } else {
         // Component: <value_prop>={<value>} {...{"<update_event>":(<param>) => ((<value>) = $event)}}
-        pieces.push(Piece::Syn(format!("{}={{", value_prop)));
+        //
+        // For a static NAMED arg, the prop NAME is a MAPPED piece (so the generated
+        // `show` / `myArg` token owns the source arg span and TSGO resolves the
+        // child `$props['show']`); the trailing `={` and everything after stay
+        // unmapped synthetic. The default `modelValue` (no arg) has no source arg,
+        // so it stays a single synthetic piece. The `onUpdate:*` event key is kept
+        // synthetic/unmapped — a duplicate mapping there would make hover land on
+        // the event key instead of the prop.
+        if let Some(arg) = static_arg_span {
+            pieces.push(Piece::MappedStaticModelPropName {
+                name: value_prop.clone(),
+                arg,
+            });
+            pieces.push(Piece::Syn("={".to_string()));
+        } else {
+            pieces.push(Piece::Syn(format!("{}={{", value_prop)));
+        }
         pieces.push(Piece::Value);
         pieces.push(Piece::Syn(format!(
             "}} {{...{{\"{}\":({}) => ((",
@@ -332,6 +372,21 @@ pub(super) fn process_v_model<'alloc>(
                             &source[span.start.0 as usize..span.end.0 as usize],
                         ),
                         source_start: span.start,
+                        content_offset: GeneratedByteLen(0),
+                    },
+                );
+            }
+            Piece::MappedStaticModelPropName { name, arg } => {
+                // The generated camelCased prop name maps back to the source arg
+                // span start (`content_offset: 0` — the whole generated token owns
+                // the arg). `InsertMapped` is linear-run, so kebab→camel is not
+                // char-perfect; the source-owned hover covers the whole arg token.
+                emit_op(
+                    out,
+                    &EmitOp::InsertMapped {
+                        at,
+                        text: EmitText::Borrowed(name.as_str()),
+                        source_start: arg.start,
                         content_offset: GeneratedByteLen(0),
                     },
                 );

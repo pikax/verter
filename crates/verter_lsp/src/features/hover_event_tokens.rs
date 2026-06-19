@@ -96,6 +96,65 @@ pub(super) fn event_directive_hover(
     None
 }
 
+/// Source-owned hover for the `v-model` directive NAME and its static/dynamic ARG.
+///
+/// The IDE codegen lowers `v-model:show="x"` on a component to a generated `show=`
+/// prop (+ an `onUpdate:show` handler) and overwrites the whole `v-model:show="x"`
+/// span, so the source `v-model` / `:show` tokens have no TypeProvider description
+/// of their own. (The mapped prop-name codegen lets TSGO describe the bound prop
+/// TYPE; this hover supplies the Vue SOURCE context for the directive name + arg.)
+/// We rebuild the label and range from the source `TemplateDirective` spans.
+///
+/// No merge-layer typed provenance is attached (`source_token: None`): TSGO shows
+/// the real prop type label, and this Verter hover gives the `v-model:show` source
+/// context. The hover bounds run from the directive start through the end of the
+/// arg (or the directive name when there is no arg), so it never covers the bound
+/// VALUE expression (which the TypeProvider types).
+pub(super) fn v_model_hover(
+    offset: u32,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+    line_index: &LineIndex,
+) -> Option<VerterHoverResult> {
+    let template = analysis.template.as_deref()?;
+    for el in &template.elements {
+        for dir in &el.directives {
+            if dir.name != "model" {
+                continue;
+            }
+            // Token bounds: from the directive start through the end of the arg (so
+            // both the `v-model` name AND the `:show` arg are covered), or just the
+            // directive name when `v-model` has no arg.
+            let token_start = dir.span.start;
+            let token_end = dir.arg_span.as_ref().map_or(dir.name_end, |a| a.end);
+            if offset < token_start || offset >= token_end {
+                continue;
+            }
+            let token = source.get(token_start as usize..token_end as usize)?;
+            let value = match dir.argument.as_deref() {
+                Some(arg) if !arg.is_empty() => {
+                    format!("`{token}`\n\nTwo-way binding to the `{arg}` model prop.")
+                }
+                _ => format!("`{token}`\n\nTwo-way binding (`v-model`)."),
+            };
+            return Some(VerterHoverResult {
+                hover: Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value,
+                    }),
+                    range: span_to_range(line_index, token_start, token_end),
+                },
+                vue_kind_label: None,
+                // No merge-layer rewrite for v-model — TSGO shows the prop type
+                // label; this hover supplies the Vue source context only.
+                source_token: None,
+            });
+        }
+    }
+    None
+}
+
 fn native_event_hover(
     token: &str,
     event: &str,
