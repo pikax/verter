@@ -667,6 +667,353 @@ async function main() {
     }
   }
 
+  // --------------------------------------------------------------------------------------------------
+  // (ix) SURFACE-1 NON-`FAIL` FAILURE CLASSIFICATION. A crashing/leaking test renders under a NON-`FAIL`
+  //      nextest status (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) and a nextest setup/harness error exits non-zero
+  //      with NO `FAIL [` line at all. Both MUST fail the gate; the pre-fix classifier (which printed PASS
+  //      whenever no `FAIL [` line was present, and tolerated when only a tolerated `FAIL` name parsed)
+  //      swallowed them. We drive BOTH the classifier hook (`--selftest-classify-nextest`, no exit code)
+  //      AND the LIVE-aggregation hook (`--selftest-classify-nextest-run <exit> <fixture>`, the EXACT code
+  //      runGate's SURFACE-1 path runs) so the testable and live paths are proven to AGREE. Each crash
+  //      fixture asserts FAIL; the tolerated baseline still asserts PASS-WITH-TOLERATED (discrimination).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(ix) SURFACE-1 non-FAIL failure classification (crash/leak/setup-error)\n");
+  {
+    const fixDir = freshTmpDir("gatetest-nxfix-");
+    const sigabrt = join(fixDir, "sigabrt.log");
+    const leakPlusTolerated = join(fixDir, "leak_plus_tolerated.log");
+    const setupError = join(fixDir, "setup_error.log");
+    const tolerated = join(fixDir, "tolerated.log");
+    // A SIGABRT crash with NO `FAIL [` line; the summary still counts it as failed and the run exits
+    // non-zero. Pre-fix: classified PASS (no FAIL line). Post-fix: FAIL.
+    writeFileSync(
+      sigabrt,
+      "    PASS [   0.010s] verter_compiler template::renders\n" +
+        "    SIGABRT [   0.204s] verter_other crash::aborts_in_drop\n" +
+        "     Summary [   1.230s] 2 tests run: 1 passed, 1 failed, 0 skipped\n",
+    );
+    // A tolerated `FAIL` PLUS an unaccounted LEAK: summary failed=2 but only 1 `FAIL` name parses, so the
+    // unaccounted shortfall trips. Pre-fix: classified PASS-WITH-TOLERATED (only the tolerated FAIL name
+    // was checked). Post-fix: FAIL.
+    writeFileSync(
+      leakPlusTolerated,
+      "    FAIL [   0.204s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "    LEAK [   0.300s] verter_other resource::leaks_a_handle\n" +
+        "     Summary [   1.500s] 3 tests run: 1 passed, 2 failed, 0 skipped\n",
+    );
+    // A nextest harness/setup error: non-zero exit, NO `FAIL [` line, NO Summary line. Pre-fix: PASS.
+    // Post-fix: FAIL (the `code !== 0 && no FAIL name` arm).
+    writeFileSync(setupError, "error: creating test list failed\nCaused by: harness error\n");
+    // The real tolerated baseline shape (the 2 env FAILs, summary failed=2): still PASS-WITH-TOLERATED.
+    writeFileSync(
+      tolerated,
+      "    FAIL [   0.204s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "    FAIL [   0.207s] verter_protocol typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide\n" +
+        "     Summary [  62.968s] 15543 tests run: 15541 passed, 2 failed, 547 skipped\n",
+    );
+    const classify = (file) => {
+      const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest", file], {
+        env: { ...process.env },
+        encoding: "utf8",
+      });
+      return (r.stdout || "").trim();
+    };
+    const classifyRun = (code, file) => {
+      const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest-run", String(code), file], {
+        env: { ...process.env },
+        encoding: "utf8",
+      });
+      return (r.stdout || "").trim();
+    };
+    let ok = true;
+    // Classifier hook (no exit code) — classifies the LOG CONTENT. SIGABRT/LEAK carry a content signal (a
+    // non-`FAIL` status line + a summary failure count) so the no-code classifier catches them. A pure
+    // setup/harness error has NO content markers and is indistinguishable from a clean log WITHOUT the exit
+    // code, so it is asserted ONLY on the live-aggregation hook below (which has the code).
+    const cSig = classify(sigabrt);
+    const cLeak = classify(leakPlusTolerated);
+    const cTol = classify(tolerated);
+    note(`classify: sigabrt=${cSig} leak+tol=${cLeak} tolerated=${cTol}`);
+    if (cSig !== "FAIL") {
+      fail(`(ix) classifier: SIGABRT crash => '${cSig}', expected FAIL (a non-FAIL status must not pass)`);
+      ok = false;
+    }
+    if (cLeak !== "FAIL") {
+      fail(`(ix) classifier: tolerated-FAIL + unaccounted LEAK => '${cLeak}', expected FAIL`);
+      ok = false;
+    }
+    if (cTol !== "PASS-WITH-TOLERATED") {
+      fail(`(ix) classifier: tolerated baseline => '${cTol}', expected PASS-WITH-TOLERATED (discrimination)`);
+      ok = false;
+    }
+    // LIVE-aggregation hook (with exit code) — the exact code runGate runs. nextest exits 100 on test
+    // failures, non-100 on internal errors; a crash run is non-zero either way. This path consults the run
+    // exit code, so it ALSO catches a content-less setup/harness error (nonzero exit, no FAIL line).
+    const rSig = classifyRun(101, sigabrt);
+    const rLeak = classifyRun(100, leakPlusTolerated);
+    const rSetup = classifyRun(1, setupError);
+    const rTol = classifyRun(100, tolerated);
+    note(`live-agg: sigabrt=${rSig} leak+tol=${rLeak} setup-error=${rSetup} tolerated=${rTol}`);
+    if (rSig !== "FAIL") {
+      fail(`(ix) live-agg: SIGABRT (exit 101) => '${rSig}', expected FAIL`);
+      ok = false;
+    }
+    if (rLeak !== "FAIL") {
+      fail(`(ix) live-agg: tolerated-FAIL + LEAK (exit 100) => '${rLeak}', expected FAIL`);
+      ok = false;
+    }
+    if (rSetup !== "FAIL") {
+      fail(`(ix) live-agg: setup error (exit 1, no FAIL line) => '${rSetup}', expected FAIL`);
+      ok = false;
+    }
+    if (rTol !== "PASS-WITH-TOLERATED") {
+      fail(`(ix) live-agg: tolerated baseline (exit 100) => '${rTol}', expected PASS-WITH-TOLERATED`);
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(ix) SURFACE-1: SIGABRT crash, unaccounted LEAK, and setup/harness error ALL => FAIL on both the " +
+          "classifier and the live-aggregation hook; tolerated baseline => PASS-WITH-TOLERATED (discriminating)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (x) FAIL-CLOSED MUTEX vs an alive holder with EMPTY/uncheckable start-identity. We hand-craft a
+  //     lockdir whose owner.json names the HARNESS's own (alive) pid with an EMPTY processStartIdentity,
+  //     then run a gate against it. PID reuse is NOT proven (no stored identity to compare), so the gate
+  //     MUST REFUSE (126), never reclaim a live lock. Pre-fix: an empty stored identity fell through to
+  //     "identity mismatch" and reclaimed the LIVE lock (two concurrent gates). A control case — a lock
+  //     owned by a DEFINITELY-DEAD pid — must still reclaim+PASS, so the refusal is specific to the alive
+  //     holder, not a blanket refusal (discrimination).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(x) FAIL-CLOSED MUTEX (alive holder, empty start-identity)\n");
+  {
+    let ok = true;
+    // Case A: alive pid (this harness) + empty identity => REFUSE (126).
+    const lkA = freshLock();
+    mkdirSync(lkA, { recursive: true });
+    writeFileSync(
+      join(lkA, "owner.json"),
+      JSON.stringify({
+        token: "crafted-live-empty-ident",
+        pid: process.pid, // the harness itself — definitely alive
+        repoRealpath: "/nonexistent/repo",
+        targetDir: freshTmpDir("gatetest-target-"),
+        createdAtMs: Date.now() - 60_000, // older than the init grace so it is not treated as "initializing"
+        processStartIdentity: "", // EMPTY — PID reuse cannot be proven
+      }),
+    );
+    const tgtA = freshTmpDir("gatetest-target-");
+    const rA = runGate(["--", `echo never_runs_${RUN_TAG}`], {
+      VERTER_GATE_LOCK: lkA,
+      VERTER_GATE_TARGET_DIR: tgtA,
+    });
+    note(`alive-pid + empty-identity holder => rc=${rA.code} (expect LOCK-REFUSED ${EXIT_LOCK_REFUSED})`);
+    if (rA.code !== EXIT_LOCK_REFUSED) {
+      fail(
+        `(x) FAIL-CLOSED: alive holder with empty start-identity returned ${rA.code}, expected LOCK-REFUSED ` +
+          `(${EXIT_LOCK_REFUSED}) — an empty/uncheckable identity must NEVER be read as proof of PID reuse`,
+      );
+      ok = false;
+    }
+    // The crafted lockdir must SURVIVE (the gate refused, it did NOT reclaim a live lock).
+    if (!existsSync(lkA)) {
+      fail("(x) FAIL-CLOSED: the live holder's lockdir was RECLAIMED (vanished) — fail-open regression");
+      ok = false;
+    }
+    rmSync(dirname(lkA), { recursive: true, force: true });
+    // Case B (control / discrimination): a DEAD pid + empty identity => reclaim + PASS. Find a pid that is
+    // certainly dead by spawning `true` and waiting for it to exit, then reuse its (now-free) pid number.
+    const lkB = freshLock();
+    mkdirSync(lkB, { recursive: true });
+    const deadPid = (() => {
+      const c = spawnSync("bash", ["-c", "exit 0"]); // a finished process
+      // Its pid is not exposed by spawnSync; use a very high, almost-certainly-unused pid instead.
+      return c.pid || 999_999;
+    })();
+    let deadCandidate = 999_999;
+    while (pidAlive(deadCandidate) && deadCandidate > 100_000) deadCandidate--;
+    writeFileSync(
+      join(lkB, "owner.json"),
+      JSON.stringify({
+        token: "crafted-dead",
+        pid: deadCandidate,
+        repoRealpath: "/nonexistent/repo",
+        targetDir: freshTmpDir("gatetest-target-"),
+        createdAtMs: Date.now() - 60_000,
+        processStartIdentity: "",
+      }),
+    );
+    note(`control: dead-pid ${deadCandidate} (alive=${pidAlive(deadCandidate)}) + empty identity => expect reclaim+PASS`);
+    const tgtB = freshTmpDir("gatetest-target-");
+    const rB = runGate(["--", `echo reclaimed_x_${RUN_TAG}`], {
+      VERTER_GATE_LOCK: lkB,
+      VERTER_GATE_TARGET_DIR: tgtB,
+    });
+    note(`dead-pid holder => rc=${rB.code} (expect PASS ${EXIT_PASS})`);
+    if (rB.code !== EXIT_PASS) {
+      fail(
+        `(x) CONTROL: a DEAD-holder lock with empty identity returned ${rB.code}, expected PASS (${EXIT_PASS}) ` +
+          "— the fail-closed rule must NOT blanket-refuse; a dead holder is still reclaimable",
+      );
+      ok = false;
+    }
+    rmSync(dirname(lkB), { recursive: true, force: true });
+    void deadPid;
+    if (ok) {
+      pass(
+        "(x) FAIL-CLOSED MUTEX: alive holder + empty start-identity => REFUSED (126) and the lock survived; " +
+          "a dead holder + empty identity => reclaimed + PASSed (discriminating, not a blanket refusal)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xi) SURFACE-2 ZERO-SUITES / PARTIAL-FILTER SETUP GATE. If the verter_session lib/test suite filter
+  //      finds nothing (a filter regression / archive-shape change) the gate must FAIL SETUP (127), NOT
+  //      pass on surface 1 alone. We drive the REAL selectSessionSuites() gate via `--selftest-surface2
+  //      <suites.json>`. Zero session suites => 127; a lib-only filter (missing the integration `test`
+  //      kind) => 127; a proper 1-lib + N-test listing => OK/0 (discrimination). Pre-fix: runGate had NO
+  //      zero-suite guard — an empty filter produced an empty loop and reached the green aggregate verdict.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(xi) SURFACE-2 zero-suites / partial-filter setup gate\n");
+  {
+    const fixDir = freshTmpDir("gatetest-s2fix-");
+    const zero = join(fixDir, "zero.json");
+    const libOnly = join(fixDir, "lib_only.json");
+    const proper = join(fixDir, "proper.json");
+    writeFileSync(
+      zero,
+      JSON.stringify([
+        { "package-name": "verter_compiler", kind: "lib" },
+        { "package-name": "verter_other", kind: "test" },
+      ]),
+    );
+    writeFileSync(
+      libOnly,
+      JSON.stringify([
+        { "package-name": "verter_session", kind: "lib" },
+        { "package-name": "verter_session", kind: "bin" },
+      ]),
+    );
+    writeFileSync(
+      proper,
+      JSON.stringify([
+        { "package-name": "verter_session", kind: "lib" },
+        { "package-name": "verter_session", kind: "test" },
+        { "package-name": "verter_session", kind: "test" },
+        { "package-name": "verter_session", kind: "bin" },
+      ]),
+    );
+    const surface2 = (file) => {
+      const r = spawnSync(process.execPath, [GATE, "--selftest-surface2", file], {
+        env: { ...process.env },
+        encoding: "utf8",
+      });
+      return { code: r.status === null ? 1 : r.status, out: (r.stdout || "").trim() };
+    };
+    let ok = true;
+    const zr = surface2(zero);
+    const lr = surface2(libOnly);
+    const pr = surface2(proper);
+    note(`zero-suites rc=${zr.code} (expect 127); lib-only rc=${lr.code} (expect 127); proper rc=${pr.code} out='${pr.out}' (expect 0)`);
+    if (zr.code !== 127) {
+      fail(`(xi) zero verter_session suites returned ${zr.code}, expected SETUP failure (127)`);
+      ok = false;
+    }
+    if (lr.code !== 127) {
+      fail(`(xi) lib-only (no integration test kind) returned ${lr.code}, expected SETUP failure (127)`);
+      ok = false;
+    }
+    if (pr.code !== 0) {
+      fail(`(xi) a proper 1-lib + 2-test listing returned ${pr.code}, expected OK (0) — over-strict regression`);
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(xi) SURFACE-2 GATE: zero session suites => 127, lib-only (missing test kind) => 127, " +
+          "1-lib+2-test => 0 (discriminating; a silent surface-2 skip is now a SETUP failure)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xii) WINDOWS `.exe` PROVENANCE-SWEEP MATCHER (pure regex/classify unit — exercised on this POSIX host
+  //       via the matcher's `windows` flag; NO real Windows needed). The sweep predicate is
+  //       `isBuildTool(cmd) && targetDirMatches(cmd, targetDir, windows)`. A Windows `rustc.exe` /
+  //       `cargo-nextest.exe` command line referencing the RUNNER target dir MUST MATCH (be swept); a
+  //       repo-root-only dev `cargo.exe` MUST NOT (be spared). Pre-fix: the matcher required whitespace/end
+  //       after the tool name, so `rustc.exe` / `cargo-nextest.exe` never matched — a runner-owned build
+  //       child on Windows escaped the sweep.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(xii) Windows .exe provenance-sweep matcher (pure unit)\n");
+  {
+    const RT = "C:\\Users\\dev\\repo\\target\\gate-runner";
+    const sweep = (plat, targetDir, cmd) => {
+      const r = spawnSync(process.execPath, [GATE, "--selftest-sweep-match", plat, targetDir, "--", cmd], {
+        env: { ...process.env },
+        encoding: "utf8",
+      });
+      return (r.stdout || "").trim();
+    };
+    // The discriminating positives: standalone rustc.exe / cargo-nextest.exe (pre-fix NOMATCH) referencing
+    // the runner target dir.
+    const rustcExe = sweep(
+      "windows",
+      RT,
+      "C:\\Users\\dev\\.rustup\\toolchains\\stable\\bin\\rustc.exe --out-dir C:\\Users\\dev\\repo\\target\\gate-runner\\debug\\deps lib.rs",
+    );
+    const nextestExe = sweep(
+      "windows",
+      RT,
+      "cargo-nextest.exe run --target-dir C:\\Users\\dev\\repo\\target\\gate-runner",
+    );
+    // The mixed-case runner-target reference (Windows case-insensitive) must still match.
+    const mixedCase = sweep(
+      "windows",
+      RT,
+      "C:\\USERS\\DEV\\.CARGO\\BIN\\CARGO.EXE NEXTEST RUN --TARGET-DIR C:\\USERS\\DEV\\REPO\\TARGET\\GATE-RUNNER",
+    );
+    // The negative: a dev cargo.exe that references ONLY the repo root (NOT the runner target) must be
+    // spared.
+    const devRepoOnly = sweep(
+      "windows",
+      RT,
+      "C:\\Users\\dev\\.cargo\\bin\\cargo.exe build --manifest-path C:\\Users\\dev\\repo\\Cargo.toml",
+    );
+    // An unrelated cargocult.exe referencing the runner target must NOT match (word-boundary holds).
+    const cargocult = sweep("windows", RT, "C:\\tools\\cargocult.exe --out C:\\Users\\dev\\repo\\target\\gate-runner");
+    note(`rustc.exe=${rustcExe} cargo-nextest.exe=${nextestExe} mixed-case=${mixedCase} dev-repo-only=${devRepoOnly} cargocult.exe=${cargocult}`);
+    let ok = true;
+    if (rustcExe !== "MATCH") {
+      fail(`(xii) Windows standalone rustc.exe + runner target => '${rustcExe}', expected MATCH (.exe suffix)`);
+      ok = false;
+    }
+    if (nextestExe !== "MATCH") {
+      fail(`(xii) Windows cargo-nextest.exe + runner target => '${nextestExe}', expected MATCH (.exe suffix)`);
+      ok = false;
+    }
+    if (mixedCase !== "MATCH") {
+      fail(`(xii) Windows mixed-case CARGO.EXE + runner target => '${mixedCase}', expected MATCH (case-normalized)`);
+      ok = false;
+    }
+    if (devRepoOnly !== "NOMATCH") {
+      fail(`(xii) Windows dev cargo.exe referencing ONLY the repo root => '${devRepoOnly}', expected NOMATCH (spared)`);
+      ok = false;
+    }
+    if (cargocult !== "NOMATCH") {
+      fail(`(xii) Windows cargocult.exe => '${cargocult}', expected NOMATCH (word-boundary must hold)`);
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(xii) WINDOWS .exe SWEEP: rustc.exe / cargo-nextest.exe / mixed-case CARGO.EXE referencing the " +
+          "runner target MATCH; a repo-root-only dev cargo.exe and cargocult.exe do NOT (discriminating)",
+      );
+    }
+  }
+
   finish();
 }
 

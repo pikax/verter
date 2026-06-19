@@ -29,8 +29,9 @@
 //   Here: the nextest run from the archive == surface 1; the direct execution of every `verter_session`
 //   suite whose kind is `lib` or `test` (i.e. the lib unit-test binary + every `tests/*.rs` integration
 //   binary — exactly what `cargo test --tests` builds; `bin`/`bench` excluded) == surface 2. Surface 2 runs
-//   with cwd = the verter_session package manifest dir (what Cargo sets) and the same env, modulo the
-//   `session_metrics` cfg (ON here, the production configuration).
+//   with cwd = the verter_session package manifest dir (what Cargo sets) and the runtime Cargo env those
+//   tests actually read (CARGO_MANIFEST_DIR + CARGO_TARGET_DIR — verified complete for this suite), modulo
+//   the `session_metrics` cfg (ON here, the production configuration).
 //
 // SAFETY MODEL (pure Node + OS-native tools; ZERO new compiled binaries)
 //   1. Runner-owned target dir: every cargo step runs with CARGO_TARGET_DIR + --target-dir forced to
@@ -322,13 +323,34 @@ function listProcesses() {
 
 function isBuildTool(cmd) {
   // cargo / rustc / cargo-nextest / nextest — word-ish boundaries so "cargo-nextest" and "/usr/bin/cargo"
-  // both match but an unrelated path containing "cargocult" does not.
+  // both match but an unrelated path containing "cargocult" does not. An optional `.exe` suffix is matched
+  // so real Windows command lines (`C:\Users\…\.cargo\bin\cargo.exe`, `rustc.exe`, `cargo-nextest.exe`,
+  // `nextest.exe`) are recognized. The argv is lowercased first so a mixed-case Windows path matches.
+  const c = cmd.toLowerCase();
   return (
-    /(^|[\s/\\])cargo-nextest([\s]|$)/.test(cmd) ||
-    /(^|[\s/\\])cargo([\s]|$)/.test(cmd) ||
-    /(^|[\s/\\])rustc([\s]|$)/.test(cmd) ||
-    /(^|[\s/\\])nextest([\s]|$)/.test(cmd)
+    /(^|[\s/\\])cargo-nextest(\.exe)?([\s]|$)/.test(c) ||
+    /(^|[\s/\\])cargo(\.exe)?([\s]|$)/.test(c) ||
+    /(^|[\s/\\])rustc(\.exe)?([\s]|$)/.test(c) ||
+    /(^|[\s/\\])nextest(\.exe)?([\s]|$)/.test(c)
   );
+}
+
+// Does a process command line reference the runner-owned target dir? On Windows, command lines and the
+// target path can differ in case and in slash direction (`\` vs `/`); normalize both to a lowercase,
+// forward-slash form before the containment check so the sweep's "only the runner-owned target dir"
+// scoping holds on Windows. On POSIX, paths are case- and separator-stable, so this is the identity.
+// `windows` is parameterized (defaulting to the live platform) so the matcher's Windows branch is unit-
+// testable on a POSIX host.
+function targetDirMatches(cmd, targetDir, windows) {
+  if (!targetDir) return false;
+  if (windows) {
+    const norm = (s) => s.toLowerCase().replace(/\\/g, "/");
+    return norm(cmd).includes(norm(targetDir));
+  }
+  return cmd.includes(targetDir);
+}
+function cmdReferencesTargetDir(cmd, targetDir) {
+  return targetDirMatches(cmd, targetDir, IS_WINDOWS);
 }
 
 async function provenanceSweep(targetDir, graceMs) {
@@ -336,7 +358,8 @@ async function provenanceSweep(targetDir, graceMs) {
   const self = process.pid;
   const term = (pid) => {
     if (IS_WINDOWS) {
-      spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore" });
+      // /T tears down the whole tree (a swept cargo.exe may have spawned rustc.exe children), /F forces it.
+      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
     } else {
       try {
         process.kill(pid, "SIGTERM");
@@ -347,7 +370,7 @@ async function provenanceSweep(targetDir, graceMs) {
   };
   const kill = (pid) => {
     if (IS_WINDOWS) {
-      spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore" });
+      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
     } else {
       try {
         process.kill(pid, "SIGKILL");
@@ -358,7 +381,7 @@ async function provenanceSweep(targetDir, graceMs) {
   };
   const matches = () =>
     listProcesses().filter(
-      (p) => p.pid !== self && isBuildTool(p.cmd) && p.cmd.includes(targetDir),
+      (p) => p.pid !== self && isBuildTool(p.cmd) && cmdReferencesTargetDir(p.cmd, targetDir),
     );
   // TERM pass.
   for (const p of matches()) term(p.pid);
@@ -474,19 +497,30 @@ class Mutex {
       const holderPid = owner.pid;
       const holderIdent = owner.processStartIdentity || "";
       if (holderPid && pidAlive(holderPid)) {
+        // FAIL CLOSED: an alive holder PID is reclaimed ONLY when PID reuse is PROVEN — i.e. BOTH the
+        // stored start-identity and the live start-identity are non-empty AND they differ (the old PID
+        // exited and the OS handed its number to an unrelated process). In every other alive case —
+        // matching identities, a missing/empty stored identity, an uncheckable live identity, or any
+        // identity we cannot positively distinguish — we REFUSE. Reclaiming a live lock would let two gates
+        // run concurrently, which is worse than a manual cleanup, so an empty/uncheckable identity is
+        // NEVER treated as evidence of PID reuse.
         const liveIdent = procIdentity(holderPid);
-        if (holderIdent && liveIdent && holderIdent === liveIdent) {
-          // Genuinely LIVE holder => REFUSE.
+        const proveReuse = holderIdent && liveIdent && holderIdent !== liveIdent;
+        if (!proveReuse) {
           const ageS = Math.round((nowMs() - (owner.createdAtMs || this._lockdirBirthMs())) / 1000);
-          this.refuseDetail = `live holder pid=${holderPid} age=${ageS}s targetDir=${owner.targetDir || "?"}`;
+          if (holderIdent && liveIdent) {
+            // Identities both present and equal => genuinely the same live holder.
+            this.refuseDetail = `live holder pid=${holderPid} age=${ageS}s targetDir=${owner.targetDir || "?"}`;
+          } else {
+            // One or both identities empty/uncheckable while the PID is alive => fail-closed refusal.
+            this.refuseDetail =
+              `holder pid=${holderPid} appears alive but PID reuse cannot be ruled out ` +
+              `(stored-identity=${holderIdent ? "present" : "missing"}, ` +
+              `live-identity=${liveIdent ? "present" : "uncheckable"}) — refusing (fail-closed)`;
+          }
           return false;
         }
-        if (holderIdent && !liveIdent) {
-          // Alive but identity UNCHECKABLE => FAIL CLOSED (a 2nd gate is worse than manual cleanup).
-          this.refuseDetail = `holder pid=${holderPid} appears alive but its start-identity is uncheckable — refusing (fail-closed)`;
-          return false;
-        }
-        // pid alive but identity mismatch => PID reuse; treat as stale and reclaim.
+        // Both identities present and DIFFERENT => proven PID reuse; treat as stale and reclaim.
         warn(`lock pid=${holderPid} reused by an unrelated process (identity mismatch) => reclaiming`);
       } else {
         warn(`lock holder pid=${holderPid} is dead/stale => reclaiming`);
@@ -663,7 +697,15 @@ async function runContainedStep(opts) {
   });
 
   clearInterval(watchdog);
-  // If the watchdog tripped, make sure the tree + strays are gone before we return.
+  // One-tick race: the 1s watchdog can set `reason` (TIMEOUT/STALL) in the same tick the child cleanly
+  // exits 0, before `close` resolves. A genuine deadline/stall reap kills with SIGKILL, so the close code
+  // is non-zero/null (128 via signal); a clean exit-0 means the step actually completed in time. Only
+  // honor `reason` when the close code is non-zero/null, so a step that finished cleanly is never mapped
+  // to a spurious TIMEOUT/STALL.
+  if (reason && code === 0) {
+    reason = "";
+  }
+  // If the watchdog tripped (a real reap), make sure the tree + strays are gone before we return.
   if (reason) {
     await reapTree(child.pid, killGraceMs);
     await provenanceSweep(targetDir, killGraceMs);
@@ -674,9 +716,60 @@ async function runContainedStep(opts) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// nextest FAIL-line parsing — the EXACT failed-test names (final whitespace token of each FAIL line).
-// nextest format: "    FAIL [   0.123s] <binary> <test::path::name>" — the name is the final field.
+// nextest result-line parsing.
+//
+// nextest prints one terminal status per test: "    <STATUS> [   0.123s] <binary> <test::path::name>".
+// A plain assertion failure is `FAIL`, but a CRASH renders under a DIFFERENT status — a signal abort
+// (`SIGABRT` / `SIGSEGV` / `SIGBUS` / `SIGILL` / `SIGFPE` / `ABORT`), a leak (`LEAK` under
+// leak-fail-mode / `LEAK-FAIL`), or a `TIMEOUT`. Those are NOT `FAIL` lines yet nextest still counts them
+// in its summary `failed` total and exits non-zero. Parsing only `FAIL [` would let an aborting/leaking
+// test in ANY crate pass the gate green, so the live SURFACE-1 path treats the summary `failed` count +
+// the run exit code as authoritative (see runGate), and the classifier below recognizes the non-`FAIL`
+// failure statuses too so the testable `--selftest-classify-nextest` hook agrees with the live path.
 // ----------------------------------------------------------------------------------------------------
+
+// Terminal status tokens nextest uses for a FAILED test (anything that is not PASS and counts toward the
+// summary `failed` total). Informational prefixes (SLOW / TRY / RETRY / START / SETUP) are NOT terminal
+// failure statuses and are excluded.
+const NEXTEST_FAILURE_STATUSES = new Set([
+  "FAIL",
+  "ABORT",
+  "SIGABRT",
+  "SIGSEGV",
+  "SIGBUS",
+  "SIGILL",
+  "SIGFPE",
+  "SIGHUP",
+  "SIGINT",
+  "SIGQUIT",
+  "SIGTERM",
+  "SIGKILL",
+  "LEAK",
+  "LEAK-FAIL",
+  "TIMEOUT",
+]);
+
+// All failed-test names from a nextest log, across EVERY terminal failure status (not just `FAIL`).
+// Returns the EXACT test name (final whitespace token after the timing bracket) for each failure line.
+function extractNextestFailureStatusNames(text) {
+  const names = [];
+  for (const line of text.split("\n")) {
+    const m = /^\s*([A-Z][A-Z-]*) \[/.exec(line);
+    if (!m) continue;
+    if (!NEXTEST_FAILURE_STATUSES.has(m[1])) continue;
+    const idx = line.indexOf("] ");
+    if (idx < 0) continue;
+    const after = line.slice(idx + 2).trim();
+    if (!after) continue;
+    const parts = after.split(/\s+/);
+    names.push(parts[parts.length - 1]);
+  }
+  return names;
+}
+
+// The EXACT failed-test names from the plain `FAIL [` lines only — the names the tolerated-allowlist
+// accounting operates over on the live path. A crash status (SIGABRT/LEAK/…) is intentionally NOT in this
+// set: a crash is never tolerated, and it is surfaced via the summary-count tripwire.
 function extractNextestFailedNames(text) {
   const names = [];
   for (const line of text.split("\n")) {
@@ -693,17 +786,57 @@ function extractNextestFailedNames(text) {
   return names;
 }
 
-// Classify a nextest log's failures.
-//   "tolerated"  — >=1 failure, and EVERY failure is an EXACT allowlisted name.
-//   "regression" — >=1 failure is NOT allowlisted.
-//   "none"       — no FAIL lines parsed.
+// Classify a nextest log's failures (used by the `--selftest-classify-nextest` hook so the testable path
+// mirrors the live SURFACE-1 verdict). It recognizes the SAME non-`FAIL` failure statuses + summary-count
+// tripwire the live path uses:
+//   "regression" — >=1 NON-`FAIL` failure status line (a crash/leak/timeout is never tolerated), OR the
+//                  summary `failed` count exceeds the accounted `FAIL` names (an unaccounted failure
+//                  class), OR >=1 parsed `FAIL` name is not allowlisted.
+//   "tolerated"  — >=1 `FAIL` line, EVERY parsed `FAIL` name is an EXACT allowlisted name, NO non-`FAIL`
+//                  failure status line, and the summary count does not exceed the accounted names.
+//   "none"       — no failure status lines parsed AND the summary reports zero failures.
 function classifyNextestFailures(text) {
-  const names = extractNextestFailedNames(text);
-  if (names.length === 0) return "none";
-  for (const nm of names) {
+  const failNames = extractNextestFailedNames(text);
+  const allFailureNames = extractNextestFailureStatusNames(text);
+  // A non-`FAIL` failure status (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) is present whenever the broader scan
+  // finds more failure lines than the `FAIL`-only scan — those extras are crashes, never tolerated.
+  const nonFailFailures = allFailureNames.length - failNames.length;
+  const summary = parseNextestSummary(text);
+  const unaccounted = summary.failed - failNames.length;
+  if (nonFailFailures > 0 || unaccounted > 0) return "regression";
+  if (failNames.length === 0) return "none";
+  for (const nm of failNames) {
     if (!TOLERATED_TEST_NAMES.has(nm)) return "regression";
   }
   return "tolerated";
+}
+
+// The SHARED SURFACE-1 verdict logic. The live gate (runGate) and the `--selftest-classify-nextest-run`
+// hook both call this so the testable path is byte-identical to the live aggregation. Given a nextest log
+// + the run exit code, it returns the non-tolerated `failures` (each {surface,name}), the tolerated count,
+// and the parsed summary. The load-bearing rule: a crash renders under a NON-`FAIL` status and a nextest
+// setup/harness error exits non-zero with NO `FAIL [` line — both would pass green if only `FAIL [` lines
+// were trusted. The summary `failed` total counts every failure class, so any shortfall vs the accounted
+// `FAIL` names is an unaccounted failure; trip a hard failure when the run exited non-zero AND (there is
+// such a shortfall OR no `FAIL` name parsed at all). The tolerated env pair has summary.failed == the two
+// accounted `FAIL` names, so unaccounted == 0 and this never fires for it.
+function analyzeNextestSurface(text, code) {
+  const failures = [];
+  let toleratedCount = 0;
+  const failNames = [...new Set(extractNextestFailedNames(text))];
+  const summary = parseNextestSummary(text);
+  for (const nm of failNames) {
+    if (TOLERATED_TEST_NAMES.has(nm)) toleratedCount++;
+    else failures.push({ surface: "nextest", name: nm });
+  }
+  const unaccounted = summary.failed - failNames.length;
+  if (code !== 0 && (unaccounted > 0 || failNames.length === 0)) {
+    failures.push({
+      surface: "nextest",
+      name: `<run exit ${code}; ${unaccounted > 0 ? unaccounted : "0"} non-FAIL-status failure(s); summary failed=${summary.failed}>`,
+    });
+  }
+  return { failures, toleratedCount, summary, namedCount: failNames.length, unaccounted };
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -846,65 +979,88 @@ function buildCargoEnv(baseEnv, runnerTarget) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// Per-package Cargo env for a DIRECTLY-executed test binary. Cargo (and nextest) inject the standard
-// `CARGO_*` package env vars into every test process; a binary run bare from the shell does NOT get them,
-// so tests that read `CARGO_MANIFEST_DIR` (e.g. to resolve the repo root and read `.cutover-state`, corpus
-// fixtures, or the package's own assets) FAIL spuriously. We replicate that env so the direct libtest
-// surface matches what Cargo would have set. `CARGO_MANIFEST_DIR` is the load-bearing one; the `CARGO_PKG_*`
-// set is included for faithfulness. Package metadata comes from `cargo metadata` (read once, cached).
+// Per-suite package identity, derived ENTIRELY from the nextest archive list JSON we already parsed inside
+// the contained/watchdogged list step — `package-name` and `package-id` (the part after `#` is the
+// semver). This deliberately avoids a SEPARATE `cargo metadata` subprocess: a second synchronous cargo
+// call would run OUTSIDE the whole-gate watchdog, the process containment, and the scrubbed/runner-owned
+// cargo env, so a hang in it would bypass the gate deadline. The list JSON already carries everything the
+// direct-libtest env needs.
 // ----------------------------------------------------------------------------------------------------
-let _pkgMetaCache = null;
-function packageMetadata(repoRealpath, pkgName) {
-  if (_pkgMetaCache && _pkgMetaCache.pkgName === pkgName) return _pkgMetaCache.meta;
-  let meta = null;
-  try {
-    const r = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
-      cwd: repoRealpath,
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    if (r.status === 0 && r.stdout) {
-      const parsed = JSON.parse(r.stdout);
-      meta = (parsed.packages || []).find((p) => p.name === pkgName) || null;
-    }
-  } catch {
-    meta = null;
+function deriveSuitePkgInfo(suite) {
+  const name = suite["package-name"] || "";
+  // package-id forms: "path+file:///…/crates/verter_session#0.0.1-beta.1" (version after the LAST '#'),
+  // or the older "verter_session 0.0.1-beta.1 (path+file://…)" form. Extract the semver defensively.
+  const id = suite["package-id"] || "";
+  let version = "";
+  const hash = id.lastIndexOf("#");
+  if (hash >= 0) {
+    const tail = id.slice(hash + 1);
+    // "name@version" or just "version".
+    const at = tail.lastIndexOf("@");
+    version = at >= 0 ? tail.slice(at + 1) : tail;
+  } else {
+    const m = /\s(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s/.exec(` ${id} `);
+    if (m) version = m[1];
   }
-  _pkgMetaCache = { pkgName, meta };
-  return meta;
+  return { name, version };
 }
 
-function buildSuiteEnv(baseCargoEnv, manifestDir, pkgMeta, crateName) {
+// ----------------------------------------------------------------------------------------------------
+// SURFACE-2 suite selection + integrity gate (shared by runGate and the `--selftest-surface2` hook). The
+// filter mirrors `cargo test -p verter_session --tests`: the lib unit-test binary + every `tests/*.rs`
+// integration binary, i.e. kind ∈ {lib, test}; bins/benches are excluded. SURFACE 2 IS the shared-process
+// surface — the whole reason this gate exists — so a filter/archive regression that finds NOTHING must NOT
+// let the gate quietly pass on surface 1 alone. Returns `{ suites, lib, test, error }`: `error` is a
+// non-null setup-failure message when zero suites are found OR a kind is missing (verter_session always
+// has exactly one `lib` plus its integration `test` targets, so we assert >=1 of EACH — a partial filter
+// that keeps only one kind is surfaced as a regression, not passed as a half-covered surface).
+// ----------------------------------------------------------------------------------------------------
+function selectSessionSuites(allSuites) {
+  const suites = (allSuites || []).filter(
+    (s) => s["package-name"] === "verter_session" && (s.kind === "lib" || s.kind === "test"),
+  );
+  const lib = suites.filter((s) => s.kind === "lib").length;
+  const test = suites.filter((s) => s.kind === "test").length;
+  let error = null;
+  if (suites.length === 0) {
+    error =
+      "zero verter_session lib/test suites found in the archive listing — the shared-process surface " +
+      "would be silently skipped. Refusing to pass on surface 1 alone.";
+  } else if (lib < 1 || test < 1) {
+    error =
+      `verter_session suite filter is incomplete (lib=${lib}, test=${test}; expected >=1 of each). ` +
+      "A partial filter would under-cover the shared-process surface. Refusing to pass.";
+  }
+  return { suites, lib, test, error };
+}
+
+// Per-package Cargo env for a DIRECTLY-executed test binary. This injects the runtime Cargo env the
+// verter_session integration tests ACTUALLY read — CARGO_MANIFEST_DIR and CARGO_TARGET_DIR — verified
+// complete for this suite (the only runtime `std::env::var(_os)` Cargo lookups in the verter_session test
+// sources are `CARGO_MANIFEST_DIR` and `CARGO_TARGET_DIR`; `CARGO_TARGET_DIR` is already forced on the base
+// cargo env to the runner-owned dir, and the manifest dir IS the suite cwd). It does NOT claim to
+// reproduce the FULL env Cargo passes (it omits e.g. dynamic-library search-path setup and per-test
+// tmp/bin vars) — only the subset this suite reads. The CARGO_PKG_NAME/VERSION pair is a faithful extra
+// derived from the same archive list JSON (NOT a subprocess); it is not load-bearing for this suite.
+function buildSuiteEnv(baseCargoEnv, manifestDir, pkgInfo, crateName) {
   const env = { ...baseCargoEnv };
-  // The load-bearing var: the package manifest dir Cargo sets for the test process.
+  // Load-bearing: the package manifest dir Cargo sets for the test process (tests read it via
+  // std::env::var("CARGO_MANIFEST_DIR") to resolve the repo root + corpus fixtures). cwd IS the manifest
+  // dir. CARGO_TARGET_DIR is already present on baseCargoEnv (forced to the runner-owned target).
   env.CARGO_MANIFEST_DIR = manifestDir;
-  const cargoBin = baseCargoEnv.CARGO || findCargoBinary();
-  if (cargoBin) env.CARGO = cargoBin;
   if (crateName) env.CARGO_CRATE_NAME = crateName.replace(/-/g, "_");
-  if (pkgMeta) {
-    env.CARGO_PKG_NAME = pkgMeta.name || "";
-    env.CARGO_PKG_VERSION = pkgMeta.version || "";
-    const v = String(pkgMeta.version || "");
-    const m = /^(\d+)\.(\d+)\.(\d+)(?:[-+](.*))?$/.exec(v);
-    env.CARGO_PKG_VERSION_MAJOR = m ? m[1] : "";
-    env.CARGO_PKG_VERSION_MINOR = m ? m[2] : "";
-    env.CARGO_PKG_VERSION_PATCH = m ? m[3] : "";
-    env.CARGO_PKG_VERSION_PRE = m && m[4] ? m[4] : "";
-    env.CARGO_PKG_AUTHORS = (pkgMeta.authors || []).join(":");
-    env.CARGO_PKG_DESCRIPTION = pkgMeta.description || "";
-    env.CARGO_PKG_HOMEPAGE = pkgMeta.homepage || "";
-    env.CARGO_PKG_REPOSITORY = pkgMeta.repository || "";
-    env.CARGO_PKG_LICENSE = pkgMeta.license || "";
-    env.CARGO_PKG_LICENSE_FILE = pkgMeta.license_file || "";
-    if (!env.CARGO_PKG_NAME) env.CARGO_PKG_NAME = pkgMeta.name || "";
+  if (pkgInfo) {
+    if (pkgInfo.name) env.CARGO_PKG_NAME = pkgInfo.name;
+    if (pkgInfo.version) {
+      env.CARGO_PKG_VERSION = pkgInfo.version;
+      const m = /^(\d+)\.(\d+)\.(\d+)(?:[-+](.*))?$/.exec(String(pkgInfo.version));
+      env.CARGO_PKG_VERSION_MAJOR = m ? m[1] : "";
+      env.CARGO_PKG_VERSION_MINOR = m ? m[2] : "";
+      env.CARGO_PKG_VERSION_PATCH = m ? m[3] : "";
+      env.CARGO_PKG_VERSION_PRE = m && m[4] ? m[4] : "";
+    }
   }
   return env;
-}
-
-function findCargoBinary() {
-  const r = spawnSync(IS_WINDOWS ? "where" : "which", ["cargo"], { encoding: "utf8" });
-  const out = (r.stdout || "").split(/\r?\n/)[0].trim();
-  return out || "cargo";
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -924,12 +1080,87 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
       process.exit(1);
     }
     const text = readFileSync(fixture, "utf8");
-    if (/^\s*FAIL \[/m.test(text)) {
-      const cls = classifyNextestFailures(text);
-      process.stdout.write(cls === "tolerated" ? "PASS-WITH-TOLERATED\n" : "FAIL\n");
-      process.exit(cls === "tolerated" ? 0 : 1);
+    // Route EVERY fixture through the real classifier — do NOT pre-gate on the presence of a `FAIL [`
+    // line. A crash/leak/timeout (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) or an unaccounted summary failure carries
+    // no `FAIL [` line yet must classify as a regression, exactly as the live SURFACE-1 path treats it.
+    const cls = classifyNextestFailures(text);
+    if (cls === "regression") {
+      process.stdout.write("FAIL\n");
+      process.exit(1);
+    }
+    if (cls === "tolerated") {
+      process.stdout.write("PASS-WITH-TOLERATED\n");
+      process.exit(0);
     }
     process.stdout.write("PASS\n");
+    process.exit(0);
+  }
+  // Self-test LIVE-aggregation hook: `--selftest-classify-nextest-run <exitCode> <fixture>` drives the
+  // EXACT `analyzeNextestSurface(text, code)` the live SURFACE-1 path calls and prints PASS |
+  // PASS-WITH-TOLERATED | FAIL. Unlike the classifier hook, this takes the run exit code so the
+  // non-zero-exit-with-no-FAIL tripwire is testable. Pure scaffolding: no mutex/process-group/target dir.
+  if (av[0] === "--selftest-classify-nextest-run") {
+    const code = parseInt(av[1], 10);
+    const fixture = av[2];
+    if (!fixture || !existsSync(fixture) || Number.isNaN(code)) {
+      process.stdout.write("FAIL\n");
+      process.exit(1);
+    }
+    const text = readFileSync(fixture, "utf8");
+    const r = analyzeNextestSurface(text, code);
+    if (r.failures.length > 0) {
+      process.stdout.write("FAIL\n");
+      process.exit(1);
+    }
+    if (r.toleratedCount > 0) {
+      process.stdout.write("PASS-WITH-TOLERATED\n");
+      process.exit(0);
+    }
+    process.stdout.write("PASS\n");
+    process.exit(0);
+  }
+  // Self-test SURFACE-2 integrity hook: `--selftest-surface2 <suites.json>` runs the REAL
+  // selectSessionSuites() gate over a canned `allSuites` array and exits with the SAME contract the live
+  // path uses — 127 (USAGE/SETUP) when the integrity gate trips (zero suites / missing kind), 0 with an
+  // `OK lib=<n> test=<n>` line otherwise. Pure scaffolding: no mutex/process-group/target dir/cargo.
+  if (av[0] === "--selftest-surface2") {
+    const fixture = av[1];
+    if (!fixture || !existsSync(fixture)) {
+      process.stderr.write("missing suites.json\n");
+      process.exit(EXIT_USAGE);
+    }
+    let allSuites;
+    try {
+      allSuites = JSON.parse(readFileSync(fixture, "utf8"));
+    } catch (e) {
+      process.stderr.write(`bad suites.json: ${e.message}\n`);
+      process.exit(EXIT_USAGE);
+    }
+    const sel = selectSessionSuites(allSuites);
+    if (sel.error) {
+      process.stderr.write(`SETUP FAILURE: ${sel.error}\n`);
+      process.exit(EXIT_USAGE);
+    }
+    process.stdout.write(`OK lib=${sel.lib} test=${sel.test}\n`);
+    process.exit(0);
+  }
+  // Self-test provenance-sweep matcher hook (pure regex/classify; NO Windows host needed):
+  // `--selftest-sweep-match <posix|windows> <targetDir> -- <command line…>` prints MATCH | NOMATCH for the
+  // REAL sweep predicate `isBuildTool(cmd) && targetDirMatches(cmd, targetDir, windows)`. Lets the harness
+  // assert that a Windows `cargo.exe`/`rustc.exe` command line referencing the runner target dir MATCHES,
+  // while a repo-root-only dev `cargo.exe` does NOT. Pure scaffolding: no mutex/process-group/cargo.
+  if (av[0] === "--selftest-sweep-match") {
+    const plat = av[1];
+    const targetDir = av[2];
+    const dd = av.indexOf("--");
+    const cmd = dd >= 0 ? av.slice(dd + 1).join(" ") : "";
+    if ((plat !== "posix" && plat !== "windows") || !targetDir || dd < 0) {
+      process.stderr.write("usage: --selftest-sweep-match <posix|windows> <targetDir> -- <cmd…>\n");
+      process.exit(EXIT_USAGE);
+    }
+    const windows = plat === "windows";
+    const swept = isBuildTool(cmd) && targetDirMatches(cmd, targetDir, windows);
+    process.stdout.write(swept ? "MATCH\n" : "NOMATCH\n");
     process.exit(0);
   }
 }
@@ -1354,39 +1585,36 @@ async function runGate(opts, ctx) {
     return mapStepReason(runRes);
   }
   const nextestText = runRes.stdout + "\n" + runRes.stderr;
-  // nextest echoes each FAIL line twice (inline during the run AND in the trailing recap block); dedup to
-  // unique exact names so the count and the tolerated/regression decision are not double-counted.
-  const nextestFailNames = [...new Set(extractNextestFailedNames(nextestText))];
-  const nextestSummary = parseNextestSummary(nextestText);
-  let nextestTolerated = 0;
-  for (const nm of nextestFailNames) {
-    if (TOLERATED_TEST_NAMES.has(nm)) {
-      toleratedOccurred = true;
-      nextestTolerated++;
-    } else {
-      failures.push({ surface: "nextest", name: nm });
-    }
-  }
+  // SURFACE-1 verdict via the shared analyzer (the same code the `--selftest-classify-nextest-run` hook
+  // drives). It consults the run exit code + the summary `failed` total, NOT just the `FAIL [` lines, so a
+  // crash (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) or a setup/harness error in ANY crate fails the gate.
+  const s1 = analyzeNextestSurface(nextestText, runRes.code);
+  for (const f of s1.failures) failures.push(f);
+  if (s1.toleratedCount > 0) toleratedOccurred = true;
   log(
     `SURFACE 1 done in ${Math.round(runRes.durationMs / 1000)}s: ` +
-      `${nextestSummary.passed} passed, ${nextestFailNames.length} failed, ${nextestSummary.skipped} skipped ` +
-      `(${nextestTolerated} tolerated)`,
+      `${s1.summary.passed} passed, ${s1.summary.failed} failed ` +
+      `(${s1.namedCount} named, ${s1.toleratedCount} tolerated), ${s1.summary.skipped} skipped; ` +
+      `run exit ${runRes.code}`,
   );
 
   // ---------- SURFACE 2: direct verter_session libtest execution (in-process surface) ----------
-  // Mirror `cargo test -p verter_session --tests`: lib unit-test binary + every integration test binary,
-  // i.e. kind ∈ {lib, test}. Bins/benches are excluded (cargo test --tests does not run them).
-  const sessionSuites = allSuites.filter(
-    (s) => s["package-name"] === "verter_session" && (s.kind === "lib" || s.kind === "test"),
-  );
+  const sel = selectSessionSuites(allSuites);
+  if (sel.error) {
+    err(`SURFACE 2 SETUP FAILURE: ${sel.error}`);
+    return EXIT_USAGE;
+  }
+  const sessionSuites = sel.suites;
   log(
-    `SURFACE 2: directly executing ${sessionSuites.length} verter_session libtest binaries (in-process) from the SAME archive …`,
+    `SURFACE 2: directly executing ${sessionSuites.length} verter_session libtest binaries ` +
+      `(lib=${sel.lib}, test=${sel.test}) in-process from the SAME archive …`,
   );
   let s2Passed = 0;
   let s2Failed = 0;
   let s2Tolerated = 0;
-  // Package metadata for the Cargo-standard CARGO_PKG_* env (read once, cached).
-  const sessionPkgMeta = packageMetadata(repoRealpath, "verter_session");
+  // Package identity derived from the archive list JSON (NOT a separate `cargo metadata` subprocess that
+  // would escape the watchdog). All session suites share one package, so derive once from the first.
+  const sessionPkgInfo = deriveSuitePkgInfo(sessionSuites[0]);
   for (const s of sessionSuites) {
     const remaining = deadlineMs - nowMs();
     if (remaining <= 0) {
@@ -1402,10 +1630,10 @@ async function runGate(opts, ctx) {
     // cwd = the package manifest dir (what Cargo sets). nextest reports it as the suite's `cwd`; defend
     // against a missing/extract-relative value by falling back to <repo>/crates/verter_session.
     const cwd = s.cwd && existsSync(s.cwd) ? s.cwd : join(repoRealpath, "crates", "verter_session");
-    // The directly-executed binary needs the SAME Cargo-provided env Cargo/nextest would set — most
-    // importantly CARGO_MANIFEST_DIR (tests resolve the repo root + read .cutover-state / corpus fixtures
-    // through it). Without it those guards fail spuriously. cwd IS the manifest dir.
-    const suiteEnv = buildSuiteEnv(cargoEnv, cwd, sessionPkgMeta, s["binary-name"] || "verter_session");
+    // The directly-executed binary needs the runtime Cargo env these tests read — CARGO_MANIFEST_DIR
+    // (tests resolve the repo root + read corpus fixtures through it) and CARGO_TARGET_DIR (already on the
+    // base cargo env). cwd IS the manifest dir. See buildSuiteEnv for the verified-complete scope.
+    const suiteEnv = buildSuiteEnv(cargoEnv, cwd, sessionPkgInfo, s["binary-name"] || "verter_session");
     // Preserve the libtest DEFAULT threading (do NOT force --test-threads=1). Optionally pass an explicit
     // passthrough if the caller asked for it.
     const binArgs = [];
@@ -1414,7 +1642,7 @@ async function runGate(opts, ctx) {
       cmd: bin,
       args: binArgs,
       cwd,
-      env: suiteEnv, // the same env Cargo would pass through (incl. CARGO_MANIFEST_DIR)
+      env: suiteEnv, // the runtime Cargo env this suite reads (CARGO_MANIFEST_DIR + CARGO_TARGET_DIR)
       phase: "test", // TEST phase: byte-growth-only liveness
       deadlineMs,
       stallMs,
