@@ -178,6 +178,7 @@ fn workspace_root() -> PathBuf {
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
+        .join("cases")
         .join("fixtures")
         .join("diagnostics")
 }
