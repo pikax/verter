@@ -8,7 +8,7 @@
 //! an authority for bindings/macros/imports/generated output). This guard scans
 //! the production setup module to keep that invariant enforced.
 
-const SETUP_SRC: &str = include_str!("../src/ide/script/setup.rs");
+const SETUP_SRC: &str = include_str!("../../src/ide/script/setup.rs");
 
 /// The deleted dual-recovery identifiers must not reappear in production code.
 #[test]

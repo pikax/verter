@@ -30,7 +30,7 @@
 //! consume it without either side leaking the other's internals. The
 //! DTO-boundary invariant (`verter_compiler` must never depend on
 //! `verter_session`) is pinned by
-//! `crates/verter_compiler/tests/no_session_dependency.rs`.
+//! `crates/verter_compiler/tests/cases/no_session_dependency.rs`.
 //!
 //! These types are the owned hand-off shape the `verter_compiler` codegen paths
 //! route through in place of the parser's `ResolvedElements`.

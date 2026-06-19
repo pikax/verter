@@ -25,7 +25,7 @@
   check. Their `value_type` column is documentary.
 
   The generated file is byte-pinned by
-  crates/verter_compiler/tests/svelte_bind_contract_freshness.rs — a registry
+  crates/verter_compiler/tests/cases/svelte_bind_contract_freshness.rs — a registry
   edit without a regen (or a hand-edit of the generated file) fails that gate.
   Regenerate with `node scripts/generate-svelte-bind-contract.mjs`.
 */

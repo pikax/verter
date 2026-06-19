@@ -10,7 +10,7 @@
 //!
 //! The table is GENERATED (`scripts/generate-svelte-bind-contract.mjs`) from a
 //! closed authored registry and byte-pinned by
-//! `crates/verter_compiler/tests/svelte_bind_contract_freshness.rs`, so a
+//! `crates/verter_compiler/tests/cases/svelte_bind_contract_freshness.rs`, so a
 //! registry change without a regen — or a hand-edit of the generated data —
 //! fails the gate. The whole-table destructure test below (no `..`) forces a
 //! conscious decision on every added binding.
