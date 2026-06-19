@@ -1,5 +1,5 @@
 error[E0624]: method `workspace` is private
-  --> tests/compile-fail/workspace_accessor_visibility.rs:18:20
+  --> tests/cases/compile-fail/workspace_accessor_visibility.rs:18:20
    |
 18 |     let _ws = host.workspace();
    |                    ^^^^^^^^^ private method
