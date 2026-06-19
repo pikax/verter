@@ -688,6 +688,86 @@ fn test_parse_lsp_location_without_inline_content_reads_disk_content() {
     let _ = std::fs::remove_dir_all(&temp_root);
 }
 
+/// Block H regression — cross-file references must convert each location's range against its OWN
+/// file's content, not the queried file's single snapshot.
+///
+/// The references path used to pass the QUERIED file's content snapshot to every returned
+/// location. For a reference in another file that converts line:col → byte offset against the
+/// WRONG content — yielding a garbage/zero-ish offset that surfaces downstream as a line-0 result.
+/// `parse_lsp_locations_per_target` (the helper `get_references` now uses) looks up each target's
+/// own content; this test pins the per-target behavior and is discriminating: feeding the queried
+/// file's content to all locations would compute the cross-file offset incorrectly.
+#[test]
+fn references_resolve_each_location_against_its_own_file_content() {
+    // Queried file: the symbol's USE site (short file). The reference in this file is on line 0.
+    let queried_path = "/proj/App.tsx";
+    let queried_content = "formatCount(1);\n";
+
+    // Cross-file declaration: `formatCount` sits at byte offset 16 (line 1), NOT a position that
+    // exists in the short queried file at the same line:col.
+    let decl_path = "/proj/utils.ts";
+    let decl_content = "// leading comment\nexport function formatCount() {}\n";
+    let decl_off = decl_content.find("formatCount").unwrap() as u32;
+    let decl_end = decl_off + "formatCount".len() as u32;
+    // Precondition: the declaration is on line 1, and the queried file has no such line:col span —
+    // so converting the decl's range against the queried content would be wrong.
+    assert_eq!(decl_content[..decl_off as usize].matches('\n').count(), 1);
+
+    // Two LSP locations: one in the queried file (line 0), one in the declaration file (line 1).
+    let locations = vec![
+        serde_json::json!({
+            "uri": path_to_file_uri_string(queried_path),
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 11 }
+            }
+        }),
+        serde_json::json!({
+            "uri": path_to_file_uri_string(decl_path),
+            "range": {
+                "start": { "line": 1, "character": 16 },
+                "end": { "line": 1, "character": 27 }
+            }
+        }),
+    ];
+
+    let result = parse_lsp_locations_per_target(&locations, |target_path| {
+        if target_path == queried_path {
+            Some(queried_content)
+        } else if target_path == decl_path {
+            Some(decl_content)
+        } else {
+            None
+        }
+    });
+
+    assert_eq!(result.len(), 2, "both references must parse");
+
+    let queried_loc = result
+        .iter()
+        .find(|l| l.path == queried_path)
+        .expect("queried-file ref present");
+    assert_eq!(queried_loc.start, 0, "use-site ref starts at offset 0");
+    assert_eq!(queried_loc.end, 11);
+
+    let decl_loc = result
+        .iter()
+        .find(|l| l.path == decl_path)
+        .expect("cross-file decl ref present");
+    // The cross-file ref's byte offsets are computed against the DECLARATION file's own content —
+    // the real symbol span. Converting against the queried file's content would not yield this.
+    assert_eq!(
+        decl_loc.start, decl_off,
+        "cross-file reference start must be the real byte offset in ITS OWN file ({decl_off}), got {}",
+        decl_loc.start
+    );
+    assert_eq!(decl_loc.end, decl_end);
+    assert_ne!(
+        decl_loc.start, 0,
+        "cross-file reference must not collapse to offset 0 (the line-0 bug)"
+    );
+}
+
 /// @ai-generated — parse_lsp_diagnostic extracts diagnostics from JSON
 #[test]
 fn test_parse_lsp_diagnostic() {
@@ -885,11 +965,74 @@ fn test_parse_code_action() {
             }
         }
     });
-    let action = parse_code_action(&json, None).unwrap();
+    let action = parse_code_action(&json, &|_p| None).unwrap();
     assert_eq!(action.title, "Add import");
     assert_eq!(action.kind.as_deref(), Some("quickfix"));
     assert_eq!(action.edits.len(), 1);
     assert_eq!(action.edits[0].new_text, "import { ref } from 'vue';\n");
+}
+
+/// Block H regression — a cross-file code action resolves each edit's range against ITS OWN
+/// target file's content, not a single queried-file snapshot. A quick-fix that edits two files
+/// (e.g. adding an import in `App.tsx` and inserting a helper in `utils.ts`) must compute the
+/// `utils.ts` edit's byte offsets from `utils.ts`'s content.
+#[test]
+fn code_action_resolves_each_edit_against_its_own_file_content() {
+    let app_path = "/proj/App.tsx";
+    let app_content = "const x = 1;\n";
+    let utils_path = "/proj/utils.ts";
+    // The helper insertion targets line 1 of utils.ts; offsets must be computed against this file.
+    let utils_content = "export {};\nexport const helper = 1;\n";
+    let utils_target_off = utils_content.find("helper").unwrap() as u32;
+
+    let json = serde_json::json!({
+        "title": "Cross-file fix",
+        "kind": "quickfix",
+        "edit": {
+            "changes": {
+                path_to_file_uri_string(app_path): [{
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 0 }
+                    },
+                    "newText": "import { helper } from './utils';\n"
+                }],
+                path_to_file_uri_string(utils_path): [{
+                    "range": {
+                        "start": { "line": 1, "character": 13 },
+                        "end": { "line": 1, "character": 19 }
+                    },
+                    "newText": "renamedHelper"
+                }]
+            }
+        }
+    });
+
+    let action = parse_code_action(&json, &|target_path| {
+        if target_path == app_path {
+            Some(app_content)
+        } else if target_path == utils_path {
+            Some(utils_content)
+        } else {
+            None
+        }
+    })
+    .unwrap();
+
+    let utils_edit = action
+        .edits
+        .iter()
+        .find(|e| e.path == utils_path)
+        .expect("cross-file utils.ts edit present");
+    assert_eq!(
+        utils_edit.start, utils_target_off,
+        "the utils.ts edit's byte offset must be computed against utils.ts's own content ({utils_target_off}), got {}",
+        utils_edit.start
+    );
+    assert_ne!(
+        utils_edit.start, 0,
+        "cross-file code-action edit must not collapse to offset 0 (the one-snapshot bug)"
+    );
 }
 
 // ── Dead pipe / process crash regression tests ──────────────

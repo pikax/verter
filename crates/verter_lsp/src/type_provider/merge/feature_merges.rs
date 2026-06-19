@@ -13,19 +13,32 @@ use crate::type_provider::protocol::{
 };
 
 use super::definition::{
-    is_carrier_api_or_dts_path, is_carrier_ide_path, normalize_carrier_path, path_to_uri,
-    resolve_carrier_tsx_range,
+    is_carrier_ide_path, normalize_carrier_path, path_to_uri, resolve_carrier_tsx_range,
+    resolve_external_target_range,
 };
-use super::position::{tsx_range_to_carrier_range, ExternalIdeResolver};
+use super::position::{tsx_range_to_carrier_range, ExternalIdeResolver, ExternalSourceReader};
 
 // ── References merge ────────────────────────────────────────────────
 
 /// Merge verter references with TypeProvider references.
 ///
 /// Strategy:
-/// - Combine verter in-file refs with TypeProvider cross-file refs
-/// - Map TSX locations back to Vue for same-file targets
-/// - Deduplicate by (uri, range.start)
+/// - Combine verter in-file refs with TypeProvider cross-file refs.
+/// - A carrier IDE target (`{carrier}.tsx`/`.jsx`) maps its byte offsets back to the carrier
+///   source through that file's CodeTransform sourcemap (the in-context mapper for the queried
+///   file, the external resolver for a foreign component).
+/// - Every other target's `start`/`end` are REAL byte offsets into that file: read the target's
+///   own source through the host VFS (`source_reader`) and convert the offsets to a line:col
+///   `Range` in the client-negotiated `encoding`, exactly as the definition merge does.
+/// - FAIL CLOSED: when the source / offsets cannot be resolved (or path normalization rewrote the
+///   emitted URI to a carrier source no in-context sourcemap bridges), DROP the reference. Never
+///   substitute `Range::default()`, which silently sends "Find All References" to line 0 of the
+///   wrong file.
+/// - Deduplicate by (uri, range.start).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "references merging needs the mapper, indexes, resolver, encoding, and VFS reader"
+)]
 pub fn merge_references(
     verter_refs: Option<Vec<Location>>,
     type_refs: Vec<TypeLocation>,
@@ -34,13 +47,17 @@ pub fn merge_references(
     carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     carrier_source_exists: &dyn Fn(&str) -> bool,
+    negotiated_encoding: PositionEncodingKind,
+    source_reader: ExternalSourceReader<'_>,
 ) -> Option<Vec<Location>> {
     let mut result = verter_refs.unwrap_or_default();
 
     for loc in &type_refs {
-        // For .vue.tsx/.vue.jsx targets, map back to .vue positions
+        // For carrier IDE targets, map back to carrier-source positions through the sourcemap.
+        // FAIL CLOSED: a carrier-IDE mapping failure DROPS the reference — never fabricate a
+        // `Range::default()` (line 0), exactly as the external-target branch below fails closed.
         if is_carrier_ide_path(&loc.path) {
-            let range = resolve_carrier_tsx_range(
+            let Some(range) = resolve_carrier_tsx_range(
                 &loc.path,
                 loc.start,
                 loc.end,
@@ -48,7 +65,9 @@ pub fn merge_references(
                 mapper,
                 carrier_line_index,
                 external_resolver,
-            );
+            ) else {
+                continue;
+            };
             let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
             if let Some(uri) = path_to_uri(carrier_path) {
                 // Deduplicate: skip if we already have a ref at this position
@@ -59,23 +78,34 @@ pub fn merge_references(
                     result.push(Location { uri, range });
                 }
             }
-        } else if is_carrier_api_or_dts_path(&loc.path, carrier_source_exists) {
-            // DTS declarations (.vue.d.ts or .vue.ts): strip suffix, use default range
-            let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
-            if let Some(uri) = path_to_uri(carrier_path) {
-                result.push(Location {
-                    uri,
-                    range: Range::default(),
-                });
-            }
-        } else {
-            // Cross-file .ts/.js targets: pass through
-            if let Some(uri) = path_to_uri(&loc.path) {
-                result.push(Location {
-                    uri,
-                    range: Range::default(), // offset mapping for external files requires their content
-                });
-            }
+            continue;
+        }
+
+        // Every other target: the emitted URI is the file the provider's byte offsets index only
+        // when path normalization is a no-op. Read that source and convert the offsets to a real
+        // `Range`; fail closed otherwise (a `{carrier}.d.ts`/`{carrier}.ts` whose URI is rewritten
+        // to the carrier source has no in-context sourcemap bridging the offsets → drop it).
+        let normalized = normalize_carrier_path(&loc.path, carrier_source_exists);
+        if normalized != loc.path {
+            continue;
+        }
+        let Some(uri) = path_to_uri(normalized) else {
+            continue;
+        };
+        let Some(range) = resolve_external_target_range(
+            &loc.path,
+            loc.start,
+            loc.end,
+            negotiated_encoding.clone(),
+            source_reader,
+        ) else {
+            continue;
+        };
+        let dup = result
+            .iter()
+            .any(|r| r.uri == uri && r.range.start == range.start);
+        if !dup {
+            result.push(Location { uri, range });
         }
     }
 
@@ -91,10 +121,21 @@ pub fn merge_references(
 /// Merge verter rename edits with TypeProvider rename locations.
 ///
 /// Strategy:
-/// - Start with verter's same-file WorkspaceEdit
-/// - Add TypeProvider's cross-file rename locations as additional TextEdits
-/// - Map TSX ranges back to Vue for .vue targets
-#[allow(clippy::mutable_key_type, clippy::too_many_arguments)]
+/// - Start with verter's same-file WorkspaceEdit.
+/// - Add TypeProvider's cross-file rename locations as additional TextEdits.
+/// - A carrier IDE target maps its TSX byte offsets back to the carrier source through the
+///   sourcemap (in-context mapper / external resolver).
+/// - Every other target's `start`/`end` are REAL byte offsets into that file: read its own source
+///   through the host VFS (`source_reader`) and convert to a line:col `Range` in the negotiated
+///   `encoding`, exactly as the definition / references merges do.
+/// - FAIL CLOSED: when the source / offsets cannot be resolved (or normalization rewrote the URI
+///   to a carrier source no sourcemap bridges), DROP the edit. A `Range::default()` rename edit is
+///   especially dangerous — it would write the new name at line 0 of the wrong file and CORRUPT it.
+#[allow(clippy::mutable_key_type)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "rename merging needs the mapper, indexes, resolver, encoding, and VFS reader"
+)]
 pub fn merge_rename_locations(
     verter_edit: Option<WorkspaceEdit>,
     type_locations: Vec<RenameLocation>,
@@ -104,6 +145,8 @@ pub fn merge_rename_locations(
     carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
     carrier_source_exists: &dyn Fn(&str) -> bool,
+    negotiated_encoding: PositionEncodingKind,
+    source_reader: ExternalSourceReader<'_>,
 ) -> Option<WorkspaceEdit> {
     let mut edit = verter_edit.unwrap_or_else(|| WorkspaceEdit {
         changes: Some(std::collections::HashMap::new()),
@@ -115,8 +158,11 @@ pub fn merge_rename_locations(
         .get_or_insert_with(std::collections::HashMap::new);
 
     for loc in &type_locations {
+        // FAIL CLOSED: a carrier-IDE mapping failure DROPS the rename edit — a `Range::default()`
+        // rename edit would write the new name at line 0 of the wrong file and CORRUPT it. Mirrors
+        // the external-target branch's fail-closed handling.
         if is_carrier_ide_path(&loc.path) {
-            let range = resolve_carrier_tsx_range(
+            let Some(range) = resolve_carrier_tsx_range(
                 &loc.path,
                 loc.start,
                 loc.end,
@@ -124,7 +170,9 @@ pub fn merge_rename_locations(
                 mapper,
                 carrier_line_index,
                 external_resolver,
-            );
+            ) else {
+                continue;
+            };
             let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
             if let Some(uri) = path_to_uri(carrier_path) {
                 let edits = changes.entry(uri).or_default();
@@ -136,19 +184,31 @@ pub fn merge_rename_locations(
                     });
                 }
             }
-        } else if is_carrier_api_or_dts_path(&loc.path, carrier_source_exists) {
-            let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
-            if let Some(uri) = path_to_uri(carrier_path) {
-                let edits = changes.entry(uri).or_default();
-                edits.push(TextEdit {
-                    range: Range::default(),
-                    new_text: new_name.to_string(),
-                });
-            }
-        } else if let Some(uri) = path_to_uri(&loc.path) {
-            let edits = changes.entry(uri).or_default();
+            continue;
+        }
+
+        // Every other target: read its own source and convert the byte offsets, fail closed.
+        let normalized = normalize_carrier_path(&loc.path, carrier_source_exists);
+        if normalized != loc.path {
+            continue;
+        }
+        let Some(uri) = path_to_uri(normalized) else {
+            continue;
+        };
+        let Some(range) = resolve_external_target_range(
+            &loc.path,
+            loc.start,
+            loc.end,
+            negotiated_encoding.clone(),
+            source_reader,
+        ) else {
+            continue;
+        };
+        let edits = changes.entry(uri).or_default();
+        let dup = edits.iter().any(|e| e.range.start == range.start);
+        if !dup {
             edits.push(TextEdit {
-                range: Range::default(),
+                range,
                 new_text: new_name.to_string(),
             });
         }
@@ -251,8 +311,13 @@ pub fn merge_signature_help(
 
 /// Convert TypeProvider code actions to LSP CodeActions.
 ///
-/// Maps edits from TSX positions back to Vue positions.
-/// Filters out actions whose edits don't map back to Vue.
+/// A carrier IDE edit maps its TSX byte offsets back to the carrier source through the sourcemap;
+/// every other edit's `start`/`end` are REAL byte offsets into its target file, so read that file's
+/// own source through the host VFS (`source_reader`) and convert to a line:col `Range` in the
+/// negotiated `encoding`, exactly as the references / rename merges do. FAIL CLOSED: drop an edit
+/// whose source / offsets cannot be resolved (or whose URI is a carrier source no sourcemap
+/// bridges) rather than emit a `Range::default()` edit that would write at line 0 of the wrong
+/// file. An action with no surviving edit is dropped entirely.
 #[allow(clippy::mutable_key_type)] // Uri has interior mutability but is used as key by tower-lsp API
 pub fn merge_code_actions(
     type_actions: Vec<TypeCodeAction>,
@@ -260,6 +325,8 @@ pub fn merge_code_actions(
     mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
     carrier_source_exists: &dyn Fn(&str) -> bool,
+    negotiated_encoding: PositionEncodingKind,
+    source_reader: ExternalSourceReader<'_>,
 ) -> Vec<CodeActionOrCommand> {
     type_actions
         .into_iter()
@@ -285,20 +352,32 @@ pub fn merge_code_actions(
                             });
                         }
                     }
-                } else if is_carrier_api_or_dts_path(&edit.path, carrier_source_exists) {
-                    let carrier_path = normalize_carrier_path(&edit.path, carrier_source_exists);
-                    if let Some(uri) = path_to_uri(carrier_path) {
-                        changes.entry(uri).or_default().push(TextEdit {
-                            range: Range::default(),
-                            new_text: edit.new_text,
-                        });
-                    }
-                } else if let Some(uri) = path_to_uri(&edit.path) {
-                    changes.entry(uri).or_default().push(TextEdit {
-                        range: Range::default(),
-                        new_text: edit.new_text,
-                    });
+                    continue;
                 }
+
+                // Every other edit: read its own target source and convert the byte offsets, fail
+                // closed (drop) — never emit a line-0 edit. A rewritten carrier-source URL has no
+                // in-context sourcemap bridging the offsets, so it is dropped too.
+                let normalized = normalize_carrier_path(&edit.path, carrier_source_exists);
+                if normalized != edit.path {
+                    continue;
+                }
+                let Some(uri) = path_to_uri(normalized) else {
+                    continue;
+                };
+                let Some(range) = resolve_external_target_range(
+                    &edit.path,
+                    edit.start,
+                    edit.end,
+                    negotiated_encoding.clone(),
+                    source_reader,
+                ) else {
+                    continue;
+                };
+                changes.entry(uri).or_default().push(TextEdit {
+                    range,
+                    new_text: edit.new_text,
+                });
             }
 
             if changes.is_empty() {

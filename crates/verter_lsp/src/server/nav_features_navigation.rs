@@ -432,6 +432,7 @@ pub(super) async fn handle_references(
         if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
             if let Some(offset) = vf_li.position_to_offset(position) {
                 if let Ok(type_refs) = tp.get_references(&tsx_path, offset).await {
+                    let encoding = server.position_encoding.read().clone();
                     let locations: Vec<Location> = type_refs
                         .into_iter()
                         .filter_map(|r| {
@@ -442,13 +443,29 @@ pub(super) async fn handle_references(
                                 &carrier_source_exists,
                             );
                             let target_uri: Uri = merge::file_path_to_uri(&target_path)?;
+                            // Same-file refs use the virtual-file LineIndex. When path
+                            // normalization is a no-op the emitted URI IS the file the provider's
+                            // byte offsets index, so read it back and convert in the negotiated
+                            // encoding. Fail closed otherwise — never manufacture a line-0 range.
                             let range = if r.path == tsx_path {
                                 Range {
-                                    start: vf_li.offset_to_position(r.start).unwrap_or_default(),
-                                    end: vf_li.offset_to_position(r.end).unwrap_or_default(),
+                                    start: vf_li.offset_to_position(r.start)?,
+                                    end: vf_li.offset_to_position(r.end)?,
                                 }
+                            } else if target_path == r.path {
+                                merge::resolve_external_target_range(
+                                    &r.path,
+                                    r.start,
+                                    r.end,
+                                    encoding.clone(),
+                                    &|p: &str| {
+                                        block_in_place_if_available(|| {
+                                            server.documents.host().workspace_read().read_file(p)
+                                        })
+                                    },
+                                )?
                             } else {
-                                Range::default()
+                                return None;
                             };
                             Some(Location {
                                 uri: target_uri,
@@ -517,6 +534,7 @@ pub(super) async fn handle_references(
                         );
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
+                        let negotiated_encoding = server.position_encoding.read().clone();
                         return Ok(merge::merge_references(
                             verter_result,
                             type_refs,
@@ -525,6 +543,12 @@ pub(super) async fn handle_references(
                             &ctx.carrier_line_index,
                             Some(&|ide_path: &str| server.external_ide_context(ide_path)),
                             &carrier_source_exists,
+                            negotiated_encoding,
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
                         ));
                     }
                     Err(e) => {
@@ -634,6 +658,7 @@ pub(super) async fn handle_rename(
                     {
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
+                        let negotiated_encoding = server.position_encoding.read().clone();
                         return Ok(merge::merge_rename_locations(
                             verter_result,
                             type_locs,
@@ -643,6 +668,12 @@ pub(super) async fn handle_rename(
                             &ctx.carrier_line_index,
                             Some(&|ide_path: &str| server.external_ide_context(ide_path)),
                             &carrier_source_exists,
+                            negotiated_encoding,
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
                         ));
                     }
                 }

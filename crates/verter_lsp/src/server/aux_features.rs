@@ -32,7 +32,7 @@ use crate::features::organize_imports::organize_imports_actions;
 use crate::features::workspace_symbol::workspace_symbols;
 use crate::type_provider::merge;
 
-use super::handler_guard::HandlerGuard;
+use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::server_utils::*;
 use super::VerterLanguageServer;
 
@@ -461,12 +461,19 @@ pub(super) async fn handle_code_action(
                     if let Ok(type_actions) = tp.get_code_actions(&ctx.tsx_path, so, eo).await {
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
+                        let negotiated_encoding = server.position_encoding.read().clone();
                         let actions = merge::merge_code_actions(
                             type_actions,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
                             &carrier_source_exists,
+                            negotiated_encoding,
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
                         );
                         all_actions.extend(actions);
                     }

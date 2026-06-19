@@ -871,6 +871,33 @@ fn parse_lsp_location(loc: &serde_json::Value, content: Option<&str>) -> Option<
     })
 }
 
+/// Parse a batch of LSP `Location` JSON values into `TypeLocation`s, resolving EACH location's
+/// byte offsets against that location's OWN file content.
+///
+/// References (and definition / type-definition) span multiple files: a location in file `B`
+/// returned from a query on file `A` carries a `range` whose line:col must be converted to a byte
+/// offset using `B`'s content, NOT `A`'s. Passing the queried file's single snapshot to every
+/// location — as the references path used to do — converts cross-file ranges against the wrong
+/// file, packing garbage byte offsets that surface downstream as line-0 / wrong-position results.
+///
+/// `content_for(target_path)` hands back the target file's content (from the contents cache);
+/// `parse_lsp_location` falls back to a disk read when it returns `None`.
+fn parse_lsp_locations_per_target<'a>(
+    locations: &[serde_json::Value],
+    content_for: impl Fn(&str) -> Option<&'a str>,
+) -> Vec<TypeLocation> {
+    locations
+        .iter()
+        .filter_map(|loc| {
+            let target_path = loc
+                .get("uri")
+                .and_then(|value| value.as_str())
+                .map(uri_to_file_path)?;
+            parse_lsp_location(loc, content_for(&target_path))
+        })
+        .collect()
+}
+
 /// Convert a `file://` URI from TSGO into the shared CANONICAL filesystem-path
 /// ID used in every path-bearing DTO this provider returns (`TypeLocation`,
 /// `RenameLocation`, `TypeCodeEdit`).
@@ -2193,14 +2220,11 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, content_snapshot) = {
+            let (line, character) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&path_owned) {
-                    Some(c) => {
-                        let (l, ch) = offset_to_position(c, offset);
-                        (l, ch, Some(c.clone()))
-                    }
-                    None => (0, offset, None),
+                    Some(c) => offset_to_position(c, offset),
+                    None => (0, offset),
                 }
             };
             let result = transport
@@ -2215,10 +2239,15 @@ impl TypeProvider for TsgoTypeProvider {
                 .await?;
 
             let locations = result.as_array().cloned().unwrap_or_default();
-            Ok(locations
-                .iter()
-                .filter_map(|loc| parse_lsp_location(loc, content_snapshot.as_deref()))
-                .collect())
+            // References are cross-file: each location's byte offsets must be computed against
+            // THAT location's own file, not the queried file. Look up each target's content (disk
+            // fallback inside `parse_lsp_location`), exactly as `get_definition` does — reusing the
+            // queried file's single snapshot for every location packs cross-file offsets against
+            // the WRONG file.
+            let cache = contents_cache.lock().await;
+            Ok(parse_lsp_locations_per_target(&locations, |target_path| {
+                cache.get(target_path).map(|text| text.as_str())
+            }))
         })
     }
 
@@ -2232,14 +2261,11 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, content_snapshot) = {
+            let (line, character) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&path_owned) {
-                    Some(c) => {
-                        let (l, ch) = offset_to_position(c, offset);
-                        (l, ch, Some(c.clone()))
-                    }
-                    None => (0, offset, None),
+                    Some(c) => offset_to_position(c, offset),
+                    None => (0, offset),
                 }
             };
             let result = transport
@@ -2257,8 +2283,16 @@ impl TypeProvider for TsgoTypeProvider {
                 return Ok(vec![]);
             }
 
+            // Cross-file rename: convert each edit's range against ITS OWN target file's content
+            // (disk fallback inside the parser), never the queried file's single snapshot — a
+            // line-0 edit in the wrong file CORRUPTS it.
+            let cache = contents_cache.lock().await;
             let mut locations = Vec::new();
-            parse_workspace_edit_locations(&result, content_snapshot.as_deref(), &mut locations);
+            parse_workspace_edit_locations(
+                &result,
+                &|target_path| cache.get(target_path).map(|text| text.as_str()),
+                &mut locations,
+            );
             Ok(locations)
         })
     }
@@ -2309,15 +2343,15 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (start_line, start_char, end_line, end_char, content_snapshot) = {
+            let (start_line, start_char, end_line, end_char) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&path_owned) {
                     Some(c) => {
                         let (sl, sc) = offset_to_position(c, start_offset);
                         let (el, ec) = offset_to_position(c, end_offset);
-                        (sl, sc, el, ec, Some(c.clone()))
+                        (sl, sc, el, ec)
                     }
-                    None => (0, start_offset, 0, end_offset, None),
+                    None => (0, start_offset, 0, end_offset),
                 }
             };
             let result = transport
@@ -2335,9 +2369,16 @@ impl TypeProvider for TsgoTypeProvider {
                 .await?;
 
             let items = result.as_array().cloned().unwrap_or_default();
+            // Cross-file code-action edits: resolve each edit's range against ITS OWN target file's
+            // content (disk fallback inside the parser), never the queried file's single snapshot.
+            let cache = contents_cache.lock().await;
             Ok(items
                 .iter()
-                .filter_map(|item| parse_code_action(item, content_snapshot.as_deref()))
+                .filter_map(|item| {
+                    parse_code_action(item, &|target_path| {
+                        cache.get(target_path).map(|text| text.as_str())
+                    })
+                })
                 .collect())
         })
     }
@@ -2700,9 +2741,17 @@ impl TypeProvider for TsgoTypeProvider {
 }
 
 /// Extract rename locations from a WorkspaceEdit JSON response.
-fn parse_workspace_edit_locations(
+/// Parse a workspace edit's rename locations, resolving EACH edit's byte offsets against the
+/// content of the file that edit targets.
+///
+/// A rename's edits are keyed by target URI (`changes: { [uri]: … }` or `documentChanges`), so a
+/// cross-file rename touches several files. `content_for(target_path)` hands back each target's own
+/// content; converting every edit against the queried file's single snapshot would pack cross-file
+/// edit offsets against the WRONG file — and a rename edit at a wrong (line-0) offset CORRUPTS the
+/// file. Mirrors the per-target content lookup `get_references` / `get_definition` use.
+fn parse_workspace_edit_locations<'a>(
     result: &serde_json::Value,
-    content: Option<&str>,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
     locations: &mut Vec<RenameLocation>,
 ) {
     // Handle `changes: { [uri]: TextEdit[] }` format
@@ -2710,7 +2759,7 @@ fn parse_workspace_edit_locations(
         for (change_uri, edits) in changes {
             if let Some(arr) = edits.as_array() {
                 for edit in arr {
-                    if let Some(loc) = parse_rename_edit(change_uri, edit, content) {
+                    if let Some(loc) = parse_rename_edit(change_uri, edit, content_for) {
                         locations.push(loc);
                     }
                 }
@@ -2727,7 +2776,7 @@ fn parse_workspace_edit_locations(
                 .unwrap_or_default();
             if let Some(edits) = dc.get("edits").and_then(|v| v.as_array()) {
                 for edit in edits {
-                    if let Some(loc) = parse_rename_edit(dc_uri, edit, content) {
+                    if let Some(loc) = parse_rename_edit(dc_uri, edit, content_for) {
                         locations.push(loc);
                     }
                 }
@@ -2736,21 +2785,22 @@ fn parse_workspace_edit_locations(
     }
 }
 
-fn parse_rename_edit(
+fn parse_rename_edit<'a>(
     uri: &str,
     edit: &serde_json::Value,
-    content: Option<&str>,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
 ) -> Option<RenameLocation> {
     let range = edit.get("range")?;
-    let (start, end) = parse_range_to_offsets(range, content)?;
-    Some(RenameLocation {
-        // Canonical filesystem-path ID, matching `TypeLocation.path` and the
-        // tsserver provider — NOT the raw `file://` URI (which would split file
-        // identity vs the documents/VFS layer on Windows).
-        path: uri_to_file_path(uri),
-        start,
-        end,
-    })
+    // Canonical filesystem-path ID, matching `TypeLocation.path` and the tsserver provider — NOT
+    // the raw `file://` URI (which would split file identity vs the documents/VFS layer on
+    // Windows). The same canonical path keys the per-target content lookup.
+    let path = uri_to_file_path(uri);
+    // Resolve each rename edit's range against ITS OWN file content, with a per-target disk
+    // fallback for a cache miss — exactly like `parse_lsp_location` (references / definition). A
+    // cross-file rename target the queried session never opened would otherwise pack a line-0 edit
+    // that CORRUPTS the file.
+    let (start, end) = parse_range_to_offsets_with_disk_fallback(range, &path, content_for)?;
+    Some(RenameLocation { path, start, end })
 }
 
 /// Parse a SignatureHelp from a JSON response.
@@ -2805,7 +2855,15 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
 }
 
 /// Parse a CodeAction from a JSON response.
-fn parse_code_action(item: &serde_json::Value, content: Option<&str>) -> Option<TypeCodeAction> {
+/// Parse a code action, resolving EACH edit's byte offsets against the content of the file that
+/// edit targets. A code action's edits are keyed by target URI, so a cross-file quick-fix /
+/// refactor edits several files; `content_for(target_path)` supplies each target's own content.
+/// Converting every edit against the queried file's single snapshot packs cross-file edit offsets
+/// against the WRONG file — the same one-snapshot hazard fixed for references / rename.
+fn parse_code_action<'a>(
+    item: &serde_json::Value,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
+) -> Option<TypeCodeAction> {
     let title = item.get("title")?.as_str()?.to_string();
     let kind = item.get("kind").and_then(|v| v.as_str()).map(String::from);
 
@@ -2815,7 +2873,8 @@ fn parse_code_action(item: &serde_json::Value, content: Option<&str>) -> Option<
             for (change_uri, text_edits) in changes {
                 if let Some(arr) = text_edits.as_array() {
                     for te in arr {
-                        if let Some(ce) = parse_text_edit_to_code_edit(change_uri, te, content) {
+                        if let Some(ce) = parse_text_edit_to_code_edit(change_uri, te, content_for)
+                        {
                             edits.push(ce);
                         }
                     }
@@ -2831,7 +2890,7 @@ fn parse_code_action(item: &serde_json::Value, content: Option<&str>) -> Option<
                     .unwrap_or_default();
                 if let Some(arr) = dc.get("edits").and_then(|v| v.as_array()) {
                     for te in arr {
-                        if let Some(ce) = parse_text_edit_to_code_edit(dc_uri, te, content) {
+                        if let Some(ce) = parse_text_edit_to_code_edit(dc_uri, te, content_for) {
                             edits.push(ce);
                         }
                     }
@@ -2843,17 +2902,21 @@ fn parse_code_action(item: &serde_json::Value, content: Option<&str>) -> Option<
     Some(TypeCodeAction { title, kind, edits })
 }
 
-fn parse_text_edit_to_code_edit(
+fn parse_text_edit_to_code_edit<'a>(
     uri: &str,
     te: &serde_json::Value,
-    content: Option<&str>,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
 ) -> Option<TypeCodeEdit> {
     let range = te.get("range")?;
     let new_text = te.get("newText")?.as_str()?.to_string();
-    let (start, end) = parse_range_to_offsets(range, content)?;
+    // Canonical filesystem-path ID (see `parse_rename_edit`), not the raw URI; keys the content.
+    let path = uri_to_file_path(uri);
+    // Per-target content with a disk fallback for a cache miss — same readback as references /
+    // definition (`parse_lsp_location`). A cross-file code-action edit target the session never
+    // opened would otherwise pack a line-0 edit against the WRONG file.
+    let (start, end) = parse_range_to_offsets_with_disk_fallback(range, &path, content_for)?;
     Some(TypeCodeEdit {
-        // Canonical filesystem-path ID (see `parse_rename_edit`), not the raw URI.
-        path: uri_to_file_path(uri),
+        path,
         start,
         end,
         new_text,
@@ -2972,6 +3035,31 @@ fn parse_range_to_offsets(range: &serde_json::Value, content: Option<&str>) -> O
     } else {
         Some((pack_position(sl, sc), pack_position(el, ec)))
     }
+}
+
+/// Like [`parse_range_to_offsets`], but resolves a cache-miss target (`content_for` returns
+/// `None`) against ITS OWN file content on disk before falling back to packed positions — the
+/// SAME per-target disk fallback [`parse_lsp_location`] gives references / definition.
+///
+/// Rename and code-action edits span multiple files; a cross-file target the queried session never
+/// opened is absent from the in-memory contents cache. Without the disk read, the range converts
+/// through `pack_position`, producing a line-0 edit in the WRONG file — for a rename that CORRUPTS
+/// the file. Reading the target's own source (the file tsgo already saw to compute the edit)
+/// converts the range against the correct content.
+fn parse_range_to_offsets_with_disk_fallback<'a>(
+    range: &serde_json::Value,
+    path: &str,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
+) -> Option<(u32, u32)> {
+    let disk_content;
+    let content = match content_for(path) {
+        Some(content) => Some(content),
+        None => {
+            disk_content = std::fs::read_to_string(path).ok();
+            disk_content.as_deref()
+        }
+    };
+    parse_range_to_offsets(range, content)
 }
 
 /// Extract a string from a MarkupContent or plain string JSON value.
@@ -3474,10 +3562,133 @@ mod dto_path_canonicalization_tests {
     fn parse_rename_edit_stores_canonical_path_not_raw_uri() {
         // The DTO path must be the canonical filesystem ID, NEVER the raw URI.
         // Reverting `parse_rename_edit` to `path: uri.to_string()` fails this.
-        let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), None).unwrap();
+        let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), &|_p| None).unwrap();
         assert_eq!(loc.path, "d:/proj/App.vue");
         assert_ne!(loc.path, "file:///D:/proj/App.vue");
         assert!(!loc.path.starts_with("file://"));
+    }
+
+    /// Per-target cross-file RENAME IPC: each rename edit's line:col range is converted against ITS
+    /// OWN file's content. The cache-miss target falls back to a per-target DISK read — never the
+    /// queried file's snapshot — so the byte offset lands on the real symbol, not line 0.
+    ///
+    /// Discriminating: the symbol sits on LINE 2 (`character` 0 of that line) of the target file,
+    /// so the correct offset is well past 0. Resolving against the queried-file snapshot (or
+    /// packing line:col) would yield a different, wrong offset; the test asserts the EXACT offset
+    /// computed from the target's own content.
+    #[test]
+    fn parse_rename_edit_resolves_each_target_against_its_own_file_disk_fallback() {
+        use super::{position_to_offset, uri_to_file_path};
+
+        // Target file content: the renamed symbol is on line 2 (0-based), not line 0.
+        let target_src = "// header line 0\nconst pad = 1;\nexport const renamed = 2;\n";
+        let want_off = target_src.find("renamed").expect("symbol present") as u32;
+        let (want_line, want_char) = super::offset_to_position(target_src, want_off);
+        assert_eq!(want_line, 2, "fixture precondition: symbol on line 2");
+
+        // Write the target to a real temp file, derive its canonical path + matching file:// URI.
+        let dir = std::env::temp_dir().join(format!(
+            "verter_tgo_rename_pertarget_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("target.ts");
+        std::fs::write(&file, target_src).unwrap();
+        let canonical = uri_to_file_path(&format!(
+            "file:///{}",
+            file.to_string_lossy().replace('\\', "/")
+        ));
+        let uri = super::path_to_file_uri_string(&canonical);
+
+        let edit = serde_json::json!({
+            "range": {
+                "start": { "line": want_line, "character": want_char },
+                "end": { "line": want_line, "character": want_char + "renamed".len() as u32 },
+            }
+        });
+
+        // `content_for` is a CACHE MISS for this path → forces the per-target disk fallback.
+        let loc = parse_rename_edit(&uri, &edit, &|_p: &str| None)
+            .expect("rename edit resolves through the per-target disk fallback");
+
+        let want_end =
+            position_to_offset(target_src, want_line, want_char + "renamed".len() as u32);
+        assert_eq!(
+            (loc.start, loc.end),
+            (want_off, want_end),
+            "the rename edit must resolve against the TARGET file's own content (disk fallback), \
+             not pack a line-0 offset — got start={} end={}, want start={want_off} end={want_end}",
+            loc.start,
+            loc.end,
+        );
+        // Discriminating negative: a line-0 packed offset (the pre-fix behavior on cache miss)
+        // would be `pack_position(line, char)`; assert we did NOT get that.
+        assert_ne!(
+            loc.start,
+            super::pack_position(want_line, want_char),
+            "must NOT be the packed line:col fallback (that is the corrupting line-0 path)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Twin of the rename per-target test for CODE ACTIONS: a code-action text edit's range is
+    /// resolved against ITS OWN target file with the per-target disk fallback on a cache miss.
+    #[test]
+    fn parse_text_edit_resolves_each_target_against_its_own_file_disk_fallback() {
+        use super::{position_to_offset, uri_to_file_path};
+
+        let target_src = "import a from 'x';\nconst y = 1;\nexport const fixme = 3;\n";
+        let want_off = target_src.find("fixme").expect("symbol present") as u32;
+        let (want_line, want_char) = super::offset_to_position(target_src, want_off);
+        assert_eq!(want_line, 2, "fixture precondition: symbol on line 2");
+
+        let dir = std::env::temp_dir().join(format!(
+            "verter_tgo_codeaction_pertarget_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("target.ts");
+        std::fs::write(&file, target_src).unwrap();
+        let canonical = uri_to_file_path(&format!(
+            "file:///{}",
+            file.to_string_lossy().replace('\\', "/")
+        ));
+        let uri = super::path_to_file_uri_string(&canonical);
+
+        let te = serde_json::json!({
+            "range": {
+                "start": { "line": want_line, "character": want_char },
+                "end": { "line": want_line, "character": want_char + "fixme".len() as u32 },
+            },
+            "newText": "fixed"
+        });
+
+        let edit = parse_text_edit_to_code_edit(&uri, &te, &|_p: &str| None)
+            .expect("code-action edit resolves through the per-target disk fallback");
+
+        let want_end = position_to_offset(target_src, want_line, want_char + "fixme".len() as u32);
+        assert_eq!(
+            (edit.start, edit.end),
+            (want_off, want_end),
+            "the code-action edit must resolve against the TARGET file's own content (disk \
+             fallback), not pack a line-0 offset",
+        );
+        assert_ne!(
+            edit.start,
+            super::pack_position(want_line, want_char),
+            "must NOT be the packed line:col fallback"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3489,7 +3700,8 @@ mod dto_path_canonicalization_tests {
             },
             "newText": "x"
         });
-        let edit = parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, None).unwrap();
+        let edit =
+            parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, &|_p| None).unwrap();
         assert_eq!(edit.path, "d:/proj/App.vue");
         assert_ne!(edit.path, "file:///D:/proj/App.vue");
         assert!(!edit.path.starts_with("file://"));

@@ -11,9 +11,7 @@ use std::sync::Arc;
 use tower_lsp_server::ls_types::*;
 use verter_span::TsPosition;
 
-use super::definition::{
-    is_carrier_api_or_dts_path, is_carrier_ide_path, normalize_carrier_path, path_to_uri,
-};
+use super::definition::{is_carrier_ide_path, normalize_carrier_path, path_to_uri};
 use super::hover::{extract_hover_text, replace_kind_prefix, strip_leading_code_block};
 use super::*;
 use crate::documents::line_index::LineIndex;
@@ -1107,6 +1105,11 @@ fn merge_references_both_present() {
         end: 10,
     }];
 
+    // The external `.ts` ref's byte offsets are converted against its own source (read through
+    // the injected VFS reader) — so the cross-file ref survives alongside the verter ref.
+    let utils_src: Arc<str> = Arc::from("export const formatCount = 1;\n");
+    let read_source = |p: &str| (p == "/project/utils.ts").then(|| utils_src.clone());
+
     let result = merge_references(
         verter,
         type_refs,
@@ -1115,6 +1118,8 @@ fn merge_references_both_present() {
         &carrier_li,
         None,
         &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &read_source,
     );
     assert!(result.is_some());
     assert_eq!(result.unwrap().len(), 2);
@@ -1132,6 +1137,8 @@ fn merge_references_neither() {
         &carrier_li,
         None,
         &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
     );
     assert!(result.is_none());
 }
@@ -1153,6 +1160,8 @@ fn merge_references_verter_only() {
         &carrier_li,
         None,
         &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
     );
     assert!(result.is_some());
     assert_eq!(result.unwrap().len(), 1);
@@ -1247,15 +1256,111 @@ fn merge_code_actions_with_edits() {
         }],
     }];
 
-    let result = merge_code_actions(actions, &tsx_li, &mapper, &carrier_li, &carrier_exists);
+    let result = merge_code_actions(
+        actions,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
     assert_eq!(result.len(), 1);
+}
+
+/// A cross-file (non-carrier) code-action edit keeps its REAL range, read from the target file's
+/// own source — and a target whose source can't be read is FAIL-CLOSED (dropped), never line-0'd.
+#[test]
+fn merge_code_actions_external_edit_keeps_real_range_or_fails_closed() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // `helper` sits on line 1 of utils.ts; the edit's byte offsets index utils.ts's own source.
+    let utils_src = "export {};\nexport const helper = 1;\n";
+    let off = utils_src.find("helper").unwrap() as u32;
+    let end = off + "helper".len() as u32;
+    let utils_li = LineIndex::new_utf16(utils_src);
+    let expected_start = utils_li.offset_to_position(off).unwrap();
+    assert_eq!(expected_start.line, 1, "fixture precondition");
+
+    let src: Arc<str> = Arc::from(utils_src);
+    let read_source = |p: &str| (p == "/proj/utils.ts").then(|| src.clone());
+
+    let actions = vec![TypeCodeAction {
+        title: "Rename helper".to_string(),
+        kind: Some("refactor".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/proj/utils.ts".to_string(),
+            start: off,
+            end,
+            new_text: "renamedHelper".to_string(),
+        }],
+    }];
+
+    let result = merge_code_actions(
+        actions,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &read_source,
+    );
+    assert_eq!(result.len(), 1, "the external code action must survive");
+    let CodeActionOrCommand::CodeAction(action) = &result[0] else {
+        panic!("expected a CodeAction");
+    };
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+    let edits = changes.values().next().unwrap();
+    assert_eq!(
+        edits[0].range.start, expected_start,
+        "external edit start must be the real line:col {expected_start:?}, got {:?}",
+        edits[0].range.start
+    );
+    assert_ne!(
+        edits[0].range,
+        Range::default(),
+        "external code-action edit must never collapse to (0,0)"
+    );
+
+    // Now with an unreadable source: the action is dropped entirely (fail-closed).
+    let actions = vec![TypeCodeAction {
+        title: "Rename helper".to_string(),
+        kind: Some("refactor".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/proj/gone.ts".to_string(),
+            start: off,
+            end,
+            new_text: "renamedHelper".to_string(),
+        }],
+    }];
+    let dropped = merge_code_actions(
+        actions,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    assert!(
+        dropped.is_empty(),
+        "a code action whose only edit can't be resolved must be dropped, not line-0'd: {dropped:?}"
+    );
 }
 
 /// @ai-generated — Empty actions returns empty vec
 #[test]
 fn merge_code_actions_empty() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
-    let result = merge_code_actions(vec![], &tsx_li, &mapper, &carrier_li, &carrier_exists);
+    let result = merge_code_actions(
+        vec![],
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
     assert!(result.is_empty());
 }
 
@@ -1371,6 +1476,8 @@ fn merge_rename_verter_only() {
         &carrier_li,
         None,
         &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
     );
     assert!(result.is_some());
 }
@@ -1388,6 +1495,8 @@ fn merge_rename_neither() {
         &carrier_li,
         None,
         &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
     );
     assert!(result.is_none());
 }
@@ -1738,6 +1847,14 @@ fn merge_definitions_prefers_verter_same_file_over_type_provider() {
 // ── normalize_carrier_path tests ────────────────────────────────────
 
 /// Predicate that always returns true — for tests where the .vue source is known to exist.
+/// A source reader that resolves nothing — every external target fails closed (dropped).
+/// Used by merge tests whose external fixtures only need to verify the carrier / fail-closed
+/// branches; the readback-line:col behavior has its own boundary suite
+/// (`tests/repro_external_refs_rename_line.rs`).
+fn no_source(_: &str) -> Option<Arc<str>> {
+    None
+}
+
 fn carrier_exists(_: &str) -> bool {
     true
 }
@@ -1796,12 +1913,6 @@ fn normalize_carrier_path_strips_svelte_virtual_suffixes() {
         "/node_modules/lib/C.svelte"
     );
     assert!(is_carrier_ide_path("/src/Comp.svelte.tsx"));
-    // `Comp.svelte.ts` is the api virtual file ONLY when `Comp.svelte`
-    // EXISTS (disambiguation against a real `.svelte.ts` rune module).
-    assert!(is_carrier_api_or_dts_path(
-        "/src/Comp.svelte.ts",
-        &carrier_exists
-    ));
     // A plain `.ts`/`.tsx` is NOT a carrier virtual file (negative).
     assert!(!is_carrier_ide_path("/src/plain.tsx"));
     assert_eq!(
@@ -1815,17 +1926,20 @@ fn real_svelte_rune_module_is_not_a_carrier_virtual_file() {
     // Co-existence: `store.svelte.ts` with NO backing `store.svelte` is
     // a REAL first-class rune module — NOT the `{carrier}.ts` component API
     // virtual file. The existence guard disambiguates it from `Foo.svelte` +
-    // `.ts` (the component API virtual file exists ONLY when `Foo.svelte`
-    // backs it); the rune module's own provider surface is served from its
-    // own canonical path, never normalized to a sibling `.svelte` component.
-    assert!(!is_carrier_api_or_dts_path(
-        "/src/store.svelte.ts",
-        &carrier_missing
-    ));
-    // And it is NOT normalized to a sibling `.svelte` (the strip is guarded).
+    // `.ts` (the strip applies ONLY when `Foo.svelte` backs it); the rune
+    // module's own provider surface is served from its own canonical path,
+    // never normalized to a sibling `.svelte` component. This guard is what
+    // the references / rename / code-action merges depend on to fail-closed
+    // (drop) a rewritten path rather than emit a line-0 edit into the wrong file.
     assert_eq!(
         normalize_carrier_path("/src/store.svelte.ts", &carrier_missing),
-        "/src/store.svelte.ts"
+        "/src/store.svelte.ts",
+        "a real rune module's path must pass through unchanged (no backing source)"
+    );
+    // Contrast: a backed `Foo.svelte.ts` IS the component API virtual file and normalizes.
+    assert_eq!(
+        normalize_carrier_path("/src/Foo.svelte.ts", &carrier_exists),
+        "/src/Foo.svelte"
     );
 }
 
@@ -1926,9 +2040,15 @@ fn merge_definitions_carrier_dts_fails_closed_no_line_zero() {
     );
 }
 
-/// .vue.d.ts references should map to .vue
+/// A `{carrier}.d.ts` reference is FAIL-CLOSED, not line-0'd.
+///
+/// Normalization rewrites `Button.vue.d.ts` → `Button.vue`, but the provider's byte offsets index
+/// the generated declaration file and no in-context sourcemap bridges them onto the carrier
+/// source. The references merge therefore DROPS the location (mirroring the definition merge's
+/// "normalization rewrote the path → None" arm) rather than emitting a wrong line-0 range into the
+/// `.vue` file. A real mapper for this carrier→declaration projection does not exist yet.
 #[test]
-fn merge_references_vue_dts_maps_to_vue() {
+fn merge_references_vue_dts_is_dropped_not_zeroed() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
     let type_refs = vec![TypeLocation {
@@ -1945,24 +2065,20 @@ fn merge_references_vue_dts_maps_to_vue() {
         &carrier_li,
         None,
         &carrier_exists,
-    );
-    assert!(result.is_some());
-    let locs = result.unwrap();
-    assert_eq!(locs.len(), 1);
-    assert!(
-        locs[0].uri.as_str().ends_with("Button.vue"),
-        "should reference .vue, got: {}",
-        locs[0].uri.as_str()
+        PositionEncodingKind::UTF16,
+        &no_source,
     );
     assert!(
-        !locs[0].uri.as_str().contains(".d.ts"),
-        "URI must not contain .d.ts suffix"
+        result.is_none(),
+        "a {{carrier}}.d.ts ref whose offsets have no carrier sourcemap must be dropped, not \
+         emitted at line 0: {result:?}"
     );
 }
 
-/// .vue.d.ts rename locations should map to .vue
+/// A `{carrier}.d.ts` rename location is FAIL-CLOSED, not line-0'd — a line-0 rename edit would
+/// corrupt the carrier file. Same reasoning as the references twin above.
 #[test]
-fn merge_rename_vue_dts_maps_to_vue() {
+fn merge_rename_vue_dts_is_dropped_not_zeroed() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
     let type_locations = vec![RenameLocation {
@@ -1980,19 +2096,13 @@ fn merge_rename_vue_dts_maps_to_vue() {
         &carrier_li,
         None,
         &carrier_exists,
-    );
-    assert!(result.is_some());
-    let edit = result.unwrap();
-    let changes = edit.changes.unwrap();
-    let uris: Vec<String> = changes.keys().map(|u| u.as_str().to_string()).collect();
-    assert!(
-        uris.iter().any(|u| u.ends_with("Button.vue")),
-        "should rename in .vue file, got: {:?}",
-        uris
+        PositionEncodingKind::UTF16,
+        &no_source,
     );
     assert!(
-        !uris.iter().any(|u| u.contains(".d.ts")),
-        "URI must not contain .d.ts suffix"
+        result.is_none(),
+        "a {{carrier}}.d.ts rename whose offsets have no carrier sourcemap must be dropped, not \
+         emitted at line 0: {result:?}"
     );
 }
 
