@@ -90,7 +90,7 @@ pub const RESOLVED_IMPORT_FACTS_RESOLVER_VERSION: u32 = 1;
 ///
 /// `lib_env_hash` is NOT a key dimension by design (R21 scoping
 /// rule). Tests pin this absence in
-/// `crates/verter_session/tests/resolved_import_facts_key_shape.rs`.
+/// `crates/verter_session/tests/cases/g_resolved/resolved_import_facts_key_shape.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedImportFactsKey {
     pub canonical: Arc<str>,

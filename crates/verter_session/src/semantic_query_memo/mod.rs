@@ -1996,7 +1996,7 @@ impl SemanticGraphStore {
     /// The only sanctioned callers are test and debug probes that
     /// explicitly want the unchecked read for cache-state inspection.
     /// The architecture guard `semantic_graph_production_reads_validated`
-    /// (`tests/semantic_graph_production_reads_validated.rs`) enforces
+    /// (`tests/cases/g_misc0/semantic_graph_production_reads_validated.rs`) enforces
     /// that no seal-scope production file calls `get_unvalidated`.
     ///
     /// The name carries the contract: `get_unvalidated` returns an entry
@@ -3825,7 +3825,7 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 // arch-guard:graph-signature-builder-provenance-pure — this function
 // (and any helper it calls to build facts) must stay provenance-pure.
 // The guard `semantic_graph_signature_builder_is_provenance_pure`
-// (`tests/semantic_graph_signature_builder_provenance.rs`) bans
+// (`tests/cases/g_misc1/semantic_graph_signature_builder_provenance.rs`) bans
 // `authoritative_current_content_hash`, `current_file_facts`,
 // `parse_fact_ref(`, `self_root_fact`, and `shallow_file_state` inside
 // this body.
@@ -3951,7 +3951,7 @@ fn empty_signature() -> DepSignature {
 // that consulted `current_request_context()`.
 //
 // Architecture guard `audit_counter_single_helper` (in
-// `crates/verter_session/tests/architecture_guards.rs`) rejects any
+// `crates/verter_session/tests/cases/architecture_guards.rs`) rejects any
 // direct `self.stats.<counter>.fetch_add` for these two counters
 // outside the helper bodies in this module.
 

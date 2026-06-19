@@ -30,7 +30,7 @@
 //! The structural arm (1) catches direct shape regressions at compile
 //! time. The source-AST arm (2) is the durable architecture pin
 //! registered in
-//! `tests/critical_rules_have_guards.rs::CRITICAL_RULE_GUARDS` so the
+//! `tests/cases/g_misc0/critical_rules_have_guards.rs::CRITICAL_RULE_GUARDS` so the
 //! "Cache Architecture (CRITICAL)" rule's R6 clause has a named
 //! discriminating guard.
 

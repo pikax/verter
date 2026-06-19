@@ -58,7 +58,7 @@
 //! `vfs_reads` lane actually populates. Files are therefore injected
 //! directly into a [`MemoryWorkspace`] and the host is built
 //! manually, mirroring the existing
-//! `tests/component_meta_audit/harness.rs::build_hermetic_host`
+//! `tests/cases/component_meta_audit/harness.rs::build_hermetic_host`
 //! pattern.
 
 use std::sync::Arc;

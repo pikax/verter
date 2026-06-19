@@ -8,7 +8,7 @@
 //! substrate-validation / fact-tracer fan-out discriminators.
 //!
 //! The completeness arch guard in
-//! `tests/cross_consumer_fact_matrix_complete.rs` enforces that
+//! `tests/cases/g_misc1/cross_consumer_fact_matrix_complete.rs` enforces that
 //! every `<consumer>_<fact_kind>.rs` cell exists; adding a new
 //! cache-bearing consumer without filing its 5 slices is caught at
 //! workspace test time.

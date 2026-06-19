@@ -15,7 +15,7 @@
 //! make the byte-pin compare the package against itself (vacuous) and break
 //! crates.io packaging (`cargo package` cannot reach outside the crate
 //! root). The byte-pin freshness test
-//! (`crates/verter_session/tests/svelte_jsx_shim_freshness.rs`) compares each
+//! (`crates/verter_session/tests/cases/svelte_jsx_shim_freshness.rs`) compares each
 //! in-crate mirror against its `packages/svelte-jsx/` canonical, so drift
 //! between the authority and the embedded copy fails the gate.
 

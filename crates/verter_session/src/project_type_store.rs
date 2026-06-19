@@ -1197,7 +1197,7 @@ pub struct ProjectTypeStore {
     /// Cache for the structural
     /// materialiser. Sole authoritative host-owned materialiser cache.
     /// The canonical removed-symbol list lives in
-    /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`.
+    /// `tests/cases/g_misc0/no_legacy_walker.rs::RETIRED_SYMBOLS`.
     materialize_structure_db: crate::component_meta_caches::MaterializeStructureDb,
     /// C — host-owned cache for
     /// `meta_resolve::ref_root_reaches_transitive_cycle_node`. BFS
@@ -1580,7 +1580,7 @@ impl ProjectTypeStore {
     /// For the structural-materialiser
     /// final-result cache. Sole authoritative materialiser cache; the
     /// canonical removed-symbol list lives in
-    /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`.
+    /// `tests/cases/g_misc0/no_legacy_walker.rs::RETIRED_SYMBOLS`.
     pub fn materialize_structure_db(
         &self,
     ) -> &crate::component_meta_caches::MaterializeStructureDb {
@@ -2006,7 +2006,7 @@ impl Default for ProjectTypeStore {
 //
 // The architecture guard
 // `every_db_field_in_project_type_store_appears_in_inventory`
-// (in `crates/verter_session/tests/architecture_guards.rs`) walks the
+// (in `crates/verter_session/tests/cases/architecture_guards.rs`) walks the
 // struct via `syn::parse_file` and asserts every DB-typed field name
 // appears in the inventory. Adding a field outside the inventory fails
 // the guard.

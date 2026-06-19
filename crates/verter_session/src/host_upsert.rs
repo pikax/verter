@@ -182,7 +182,7 @@ impl VerterHost {
     pub fn upsert(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
         // Provenance counter (R17 — host-mutation entry point).
         // Increments on every `VerterHost::upsert(...)` call. The
-        // counter is consumed by `tests/session_view_isolation.rs`
+        // counter is consumed by `tests/cases/g_session/session_view_isolation.rs`
         // to assert that the session query paths never re-enter
         // host-side mutation.
         self.provenance

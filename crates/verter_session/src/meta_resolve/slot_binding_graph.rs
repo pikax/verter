@@ -1255,7 +1255,7 @@ pub(crate) fn publish_merged_bindings(
     // `OwnProps['actions']` reducing into its underlying array body),
     // dragging in deeply-nested external members. The discriminating
     // regression at
-    // `tests/slot_binding_shallow_publication_tests.rs` characterises
+    // `tests/cases/g_misc0/slot_binding_shallow_publication_tests.rs` characterises
     // the carrier-vs-expansion boundary.
     //
     // The producer-shallow contract here is variant-dispatched on the

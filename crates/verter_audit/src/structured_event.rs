@@ -333,7 +333,7 @@ pub enum StructuredAuditEvent {
     ///
     /// Emitted by the full `host.upsert(...)` path at every cache
     /// drain site enumerated in
-    /// `crates/verter_session/tests/fixtures/cache_baseline/evict_canonical_inventory.json`.
+    /// `crates/verter_session/tests/cases/fixtures/cache_baseline/evict_canonical_inventory.json`.
     /// The quintuple-unchanged fast path (R1) MUST NOT emit this event;
     /// the structural-change path emits one event per draining
     /// instruction. Cache-reuse tests use the absence of these

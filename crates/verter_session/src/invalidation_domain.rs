@@ -25,7 +25,7 @@
 //! [`crate::project_type_store::ProjectTypeStore::all_dbs_for_invalidation`].
 //! The source-structure guard
 //! `every_db_field_in_project_type_store_appears_in_inventory` in
-//! `tests/architecture_guards.rs` parses the struct and asserts every
+//! `tests/cases/architecture_guards.rs` parses the struct and asserts every
 //! DB-typed field is registered.
 //!
 //! # Domain semantics

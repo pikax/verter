@@ -18,7 +18,7 @@
 //! accessors. Embedding the full snapshot as a single key field
 //! violates R21 (the five env-hash dimensions must remain split) and
 //! is statically rejected by
-//! `tests/world_snapshot_is_not_a_cache_key.rs`.
+//! `tests/cases/g_misc3/world_snapshot_is_not_a_cache_key.rs`.
 
 pub(crate) mod admission;
 pub(crate) mod candidate_store;
@@ -41,7 +41,7 @@ mod world_snapshot;
 // `WorldSnapshot` and its `*Dims` companions as canonical identity
 // types that downstream cache-runtime consumers thread through every
 // query- and content-addressed cache family. The architecture guard
-// `tests/world_snapshot_is_not_a_cache_key.rs` verifies the types
+// `tests/cases/g_misc3/world_snapshot_is_not_a_cache_key.rs` verifies the types
 // exist and have the right structural shape independent of any
 // particular consumer, so the substrate must compile clean even
 // before a given consumer wires the identity through.

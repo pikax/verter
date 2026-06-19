@@ -63,7 +63,7 @@ const TABS_HELPER_TS: &str = include_str!("../../../test_fixtures/tabs_helper.ts
 /// Build a hermetic host with default caps + footprint capture on
 /// and the bundled tabs fixture set injected directly into a
 /// [`MemoryWorkspace`]. Mirrors the
-/// `tests/audit_caps_wiring.rs::build_capped_host` pattern — files
+/// `tests/cases/g_audit/audit_caps_wiring.rs::build_capped_host` pattern — files
 /// land cold so the prepared-decl bundle path actually runs.
 fn build_footprint_host() -> Arc<VerterHost> {
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));

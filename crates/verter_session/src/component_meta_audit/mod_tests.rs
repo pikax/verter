@@ -388,7 +388,7 @@ fn audit_counter_smallest_reproducer() {
 }
 
 /// Discriminating: the cold-path attribution sheet at
-/// `crates/verter_session/tests/perf_bounds/cold-path-attribution-baseline.md`
+/// `crates/verter_session/tests/cases/perf_bounds/cold-path-attribution-baseline.md`
 /// must (a) identify a dominant cost arm per fixture and (b) record
 /// the bridge max-depth column.
 #[test]

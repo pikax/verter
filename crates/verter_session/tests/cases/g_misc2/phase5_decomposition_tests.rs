@@ -227,7 +227,7 @@ fn getcomponentmeta_decomposes_through_dispatch_primitives() {
 // `reduce_field_type_expr` is the SOLE authority that reduces
 // `ButtonStyles['variants']['size']` → `"sm" | "md" | "lg"`. Mirrors
 // the `indexed_access_two_levels` correctness-suite fixture
-// (`tests/correctness/fixtures.rs`), which is the canonical Tier-1
+// (`tests/cases/correctness/fixtures.rs`), which is the canonical Tier-1
 // regression for this invariant — duplicated here so the
 // `phase5_decomposition_tests` characterization fails loudly when the
 // projector's reducer is regressed (e.g. an early-return that bypasses

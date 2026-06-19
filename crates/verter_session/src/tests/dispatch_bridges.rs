@@ -5,7 +5,7 @@
 //! `crates/verter_session/tests/*.rs` build as a separate crate and
 //! cannot reach them directly. These shims expose a discriminating
 //! probe of each bridge — the conversion the integration test
-//! `tests/dispatch_bridges_convert_project_generation.rs` asserts.
+//! `tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs` asserts.
 //!
 //! The module is gated `cfg(any(test, debug_assertions))` at its
 //! `lib.rs` declaration site, so release builds never include it.
@@ -18,7 +18,7 @@ use crate::semantic_query::DepSignature;
 ///
 /// The accumulator is reset before the call and drained after, so the
 /// returned `Vec` is exactly the `FactVersionRef` set this one `sig`
-/// contributed. Used by `tests/dispatch_bridges_convert_project_generation.rs`
+/// contributed. Used by `tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs`
 /// to assert the dispatch accumulator bridge converts a
 /// `ProjectGeneration` dep and still drops a `RouteGeneration` dep.
 pub fn accumulate_dispatch_dep_signature_for_tests(sig: &DepSignature) -> Vec<FactVersionRef> {
@@ -31,7 +31,7 @@ pub fn accumulate_dispatch_dep_signature_for_tests(sig: &DepSignature) -> Vec<Fa
 /// `sig` inside a fresh fact-tracer scope and return the finalized
 /// observation set.
 ///
-/// Used by `tests/dispatch_bridges_convert_project_generation.rs` to
+/// Used by `tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs` to
 /// assert the fence-entry bridge converts a `ProjectGeneration` dep
 /// into a `FactVersionRef::ProjectGeneration` observation and still
 /// emits no observation for a `RouteGeneration` dep.

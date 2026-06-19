@@ -42,7 +42,7 @@
 //!    re-read of the store view that drops the currentness flag.
 //!
 //! The static-guard half of the contract (part 5) lives in
-//! `tests/architecture_guards.rs`
+//! `tests/cases/architecture_guards.rs`
 //! (`resolver_store_view_returns_store_view_read`,
 //! `cold_seed_store_view_exposes_no_validation_surface`,
 //! `warm_validation_entry_points_require_current_store_view`,

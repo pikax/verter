@@ -61,7 +61,7 @@
 //!   the stack on DROP, because `TypeExpr`'s drop glue is recursive
 //!   over its `Arc<TypeExpr>` children. The test passes only because
 //!   `verter_type_expr::TypeExpr` now has a manual iterative `Drop`
-//!   (see `verter_type_expr/tests/deep_drop_is_iterative.rs`). With
+//!   (see `verter_type_expr/tests/cases/deep_drop_is_iterative.rs`). With
 //!   that `Drop` removed, this test aborts with `STATUS_STACK_OVERFLOW`
 //!   on a default stack.
 
@@ -322,7 +322,7 @@ fn fingerprint_distinguishes_structurally_distinct_mappers() {
 /// chain — was the actual overflow this test originally caught; it
 /// is now safe because `verter_type_expr::TypeExpr` carries a manual
 /// iterative `Drop` (pinned in
-/// `verter_type_expr/tests/deep_drop_is_iterative.rs`).
+/// `verter_type_expr/tests/cases/deep_drop_is_iterative.rs`).
 ///
 /// This pins R27 (stack-safe). It passes on the default thread stack
 /// (no `RUST_MIN_STACK`); with `TypeExpr`'s iterative `Drop` removed

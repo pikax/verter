@@ -80,7 +80,7 @@ pub use crate::cache_runtime::singleflight::ComputeAdmission;
 
 /// Constructs `ComputeAdmission::Failed` for the
 /// `compute_admission_failed_variant_is_constructible` discriminator
-/// in `tests/block_1_i_discriminators.rs`. The Failed variant is
+/// in `tests/cases/g_block/block_1_i_discriminators.rs`. The Failed variant is
 /// part of the three-variant contract for
 /// `cooperative_admit_with_post_publish`; this helper proves it is
 /// constructible so the variant cannot be silently dropped.
@@ -144,7 +144,7 @@ pub fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
 /// thousands of facts. The returned guard zeroes the knob on drop.
 ///
 /// Integration tests in
-/// `crates/verter_session/tests/g_family/family_bcd_*overflow*.rs` use
+/// `crates/verter_session/tests/cases/g_family/family_bcd_*overflow*.rs` use
 /// this to discriminate the `MaterializeOutcome::Value` vs `Tainted`
 /// distinction on admission refusal. Per-host so the forced state never
 /// leaks into a concurrent materialise on a different host.
@@ -474,7 +474,7 @@ pub fn active_session_view_is_none_for_tests(host: &crate::VerterHost) -> bool {
 /// from integration tests. The producer takes a `&dyn ResolverContext`
 /// internally (per the seal contract); this wrapper accepts a
 /// concrete `&VerterHost` reference so integration tests in
-/// `tests/family_bcd_*.rs` can drive it end-to-end.
+/// `tests/cases/g_family/family_bcd_*.rs` can drive it end-to-end.
 pub fn app_config_no_override_proof_get_or_compute_for_tests(
     host: &crate::VerterHost,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
@@ -491,8 +491,8 @@ pub fn app_config_no_override_proof_get_or_compute_for_tests(
 /// canonical + current `IndexedReady` whole-hash + the default
 /// `ComponentMetaOptions` fingerprint — so it matches the
 /// published entry. Integration tests in
-/// `tests/component_meta_signature_is_tracer_owned.rs` and
-/// `tests/component_meta_family_producers_observe_cross_file_deps.rs`
+/// `tests/cases/g_component/component_meta_signature_is_tracer_owned.rs` and
+/// `tests/cases/g_component/component_meta_family_producers_observe_cross_file_deps.rs`
 /// use it to inspect the tracer-owned `facts` rail of the
 /// published signature.
 pub fn component_meta_result_signature_for_owner(
@@ -551,7 +551,7 @@ pub fn component_meta_cold_traced_read_set_for_tests(
 /// Discriminating probes for the dispatch DepSignature→fact
 /// bridges (`accumulate_dispatch_dep_signature` /
 /// `observe_fence_entry`). Used by
-/// `tests/dispatch_bridges_convert_project_generation.rs`.
+/// `tests/cases/g_misc0/dispatch_bridges_convert_project_generation.rs`.
 pub use crate::tests::dispatch_bridges::{
     accumulate_dispatch_dep_signature_for_tests, observe_fence_entry_for_tests,
 };

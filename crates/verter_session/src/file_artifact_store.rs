@@ -238,7 +238,7 @@ impl FileArtifactKey {
 
     /// Test-only public shim over [`Self::base`].
     ///
-    /// Used by `tests/eviction_policy.rs` and similar integration
+    /// Used by `tests/cases/g_misc0/eviction_policy.rs` and similar integration
     /// tests that need to construct multiple distinct
     /// `FileArtifactKey` variants for the same canonical to
     /// exercise the per-canonical retention sweep + the

@@ -642,7 +642,7 @@ impl ImportedRegistryDb {
 
     /// Test-only direct insertion entry point used by the
     /// invalidation-perf regression test
-    /// (`crates/verter_session/tests/invalidation_perf.rs`). Bypasses the
+    /// (`crates/verter_session/tests/cases/g_misc0/invalidation_perf.rs`). Bypasses the
     /// cooperative-admission inflight slot and admits the candidate into
     /// the store (registering its reverse index) identically to the cold
     /// publish path. NOT for use from production code.
@@ -1453,7 +1453,7 @@ impl ShapeCacheDb {
     // this route today — every projector, reducer, registry, and
     // graph-builder site refuses the carrier as a shallow terminal.
     // The positive-proof integration test
-    // `tests/synthetic_carrier_explicit_deepen_proof.rs` uses these
+    // `tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs` uses these
     // helpers to prove the cache-key identity round-trip is
     // well-defined for any future consumer that needs it.
 
@@ -1897,7 +1897,7 @@ impl MaterializeStructureDb {
     /// the same content-free `MaterializationCacheKey` subject (the
     /// canonical-subject slot + projection path/policy/mode axes — NO
     /// consumer-scope dimension at all) collapse to ONE slot. Used by
-    /// `tests/cross_owner_materialise_reuse_production.rs` to verify the
+    /// `tests/cases/g_misc0/cross_owner_materialise_reuse_production.rs` to verify the
     /// production-flow contract: driving
     /// `materialize_component_meta_structure` from N owners with a shared
     /// inner type produces one candidate for that slot under one view.

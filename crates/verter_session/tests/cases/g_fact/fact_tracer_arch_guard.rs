@@ -23,7 +23,7 @@
 //!   than per-compute instrumentation.
 //!
 //! These are structural-guard assertions, not behavioural tests.
-//! Behavioural coverage lives in `tests/fact_tracer_observe.rs`.
+//! Behavioural coverage lives in `tests/cases/g_fact/fact_tracer_observe.rs`.
 
 use std::fs;
 use std::path::PathBuf;

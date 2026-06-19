@@ -4,12 +4,12 @@
 //! DEFAULT canonical run (`cargo nextest run --workspace` + `cargo test -p
 //! verter_session --tests`) NEVER invokes the live svelte compiler — the
 //! default suite checks the COMMITTED goldens only (see
-//! `crates/verter_compiler/tests/svelte_goldens_in_sync.rs`). Run the live
+//! `crates/verter_compiler/tests/cases/svelte_goldens_in_sync.rs`). Run the live
 //! drift gate explicitly:
 //!
 //! ```bash
 //! cargo test -p verter_compiler --features svelte-oracle \
-//!   --test svelte_oracle_harness
+//!   --test main svelte_oracle_harness
 //! ```
 //!
 //! ## What it does (Svelte reference-drift gate)

@@ -49,7 +49,7 @@
 //! resolver_version)`. `lib_env_hash` is INTENTIONALLY ABSENT — a
 //! TS lib change MUST NOT invalidate base import-target resolution.
 //! Arch-guard
-//! `crates/verter_session/tests/lib_env_hash_excluded_from_resolved_import_facts.rs`
+//! `crates/verter_session/tests/cases/g_misc1/lib_env_hash_excluded_from_resolved_import_facts.rs`
 //! pins this absence.
 
 use std::sync::Arc;

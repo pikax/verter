@@ -601,7 +601,7 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
 /// prove the check is RELEASE-ACTIVE. Release-activeness (the check must be
 /// a real `assert!`/`panic!`, never a `debug_assert!` that a release build
 /// compiles out) is enforced statically by
-/// `tests/g_misc0/uniqueness_check_release_active.rs`, which extracts the
+/// `tests/cases/g_misc0/uniqueness_check_release_active.rs`, which extracts the
 /// `assert_canonicals_unique` fn body and fails on a `debug_assert*!`
 /// downgrade.
 ///

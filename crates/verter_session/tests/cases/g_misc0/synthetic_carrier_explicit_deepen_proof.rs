@@ -24,7 +24,7 @@
 //!
 //! The complementary architecture guard
 //! `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
-//! at `tests/no_carrier_verdict_db.rs` bans any production source
+//! at `tests/cases/g_misc2/no_carrier_verdict_db.rs` bans any production source
 //! that constructs `SemanticNodeId(<ident>.value_node)` outside the
 //! legitimate cache-route call.
 //!

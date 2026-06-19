@@ -287,7 +287,7 @@ fn session_drop_does_not_affect_base_cache() {
 }
 
 // `OverlaidView` direct substrate surface is covered by
-// `tests/session_view_smoke.rs` — see
+// `tests/cases/g_session/session_view_smoke.rs` — see
 // `overlaid_view_byte_identical_overlay_matches_base_hash` and
 // `overlaid_view_diverging_overlay_diverges_in_hash`. The tests in
 // this file exercise the production-flow consumer path that consults

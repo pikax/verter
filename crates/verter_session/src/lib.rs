@@ -96,7 +96,7 @@ mod raw_snapshot_template_source_move_tests;
 mod request_store_view_derived_hash_tests;
 #[cfg(test)]
 mod template_slot_generation_rail_tests;
-// tests/invalidation_perf.rs — InvalidationByCanonical impl on
+// tests/cases/g_misc0/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub(crate) mod bounded_query_retention;
 pub(crate) mod cache_runtime;
@@ -286,7 +286,7 @@ pub(crate) mod template_convert;
 /// NOT a public API — hidden from documentation; production code MUST
 /// NOT import from here. The architecture guard
 /// `test_only_module_is_only_consumed_by_test_files` (see
-/// `tests/architecture_guards.rs`) pins this contract. Body lives in
+/// `tests/cases/architecture_guards.rs`) pins this contract. Body lives in
 /// `test_only.rs`.
 #[doc(hidden)]
 pub mod test_only;

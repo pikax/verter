@@ -168,7 +168,7 @@ pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVer
 /// Exposed for integration tests that verify overflow telemetry —
 /// reached through the `for_tests::read_signature_overflow_at_install`
 /// re-export in `lib.rs` (see
-/// `tests/g_fact/fact_read_set_finalise_overflow.rs`). The `for_tests`
+/// `tests/cases/g_fact/fact_read_set_finalise_overflow.rs`). The `for_tests`
 /// shim is gated `cfg(any(test, debug_assertions))`; this accessor
 /// matches so it is not a dead symbol in release.
 #[cfg(any(test, debug_assertions))]

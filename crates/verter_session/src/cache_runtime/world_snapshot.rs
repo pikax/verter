@@ -33,7 +33,7 @@
 //! through cooperative-admission slots. The struct shape, derives,
 //! and accessor signatures are verified by the inline
 //! `#[cfg(test)] mod tests` below; the architecture guard
-//! `tests/world_snapshot_is_not_a_cache_key.rs` enforces the
+//! `tests/cases/g_misc3/world_snapshot_is_not_a_cache_key.rs` enforces the
 //! identity-vs-key invariant statically, independent of which
 //! consumer wires the identity through.
 

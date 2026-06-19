@@ -46,7 +46,7 @@ fn workspace_root() -> PathBuf {
                  by walking up from `{}`. The file is tracked and is the single \
                  source of truth; regenerate it via \
                  `VERTER_UPDATE_TS_BINDINGS=1 cargo test -p verter_session \
-                 --test g_misc1 audit_ts_bindings_are_in_sync` if it is missing.",
+                 --test main audit_ts_bindings_are_in_sync` if it is missing.",
                 env!("CARGO_MANIFEST_DIR"),
             );
         }

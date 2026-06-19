@@ -44,7 +44,7 @@
 //! - Function-shape skip at Nested — keeps function bodies symbolic
 //!   for Object-property positions.
 //!
-//! The static-grep gate at `tests/no_legacy_walker.rs` enforces that
+//! The static-grep gate at `tests/cases/g_misc0/no_legacy_walker.rs` enforces that
 //! retired walker symbols never reappear — see that file's
 //! `RETIRED_SYMBOLS` array for the canonical list of names.
 
@@ -243,7 +243,7 @@ impl std::hash::Hash for MaterializeRuntimeKey {
 /// through it, so they key on the identical slot. A request whose
 /// subject cannot be canonicalised yields `None` (uncached) rather than
 /// a content-derived key fallback. The cross-owner reuse invariant
-/// (`tests/g_misc0/cross_owner_materialise_reuse.rs`) holds: N consumer
+/// (`tests/cases/g_misc0/cross_owner_materialise_reuse.rs`) holds: N consumer
 /// scopes reaching the same canonical subject share ONE slot.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MaterializationCacheKey {

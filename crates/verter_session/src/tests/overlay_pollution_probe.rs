@@ -22,7 +22,7 @@ use crate::VerterHost;
 /// Observable facts about an overlay-bearing prepared-decl bundle —
 /// returned by [`overlay_prepared_decl_bundle_probe`].
 ///
-/// Used by `tests/overlay_prepared_decl_no_base_cache_pollution.rs` to
+/// Used by `tests/cases/g_misc0/overlay_prepared_decl_no_base_cache_pollution.rs` to
 /// discriminate the cache-pollution defect where a session-overlay
 /// prepared-decl bundle is keyed under the normalised companion
 /// canonical, so prepared-member write-throughs root overlay-derived

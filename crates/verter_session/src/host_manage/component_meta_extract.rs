@@ -1019,7 +1019,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     // `ctx.store_view()`) MUST run under the request-bound `ctx`, not the
     // bare `&VerterHost` rail (whose `store_view()` panics in a
     // `debug_assertions`-off build). See
-    // `tests/session_meta_store_view_regression.rs`.
+    // `tests/cases/g_session/session_meta_store_view_regression.rs`.
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
         canonical.as_str(),
@@ -1095,7 +1095,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     // Macro-DTO surface read runs under the request-bound `ctx` (not the
     // bare host) — see the sibling `extract_component_meta_from_resolved`
-    // and `tests/session_meta_store_view_regression.rs`.
+    // and `tests/cases/g_session/session_meta_store_view_regression.rs`.
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
         canonical.as_str(),

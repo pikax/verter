@@ -17,7 +17,7 @@
 //! [`render_client_framework_manifest_ts`] renders the canonical TS module text
 //! from the descriptor rows (joined with the [`LanguageRegistry`] extension
 //! table for adapter-module extensions); the freshness test
-//! (`crates/verter_session/tests/client_framework_manifest_ts_freshness.rs`)
+//! (`crates/verter_session/tests/cases/client_framework_manifest_ts_freshness.rs`)
 //! byte-compares the committed file against this render, so a hand-edit or a
 //! descriptor/registry change without a regen fails the gate. Mirrors the
 //! `virtual_file_naming_ts_freshness` discipline (regenerate + byte-compare).

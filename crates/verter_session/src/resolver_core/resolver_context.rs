@@ -6,7 +6,7 @@
 //! `component_meta_caches.rs` and `component_meta_materialize.rs`. Every
 //! such file routes its host access through this trait; the
 //! `no_concrete_verter_host_in_seal_scope` architecture guard
-//! (`tests/architecture_guards.rs`) enforces that the seal scope contains
+//! (`tests/cases/architecture_guards.rs`) enforces that the seal scope contains
 //! zero production references to `crate::VerterHost`.
 //!
 //! ## Why a separate trait (not super-trait composition)
@@ -559,7 +559,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// helpers can read overlay content without carrying an explicit
     /// view parameter. Default is reached today through the
     /// `for_tests::active_session_view_is_none_for_tests` shim in
-    /// `lib.rs` (see `tests/resolver_context_active_session_view.rs`).
+    /// `lib.rs` (see `tests/cases/g_misc0/resolver_context_active_session_view.rs`).
     fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
         None
     }
@@ -1148,7 +1148,7 @@ mod fact_tracer_tls {
         /// works with non-`Copy` payloads because `Cell::take()`
         /// internally calls `mem::replace`. The borrow-clone-release
         /// pattern is exercised by
-        /// `tests/tracer_stack_reentrant_observe_safe.rs`. All access
+        /// `tests/cases/g_misc0/tracer_stack_reentrant_observe_safe.rs`. All access
         /// is single-threaded (TLS).
         static ACTIVE_TRACERS: RefCell<SmallVec<[*const FactReadSetCell; 8]>> =
             RefCell::new(SmallVec::new());

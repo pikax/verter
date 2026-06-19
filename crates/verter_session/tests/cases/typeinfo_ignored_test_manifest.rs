@@ -3046,7 +3046,7 @@ fn registry_fidelity_for_row(
 /// faithfully reproduces the original query), and emits the `LIFTED_ROW_MIGRATIONS`
 /// Rust literal to a `/tmp` file. Run manually:
 ///   `LIFTED_BODIES=/tmp/mom/F1F2/lifted_bodies.json \
-///    cargo test -p verter_session --test typeinfo_ignored_test_manifest \
+///    cargo test -p verter_session --test main \
 ///    -- --ignored --nocapture emit_lifted_row_migrations`
 #[test]
 #[ignore = "audited lift-capture generator; run manually to (re)emit LIFTED_ROW_MIGRATIONS"]

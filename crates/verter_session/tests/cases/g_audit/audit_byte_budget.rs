@@ -11,7 +11,7 @@
 //! materializer-driven expansion blows the budget.
 //!
 //! This file is excluded from the generator-managed
-//! `crates/verter_session/tests/corpus_audit_tests.rs`. To wire it as a
+//! `crates/verter_session/tests/cases/corpus_audit_tests.rs`. To wire it as a
 //! standalone integration target, add it as a `[[test]]` in
 //! `Cargo.toml` once SA-1.B-impl lands. Today the file is reachable
 //! only as a `#[path = "../..."]` mod from a Cargo `[[test]]` definition.

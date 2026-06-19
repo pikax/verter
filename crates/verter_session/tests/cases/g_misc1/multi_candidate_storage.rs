@@ -286,7 +286,7 @@ fn r20_same_key_concurrent_admissions_preserve_cap() {
 ///    suppress the value — the observed behaviour proves it isn't.
 ///
 /// The architecture guard at
-/// `tests/architecture_guards.rs::storeview_checks_archive_retired`
+/// `tests/cases/architecture_guards.rs::storeview_checks_archive_retired`
 /// covers the source-tree scan; this `#[test]` covers behavioural
 /// observation.
 #[test]

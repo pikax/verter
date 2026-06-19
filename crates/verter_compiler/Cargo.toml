@@ -20,8 +20,8 @@ dhat-heap = []
 # (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`) so
 # the default suite never shells `node` / invokes the live svelte compiler — it
 # keeps the HERMETIC committed-golden structural guard in
-# `tests/svelte_goldens_in_sync.rs`. Run the live oracle with
-# `cargo test -p verter_compiler --features svelte-oracle --test svelte_oracle_harness`.
+# `tests/cases/svelte_goldens_in_sync.rs`. Run the live oracle with
+# `cargo test -p verter_compiler --features svelte-oracle --test main svelte_oracle_harness`.
 svelte-oracle = []
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]

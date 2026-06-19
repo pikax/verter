@@ -11,8 +11,8 @@
 //!
 //! This module is intentionally a `pub const` only so it can be
 //! `#[path]`-included from BOTH
-//! `tests/architecture_guards.rs` (the canonical home for arch
-//! guards) and `tests/compile_audit_no_hot_loop_instrumentation.rs`
+//! `tests/cases/architecture_guards.rs` (the canonical home for arch
+//! guards) and `tests/cases/g_compile/compile_audit_no_hot_loop_instrumentation.rs`
 //! (the focused regression).
 //!
 //! When adding entries: keep this list small (4–8 entries; escalate

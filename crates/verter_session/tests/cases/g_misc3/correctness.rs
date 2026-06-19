@@ -5,7 +5,7 @@
 //! included via `#[path]` (matches the repo's existing
 //! integration-test convention used by `component_meta_audit.rs`).
 //!
-//! Run: `cargo test -p verter_session --test correctness`
+//! Run: `cargo test -p verter_session --test main correctness`
 //!
 //! Author-first workflow: for every Class A fixture the
 //! programmatic expected value lives in
@@ -214,7 +214,7 @@ fn correctness_snapshot_for_every_fixture() {
                     "Class A fixture `{}` cannot be regenerated via \
                      UPDATE_SNAPSHOTS=1 — that captures Verter's output, \
                      bypassing the author-first workflow. \
-                     Run `cargo test --test correctness -- --ignored \
+                     Run `cargo test --test main -- --ignored \
                      generate_class_a_snapshots_from_expected` instead, \
                      after updating `expected.rs`.",
                     fixture.id,
@@ -283,7 +283,7 @@ fn ensure_class_a_expected_matches_snapshot() {
             expected_json.trim(),
             snapshot.trim(),
             "Class A expected.rs and .snap.json are out of sync for `{}`. \
-             Run `cargo test --test correctness -- --ignored \
+             Run `cargo test --test main -- --ignored \
              generate_class_a_snapshots_from_expected` to regenerate the \
              .snap.json from the programmatic expected value.",
             fixture.id,

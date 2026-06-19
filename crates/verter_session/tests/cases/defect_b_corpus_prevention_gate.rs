@@ -43,7 +43,7 @@
 //! Run with:
 //! ```text
 //! cargo test -p verter_session --features external-corpus \
-//!   --test defect_b_corpus_prevention_gate
+//!   --test main defect_b_corpus_prevention_gate
 //! ```
 
 #![cfg(feature = "external-corpus")]

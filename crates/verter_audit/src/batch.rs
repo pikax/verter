@@ -191,7 +191,7 @@ mod tests {
 
     /// Trivial in-memory source for unit-level tests inside
     /// `verter_audit`. The full integration test lives at
-    /// `crates/verter_audit/tests/batch_aggregator.rs`.
+    /// `crates/verter_audit/tests/cases/batch_aggregator.rs`.
     struct VecSource {
         entries: Vec<(Instant, RequestAuditRecord)>,
     }

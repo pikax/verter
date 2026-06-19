@@ -1,9 +1,9 @@
 //! Focused regression: the
 //! `audit_no_hot_loop_instrumentation` architecture guard MUST run
 //! cleanly. The same denylist used by the canonical guard in
-//! `tests/architecture_guards.rs` is consumed here via `#[path]`
+//! `tests/cases/architecture_guards.rs` is consumed here via `#[path]`
 //! mod-include — the constant lives in
-//! `tests/audit_hot_loop_denylist.rs`.
+//! `tests/cases/support/audit_hot_loop_denylist.rs`.
 //!
 //! Contract: the AST visitor finds every denylisted function body and
 //! confirms each is free of audit-emit calls. A compile producer emit

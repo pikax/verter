@@ -557,7 +557,7 @@ fn clean_script_setup_output_matches_golden() {
     assert_eq!(
         code, golden,
         "clean-path IDE TSX drifted from the golden — if this change is intentional, update the \
-         tests/golden_clean_ide_tsx.snap fixture\n--- ACTUAL ---\n{code}"
+         tests/cases/golden_clean_ide_tsx.snap fixture\n--- ACTUAL ---\n{code}"
     );
 }
 

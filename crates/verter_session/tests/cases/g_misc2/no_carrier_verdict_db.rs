@@ -451,7 +451,7 @@ fn no_carrier_verdict_db_self_test() {
 //   Currently zero workspace consumers exercise the explicit-deepen
 //   route — the carrier is always shallow in every projector,
 //   reducer, registry, and graph-builder site. The
-//   `tests/synthetic_carrier_explicit_deepen_proof.rs` integration
+//   `tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs` integration
 //   test exercises the cache-key identity round-trip via the
 //   `ShapeCacheDb::insert_synthetic_carrier_deep_for_test` /
 //   `get_synthetic_carrier_deep_for_test` `#[cfg(any(test,

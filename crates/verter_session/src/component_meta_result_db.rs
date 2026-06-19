@@ -804,7 +804,7 @@ mod tests {
     /// Build a slot key with zero env axes — the substrate-level DB unit
     /// tests exercise candidate/eviction mechanics, not env discrimination
     /// (that is covered by the R21 guard in
-    /// `tests/g_cache/r6_r21_query_identity_keys.rs`), so a uniform zero
+    /// `tests/cases/g_cache/r6_r21_query_identity_keys.rs`), so a uniform zero
     /// env keeps these tests focused on the bounded-candidate behaviour.
     fn mk_result_key(owner: &str, options_fingerprint: Hash16) -> ComponentMetaResultKey {
         ComponentMetaResultKey {

@@ -173,7 +173,7 @@ fn audited_result_lives_in_audit_and_exports_through_generated_ts() {
         generated.contains("export type AuditedResult<T, E> ="),
         "AuditedResult<T, E> must export as a generic type into \
          packages/types/audit.generated.ts (regenerate via \
-         `VERTER_UPDATE_TS_BINDINGS=1 cargo test -p verter_session --test g_misc1 \
+         `VERTER_UPDATE_TS_BINDINGS=1 cargo test -p verter_session --test main \
          audit_ts_bindings_are_in_sync` after a schema change)",
     );
     // The generated carrier references the audit record (its embedded

@@ -699,7 +699,7 @@ mod tests {
     /// subtrees with the SAME structure but distinct `Arc`
     /// allocations produce the SAME ordinal (covered by
     /// `fingerprint_content_addressed_across_value_cloned_arcs`
-    /// in `tests/mapper_fingerprint_content_addressed.rs`).
+    /// in `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`).
     /// Distinct ordinals therefore require STRUCTURALLY
     /// distinct inputs — different source, different value,
     /// different modifiers, or different name-type rename.

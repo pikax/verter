@@ -123,7 +123,7 @@ pub struct SyntheticCarrierKey {
 /// and overflowed the stack on deeply-nested types (e.g.
 /// `cycle_guard::hash_type_expr` routes a `TypeExpr` through `Hash`). The
 /// manual impl emits a BYTE-IDENTICAL stream to the former derive
-/// (pinned by `tests/hash_byte_stream_contract.rs`).
+/// (pinned by `tests/cases/hash_byte_stream_contract.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeExpr {
     // -- Terminals --

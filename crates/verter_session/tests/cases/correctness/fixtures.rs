@@ -585,7 +585,7 @@ const F_PATH_TABS_DYNAMIC_HELPER: &[(&str, &str)] = &[
 // FIRST so that under `UPDATE_SNAPSHOTS=1` the regression baselines
 // are captured before the harness's by-design panic on Class A
 // (see `correctness_snapshot_for_every_fixture` in
-// `tests/correctness.rs`). The normal run iterates the
+// `tests/cases/g_misc3/correctness.rs`). The normal run iterates the
 // same list and validates every entry against its committed
 // snapshot — Class A against `expected.rs` via
 // `ensure_class_a_expected_matches_snapshot`, Class B+C against the

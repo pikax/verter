@@ -914,7 +914,7 @@ mod tests {
     /// Build a zero-env route key. These unit tests exercise the cache /
     /// singleflight mechanics in isolation, not env discrimination (that
     /// is covered by the R21 guard in
-    /// `tests/g_cache/r6_r21_query_identity_keys.rs`), so a uniform zero
+    /// `tests/cases/g_cache/r6_r21_query_identity_keys.rs`), so a uniform zero
     /// env keeps the focus on route behaviour. Zero `ProjectIdentity` is
     /// permitted here because this is a `#[cfg(test)]` block.
     fn rk(provider: &str, name: &str) -> RouteNameKey {

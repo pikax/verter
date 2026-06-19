@@ -64,7 +64,7 @@ use std::path::PathBuf;
 ///    `no_macro_string_heuristics_in_resolver_core`), discoverable
 ///    via `cargo test <name>`, or
 /// 2. an integration-test FILE basename (e.g. `import_route_writer_guard`
-///    → `crates/verter_session/tests/import_route_writer_guard.rs`),
+///    → `crates/verter_session/tests/cases/g_misc3/import_route_writer_guard.rs`),
 ///    discoverable via `cargo test --test <name>`.
 ///
 /// Guard-name validity is enforced by
@@ -176,7 +176,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "cache_satisfaction_requires_path_exact_not_prefix",
             "backfill_writes_only_recorded_materialized_points",
             // R6/R21 direct guards for the four migrated query-identity
-            // cache keys (`crates/verter_session/tests/g_cache/r6_r21_query_identity_keys.rs`):
+            // cache keys (`crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs`):
             // each key is a content-free slot (R6 — no whole_hash /
             // content_hash / parse_stable_hash / fact_dep_signature / bundled
             // project_config_hash) carrying the split env axes it depends on
@@ -712,7 +712,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         "Editor-Liveness Provider-Sync Invariant",
         &[
             // The static editor-liveness architecture guard
-            // (`crates/verter_lsp/tests/editor_liveness_guards.rs`) source-scans
+            // (`crates/verter_lsp/tests/cases/editor_liveness_guards.rs`) source-scans
             // every LSP provider-sync file and FAILS if any function OTHER THAN
             // the approved leaf close-dispatch primitives contains an inline
             // provider-close loop (close-before-sync), which would close the live
@@ -968,14 +968,14 @@ fn every_critical_rule_in_docs_has_registered_guard() {
         "R6 META-GUARD — every `(CRITICAL)` section in \
          CLAUDE.md and `.claude/skills/*/SKILL.md` MUST be registered \
          in `CRITICAL_RULE_GUARDS` (in \
-         `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`) \
+         `crates/verter_session/tests/cases/g_misc0/critical_rules_have_guards.rs`) \
          with at least one guard reference. Prose-only CRITICAL rules \
          are documentation that nothing enforces. Every CRITICAL rule \
          needs a static architecture \
          guard OR a discriminating test in the same change that adds \
          the rule. Missing registry entries:\n\n{list}\n\n\
          To fix: open \
-         `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`, \
+         `crates/verter_session/tests/cases/g_misc0/critical_rules_have_guards.rs`, \
          add a row to `CRITICAL_RULE_GUARDS` for each missing title, \
          and reference the guard(s) that pin the invariant.",
         list = missing.join("\n")

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 // Shared denylist consumed by both `audit_no_hot_loop_instrumentation`
 // (defined below) and the focused regression test in
-// `tests/compile_audit_no_hot_loop_instrumentation.rs`.
+// `tests/cases/g_compile/compile_audit_no_hot_loop_instrumentation.rs`.
 // Each entry module intentionally gets its own copy of this stateless
 // denylist helper (no statics/atomics/OnceCell), so the per-entry scopes
 // stay disjoint and share no state. The "duplicate mod" the lint reports
@@ -4417,11 +4417,11 @@ mod foundations_guards {
         // verter_tsc) OR a verter_session integration test. Items
         // demoted to `pub(crate)` by Phase 12.A9 do not appear here.
         // ─── public modules: cited consumers ────────────────────────
-        // tests/audited_request_e2e.rs
+        // tests/cases/g_misc0/audited_request_e2e.rs
         "pub mod audited_request",
         // Workspace-wide cache-cluster schema-version constant + the
         // `CacheSchemaVersioned` trait. Public so
-        // `tests/cache_invariant_migration.rs` (the W0.5 fixture cohort)
+        // `tests/cases/g_cache/cache_invariant_migration.rs` (the W0.5 fixture cohort)
         // can read `CACHE_CLUSTER_SCHEMA_VERSION` and call the trait
         // methods to verify the cohort's eviction invariant.
         "pub mod cache_schema",
@@ -4467,33 +4467,33 @@ mod foundations_guards {
         // Parse-time fact-emission producer (R10–R16, R28, R29) —
         // walks `IndexedReady.shallow_state` and populates the
         // per-file `FactRegistry` + module-augmentation facts.
-        // Consumed by tests/fact_*.rs + tests/module_augmentation.rs +
-        // tests/shallow_walk_invariant.rs + future host paths.
+        // Consumed by tests/fact_*.rs + tests/cases/g_misc2/module_augmentation.rs +
+        // tests/cases/g_misc2/shallow_walk_invariant.rs + future host paths.
         "pub mod fact_emission",
         // Lazy member-body fact stores (R13, R28) — semantic and
         // display fingerprint stores keyed differently so cosmetic
         // edits invalidate display-bearing materialisations only.
-        // Consumed by tests/fact_semantic_display_split.rs +
-        // tests/member_presence_vs_member.rs + future resolver
+        // Consumed by tests/cases/g_fact/fact_semantic_display_split.rs +
+        // tests/cases/g_misc1/member_presence_vs_member.rs + future resolver
         // / materialiser admission paths.
         "pub mod member_display_fact_store",
         "pub mod member_semantic_fact_store",
         // Resolve-domain authoritative cache for resolved import /
         // re-export bindings + per-specifier resolutions (R5, R12,
         // R21, R28). Public because
-        // tests/resolved_import_facts_invariants.rs and
-        // tests/resolved_import_facts_key_shape.rs consume
+        // tests/cases/g_resolved/resolved_import_facts_invariants.rs and
+        // tests/cases/g_resolved/resolved_import_facts_key_shape.rs consume
         // `ResolvedImportFactsDb`, `ResolvedImportFactsKey`, and
         // `RESOLVED_IMPORT_FACTS_RESOLVER_VERSION` through the
         // canonical module path; future resolver consumers (RouteDb
         // fact-validation, materialiser observations) reach the
         // same module.
         "pub mod resolved_import_facts",
-        // tests/resolved_import_facts_producer_real.rs +
-        // tests/resolved_import_facts_unresolved_admitted.rs +
-        // tests/resolved_import_facts_validator_real_path.rs +
-        // tests/resolved_import_facts_lane_population.rs +
-        // tests/resolved_import_facts_namespace_space_admitted.rs —
+        // tests/cases/g_resolved/resolved_import_facts_producer_real.rs +
+        // tests/cases/g_resolved/resolved_import_facts_unresolved_admitted.rs +
+        // tests/cases/g_resolved/resolved_import_facts_validator_real_path.rs +
+        // tests/cases/g_resolved/resolved_import_facts_lane_population.rs +
+        // tests/cases/g_resolved/resolved_import_facts_namespace_space_admitted.rs —
         // production producer for
         // `ResolvedImportFactsDb`. Reads
         // `script_analysis.imports` (with `is_type_only` +
@@ -4510,8 +4510,8 @@ mod foundations_guards {
         // so the validator can detect when an unresolved binding
         // becomes resolved on workspace bump.
         "pub mod resolved_import_facts_producer",
-        // tests/semantic_analysis_audit_e2e.rs +
-        // tests/semantic_analysis_audit_tls_propagation.rs — public
+        // tests/cases/g_misc0/semantic_analysis_audit_e2e.rs +
+        // tests/cases/g_misc0/semantic_analysis_audit_tls_propagation.rs — public
         // audited entry-point that wires
         // `VerterHost::analyze_with_audit` for semantic-analysis
         // requests. Producer side of the
@@ -4524,10 +4524,10 @@ mod foundations_guards {
         // wiring (component_meta_audit producer) can pick the helper
         // up by canonical path.
         "pub mod host_audit_bridge",
-        // tests/host_tests.rs (host_compile module surface)
+        // tests/cases/g_misc0/host_tests.rs (host_compile module surface)
         "pub mod host_compile",
         // `compile_with_audit` entry-point. Public because
-        // tests/compile_audit_*.rs and tests/tls_harness_cross_crate.rs
+        // tests/compile_audit_*.rs and tests/cases/g_misc0/tls_harness_cross_crate.rs
         // drive the audited compile path; consumer crates (verter_napi,
         // verter_lsp) pick this up through their audited surfaces.
         "pub mod host_compile_audit",
@@ -4537,17 +4537,17 @@ mod foundations_guards {
         // the `tests/lsp_audit_*.rs` integration tests reach
         // `LspAuditSession` through the canonical module path.
         "pub mod host_lsp_audit",
-        // tests/host_tests.rs (host_manage::* APIs in integration tests)
+        // tests/cases/g_misc0/host_tests.rs (host_manage::* APIs in integration tests)
         "pub mod host_manage",
         // Slice 3.F — `audit_mcp_tool_call` entry-point. Public so
         // verter_mcp tool handlers can route their audited body
         // through the wrapper and land RequestKind::Mcp records on
-        // the host store. Tests in tests/mcp_audit_e2e.rs and
-        // verter_mcp/tests/mcp_tool_audit_integration.rs exercise
+        // the host store. Tests in tests/cases/g_misc0/mcp_audit_e2e.rs and
+        // verter_mcp/tests/cases/mcp_tool_audit_integration.rs exercise
         // the production wiring.
         "pub mod host_mcp_audit",
         // verter_type_runtime::backend::tests via meta_resolve types,
-        // tests/host_tests.rs
+        // tests/cases/g_misc0/host_tests.rs
         "pub mod meta_resolve",
         // `OwnedEvalProgram` / `OwnedTypeResolutionContext`
         // owned-artifact module. Public so the typed-DB shapes on
@@ -4568,20 +4568,20 @@ mod foundations_guards {
         // `get_component_meta_payload_via_bridge`) are reachable from
         // verter_napi (NapiMetaSession), the LSP custom-method handler
         // chain, and the integration test target
-        // `tests/selective_component_meta_api.rs`.
+        // `tests/cases/g_misc0/selective_component_meta_api.rs`.
         "pub mod meta",
-        // tests/host_tests.rs (project_type_store::*)
+        // tests/cases/g_misc0/host_tests.rs (project_type_store::*)
         "pub mod project_type_store",
-        // tests/audited_request_e2e.rs, tests/host_tests.rs
+        // tests/cases/g_misc0/audited_request_e2e.rs, tests/cases/g_misc0/host_tests.rs
         "pub mod request_context",
         // verter_type_runtime, verter_napi (TypeExpander API);
-        // tests/host_tests.rs
+        // tests/cases/g_misc0/host_tests.rs
         "pub mod resolver_core",
-        // tests/host_tests.rs (semantic_query::* in integration tests)
+        // tests/cases/g_misc0/host_tests.rs (semantic_query::* in integration tests)
         "pub mod semantic_query",
-        // tests/invalidation_coverage.rs, tests/invalidation_perf.rs
+        // tests/cases/g_misc0/invalidation_coverage.rs, tests/cases/g_misc0/invalidation_perf.rs
         "pub mod invalidation_domain",
-        // tests/invalidation_perf.rs (ImportedRegistryDb /
+        // tests/cases/g_misc0/invalidation_perf.rs (ImportedRegistryDb /
         // ImportedRegistryEntry / ImportedRegistryKey for the §12.A12
         // InvalidationByCanonical perf gate)
         "pub mod component_meta_caches",
@@ -4607,10 +4607,10 @@ mod foundations_guards {
         // ─── B-C5 territory (separate ownership), kept `pub` ────────
         "pub mod component_meta_resolution_policy",
         // ─── crate-private modules (already non-public) ─────────────
-        // `tests/cross_owner_materialise_reuse.rs` needs the key types
+        // `tests/cases/g_misc0/cross_owner_materialise_reuse.rs` needs the key types
         // (R7 cross-owner reuse).
         "pub mod component_meta_materialize",
-        // tests/cache_invariant_migration.rs — the W0.5 schema-bump
+        // tests/cases/g_cache/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `ComponentMetaResultDb::evict_if_schema_mismatch`.
         "pub mod component_meta_result_db",
         // R3/R26/R28 compile-tier fact-observation helper module.
@@ -4684,7 +4684,7 @@ mod foundations_guards {
         // `project_semantic_dispatch::lower`'s `TypeExpr::Mapped`
         // arm via `ProjectTypeStore::mapper_binder_registry()`.
         "pub(crate) mod mapper_binder_registry",
-        // tests/cache_invariant_migration.rs — the W0.5 schema-bump
+        // tests/cases/g_cache/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `OwnerImportSurfaceDb::evict_if_schema_mismatch`.
         "pub mod owner_import_surface",
         "pub(crate) mod project_semantic_dispatch",
@@ -4692,7 +4692,7 @@ mod foundations_guards {
         "pub(crate) mod session_runtime",
         // Stage 4a SessionView trait surface — `HostView` and
         // `OverlaidView` impls. `pub` because the integration smoke
-        // test `tests/session_view_smoke.rs` consumes the trait
+        // test `tests/cases/g_session/session_view_smoke.rs` consumes the trait
         // directly via `verter_session::session_view::SessionView`.
         // Stages 4b/4c thread the trait through `ResolverContext`
         // and `HostFenceValidator`; Stage 4d retires the
@@ -4705,8 +4705,8 @@ mod foundations_guards {
         "pub mod for_tests",
         // ─── test-support submodules (gated cfg(any(test, debug_assertions))) ──
         // Hosts the reusable TLS observer-propagation harness consumed
-        // by `tests/tls_harness_in_crate.rs` and
-        // `tests/tls_harness_cross_crate.rs`. The harness is
+        // by `tests/cases/g_misc0/tls_harness_in_crate.rs` and
+        // `tests/cases/g_misc0/tls_harness_cross_crate.rs`. The harness is
         // `pub mod tests` (rather than `pub(crate)`) only so the
         // integration tests under `crates/verter_session/tests/*.rs`
         // can reach it; release builds drop the entire module
@@ -4714,7 +4714,7 @@ mod foundations_guards {
         "pub mod tests",
         // Test-only probe substrate for the content-addressed
         // `MapperFingerprint` primitive. Consumed by
-        // `tests/mapper_fingerprint_content_addressed.rs`. The
+        // `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`. The
         // module is `#[doc(hidden)]` and wraps the internal
         // `pub(crate)` `MapperFingerprint` / `MapperBinderRegistry`
         // in a newtype so production callers cannot reach the
@@ -4734,7 +4734,7 @@ mod foundations_guards {
         // verter_lsp::workspace_scanner, verter_lsp::server_utils,
         // verter_lsp::documents, verter_type_runtime::tsgo::ipc
         "pub use verter_compiler::compile::CompileTarget",
-        // tests/relative_path_session_parity.rs
+        // tests/cases/g_misc0/relative_path_session_parity.rs
         "pub use id::resolve_external",
         // `ReadSetSignature` is the typed return type of the public
         // `compile_slot_fact_dep_signature` inspector. The owning
@@ -7944,7 +7944,7 @@ mod foundations_guards {
              without an explicit `D14_ALLOW_LIST` entry. To resolve, EITHER\n\
              route the I/O through `verter_workspace::NativeFs` /\n\
              `WorkspaceAccess`, OR add an `(path, justification)` tuple to\n\
-             `D14_ALLOW_LIST` in `crates/verter_session/tests/architecture_guards.rs`.",
+             `D14_ALLOW_LIST` in `crates/verter_session/tests/cases/architecture_guards.rs`.",
             violations.join("\n  "),
         );
     }
@@ -8250,7 +8250,7 @@ mod foundations_guards {
 // outside the inventory fails this guard.
 //
 // Companion runtime guard:
-// `crates/verter_session/tests/invalidation_coverage.rs`'s
+// `crates/verter_session/tests/cases/g_misc0/invalidation_coverage.rs`'s
 // `every_db_in_project_type_store_participates_in_invalidation` walks
 // the macro-generated runtime surface; this source-structure guard
 // walks the actual struct definition and asserts every DB-typed field
@@ -8409,7 +8409,7 @@ fn guard8_predicate_passes_when_inventory_is_complete() {
 // `impl ... InvalidationByCanonical for <Head>` block.
 //
 // Companion runtime guard:
-// `crates/verter_session/tests/invalidation_perf.rs`'s
+// `crates/verter_session/tests/cases/g_misc0/invalidation_perf.rs`'s
 // `invalidate_canonical_touches_only_indexed_entries` exercises the
 // O(K) drain semantics for one representative DB; this guard asserts
 // the full inventory is uniformly covered.
@@ -9621,7 +9621,7 @@ fn god_module_size_budget_targets_five_files() {
     }
     assert!(
         missing.is_empty(),
-        "god_module_size_budget_targets_five_files: tests/architecture_guards.rs must reference these Tier 2 split-target paths so the size-budget guard cannot silently drop coverage:\n{}",
+        "god_module_size_budget_targets_five_files: tests/cases/architecture_guards.rs must reference these Tier 2 split-target paths so the size-budget guard cannot silently drop coverage:\n{}",
         missing.join("\n"),
     );
 }
@@ -10920,7 +10920,7 @@ fn audit_no_hot_loop_instrumentation() {
         "audit_no_hot_loop_instrumentation: the following denylist entries did NOT \
          match any function in the corresponding crate's source tree. The denylist \
          is stale — the function was renamed, moved, or removed. Update the \
-         denylist in `tests/audit_hot_loop_denylist.rs`:\n{}",
+         denylist in `tests/cases/support/audit_hot_loop_denylist.rs`:\n{}",
         stale.join("\n"),
     );
 
@@ -11197,7 +11197,7 @@ fn wave_3_entry_points_propagate_tls() {
         // nested guard drops.
         (
             "resolve_type_with_audit",
-            &["crates/verter_session/tests/type_resolution_audit_tls_propagation.rs"],
+            &["crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs"],
         ),
         // Slice 3.B — Compile producer.
         // `compile_with_audit` (verter_session) drives the
@@ -11209,7 +11209,7 @@ fn wave_3_entry_points_propagate_tls() {
         // discriminator.
         (
             "compile_with_audit",
-            &["crates/verter_session/tests/tls_harness_cross_crate.rs"],
+            &["crates/verter_session/tests/cases/g_misc0/tls_harness_cross_crate.rs"],
         ),
         // Slice 3.C — SemanticAnalysis producer.
         // `analyze_with_audit` (verter_session) drives the
@@ -11218,7 +11218,7 @@ fn wave_3_entry_points_propagate_tls() {
         // for the audit window and drained on return.
         (
             "analyze_with_audit",
-            &["crates/verter_session/tests/semantic_analysis_audit_tls_propagation.rs"],
+            &["crates/verter_session/tests/cases/g_misc0/semantic_analysis_audit_tls_propagation.rs"],
         ),
         // Slice 3.D — Workspace producer.
         // `audit_op` is a trait method on `WorkspaceAccess`; the
@@ -11237,7 +11237,7 @@ fn wave_3_entry_points_propagate_tls() {
         // same constraint by living here too.
         (
             "audit_op",
-            &["crates/verter_session/tests/workspace_audit_tls_propagation.rs"],
+            &["crates/verter_session/tests/cases/g_misc0/workspace_audit_tls_propagation.rs"],
         ),
         // Slice 3.E — LSP producer.
         // `run_with_audit` (verter_lsp::audit_harness) wraps every
@@ -11248,7 +11248,7 @@ fn wave_3_entry_points_propagate_tls() {
         // (short-circuit path).
         (
             "run_with_audit",
-            &["crates/verter_lsp/tests/lsp_audit_tls_propagation.rs"],
+            &["crates/verter_lsp/tests/cases/lsp_audit_tls_propagation.rs"],
         ),
         // Slice 3.F — Mcp producer.
         // `audit_mcp_tool_call` (verter_session) wraps a synthetic
@@ -11259,7 +11259,7 @@ fn wave_3_entry_points_propagate_tls() {
         // enabled, and absent when audit is disabled (Noop arm).
         (
             "audit_mcp_tool_call",
-            &["crates/verter_session/tests/mcp_audit_tls_propagation.rs"],
+            &["crates/verter_session/tests/cases/g_misc0/mcp_audit_tls_propagation.rs"],
         ),
     ];
 
@@ -12029,7 +12029,7 @@ fn getcomponentmeta_uses_per_macro_projectors() {
 
 // `no_legacy_walker_in_production_code` retired post-§7.3 cutover —
 // the legacy walker family is fully deleted. Coverage moves to the
-// `tests/no_legacy_walker.rs` `RETIRED_SYMBOLS` gate which scans
+// `tests/cases/g_misc0/no_legacy_walker.rs` `RETIRED_SYMBOLS` gate which scans
 // the entire workspace, not just `crates/verter_session/src/host_manage/`.
 
 /// R22 + reachability-GC rename guard.
@@ -13527,7 +13527,7 @@ mod content_pinned_artifact_read_guards {
     /// needs real name resolution, not a scanner. No current
     /// `verter_session` production file uses the var-bound form, and
     /// the structural guard in
-    /// `tests/structural_carrier_no_get_any_guard.rs` covers the
+    /// `tests/cases/g_misc3/structural_carrier_no_get_any_guard.rs` covers the
     /// carrier-type angle. If a var-bound `FileArtifactStore` read is
     /// ever introduced, convert it to the fluent form (so this guard
     /// catches it) or route it through a content-pinned named helper.
@@ -13774,7 +13774,7 @@ mod content_pinned_artifact_read_guards {
     /// shape and are intentionally retained as low-level escapes. Their
     /// every call site is independently guarded by
     /// [`no_direct_file_artifact_get_any_outside_allowlist`] +
-    /// `tests/structural_carrier_no_get_any_guard.rs`.
+    /// `tests/cases/g_misc3/structural_carrier_no_get_any_guard.rs`.
     const CURRENCY_ORACLE_DEFINITION_ALLOWLIST: &[&str] = &["get_any", "get_artifacts_any"];
 
     /// Banned named currency oracles — a canonical-only

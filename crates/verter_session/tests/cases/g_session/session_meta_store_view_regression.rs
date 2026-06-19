@@ -49,7 +49,7 @@
 //!   passes. It still locks the resolved surface content against future
 //!   regressions of the cross-file resolution itself.
 //! - `cargo test --release -p verter_session
-//!   --test session_meta_store_view_regression` (RELEASE →
+//!   --test main session_meta_store_view_regression` (RELEASE →
 //!   `debug_assertions` OFF, `cfg(test)` OFF): the panic arm is active.
 //!   On the PRE-FIX tree the bare host reaches `store_view()` and this
 //!   test PANICS. On the POST-FIX tree the real ctx is threaded and it

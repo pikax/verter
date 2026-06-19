@@ -11,7 +11,7 @@
 //!   / cache-hit / cache-bypass / LRU-eviction / one-record / trace_id.
 //!
 //! Tests follow the project pattern from
-//! `tests/type_resolution_audit_diamond_repeated_prop.rs`.
+//! `tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs`.
 
 use std::sync::Arc;
 

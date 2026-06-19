@@ -293,7 +293,7 @@ fn drain_function_expr(func: FunctionExpr, worklist: &mut Vec<TypeExpr>) {
 // a child's `Node` frame is popped only after the child subtree is fully
 // hashed.
 //
-// Byte-identity is pinned by `tests/hash_byte_stream_contract.rs`, which
+// Byte-identity is pinned by `tests/cases/hash_byte_stream_contract.rs`, which
 // asserts this stream equals a frozen mirror of the former derive across
 // every variant.
 

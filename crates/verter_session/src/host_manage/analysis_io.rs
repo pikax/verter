@@ -1865,7 +1865,7 @@ impl VerterHost {
     /// reverse-dependency tracking.
     ///
     /// **Architectural contract** (see also
-    /// `tests/import_route_writer_guard.rs`):
+    /// `tests/cases/g_misc3/import_route_writer_guard.rs`):
     ///
     /// `set_import_dependencies` is the **complete caller-supplied
     /// route-snapshot writer** for

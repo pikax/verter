@@ -12,7 +12,7 @@
 //! # Why hand-rolled, not `parking_lot::Semaphore`
 //!
 //! The project forbids `parking_lot::Semaphore` (enforced by
-//! `tests/no_parking_lot_semaphore.rs`). A hand-rolled
+//! `tests/cases/no_parking_lot_semaphore.rs`). A hand-rolled
 //! `Mutex<usize>` + `Condvar` counter gives us exactly the permit
 //! semantics we need with no second accounting truth:
 //!

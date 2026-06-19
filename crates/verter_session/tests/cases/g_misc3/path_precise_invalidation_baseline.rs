@@ -1,6 +1,6 @@
 //! Coarse-invalidation baseline characterisation for path-precision.
 //!
-//! Paired with `tests/path_precise_invalidation.rs`. Both consume the
+//! Paired with `tests/cases/g_misc2/path_precise_invalidation.rs`. Both consume the
 //! shared fixture corpus under
 //! `crates/verter_session/tests/fixtures/path_precise/`.
 //!
@@ -11,7 +11,7 @@
 //! sibling member the projection did NOT select (the cache is
 //! path-coarse today).
 //!
-//! The paired `tests/path_precise_invalidation.rs` is the inverted
+//! The paired `tests/cases/g_misc2/path_precise_invalidation.rs` is the inverted
 //! assertion — under path-precise semantics the consumer must NOT
 //! invalidate when an unselected sibling is edited.
 //!

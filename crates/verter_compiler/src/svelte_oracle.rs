@@ -9,7 +9,7 @@
 //! rather than its own fork.
 //!
 //! Today the sole consumer is the Svelte reference-drift gate
-//! (`tests/svelte_oracle_harness.rs`), which diffs the committed goldens against
+//! (`tests/cases/svelte_oracle_harness.rs`), which diffs the committed goldens against
 //! the PINNED official Svelte compiler. A Verter-side conformance consumer that
 //! diffs VERTER's own emitted output against these goldens is a follow-up for
 //! when the native Svelte codegen lands (`svelte-native-compiler-plan.md`).

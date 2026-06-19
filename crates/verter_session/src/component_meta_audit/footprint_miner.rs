@@ -765,7 +765,7 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
                 "ProjectMember edge emitted with non-ProjectedMember OriginMeta variant: {other:?}. \
                  Every ProjectMember producer MUST construct OriginMeta::ProjectedMember with a \
                  typed MemberEdgeProvenance — see the architecture guard \
-                 `crates/verter_audit/tests/member_edge_provenance_arch_guard.rs`.",
+                 `crates/verter_audit/tests/cases/member_edge_provenance_arch_guard.rs`.",
             ),
         },
         CoreOriginEdgeKind::ProjectIndex => OriginEdgeMetaDto::ProjectIndex {

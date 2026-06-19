@@ -2610,14 +2610,14 @@ pub struct MetaProvenance {
     pub get_analysis_calls: std::sync::atomic::AtomicU64,
     pub evaluate_types_calls: std::sync::atomic::AtomicU64,
     /// Bumped on every `VerterHost::upsert(...)` call. Used by
-    /// `tests/session_view_isolation.rs` to assert the R17
+    /// `tests/cases/g_session/session_view_isolation.rs` to assert the R17
     /// invariant that session query paths do NOT mutate the host.
     pub host_upsert_calls: std::sync::atomic::AtomicU64,
     /// Bumped on every cache-key derivation that consulted a
     /// [`crate::session_view::SessionView`] via
     /// `view.content_hash_for(canonical)` rather than the base host's
     /// `shallow_file_state(canonical).whole_hash`. Used by
-    /// `tests/session_view_warm_reuse.rs` to assert R17/R18 (the
+    /// `tests/cases/g_session/session_view_warm_reuse.rs` to assert R17/R18 (the
     /// consumer path is wired through `SessionView`, not through the
     /// bare host).
     pub view_aware_cache_key_lookups: std::sync::atomic::AtomicU64,

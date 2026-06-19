@@ -1,6 +1,6 @@
 //! Path-precise invalidation (substrate-level).
 //!
-//! Paired with `tests/path_precise_invalidation_baseline.rs`. Both
+//! Paired with `tests/cases/g_misc3/path_precise_invalidation_baseline.rs`. Both
 //! consume the shared fixture corpus under
 //! `crates/verter_session/tests/fixtures/path_precise/`.
 //!

@@ -225,7 +225,7 @@ impl VerterHost {
         // Macro-DTO surface read runs under the request-bound `ctx` (not
         // `self`, the bare host) — `vue_macro_dtos_with_ctx` ->
         // `ctx.store_view()` panics on the bare-host rail in a release
-        // build. See `tests/session_meta_store_view_regression.rs`.
+        // build. See `tests/cases/g_session/session_meta_store_view_regression.rs`.
         let resolved_macros = resolver_component_meta_resolved_macros(
             ctx,
             canonical_id,

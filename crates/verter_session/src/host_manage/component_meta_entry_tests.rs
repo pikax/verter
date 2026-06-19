@@ -10,7 +10,7 @@
 //! `DerivedFactHash{Route}` fact. That premise is false: the cold
 //! compute's macro-root route walk observes the owner's Route fact
 //! whenever the owner is a route participant (see
-//! `tests/component_meta_route_facts_flow_into_signature.rs`, which
+//! `tests/cases/g_component/component_meta_route_facts_flow_into_signature.rs`, which
 //! characterises that the owner's Route fact reaches the tracer).
 //!
 //! The owner's own Route fact is non-round-tripping on warm

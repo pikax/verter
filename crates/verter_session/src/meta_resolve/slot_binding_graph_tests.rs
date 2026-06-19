@@ -813,7 +813,7 @@ defineSlots<Slots>()
 // Note: the prior in-src source-guard
 // (`no_phase_archaeology_in_slot_binding_graph`) was removed because
 // the broader-scope `slot_binding_graph_no_phase_archaeology` guard in
-// `crates/verter_session/tests/architecture_guards.rs` already scans
+// `crates/verter_session/tests/cases/architecture_guards.rs` already scans
 // `slot_binding_graph.rs` with a superset of the same needles, and
 // keeping needle literals in `crates/*/src/**` is incompatible with
 // the strict `phase_archaeology_test_files_count_zero` invariant.

@@ -199,7 +199,7 @@ fn r7_slot_identity_is_content_free() {
     // The multi-candidate substrate stores both under the same
     // slot key; per-candidate fact validation discriminates them
     // (verified separately by
-    // `tests/multi_candidate_storage.rs::r20_two_candidates_coexist_for_same_key`).
+    // `tests/cases/g_misc1/multi_candidate_storage.rs::r20_two_candidates_coexist_for_same_key`).
 }
 
 /// R7 — distinct projects with the SAME (canonical, name) produce

@@ -16,7 +16,7 @@
 //! coexist (`count == 2`).
 //!
 //! The structural R6 guard at
-//! `tests/r6_query_identity_keys_content_free.rs` independently pins
+//! `tests/cases/g_block/r6_query_identity_keys_content_free.rs` independently pins
 //! the key shape (the env-bearing content-free `ResolvedDeclSlotIdentity`
 //! slot). This test pins the coexistence behaviour the key shape alone
 //! does not guarantee.

@@ -16,7 +16,7 @@
 //! pass both before and after the P2 source fixes — they are CHARACTERIZATION
 //! of the landed surface behavior, NOT the discriminating P2 fix-gate. The
 //! DISCRIMINATING P2-2 / P2-3 / P2-4 regressions (which FAIL pre-fix / PASS
-//! post-fix) live in `tests/jsdoc_provenance_p2.rs`, driving the component-meta
+//! post-fix) live in `tests/cases/g_misc0/jsdoc_provenance_p2.rs`, driving the component-meta
 //! LAZY imported-macro-surface rail (`member_display_jsdoc`) — the surface that
 //! actually carried the value-node / `?`-only-matcher bugs the P2s fix.
 //!

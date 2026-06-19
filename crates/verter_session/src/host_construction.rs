@@ -514,7 +514,7 @@ impl VerterHost {
     /// invariants without going through the surface materialiser.
     ///
     /// Visible to integration tests (no `#[cfg(test)]` gate) so
-    /// `tests/cross_owner_materialise_reuse_production.rs` can drive
+    /// `tests/cases/g_misc0/cross_owner_materialise_reuse_production.rs` can drive
     /// `materialize_surface` from N owner scopes and observe the
     /// cross-owner reuse contract on the live
     /// `MaterializeStructureDb`. The accessor's contract is

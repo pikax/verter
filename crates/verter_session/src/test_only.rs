@@ -6,11 +6,11 @@
 //! `MapperFingerprint` substrate). Production code MUST NOT
 //! import from here. The architecture guard
 //! `test_only_module_is_only_consumed_by_test_files` (see
-//! `tests/architecture_guards.rs`) pins this contract.
+//! `tests/cases/architecture_guards.rs`) pins this contract.
 
 /// Test-only probe for the content-addressed `MapperFingerprint`
 /// primitive. The wrapper exposes the minimal surface needed by
-/// `tests/mapper_fingerprint_content_addressed.rs` without
+/// `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs` without
 /// promoting the internal `MapperFingerprint` / `MapperBinderRegistry`
 /// types to the crate's public API.
 ///
@@ -28,7 +28,7 @@ pub mod mapper_fingerprint {
     use crate::mapper_binder_registry::{MapperBinderRegistry, MapperFingerprint};
 
     /// Public newtype around the internal `MapperFingerprint`.
-    /// This is what `tests/mapper_fingerprint_content_addressed.rs`
+    /// This is what `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`
     /// asserts equality / inequality on. The newtype keeps the
     /// inner type out of the public API surface while still
     /// letting integration tests drive its observable
@@ -94,7 +94,7 @@ pub mod mapper_fingerprint {
 }
 
 /// Test-only probe for the budget-exceeded published-surface
-/// recognizer. Integration tests (`tests/defect_b_corpus_prevention_gate.rs`)
+/// recognizer. Integration tests (`tests/cases/defect_b_corpus_prevention_gate.rs`)
 /// scan a published surface for a leaked budget sentinel; this
 /// re-exports the SAME `pub(crate)` recognizer production routing
 /// uses (`type_expr_is_budget_exceeded_sentinel`, which keys on the

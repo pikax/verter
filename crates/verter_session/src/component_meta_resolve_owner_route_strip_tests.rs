@@ -28,7 +28,7 @@
 //! false-misses the content-identical published entry and re-runs the
 //! cold path as a second `Flight::Leader`. That breaks the cold-concurrent
 //! per-joiner attribution contract
-//! (`tests/g_cache/cache_layer_cold_concurrent_attribution.rs`).
+//! (`tests/cases/g_cache/cache_layer_cold_concurrent_attribution.rs`).
 //!
 //! The `ComponentMetaResultDb` path already filters exactly this fact via
 //! `strip_owner_route_fact` (see `component_meta_entry.rs` +

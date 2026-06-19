@@ -1,5 +1,5 @@
 //! Tests for the corpus regression-capture harness defined in
-//! `tests/component_meta_audit_corpus/harness.rs`.
+//! `tests/cases/component_meta_audit_corpus/harness.rs`.
 //!
 //! Contract under test: a corpus fixture that resolves slower than
 //! its declared timeout MUST produce a structured [`AuditCapture`]

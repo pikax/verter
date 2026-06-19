@@ -1,7 +1,7 @@
 //! Plain-script dialect authority — runtime half of the
 //! `plain_script_dialect_from_file_language` architecture guard (the
 //! static-grep half lives in
-//! `tests/g_misc0/plain_script_dialect_from_file_language.rs`).
+//! `tests/cases/g_misc0/plain_script_dialect_from_file_language.rs`).
 //!
 //! Non-carrier (plain Script) files parse under the dialect their
 //! classified [`verter_language::FileLanguage`] row declares — the

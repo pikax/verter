@@ -13,7 +13,7 @@
 //! The companion behavioural discriminators that assert the
 //! primitive's three-variant `ComputeAdmission<V, Entry>` shape and
 //! its admission semantics live in
-//! `tests/block_1_i_discriminators.rs::cooperative_return_only_not_shared_to_joiners`,
+//! `tests/cases/g_block/block_1_i_discriminators.rs::cooperative_return_only_not_shared_to_joiners`,
 //! which reads the canonical `cache_runtime/singleflight.rs` path.
 
 use std::path::PathBuf;
