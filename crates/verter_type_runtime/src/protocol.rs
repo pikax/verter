@@ -218,6 +218,23 @@ pub struct TypeDiagnostic {
     pub start: u32,
     pub end: u32,
     pub code: Option<String>,
+    /// Editor-facing diagnostic tags (e.g. unused-symbol fade, deprecation
+    /// strikethrough). tsserver reports these as the `reportsUnnecessary` /
+    /// `reportsDeprecated` booleans; TSGO carries the native LSP `tags` array.
+    /// Both are normalized into this carrier so the LSP merge can re-emit them
+    /// as `DiagnosticTag`s. Empty when the diagnostic carries no tags.
+    pub tags: Vec<TypeDiagnosticTag>,
+}
+
+/// Editor-facing diagnostic tag, mirroring the LSP `DiagnosticTag` taxonomy.
+///
+/// `Unnecessary` fades unused code (TS6133 and friends); `Deprecated` renders a
+/// strikethrough. Kept provider-neutral so both the tsserver boolean flags and
+/// the TSGO native LSP `tags` array map onto the same carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeDiagnosticTag {
+    Unnecessary,
+    Deprecated,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

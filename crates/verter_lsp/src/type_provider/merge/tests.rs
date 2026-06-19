@@ -825,6 +825,7 @@ fn merge_diagnostics_combines_both() {
         start: 6, // TSX offset for "msg"
         end: 9,
         code: Some("2322".to_string()),
+        tags: Vec::new(),
     }];
 
     let result = merge_diagnostics(verter, types, &tsx_li, &mapper, &carrier_li);
@@ -832,6 +833,115 @@ fn merge_diagnostics_combines_both() {
     assert_eq!(result[0].source.as_deref(), Some("verter"));
     assert_eq!(result[1].source.as_deref(), Some("ts"));
     assert!(result[1].message.contains("not assignable"));
+    // A plain type error carries no editor tags.
+    assert_eq!(
+        result[1].tags, None,
+        "an untagged type diagnostic yields tags == None"
+    );
+}
+
+/// An `Unnecessary`/`Deprecated` carrier tag survives onto the published LSP
+/// `Diagnostic.tags` — this is what fades an unused `<script setup>` import in
+/// a `.vue` (TypeProvider is the sole diagnostic source there). Mirrors the
+/// native lint-bridge tag mapping in `diagnostics_bridge.rs`.
+#[test]
+fn merge_diagnostics_propagates_unnecessary_and_deprecated_tags() {
+    use crate::type_provider::protocol::TypeDiagnosticTag;
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let types = vec![
+        TypeDiagnostic {
+            message: "'msg' is declared but its value is never read.".to_string(),
+            severity: TypeDiagnosticSeverity::Hint,
+            start: 6, // TSX offset for "msg"
+            end: 9,
+            code: Some("6133".to_string()),
+            tags: vec![TypeDiagnosticTag::Unnecessary],
+        },
+        TypeDiagnostic {
+            message: "'msg' is deprecated.".to_string(),
+            severity: TypeDiagnosticSeverity::Hint,
+            start: 6,
+            end: 9,
+            code: Some("6385".to_string()),
+            tags: vec![TypeDiagnosticTag::Deprecated],
+        },
+    ];
+
+    let result = merge_diagnostics(vec![], types, &tsx_li, &mapper, &carrier_li);
+    assert_eq!(
+        result.len(),
+        2,
+        "both diagnostics map and survive: {result:?}"
+    );
+    assert_eq!(
+        result[0].tags,
+        Some(vec![DiagnosticTag::UNNECESSARY]),
+        "the 6133 carrier tag must publish as Unnecessary, got: {:?}",
+        result[0].tags
+    );
+    assert_eq!(
+        result[1].tags,
+        Some(vec![DiagnosticTag::DEPRECATED]),
+        "the deprecated carrier tag must publish as Deprecated, got: {:?}",
+        result[1].tags
+    );
+}
+
+/// A SINGLE diagnostic carrying BOTH carrier tags publishes BOTH LSP
+/// `DiagnosticTag`s — an unused deprecated import is faded AND struck through.
+/// The native LSP tag taxonomy is per-diagnostic-multi-tag, so the merge must
+/// not collapse a two-tag carrier to one tag.
+#[test]
+fn merge_diagnostics_propagates_both_tags_on_single_diagnostic() {
+    use crate::type_provider::protocol::TypeDiagnosticTag;
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let types = vec![TypeDiagnostic {
+        message: "'msg' is declared but its value is never read.".to_string(),
+        severity: TypeDiagnosticSeverity::Hint,
+        start: 6, // TSX offset for "msg"
+        end: 9,
+        code: Some("6133".to_string()),
+        tags: vec![
+            TypeDiagnosticTag::Unnecessary,
+            TypeDiagnosticTag::Deprecated,
+        ],
+    }];
+
+    let result = merge_diagnostics(vec![], types, &tsx_li, &mapper, &carrier_li);
+    assert_eq!(
+        result.len(),
+        1,
+        "the diagnostic maps and survives: {result:?}"
+    );
+    assert_eq!(
+        result[0].tags,
+        Some(vec![DiagnosticTag::UNNECESSARY, DiagnosticTag::DEPRECATED]),
+        "a two-tag carrier must publish BOTH LSP tags in order, got: {:?}",
+        result[0].tags
+    );
+}
+
+/// Negative: a tagless carrier yields `tags == None` (no spurious fade).
+#[test]
+fn merge_diagnostics_tagless_input_yields_no_tags() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let types = vec![TypeDiagnostic {
+        message: "Type 'number' is not assignable to type 'string'".to_string(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 6,
+        end: 9,
+        code: Some("2322".to_string()),
+        tags: Vec::new(),
+    }];
+
+    let result = merge_diagnostics(vec![], types, &tsx_li, &mapper, &carrier_li);
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        result[0].tags, None,
+        "a non-6133 / untagged diagnostic must NOT carry a tag"
+    );
 }
 
 /// @ai-generated — Type diagnostics in unmapped regions are filtered out
@@ -846,6 +956,7 @@ fn merge_diagnostics_filters_unmapped() {
         start: 100,
         end: 110,
         code: None,
+        tags: Vec::new(),
     }];
 
     let result = merge_diagnostics(verter, types, &tsx_li, &mapper, &carrier_li);

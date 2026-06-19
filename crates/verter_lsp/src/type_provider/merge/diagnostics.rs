@@ -5,7 +5,7 @@ use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
-use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
+use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity, TypeDiagnosticTag};
 
 use super::position::tsx_range_to_carrier_range;
 
@@ -41,6 +41,7 @@ pub fn merge_diagnostics(
                 code: diag.code.clone().map(NumberOrString::String),
                 source: Some("ts".to_string()),
                 message: diag.message.clone(),
+                tags: convert_tags(&diag.tags),
                 ..Default::default()
             });
         } else {
@@ -62,6 +63,24 @@ pub fn merge_diagnostics(
     }
 
     result
+}
+
+/// Translate the provider-neutral carrier tags into LSP `DiagnosticTag`s,
+/// mirroring the native lint-bridge mapping in `features::diagnostics_bridge`.
+/// `None` when the diagnostic carries no tags (so an untagged diagnostic never
+/// publishes an empty `tags` array, keeping parity with the native path).
+fn convert_tags(tags: &[TypeDiagnosticTag]) -> Option<Vec<DiagnosticTag>> {
+    if tags.is_empty() {
+        return None;
+    }
+    Some(
+        tags.iter()
+            .map(|t| match t {
+                TypeDiagnosticTag::Unnecessary => DiagnosticTag::UNNECESSARY,
+                TypeDiagnosticTag::Deprecated => DiagnosticTag::DEPRECATED,
+            })
+            .collect(),
+    )
 }
 
 fn convert_severity(sev: TypeDiagnosticSeverity) -> DiagnosticSeverity {

@@ -63,6 +63,81 @@ fn test_parse_tsserver_diagnostic() {
     assert_eq!(parsed.start, 19);
     // "string" ends at byte 25 (line 2, offset 13 → col index 12 → byte 13 + 12 = 25)
     assert_eq!(parsed.end, 25);
+    // A plain type error carries no editor tags.
+    assert!(
+        parsed.tags.is_empty(),
+        "a non-suggestion diagnostic must carry no tags, got: {:?}",
+        parsed.tags
+    );
+}
+
+#[test]
+fn parse_tsserver_diagnostic_reads_reports_unnecessary_tag() {
+    // tsserver flags unused-symbol suggestions (e.g. TS6133) with the
+    // `reportsUnnecessary` boolean; it must surface as an `Unnecessary` tag so
+    // the LSP can fade the unused code (the `.vue` gray-out parity fix).
+    let content = "import { unused } from './x';\n";
+    let diag = serde_json::json!({
+        "start": { "line": 1, "offset": 10 },
+        "end": { "line": 1, "offset": 16 },
+        "text": "'unused' is declared but its value is never read.",
+        "code": 6133,
+        "category": "suggestion",
+        "reportsUnnecessary": true
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content)).unwrap();
+    assert_eq!(parsed.code, Some("6133".to_string()));
+    assert_eq!(
+        parsed.tags,
+        vec![TypeDiagnosticTag::Unnecessary],
+        "reportsUnnecessary:true must yield the Unnecessary tag, got: {:?}",
+        parsed.tags
+    );
+}
+
+#[test]
+fn parse_tsserver_diagnostic_reads_reports_deprecated_tag() {
+    // tsserver flags deprecated-symbol usage with `reportsDeprecated`; it must
+    // surface as a `Deprecated` tag (strikethrough rendering).
+    let content = "oldApi();\n";
+    let diag = serde_json::json!({
+        "start": { "line": 1, "offset": 1 },
+        "end": { "line": 1, "offset": 7 },
+        "text": "'oldApi' is deprecated.",
+        "code": 6385,
+        "category": "suggestion",
+        "reportsDeprecated": true
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content)).unwrap();
+    assert_eq!(
+        parsed.tags,
+        vec![TypeDiagnosticTag::Deprecated],
+        "reportsDeprecated:true must yield the Deprecated tag, got: {:?}",
+        parsed.tags
+    );
+}
+
+#[test]
+fn parse_tsserver_diagnostic_without_tag_flags_stays_untagged() {
+    // Control: a suggestion-category diagnostic WITHOUT the boolean flags carries
+    // no tags (the flags are the sole tag source on the tsserver path).
+    let content = "const x = 1;\n";
+    let diag = serde_json::json!({
+        "start": { "line": 1, "offset": 7 },
+        "end": { "line": 1, "offset": 8 },
+        "text": "some hint",
+        "code": 9999,
+        "category": "suggestion"
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content)).unwrap();
+    assert!(
+        parsed.tags.is_empty(),
+        "no boolean flags ⇒ no tags, got: {:?}",
+        parsed.tags
+    );
 }
 
 #[test]
@@ -780,6 +855,7 @@ fn diag(message: &str, severity: TypeDiagnosticSeverity, start: u32, end: u32) -
         start,
         end,
         code: None,
+        tags: Vec::new(),
     }
 }
 
@@ -796,6 +872,7 @@ fn diag_with_code(
         start,
         end,
         code: Some(code.to_string()),
+        tags: Vec::new(),
     }
 }
 
@@ -929,4 +1006,151 @@ fn merge_diagnostic_sets_preserves_a_lone_suggestion() {
     );
     assert_eq!(merged.len(), 1);
     assert!(matches!(merged[0].severity, TypeDiagnosticSeverity::Hint));
+}
+
+/// Build a diagnostic carrying the given tags (same `(start,end,code,message)`
+/// identity helpers above but with editor tags attached).
+fn diag_with_tags(
+    message: &str,
+    severity: TypeDiagnosticSeverity,
+    start: u32,
+    end: u32,
+    code: &str,
+    tags: Vec<TypeDiagnosticTag>,
+) -> TypeDiagnostic {
+    TypeDiagnostic {
+        message: message.to_string(),
+        severity,
+        start,
+        end,
+        code: Some(code.to_string()),
+        tags,
+    }
+}
+
+/// The dedup key is `(start, end, code, message)` and EXCLUDES tags. When the
+/// same finding is reported by two passes — one carrying the `Unnecessary` tag
+/// (the unused-symbol fade) and one without — the surviving diagnostic MUST keep
+/// the tag, regardless of which pass emitted it first. Otherwise a `.vue` unused
+/// import stops graying out whenever a tagless duplicate is seen first.
+///
+/// Discriminating: the pre-fix `merge_diagnostic_sets` kept the FIRST-seen
+/// variant verbatim and dropped the rest, so a tagless-then-tagged ordering lost
+/// the tag entirely. This asserts the tag survives in BOTH orderings.
+#[test]
+fn merge_diagnostic_sets_tag_survives_dedup_when_untagged_duplicate_seen_first() {
+    // semantic pass reports it WITHOUT the tag; suggestion pass reports the SAME
+    // finding WITH the Unnecessary tag. The tagless variant is first.
+    let untagged = diag_with_tags(
+        "'unused' is declared but its value is never read.",
+        TypeDiagnosticSeverity::Hint,
+        10,
+        16,
+        "6133",
+        vec![],
+    );
+    let tagged = diag_with_tags(
+        "'unused' is declared but its value is never read.",
+        TypeDiagnosticSeverity::Hint,
+        10,
+        16,
+        "6133",
+        vec![TypeDiagnosticTag::Unnecessary],
+    );
+
+    let merged = merge_diagnostic_sets(vec![untagged], vec![], vec![tagged]);
+    assert_eq!(
+        merged.len(),
+        1,
+        "the duplicate collapses to one: {merged:?}"
+    );
+    assert!(
+        merged[0].tags.contains(&TypeDiagnosticTag::Unnecessary),
+        "the surviving diagnostic must keep the Unnecessary tag even though the \
+         tagless duplicate was seen first, got: {:?}",
+        merged[0].tags
+    );
+}
+
+/// Mirror case: the tagged variant is seen FIRST. The tag must still survive (it
+/// must not be clobbered by a later tagless duplicate of the same finding).
+#[test]
+fn merge_diagnostic_sets_tag_survives_dedup_when_tagged_duplicate_seen_first() {
+    let tagged = diag_with_tags(
+        "'unused' is declared but its value is never read.",
+        TypeDiagnosticSeverity::Hint,
+        10,
+        16,
+        "6133",
+        vec![TypeDiagnosticTag::Unnecessary],
+    );
+    let untagged = diag_with_tags(
+        "'unused' is declared but its value is never read.",
+        TypeDiagnosticSeverity::Hint,
+        10,
+        16,
+        "6133",
+        vec![],
+    );
+
+    let merged = merge_diagnostic_sets(vec![tagged], vec![], vec![untagged]);
+    assert_eq!(
+        merged.len(),
+        1,
+        "the duplicate collapses to one: {merged:?}"
+    );
+    assert!(
+        merged[0].tags.contains(&TypeDiagnosticTag::Unnecessary),
+        "the surviving diagnostic must keep the Unnecessary tag when it was seen \
+         first, got: {:?}",
+        merged[0].tags
+    );
+}
+
+/// Distinct tags reported across two duplicate passes UNION onto the surviving
+/// diagnostic — a finding flagged `Unnecessary` by one pass and `Deprecated` by
+/// another must publish BOTH (e.g. an unused deprecated import is both faded and
+/// struck through).
+#[test]
+fn merge_diagnostic_sets_unions_distinct_tags_across_duplicates() {
+    let unnecessary = diag_with_tags(
+        "'oldUnused' is declared but its value is never read.",
+        TypeDiagnosticSeverity::Hint,
+        4,
+        13,
+        "6133",
+        vec![TypeDiagnosticTag::Unnecessary],
+    );
+    let deprecated = diag_with_tags(
+        "'oldUnused' is declared but its value is never read.",
+        TypeDiagnosticSeverity::Hint,
+        4,
+        13,
+        "6133",
+        vec![TypeDiagnosticTag::Deprecated],
+    );
+
+    let merged = merge_diagnostic_sets(vec![unnecessary], vec![], vec![deprecated]);
+    assert_eq!(
+        merged.len(),
+        1,
+        "the duplicate collapses to one: {merged:?}"
+    );
+    assert!(
+        merged[0].tags.contains(&TypeDiagnosticTag::Unnecessary)
+            && merged[0].tags.contains(&TypeDiagnosticTag::Deprecated),
+        "distinct tags from each duplicate must union onto the survivor, got: {:?}",
+        merged[0].tags
+    );
+    // No duplicate tag entries (a union, not a concat).
+    assert_eq!(
+        merged[0]
+            .tags
+            .iter()
+            .filter(|t| **t == TypeDiagnosticTag::Unnecessary)
+            .count(),
+        1,
+        "the union must not duplicate a tag, got: {:?}",
+        merged[0].tags
+    );
 }

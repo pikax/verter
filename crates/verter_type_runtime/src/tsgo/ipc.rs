@@ -742,6 +742,24 @@ fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<
             .or_else(|| v.as_str().map(String::from))
     });
 
+    // TSGO returns native LSP `DiagnosticTag`s (1 = Unnecessary, 2 = Deprecated)
+    // in an integer array. Map the known values onto the provider-neutral carrier
+    // (unknown tag numbers are ignored) so the LSP merge re-emits the fade /
+    // strikethrough — the same gray-out parity the `.vue` path needs.
+    let tags = d
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| match t.as_u64() {
+                    Some(1) => Some(TypeDiagnosticTag::Unnecessary),
+                    Some(2) => Some(TypeDiagnosticTag::Deprecated),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let start_line = start.get("line")?.as_u64()? as u32;
     let start_char = start.get("character")?.as_u64()? as u32;
     let end_line = end.get("line")?.as_u64()? as u32;
@@ -767,6 +785,7 @@ fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<
         start: start_offset,
         end: end_offset,
         code,
+        tags,
     })
 }
 
@@ -1190,13 +1209,29 @@ impl TsgoTypeProvider {
             });
         }
 
-        // Send initialize request (use longer timeout for cold starts)
+        // Send initialize request (use longer timeout for cold starts).
+        //
+        // Advertise diagnostic `tagSupport` on BOTH the push (`publishDiagnostics`)
+        // and pull (`diagnostic`) channels. An LSP server only attaches
+        // `DiagnosticTag`s (1 = Unnecessary fade, 2 = Deprecated strikethrough) when
+        // the client declares it understands them; with empty capabilities TSGO
+        // silently drops the tags, so an unused `.vue` import would never gray out.
+        // The `valueSet` enumerates the tags we render.
         let init_result = transport
             .request_with_priority(
                 "initialize",
                 serde_json::json!({
                     "processId": std::process::id(),
-                    "capabilities": {},
+                    "capabilities": {
+                        "textDocument": {
+                            "publishDiagnostics": {
+                                "tagSupport": { "valueSet": [1, 2] }
+                            },
+                            "diagnostic": {
+                                "tagSupport": { "valueSet": [1, 2] }
+                            }
+                        }
+                    },
                     "rootUri": root_uri,
                     "workspaceFolders": [{
                         "uri": root_uri,

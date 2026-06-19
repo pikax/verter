@@ -23,6 +23,14 @@ export interface CanonicalDiagnostic {
   readonly code?: string;
   readonly source?: string;
   readonly message: string;
+  /**
+   * The published LSP `DiagnosticTag` numbers (1 = Unnecessary fade, 2 =
+   * Deprecated strikethrough), stably sorted. {@link normalizeDiagnostics}
+   * ALWAYS populates this (empty when the diagnostic carries none) so the
+   * dx-harness can guard the user-visible gray-out / strikethrough contract
+   * end-to-end; optional only so hand-built fixtures need not spell `tags: []`.
+   */
+  readonly tags?: readonly number[];
 }
 
 function toCanonical(diag: unknown): CanonicalDiagnostic {
@@ -30,10 +38,22 @@ function toCanonical(diag: unknown): CanonicalDiagnostic {
   // bare `{}`, or a junk object must all fold to a safe canonical diagnostic rather
   // than dereferencing `diag.range` / `diag.message`.
   const d = (diag !== null && typeof diag === "object" ? diag : {}) as Record<string, unknown>;
-  const out: { range: Range; severity: string; code?: string; source?: string; message: string } = {
+  const out: {
+    range: Range;
+    severity: string;
+    code?: string;
+    source?: string;
+    message: string;
+    tags: readonly number[];
+  } = {
     range: coerceRange(d.range),
     severity: diagnosticSeverityName(typeof d.severity === "number" ? d.severity : undefined),
     message: typeof d.message === "string" ? normalizeEol(d.message) : "",
+    // The published LSP tags (1 = Unnecessary, 2 = Deprecated). A junk entry (a
+    // non-number) is dropped; the kept tags are sorted for set comparison.
+    tags: Array.isArray(d.tags)
+      ? d.tags.filter((t): t is number => typeof t === "number").sort((a, b) => a - b)
+      : [],
   };
   // `code` is `string | number` when present; a non-scalar code is omitted.
   if (typeof d.code === "string" || typeof d.code === "number") out.code = String(d.code);
@@ -54,7 +74,10 @@ function compare(a: CanonicalDiagnostic, b: CanonicalDiagnostic): number {
     compareStrings(a.severity, b.severity) ||
     compareStrings(a.code ?? "", b.code ?? "") ||
     compareStrings(a.source ?? "", b.source ?? "") ||
-    compareStrings(a.message, b.message)
+    compareStrings(a.message, b.message) ||
+    // Tags are pre-sorted within each diagnostic; compare them so two otherwise-
+    // identical diagnostics that differ only by tag sort deterministically.
+    compareStrings((a.tags ?? []).join(","), (b.tags ?? []).join(","))
   );
 }
 

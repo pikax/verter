@@ -175,7 +175,72 @@ describe("normalizeDiagnostics — totality over malformed array entries", () =>
         code: "2304",
         source: "ts",
         message: "Cannot find name",
+        // An untagged diagnostic carries an empty tag set (always present).
+        tags: [],
       },
     ]);
+  });
+});
+
+describe("normalizeDiagnostics — editor tags (gray-out / strikethrough contract)", () => {
+  // The user-visible end-to-end contract: a published `.vue` unused-import
+  // diagnostic must carry the `Unnecessary` LSP tag (1) so the editor FADES it.
+  // Without this the gray-out is silently lost. The dx-harness guards it here.
+  it("carries the Unnecessary tag (1) through normalization — the unused-import fade", () => {
+    const unused: Diagnostic = {
+      range: range(0, 9, 0, 15),
+      severity: 4,
+      code: 6133,
+      source: "ts",
+      message: "'unused' is declared but its value is never read.",
+      tags: [1],
+    };
+    const [d] = normalizeDiagnostics([unused]);
+    expect(d.tags).toEqual([1]);
+    // Negative: the tag is NOT silently dropped (the pre-fix shape had no tags).
+    expect(d.tags).not.toEqual([]);
+  });
+
+  it("carries BOTH Unnecessary (1) and Deprecated (2) tags, sorted, on one diagnostic", () => {
+    const both: Diagnostic = {
+      range: range(0, 0, 0, 9),
+      severity: 4,
+      message: "'oldUnused' is declared but its value is never read.",
+      // Out-of-order on the wire; normalization sorts for set comparison.
+      tags: [2, 1],
+    };
+    const [d] = normalizeDiagnostics([both]);
+    expect(d.tags).toEqual([1, 2]);
+  });
+
+  it("an untagged diagnostic normalizes to an empty tag set, never undefined", () => {
+    const plain: Diagnostic = {
+      range: range(1, 0, 1, 1),
+      severity: 1,
+      message: "Type error",
+    };
+    const [d] = normalizeDiagnostics([plain]);
+    expect(d.tags).toEqual([]);
+  });
+
+  it("drops a junk (non-number) tag entry rather than throwing", () => {
+    const out = normalizeDiagnostics([
+      { range: range(0, 0, 0, 1), severity: 4, message: "m", tags: [1, "x", null] },
+    ] as unknown as readonly Diagnostic[]);
+    expect(out[0].tags).toEqual([1]);
+  });
+
+  it("two diagnostics identical except for tags sort deterministically (not deduped)", () => {
+    const tagged: Diagnostic = {
+      range: range(3, 0, 3, 4),
+      severity: 4,
+      message: "same",
+      tags: [1],
+    };
+    const untagged: Diagnostic = { range: range(3, 0, 3, 4), severity: 4, message: "same" };
+    const out = normalizeDiagnostics([untagged, tagged]);
+    expect(out).toHaveLength(2);
+    // The empty-tag one sorts before the tagged one (tag tiebreaker).
+    expect(out.map((d) => d.tags)).toEqual([[], [1]]);
   });
 });

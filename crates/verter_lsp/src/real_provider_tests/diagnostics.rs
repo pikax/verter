@@ -114,6 +114,87 @@ real_provider_test!(
             has_suggestion,
             "the unused-symbol SUGGESTION diagnostic must be present (GAP-2 merge); got: {diags:?}"
         );
+
+        // ISSUE-3: the unused-symbol diagnostic must carry the `Unnecessary` tag
+        // (tsserver `reportsUnnecessary` / TSGO native `tags`), so the editor
+        // fades it. Without the tag a `.vue` unused import does NOT gray out.
+        // Identify the unused-symbol diagnostic by its 6133-family code / message
+        // (a non-6133 control diagnostic must NOT carry the tag).
+        let unused = diags.iter().find(|d| {
+            matches!(d.code.as_deref(), Some("6133") | Some("6196") | Some("6138"))
+                || d.message.contains("is declared but its value is never read")
+                || d.message.contains("never used")
+        });
+        // The `const neverRead = 42` is an unused local: a real provider MUST
+        // surface the 6133-family unused-symbol diagnostic. Assert its presence
+        // UNCONDITIONALLY so the tag assertion below can never be skipped (a
+        // missing 6133 must fail the test, not pass it vacuously).
+        let unused = unused.unwrap_or_else(|| {
+            panic!("the unused `neverRead` local must surface a 6133-family diagnostic, got: {diags:?}")
+        });
+        assert!(
+            unused
+                .tags
+                .contains(&verter_type_runtime::protocol::TypeDiagnosticTag::Unnecessary),
+            "the unused-symbol diagnostic must carry the Unnecessary tag, got: {:?}",
+            unused.tags
+        );
+        // Negative: no NON-unused diagnostic should spuriously carry Unnecessary.
+        for d in &diags {
+            let is_unused = matches!(d.code.as_deref(), Some("6133") | Some("6196") | Some("6138"))
+                || d.message.contains("is declared but its value is never read")
+                || d.message.contains("never used");
+            if !is_unused {
+                assert!(
+                    !d.tags
+                        .contains(&verter_type_runtime::protocol::TypeDiagnosticTag::Unnecessary),
+                    "a non-unused diagnostic must NOT carry the Unnecessary tag, got: {d:?}"
+                );
+            }
+        }
+    }
+);
+
+// ---------------------------------------------------------------------------
+// ISSUE-3: a `@deprecated` symbol usage carries the Deprecated tag (both providers)
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    diagnostics_deprecated_symbol_carries_deprecated_tag,
+    fixture = "single-project",
+    async fn run(session) {
+        // A `@deprecated` function whose USE surfaces a deprecation diagnostic.
+        // tsserver flags it via `reportsDeprecated`; TSGO via the native LSP tag 2.
+        // Both must normalize onto the `Deprecated` carrier tag (strikethrough).
+        let source = "/** @deprecated use newApi instead */\nexport function oldApi() {}\noldApi();\n";
+        let path = session
+            .open_in_provider("src/__diag_deprecated.tsx", source)
+            .await;
+
+        let diags = diagnostics_until_nonempty(session, &path).await;
+
+        // The deprecation diagnostic is the one carrying the Deprecated tag (its
+        // message text varies across provider/TS versions, so identify it by tag).
+        let deprecated = diags
+            .iter()
+            .find(|d| {
+                d.tags
+                    .contains(&verter_type_runtime::protocol::TypeDiagnosticTag::Deprecated)
+            });
+        assert!(
+            deprecated.is_some(),
+            "a `@deprecated` symbol usage must surface a diagnostic carrying the \
+             Deprecated tag (strikethrough), got: {diags:?}"
+        );
+        // Negative: the Deprecated tag must be the ONLY tag on a pure-deprecation
+        // diagnostic (a deprecated-but-used symbol is not also "unnecessary").
+        let dep = deprecated.unwrap();
+        assert!(
+            !dep.tags
+                .contains(&verter_type_runtime::protocol::TypeDiagnosticTag::Unnecessary),
+            "a used (non-unused) deprecated symbol must NOT carry the Unnecessary tag, got: {:?}",
+            dep.tags
+        );
     }
 );
 

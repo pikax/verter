@@ -198,12 +198,24 @@ export interface ResolveCompletionResponse {
   documentation?: string;
   capabilities: ProviderCapabilities;
 }
+/**
+ * Provider-neutral editor diagnostic tag on the baseline wire — the Rust
+ * `NormalizedDiagnosticTag` mirror. `"unnecessary"` fades unused code,
+ * `"deprecated"` renders a strikethrough.
+ */
+export type NormalizedDiagnosticTag = "unnecessary" | "deprecated";
 export interface NormalizedDiagnostic {
   message: string;
   severity: string;
   start: number;
   end: number;
   code?: string;
+  /**
+   * Editor-facing tags (gray-out / strikethrough). The Rust bridge always emits
+   * this array (empty when untagged); optional here so in-test fixtures need not
+   * spell an empty array, but a real bridge frame always carries it.
+   */
+  tags?: NormalizedDiagnosticTag[];
 }
 export interface DiagnosticsResponse {
   type: "diagnostics";

@@ -1070,6 +1070,7 @@ mod tests {
                 start: provider_bad as u32,
                 end: (provider_bad + 3) as u32,
                 code: Some("2322".to_string()),
+                tags: Vec::new(),
             }],
         );
 

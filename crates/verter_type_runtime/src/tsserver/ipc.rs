@@ -412,6 +412,24 @@ pub fn parse_tsserver_diagnostic(
         .and_then(|v| v.as_u64())
         .map(|n| n.to_string());
 
+    // tsserver flags editor-facing tags via two booleans: `reportsUnnecessary`
+    // (unused-symbol fade, e.g. TS6133) and `reportsDeprecated` (strikethrough).
+    // Mirror them onto the provider-neutral carrier so the LSP merge can re-emit
+    // them as `DiagnosticTag`s — this is what grays out an unused `.vue` import.
+    let mut tags = Vec::new();
+    if d.get("reportsUnnecessary")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        tags.push(TypeDiagnosticTag::Unnecessary);
+    }
+    if d.get("reportsDeprecated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        tags.push(TypeDiagnosticTag::Deprecated);
+    }
+
     // Convert 1-based line/offset to byte offsets
     let (so, eo) = if let Some(c) = content {
         (
@@ -433,6 +451,7 @@ pub fn parse_tsserver_diagnostic(
         start: so,
         end: eo,
         code,
+        tags,
     })
 }
 
@@ -452,13 +471,23 @@ pub fn parse_tsserver_diagnostic(
 /// Duplicates (a diagnostic reported by more than one pass) collapse on the full
 /// identity `(start, end, code, message)` — a same-span finding with a different
 /// code or message is a DISTINCT diagnostic and is preserved.
+///
+/// The dedup key deliberately EXCLUDES editor tags (`reportsUnnecessary` /
+/// `reportsDeprecated`), because the same finding can be reported once tagged and
+/// once untagged across two passes. To keep the user-visible fade / strikethrough
+/// regardless of pass ordering, a duplicate UNIONS its tags onto the already-kept
+/// diagnostic instead of being discarded outright — so a tagless-then-tagged (or
+/// tagged-then-tagless) ordering never loses the tag.
 pub fn merge_diagnostic_sets(
     semantic: Vec<TypeDiagnostic>,
     syntactic: Vec<TypeDiagnostic>,
     suggestion: Vec<TypeDiagnostic>,
 ) -> Vec<TypeDiagnostic> {
-    let mut seen: HashSet<(u32, u32, Option<String>, String)> = HashSet::new();
-    let mut merged = Vec::with_capacity(semantic.len() + syntactic.len() + suggestion.len());
+    // Map the dedup identity to the index of the kept diagnostic so a later
+    // duplicate can union its tags onto the survivor.
+    let mut seen: HashMap<(u32, u32, Option<String>, String), usize> = HashMap::new();
+    let mut merged: Vec<TypeDiagnostic> =
+        Vec::with_capacity(semantic.len() + syntactic.len() + suggestion.len());
     for diag in semantic.into_iter().chain(syntactic).chain(suggestion) {
         let key = (
             diag.start,
@@ -466,8 +495,20 @@ pub fn merge_diagnostic_sets(
             diag.code.clone(),
             diag.message.clone(),
         );
-        if seen.insert(key) {
-            merged.push(diag);
+        match seen.get(&key) {
+            Some(&idx) => {
+                // Same finding from another pass: keep the first occurrence but
+                // union any tags the duplicate carries (union, never duplicate).
+                for tag in diag.tags {
+                    if !merged[idx].tags.contains(&tag) {
+                        merged[idx].tags.push(tag);
+                    }
+                }
+            }
+            None => {
+                seen.insert(key, merged.len());
+                merged.push(diag);
+            }
         }
     }
     merged

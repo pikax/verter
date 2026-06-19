@@ -704,6 +704,107 @@ fn test_parse_lsp_diagnostic() {
     assert_eq!(diag.message, "Type error");
     assert!(matches!(diag.severity, TypeDiagnosticSeverity::Error));
     assert_eq!(diag.code.as_deref(), Some("2322"));
+    assert!(
+        diag.tags.is_empty(),
+        "a plain type error carries no tags, got: {:?}",
+        diag.tags
+    );
+}
+
+/// @ai-generated — TSGO native LSP `tags` array maps into the carrier.
+///
+/// LSP `DiagnosticTag`: 1 = Unnecessary (unused-symbol fade), 2 = Deprecated.
+/// TSGO's pull-diagnostics already carry the native array; it must round-trip
+/// onto `TypeDiagnostic.tags` so the LSP merge re-emits the fade (the `.vue`
+/// gray-out parity fix).
+#[test]
+fn parse_lsp_diagnostic_maps_native_unnecessary_tag() {
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 9 },
+            "end": { "line": 0, "character": 15 }
+        },
+        "severity": 4,
+        "code": 6133,
+        "message": "'unused' is declared but its value is never read.",
+        "tags": [1]
+    });
+    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    assert_eq!(diag.code.as_deref(), Some("6133"));
+    assert_eq!(
+        diag.tags,
+        vec![TypeDiagnosticTag::Unnecessary],
+        "native tag 1 must map to Unnecessary, got: {:?}",
+        diag.tags
+    );
+}
+
+/// @ai-generated — TSGO native Deprecated tag (2) maps; unknown tags are ignored.
+#[test]
+fn parse_lsp_diagnostic_maps_deprecated_and_ignores_unknown_tags() {
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 6 }
+        },
+        "severity": 4,
+        "message": "'oldApi' is deprecated.",
+        "tags": [2, 99]
+    });
+    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    assert_eq!(
+        diag.tags,
+        vec![TypeDiagnosticTag::Deprecated],
+        "native tag 2 maps to Deprecated and the unknown 99 is dropped, got: {:?}",
+        diag.tags
+    );
+}
+
+/// A single diagnostic carrying BOTH native LSP tags (1 = Unnecessary, 2 =
+/// Deprecated) maps to BOTH carrier tags in order — an unused deprecated symbol
+/// is faded AND struck through. Order is preserved from the native array.
+#[test]
+fn parse_lsp_diagnostic_maps_both_unnecessary_and_deprecated_tags() {
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 9 },
+            "end": { "line": 0, "character": 15 }
+        },
+        "severity": 4,
+        "code": 6133,
+        "message": "'oldUnused' is declared but its value is never read.",
+        "tags": [1, 2]
+    });
+    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    assert_eq!(
+        diag.tags,
+        vec![
+            TypeDiagnosticTag::Unnecessary,
+            TypeDiagnosticTag::Deprecated
+        ],
+        "a diagnostic with native tags [1, 2] must map to BOTH carrier tags, got: {:?}",
+        diag.tags
+    );
+}
+
+/// @ai-generated — a TSGO diagnostic with no `tags` field stays untagged.
+#[test]
+fn parse_lsp_diagnostic_without_tags_field_stays_untagged() {
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 5 },
+            "end": { "line": 0, "character": 10 }
+        },
+        "severity": 1,
+        "code": 2322,
+        "message": "Type error"
+    });
+    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    assert!(
+        diag.tags.is_empty(),
+        "absent `tags` ⇒ no carrier tags, got: {:?}",
+        diag.tags
+    );
 }
 
 /// @ai-generated — parse_signature_help parses a SignatureHelp response

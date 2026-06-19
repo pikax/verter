@@ -365,6 +365,26 @@ pub struct NormalizedCompletionItem {
     pub resolve_data: Option<rt::CompletionResolveData>,
 }
 
+/// A provider-neutral editor diagnostic tag on the baseline wire, mirroring
+/// [`rt::TypeDiagnosticTag`]. Serialized as a lowercase string so the TS bridge
+/// mirror reads `"unnecessary"` / `"deprecated"` directly (the user-visible
+/// gray-out / strikethrough contract crosses this seam intact).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NormalizedDiagnosticTag {
+    Unnecessary,
+    Deprecated,
+}
+
+impl From<rt::TypeDiagnosticTag> for NormalizedDiagnosticTag {
+    fn from(t: rt::TypeDiagnosticTag) -> Self {
+        match t {
+            rt::TypeDiagnosticTag::Unnecessary => NormalizedDiagnosticTag::Unnecessary,
+            rt::TypeDiagnosticTag::Deprecated => NormalizedDiagnosticTag::Deprecated,
+        }
+    }
+}
+
 /// Normalized diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,6 +395,12 @@ pub struct NormalizedDiagnostic {
     pub end: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// Editor-facing tags (unused-symbol fade / deprecation strikethrough). Empty
+    /// when the diagnostic carries no tags, so a tagless baseline diagnostic
+    /// serializes an empty array rather than an absent field — the dx-harness can
+    /// guard the gray-out contract end-to-end.
+    #[serde(default)]
+    pub tags: Vec<NormalizedDiagnosticTag>,
 }
 
 /// Normalized query result, keyed by the kind that produced it.
@@ -613,6 +639,7 @@ impl From<&rt::TypeDiagnostic> for NormalizedDiagnostic {
             start: d.start,
             end: d.end,
             code: d.code.clone(),
+            tags: d.tags.iter().copied().map(Into::into).collect(),
         }
     }
 }
@@ -984,9 +1011,69 @@ mod tests {
             start: 0,
             end: 1,
             code: Some("2304".to_string()),
+            tags: Vec::new(),
         };
         let nd: NormalizedDiagnostic = (&diag).into();
         assert_eq!(nd.severity, "error");
         assert_eq!(nd.code.as_deref(), Some("2304"));
+        // A tagless diagnostic carries no tags.
+        assert!(nd.tags.is_empty(), "a plain diagnostic carries no tags");
+    }
+
+    /// The baseline `NormalizedDiagnostic` must carry editor tags end-to-end (the
+    /// gray-out / strikethrough contract the dx-harness guards). An unused-symbol
+    /// `Unnecessary` tag and a `Deprecated` tag both cross the seam and serialize
+    /// to their lowercase wire spellings.
+    #[test]
+    fn normalized_diagnostic_carries_editor_tags() {
+        let unused = rt::TypeDiagnostic {
+            message: "'msg' is declared but its value is never read.".to_string(),
+            severity: rt::TypeDiagnosticSeverity::Hint,
+            start: 6,
+            end: 9,
+            code: Some("6133".to_string()),
+            tags: vec![rt::TypeDiagnosticTag::Unnecessary],
+        };
+        let nd: NormalizedDiagnostic = (&unused).into();
+        assert_eq!(
+            nd.tags,
+            vec![NormalizedDiagnosticTag::Unnecessary],
+            "the Unnecessary tag must survive normalization, got: {:?}",
+            nd.tags
+        );
+
+        // It serializes to the lowercase wire spelling the TS mirror reads.
+        let json = serde_json::to_value(&nd).unwrap();
+        assert_eq!(json["tags"], serde_json::json!(["unnecessary"]));
+
+        // A multi-tag diagnostic (unused + deprecated) carries BOTH in order.
+        let both = rt::TypeDiagnostic {
+            message: "'oldUnused' is declared but its value is never read.".to_string(),
+            severity: rt::TypeDiagnosticSeverity::Hint,
+            start: 0,
+            end: 9,
+            code: Some("6133".to_string()),
+            tags: vec![
+                rt::TypeDiagnosticTag::Unnecessary,
+                rt::TypeDiagnosticTag::Deprecated,
+            ],
+        };
+        let nd: NormalizedDiagnostic = (&both).into();
+        assert_eq!(
+            nd.tags,
+            vec![
+                NormalizedDiagnosticTag::Unnecessary,
+                NormalizedDiagnosticTag::Deprecated
+            ]
+        );
+        let json = serde_json::to_value(&nd).unwrap();
+        assert_eq!(
+            json["tags"],
+            serde_json::json!(["unnecessary", "deprecated"])
+        );
+
+        // Round-trip back to the same value (the bridge re-reads its own frames).
+        let back: NormalizedDiagnostic = serde_json::from_value(json).unwrap();
+        assert_eq!(back, nd);
     }
 }
