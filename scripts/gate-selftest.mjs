@@ -40,6 +40,27 @@
 //   (viii) WHOLE-GATE TIMEOUT — a multi-step custom run whose cumulative time exceeds the WHOLE-gate
 //                           budget TIMEOUTs at the budget, not at N×. The inverse (a fitting sequence)
 //                           PASSes, so the test discriminates.
+//   (ix)   SURFACE-1 NON-FAIL — a crash/leak (SIGABRT/LEAK) or a setup/harness error (non-zero exit, no
+//                           `FAIL [` line) classifies FAIL on both the classifier and the live-aggregation
+//                           hook; the tolerated baseline stays PASS-WITH-TOLERATED.
+//   (x)    FAIL-CLOSED MUTEX — an alive holder with an EMPTY/uncheckable start-identity REFUSES (126); a
+//                           dead holder with empty identity still reclaims + PASSes (discriminating).
+//   (xi)   SURFACE-2 GATE — zero / partial verter_session suite selection FAILS SETUP (127); a proper
+//                           1-lib + N-test listing passes (discriminating).
+//   (xii)  WINDOWS .exe SWEEP — rustc.exe / cargo-nextest.exe / mixed-case CARGO.EXE referencing the runner
+//                           target MATCH the provenance matcher; a repo-root-only dev cargo.exe does NOT.
+//   (xiii) WATCHDOG REASON SURVIVES TRAPPED-SIGTERM EXIT-0 — a custom command that traps SIGTERM and
+//                           exit(0)s AFTER a real `--timeout` still reports TIMEOUT (124); the verdict is
+//                           keyed on a signaled-LIVE reap, not on the close `code === 0`. The pre-fix
+//                           `code === 0`-clears-reason logic returned 0 (a real timeout masked as PASS).
+//   (xiv)  SURFACE-1 SUMMARY-REQUIRED — a non-zero exit with tolerated `FAIL [` lines but a MISSING/
+//                           unparseable Summary FAILS (it cannot prove the failures are accounted for); a
+//                           summary-accounted tolerated failure and a clean exit-0 stay PASS-WITH-TOLERATED.
+//                           Pre-fix the negative `unaccounted` swallowed it as PASS-WITH-TOLERATED.
+//   (xv)   WINDOWS SWEEP QUOTED PATHS + PATH-TOKEN MATCH — a QUOTED full path to cargo.exe / rustc.exe is
+//                           recognized (a quote is an exec-name boundary), and the runner target matches on
+//                           a path-SEGMENT boundary so a SIBLING `…\target\gate-runner2` does NOT spuriously
+//                           match `…\target\gate-runner`. Pre-fix: quoted paths missed; the sibling matched.
 //
 // Exit non-zero if any property fails.
 
@@ -1010,6 +1031,238 @@ async function main() {
       pass(
         "(xii) WINDOWS .exe SWEEP: rustc.exe / cargo-nextest.exe / mixed-case CARGO.EXE referencing the " +
           "runner target MATCH; a repo-root-only dev cargo.exe and cargocult.exe do NOT (discriminating)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xiii) WATCHDOG REASON SURVIVES A TRAPPED-SIGTERM EXIT-0. The whole-gate reap sends SIGTERM before
+  //        SIGKILL; a process can TRAP SIGTERM and exit(0). A REAL timeout that fires the reap, hits a LIVE
+  //        process group, and is then trapped-exit-0'd MUST still report TIMEOUT (124) — the trapped clean
+  //        exit must NOT mask the watchdog verdict. We run a custom command that installs `trap 'exit 0'
+  //        TERM`, backgrounds an argv-tagged `sleep 600`, and waits; under `--timeout 4s` the watchdog
+  //        fires, signals the live group, bash traps SIGTERM and exits 0 (within ~1 trap latency). The gate
+  //        MUST return 124. Pre-fix (the `code === 0` clears `reason` logic) returned 0 — a real timeout
+  //        masked as PASS. We assert rc=124 (discriminates) AND that the tagged sleep was reaped.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(xiii) WATCHDOG reason survives a trapped-SIGTERM exit-0\n");
+  {
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-target-");
+    // bash installs a TERM trap that exits 0, backgrounds an argv-tagged sleep 600, and waits for it. On
+    // the watchdog's SIGTERM the wait returns, the trap runs `exit 0` — a clean exit AFTER a real timeout.
+    const trapCmd =
+      `trap 'exit 0' TERM; ( exec -a sleep_${RUN_TAG}_trapsig sleep 600 ) & ` + `c=$!; wait $c`;
+    const t0 = Date.now();
+    const r = runGate(["--timeout", "4s", "--stall", "600s", "--", trapCmd], {
+      VERTER_GATE_LOCK: lk,
+      VERTER_GATE_TARGET_DIR: tgt,
+    });
+    const elapsed = Math.round((Date.now() - t0) / 1000);
+    await delay(2000);
+    let ok = true;
+    if (r.code !== EXIT_TIMEOUT) {
+      fail(
+        `(xiii) trapped-SIGTERM-exit-0 returned ${r.code}, expected TIMEOUT (${EXIT_TIMEOUT}) — a process that ` +
+          `traps SIGTERM and exit(0)s after a REAL timeout must NOT mask the watchdog verdict (pre-fix masked it to 0)`,
+      );
+      ok = false;
+    }
+    if (elapsed >= 60) {
+      fail(`(xiii) took ${elapsed}s — the watchdog did not bound the trapped run near 4s`);
+      ok = false;
+    }
+    const trapLeft = countArgvSleeps(`${RUN_TAG}_trapsig`);
+    if (trapLeft !== 0) {
+      fail(`(xiii) ${trapLeft} argv-tagged sleep survived the trapped-SIGTERM reap — the group was not torn down`);
+      spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_trapsig`], { stdio: "ignore" });
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        `(xiii) WATCHDOG: a trapped-SIGTERM exit-0 after a real --timeout still reports TIMEOUT (124) in ` +
+          `~${elapsed}s and the group was reaped (the verdict is keyed on a signaled-LIVE reap, not on code===0)`,
+      );
+    }
+    // teardown.
+    for (let w = 0; w < 40; w++) {
+      if (!existsSync(lk)) break;
+      await delay(100);
+    }
+    const left = countArgvSleeps(`${RUN_TAG}_trapsig`);
+    if (!existsSync(lk) && left === 0) {
+      pass("(v/xiii) TEARDOWN: lockdir released and 0 stray tagged sleeps after trapped-SIGTERM test");
+    } else {
+      fail(`(v/xiii) TEARDOWN: lockdir-exists=${existsSync(lk)} stray_sleeps=${left}`);
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xiv) SURFACE-1 SUMMARY-REQUIRED FAILURE ACCOUNTING. A non-zero nextest exit must be EXACTLY accounted
+  //       for by a PARSED `Summary` line, not merely by the tolerated `FAIL [` names. With one or two
+  //       tolerated `FAIL [` lines and a MISSING/unparseable Summary, the prior `unaccounted =
+  //       summary.failed - failNames.length` went NEGATIVE (summary.failed defaulted to 0) so the tripwire
+  //       never fired and the gate returned PASS-WITH-TOLERATED — swallowing whatever caused the non-zero
+  //       exit. The fix: `parseNextestSummary()` reports `found`, and a non-zero exit FAILS unless a Summary
+  //       was found AND its `failed` count EXACTLY equals the parsed `FAIL` name count. We drive the LIVE
+  //       aggregation hook (which has the exit code). Discriminators: a tolerated `FAIL` + NO Summary at
+  //       exit 100 and exit 1 => FAIL (pre-fix PASS-WITH-TOLERATED); the WITH-Summary tolerated baseline
+  //       still => PASS-WITH-TOLERATED (no over-strict regression); and a CODE-0 no-Summary tolerated log
+  //       stays PASS-WITH-TOLERATED (a clean run is never forced to FAIL by the new requirement).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(xiv) SURFACE-1 summary-required failure accounting\n");
+  {
+    const fixDir = freshTmpDir("gatetest-s1sum-");
+    const tolNoSummary = join(fixDir, "tolerated_no_summary.log");
+    const tolWithSummary = join(fixDir, "tolerated_with_summary.log");
+    // One tolerated FAIL line, NO Summary line. A non-zero exit cannot be proven accounted-for => FAIL.
+    writeFileSync(
+      tolNoSummary,
+      "    FAIL [   0.012s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
+    );
+    // The same tolerated FAIL line WITH a matching Summary (failed=1 == 1 parsed FAIL name) => accounted =>
+    // PASS-WITH-TOLERATED. Proves the requirement is summary-PRESENCE + exact-count, not a blanket fail.
+    writeFileSync(
+      tolWithSummary,
+      "    FAIL [   0.012s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n",
+    );
+    const classifyRun = (code, file) => {
+      const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest-run", String(code), file], {
+        env: { ...process.env },
+        encoding: "utf8",
+      });
+      return (r.stdout || "").trim();
+    };
+    let ok = true;
+    const rNoSum100 = classifyRun(100, tolNoSummary);
+    const rNoSum1 = classifyRun(1, tolNoSummary);
+    const rWithSum = classifyRun(100, tolWithSummary);
+    const rNoSum0 = classifyRun(0, tolNoSummary);
+    note(
+      `tolerated+no-Summary: exit100=${rNoSum100} exit1=${rNoSum1}; tolerated+Summary exit100=${rWithSum}; ` +
+        `tolerated+no-Summary exit0=${rNoSum0}`,
+    );
+    if (rNoSum100 !== "FAIL") {
+      fail(
+        `(xiv) tolerated FAIL + NO Summary at exit 100 => '${rNoSum100}', expected FAIL — a non-zero exit with no ` +
+          `parseable Summary cannot prove the failures are accounted for (pre-fix swallowed it as PASS-WITH-TOLERATED)`,
+      );
+      ok = false;
+    }
+    if (rNoSum1 !== "FAIL") {
+      fail(`(xiv) tolerated FAIL + NO Summary at exit 1 => '${rNoSum1}', expected FAIL`);
+      ok = false;
+    }
+    if (rWithSum !== "PASS-WITH-TOLERATED") {
+      fail(
+        `(xiv) tolerated FAIL + matching Summary (failed=1) at exit 100 => '${rWithSum}', expected ` +
+          `PASS-WITH-TOLERATED — an exact summary-accounted tolerated failure must still tolerate (no over-strict regression)`,
+      );
+      ok = false;
+    }
+    if (rNoSum0 !== "PASS-WITH-TOLERATED") {
+      fail(
+        `(xiv) tolerated FAIL + NO Summary at exit 0 => '${rNoSum0}', expected PASS-WITH-TOLERATED — a CLEAN ` +
+          `(exit 0) run is never forced to FAIL by the summary requirement (the requirement gates non-zero exits only)`,
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(xiv) SURFACE-1 SUMMARY-REQUIRED: tolerated FAIL + missing Summary at non-zero exit (100 and 1) => FAIL; " +
+          "a summary-accounted tolerated failure and a clean exit-0 stay PASS-WITH-TOLERATED (discriminating)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xv) WINDOWS SWEEP: QUOTED EXECUTABLE PATHS + PATH-TOKEN TARGET MATCH. The provenance sweep predicate
+  //      `isBuildTool(cmd) && targetDirMatches(cmd, targetDir, windows)` must (a) recognize a QUOTED full
+  //      path to a build tool — `"C:\Users\Name With Space\.cargo\bin\cargo.exe" …` (the standard Windows
+  //      form when the path has spaces) — where the opening `"` blocked the prior boundary class, and (b)
+  //      match the runner target dir on a path-SEGMENT boundary so a SIBLING `…\target\gate-runner2` does
+  //      NOT spuriously match `…\target\gate-runner`. Pure regex/classify unit on this POSIX host via the
+  //      matcher's `windows` flag. Discriminators (each FAILs against the round-1 raw-includes /
+  //      no-quote-boundary code): quoted cargo.exe / rustc.exe with the ONLY build-tool token quoted =>
+  //      MATCH; sibling gate-runner2 => NOMATCH.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(xv) Windows sweep: quoted exec paths + path-token target match\n");
+  {
+    const RT = "C:\\Users\\dev\\repo\\target\\gate-runner";
+    const sweep = (plat, targetDir, cmd) => {
+      const r = spawnSync(process.execPath, [GATE, "--selftest-sweep-match", plat, targetDir, "--", cmd], {
+        env: { ...process.env },
+        encoding: "utf8",
+      });
+      return (r.stdout || "").trim();
+    };
+    // (a) Quoted cargo.exe — the ONLY build-tool token is the quoted exe (the closing `"` follows it, and
+    //     `.cargo` in the path is `.`-prefixed so it is not a bare token). Pre-fix: NOMATCH (the opening `"`
+    //     blocked the boundary). Post-fix: MATCH.
+    const quotedCargo = sweep(
+      "windows",
+      RT,
+      '"C:\\Users\\Name With Space\\.cargo\\bin\\cargo.exe" --version C:\\Users\\dev\\repo\\target\\gate-runner\\debug',
+    );
+    // (b) Quoted rustc.exe referencing the runner target deps. Pre-fix: NOMATCH. Post-fix: MATCH.
+    const quotedRustc = sweep(
+      "windows",
+      RT,
+      '"C:\\Users\\dev\\.rustup\\toolchains\\stable\\bin\\rustc.exe" --out-dir C:\\Users\\dev\\repo\\target\\gate-runner\\debug\\deps lib.rs',
+    );
+    // (c) Sibling runner target `gate-runner2` — a DIFFERENT runner's dir whose path CONTAINS `gate-runner`
+    //     as a prefix. Pre-fix raw `includes`: MATCH (false positive — would sweep an unrelated runner).
+    //     Post-fix path-token boundary: NOMATCH.
+    const siblingDir = sweep(
+      "windows",
+      RT,
+      "cargo.exe build --target-dir C:\\Users\\dev\\repo\\target\\gate-runner2\\debug",
+    );
+    // (d) POSIX sibling-dir false positive must ALSO be closed (the boundary check is platform-shared).
+    const posixSibling = sweep(
+      "posix",
+      "/home/dev/repo/target/gate-runner",
+      "cargo build --target-dir /home/dev/repo/target/gate-runner2/debug",
+    );
+    // (e) Discrimination floor: the EXACT runner target dir still matches (we did not break the positive).
+    const exactDir = sweep(
+      "windows",
+      RT,
+      "cargo-nextest.exe run --target-dir C:\\Users\\dev\\repo\\target\\gate-runner",
+    );
+    note(
+      `quoted-cargo=${quotedCargo} quoted-rustc=${quotedRustc} sibling=${siblingDir} ` +
+        `posix-sibling=${posixSibling} exact=${exactDir}`,
+    );
+    let ok = true;
+    if (quotedCargo !== "MATCH") {
+      fail(`(xv) quoted "…\\cargo.exe" => '${quotedCargo}', expected MATCH (a quote is an exec-name boundary)`);
+      ok = false;
+    }
+    if (quotedRustc !== "MATCH") {
+      fail(`(xv) quoted "…\\rustc.exe" => '${quotedRustc}', expected MATCH (a quote is an exec-name boundary)`);
+      ok = false;
+    }
+    if (siblingDir !== "NOMATCH") {
+      fail(
+        `(xv) sibling …\\target\\gate-runner2 => '${siblingDir}', expected NOMATCH (a raw substring match would ` +
+          `wrongly sweep a SIBLING runner's processes; the target must match on a path-segment boundary)`,
+      );
+      ok = false;
+    }
+    if (posixSibling !== "NOMATCH") {
+      fail(`(xv) POSIX sibling …/target/gate-runner2 => '${posixSibling}', expected NOMATCH (boundary is platform-shared)`);
+      ok = false;
+    }
+    if (exactDir !== "MATCH") {
+      fail(`(xv) exact runner target dir => '${exactDir}', expected MATCH (the positive must still hold)`);
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(xv) WINDOWS SWEEP: quoted cargo.exe / rustc.exe referencing the runner target MATCH; a sibling " +
+          "gate-runner2 (Windows + POSIX) does NOT; the exact runner target still does (discriminating)",
       );
     }
   }

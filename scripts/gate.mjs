@@ -219,6 +219,10 @@ function pidAlive(pid) {
 
 // ----------------------------------------------------------------------------------------------------
 // Negative-PGID reap (POSIX) / taskkill tree (Windows). TERM, grace, KILL. Safe on an already-dead group.
+// Pure teardown primitive: it terminates the group and waits out the grace window. Whether the reap hit a
+// LIVE target (the "signaled-live vs pure-race" discriminator the watchdog needs) is captured SYNCHRONOUSLY
+// at the reap-decision point by groupIsLive() in runContainedStep — NOT here, because this is async and its
+// answer would only resolve after the grace loop, too late for the close handler to read.
 // ----------------------------------------------------------------------------------------------------
 async function reapTree(pid, graceMs) {
   if (!pid) return;
@@ -325,29 +329,56 @@ function isBuildTool(cmd) {
   // cargo / rustc / cargo-nextest / nextest — word-ish boundaries so "cargo-nextest" and "/usr/bin/cargo"
   // both match but an unrelated path containing "cargocult" does not. An optional `.exe` suffix is matched
   // so real Windows command lines (`C:\Users\…\.cargo\bin\cargo.exe`, `rustc.exe`, `cargo-nextest.exe`,
-  // `nextest.exe`) are recognized. The argv is lowercased first so a mixed-case Windows path matches.
+  // `nextest.exe`) are recognized. A leading/trailing QUOTE (`"` or `'`) is ALSO an executable-name
+  // boundary so a quoted full path — `"C:\Users\Name With Space\.cargo\bin\cargo.exe" nextest run` (the
+  // standard Windows form when the path contains spaces) — is recognized; without quote boundaries the
+  // opening `"` would block the `(^|[\s/\\])` boundary and the build tool would escape the sweep. The argv
+  // is lowercased first so a mixed-case Windows path matches.
   const c = cmd.toLowerCase();
+  const B = `(^|[\\s/\\\\"'])`; // start-of-string OR whitespace / path-sep / quote — an exec-name boundary.
+  const E = `(\\.exe)?([\\s"']|$)`; // optional `.exe`, then whitespace / quote / end — closing boundary.
   return (
-    /(^|[\s/\\])cargo-nextest(\.exe)?([\s]|$)/.test(c) ||
-    /(^|[\s/\\])cargo(\.exe)?([\s]|$)/.test(c) ||
-    /(^|[\s/\\])rustc(\.exe)?([\s]|$)/.test(c) ||
-    /(^|[\s/\\])nextest(\.exe)?([\s]|$)/.test(c)
+    new RegExp(`${B}cargo-nextest${E}`).test(c) ||
+    new RegExp(`${B}cargo${E}`).test(c) ||
+    new RegExp(`${B}rustc${E}`).test(c) ||
+    new RegExp(`${B}nextest${E}`).test(c)
   );
 }
 
 // Does a process command line reference the runner-owned target dir? On Windows, command lines and the
 // target path can differ in case and in slash direction (`\` vs `/`); normalize both to a lowercase,
 // forward-slash form before the containment check so the sweep's "only the runner-owned target dir"
-// scoping holds on Windows. On POSIX, paths are case- and separator-stable, so this is the identity.
+// scoping holds on Windows. On POSIX, paths are case- and separator-stable.
+//
+// The match is PATH-TOKEN aware, NOT a raw substring: the target dir must appear at a path-SEGMENT
+// boundary — the character immediately after the matched target dir must be a separator (`/`, or `\` on
+// Windows), a quote, whitespace, or end-of-string. A raw `includes` would let `…/target/gate-runner`
+// spuriously match a SIBLING `…/target/gate-runner2` (the runner target dir is a substring of the
+// sibling's path), which would sweep an unrelated runner's processes. Requiring a trailing segment
+// boundary stops the sibling-dir false positive while still matching the runner dir itself and any
+// `…/gate-runner/debug/deps/…` descendant path.
 // `windows` is parameterized (defaulting to the live platform) so the matcher's Windows branch is unit-
 // testable on a POSIX host.
 function targetDirMatches(cmd, targetDir, windows) {
   if (!targetDir) return false;
-  if (windows) {
-    const norm = (s) => s.toLowerCase().replace(/\\/g, "/");
-    return norm(cmd).includes(norm(targetDir));
+  const norm = windows ? (s) => s.toLowerCase().replace(/\\/g, "/") : (s) => s;
+  const hay = norm(cmd);
+  let needle = norm(targetDir);
+  // Trailing separators on the target dir are not significant to the boundary check.
+  needle = needle.replace(/[/\\]+$/, "");
+  if (!needle) return false;
+  let from = 0;
+  for (;;) {
+    const at = hay.indexOf(needle, from);
+    if (at < 0) return false;
+    const after = hay[at + needle.length];
+    // end-of-string, a path separator, a quote, or whitespace = a segment boundary => a real match.
+    if (after === undefined || after === "/" || after === "\\" || after === '"' || after === "'" || /\s/.test(after)) {
+      return true;
+    }
+    // Otherwise this occurrence is mid-segment (e.g. the `2` in `gate-runner2`); keep scanning.
+    from = at + 1;
   }
-  return cmd.includes(targetDir);
 }
 function cmdReferencesTargetDir(cmd, targetDir) {
   return targetDirMatches(cmd, targetDir, IS_WINDOWS);
@@ -655,14 +686,45 @@ async function runContainedStep(opts) {
 
   let reason = "";
   let reaped = false;
+  // Did the watchdog's reap actually signal a LIVE child/process group? Set SYNCHRONOUSLY by reapNow at the
+  // instant it begins the reap (before any await), so the close handler reads a settled value even when the
+  // child resolves `close` in the same tick. A real TIMEOUT/STALL reap hits a live group (true); a one-tick
+  // race where the child had already exited before we signaled gets ESRCH (false). The close handler clears
+  // a spurious `reason` ONLY when this is false — so a process that TRAPS SIGTERM and exits(0)
+  // (watchdogSignaledLive=true) keeps its TIMEOUT/STALL verdict.
+  let watchdogSignaledLive = false;
+  // The in-flight reap promise (reapTree's grace-loop + SIGKILL, then the provenance sweep). The close
+  // handler awaits it so the tree is fully torn down before we return. (watchdogSignaledLive is already
+  // settled synchronously inside reapNow, before this promise is created.)
+  let reapPromise = null;
   const startMs = nowMs();
 
-  const reapNow = async (why) => {
+  // Synchronously probe whether the child's process group is LIVE right now (the instant the watchdog
+  // decides to reap). On POSIX, `process.kill(-pgid, 0)` throws ESRCH only if the group is gone; success or
+  // EPERM means a live target. On Windows, pidAlive(pid) is the probe. This is the load-bearing
+  // "signaled-live vs pure-race" discriminator, captured BEFORE the awaited grace loop can interleave.
+  const groupIsLive = () => {
+    if (!child.pid) return false;
+    if (IS_WINDOWS) return pidAlive(child.pid);
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch (e) {
+      return e.code === "EPERM";
+    }
+  };
+
+  const reapNow = (why) => {
     if (reaped) return;
     reaped = true;
     reason = why;
-    await reapTree(child.pid, killGraceMs);
-    await provenanceSweep(targetDir, killGraceMs);
+    // Capture the signaled-live discriminator SYNCHRONOUSLY, before the awaited reap can interleave with the
+    // child's `close`.
+    watchdogSignaledLive = groupIsLive();
+    reapPromise = (async () => {
+      await reapTree(child.pid, killGraceMs);
+      await provenanceSweep(targetDir, killGraceMs);
+    })();
   };
 
   // Watchdog: owns BOTH the whole-gate deadline and the phase stall detector.
@@ -670,7 +732,7 @@ async function runContainedStep(opts) {
     const cur = nowMs();
     // Whole-gate hard deadline.
     if (deadlineMs > 0 && cur >= deadlineMs) {
-      void reapNow("TIMEOUT");
+      reapNow("TIMEOUT");
       return;
     }
     // Stall.
@@ -683,7 +745,7 @@ async function runContainedStep(opts) {
         lastArtifact = artifact;
         lastGrowthMs = cur;
       } else if (cur - lastGrowthMs >= stallMs) {
-        void reapNow("STALL");
+        reapNow("STALL");
       }
     }
   }, 1000);
@@ -697,18 +759,30 @@ async function runContainedStep(opts) {
   });
 
   clearInterval(watchdog);
-  // One-tick race: the 1s watchdog can set `reason` (TIMEOUT/STALL) in the same tick the child cleanly
-  // exits 0, before `close` resolves. A genuine deadline/stall reap kills with SIGKILL, so the close code
-  // is non-zero/null (128 via signal); a clean exit-0 means the step actually completed in time. Only
-  // honor `reason` when the close code is non-zero/null, so a step that finished cleanly is never mapped
-  // to a spurious TIMEOUT/STALL.
-  if (reason && code === 0) {
-    reason = "";
+  // If the watchdog fired (reapNow set reapPromise), let its reap — the grace loop + SIGKILL + provenance
+  // sweep — settle before we read its flag or return. This is the SINGLE authoritative teardown: the tree
+  // is fully torn down here and watchdogSignaledLive is final. `reason` is set iff reapNow ran iff
+  // reapPromise exists, so this covers every watchdog-kill path; no redundant second reap is needed.
+  if (reapPromise) {
+    try {
+      await reapPromise;
+    } catch {
+      /* best-effort reap */
+    }
   }
-  // If the watchdog tripped (a real reap), make sure the tree + strays are gone before we return.
-  if (reason) {
-    await reapTree(child.pid, killGraceMs);
-    await provenanceSweep(targetDir, killGraceMs);
+  // One-tick race vs a REAL trapped-SIGTERM exit-0. The 1s watchdog can set `reason` (TIMEOUT/STALL) in the
+  // same tick the child resolves `close`. Two cases must be told apart:
+  //   (a) PURE RACE — the child had ALREADY finished (cleanly, code 0) before the reap signaled, so the
+  //       reap found NOTHING live (watchdogSignaledLive=false). The step genuinely completed in time; the
+  //       watchdog reason is spurious and must be cleared.
+  //   (b) REAL REAP, trapped-exit-0 — the watchdog fired on a genuine deadline/stall and found a LIVE
+  //       process group (watchdogSignaledLive=true), but that process TRAPPED SIGTERM and exit(0)'d before
+  //       SIGKILL. The close code is 0, yet this was a REAL TIMEOUT/STALL — the verdict STANDS.
+  // Keying on `code === 0` alone (the prior logic) masked case (b) as a PASS. We key on whether the reap
+  // actually found a live target instead: clear `reason` ONLY for the proven no-op race (not signaled
+  // live). If it WAS signaled live, the TIMEOUT/STALL reason survives regardless of the trapped exit code.
+  if (reason && code === 0 && !watchdogSignaledLive) {
+    reason = "";
   }
 
   const durationMs = nowMs() - startMs;
@@ -830,10 +904,22 @@ function analyzeNextestSurface(text, code) {
     else failures.push({ surface: "nextest", name: nm });
   }
   const unaccounted = summary.failed - failNames.length;
-  if (code !== 0 && (unaccounted > 0 || failNames.length === 0)) {
+  // A non-zero run exit is authoritative: it must be EXACTLY accounted for by the parsed `FAIL` names,
+  // PROVEN by the summary. We accept a non-zero exit as accounted-for ONLY when ALL of:
+  //   - a `Summary [` line was actually parsed (summary.found) — a missing/unparseable summary (a setup or
+  //     harness error, or a killed/interrupted run) cannot prove what failed, so it must FAIL; AND
+  //   - the summary `failed` count EQUALS the parsed `FAIL` name count (no crash/leak/timeout class hides in
+  //     the summary total beyond the accounted `FAIL [` lines), AND that count is non-zero (a non-zero exit
+  //     with zero parsed failures is unexplained — fail it).
+  // Otherwise the run is unaccounted and we trip a hard failure. Keying the prior tripwire on
+  // `unaccounted > 0` swallowed the no-summary case: with tolerated `FAIL` lines and no summary,
+  // summary.failed defaulted to 0 so `unaccounted` went NEGATIVE and never fired. Requiring an exact,
+  // summary-proven accounting closes that swallow.
+  const accounted = summary.found && summary.failed === failNames.length && failNames.length > 0;
+  if (code !== 0 && !accounted) {
     failures.push({
       surface: "nextest",
-      name: `<run exit ${code}; ${unaccounted > 0 ? unaccounted : "0"} non-FAIL-status failure(s); summary failed=${summary.failed}>`,
+      name: `<run exit ${code}; unaccounted failure(s) (summary ${summary.found ? `failed=${summary.failed}` : "MISSING"}, parsed FAIL names=${failNames.length})>`,
     });
   }
   return { failures, toleratedCount, summary, namedCount: failNames.length, unaccounted };
@@ -1701,6 +1787,10 @@ async function runGate(opts, ctx) {
 }
 
 // Parse nextest's trailing "Summary [   …s] N tests run: P passed, S skipped" line for counts.
+// Returns `found`: whether a `Summary [` line was actually present. The live SURFACE-1 accounting REQUIRES
+// `found === true` to treat a non-zero run exit as accounted-for — a missing/unparseable Summary (a setup
+// or harness error, a killed run) cannot prove the failures are accounted for, so it must FAIL the gate
+// rather than fall through to PASS-WITH-TOLERATED on the parsed `FAIL` names alone.
 function parseNextestSummary(text) {
   let passed = 0;
   let skipped = 0;
@@ -1708,14 +1798,15 @@ function parseNextestSummary(text) {
   // nextest emits: "Summary [  63.890s] 15543 tests run: 15541 passed, 547 skipped" and may include
   // "N failed" when there are failures.
   const lines = text.split("\n").filter((l) => /Summary \[/.test(l));
-  const line = lines.length ? lines[lines.length - 1] : "";
+  const found = lines.length > 0;
+  const line = found ? lines[lines.length - 1] : "";
   let m = /(\d+)\s+passed/.exec(line);
   if (m) passed = parseInt(m[1], 10);
   m = /(\d+)\s+skipped/.exec(line);
   if (m) skipped = parseInt(m[1], 10);
   m = /(\d+)\s+failed/.exec(line);
   if (m) failed = parseInt(m[1], 10);
-  return { passed, skipped, failed };
+  return { passed, skipped, failed, found };
 }
 
 main().catch((e) => {
