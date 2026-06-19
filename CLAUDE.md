@@ -224,7 +224,7 @@ Guards: `typeinfo_graph_taxonomy` (`crates/verter_session/tests/cases/g_block/ty
 
 The codebase MUST build, test, and materialize on macOS, Windows, AND Linux. Platform-assuming code is a defect, not a nit.
 
-Guard-enforced — `tracked_paths_are_portable` (`crates/verter_session/tests/tracked_paths_are_portable.rs`) enumerates `git ls-files -z` and enforces: valid UTF-8; no NTFS-illegal characters (`< > : " | ? * \` plus control chars); no trailing dot or space; no reserved device basenames (`CON`/`PRN`/`AUX`/`NUL`/`COM1`–`COM9`/`LPT1`–`LPT9`, with or without extension, plus `CONIN$`/`CONOUT$` — the `$`-suffixed forms only); no case-insensitive path collisions (lowercase-fold approximation of NTFS/APFS folding, not the exact filesystem fold tables); ≤200-byte relative paths.
+Guard-enforced — `tracked_paths_are_portable` (`crates/verter_session/tests/cases/tracked_paths_are_portable.rs`) enumerates `git ls-files -z` and enforces: valid UTF-8; no NTFS-illegal characters (`< > : " | ? * \` plus control chars); no trailing dot or space; no reserved device basenames (`CON`/`PRN`/`AUX`/`NUL`/`COM1`–`COM9`/`LPT1`–`LPT9`, with or without extension, plus `CONIN$`/`CONOUT$` — the `$`-suffixed forms only); no case-insensitive path collisions (lowercase-fold approximation of NTFS/APFS folding, not the exact filesystem fold tables); ≤200-byte relative paths.
 
 Review-enforced (the guard does not cover these):
 

@@ -82,6 +82,44 @@ export function err(msg) {
   process.stderr.write(`[gate][error] ${msg}\n`);
 }
 
+// ----------------------------------------------------------------------------------------------------
+// --prepare success marker + output. `--prepare` is a warm-pass, NOT a gate PASS: its exit 0 means
+// "prepared", never "the suite built and passed". To keep a CI `grep PASS` from EVER mistaking a prepare
+// run for a gate pass, the success marker is `PREPARED_NOT_GATE` and NONE of the prepare success-output
+// lines may contain the token `PASS`. These lines are produced here (one place) so the self-test can assert
+// both invariants in-process WITHOUT running cargo. `assertNoPassToken` is the byte-level guarantee the
+// caller emits exactly these strings (a future edit re-introducing `PASS` trips it).
+// ----------------------------------------------------------------------------------------------------
+export const PREPARE_SUCCESS_MARKER = "PREPARED_NOT_GATE";
+
+export function preparedSuccessLines(suiteCount, warmed, warmFailures, missing) {
+  // NB: no line below may contain the token "PASS" — a CI `grep PASS` of prepare's output must find nothing
+  // that looks like a gate verdict. `assertNoPassToken` enforces this on the assembled array.
+  const lines = [
+    `prepare: archived + listed ${suiteCount} suites; warmed first-launch assessment for ${warmed} ` +
+      `binaries (${warmFailures} warm-list failure(s), ${missing} missing binary/-ies)`,
+    "prepare is a PRE-WARM (it moves the legitimate first-launch assessment earlier); it does NOT disable " +
+      "Gatekeeper or remove the cost, and it is NOT a gate verdict — the gate is `node scripts/gate.mjs`.",
+    `${PREPARE_SUCCESS_MARKER}: tests were NOT run — run the gate (\`node scripts/gate.mjs\`, no mode flag) ` +
+      "to actually build + verify the suite. A prepare exit 0 means PREPARED, never a verdict.",
+  ];
+  return assertNoPassToken(lines);
+}
+
+// Guard: assert no line contains the uppercase token PASS. Returns the array on success; throws otherwise.
+// Used to byte-pin the prepare success output (and exercisable by the self-test) so a regression that
+// reintroduces a `PASS`-bearing line fails loudly instead of silently making prepare grep-confusable.
+export function assertNoPassToken(lines) {
+  for (const l of lines) {
+    if (l.includes("PASS")) {
+      throw new Error(
+        `prepare success output must not contain the token PASS; offending line: ${l}`,
+      );
+    }
+  }
+  return lines;
+}
+
 export function nowMs() {
   return Date.now();
 }
@@ -805,10 +843,13 @@ export async function reapActiveStep() {
 // runContainedStep — launch one external command in a NEW process group (POSIX) / job-tree (Windows) under
 // the whole-gate deadline + the phase-appropriate stall detector, capturing combined stdout+stderr to a
 // growing buffer (also mirrored to our stderr). Returns
-// { code, reason, durationMs, stdout, stderr, spawnError, reapConfirmedDead }.
+// { code, reason, durationMs, stdout, stderr, spawnError, reapConfirmedDead, signalName }.
 //   reason: "TIMEOUT" | "STALL" | "" (empty when not a watchdog kill).
 //   reapConfirmedDead: when a watchdog reap ran, whether the child tree was VERIFIED dead afterward
 //     (true), false if death could not be confirmed within the bound. Undefined when no reap ran.
+//   signalName: the SIGNAL name the child was terminated by (e.g. "SIGABRT") when it was signal-killed
+//     (code===128 stand-in), "" when it exited normally. Lets a caller report the real signal instead of
+//     the misleading synthesized "exit 128".
 //
 //   phase: "build" => progress is byte growth OR target-tree artifact growth.
 //          "test"  => progress is byte growth ONLY (a silent test binary is a hang).
@@ -929,14 +970,24 @@ export async function runContainedStep(opts) {
   // compiled and FAILED can exit with any code (including 127 of its own), and that is a GATE FAILURE
   // (exit 1), not a setup error. The caller keys its 127-vs-1 mapping on this flag, never on the code.
   let spawnError = false;
+  // When the child is terminated by a SIGNAL (close `code === null` + a signal name), the synthesized exit
+  // code is 128 — but that 128 is NOT a real exit code the program chose, it is a stand-in for "killed by a
+  // signal". Capture the signal NAME so a caller can report e.g. "terminated by signal SIGABRT" instead of
+  // the misleading "exit 128" (a flaky test binary SIGABRTing during `--list` is a signal-kill, not a
+  // nextest exit 128). Empty when the child exited normally.
+  let signalName = "";
   const code = await new Promise((resolve) => {
     child.on("error", () => {
       spawnError = true;
       resolve(127);
     });
     child.on("close", (c, signal) => {
-      if (c === null && signal) resolve(128);
-      else resolve(c === null ? 1 : c);
+      if (c === null && signal) {
+        signalName = signal;
+        resolve(128);
+      } else {
+        resolve(c === null ? 1 : c);
+      }
     });
   });
 
@@ -980,6 +1031,7 @@ export async function runContainedStep(opts) {
     stderr: stderrBuf,
     spawnError,
     reapConfirmedDead,
+    signalName,
   };
 }
 

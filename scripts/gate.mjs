@@ -10,6 +10,20 @@
 // here AND imported DIRECTLY by `gate-selftest.mjs`; the self-test drives the cargo-free seam/classifier
 // scenarios in-process, never via a magic flag on this CLI.
 //
+// OPERATION-SCOPED EXIT SEMANTICS (read this before trusting an exit 0)
+//   `exit 0` means "the requested OPERATION succeeded" — it is scoped to the mode you ran, NOT a blanket
+//   gate pass. Concretely:
+//     * ONLY `node scripts/gate.mjs` (no mode flag) is THE GATE. Its exit 0 means the FULL test suite built
+//       AND passed (except env-tolerated failures, by exact name). That, and only that, is the gate-pass
+//       contract.
+//     * `--prepare` is a WARM-PASS only. Its exit 0 means PREPARED (the archive built + the first-launch
+//       assessment was warmed) — tests were NOT run, so it is NEVER a gate pass. Its success output carries
+//       the `PREPARED_NOT_GATE` marker and contains no `PASS` token precisely so a CI `grep PASS` cannot
+//       mistake it for a verdict.
+//     * `--help` exits 0 after printing this usage — also not a gate pass.
+//   `--help` and `--prepare` are both MUTUALLY EXCLUSIVE and argv-strict (a stray flag/positional alongside
+//   either is a usage error, exit 127), so neither exit-0 mode can be reached with junk arguments.
+//
 // PURPOSE
 //   Builds the whole workspace test universe ONCE (via `cargo nextest archive`) and runs BOTH
 //   verification surfaces from the SAME archived artifacts:
@@ -76,18 +90,25 @@
 //
 // USAGE
 //   node scripts/gate.mjs [--timeout 50m] [--stall 12m] [--target-dir <DIR>] [--no-fail-fast]
-//                         [--test-threads N]
-//   node scripts/gate.mjs --prepare           # warm-pass: archive + list (+ a one-shot warm of the
-//                                             # macOS first-launch assessment). Prints PREPARED — this is a
-//                                             # pre-warm, NOT a gate PASS, and is not counted in a timed gate.
+//                         [--test-threads N]                # THE GATE — exit 0 = suite built + passed.
+//   node scripts/gate.mjs --prepare [--target-dir <DIR>] [--timeout 50m] [--stall 12m]
+//                                             # warm-pass: archive + list (+ a one-shot warm of the macOS
+//                                             # first-launch assessment). Prints the `PREPARED_NOT_GATE`
+//                                             # marker — this is a PRE-WARM (tests were NOT run), NOT a gate
+//                                             # pass, and is not counted in a timed gate. --prepare combines
+//                                             # ONLY with --target-dir/--timeout/--stall; any other flag or a
+//                                             # positional argument is a usage error (exit 127).
+//   node scripts/gate.mjs --help              # prints this usage + exits 0. Accepts no other argument
+//                                             # (a bare --help only); --help with any other token => 127.
 //     durations: s/m/h suffix or bare seconds (e.g. 50m, 12m, 5s, 90).
 //
 //   This CLI accepts ONLY the flags above. There is intentionally NO test-seam / classifier-hook /
 //   custom-command mode — every accepted invocation either runs the real gate, runs the `--prepare`
 //   warm-pass, or prints help. An unknown flag is a USAGE error (exit 127), never a silent success.
 //
-// EXIT CODES (distinct, documented)
-//   0   PASS / PASS-WITH-TOLERATED  (a real gate run); or a successful --prepare warm-pass (PREPARED)
+// EXIT CODES (distinct, documented; exit 0 is OPERATION-scoped — see OPERATION-SCOPED EXIT SEMANTICS above)
+//   0   PASS / PASS-WITH-TOLERATED  (the GATE: a real `node scripts/gate.mjs` run); OR a successful
+//       --prepare warm-pass (PREPARED_NOT_GATE — NOT a gate pass); OR --help after printing usage
 //   1   FAIL          (a build/test command failed / a non-tolerated test failed)
 //   124 TIMEOUT       (whole-gate wallclock deadline tripped)
 //   125 STALL         (no progress within the stall window)
@@ -115,6 +136,8 @@ import {
   err,
   nowMs,
   parseDuration,
+  // --prepare success output (warm-pass marker — never a gate PASS token)
+  preparedSuccessLines,
   // setup
   resolveRepoRoot,
   defaultLockDir,
@@ -151,10 +174,89 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 // `-- <cmd>` custom-command path, NO `--selftest-*` hook, and NO `--internal-selftest-seam` seam: those
 // would be modes that can return success without running the gate, which this binary must never expose.
 // An unknown argument is a USAGE error (exit 127), never a silent success.
+//
+// OPERATION-SCOPED EXIT SEMANTICS — the two NON-gate modes (`--help`, `--prepare`) each legitimately exit 0
+// on success, but ONLY `node scripts/gate.mjs` with NO mode flag carries the gate-pass contract. To keep
+// those two modes from being confusable with a gate pass, BOTH are MUTUALLY EXCLUSIVE and argv-strict:
+//   --help / -h : accepts NO other argv token whatsoever. `gate.mjs --help --anything` (a flag OR a
+//     positional) is a USAGE error (exit 127) — only a bare `gate.mjs --help` prints usage and exits 0, so
+//     a stray flag can never be silently swallowed under the exit-0 help mode.
+//   --prepare   : accepts ONLY the companion flags the prepare warm-pass actually uses (--target-dir,
+//     --timeout, --stall, each with its value); ANY other flag (e.g. --no-fail-fast / --test-threads — gate-
+//     only) or ANY positional token is a USAGE error (exit 127). `gate.mjs --prepare junk` /
+//     `--prepare --selftest-x` exit 127, so prepare's exit-0 cannot be reached with junk argv.
+// The gate mode (no mode flag) accepts the full real-gate flag set.
 // ----------------------------------------------------------------------------------------------------
+
+// Flags --prepare is allowed to combine with (the warm-pass front half — archiveAndList — reads exactly
+// these). Each takes a value argument. Gate-only flags (--no-fail-fast / --test-threads) are NOT here, so
+// `--prepare --no-fail-fast` is a usage error rather than a silently-ignored flag.
+const PREPARE_ALLOWED_VALUE_FLAGS = new Set(["--target-dir", "--timeout", "--stall"]);
+
+function usageError(msg) {
+  return new Error(msg);
+}
+
 function parseArgs(argv) {
+  // --help / -h is mutually exclusive: a bare `--help` (the SOLE token) prints usage + exits 0; help
+  // alongside ANY other token (flag or positional) is a usage error. This is checked FIRST so a stray
+  // trailing flag (e.g. `--help --bad-flag`) can never ride the exit-0 help mode.
+  if (argv.includes("--help") || argv.includes("-h")) {
+    if (argv.length !== 1) {
+      throw usageError(
+        "--help/-h is mutually exclusive: it accepts no other argument. Run a bare `node scripts/gate.mjs " +
+          "--help` for usage; any flag or positional alongside --help is a usage error.",
+      );
+    }
+    return {
+      mode: "help",
+      timeoutSecs: parseDuration("50m"),
+      stallSecs: parseDuration("12m"),
+      targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
+      noFailFast: true,
+      testThreads: null,
+    };
+  }
+
+  // --prepare is mutually exclusive: it combines ONLY with its warm-pass companion flags
+  // (--target-dir/--timeout/--stall) and accepts NO positional argument and NO gate-only flag. This is the
+  // non-gate warm-pass; rejecting stray argv keeps its exit-0 unreachable with junk arguments.
+  if (argv.includes("--prepare")) {
+    const opts = {
+      mode: "prepare",
+      timeoutSecs: parseDuration("50m"),
+      stallSecs: parseDuration("12m"),
+      targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
+      noFailFast: true,
+      testThreads: null,
+    };
+    let i = 0;
+    while (i < argv.length) {
+      const a = argv[i];
+      if (a === "--prepare") {
+        // the mode selector itself; already handled.
+      } else if (PREPARE_ALLOWED_VALUE_FLAGS.has(a)) {
+        const v = argv[++i];
+        if (v === undefined) {
+          throw usageError(`--prepare: '${a}' requires a value`);
+        }
+        if (a === "--target-dir") opts.targetDir = v;
+        else if (a === "--timeout") opts.timeoutSecs = parseDuration(v);
+        else if (a === "--stall") opts.stallSecs = parseDuration(v);
+      } else {
+        throw usageError(
+          `--prepare accepts only --target-dir/--timeout/--stall (and no positional argument); got ` +
+            `'${a}'. --prepare is the warm-pass, NOT the gate — gate-only flags and stray tokens are rejected.`,
+        );
+      }
+      i++;
+    }
+    return opts;
+  }
+
+  // Gate mode — the real-gate flag set. No mode flag, so the gate-pass contract applies.
   const opts = {
-    mode: "gate", // gate | prepare | help
+    mode: "gate",
     timeoutSecs: parseDuration("50m"),
     stallSecs: parseDuration("12m"),
     targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
@@ -174,13 +276,8 @@ function parseArgs(argv) {
       opts.noFailFast = true;
     } else if (a === "--test-threads") {
       opts.testThreads = argv[++i];
-    } else if (a === "--prepare") {
-      opts.mode = "prepare";
-    } else if (a === "-h" || a === "--help") {
-      opts.mode = "help";
-      break;
     } else {
-      throw new Error(
+      throw usageError(
         `unknown argument: '${a}'. This gate accepts only --timeout/--stall/--target-dir/` +
           `--no-fail-fast/--test-threads/--prepare/--help; it has no test-seam or custom-command mode.`,
       );
@@ -409,7 +506,15 @@ async function archiveAndList(ctx) {
       err(`could not launch 'cargo' for the archive build (command not found / not executable)`);
       return { error: EXIT_USAGE, where: "archive", res: archiveRes };
     }
-    err(`cargo nextest archive build failed (exit ${archiveRes.code}) — workspace did not compile`);
+    // As with the list step: a SIGNAL-kill (signalName set, not a watchdog reason) is reported by its signal
+    // name rather than the misleading synthesized "exit 128 — workspace did not compile". The verdict stays
+    // a gate FAILURE (exit 1, fail-closed) either way — a build that was signal-killed is not a green build.
+    err(
+      archiveRes.signalName
+        ? `cargo nextest archive build child terminated by signal ${archiveRes.signalName} (not a ` +
+            "compile exit code) — workspace build did not complete"
+        : `cargo nextest archive build failed (exit ${archiveRes.code}) — workspace did not compile`,
+    );
     return { error: EXIT_FAIL, where: "archive", res: archiveRes };
   }
   log(`archive built in ${Math.round(archiveRes.durationMs / 1000)}s -> ${archiveFile}`);
@@ -446,10 +551,18 @@ async function archiveAndList(ctx) {
     // The list step reads an ALREADY-BUILT archive; a non-zero exit here is a setup/list failure (a corrupt
     // or unreadable archive, a nextest usage error, or — via spawnError — cargo not launchable). Either way
     // the gate cannot enumerate the suites, so it is a SETUP condition (127), not a build/test failure.
+    //
+    // Distinguish a SIGNAL-kill from a real nextest exit code. When the child was killed by an EXTERNAL
+    // signal (signalName set) and this is NOT a watchdog TIMEOUT/STALL (reason already empty here — those
+    // returned above), the synthesized "exit 128" is misleading: it implies nextest chose exit 128, but the
+    // child was signal-killed (e.g. a flaky test binary SIGABRTing during `--list`). Report the SIGNAL name.
     err(
       listRes.spawnError
         ? `could not launch 'cargo' for the archive list (command not found / not executable)`
-        : `cargo nextest list failed (exit ${listRes.code}) — cannot enumerate suites from the archive`,
+        : listRes.signalName
+          ? `cargo nextest list child terminated by signal ${listRes.signalName} (not a nextest exit ` +
+            "code) — cannot enumerate suites from the archive"
+          : `cargo nextest list failed (exit ${listRes.code}) — cannot enumerate suites from the archive`,
     );
     return { error: EXIT_USAGE, where: "list", res: listRes };
   }
@@ -470,8 +583,9 @@ async function archiveAndList(ctx) {
 // NOT disable Gatekeeper; it only moves the legitimate first-launch assessment earlier, out of a timed
 // gate. STRICT warm counting: only `status === 0` counts as warmed; a non-zero/unexpected status during
 // the warm `--list` is REPORTED (warn), never counted as success, and a warm-list FAILURE in ANY suite
-// makes the prepare a fail-setup (exit 127) rather than silently swallowing it. On success it prints
-// "PREPARED" so it is NEVER confused with a gate VERDICT PASS.
+// makes the prepare a fail-setup (exit 127) rather than silently swallowing it. On success it prints the
+// `PREPARED_NOT_GATE` marker (and NO `PASS` token) so it is NEVER confused with a gate VERDICT PASS — a CI
+// `grep PASS` of prepare's output cannot mistake the warm-pass for a verdict.
 // ----------------------------------------------------------------------------------------------------
 async function runPrepare(ctx) {
   const out = await archiveAndList(ctx);
@@ -514,25 +628,22 @@ async function runPrepare(ctx) {
       );
     }
   }
-  log(
-    `prepare: archived + listed ${suites.length} suites; warmed first-launch assessment for ${warmed} ` +
-      `binaries (${warmFailures} warm-list failure(s), ${missing} missing binary/-ies)`,
-  );
-  log(
-    "prepare is a PRE-WARM (moves the legitimate first-launch assessment earlier); it does NOT disable " +
-      "Gatekeeper or remove the cost, and it is NOT a gate PASS.",
-  );
   if (warmFailures > 0 || missing > 0) {
+    // STRICT warm counting: a warm-list failure / missing binary is NEVER swallowed as success — it is a
+    // fail-setup (exit 127). This is NOT a gate verdict (the gate is `node scripts/gate.mjs`); it means
+    // prepare could not complete its warm-pass.
     err(
       `prepare: ${warmFailures} warm-list failure(s) + ${missing} missing binary/-ies — a warm FAILURE is ` +
-        "not swallowed; reporting fail-setup (exit 127). This is NOT a gate failure verdict.",
+        "not swallowed; reporting fail-setup (exit 127). This is NOT a gate verdict, it is an incomplete warm.",
     );
     return EXIT_USAGE;
   }
-  // PREPARED — distinct, honest output so this exit-0 is never confusable with a gate VERDICT PASS.
-  log(
-    "PREPARED (pre-warm complete; this is NOT a gate pass — run the gate without --prepare to verify)",
-  );
+  // PREPARED_NOT_GATE — the success output. It is unmistakably NOT a gate pass: the marker is
+  // PREPARED_NOT_GATE and NO line contains the token `PASS` (so a CI `grep PASS` of prepare's output cannot
+  // mistake it for a gate verdict). The lines are produced + guarded centrally in gate-internals.mjs.
+  for (const line of preparedSuccessLines(suites.length, warmed, warmFailures, missing)) {
+    log(line);
+  }
   return EXIT_PASS;
 }
 

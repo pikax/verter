@@ -116,6 +116,8 @@ import {
   selectSessionSuites,
   isBuildTool,
   targetDirMatches,
+  preparedSuccessLines,
+  PREPARE_SUCCESS_MARKER,
 } from "./gate-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -1886,6 +1888,121 @@ async function main() {
             "exit 1 (discriminating; a non-zero exit without the stub running would be vacuous)",
         );
       }
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (U-P1) STRICT ARGV ON THE NON-GATE EXIT-0 MODES (--help / --prepare are MUTUALLY EXCLUSIVE). The two
+  //        modes that legitimately exit 0 without running the gate must NOT be reachable with junk argv —
+  //        otherwise a stray flag rides an exit-0 mode. We assert (PLATFORM-INDEPENDENT — pure argv probes
+  //        of the production CLI):
+  //          * `--help --bad-flag` => USAGE (127), NOT 0 (pre-fix: help broke the parse loop immediately and
+  //            IGNORED the trailing token, exiting 0 — the bug this scenario discriminates).
+  //          * a bare `--help` => 0 (the legit non-gate mode still works — discriminating control).
+  //          * `--prepare trailingjunk` => 127 (a positional after --prepare is rejected).
+  //          * `--prepare --selftest-x` => 127 (an unknown flag after --prepare is rejected).
+  //          * `--prepare --no-fail-fast` => 127 (a GATE-ONLY flag after --prepare is rejected — pre-fix it
+  //            was SILENTLY ACCEPTED and the warm-pass ran, the strongest discriminator for the prepare
+  //            mutual-exclusion).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(U-P1) strict argv on the non-gate exit-0 modes (--help/--prepare exclusive)\n",
+  );
+  {
+    let ok = true;
+    const helpBad = runGate(["--help", "--bad-flag"], {});
+    if (helpBad.code !== 127) {
+      fail(
+        `(U-P1) --help --bad-flag returned ${helpBad.code}, expected USAGE (127) — --help must NOT swallow a ` +
+          "trailing token and exit 0 (it is mutually exclusive: a bare --help only).",
+      );
+      ok = false;
+    }
+    const helpBare = runGate(["--help"], {});
+    if (helpBare.code !== EXIT_PASS) {
+      fail(
+        `(U-P1) bare --help returned ${helpBare.code}, expected 0 (the legit non-gate help mode must still work)`,
+      );
+      ok = false;
+    }
+    // --prepare mutual-exclusion: a positional, an unknown flag, AND a gate-only flag each => 127.
+    const prepareCases = [
+      { argv: ["--prepare", "trailingjunk"], why: "positional after --prepare" },
+      { argv: ["--prepare", "--selftest-x"], why: "unknown flag after --prepare" },
+      {
+        argv: ["--prepare", "--no-fail-fast"],
+        why: "gate-only flag after --prepare (pre-fix: accepted)",
+      },
+    ];
+    for (const c of prepareCases) {
+      const r = runGate(c.argv, {});
+      if (r.code === EXIT_PASS) {
+        fail(
+          `(U-P1) \`gate.mjs ${c.argv.join(" ")}\` (${c.why}) returned 0 — --prepare must reject junk argv, ` +
+            "never reach its exit-0 warm-pass with stray arguments.",
+        );
+        ok = false;
+      } else if (r.code !== 127) {
+        fail(
+          `(U-P1) \`gate.mjs ${c.argv.join(" ")}\` (${c.why}) returned ${r.code}; expected USAGE (127)`,
+        );
+        ok = false;
+      }
+    }
+    if (ok) {
+      pass(
+        "(U-P1) STRICT ARGV: --help --bad-flag => 127 (bare --help => 0); --prepare trailingjunk / " +
+          "--prepare --selftest-x / --prepare --no-fail-fast each => 127 — the exit-0 non-gate modes are " +
+          "mutually exclusive and unreachable with junk argv (discriminating)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (U-P2-prep) --prepare SUCCESS OUTPUT IS NOT A GATE PASS. --prepare exits 0 on success, but it is a
+  //        WARM-PASS, never a gate verdict — so a CI `grep PASS` of its output must find NOTHING that looks
+  //        like a verdict. We drive the REAL prepare success-output producer (`preparedSuccessLines`,
+  //        imported in-process — the exact strings runPrepare logs on the success path) and assert:
+  //          * the success marker is `PREPARED_NOT_GATE` (PREPARE_SUCCESS_MARKER), present in the output.
+  //          * NO produced line contains the token `PASS` (a CI grep cannot mistake prepare for a verdict).
+  //        Pre-fix the success output contained "...it is NOT a gate PASS." (a literal PASS token a CI grep
+  //        would match), so this scenario FAILS against the pre-fix code and PASSES post-fix. Cargo-free.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(U-P2-prep) --prepare success output is NOT a gate PASS (no PASS token)\n",
+  );
+  {
+    let ok = true;
+    // A representative successful prepare (10 suites archived/listed, all warmed, 0 failures, 0 missing).
+    const lines = preparedSuccessLines(10, 10, 0, 0);
+    const joined = lines.join("\n");
+    note(`prepare success marker = ${PREPARE_SUCCESS_MARKER}`);
+    if (PREPARE_SUCCESS_MARKER !== "PREPARED_NOT_GATE") {
+      fail(
+        `(U-P2-prep) the prepare success marker is '${PREPARE_SUCCESS_MARKER}', expected 'PREPARED_NOT_GATE'`,
+      );
+      ok = false;
+    }
+    if (!joined.includes(PREPARE_SUCCESS_MARKER)) {
+      fail(
+        `(U-P2-prep) the prepare success output does NOT contain the '${PREPARE_SUCCESS_MARKER}' marker`,
+      );
+      ok = false;
+    }
+    if (joined.includes("PASS")) {
+      const bad = lines.find((l) => l.includes("PASS"));
+      fail(
+        `(U-P2-prep) the prepare success output contains the token 'PASS' — a CI grep PASS would mistake it ` +
+          `for a gate verdict. Offending line: ${bad}`,
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(U-P2-prep) --prepare success output uses the PREPARED_NOT_GATE marker and contains NO 'PASS' token " +
+          "(a CI grep PASS cannot confuse the warm-pass with a gate verdict; discriminating — pre-fix it " +
+          "printed 'NOT a gate PASS' which a grep would match)",
+      );
     }
   }
 
