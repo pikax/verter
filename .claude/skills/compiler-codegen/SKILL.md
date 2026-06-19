@@ -189,6 +189,23 @@ The `<script setup>` lowering exposes setup bindings to the template through a `
 
 Plus the `defineProps` result var (always live via the synthetic `const __props = props`). The same union drives the `void(name)` block-copy keep-alive. This is Vue-specific: the Svelte IDE projector keeps script chunks at their source spans with no synthetic value-read, so an unused Svelte top-level `let` is naturally flagged. The gray `Unnecessary` tag is a separate TypeProvider-merge concern, not codegen.
 
+## Carrier IDE TS Surface Principle
+
+North star for the LSP/IDE experience (a **principle**, not yet a `(CRITICAL)` guarded rule — promoted to CRITICAL once real-provider cross-region Vue/Svelte regression tests guard it).
+
+For every carrier with an IDE projection (`.vue`, `.svelte`), the IDE provider surface is **one generated `.tsx`/`.jsx` file** containing the script code AND the supported template/markup expressions lowered into checkable TypeScript/JavaScript/JSX. The LSP must obtain that surface through the IDE path (`CompileTarget::IDE`/`TSX`, e.g. `host.ensure_compiled()` — see "Two Template Codegen Paths"), sync it to the active TypeProvider, and map provider positions, ranges, and edits back through the document's `ProviderPositionMapper`.
+
+This covers, as ONE surface:
+
+- **Vue** — `<script>`, `<script setup>`, interpolations `{{ }}`, and supported directive/expression values: `v-if`, `v-show`, `v-for`, `v-bind`/`:`, `v-on`/`@`, `v-model`, `v-slot`, and dynamic arguments.
+- **Svelte** — module/instance `<script>`, `{expr}` interpolations, expression/spread/shorthand attributes, `bind:`, `on:`/event attributes, `class:`, `style:`, `use:` and transition/action expressions, `{#if}`/`{#each}`/`{#await}`/`{#key}`/snippets, `{@render}`/`{@html}`/`{@const}`/`{@debug}`/`{@attach}`, and rune calls in script/module code.
+
+**The bar:** for any supported mapped TS/JS expression position, provider-backed diagnostics, hover, definition/type-definition, references, rename, completions/resolve, signature help, document highlights, semantic tokens, and inlay hints should behave like the equivalent generated standalone TS/JS/JSX program, with all source positions/ranges/edits mapped back to the carrier source. A binding represented in BOTH script and template must be discoverable and renamable from either side (rename spans script + template; find-all-references finds both). Holds equally for Vue and Svelte over the shared LSP path.
+
+**Fail-closed boundary:** unmapped synthetic helper code, framework syntax tokens with no TS correlate, unsupported or experimental projection regions, and provider edits whose full ranges cannot be mapped must fail closed or return framework-native results — never mis-mapped. Generic TS provider code actions / refactors / quickfixes may be exposed ONLY when every edit maps exactly back to carrier source; source actions such as organize-imports, fix-all, and formatting require explicit per-action support and tests, and are NOT implied by this principle.
+
+**Validation:** regression tests for this principle exercise the REAL TypeProvider (tsgo + tsserver) when TypeScript semantics are required — generated-TSX shape tests are useful but NOT sufficient for script/template IDE behavior (a binding TS counts as "used", where TS pins a diagnostic, and whether an edit surfaces are runtime facts only the real provider reveals). See `/host-session` for provider sync and `/position-encoding` for the position/range/edit mapping contract.
+
 ## Strict Slot Children Type Checking (Experimental)
 
 When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree, enforcing that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).

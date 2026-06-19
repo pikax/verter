@@ -144,6 +144,16 @@ Guards: `compile_audit_sourcemap`.
 
 See `/compiler-codegen` skill for full codegen pipeline, backends, and CompileTarget details.
 
+### Carrier IDE TS Surface Principle
+
+North star for the IDE/LSP experience: for every carrier with an IDE projection (`.vue`, `.svelte`), the script block (`<script>`, `<script setup>`, Svelte module/instance scripts) AND the supported template/markup expressions are **ONE** generated TypeScript/JavaScript/JSX surface — interpolations (`{{ }}`, Svelte `{expr}`), directive/attribute expression values (`v-if`/`v-for`/`v-bind`/`:`/`v-on`/`@`/`v-model`/`v-slot` and dynamic args; Svelte `bind:`/`on:`/`class:`/`style:`/`use:`, `{#if}`/`{#each}`/`{#await}`/snippets, `{@render}`/`{@html}`/`{@const}`, rune calls) all lower into it. That surface is obtained through the IDE path (`CompileTarget::IDE`/`TSX`), synced to the active TypeProvider, with provider positions/ranges/edits mapped back through the document's `ProviderPositionMapper`.
+
+**The bar:** for any supported mapped TS/JS expression position, every provider-backed IDE feature — diagnostics, hover, definition/type-definition, references, rename, completion/resolve, signature help, document highlights, semantic tokens, inlay hints, and generic code actions whose edits map exactly — should behave like the equivalent standalone `.ts`/`.js`/`.jsx` program, with results mapped back to the carrier source. A binding represented in BOTH script and template is discoverable and renamable from either side (rename spans script + template; find-all-references finds both). This holds for **both Vue and Svelte** over the shared LSP path.
+
+Fail-closed boundary: unmapped synthetic helper code, framework tokens with no TS correlate, unsupported/experimental projection regions, and provider edits whose full ranges cannot be mapped must fail closed or return framework-native results — never mis-mapped. Source actions (organize-imports, fix-all, formatting) require explicit per-action support and tests; they are NOT implied by this principle. This is a **principle, not yet a `(CRITICAL)` guarded rule** — it is promoted to CRITICAL once real-provider cross-region Vue/Svelte regression tests guard it.
+
+See `/compiler-codegen` → "Carrier IDE TS Surface Principle" for the full normative text (every covered expression form), and `/host-session` / `/position-encoding` for provider sync and position/range/edit mapping.
+
 ### Fallthrough / Root Inheritance (CRITICAL)
 
 The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_semantic::analysis` extracts root reachability facts only. `verter_session` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.

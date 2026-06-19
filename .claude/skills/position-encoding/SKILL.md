@@ -5,6 +5,8 @@ description: "Position encoding, span types, coordinate systems, path normalizat
 
 # Position Encoding & Path Normalization Reference
 
+> **Carrier IDE TS Surface Principle:** the coordinate conversions here are how provider positions/ranges/edits over the generated `.tsx`/`.jsx` map back to `.vue`/`.svelte` source (one surface spanning script + template); edits whose full ranges cannot be mapped must fail closed, never mis-map. Full principle: `/compiler-codegen` → "Carrier IDE TS Surface Principle".
+
 ## Typed Span Types (`verter_span` crate)
 
 All Rust span types are defined in `crates/verter_span/src/lib.rs`. Each type enforces a specific coordinate system at compile time:

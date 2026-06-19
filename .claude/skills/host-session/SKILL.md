@@ -5,6 +5,8 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 
 # Host & Session
 
+> **Carrier IDE TS Surface Principle:** the TypeProvider sync described here serves one mapped TS/JS surface spanning script + supported template expressions for every `.vue`/`.svelte` carrier; provider results map back to carrier source via `ProviderPositionMapper`. Full principle: `/compiler-codegen` → "Carrier IDE TS Surface Principle".
+
 ## Project-Global Cache on `VerterHost` (post-rewrite)
 
 `VerterHost` owns one `Arc<ProjectTypeStore>` per loaded project, exposed via `.project_type_store()` — the single shared cache graph for component-meta and cross-file type resolution:
