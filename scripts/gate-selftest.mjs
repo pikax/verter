@@ -1,0 +1,690 @@
+#!/usr/bin/env node
+// gate-selftest.mjs — proves the safety properties of gate.mjs using ONLY sleep/echo stand-ins.
+//
+// NO workspace cargo runs here. Every gate command is a `sleep`/`echo` stand-in, so the build lock is
+// never touched. Each test uses a UNIQUE lock dir (an os.tmpdir() mkdtemp) so a developer's real lock is
+// safe. The whole harness is POSIX-only (it asserts the process-group containment that only exists on
+// POSIX); on Windows it prints a clear skip notice and exits 0 (the gate.mjs Windows kill path —
+// taskkill — is statically reviewed, not exercised here, because there is no portable `sleep`/argv-rename
+// stand-in on Windows).
+//
+// ARGV-TAGGED SLEEPS (critical for honest, PORTABLE discrimination).
+//   Every sleep stand-in is launched as `exec -a sleep_${RUN_TAG}_<role> sleep <n>` (via a `bash -c`
+//   string the gate spawns) so the unique tag lands in the process ARGV, NOT in a shell COMMENT. A
+//   `# tag` comment never reaches the sleep argv, so a `pgrep -f "$tag"` would return 0 whether or not
+//   orphans leaked — a vacuous always-pass. The surviving-orphan assertions count REAL sleeps by reading
+//   the FULL untruncated argv (`ps -o command=`) and matching the FIRST argv token's basename against
+//   `sleep_${RUN_TAG}_`. They deliberately do NOT use `ps -o comm=`: on Linux procps truncates comm to
+//   ~15 chars (TASK_COMM_LEN), so the long tag would never match the truncated comm and EVERY survivor
+//   assertion would FALSELY PASS (vacuous on Linux). The full-argv first-token match works identically on
+//   macOS and Linux and EXCLUDES the `bash -c "<string>"` wrapper (its argv CONTAINS the sentinels so a
+//   substring search finds it, but its argv[0] basename is `bash`, not `sleep_…`).
+//
+// Properties proven (acceptance criteria — they MUST discriminate, not always-pass):
+//   (i)    MUTEX        — a second concurrent run REFUSES with the LOCK-REFUSED code (126).
+//   (ii)   STALE        — a SIGKILL'd holder's lockdir is reclaimed; a fresh run PASSes.
+//   (iii)  TIMEOUT+ORPHAN — `--timeout 5s` on a wrapper that backgrounds two argv-tagged sleep 600s and
+//                           waits returns TIMEOUT (124) and leaves ZERO surviving argv-tagged sleeps
+//                           (the WHOLE process group reaped, not just the wrapper). FAILS if only the
+//                           wrapper died.
+//   (iv)   STALL        — a silent argv-tagged sleep 600 (TEST phase) is killed with STALL (125) well
+//                           before 600s.
+//   (v)    TEARDOWN     — after each test, no stray runner-spawned argv-tagged sleeps linger; lockdir gone.
+//   (vi)   SWEEP        — a fake process whose argv carries $REPO_ROOT but NOT the runner target dir
+//                           SURVIVES the provenance sweep; a fake process whose argv carries the runner
+//                           target dir is SWEPT. (Proves the sweep keys SOLELY on the runner-owned target.)
+//   (vii)  ALLOWLIST    — EXACT-name tolerated allowlist via canned nextest fixtures: only-allowlisted =>
+//                           PASS-WITH-TOLERATED (0); allowlisted+non-allowlisted => FAIL (1); a
+//                           non-allowlisted name that CONTAINS an allowlisted substring => FAIL; a name
+//                           that is an ENTIRE allowlisted name PLUS a suffix => FAIL (exact-equality).
+//   (viii) WHOLE-GATE TIMEOUT — a multi-step custom run whose cumulative time exceeds the WHOLE-gate
+//                           budget TIMEOUTs at the budget, not at N×. The inverse (a fitting sequence)
+//                           PASSes, so the test discriminates.
+//
+// Exit non-zero if any property fails.
+
+import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
+const GATE = join(SELFTEST_DIR, "gate.mjs");
+
+// Exit-code contract (must match gate.mjs).
+const EXIT_PASS = 0;
+const EXIT_FAIL = 1;
+const EXIT_TIMEOUT = 124;
+const EXIT_STALL = 125;
+const EXIT_LOCK_REFUSED = 126;
+
+let PASS_COUNT = 0;
+let FAIL_COUNT = 0;
+const RESULTS = [];
+
+function pass(msg) {
+  RESULTS.push(`PASS  ${msg}`);
+  PASS_COUNT++;
+  process.stderr.write(`  PASS: ${msg}\n`);
+}
+function fail(msg) {
+  RESULTS.push(`FAIL  ${msg}`);
+  FAIL_COUNT++;
+  process.stderr.write(`  FAIL: ${msg}\n`);
+}
+function note(msg) {
+  process.stderr.write(`  ... ${msg}\n`);
+}
+
+const IS_WINDOWS = process.platform === "win32";
+
+// Unique marker per harness invocation so we only ever match OUR sleeps, never a developer's.
+const RUN_TAG = `gatetest_${process.pid}_${Math.floor(Date.now() / 1000)}`;
+
+const CLEAN_DIRS = [];
+function registerClean(d) {
+  CLEAN_DIRS.push(d);
+}
+function harnessCleanup() {
+  // Kill any of OUR argv-tagged sleeps that somehow survived (belt and suspenders; tests assert empty).
+  try {
+    spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_`], { stdio: "ignore" });
+  } catch {
+    /* ignore */
+  }
+  for (const d of CLEAN_DIRS) {
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+process.on("exit", harnessCleanup);
+process.on("SIGINT", () => {
+  harnessCleanup();
+  process.exit(130);
+});
+process.on("SIGTERM", () => {
+  harnessCleanup();
+  process.exit(143);
+});
+
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Run the gate.mjs CLI synchronously with the given argv + env; return { code }.
+function runGate(args, env) {
+  const r = spawnSync(process.execPath, [GATE, ...args], {
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  // spawnSync sets .status (exit code) or .signal. A signalled exit yields null status.
+  if (r.status === null && r.signal) return { code: 128, signal: r.signal };
+  return { code: r.status === null ? 1 : r.status };
+}
+
+// Spawn the gate.mjs CLI detached in the background (so we can hold a lock while probing it). detached:true
+// gives the holder its OWN process group (PGID==PID), so we can SIGKILL its whole group with
+// `process.kill(-pid, …)` for the STALE-reclaim scenario WITHOUT touching the harness's own group.
+// Returns the ChildProcess.
+function spawnGate(args, env) {
+  const child = spawn(process.execPath, [GATE, ...args], {
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "ignore", "ignore"],
+    detached: true,
+  });
+  child.unref();
+  return child;
+}
+
+// Wait (bounded, ~6s) for a gate holder to acquire the lock — its owner.json appears once it is held.
+async function waitLockHeld(lk) {
+  for (let w = 0; w < 60; w++) {
+    if (existsSync(join(lk, "owner.json"))) return true;
+    await delay(100);
+  }
+  return false;
+}
+
+// ----------------------------------------------------------------------------------------------------
+// Count live processes that are REAL argv-tagged sleeps for a given role pattern. PORTABLE — keys on the
+// FULL untruncated argv, NEVER on `ps -o comm=`. `ps -o comm=` is unusable on Linux (procps truncates
+// comm to TASK_COMM_LEN ~15 chars), so the long tag would never match and every survivor assertion would
+// FALSELY PASS. Instead read the full argv via `ps -axww -o pid=,command=`, take argv[0]'s basename, and
+// count it ONLY if that basename starts with `sleep_${pat}` — i.e. argv[0] IS the renamed sleep. The
+// `bash -c "…"` wrapper's argv[0] basename is `bash`, so it is excluded.
+// ----------------------------------------------------------------------------------------------------
+function countArgvSleeps(pat) {
+  let out = "";
+  try {
+    out = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch {
+    return 0;
+  }
+  let n = 0;
+  for (const line of out.split("\n")) {
+    const trimmed = line.replace(/^\s+/, "");
+    if (!trimmed) continue;
+    const sp = trimmed.indexOf(" ");
+    if (sp < 0) continue;
+    const pidTok = trimmed.slice(0, sp);
+    if (!/^\d+$/.test(pidTok)) continue;
+    const cmd = trimmed.slice(sp + 1).trimStart();
+    if (!cmd) continue;
+    const argv0 = cmd.split(/\s+/)[0];
+    const base = argv0.slice(argv0.lastIndexOf("/") + 1).replace(/\\/g, "/");
+    const baseName = base.slice(base.lastIndexOf("/") + 1);
+    if (baseName.startsWith(`sleep_${pat}`)) n++;
+  }
+  return n;
+}
+
+// Is a pid alive?
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+// Build a gate command string that backgrounds two argv-tagged sleeps and waits (the orphan shape).
+function orphanCmd(dur) {
+  return (
+    `( exec -a sleep_${RUN_TAG}_orphanA sleep ${dur} ) & ` +
+    `( exec -a sleep_${RUN_TAG}_orphanB sleep ${dur} ) & wait`
+  );
+}
+// A single argv-tagged sleep (the stall / hold shapes).
+function singleSleepCmd(role, dur) {
+  return `exec -a sleep_${RUN_TAG}_${role} sleep ${dur}`;
+}
+
+// A fresh temp lockdir path (the dir itself must NOT exist yet — mkdir is the acquire).
+function freshLock() {
+  const base = mkdtempSync(join(tmpdir(), "gatetest-lock-"));
+  registerClean(base);
+  return join(base, "lock.d");
+}
+function freshTmpDir(prefix) {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  registerClean(d);
+  return d;
+}
+
+// ====================================================================================================
+async function main() {
+  process.stderr.write("=== gate.mjs self-test (sleep/echo stand-ins only; NO cargo) ===\n");
+  process.stderr.write(`gate: ${GATE}\n`);
+  process.stderr.write(`run-tag: ${RUN_TAG}\n`);
+
+  if (!existsSync(GATE)) {
+    fail(`gate.mjs not found at ${GATE}`);
+    finish();
+    return;
+  }
+
+  if (IS_WINDOWS) {
+    process.stderr.write(
+      "\n[skip] This harness exercises POSIX process-group containment with sleep/argv-rename\n" +
+        "stand-ins; those primitives do not exist on Windows. The gate.mjs Windows kill path\n" +
+        "(taskkill /PID <pid> /T /F + CIM creation-date identity) is covered by static review, not\n" +
+        "by this harness. Skipping on Windows (exit 0).\n",
+    );
+    process.exit(0);
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (i) MUTEX — a second concurrent run must REFUSE with LOCK-REFUSED (126).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(i) MUTEX\n");
+  {
+    const lk = freshLock();
+    const tgt1 = freshTmpDir("gatetest-target-");
+    const holder = spawnGate(["--", singleSleepCmd("hold_i", 30)], {
+      VERTER_GATE_LOCK: lk,
+      VERTER_GATE_TARGET_DIR: tgt1,
+    });
+    // Wait until the holder has acquired the lock (owner.json stamped) — bounded.
+    const acq = await waitLockHeld(lk);
+    if (!acq) {
+      fail("(i) holder never acquired the lock within 6s");
+    } else {
+      note(`holder acquired lock (pid=${holder.pid})`);
+      const tgt2 = freshTmpDir("gatetest-target-");
+      const second = runGate(["--", singleSleepCmd("second_i", 30)], {
+        VERTER_GATE_LOCK: lk,
+        VERTER_GATE_TARGET_DIR: tgt2,
+      });
+      if (second.code === EXIT_LOCK_REFUSED) {
+        pass(`(i) MUTEX: second concurrent run refused with LOCK-REFUSED (${EXIT_LOCK_REFUSED})`);
+      } else {
+        fail(`(i) MUTEX: second run returned ${second.code}, expected LOCK-REFUSED (${EXIT_LOCK_REFUSED})`);
+      }
+    }
+    // Graceful SIGTERM to the holder's group so the gate's SIGTERM trap runs teardown (releases the lock).
+    try {
+      process.kill(-holder.pid, "SIGTERM");
+    } catch {
+      try {
+        holder.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+    }
+    // Wait (bounded) for the holder's teardown to release the lockdir.
+    for (let w = 0; w < 40; w++) {
+      if (!existsSync(lk)) break;
+      await delay(100);
+    }
+    spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_hold_i`], { stdio: "ignore" });
+    await delay(500);
+    const left = countArgvSleeps(`${RUN_TAG}_hold_i`);
+    if (!existsSync(lk) && left === 0) {
+      pass("(v/i) TEARDOWN: lockdir released and 0 stray tagged sleeps after MUTEX test");
+    } else {
+      fail(`(v/i) TEARDOWN: lockdir-exists=${existsSync(lk)} stray_sleeps=${left}`);
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (ii) STALE reclaim — SIGKILL a holder (cleanup never runs), fresh run reclaims and PASSes.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(ii) STALE reclaim\n");
+  {
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-target-");
+    const holder = spawnGate(["--", singleSleepCmd("hold_ii", 60)], {
+      VERTER_GATE_LOCK: lk,
+      VERTER_GATE_TARGET_DIR: tgt,
+    });
+    const acq = await waitLockHeld(lk);
+    if (!acq) {
+      fail("(ii) holder never acquired the lock");
+    } else {
+      note(`stale-holder acquired (pid=${holder.pid}); SIGKILL the whole group so cleanup never runs`);
+      // SIGKILL the holder's OWN process group (spawnGate ran it detached, PGID==pid). This kills the gate
+      // process + its step child + the sleep WITHOUT running the gate's cleanup — so the lockdir must
+      // survive for the stale-reclaim path. The harness lives in a different group, untouched.
+      try {
+        process.kill(-holder.pid, "SIGKILL");
+      } catch {
+        try {
+          holder.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+      }
+      spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_hold_ii`], { stdio: "ignore" });
+      await delay(1000);
+      if (!existsSync(lk)) {
+        fail("(ii) lockdir vanished after SIGKILL — cannot exercise stale reclaim");
+      } else {
+        note("lockdir survived SIGKILL (as required for the stale path)");
+        const tgt2 = freshTmpDir("gatetest-target-");
+        const reclaim = runGate(["--", `echo reclaimed_ii_${RUN_TAG}`], {
+          VERTER_GATE_LOCK: lk,
+          VERTER_GATE_TARGET_DIR: tgt2,
+        });
+        if (reclaim.code === EXIT_PASS) {
+          pass("(ii) STALE: fresh run reclaimed the stale lock and PASSed (rc=0, did NOT refuse)");
+        } else if (reclaim.code === EXIT_LOCK_REFUSED) {
+          fail(`(ii) STALE: fresh run REFUSED a dead holder's lock (rc=${EXIT_LOCK_REFUSED}) — reclaim broken`);
+        } else {
+          fail(`(ii) STALE: fresh run returned ${reclaim.code} (expected PASS=0)`);
+        }
+      }
+    }
+    await delay(500);
+    const left = countArgvSleeps(`${RUN_TAG}_hold_ii`);
+    if (!existsSync(lk) && left === 0) {
+      pass("(v/ii) TEARDOWN: lockdir released and 0 stray tagged sleeps after STALE test");
+    } else {
+      fail(`(v/ii) TEARDOWN: lockdir-exists=${existsSync(lk)} stray_sleeps=${left}`);
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (iii) TIMEOUT + ORPHAN-FIX (HEADLINE). Two backgrounded argv-tagged sleep 600s under a wrapper that
+  //       `wait`s them. After --timeout 5s, NO argv-tagged sleep may survive. This discriminates: killing
+  //       only the wrapper (the bash that did `wait`) would orphan both sleeps and FAIL this test.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(iii) TIMEOUT + ORPHAN-FIX (headline)\n");
+  {
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-target-");
+    note(`before: argv-tagged-sleep count = ${countArgvSleeps(`${RUN_TAG}_orphan`)}`);
+    const t0 = Date.now();
+    const r = runGate(["--timeout", "5s", "--", orphanCmd(600)], {
+      VERTER_GATE_LOCK: lk,
+      VERTER_GATE_TARGET_DIR: tgt,
+    });
+    const elapsed = Math.round((Date.now() - t0) / 1000);
+    await delay(2000);
+    const after = countArgvSleeps(`${RUN_TAG}_orphan`);
+    note(`returned rc=${r.code} after ${elapsed}s; after: surviving argv-tagged-sleep count = ${after}`);
+    let ok = true;
+    if (r.code !== EXIT_TIMEOUT) {
+      fail(`(iii) expected TIMEOUT code (${EXIT_TIMEOUT}), got ${r.code}`);
+      ok = false;
+    }
+    if (elapsed >= 60) {
+      fail(`(iii) took ${elapsed}s — timeout did not bound the run near 5s`);
+      ok = false;
+    }
+    if (after !== 0) {
+      fail(
+        `(iii) ORPHAN-FIX: ${after} argv-tagged sleep 600 process(es) SURVIVED the group kill — only the wrapper was reaped, NOT the group`,
+      );
+      spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_orphan`], { stdio: "ignore" });
+      ok = false;
+    }
+    if (ok) {
+      pass(`(iii) TIMEOUT+ORPHAN: rc=TIMEOUT in ${elapsed}s AND 0 surviving sleep 600 (whole process group reaped)`);
+    }
+    await delay(500);
+    const left = countArgvSleeps(`${RUN_TAG}_orphan`);
+    if (!existsSync(lk) && left === 0) {
+      pass("(v/iii) TEARDOWN: lockdir released and 0 stray tagged sleeps after TIMEOUT test");
+    } else {
+      fail(`(v/iii) TEARDOWN: lockdir-exists=${existsSync(lk)} stray_sleeps=${left}`);
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (iv) STALL — a silent argv-tagged sleep 600 (no output) under the TEST phase is killed with STALL
+  //      well before 600s. We force the command to be classified as a TEST-phase step via the gate's
+  //      custom-step phase override (a custom `--` gate is treated as a TEST phase: byte-growth only).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(iv) STALL (test-phase: byte-growth-only liveness)\n");
+  {
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-target-");
+    const t0 = Date.now();
+    const r = runGate(
+      ["--stall", "5s", "--timeout", "600s", "--", singleSleepCmd("stall", 600)],
+      { VERTER_GATE_LOCK: lk, VERTER_GATE_TARGET_DIR: tgt },
+    );
+    const elapsed = Math.round((Date.now() - t0) / 1000);
+    await delay(2000);
+    let ok = true;
+    if (r.code !== EXIT_STALL) {
+      fail(`(iv) expected STALL code (${EXIT_STALL}), got ${r.code}`);
+      ok = false;
+    }
+    if (elapsed >= 120) {
+      fail(`(iv) took ${elapsed}s — stall detector did not fire near 5s (well before 600s)`);
+      ok = false;
+    }
+    const stallLeft = countArgvSleeps(`${RUN_TAG}_stall`);
+    if (stallLeft !== 0) {
+      fail(`(iv) STALL: the stalled sleep survived (${stallLeft} left) — group not reaped on stall`);
+      spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_stall`], { stdio: "ignore" });
+      ok = false;
+    }
+    if (ok) {
+      pass(`(iv) STALL: rc=STALL in ${elapsed}s (<<600s) and the stalled group was reaped`);
+    }
+    await delay(500);
+    const left = countArgvSleeps(`${RUN_TAG}_stall`);
+    if (!existsSync(lk) && left === 0) {
+      pass("(v/iv) TEARDOWN: lockdir released and 0 stray tagged sleeps after STALL test");
+    } else {
+      fail(`(v/iv) TEARDOWN: lockdir-exists=${existsSync(lk)} stray_sleeps=${left}`);
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (vi) SWEEP provenance scoping. The provenance sweep must key SOLELY on the runner-owned target dir.
+  //      We spawn TWO argv-tagged decoys directly (NOT through the gate): one whose argv carries the repo
+  //      root but NOT the target dir (a stand-in for a dev `cargo build --manifest-path <repo>/...`), and
+  //      one whose argv carries the runner target dir (a runner-owned rustc stand-in). We run a trivial
+  //      gate (whose teardown sweep keys on its own runner target dir) and assert: repo-root-only decoy
+  //      SURVIVES, target-dir decoy is SWEPT.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(vi) SWEEP provenance scoping\n");
+  {
+    const repoRoot = (() => {
+      try {
+        return execFileSync("git", ["-C", SELFTEST_DIR, "rev-parse", "--show-toplevel"], {
+          encoding: "utf8",
+        }).trim();
+      } catch {
+        return "";
+      }
+    })();
+    const gateTarget = freshTmpDir("gatetest-target-");
+    if (!repoRoot) {
+      fail("(vi) could not determine repo root for the sweep test");
+    } else {
+      note(`repo_root=${repoRoot}`);
+      note(`gate_target=${gateTarget}`);
+      // Decoy A: argv carries the repo root but NOT the runner target dir => legit dev process model.
+      const decoyAArgv = `sleep_${RUN_TAG}_sweepDevA cargo build --manifest-path ${repoRoot}/Cargo.toml`;
+      // Decoy B: argv carries the runner-owned target dir => runner-owned rustc model (must be swept).
+      const decoyBArgv = `sleep_${RUN_TAG}_sweepRunnerB rustc --out-dir ${gateTarget}/debug/deps lib.rs`;
+      const decoyA = spawn("bash", ["-c", `exec -a "${decoyAArgv}" sleep 30`], { stdio: "ignore" });
+      const decoyB = spawn("bash", ["-c", `exec -a "${decoyBArgv}" sleep 30`], { stdio: "ignore" });
+      await delay(700);
+      const aBefore = pidAlive(decoyA.pid);
+      const bBefore = pidAlive(decoyB.pid);
+      note(`before sweep: devA(repo-root-only)=${aBefore} runnerB(target-dir)=${bBefore}`);
+      if (!aBefore || !bBefore) {
+        fail(`(vi) decoys did not both start (devA=${aBefore} runnerB=${bBefore})`);
+      } else {
+        const lk = freshLock();
+        // A trivial gate run whose teardown provenance sweep keys on THIS runner target dir.
+        runGate(["--", `echo sweep_probe_${RUN_TAG}`], {
+          VERTER_GATE_LOCK: lk,
+          VERTER_GATE_TARGET_DIR: gateTarget,
+        });
+        await delay(2000);
+        const aAfter = pidAlive(decoyA.pid);
+        const bAfter = pidAlive(decoyB.pid);
+        note(`after sweep:  devA(repo-root-only)=${aAfter} runnerB(target-dir)=${bAfter}`);
+        let ok = true;
+        if (!aAfter) {
+          fail("(vi) SWEEP: the repo-root-only dev decoy was KILLED — the sweep must NOT key on the repo root");
+          ok = false;
+        }
+        if (bAfter) {
+          fail("(vi) SWEEP: the runner-owned target-dir decoy SURVIVED — the sweep must reap target-dir processes");
+          ok = false;
+        }
+        if (ok) {
+          pass(
+            "(vi) SWEEP: repo-root-only dev process SURVIVED and target-dir process was SWEPT (sweep keys solely on the runner-owned target dir)",
+          );
+        }
+      }
+      try {
+        process.kill(decoyA.pid, "SIGKILL");
+      } catch {
+        /* ignore */
+      }
+      try {
+        process.kill(decoyB.pid, "SIGKILL");
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (vii) EXACT-name tolerated allowlist. Drives the REAL classifier + verdict mapping via the gate's
+  //       `--selftest-classify-nextest <fixture>` hook on canned nextest-style fixtures (no cargo). FOUR
+  //       cases — the last two are lookalikes that a substring/prefix match would WRONGLY tolerate but
+  //       exact-equality must FAIL: (c) the allowlisted token as a SUBSTRING inside a different path, and
+  //       (d) the ENTIRE allowlisted name PLUS a suffix.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(vii) EXACT-name tolerated allowlist\n");
+  {
+    const fixDir = freshTmpDir("gatetest-fix-");
+    const A = join(fixDir, "only_allowlisted.log");
+    const B = join(fixDir, "allowlisted_plus_real.log");
+    const C = join(fixDir, "substring_lookalike.log");
+    const D = join(fixDir, "affix_lookalike.log");
+    // (a) ONLY allowlisted tests failed => PASS-WITH-TOLERATED.
+    writeFileSync(
+      A,
+      "    FAIL [   0.012s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
+    );
+    // (b) an allowlisted test PLUS a non-allowlisted test failed => FAIL.
+    writeFileSync(
+      B,
+      "    FAIL [   0.012s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "    FAIL [   0.030s] verter_compiler template::vmemo::renders_cached\n",
+    );
+    // (c) a NON-allowlisted test whose name merely CONTAINS an allowlisted substring failed => FAIL.
+    writeFileSync(
+      C,
+      "    FAIL [   0.041s] verter_session meta::typeinfo_proto_ts_freshness_lookalike::regresses\n",
+    );
+    // (d) a NON-allowlisted test whose exact final token is an ENTIRE allowlisted name PLUS a suffix => FAIL.
+    writeFileSync(
+      D,
+      "    FAIL [   0.044s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output_extra\n",
+    );
+    const classify = (file) => {
+      const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest", file], {
+        env: { ...process.env },
+        encoding: "utf8",
+      });
+      return (r.stdout || "").trim();
+    };
+    const va = classify(A);
+    const vb = classify(B);
+    const vc = classify(C);
+    const vd = classify(D);
+    note(`(a) only-allowlisted               => ${va}  (expect PASS-WITH-TOLERATED)`);
+    note(`(b) allowlisted+real               => ${vb}  (expect FAIL)`);
+    note(`(c) substring-lookalike            => ${vc}  (expect FAIL)`);
+    note(`(d) full-name+suffix lookalike     => ${vd}  (expect FAIL — proves exact-equality, not prefix/contains)`);
+    let ok = true;
+    if (va !== "PASS-WITH-TOLERATED") {
+      fail(`(vii a) only-allowlisted => '${va}', expected PASS-WITH-TOLERATED`);
+      ok = false;
+    }
+    if (vb !== "FAIL") {
+      fail(`(vii b) allowlisted+real => '${vb}', expected FAIL`);
+      ok = false;
+    }
+    if (vc !== "FAIL") {
+      fail(`(vii c) substring-lookalike => '${vc}', expected FAIL (proves exact-name, not substring)`);
+      ok = false;
+    }
+    if (vd !== "FAIL") {
+      fail(
+        `(vii d) full-allowlisted-name+suffix => '${vd}', expected FAIL (a prefix/contains match would wrongly tolerate it; exact-equality must reject)`,
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(vii) ALLOWLIST: exact-name — only-allowlisted=>PASS-WITH-TOLERATED, +real=>FAIL, substring-lookalike=>FAIL, full-name+suffix=>FAIL",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (viii) WHOLE-GATE TIMEOUT. The --timeout is a WHOLE-gate budget for the ENTIRE multi-step sequence,
+  //        NOT per-step (per-step would allow ~N×--timeout). We drive the REAL multi-step loop via the
+  //        gate's `--selftest-steps` seam: THREE separate steps, each a 4s argv-tagged sleep (12s of work
+  //        if each got the full budget). Under a WHOLE-gate --timeout 6s the sequence MUST TIMEOUT after
+  //        ~6-9s having run only ~1.5 steps, NOT ~12s (which would be per-step). It must also reap the
+  //        running step's group. ALSO assert the inverse: a fitting sequence PASSes (discrimination).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(viii) WHOLE-GATE TIMEOUT (cumulative budget bound)\n");
+  {
+    let ok = true;
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-target-");
+    const stepsOver = [
+      `seqA|exec -a sleep_${RUN_TAG}_seqA sleep 4`,
+      `seqB|exec -a sleep_${RUN_TAG}_seqB sleep 4`,
+      `seqC|exec -a sleep_${RUN_TAG}_seqC sleep 4`,
+    ].join("\n");
+    const t0 = Date.now();
+    const r = runGate(["--timeout", "6s", "--stall", "600s"], {
+      VERTER_GATE_SELFTEST: "1",
+      VERTER_GATE_SELFTEST_STEPS: stepsOver,
+      VERTER_GATE_LOCK: lk,
+      VERTER_GATE_TARGET_DIR: tgt,
+    });
+    const elapsed = Math.round((Date.now() - t0) / 1000);
+    await delay(2000);
+    note(`over-budget: rc=${r.code} after ${elapsed}s (3 steps x4s=12s of work under a 6s whole-gate budget)`);
+    if (r.code !== EXIT_TIMEOUT) {
+      fail(`(viii) over-budget: expected TIMEOUT (${EXIT_TIMEOUT}) at the whole-gate budget, got ${r.code}`);
+      ok = false;
+    }
+    if (elapsed >= 11) {
+      fail(
+        `(viii) over-budget: took ${elapsed}s — the whole-gate budget did NOT bound the sequence near 6s (ran ~full 12s; per-step not whole-gate)`,
+      );
+      ok = false;
+    }
+    const seqLeft =
+      countArgvSleeps(`${RUN_TAG}_seqA`) +
+      countArgvSleeps(`${RUN_TAG}_seqB`) +
+      countArgvSleeps(`${RUN_TAG}_seqC`);
+    if (seqLeft !== 0) {
+      fail(`(viii) over-budget: ${seqLeft} step sleeps survived the whole-gate TIMEOUT reap`);
+      spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_seq`], { stdio: "ignore" });
+      ok = false;
+    }
+    // Inverse (discrimination): a sequence whose cumulative time FITS the budget must PASS, not TIMEOUT.
+    const lk2 = freshLock();
+    const tgt2 = freshTmpDir("gatetest-target-");
+    const stepsFit = [
+      `fitA|exec -a sleep_${RUN_TAG}_fitA sleep 1`,
+      `fitB|exec -a sleep_${RUN_TAG}_fitB sleep 1`,
+      `fitC|exec -a sleep_${RUN_TAG}_fitC sleep 1`,
+    ].join("\n");
+    const rf = runGate(["--timeout", "30s", "--stall", "600s"], {
+      VERTER_GATE_SELFTEST: "1",
+      VERTER_GATE_SELFTEST_STEPS: stepsFit,
+      VERTER_GATE_LOCK: lk2,
+      VERTER_GATE_TARGET_DIR: tgt2,
+    });
+    note(`within-budget: rc=${rf.code} (3 steps x1s=3s under a 30s budget)`);
+    if (rf.code !== EXIT_PASS) {
+      fail(`(viii) within-budget: expected PASS (${EXIT_PASS}), got ${rf.code} — the budget wrongly tripped a fitting sequence`);
+      ok = false;
+    }
+    spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_fit`], { stdio: "ignore" });
+    if (ok) {
+      pass(
+        `(viii) WHOLE-GATE TIMEOUT: 3-step 12s-of-work TIMED OUT at ~${elapsed}s (whole-gate 6s budget, not 12s) and was reaped; a 3s sequence under 30s PASSed`,
+      );
+    }
+  }
+
+  finish();
+}
+
+function finish() {
+  process.stderr.write("\n=== SELF-TEST SUMMARY ===\n");
+  for (const r of RESULTS) process.stderr.write(`${r}\n`);
+  process.stderr.write("-------------------------\n");
+  process.stderr.write(`PASS=${PASS_COUNT}  FAIL=${FAIL_COUNT}\n`);
+  if (FAIL_COUNT === 0) {
+    process.stderr.write("ALL SELF-TESTS PASSED\n");
+    process.exit(0);
+  } else {
+    process.stderr.write(`SELF-TESTS FAILED (${FAIL_COUNT} failing)\n`);
+    process.exit(1);
+  }
+}
+
+main().catch((e) => {
+  fail(`harness threw: ${e && e.stack ? e.stack : e}`);
+  finish();
+});
