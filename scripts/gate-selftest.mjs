@@ -37,9 +37,15 @@
 //                           PASS-WITH-TOLERATED (0); allowlisted+non-allowlisted => FAIL (1); a
 //                           non-allowlisted name that CONTAINS an allowlisted substring => FAIL; a name
 //                           that is an ENTIRE allowlisted name PLUS a suffix => FAIL (exact-equality).
-//   (viii) WHOLE-GATE TIMEOUT — a multi-step custom run whose cumulative time exceeds the WHOLE-gate
-//                           budget TIMEOUTs at the budget, not at N×. The inverse (a fitting sequence)
-//                           PASSes, so the test discriminates.
+//   (viii) WHOLE-GATE TIMEOUT — a multi-step seam run (the EXPLICIT `--internal-selftest-seam` subcommand)
+//                           whose cumulative time exceeds the WHOLE-gate budget TIMEOUTs at the budget, not
+//                           at N×. The inverse (a fitting sequence) PASSes, so the test discriminates.
+//   (xvi)  NO ENV GATE-BYPASS — the NORMAL gate path (no `--internal-selftest-seam` flag) is NOT divertible
+//                           to the no-op multi-step seam by ANY ambient environment variable. With the old
+//                           VERTER_GATE_SELFTEST(_STEPS) vars set AND a fast-failing `cargo` stub on PATH,
+//                           `node gate.mjs` (no seam flag) runs the REAL archive path (it invokes the stub
+//                           cargo and exits on its failure), NOT the seam (which would PASS/TIMEOUT on the
+//                           stand-in steps). The flag form, by contrast, DOES run the seam (discrimination).
 //   (ix)   SURFACE-1 NON-FAIL — a crash/leak (SIGABRT/LEAK) or a setup/harness error (non-zero exit, no
 //                           `FAIL [` line) classifies FAIL on both the classifier and the live-aggregation
 //                           hook; the tolerated baseline stays PASS-WITH-TOLERATED.
@@ -65,13 +71,42 @@
 // Exit non-zero if any property fails.
 
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
 const GATE = join(SELFTEST_DIR, "gate.mjs");
+
+// The gate-owned lock sentinel file name — must match GATE_LOCK_SENTINEL in gate.mjs. A lockdir is
+// reclaimable ONLY if it carries this marker (proving the gate created it); the crafted-lock scenarios
+// below stamp it to model a real gate-created lock.
+const GATE_LOCK_SENTINEL = ".verter-gate-lock";
+
+// The repo realpath the gate itself computes (realpathSync of the git toplevel). The crafted owner.json
+// scenarios must use this BYTE-IDENTICAL value so the gate's reclaim "owned by THIS repo" check passes for
+// a dead holder (and so the refusal in the live/empty-identity case is proven to be the fail-closed-identity
+// path, not the foreign-repo path).
+const REPO_REALPATH = (() => {
+  try {
+    const top = execFileSync("git", ["-C", SELFTEST_DIR, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+    }).trim();
+    try {
+      return realpathSync(top);
+    } catch {
+      return top;
+    }
+  } catch {
+    return "";
+  }
+})();
+
+// Stamp a lockdir as gate-owned the same way gate.mjs does at acquire (sentinel = "<token>\n<repo>\n").
+function writeSentinel(lockdir, token, repo) {
+  writeFileSync(join(lockdir, GATE_LOCK_SENTINEL), `${token}\n${repo}\n`);
+}
 
 // Exit-code contract (must match gate.mjs).
 const EXIT_PASS = 0;
@@ -287,7 +322,9 @@ async function main() {
       if (second.code === EXIT_LOCK_REFUSED) {
         pass(`(i) MUTEX: second concurrent run refused with LOCK-REFUSED (${EXIT_LOCK_REFUSED})`);
       } else {
-        fail(`(i) MUTEX: second run returned ${second.code}, expected LOCK-REFUSED (${EXIT_LOCK_REFUSED})`);
+        fail(
+          `(i) MUTEX: second run returned ${second.code}, expected LOCK-REFUSED (${EXIT_LOCK_REFUSED})`,
+        );
       }
     }
     // Graceful SIGTERM to the holder's group so the gate's SIGTERM trap runs teardown (releases the lock).
@@ -330,7 +367,9 @@ async function main() {
     if (!acq) {
       fail("(ii) holder never acquired the lock");
     } else {
-      note(`stale-holder acquired (pid=${holder.pid}); SIGKILL the whole group so cleanup never runs`);
+      note(
+        `stale-holder acquired (pid=${holder.pid}); SIGKILL the whole group so cleanup never runs`,
+      );
       // SIGKILL the holder's OWN process group (spawnGate ran it detached, PGID==pid). This kills the gate
       // process + its step child + the sleep WITHOUT running the gate's cleanup — so the lockdir must
       // survive for the stale-reclaim path. The harness lives in a different group, untouched.
@@ -357,7 +396,9 @@ async function main() {
         if (reclaim.code === EXIT_PASS) {
           pass("(ii) STALE: fresh run reclaimed the stale lock and PASSed (rc=0, did NOT refuse)");
         } else if (reclaim.code === EXIT_LOCK_REFUSED) {
-          fail(`(ii) STALE: fresh run REFUSED a dead holder's lock (rc=${EXIT_LOCK_REFUSED}) — reclaim broken`);
+          fail(
+            `(ii) STALE: fresh run REFUSED a dead holder's lock (rc=${EXIT_LOCK_REFUSED}) — reclaim broken`,
+          );
         } else {
           fail(`(ii) STALE: fresh run returned ${reclaim.code} (expected PASS=0)`);
         }
@@ -390,7 +431,9 @@ async function main() {
     const elapsed = Math.round((Date.now() - t0) / 1000);
     await delay(2000);
     const after = countArgvSleeps(`${RUN_TAG}_orphan`);
-    note(`returned rc=${r.code} after ${elapsed}s; after: surviving argv-tagged-sleep count = ${after}`);
+    note(
+      `returned rc=${r.code} after ${elapsed}s; after: surviving argv-tagged-sleep count = ${after}`,
+    );
     let ok = true;
     if (r.code !== EXIT_TIMEOUT) {
       fail(`(iii) expected TIMEOUT code (${EXIT_TIMEOUT}), got ${r.code}`);
@@ -408,7 +451,9 @@ async function main() {
       ok = false;
     }
     if (ok) {
-      pass(`(iii) TIMEOUT+ORPHAN: rc=TIMEOUT in ${elapsed}s AND 0 surviving sleep 600 (whole process group reaped)`);
+      pass(
+        `(iii) TIMEOUT+ORPHAN: rc=TIMEOUT in ${elapsed}s AND 0 surviving sleep 600 (whole process group reaped)`,
+      );
     }
     await delay(500);
     const left = countArgvSleeps(`${RUN_TAG}_orphan`);
@@ -429,10 +474,10 @@ async function main() {
     const lk = freshLock();
     const tgt = freshTmpDir("gatetest-target-");
     const t0 = Date.now();
-    const r = runGate(
-      ["--stall", "5s", "--timeout", "600s", "--", singleSleepCmd("stall", 600)],
-      { VERTER_GATE_LOCK: lk, VERTER_GATE_TARGET_DIR: tgt },
-    );
+    const r = runGate(["--stall", "5s", "--timeout", "600s", "--", singleSleepCmd("stall", 600)], {
+      VERTER_GATE_LOCK: lk,
+      VERTER_GATE_TARGET_DIR: tgt,
+    });
     const elapsed = Math.round((Date.now() - t0) / 1000);
     await delay(2000);
     let ok = true;
@@ -446,7 +491,9 @@ async function main() {
     }
     const stallLeft = countArgvSleeps(`${RUN_TAG}_stall`);
     if (stallLeft !== 0) {
-      fail(`(iv) STALL: the stalled sleep survived (${stallLeft} left) — group not reaped on stall`);
+      fail(
+        `(iv) STALL: the stalled sleep survived (${stallLeft} left) — group not reaped on stall`,
+      );
       spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_stall`], { stdio: "ignore" });
       ok = false;
     }
@@ -512,11 +559,15 @@ async function main() {
         note(`after sweep:  devA(repo-root-only)=${aAfter} runnerB(target-dir)=${bAfter}`);
         let ok = true;
         if (!aAfter) {
-          fail("(vi) SWEEP: the repo-root-only dev decoy was KILLED — the sweep must NOT key on the repo root");
+          fail(
+            "(vi) SWEEP: the repo-root-only dev decoy was KILLED — the sweep must NOT key on the repo root",
+          );
           ok = false;
         }
         if (bAfter) {
-          fail("(vi) SWEEP: the runner-owned target-dir decoy SURVIVED — the sweep must reap target-dir processes");
+          fail(
+            "(vi) SWEEP: the runner-owned target-dir decoy SURVIVED — the sweep must reap target-dir processes",
+          );
           ok = false;
         }
         if (ok) {
@@ -552,26 +603,27 @@ async function main() {
     const B = join(fixDir, "allowlisted_plus_real.log");
     const C = join(fixDir, "substring_lookalike.log");
     const D = join(fixDir, "affix_lookalike.log");
-    // (a) ONLY allowlisted tests failed => PASS-WITH-TOLERATED.
+    // (a) ONLY allowlisted tests failed => PASS-WITH-TOLERATED. Post-consolidation exact name under the
+    //     single verter_protocol::main binary: cases::typeinfo_proto_ts_freshness::<fn>.
     writeFileSync(
       A,
-      "    FAIL [   0.012s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
+      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
     );
     // (b) an allowlisted test PLUS a non-allowlisted test failed => FAIL.
     writeFileSync(
       B,
-      "    FAIL [   0.012s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    FAIL [   0.030s] verter_compiler template::vmemo::renders_cached\n",
+      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "    FAIL [   0.030s] verter_compiler::main template::vmemo::renders_cached\n",
     );
     // (c) a NON-allowlisted test whose name merely CONTAINS an allowlisted substring failed => FAIL.
     writeFileSync(
       C,
-      "    FAIL [   0.041s] verter_session meta::typeinfo_proto_ts_freshness_lookalike::regresses\n",
+      "    FAIL [   0.041s] verter_session::main cases::typeinfo_proto_ts_freshness_lookalike::regresses\n",
     );
     // (d) a NON-allowlisted test whose exact final token is an ENTIRE allowlisted name PLUS a suffix => FAIL.
     writeFileSync(
       D,
-      "    FAIL [   0.044s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output_extra\n",
+      "    FAIL [   0.044s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output_extra\n",
     );
     const classify = (file) => {
       const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest", file], {
@@ -587,7 +639,9 @@ async function main() {
     note(`(a) only-allowlisted               => ${va}  (expect PASS-WITH-TOLERATED)`);
     note(`(b) allowlisted+real               => ${vb}  (expect FAIL)`);
     note(`(c) substring-lookalike            => ${vc}  (expect FAIL)`);
-    note(`(d) full-name+suffix lookalike     => ${vd}  (expect FAIL — proves exact-equality, not prefix/contains)`);
+    note(
+      `(d) full-name+suffix lookalike     => ${vd}  (expect FAIL — proves exact-equality, not prefix/contains)`,
+    );
     let ok = true;
     if (va !== "PASS-WITH-TOLERATED") {
       fail(`(vii a) only-allowlisted => '${va}', expected PASS-WITH-TOLERATED`);
@@ -598,7 +652,9 @@ async function main() {
       ok = false;
     }
     if (vc !== "FAIL") {
-      fail(`(vii c) substring-lookalike => '${vc}', expected FAIL (proves exact-name, not substring)`);
+      fail(
+        `(vii c) substring-lookalike => '${vc}', expected FAIL (proves exact-name, not substring)`,
+      );
       ok = false;
     }
     if (vd !== "FAIL") {
@@ -633,17 +689,20 @@ async function main() {
       `seqC|exec -a sleep_${RUN_TAG}_seqC sleep 4`,
     ].join("\n");
     const t0 = Date.now();
-    const r = runGate(["--timeout", "6s", "--stall", "600s"], {
-      VERTER_GATE_SELFTEST: "1",
+    const r = runGate(["--internal-selftest-seam", "--timeout", "6s", "--stall", "600s"], {
       VERTER_GATE_SELFTEST_STEPS: stepsOver,
       VERTER_GATE_LOCK: lk,
       VERTER_GATE_TARGET_DIR: tgt,
     });
     const elapsed = Math.round((Date.now() - t0) / 1000);
     await delay(2000);
-    note(`over-budget: rc=${r.code} after ${elapsed}s (3 steps x4s=12s of work under a 6s whole-gate budget)`);
+    note(
+      `over-budget: rc=${r.code} after ${elapsed}s (3 steps x4s=12s of work under a 6s whole-gate budget)`,
+    );
     if (r.code !== EXIT_TIMEOUT) {
-      fail(`(viii) over-budget: expected TIMEOUT (${EXIT_TIMEOUT}) at the whole-gate budget, got ${r.code}`);
+      fail(
+        `(viii) over-budget: expected TIMEOUT (${EXIT_TIMEOUT}) at the whole-gate budget, got ${r.code}`,
+      );
       ok = false;
     }
     if (elapsed >= 11) {
@@ -669,15 +728,16 @@ async function main() {
       `fitB|exec -a sleep_${RUN_TAG}_fitB sleep 1`,
       `fitC|exec -a sleep_${RUN_TAG}_fitC sleep 1`,
     ].join("\n");
-    const rf = runGate(["--timeout", "30s", "--stall", "600s"], {
-      VERTER_GATE_SELFTEST: "1",
+    const rf = runGate(["--internal-selftest-seam", "--timeout", "30s", "--stall", "600s"], {
       VERTER_GATE_SELFTEST_STEPS: stepsFit,
       VERTER_GATE_LOCK: lk2,
       VERTER_GATE_TARGET_DIR: tgt2,
     });
     note(`within-budget: rc=${rf.code} (3 steps x1s=3s under a 30s budget)`);
     if (rf.code !== EXIT_PASS) {
-      fail(`(viii) within-budget: expected PASS (${EXIT_PASS}), got ${rf.code} — the budget wrongly tripped a fitting sequence`);
+      fail(
+        `(viii) within-budget: expected PASS (${EXIT_PASS}), got ${rf.code} — the budget wrongly tripped a fitting sequence`,
+      );
       ok = false;
     }
     spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_fit`], { stdio: "ignore" });
@@ -698,7 +758,9 @@ async function main() {
   //      runGate's SURFACE-1 path runs) so the testable and live paths are proven to AGREE. Each crash
   //      fixture asserts FAIL; the tolerated baseline still asserts PASS-WITH-TOLERATED (discrimination).
   // --------------------------------------------------------------------------------------------------
-  process.stderr.write("\n(ix) SURFACE-1 non-FAIL failure classification (crash/leak/setup-error)\n");
+  process.stderr.write(
+    "\n(ix) SURFACE-1 non-FAIL failure classification (crash/leak/setup-error)\n",
+  );
   {
     const fixDir = freshTmpDir("gatetest-nxfix-");
     const sigabrt = join(fixDir, "sigabrt.log");
@@ -718,8 +780,8 @@ async function main() {
     // was checked). Post-fix: FAIL.
     writeFileSync(
       leakPlusTolerated,
-      "    FAIL [   0.204s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    LEAK [   0.300s] verter_other resource::leaks_a_handle\n" +
+      "    FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "    LEAK [   0.300s] verter_other::main resource::leaks_a_handle\n" +
         "     Summary [   1.500s] 3 tests run: 1 passed, 2 failed, 0 skipped\n",
     );
     // A nextest harness/setup error: non-zero exit, NO `FAIL [` line, NO Summary line. Pre-fix: PASS.
@@ -728,8 +790,8 @@ async function main() {
     // The real tolerated baseline shape (the 2 env FAILs, summary failed=2): still PASS-WITH-TOLERATED.
     writeFileSync(
       tolerated,
-      "    FAIL [   0.204s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
-        "    FAIL [   0.207s] verter_protocol typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide\n" +
+      "    FAIL [   0.204s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+        "    FAIL [   0.207s] verter_protocol::main cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide\n" +
         "     Summary [  62.968s] 15543 tests run: 15541 passed, 2 failed, 547 skipped\n",
     );
     const classify = (file) => {
@@ -740,10 +802,14 @@ async function main() {
       return (r.stdout || "").trim();
     };
     const classifyRun = (code, file) => {
-      const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest-run", String(code), file], {
-        env: { ...process.env },
-        encoding: "utf8",
-      });
+      const r = spawnSync(
+        process.execPath,
+        [GATE, "--selftest-classify-nextest-run", String(code), file],
+        {
+          env: { ...process.env },
+          encoding: "utf8",
+        },
+      );
       return (r.stdout || "").trim();
     };
     let ok = true;
@@ -756,7 +822,9 @@ async function main() {
     const cTol = classify(tolerated);
     note(`classify: sigabrt=${cSig} leak+tol=${cLeak} tolerated=${cTol}`);
     if (cSig !== "FAIL") {
-      fail(`(ix) classifier: SIGABRT crash => '${cSig}', expected FAIL (a non-FAIL status must not pass)`);
+      fail(
+        `(ix) classifier: SIGABRT crash => '${cSig}', expected FAIL (a non-FAIL status must not pass)`,
+      );
       ok = false;
     }
     if (cLeak !== "FAIL") {
@@ -764,7 +832,9 @@ async function main() {
       ok = false;
     }
     if (cTol !== "PASS-WITH-TOLERATED") {
-      fail(`(ix) classifier: tolerated baseline => '${cTol}', expected PASS-WITH-TOLERATED (discrimination)`);
+      fail(
+        `(ix) classifier: tolerated baseline => '${cTol}', expected PASS-WITH-TOLERATED (discrimination)`,
+      );
       ok = false;
     }
     // LIVE-aggregation hook (with exit code) — the exact code runGate runs. nextest exits 100 on test
@@ -788,7 +858,9 @@ async function main() {
       ok = false;
     }
     if (rTol !== "PASS-WITH-TOLERATED") {
-      fail(`(ix) live-agg: tolerated baseline (exit 100) => '${rTol}', expected PASS-WITH-TOLERATED`);
+      fail(
+        `(ix) live-agg: tolerated baseline (exit 100) => '${rTol}', expected PASS-WITH-TOLERATED`,
+      );
       ok = false;
     }
     if (ok) {
@@ -811,15 +883,21 @@ async function main() {
   process.stderr.write("\n(x) FAIL-CLOSED MUTEX (alive holder, empty start-identity)\n");
   {
     let ok = true;
-    // Case A: alive pid (this harness) + empty identity => REFUSE (126).
+    // A DEAD pid number for the control/reclaim cases (a very high, almost-certainly-unused pid).
+    let deadCandidate = 999_999;
+    while (pidAlive(deadCandidate) && deadCandidate > 100_000) deadCandidate--;
+    // Case A: alive pid (this harness) + empty identity, in a GATE-OWNED lockdir (sentinel + matching repo)
+    // => REFUSE (126). The sentinel + matching repo make this a genuine fail-closed-IDENTITY refusal, not a
+    // sentinel/foreign-repo refusal — so it proves the identity rule specifically.
     const lkA = freshLock();
     mkdirSync(lkA, { recursive: true });
+    writeSentinel(lkA, "crafted-live-empty-ident", REPO_REALPATH);
     writeFileSync(
       join(lkA, "owner.json"),
       JSON.stringify({
         token: "crafted-live-empty-ident",
         pid: process.pid, // the harness itself — definitely alive
-        repoRealpath: "/nonexistent/repo",
+        repoRealpath: REPO_REALPATH, // matches => not a foreign-repo refusal
         targetDir: freshTmpDir("gatetest-target-"),
         createdAtMs: Date.now() - 60_000, // older than the init grace so it is not treated as "initializing"
         processStartIdentity: "", // EMPTY — PID reuse cannot be proven
@@ -830,7 +908,9 @@ async function main() {
       VERTER_GATE_LOCK: lkA,
       VERTER_GATE_TARGET_DIR: tgtA,
     });
-    note(`alive-pid + empty-identity holder => rc=${rA.code} (expect LOCK-REFUSED ${EXIT_LOCK_REFUSED})`);
+    note(
+      `alive-pid + empty-identity holder (gate-owned) => rc=${rA.code} (expect LOCK-REFUSED ${EXIT_LOCK_REFUSED})`,
+    );
     if (rA.code !== EXIT_LOCK_REFUSED) {
       fail(
         `(x) FAIL-CLOSED: alive holder with empty start-identity returned ${rA.code}, expected LOCK-REFUSED ` +
@@ -840,52 +920,157 @@ async function main() {
     }
     // The crafted lockdir must SURVIVE (the gate refused, it did NOT reclaim a live lock).
     if (!existsSync(lkA)) {
-      fail("(x) FAIL-CLOSED: the live holder's lockdir was RECLAIMED (vanished) — fail-open regression");
+      fail(
+        "(x) FAIL-CLOSED: the live holder's lockdir was RECLAIMED (vanished) — fail-open regression",
+      );
       ok = false;
     }
     rmSync(dirname(lkA), { recursive: true, force: true });
-    // Case B (control / discrimination): a DEAD pid + empty identity => reclaim + PASS. Find a pid that is
-    // certainly dead by spawning `true` and waiting for it to exit, then reuse its (now-free) pid number.
+    // Case B (control / discrimination): a DEAD pid + empty identity, in a GATE-OWNED lockdir (sentinel +
+    // matching repo) => reclaim + PASS. Proves the fail-closed rule is not a blanket refusal — a genuinely
+    // dead, gate-owned lock is still reclaimable.
     const lkB = freshLock();
     mkdirSync(lkB, { recursive: true });
-    const deadPid = (() => {
-      const c = spawnSync("bash", ["-c", "exit 0"]); // a finished process
-      // Its pid is not exposed by spawnSync; use a very high, almost-certainly-unused pid instead.
-      return c.pid || 999_999;
-    })();
-    let deadCandidate = 999_999;
-    while (pidAlive(deadCandidate) && deadCandidate > 100_000) deadCandidate--;
+    writeSentinel(lkB, "crafted-dead", REPO_REALPATH);
     writeFileSync(
       join(lkB, "owner.json"),
       JSON.stringify({
         token: "crafted-dead",
         pid: deadCandidate,
-        repoRealpath: "/nonexistent/repo",
+        repoRealpath: REPO_REALPATH, // matches => reclaimable by THIS repo
         targetDir: freshTmpDir("gatetest-target-"),
         createdAtMs: Date.now() - 60_000,
         processStartIdentity: "",
       }),
     );
-    note(`control: dead-pid ${deadCandidate} (alive=${pidAlive(deadCandidate)}) + empty identity => expect reclaim+PASS`);
+    note(
+      `control: dead-pid ${deadCandidate} (alive=${pidAlive(deadCandidate)}) + empty identity, gate-owned => expect reclaim+PASS`,
+    );
     const tgtB = freshTmpDir("gatetest-target-");
     const rB = runGate(["--", `echo reclaimed_x_${RUN_TAG}`], {
       VERTER_GATE_LOCK: lkB,
       VERTER_GATE_TARGET_DIR: tgtB,
     });
-    note(`dead-pid holder => rc=${rB.code} (expect PASS ${EXIT_PASS})`);
+    note(`dead-pid holder (gate-owned) => rc=${rB.code} (expect PASS ${EXIT_PASS})`);
     if (rB.code !== EXIT_PASS) {
       fail(
         `(x) CONTROL: a DEAD-holder lock with empty identity returned ${rB.code}, expected PASS (${EXIT_PASS}) ` +
-          "— the fail-closed rule must NOT blanket-refuse; a dead holder is still reclaimable",
+          "— the fail-closed rule must NOT blanket-refuse; a dead, gate-owned lock is still reclaimable",
       );
       ok = false;
     }
     rmSync(dirname(lkB), { recursive: true, force: true });
-    void deadPid;
     if (ok) {
       pass(
         "(x) FAIL-CLOSED MUTEX: alive holder + empty start-identity => REFUSED (126) and the lock survived; " +
-          "a dead holder + empty identity => reclaimed + PASSed (discriminating, not a blanket refusal)",
+          "a dead, gate-owned holder + empty identity => reclaimed + PASSed (discriminating, not a blanket refusal)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (x-safe) SAFE LOCK RECLAIM — never rm an arbitrary non-gate directory. The hard A3 invariant: a lockdir
+  //          is renamed/removed ONLY if it carries the gate-owned sentinel (proving the gate created it).
+  //          Two discriminating cases:
+  //            (a) a DEAD-holder lockdir with a valid owner.json but NO sentinel — models a mis-set
+  //                VERTER_GATE_LOCK pointing at a pre-existing dir that merely LOOKS like a lock. The gate
+  //                MUST REFUSE (126) and the dir MUST SURVIVE (never deleted), even though the holder is
+  //                dead and old. Pre-fix: the dead+old dir was renamed+rm'd (arbitrary directory deletion).
+  //            (b) a DEAD-holder lockdir with a sentinel but a FOREIGN repoRealpath — models a different
+  //                checkout sharing a lock path. The gate MUST REFUSE (126) and the dir MUST SURVIVE (it is
+  //                not ours to delete). Both place a real decoy file inside the dir and assert it remains.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(x-safe) SAFE LOCK RECLAIM (never delete a non-gate / foreign dir)\n");
+  {
+    let ok = true;
+    let deadCandidate = 999_999;
+    while (pidAlive(deadCandidate) && deadCandidate > 100_000) deadCandidate--;
+
+    // (a) Dead holder, valid owner.json, NO sentinel => REFUSE + SURVIVE (the headline A3 case).
+    const lkNoSentinel = freshLock();
+    mkdirSync(lkNoSentinel, { recursive: true });
+    const decoyA = join(lkNoSentinel, "DO_NOT_DELETE_me.txt");
+    writeFileSync(decoyA, "a precious pre-existing file a mis-set env var must never delete\n");
+    writeFileSync(
+      join(lkNoSentinel, "owner.json"),
+      JSON.stringify({
+        token: "crafted-no-sentinel",
+        pid: deadCandidate, // dead
+        repoRealpath: REPO_REALPATH, // even with a MATCHING repo, the missing sentinel must block reclaim
+        targetDir: freshTmpDir("gatetest-target-"),
+        createdAtMs: Date.now() - 60_000, // old (past the init grace)
+        processStartIdentity: "",
+      }),
+    );
+    const tgtNS = freshTmpDir("gatetest-target-");
+    const rNS = runGate(["--", `echo never_runs_${RUN_TAG}`], {
+      VERTER_GATE_LOCK: lkNoSentinel,
+      VERTER_GATE_TARGET_DIR: tgtNS,
+    });
+    note(
+      `dead holder, NO sentinel => rc=${rNS.code} (expect LOCK-REFUSED ${EXIT_LOCK_REFUSED}); dir survives?`,
+    );
+    if (rNS.code !== EXIT_LOCK_REFUSED) {
+      fail(
+        `(x-safe a) a dead holder lockdir WITHOUT the gate sentinel returned ${rNS.code}, expected ` +
+          `LOCK-REFUSED (${EXIT_LOCK_REFUSED}) — an unmarked directory must NEVER be reclaimed/deleted`,
+      );
+      ok = false;
+    }
+    if (!existsSync(lkNoSentinel) || !existsSync(decoyA)) {
+      fail(
+        `(x-safe a) the unmarked lockdir was DELETED (dir=${existsSync(lkNoSentinel)} decoy=${existsSync(decoyA)}) ` +
+          "— A3 violation: the gate rm'd an arbitrary directory it did not create",
+      );
+      ok = false;
+    }
+    rmSync(dirname(lkNoSentinel), { recursive: true, force: true });
+
+    // (b) Dead holder, sentinel present, FOREIGN repoRealpath => REFUSE + SURVIVE.
+    const lkForeign = freshLock();
+    mkdirSync(lkForeign, { recursive: true });
+    writeSentinel(lkForeign, "crafted-foreign", "/some/other/checkout/of/verter");
+    const decoyB = join(lkForeign, "owned_by_other_repo.txt");
+    writeFileSync(decoyB, "another checkout's lock — not ours to delete\n");
+    writeFileSync(
+      join(lkForeign, "owner.json"),
+      JSON.stringify({
+        token: "crafted-foreign",
+        pid: deadCandidate, // dead
+        repoRealpath: "/some/other/checkout/of/verter", // FOREIGN — not this repo
+        targetDir: freshTmpDir("gatetest-target-"),
+        createdAtMs: Date.now() - 60_000,
+        processStartIdentity: "",
+      }),
+    );
+    const tgtF = freshTmpDir("gatetest-target-");
+    const rF = runGate(["--", `echo never_runs_${RUN_TAG}`], {
+      VERTER_GATE_LOCK: lkForeign,
+      VERTER_GATE_TARGET_DIR: tgtF,
+    });
+    note(
+      `dead holder, sentinel + FOREIGN repo => rc=${rF.code} (expect LOCK-REFUSED ${EXIT_LOCK_REFUSED})`,
+    );
+    if (rF.code !== EXIT_LOCK_REFUSED) {
+      fail(
+        `(x-safe b) a dead foreign-repo lockdir returned ${rF.code}, expected LOCK-REFUSED ` +
+          `(${EXIT_LOCK_REFUSED}) — another repo's lock is not ours to reclaim/delete`,
+      );
+      ok = false;
+    }
+    if (!existsSync(lkForeign) || !existsSync(decoyB)) {
+      fail(
+        `(x-safe b) the foreign-repo lockdir was DELETED (dir=${existsSync(lkForeign)} decoy=${existsSync(decoyB)}) ` +
+          "— A3 violation: the gate rm'd another repo's lock",
+      );
+      ok = false;
+    }
+    rmSync(dirname(lkForeign), { recursive: true, force: true });
+
+    if (ok) {
+      pass(
+        "(x-safe) SAFE RECLAIM: a dead-holder dir WITHOUT the gate sentinel and a dead foreign-repo dir " +
+          "BOTH => REFUSED (126) and SURVIVED (never deleted); only a gate-owned same-repo dir is reclaimed",
       );
     }
   }
@@ -938,17 +1123,23 @@ async function main() {
     const zr = surface2(zero);
     const lr = surface2(libOnly);
     const pr = surface2(proper);
-    note(`zero-suites rc=${zr.code} (expect 127); lib-only rc=${lr.code} (expect 127); proper rc=${pr.code} out='${pr.out}' (expect 0)`);
+    note(
+      `zero-suites rc=${zr.code} (expect 127); lib-only rc=${lr.code} (expect 127); proper rc=${pr.code} out='${pr.out}' (expect 0)`,
+    );
     if (zr.code !== 127) {
       fail(`(xi) zero verter_session suites returned ${zr.code}, expected SETUP failure (127)`);
       ok = false;
     }
     if (lr.code !== 127) {
-      fail(`(xi) lib-only (no integration test kind) returned ${lr.code}, expected SETUP failure (127)`);
+      fail(
+        `(xi) lib-only (no integration test kind) returned ${lr.code}, expected SETUP failure (127)`,
+      );
       ok = false;
     }
     if (pr.code !== 0) {
-      fail(`(xi) a proper 1-lib + 2-test listing returned ${pr.code}, expected OK (0) — over-strict regression`);
+      fail(
+        `(xi) a proper 1-lib + 2-test listing returned ${pr.code}, expected OK (0) — over-strict regression`,
+      );
       ok = false;
     }
     if (ok) {
@@ -972,10 +1163,14 @@ async function main() {
   {
     const RT = "C:\\Users\\dev\\repo\\target\\gate-runner";
     const sweep = (plat, targetDir, cmd) => {
-      const r = spawnSync(process.execPath, [GATE, "--selftest-sweep-match", plat, targetDir, "--", cmd], {
-        env: { ...process.env },
-        encoding: "utf8",
-      });
+      const r = spawnSync(
+        process.execPath,
+        [GATE, "--selftest-sweep-match", plat, targetDir, "--", cmd],
+        {
+          env: { ...process.env },
+          encoding: "utf8",
+        },
+      );
       return (r.stdout || "").trim();
     };
     // The discriminating positives: standalone rustc.exe / cargo-nextest.exe (pre-fix NOMATCH) referencing
@@ -1004,27 +1199,43 @@ async function main() {
       "C:\\Users\\dev\\.cargo\\bin\\cargo.exe build --manifest-path C:\\Users\\dev\\repo\\Cargo.toml",
     );
     // An unrelated cargocult.exe referencing the runner target must NOT match (word-boundary holds).
-    const cargocult = sweep("windows", RT, "C:\\tools\\cargocult.exe --out C:\\Users\\dev\\repo\\target\\gate-runner");
-    note(`rustc.exe=${rustcExe} cargo-nextest.exe=${nextestExe} mixed-case=${mixedCase} dev-repo-only=${devRepoOnly} cargocult.exe=${cargocult}`);
+    const cargocult = sweep(
+      "windows",
+      RT,
+      "C:\\tools\\cargocult.exe --out C:\\Users\\dev\\repo\\target\\gate-runner",
+    );
+    note(
+      `rustc.exe=${rustcExe} cargo-nextest.exe=${nextestExe} mixed-case=${mixedCase} dev-repo-only=${devRepoOnly} cargocult.exe=${cargocult}`,
+    );
     let ok = true;
     if (rustcExe !== "MATCH") {
-      fail(`(xii) Windows standalone rustc.exe + runner target => '${rustcExe}', expected MATCH (.exe suffix)`);
+      fail(
+        `(xii) Windows standalone rustc.exe + runner target => '${rustcExe}', expected MATCH (.exe suffix)`,
+      );
       ok = false;
     }
     if (nextestExe !== "MATCH") {
-      fail(`(xii) Windows cargo-nextest.exe + runner target => '${nextestExe}', expected MATCH (.exe suffix)`);
+      fail(
+        `(xii) Windows cargo-nextest.exe + runner target => '${nextestExe}', expected MATCH (.exe suffix)`,
+      );
       ok = false;
     }
     if (mixedCase !== "MATCH") {
-      fail(`(xii) Windows mixed-case CARGO.EXE + runner target => '${mixedCase}', expected MATCH (case-normalized)`);
+      fail(
+        `(xii) Windows mixed-case CARGO.EXE + runner target => '${mixedCase}', expected MATCH (case-normalized)`,
+      );
       ok = false;
     }
     if (devRepoOnly !== "NOMATCH") {
-      fail(`(xii) Windows dev cargo.exe referencing ONLY the repo root => '${devRepoOnly}', expected NOMATCH (spared)`);
+      fail(
+        `(xii) Windows dev cargo.exe referencing ONLY the repo root => '${devRepoOnly}', expected NOMATCH (spared)`,
+      );
       ok = false;
     }
     if (cargocult !== "NOMATCH") {
-      fail(`(xii) Windows cargocult.exe => '${cargocult}', expected NOMATCH (word-boundary must hold)`);
+      fail(
+        `(xii) Windows cargocult.exe => '${cargocult}', expected NOMATCH (word-boundary must hold)`,
+      );
       ok = false;
     }
     if (ok) {
@@ -1074,7 +1285,9 @@ async function main() {
     }
     const trapLeft = countArgvSleeps(`${RUN_TAG}_trapsig`);
     if (trapLeft !== 0) {
-      fail(`(xiii) ${trapLeft} argv-tagged sleep survived the trapped-SIGTERM reap — the group was not torn down`);
+      fail(
+        `(xiii) ${trapLeft} argv-tagged sleep survived the trapped-SIGTERM reap — the group was not torn down`,
+      );
       spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_trapsig`], { stdio: "ignore" });
       ok = false;
     }
@@ -1091,7 +1304,9 @@ async function main() {
     }
     const left = countArgvSleeps(`${RUN_TAG}_trapsig`);
     if (!existsSync(lk) && left === 0) {
-      pass("(v/xiii) TEARDOWN: lockdir released and 0 stray tagged sleeps after trapped-SIGTERM test");
+      pass(
+        "(v/xiii) TEARDOWN: lockdir released and 0 stray tagged sleeps after trapped-SIGTERM test",
+      );
     } else {
       fail(`(v/xiii) TEARDOWN: lockdir-exists=${existsSync(lk)} stray_sleeps=${left}`);
     }
@@ -1118,20 +1333,24 @@ async function main() {
     // One tolerated FAIL line, NO Summary line. A non-zero exit cannot be proven accounted-for => FAIL.
     writeFileSync(
       tolNoSummary,
-      "    FAIL [   0.012s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
+      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n",
     );
     // The same tolerated FAIL line WITH a matching Summary (failed=1 == 1 parsed FAIL name) => accounted =>
     // PASS-WITH-TOLERATED. Proves the requirement is summary-PRESENCE + exact-count, not a blanket fail.
     writeFileSync(
       tolWithSummary,
-      "    FAIL [   0.012s] verter_protocol typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
+      "    FAIL [   0.012s] verter_protocol::main cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output\n" +
         "     Summary [  62.968s] 15543 tests run: 15542 passed, 1 failed, 547 skipped\n",
     );
     const classifyRun = (code, file) => {
-      const r = spawnSync(process.execPath, [GATE, "--selftest-classify-nextest-run", String(code), file], {
-        env: { ...process.env },
-        encoding: "utf8",
-      });
+      const r = spawnSync(
+        process.execPath,
+        [GATE, "--selftest-classify-nextest-run", String(code), file],
+        {
+          env: { ...process.env },
+          encoding: "utf8",
+        },
+      );
       return (r.stdout || "").trim();
     };
     let ok = true;
@@ -1191,10 +1410,14 @@ async function main() {
   {
     const RT = "C:\\Users\\dev\\repo\\target\\gate-runner";
     const sweep = (plat, targetDir, cmd) => {
-      const r = spawnSync(process.execPath, [GATE, "--selftest-sweep-match", plat, targetDir, "--", cmd], {
-        env: { ...process.env },
-        encoding: "utf8",
-      });
+      const r = spawnSync(
+        process.execPath,
+        [GATE, "--selftest-sweep-match", plat, targetDir, "--", cmd],
+        {
+          env: { ...process.env },
+          encoding: "utf8",
+        },
+      );
       return (r.stdout || "").trim();
     };
     // (a) Quoted cargo.exe — the ONLY build-tool token is the quoted exe (the closing `"` follows it, and
@@ -1237,11 +1460,15 @@ async function main() {
     );
     let ok = true;
     if (quotedCargo !== "MATCH") {
-      fail(`(xv) quoted "…\\cargo.exe" => '${quotedCargo}', expected MATCH (a quote is an exec-name boundary)`);
+      fail(
+        `(xv) quoted "…\\cargo.exe" => '${quotedCargo}', expected MATCH (a quote is an exec-name boundary)`,
+      );
       ok = false;
     }
     if (quotedRustc !== "MATCH") {
-      fail(`(xv) quoted "…\\rustc.exe" => '${quotedRustc}', expected MATCH (a quote is an exec-name boundary)`);
+      fail(
+        `(xv) quoted "…\\rustc.exe" => '${quotedRustc}', expected MATCH (a quote is an exec-name boundary)`,
+      );
       ok = false;
     }
     if (siblingDir !== "NOMATCH") {
@@ -1252,11 +1479,15 @@ async function main() {
       ok = false;
     }
     if (posixSibling !== "NOMATCH") {
-      fail(`(xv) POSIX sibling …/target/gate-runner2 => '${posixSibling}', expected NOMATCH (boundary is platform-shared)`);
+      fail(
+        `(xv) POSIX sibling …/target/gate-runner2 => '${posixSibling}', expected NOMATCH (boundary is platform-shared)`,
+      );
       ok = false;
     }
     if (exactDir !== "MATCH") {
-      fail(`(xv) exact runner target dir => '${exactDir}', expected MATCH (the positive must still hold)`);
+      fail(
+        `(xv) exact runner target dir => '${exactDir}', expected MATCH (the positive must still hold)`,
+      );
       ok = false;
     }
     if (ok) {
@@ -1265,6 +1496,333 @@ async function main() {
           "gate-runner2 (Windows + POSIX) does NOT; the exact runner target still does (discriminating)",
       );
     }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xvi) NO ENV GATE-BYPASS. The NORMAL gate path must NEVER be divertible to the no-op multi-step seam by
+  //       an ambient environment variable. We put a fast-FAILING `cargo` stub first on PATH and run the
+  //       normal gate (NO `--internal-selftest-seam` flag) with the legacy VERTER_GATE_SELFTEST(_STEPS)
+  //       vars set. If the env could still divert to the seam, the trivial `echo` steps would make the gate
+  //       return PASS (0) WITHOUT building anything — the exact gate-bypass. Post-fix the gate runs the REAL
+  //       archive path: it invokes the stub `cargo nextest archive`, the stub exits non-zero, and a build
+  //       failure maps to exit 1 (per the build-fail contract). So the normal path returns 1 (real-gate
+  //       build failure), NOT 0 (seam success). The discriminating control: the SAME steps WITH the explicit
+  //       `--internal-selftest-seam` flag DO run the seam and return 0 (the seam path is intact, only the
+  //       AMBIENT divert is closed).
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(xvi) NO ENV GATE-BYPASS (the normal path is not env-divertible to the seam)\n",
+  );
+  {
+    let ok = true;
+    // A fast-failing cargo stub: any invocation exits 3 immediately (models a build that the gate must
+    // treat as a real failure). Placed first on PATH so the gate's `cargo` resolves to it.
+    const stubDir = freshTmpDir("gatetest-cargostub-");
+    const stubPath = join(stubDir, "cargo");
+    writeFileSync(stubPath, "#!/usr/bin/env bash\nexit 3\n", { mode: 0o755 });
+    // Belt-and-suspenders: ensure the exec bit is set even if the mode option is ignored on this FS.
+    try {
+      spawnSync("chmod", ["+x", stubPath], { stdio: "ignore" });
+    } catch {
+      /* ignore */
+    }
+    const stubPATH = `${stubDir}:${process.env.PATH || ""}`;
+    const steps = [`bypassA|echo bypass_${RUN_TAG}_A`, `bypassB|echo bypass_${RUN_TAG}_B`].join(
+      "\n",
+    );
+
+    // NORMAL path (no seam flag) + the legacy env vars set + the failing cargo stub first on PATH.
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-target-");
+    const rNormal = runGate(["--timeout", "120s", "--stall", "60s"], {
+      PATH: stubPATH,
+      VERTER_GATE_SELFTEST: "1",
+      VERTER_GATE_SELFTEST_STEPS: steps,
+      VERTER_GATE_LOCK: lk,
+      VERTER_GATE_TARGET_DIR: tgt,
+    });
+    note(
+      `normal path + legacy env + failing cargo stub => rc=${rNormal.code} (expect REAL build-fail 1, NOT seam 0)`,
+    );
+    if (rNormal.code === EXIT_PASS) {
+      fail(
+        "(xvi) GATE-BYPASS: the normal gate path returned PASS (0) with the legacy VERTER_GATE_SELFTEST env " +
+          "set — the env DIVERTED it to the no-op seam (it did NOT build anything). This is the gate-bypass.",
+      );
+      ok = false;
+    } else if (rNormal.code !== EXIT_FAIL) {
+      // Not the bypass, but flag the unexpected code (a stub cargo build-fail must map to 1, not 124/125/127).
+      fail(
+        `(xvi) normal path returned ${rNormal.code}; expected 1 (a stub-cargo build failure mapped to a gate ` +
+          "failure). It did NOT divert to the seam (good), but the build-fail exit mapping is unexpected.",
+      );
+      ok = false;
+    } else {
+      note(
+        "normal path ran the REAL archive (invoked the stub cargo, which failed) => build-failure exit 1",
+      );
+    }
+
+    // CONTROL (discrimination): the SAME steps WITH the explicit seam flag DO run the seam => PASS (0). This
+    // proves the seam itself still works; only the ambient divert was removed.
+    const lk2 = freshLock();
+    const tgt2 = freshTmpDir("gatetest-target-");
+    const rFlag = runGate(["--internal-selftest-seam", "--timeout", "120s", "--stall", "60s"], {
+      VERTER_GATE_SELFTEST_STEPS: steps,
+      VERTER_GATE_LOCK: lk2,
+      VERTER_GATE_TARGET_DIR: tgt2,
+    });
+    note(`explicit --internal-selftest-seam + steps => rc=${rFlag.code} (expect seam PASS 0)`);
+    if (rFlag.code !== EXIT_PASS) {
+      fail(
+        `(xvi) CONTROL: the explicit --internal-selftest-seam flag returned ${rFlag.code}, expected PASS (0) ` +
+          "— the seam path must remain reachable via the explicit flag (only the ambient env divert is removed)",
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(xvi) NO ENV GATE-BYPASS: the normal gate path with the legacy VERTER_GATE_SELFTEST env ran the REAL " +
+          "build (failing-stub cargo => exit 1), NOT the no-op seam; the explicit --internal-selftest-seam flag " +
+          "still runs the seam (=> 0) (discriminating)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xvii) SIGNAL TEARDOWN REAPS THE ACTIVE CHILD TREE. A SIGINT/SIGTERM to ONLY the gate pid (NOT the whole
+  //        process group) must reap the active step's WHOLE tree (the argv-tagged sleep) BEFORE releasing
+  //        the lock. Pre-fix, the signal handler ran only the provenance sweep — which skips a plain `sleep`
+  //        (not a build tool, no runner-target reference) — so the test child SURVIVED while the lock was
+  //        released, letting a second gate start over a still-running test. We spawn the gate DETACHED (its
+  //        own group), in custom mode running a wrapper that backgrounds an argv-tagged `sleep 600` and
+  //        waits; once the lock is held and the sleep is live we `kill(gatePid, SIGTERM)` — the GATE PID
+  //        ONLY (a positive pid, never the negative group) — and assert: 0 surviving argv-tagged sleeps
+  //        (the tree was reaped) AND the lockdir was released. Discriminates: the pre-fix sweep-only path
+  //        leaves the sleep alive.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write(
+    "\n(xvii) SIGNAL teardown reaps the active child tree (SIGTERM to the gate pid only)\n",
+  );
+  {
+    let ok = true;
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-target-");
+    // A wrapper that backgrounds ONE argv-tagged sleep 600 and waits. The sleep is a non-build-tool child
+    // with NO runner-target reference, so ONLY a real tree-reap (not the provenance sweep) can kill it.
+    const childCmd = `( exec -a sleep_${RUN_TAG}_sigchild sleep 600 ) & c=$!; wait $c`;
+    const gate = spawnGate(["--timeout", "600s", "--stall", "600s", "--", childCmd], {
+      VERTER_GATE_LOCK: lk,
+      VERTER_GATE_TARGET_DIR: tgt,
+    });
+    // Wait for the lock to be held AND the argv-tagged sleep to be live.
+    const held = await waitLockHeld(lk);
+    let sawChild = false;
+    for (let w = 0; w < 60; w++) {
+      if (countArgvSleeps(`${RUN_TAG}_sigchild`) > 0) {
+        sawChild = true;
+        break;
+      }
+      await delay(100);
+    }
+    if (!held || !sawChild) {
+      fail(
+        `(xvii) setup: lock-held=${held} child-live=${sawChild} — could not stage the signal-reap test`,
+      );
+      ok = false;
+    } else {
+      note(
+        `gate pid=${gate.pid} holds the lock and the argv-tagged child is live; sending SIGTERM to the GATE PID ONLY`,
+      );
+      // SIGTERM the GATE PID ONLY — a positive pid, NOT the negative process group. If teardown relied on
+      // the OS delivering the signal to the whole group (or on the group-wide reap the watchdog does), this
+      // would not exercise the bug. We target the single pid so only the gate's OWN handler can reap the
+      // tree.
+      try {
+        process.kill(gate.pid, "SIGTERM");
+      } catch {
+        /* ignore */
+      }
+      // Give the handler time to reap (TERM→grace→KILL) + release the lock.
+      let released = false;
+      for (let w = 0; w < 80; w++) {
+        if (!existsSync(lk)) {
+          released = true;
+          break;
+        }
+        await delay(100);
+      }
+      await delay(1000);
+      const survivors = countArgvSleeps(`${RUN_TAG}_sigchild`);
+      note(
+        `after SIGTERM-to-pid: surviving argv-tagged children=${survivors} lock-released=${released}`,
+      );
+      if (survivors !== 0) {
+        fail(
+          `(xvii) ${survivors} argv-tagged child(ren) SURVIVED a SIGTERM to the gate pid — the signal teardown ` +
+            "did NOT reap the active step's tree (the provenance sweep alone skips a plain sleep). A second gate " +
+            "could start over a still-running test.",
+        );
+        spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_sigchild`], { stdio: "ignore" });
+        ok = false;
+      }
+      if (!released) {
+        fail(
+          "(xvii) the lockdir was NOT released after the signal teardown — the mutex stayed held",
+        );
+        ok = false;
+      }
+    }
+    if (ok) {
+      pass(
+        "(xvii) SIGNAL TEARDOWN: a SIGTERM to the gate pid ONLY reaped the active step's whole tree " +
+          "(0 surviving children) and released the lock — no orphan survives, lock freed only after reaping",
+      );
+    }
+    // Belt-and-suspenders cleanup.
+    spawnSync("pkill", ["-9", "-f", `sleep_${RUN_TAG}_sigchild`], { stdio: "ignore" });
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (xviii) SURFACE-2 CRASHED/ABNORMAL LIBTEST IS A HARD FAIL. A direct-libtest failure is tolerated ONLY
+  //         under NORMAL libtest failure semantics: exit 101 + a parsed `test result: FAILED` summary whose
+  //         `failed` count EXACTLY equals the parsed FAILED names + every name allowlisted. We drive the REAL
+  //         `analyzeLibtestSurface` via `--selftest-libtest <exit> <binaryId> <fixture>`. Discriminators —
+  //         each FAILs the pre-fix "non-zero exit + ≥1 tolerated FAILED line => tolerate" logic:
+  //           (a) a SIGABRT crash (exit 134) whose output names a TOLERATED test + an abort message but NO
+  //               `test result:` summary => HARD FAIL (a signal is never tolerated);
+  //           (b) a clean exit-101 with a tolerated FAILED name but a MISSING summary => HARD FAIL
+  //               (unaccounted — the run did not complete normally);
+  //           (c) exit 101 + a tolerated FAILED name + a summary whose failed count (2) EXCEEDS the parsed
+  //               FAILED names (1) => HARD FAIL (an unaccounted extra failure hides in the count);
+  //           (d) exit 101 + a tolerated FAILED name + a matching summary (failed=1) => PASS-WITH-TOLERATED
+  //               (the proper tolerated shape still tolerates — no over-strict regression);
+  //           (e) a NON-tolerated FAILED name under a clean 101 + matching summary => HARD FAIL;
+  //           (f) a clean run (exit 0, no FAILED) => PASS.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(xviii) SURFACE-2 crashed/abnormal libtest hard-fail\n");
+  {
+    const fixDir = freshTmpDir("gatetest-libtest-");
+    const TOL =
+      "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output";
+    const BIN = "verter_protocol::main";
+    const sigabrt = join(fixDir, "sigabrt.log");
+    const noSummary = join(fixDir, "no_summary.log");
+    const countMismatch = join(fixDir, "count_mismatch.log");
+    const properTol = join(fixDir, "proper_tolerated.log");
+    const realFail = join(fixDir, "real_fail.log");
+    const cleanPass = join(fixDir, "clean_pass.log");
+    // (a) A SIGABRT: a tolerated FAILED name printed, then an abort with NO `test result:` summary. The
+    //     process exit for a SIGABRT is 134 (128+6). Pre-fix: tolerated (≥1 tolerated FAILED line). Post-fix:
+    //     HARD FAIL (signal exit, never tolerated; also no summary).
+    writeFileSync(
+      sigabrt,
+      `running 3 tests\ntest ${TOL} ... FAILED\nerror: test failed, to rerun pass ` +
+        `'-p verter_protocol --test main'\n\nthread 'main' panicked / SIGABRT: process abort\n`,
+    );
+    // (b) exit 101 but NO `test result:` summary (a truncated/aborted run). Post-fix: HARD FAIL (unaccounted).
+    writeFileSync(noSummary, `running 1 test\ntest ${TOL} ... FAILED\n`);
+    // (c) exit 101 + tolerated name + summary failed=2 but only 1 parsed FAILED name => unaccounted extra.
+    writeFileSync(
+      countMismatch,
+      `running 5 tests\ntest ${TOL} ... FAILED\n\ntest result: FAILED. 3 passed; 2 failed; 0 ignored\n`,
+    );
+    // (d) the PROPER tolerated shape: exit 101 + tolerated name + matching summary (failed=1).
+    writeFileSync(
+      properTol,
+      `running 5 tests\ntest ${TOL} ... FAILED\n\ntest result: FAILED. 4 passed; 1 failed; 0 ignored\n`,
+    );
+    // (e) a NON-tolerated failing test under an otherwise-normal 101 + matching summary => HARD FAIL.
+    writeFileSync(
+      realFail,
+      `running 5 tests\ntest cases::some_module::a_real_regression ... FAILED\n\n` +
+        `test result: FAILED. 4 passed; 1 failed; 0 ignored\n`,
+    );
+    // (f) a clean run: exit 0, no FAILED, summary ok => PASS.
+    writeFileSync(cleanPass, `running 5 tests\n\ntest result: ok. 5 passed; 0 failed; 0 ignored\n`);
+
+    const libtest = (code, binaryId, file) => {
+      const r = spawnSync(
+        process.execPath,
+        [GATE, "--selftest-libtest", String(code), binaryId, file],
+        {
+          env: { ...process.env },
+          encoding: "utf8",
+        },
+      );
+      return (r.stdout || "").trim();
+    };
+    const vSig = libtest(134, BIN, sigabrt);
+    const vNoSum = libtest(101, BIN, noSummary);
+    const vMism = libtest(101, BIN, countMismatch);
+    const vProper = libtest(101, BIN, properTol);
+    const vReal = libtest(101, BIN, realFail);
+    const vClean = libtest(0, BIN, cleanPass);
+    note(
+      `sigabrt(134)=${vSig} no-summary(101)=${vNoSum} count-mismatch(101)=${vMism} ` +
+        `proper-tolerated(101)=${vProper} real-fail(101)=${vReal} clean(0)=${vClean}`,
+    );
+    let ok = true;
+    if (vSig !== "FAIL") {
+      fail(
+        `(xviii a) SIGABRT (exit 134) with a tolerated name + abort => '${vSig}', expected FAIL (a signal/crash is never tolerated)`,
+      );
+      ok = false;
+    }
+    if (vNoSum !== "FAIL") {
+      fail(
+        `(xviii b) exit 101 + tolerated name but NO 'test result:' summary => '${vNoSum}', expected FAIL (unaccounted)`,
+      );
+      ok = false;
+    }
+    if (vMism !== "FAIL") {
+      fail(
+        `(xviii c) exit 101 + summary failed=2 but 1 parsed FAILED name => '${vMism}', expected FAIL (unaccounted extra)`,
+      );
+      ok = false;
+    }
+    if (vProper !== "PASS-WITH-TOLERATED") {
+      fail(
+        `(xviii d) exit 101 + tolerated name + matching summary (failed=1) => '${vProper}', expected PASS-WITH-TOLERATED (no over-strict regression)`,
+      );
+      ok = false;
+    }
+    if (vReal !== "FAIL") {
+      fail(
+        `(xviii e) a NON-tolerated FAILED name under a clean 101 + matching summary => '${vReal}', expected FAIL`,
+      );
+      ok = false;
+    }
+    if (vClean !== "PASS") {
+      fail(`(xviii f) a clean run (exit 0, no FAILED) => '${vClean}', expected PASS`);
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(xviii) SURFACE-2 CRASH GATE: SIGABRT(134), exit-101-without-summary, and summary-count-mismatch ALL " +
+          "=> FAIL even with a tolerated name; a proper exit-101 + matching summary + allowlisted name tolerates; " +
+          "a real non-tolerated failure FAILs; a clean run PASSes (discriminating)",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // Windows process-management coverage — HONEST GAP. The (xii) and (xv) cases above are pure regex/classify
+  // UNITS of the Windows sweep MATCHER (exercised here via the matcher's `windows` flag on this POSIX host).
+  // The Windows RUNTIME process-management path — the `taskkill /PID <pid> /T /F` tree kill, the CIM
+  // CreationDate start-identity, and the lock/timeout/stall behavior under a real Windows process group — is
+  // NOT exercised by this harness on a non-Windows host (there is no portable `sleep`/argv-rename stand-in
+  // for Windows here). It is covered by static review only. This is stated explicitly so a non-Windows run
+  // does NOT report Windows runtime process-management as covered.
+  // --------------------------------------------------------------------------------------------------
+  if (!IS_WINDOWS) {
+    process.stderr.write(
+      "\n[honest-skip] Windows RUNTIME process-management selftests (taskkill /T tree kill, CIM start-\n" +
+        "identity, the Windows lock/timeout/stall path) are NOT run on this non-Windows host — there is no\n" +
+        "portable Windows sleep/argv-rename stand-in here. Only the Windows sweep-MATCHER regex units (xii,\n" +
+        "xv) are exercised (via the matcher's `windows` flag). The Windows runtime path is covered by static\n" +
+        "review; it is NOT counted as a passing process-management test on a non-Windows run.\n",
+    );
   }
 
   finish();

@@ -122,12 +122,15 @@ const IS_MAC = process.platform === "darwin";
 // these tokens still FAILS, and a name equal to an allowlisted one PLUS a suffix still FAILS.
 // ----------------------------------------------------------------------------------------------------
 const TOLERATED_TEST_NAMES = new Set([
-  // nextest renders "<suite>::<path>"; the suite is its own binary so the bare free-function name is the
-  // path. Both the qualified and bare forms are tolerated for the SAME env-only test.
-  "typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output",
-  "typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output",
-  "typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide",
-  "proto_ts_bindings_byte_pinned_repo_wide",
+  // Post-consolidation, both env-only freshness tests live in the single `verter_protocol::main`
+  // integration binary under the module path `cases::typeinfo_proto_ts_freshness::<fn>`. nextest renders
+  // a run line as "<STATUS> [   …s] (n/m) verter_protocol::main cases::typeinfo_proto_ts_freshness::<fn>"
+  // (the last whitespace token is the bare libtest path), and a direct libtest run prints
+  // "test cases::typeinfo_proto_ts_freshness::<fn> ... FAILED" — so the EXACT name on BOTH surfaces is the
+  // `cases::`-prefixed module path. (Pre-consolidation these were a standalone `typeinfo_proto_ts_freshness`
+  // binary; that bare/`typeinfo_proto_ts_freshness::`-qualified form no longer exists in the archive.)
+  "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output",
+  "cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide",
 ]);
 
 // ----------------------------------------------------------------------------------------------------
@@ -194,10 +197,14 @@ function procIdentity(pid) {
     );
     let out = (r.stdout || "").trim();
     if (!out) {
-      r = spawnSync("wmic", ["process", "where", `ProcessId=${pid}`, "get", "CreationDate", "/value"], {
-        encoding: "utf8",
-        windowsHide: true,
-      });
+      r = spawnSync(
+        "wmic",
+        ["process", "where", `ProcessId=${pid}`, "get", "CreationDate", "/value"],
+        {
+          encoding: "utf8",
+          windowsHide: true,
+        },
+      );
       out = (r.stdout || "").trim();
     }
     return out.replace(/\s+/g, " ").trim();
@@ -274,7 +281,7 @@ function listProcesses() {
       [
         "-NoProfile",
         "-Command",
-        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }",
+        'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }',
       ],
       { encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
     );
@@ -300,7 +307,10 @@ function listProcesses() {
       const parts = line.split(",");
       if (parts.length >= 3) {
         const pid = parts[parts.length - 1].trim();
-        const cmd = parts.slice(1, parts.length - 1).join(",").trim();
+        const cmd = parts
+          .slice(1, parts.length - 1)
+          .join(",")
+          .trim();
         if (/^\d+$/.test(pid)) rows.push({ pid: parseInt(pid, 10), cmd });
       }
     }
@@ -373,7 +383,14 @@ function targetDirMatches(cmd, targetDir, windows) {
     if (at < 0) return false;
     const after = hay[at + needle.length];
     // end-of-string, a path separator, a quote, or whitespace = a segment boundary => a real match.
-    if (after === undefined || after === "/" || after === "\\" || after === '"' || after === "'" || /\s/.test(after)) {
+    if (
+      after === undefined ||
+      after === "/" ||
+      after === "\\" ||
+      after === '"' ||
+      after === "'" ||
+      /\s/.test(after)
+    ) {
       return true;
     }
     // Otherwise this occurrence is mid-segment (e.g. the `2` in `gate-runner2`); keep scanning.
@@ -390,7 +407,10 @@ async function provenanceSweep(targetDir, graceMs) {
   const term = (pid) => {
     if (IS_WINDOWS) {
       // /T tears down the whole tree (a swept cargo.exe may have spawned rustc.exe children), /F forces it.
-      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
     } else {
       try {
         process.kill(pid, "SIGTERM");
@@ -401,7 +421,10 @@ async function provenanceSweep(targetDir, graceMs) {
   };
   const kill = (pid) => {
     if (IS_WINDOWS) {
-      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
     } else {
       try {
         process.kill(pid, "SIGKILL");
@@ -421,22 +444,46 @@ async function provenanceSweep(targetDir, graceMs) {
   for (const p of matches()) kill(p.pid);
 }
 
+// The gate-owned sentinel marker written INSIDE the lockdir at acquire time. A directory is reclaimable
+// (rename+recursive-remove) ONLY if it carries this marker — i.e. ONLY if the gate itself created it. An
+// arbitrary pre-existing directory that a mis-set VERTER_GATE_LOCK / MOM_GATE_LOCK happens to point at is
+// NEVER renamed or removed, because it will not carry the sentinel.
+const GATE_LOCK_SENTINEL = ".verter-gate-lock";
+
 // ----------------------------------------------------------------------------------------------------
-// Mutex: mkdir lockdir + owner.json + atomic-rename reclaim. NO bare rm of a live holder's dir.
-// owner.json = { token, pid, repoRealpath, targetDir, createdAtMs, processStartIdentity }.
+// Mutex: mkdir lockdir + a gate-owned sentinel + owner.json + atomic-rename reclaim. NEVER renames/removes
+// a directory the gate did not create (no sentinel), and NEVER reclaims a live holder's dir or a foreign
+// repo's lock. owner.json = { token, pid, repoRealpath, targetDir, createdAtMs, processStartIdentity }.
 // ----------------------------------------------------------------------------------------------------
 class Mutex {
   constructor(lockdir, token, ctx) {
     this.lockdir = lockdir;
     this.ownerFile = join(lockdir, "owner.json");
+    this.sentinelFile = join(lockdir, GATE_LOCK_SENTINEL);
     this.token = token;
     this.ctx = ctx; // { pid, repoRealpath, targetDir }
     this.held = false;
     this.refuseDetail = "";
+    this.reclaimRefused = false; // set true by _reclaim when it refuses a non-gate-owned/foreign dir
     this.INIT_GRACE_MS = 5000;
     this.RECLAIM_RACE_RETRIES = 8;
     this.RECLAIM_RACE_BACKOFF_MS = 200;
     this.KILL_GRACE_MS = 5000;
+  }
+
+  // Write the gate-owned sentinel marker FIRST (immediately after winning the mkdir, before owner.json), so
+  // that even a crash between mkdir and the owner write leaves a dir provably created by THIS gate — the
+  // mid-init reclaim path keys on the sentinel, not on owner.json presence.
+  _writeSentinel() {
+    writeFileSync(this.sentinelFile, `${this.token}\n${this.ctx.repoRealpath}\n`);
+  }
+
+  _hasSentinel() {
+    try {
+      return statSync(this.sentinelFile).isFile();
+    } catch {
+      return false;
+    }
   }
 
   _writeOwner() {
@@ -470,8 +517,50 @@ class Mutex {
     }
   }
 
-  // Reclaim a dead/stale lock via atomic rename. Returns true if we won the reclaim.
-  _reclaim() {
+  // Is this lockdir SAFE to reclaim (rename + recursive-remove)? The hard rule: NEVER delete a directory the
+  // gate did not create. Two reclaim shapes are allowed, both requiring the gate-owned sentinel:
+  //   - dead/stale holder (owner present): the sentinel proves the gate created the dir AND the owner's
+  //     repoRealpath must equal ours (a foreign repo's lock — e.g. another checkout sharing a mis-set
+  //     VERTER_GATE_LOCK — is not ours to delete).
+  //   - crashed mid-init (owner null/unreadable): the sentinel ALONE proves the gate created the dir; the
+  //     caller has already enforced the init grace.
+  // A directory WITHOUT the sentinel — an arbitrary pre-existing dir a mis-set env var points at — is NEVER
+  // reclaimable. Returns { ok, why }.
+  _reclaimable(owner) {
+    if (!this._hasSentinel()) {
+      return {
+        ok: false,
+        why:
+          `lockdir lacks the gate-owned sentinel (${GATE_LOCK_SENTINEL}) — it is not a directory this gate ` +
+          `created; refusing to rename/remove it (a mis-set VERTER_GATE_LOCK/MOM_GATE_LOCK must never delete ` +
+          `an arbitrary directory)`,
+      };
+    }
+    if (owner) {
+      const ownerRepo = owner.repoRealpath || "";
+      if (!ownerRepo || ownerRepo !== this.ctx.repoRealpath) {
+        return {
+          ok: false,
+          why:
+            `lockdir owner.json repoRealpath=${ownerRepo || "<missing>"} does not match this repo ` +
+            `(${this.ctx.repoRealpath}) — refusing to reclaim another repo's lock`,
+        };
+      }
+    }
+    return { ok: true, why: "" };
+  }
+
+  // Reclaim a dead/stale lock via atomic rename — ONLY after _reclaimable() confirms the dir is gate-owned
+  // (and, for a dead holder, owned by THIS repo). Returns true if we won the reclaim, false if we lost the
+  // rename race. NEVER renames/removes a non-reclaimable dir: on a non-reclaimable verdict it sets
+  // refuseDetail and returns false WITHOUT touching the filesystem (the caller maps that to LOCK-REFUSED).
+  _reclaim(owner) {
+    const verdict = this._reclaimable(owner);
+    if (!verdict.ok) {
+      this.refuseDetail = verdict.why;
+      this.reclaimRefused = true;
+      return false;
+    }
     const stale = `${this.lockdir}.stale.${this.token}`;
     try {
       renameSync(this.lockdir, stale);
@@ -492,6 +581,9 @@ class Mutex {
       // Try to win the slot. mkdir with recursive:false is atomic (EEXIST on contention).
       try {
         mkdirSync(this.lockdir, { recursive: false });
+        // Stamp the gate-owned sentinel BEFORE owner.json so a crash mid-acquire still leaves the dir
+        // provably gate-created (the mid-init reclaim path keys on this marker, never on a bare rm).
+        this._writeSentinel();
         this._writeOwner();
         this.held = true;
         return true;
@@ -515,8 +607,11 @@ class Mutex {
           this.refuseDetail = `initializing, no owner.json, age=${Math.round(ageMs / 1000)}s < ${Math.round(this.INIT_GRACE_MS / 1000)}s grace`;
           return false;
         }
-        // Past grace, still no owner.json => crashed mid-init. Reclaim.
-        if (this._reclaim()) continue;
+        // Past grace, still no owner.json => crashed mid-init OR a non-gate dir a mis-set env var points at.
+        // _reclaim only renames/removes when the gate-owned sentinel is present; otherwise it refuses
+        // (reclaimRefused) and we map that to LOCK-REFUSED — never deleting an arbitrary directory.
+        if (this._reclaim(null)) continue;
+        if (this.reclaimRefused) return false; // non-gate-owned dir => refuse, do NOT delete
         reclaimRaces++;
         if (reclaimRaces >= this.RECLAIM_RACE_RETRIES) {
           this.refuseDetail = `could not reclaim a crashed mid-init lock after ${reclaimRaces} attempts`;
@@ -552,11 +647,16 @@ class Mutex {
           return false;
         }
         // Both identities present and DIFFERENT => proven PID reuse; treat as stale and reclaim.
-        warn(`lock pid=${holderPid} reused by an unrelated process (identity mismatch) => reclaiming`);
+        warn(
+          `lock pid=${holderPid} reused by an unrelated process (identity mismatch) => reclaiming`,
+        );
       } else {
         warn(`lock holder pid=${holderPid} is dead/stale => reclaiming`);
       }
-      if (this._reclaim()) continue;
+      // Reclaim only when the dir is gate-owned (sentinel present) AND owned by THIS repo. A foreign-repo or
+      // sentinel-less dir => refuse (LOCK-REFUSED), never a bare rm.
+      if (this._reclaim(owner)) continue;
+      if (this.reclaimRefused) return false; // non-gate-owned / foreign-repo dir => refuse, do NOT delete
       reclaimRaces++;
       if (reclaimRaces >= this.RECLAIM_RACE_RETRIES) {
         this.refuseDetail = `could not acquire lock after ${reclaimRaces} reclaim-race attempts`;
@@ -637,6 +737,26 @@ function artifactSignature(dir) {
 //               step is reaped as TIMEOUT. (The same deadline is shared across every step so the budget is
 //               whole-gate, not per-step.)
 // ----------------------------------------------------------------------------------------------------
+// ----------------------------------------------------------------------------------------------------
+// Module-level ACTIVE-STEP handle. runContainedStep registers the CURRENT live child (its pid IS the PGID
+// on POSIX; the tree root on Windows) here for the duration of that step and clears it on completion. The
+// SIGINT/SIGTERM teardown reads this and reaps the SAME tree (the negative-PGID TERM→grace→KILL / Windows
+// `taskkill /T /F`) BEFORE running the provenance sweep and releasing the mutex — so an external signal to
+// ONLY the gate pid (not the whole group) cannot leave a running cargo/nextest/libtest tree orphaned while
+// the lock is released and a second gate starts. Without this, the signal handler ran only the provenance
+// sweep, which skips direct libtest binaries and any non-build-tool child, leaving the active test tree
+// alive past lock release.
+let ACTIVE_STEP = null; // { pid, targetDir, killGraceMs } | null
+async function reapActiveStep() {
+  const active = ACTIVE_STEP;
+  if (!active || !active.pid) return;
+  try {
+    await reapTree(active.pid, active.killGraceMs);
+  } catch {
+    /* best-effort reap */
+  }
+}
+
 async function runContainedStep(opts) {
   const {
     cmd,
@@ -659,6 +779,9 @@ async function runContainedStep(opts) {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  // Publish the live child as the active step so the signal teardown can reap its WHOLE tree (not just the
+  // sweep's build-tool subset) before releasing the lock. Cleared in the close handler below.
+  ACTIVE_STEP = { pid: child.pid, targetDir, killGraceMs };
 
   let stdoutBuf = "";
   let stderrBuf = "";
@@ -750,8 +873,17 @@ async function runContainedStep(opts) {
     }
   }, 1000);
 
+  // `spawnError` distinguishes "the OS could not launch the command at all" (ENOENT / EACCES — a
+  // setup/usage condition, exit 127) from "the command RAN and exited non-zero" (a real build/test
+  // failure). A bare non-zero close code MUST NOT be conflated with a launch failure: a cargo build that
+  // compiled and FAILED can exit with any code (including 127 of its own), and that is a GATE FAILURE
+  // (exit 1), not a setup error. The caller keys its 127-vs-1 mapping on this flag, never on the code.
+  let spawnError = false;
   const code = await new Promise((resolve) => {
-    child.on("error", () => resolve(127));
+    child.on("error", () => {
+      spawnError = true;
+      resolve(127);
+    });
     child.on("close", (c, signal) => {
       if (c === null && signal) resolve(128);
       else resolve(c === null ? 1 : c);
@@ -785,8 +917,13 @@ async function runContainedStep(opts) {
     reason = "";
   }
 
+  // The step is fully settled (the child closed and any watchdog reap completed), so retire the active-step
+  // handle: the teardown must not reap a torn-down tree, nor a later/unrelated child's pid. Only clear OUR
+  // own registration in case a concurrent step (there is none today, steps are sequential) replaced it.
+  if (ACTIVE_STEP && ACTIVE_STEP.pid === child.pid) ACTIVE_STEP = null;
+
   const durationMs = nowMs() - startMs;
-  return { code, reason, durationMs, stdout: stdoutBuf, stderr: stderrBuf };
+  return { code, reason, durationMs, stdout: stdoutBuf, stderr: stderrBuf, spawnError };
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -939,6 +1076,98 @@ function extractLibtestFailedNames(text) {
   return names;
 }
 
+// Parse libtest's trailing "test result: FAILED. N passed; M failed; …" (or "ok. …") line. Returns
+// `{ found, ok, passed, failed }`. `found` is whether a `test result:` line was present at all — a missing
+// summary means the binary did NOT complete its run normally (a panic in the harness, an abort/signal, a
+// truncated capture), which the tolerance gate treats as UNACCOUNTED (a hard failure). libtest prints
+// EXACTLY one such line per binary at the end of a normal run.
+function parseLibtestSummary(text) {
+  let found = false;
+  let ok = false;
+  let passed = 0;
+  let failed = 0;
+  for (const line of text.split("\n")) {
+    const m = /^test result:\s+(ok|FAILED)\.\s+(\d+)\s+passed;\s+(\d+)\s+failed/.exec(line.trim());
+    if (m) {
+      found = true;
+      ok = m[1] === "ok";
+      passed = parseInt(m[2], 10);
+      failed = parseInt(m[3], 10);
+      // Keep scanning; the LAST `test result:` line wins (a binary prints one, but be defensive).
+    }
+  }
+  return { found, ok, passed, failed };
+}
+
+// SURFACE-2 (direct libtest binary) verdict — shared by runGate and the `--selftest-libtest` hook so the
+// testable path is byte-identical to the live one. Given a binary's combined stdout+stderr `text`, its
+// process exit `code`, and the suite `binaryId` (for name qualification), returns:
+//   { verdict: "pass" | "tolerated" | "fail", failures: [{ surface, name }], toleratedNames: [name…] }
+//
+// A tolerated SURFACE-2 failure is admitted ONLY under NORMAL libtest failure semantics. Concretely, ALL of:
+//   - the process exited with code 101 — libtest's canonical "some tests failed" exit. A SIGNAL/ABORT
+//     (SIGABRT/SIGSEGV/… surface as code 128+signal here, or any non-101 code) is a CRASH, never tolerated;
+//   - a `test result: FAILED. P passed; M failed` summary line WAS parsed (a missing summary means the run
+//     did not complete normally — a harness panic, an abort, a truncated capture — which is unaccounted);
+//   - the summary `M failed` EXACTLY equals the number of parsed `test … FAILED` names (no extra failure
+//     hides in the count beyond the accounted names);
+//   - EVERY parsed FAILED name is an EXACT allowlisted name (bare or suite-qualified).
+// Any deviation — a non-101/signal exit, a missing summary, a count mismatch, or a non-allowlisted name —
+// is a HARD FAILURE. A clean run (code 0, zero FAILED names, summary `ok`/absent) is a pass.
+function analyzeLibtestSurface(text, code, binaryId) {
+  const failNames = extractLibtestFailedNames(text);
+  const summary = parseLibtestSummary(text);
+  const qualify = (nm) => `${String(binaryId || "").replace(/^verter_session::?/, "")}::${nm}`;
+  const isTolerated = (nm) => TOLERATED_TEST_NAMES.has(nm) || TOLERATED_TEST_NAMES.has(qualify(nm));
+
+  // Clean pass: exited 0 with no parsed FAILED lines. (A non-zero exit with zero FAILED names is a
+  // crash/abort and falls through to the hard-fail accounting below.)
+  if (code === 0 && failNames.length === 0) {
+    return { verdict: "pass", failures: [], toleratedNames: [] };
+  }
+
+  // From here the run is non-clean. It is tolerable ONLY under exact, summary-proven, allowlisted libtest
+  // failure semantics. Determine whether the accounting holds.
+  const normalFailureExit = code === 101; // libtest's "tests failed" exit; a signal => 128+sig, never 101
+  const summaryAccounts =
+    summary.found && summary.failed === failNames.length && failNames.length > 0;
+  const allNamesTolerated = failNames.length > 0 && failNames.every(isTolerated);
+
+  if (normalFailureExit && summaryAccounts && allNamesTolerated) {
+    return { verdict: "tolerated", failures: [], toleratedNames: failNames.slice() };
+  }
+
+  // HARD FAILURE. Surface a precise, accounted reason.
+  const failures = [];
+  for (const nm of failNames) {
+    if (!isTolerated(nm)) failures.push({ surface: `libtest:${binaryId}`, name: nm });
+  }
+  if (!normalFailureExit) {
+    // A crash/abort/signal or any non-101 exit — never tolerated, even if every parsed name is allowlisted.
+    const signalled = code >= 128;
+    failures.push({
+      surface: `libtest:${binaryId}`,
+      name: `<abnormal libtest exit ${code}${signalled ? " (signal/abort)" : ""}; not the normal 101 test-failure exit — crash not tolerated>`,
+    });
+  } else if (!summary.found) {
+    failures.push({
+      surface: `libtest:${binaryId}`,
+      name: `<exit 101 but NO 'test result:' summary parsed — run did not complete normally; failures unaccounted>`,
+    });
+  } else if (summary.failed !== failNames.length) {
+    failures.push({
+      surface: `libtest:${binaryId}`,
+      name: `<summary failed=${summary.failed} != ${failNames.length} parsed FAILED names — unaccounted failure(s)>`,
+    });
+  } else if (failNames.length === 0) {
+    failures.push({
+      surface: `libtest:${binaryId}`,
+      name: `<exit ${code} with no parseable FAILED line>`,
+    });
+  }
+  return { verdict: "fail", failures, toleratedNames: [] };
+}
+
 // ----------------------------------------------------------------------------------------------------
 // Resolve a suite binary path from a nextest archive listing. With `--extract-to <dir>`, nextest rewrites
 // `binary-path` to the extract location. We defend against either layout: if the listed path exists, use
@@ -1030,7 +1259,9 @@ function parseNextestListJson(stdout) {
 // Setup: repo root, runner target dir, lock path, env.
 // ----------------------------------------------------------------------------------------------------
 function resolveRepoRoot(scriptDir) {
-  const r = spawnSync("git", ["-C", scriptDir, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", scriptDir, "rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+  });
   const top = (r.stdout || "").trim();
   if (top) {
     try {
@@ -1230,6 +1461,33 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
     process.stdout.write(`OK lib=${sel.lib} test=${sel.test}\n`);
     process.exit(0);
   }
+  // Self-test SURFACE-2 libtest-verdict hook: `--selftest-libtest <exitCode> <binaryId> <fixture>` drives
+  // the REAL `analyzeLibtestSurface(text, code, binaryId)` the live SURFACE-2 path calls and prints
+  // PASS | PASS-WITH-TOLERATED | FAIL. Proves the crashed/abnormal-libtest tolerance gate: a SIGABRT/non-101
+  // exit, a missing `test result:` summary, or a count mismatch HARD-FAILS even with a tolerated FAILED
+  // name; a clean 101 + matching summary + allowlisted name tolerates. Pure scaffolding: no
+  // mutex/process-group/target dir/cargo.
+  if (av[0] === "--selftest-libtest") {
+    const code = parseInt(av[1], 10);
+    const binaryId = av[2];
+    const fixture = av[3];
+    if (!fixture || !existsSync(fixture) || Number.isNaN(code) || !binaryId) {
+      process.stdout.write("FAIL\n");
+      process.exit(1);
+    }
+    const text = readFileSync(fixture, "utf8");
+    const r = analyzeLibtestSurface(text, code, binaryId);
+    if (r.verdict === "fail") {
+      process.stdout.write("FAIL\n");
+      process.exit(1);
+    }
+    if (r.verdict === "tolerated") {
+      process.stdout.write("PASS-WITH-TOLERATED\n");
+      process.exit(0);
+    }
+    process.stdout.write("PASS\n");
+    process.exit(0);
+  }
   // Self-test provenance-sweep matcher hook (pure regex/classify; NO Windows host needed):
   // `--selftest-sweep-match <posix|windows> <targetDir> -- <command line…>` prints MATCH | NOMATCH for the
   // REAL sweep predicate `isBuildTool(cmd) && targetDirMatches(cmd, targetDir, windows)`. Lets the harness
@@ -1276,6 +1534,12 @@ function parseArgs(argv) {
       opts.testThreads = argv[++i];
     } else if (a === "--prepare") {
       opts.mode = "prepare";
+    } else if (a === "--internal-selftest-seam") {
+      // EXPLICIT, non-ambient self-test entry. Drives the multi-step budget/stall/timeout seam with the
+      // stand-in steps from VERTER_GATE_SELFTEST_STEPS. This flag is the ONLY way to reach the seam; the
+      // normal gate path can never be diverted here by any environment variable. The gate self-test passes
+      // this flag; production never does.
+      opts.mode = "selftest-seam";
     } else if (a === "--") {
       opts.mode = "custom";
       opts.customCmd = argv.slice(i + 1);
@@ -1346,17 +1610,37 @@ async function main() {
     targetDir: runnerTarget,
   });
 
-  // Teardown — idempotent. Release the mutex (token-checked) + a final provenance sweep.
-  let teardownDone = false;
-  const teardown = async () => {
-    if (teardownDone) return;
-    teardownDone = true;
-    try {
-      await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
-    } catch {
-      /* ignore */
-    }
-    mutex.release();
+  // Teardown — idempotent. ORDER IS LOAD-BEARING for the signal path:
+  //   1. Reap the ACTIVE step's WHOLE tree (negative-PGID TERM→grace→KILL / Windows taskkill /T /F). This
+  //      is the SAME reapTree the watchdog uses, applied to the live child runContainedStep registered. The
+  //      provenance sweep alone is NOT sufficient on the signal path — it skips direct libtest binaries and
+  //      any non-build-tool child — so an external SIGTERM to ONLY the gate pid (not the group) would
+  //      otherwise leave a running test tree orphaned.
+  //   2. Provenance sweep (the backstop for any detached build-tool descendant).
+  //   3. Release the mutex (token-checked) — only AFTER the tree is reaped, so a second gate can never
+  //      start while the old test process still runs.
+  // Memoized so EVERY caller awaits the SAME completion. The signal handlers AND the main-flow `finally`
+  // both invoke teardown; without memoization the second caller's `teardownDone` short-circuit would let it
+  // race ahead to `process.exit` while the FIRST caller's async reap/sweep/release was still in flight,
+  // cutting off the lock release (an external SIGTERM then leaves the lockdir held). The shared promise makes
+  // both paths block on the full teardown before any exit, so the mutex is ALWAYS released before exit.
+  let teardownPromise = null;
+  const teardown = () => {
+    if (teardownPromise) return teardownPromise;
+    teardownPromise = (async () => {
+      try {
+        await reapActiveStep();
+      } catch {
+        /* best-effort reap */
+      }
+      try {
+        await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
+      } catch {
+        /* ignore */
+      }
+      mutex.release();
+    })();
+    return teardownPromise;
   };
   const installSignalTraps = () => {
     process.on("SIGINT", async () => {
@@ -1393,11 +1677,42 @@ async function main() {
   let exitCode = EXIT_PASS;
   try {
     if (opts.mode === "custom") {
-      exitCode = await runCustom(opts, { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs });
+      exitCode = await runCustom(opts, {
+        cargoEnv,
+        repoRealpath,
+        runnerTarget,
+        deadlineMs,
+        stallMs,
+      });
     } else if (opts.mode === "prepare") {
-      exitCode = await runPrepare({ cargoEnv, repoRealpath, runnerTarget, gateDir, deadlineMs, stallMs });
+      exitCode = await runPrepare({
+        cargoEnv,
+        repoRealpath,
+        runnerTarget,
+        gateDir,
+        deadlineMs,
+        stallMs,
+      });
+    } else if (opts.mode === "selftest-seam") {
+      // Explicitly-requested cargo-free multi-step seam (proves the whole-gate budget/stall/timeout logic).
+      // Runs under the same mutex + containment + teardown as a real gate. NOT reachable without the
+      // `--internal-selftest-seam` flag.
+      exitCode = await runMultiStepSeam({
+        cargoEnv,
+        repoRealpath,
+        runnerTarget,
+        deadlineMs,
+        stallMs,
+      });
     } else {
-      exitCode = await runGate(opts, { cargoEnv, repoRealpath, runnerTarget, gateDir, deadlineMs, stallMs });
+      exitCode = await runGate(opts, {
+        cargoEnv,
+        repoRealpath,
+        runnerTarget,
+        gateDir,
+        deadlineMs,
+        stallMs,
+      });
     }
   } catch (e) {
     err(`gate error: ${e && e.stack ? e.stack : e}`);
@@ -1409,23 +1724,25 @@ async function main() {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// Self-test multi-step seam (INERT unless VERTER_GATE_SELFTEST=1). Drives the REAL whole-gate budget bound
-// (the shared `deadlineMs` across every step) with `name|cmd` stand-in steps so the budget semantics can be
-// proven cargo-free. This seam can NEVER replace the real cargo gate in production: it is reachable only
-// when VERTER_GATE_SELFTEST=1 is set (the harness sets it; production never does). A stray
-// VERTER_GATE_SELFTEST_STEPS with the guard unset is IGNORED — the real archive/run path runs unchanged.
+// Self-test multi-step seam — reachable ONLY via the EXPLICIT `--internal-selftest-seam` subcommand (mode
+// "selftest-seam"), NEVER from an ambient environment variable. Drives the REAL whole-gate budget bound
+// (the shared `deadlineMs` across every step) with `name|cmd` stand-in steps so the budget/stall/timeout
+// semantics can be proven cargo-free.
+//
+// SECURITY INVARIANT (do not regress): `node scripts/gate.mjs` (the NORMAL gate path) with ANY ambient env
+// — including a polluted CI/dev environment that happens to carry VERTER_GATE_SELFTEST / VGS-style vars —
+// MUST run the real gate (archive + nextest run + direct libtest). It must be STRUCTURALLY impossible for
+// any environment variable to divert the normal gate to this no-op seam. The ONLY way to reach the seam is
+// to type the explicit `--internal-selftest-seam` flag on argv, which the gate self-test does and which
+// production never does. (Previously this seam was dispatched from runGate whenever VERTER_GATE_SELFTEST=1
+// + VERTER_GATE_SELFTEST_STEPS were present — that was an env-triggered gate-bypass: a polluted env returned
+// SUCCESS without building or running anything. It is removed.) The step list still rides
+// VERTER_GATE_SELFTEST_STEPS, but that env var is read ONLY inside this explicitly-dispatched seam — it has
+// ZERO effect on the normal gate path.
 // ----------------------------------------------------------------------------------------------------
-function selftestStepsActive(opts) {
-  return (
-    process.env.VERTER_GATE_SELFTEST === "1" &&
-    !!process.env.VERTER_GATE_SELFTEST_STEPS &&
-    (!opts || opts.customCmd.length === 0)
-  );
-}
-
 async function runMultiStepSeam(ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
-  const specs = process.env.VERTER_GATE_SELFTEST_STEPS.split("\n").filter((l) => l.trim());
+  const specs = (process.env.VERTER_GATE_SELFTEST_STEPS || "").split("\n").filter((l) => l.trim());
   let overall = EXIT_PASS;
   for (const spec of specs) {
     const bar = spec.indexOf("|");
@@ -1448,7 +1765,9 @@ async function runMultiStepSeam(ctx) {
       stallMs,
       targetDir: runnerTarget,
     });
-    log(`step ${name}: exit=${res.code} reason=${res.reason || "-"} secs=${Math.round(res.durationMs / 1000)}`);
+    log(
+      `step ${name}: exit=${res.code} reason=${res.reason || "-"} secs=${Math.round(res.durationMs / 1000)}`,
+    );
     const rc = mapStepReason(res);
     if (rc !== EXIT_PASS) {
       overall = rc;
@@ -1488,7 +1807,9 @@ async function runCustom(opts, ctx) {
     stallMs,
     targetDir: runnerTarget,
   });
-  log(`custom: exit=${res.code} reason=${res.reason || "-"} secs=${Math.round(res.durationMs / 1000)}`);
+  log(
+    `custom: exit=${res.code} reason=${res.reason || "-"} secs=${Math.round(res.durationMs / 1000)}`,
+  );
   return mapStepReason(res);
 }
 
@@ -1537,8 +1858,17 @@ async function archiveAndList(ctx) {
     return { error: mapStepReason(archiveRes), where: "archive", res: archiveRes };
   }
   if (archiveRes.code !== 0) {
-    err(`cargo nextest archive failed (exit ${archiveRes.code})`);
-    return { error: EXIT_USAGE, where: "archive", res: archiveRes };
+    // Two distinct conditions hide behind a non-zero archive step:
+    //   - the OS could not LAUNCH cargo (ENOENT/EACCES) => spawnError set => a SETUP/USAGE condition (127);
+    //   - cargo RAN and the workspace failed to COMPILE => a real build failure, which per the exit
+    //     contract is a GATE FAILURE (exit 1), NOT a setup error. A compile failure must be exit 1 so a
+    //     red build is reported as a gate failure, not misclassified as a usage problem.
+    if (archiveRes.spawnError) {
+      err(`could not launch 'cargo' for the archive build (command not found / not executable)`);
+      return { error: EXIT_USAGE, where: "archive", res: archiveRes };
+    }
+    err(`cargo nextest archive build failed (exit ${archiveRes.code}) — workspace did not compile`);
+    return { error: EXIT_FAIL, where: "archive", res: archiveRes };
   }
   log(`archive built in ${Math.round(archiveRes.durationMs / 1000)}s -> ${archiveFile}`);
 
@@ -1571,7 +1901,14 @@ async function archiveAndList(ctx) {
     return { error: mapStepReason(listRes), where: "list", res: listRes };
   }
   if (listRes.code !== 0) {
-    err(`cargo nextest list failed (exit ${listRes.code})`);
+    // The list step reads an ALREADY-BUILT archive; a non-zero exit here is a setup/list failure (a corrupt
+    // or unreadable archive, a nextest usage error, or — via spawnError — cargo not launchable). Either way
+    // the gate cannot enumerate the suites, so it is a SETUP condition (127), not a build/test failure.
+    err(
+      listRes.spawnError
+        ? `could not launch 'cargo' for the archive list (command not found / not executable)`
+        : `cargo nextest list failed (exit ${listRes.code}) — cannot enumerate suites from the archive`,
+    );
     return { error: EXIT_USAGE, where: "list", res: listRes };
   }
   let listJson;
@@ -1594,7 +1931,8 @@ async function runPrepare(ctx) {
   const out = await archiveAndList(ctx);
   if (out.error) return out.error;
   const { listJson, extractDir } = out;
-  const buildMetaTargetDir = listJson["rust-build-meta"] && listJson["rust-build-meta"]["target-directory"];
+  const buildMetaTargetDir =
+    listJson["rust-build-meta"] && listJson["rust-build-meta"]["target-directory"];
   const suites = Object.values(listJson["rust-suites"] || {});
   // One-shot warm: launch each suite binary with --list (no test execution) so the OS first-launch
   // assessment for that binary is performed now via the legitimate path.
@@ -1605,8 +1943,12 @@ async function runPrepare(ctx) {
     const r = spawnSync(bin, ["--list"], { encoding: "utf8", windowsHide: true, timeout: 30000 });
     if (r.status === 0 || r.status === 101 || r.signal == null) warmed++;
   }
-  log(`prepare: archived + listed ${suites.length} suites; warmed first-launch assessment for ${warmed} binaries`);
-  log("prepare is a PRE-WARM (moves the legitimate first-launch assessment earlier); it does NOT disable Gatekeeper or remove the cost.");
+  log(
+    `prepare: archived + listed ${suites.length} suites; warmed first-launch assessment for ${warmed} binaries`,
+  );
+  log(
+    "prepare is a PRE-WARM (moves the legitimate first-launch assessment earlier); it does NOT disable Gatekeeper or remove the cost.",
+  );
   return EXIT_PASS;
 }
 
@@ -1621,21 +1963,22 @@ async function runPrepare(ctx) {
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
 
-  // Self-test seam (INERT unless VERTER_GATE_SELFTEST=1): drive the whole-gate budget with stand-in steps
-  // WITHOUT issuing the real cargo archive build. Production never sets the guard, so the real path runs.
-  if (selftestStepsActive(opts)) {
-    return runMultiStepSeam(ctx);
-  }
-
+  // NOTE: the normal gate path has NO self-test seam. The multi-step stand-in seam is reachable ONLY via
+  // the explicit `--internal-selftest-seam` subcommand (mode "selftest-seam", dispatched from main). No
+  // ambient environment variable can divert this path to a no-op — runGate ALWAYS issues the real archive
+  // build + nextest run + direct libtest execution.
   const out = await archiveAndList(ctx);
   if (out.error) {
     err(`gate setup failed at the ${out.where} step`);
     return out.error;
   }
   const { listJson, extractDir, archiveFile } = out;
-  const buildMetaTargetDir = listJson["rust-build-meta"] && listJson["rust-build-meta"]["target-directory"];
+  const buildMetaTargetDir =
+    listJson["rust-build-meta"] && listJson["rust-build-meta"]["target-directory"];
   const allSuites = Object.values(listJson["rust-suites"] || {});
-  log(`archive lists ${allSuites.length} suites; build-meta target-directory=${buildMetaTargetDir || "?"}`);
+  log(
+    `archive lists ${allSuites.length} suites; build-meta target-directory=${buildMetaTargetDir || "?"}`,
+  );
 
   // Aggregate verdict accumulators.
   const failures = []; // { surface, name }
@@ -1704,12 +2047,16 @@ async function runGate(opts, ctx) {
   for (const s of sessionSuites) {
     const remaining = deadlineMs - nowMs();
     if (remaining <= 0) {
-      warn(`whole-gate budget exhausted before verter_session suite '${s["binary-id"]}' => TIMEOUT`);
+      warn(
+        `whole-gate budget exhausted before verter_session suite '${s["binary-id"]}' => TIMEOUT`,
+      );
       return EXIT_TIMEOUT;
     }
     const bin = resolveSuiteBinary(s["binary-path"], buildMetaTargetDir, extractDir);
     if (!bin || !existsSync(bin)) {
-      err(`SURFACE 2: suite binary not found for ${s["binary-id"]} (path=${s["binary-path"]}) — setup failure`);
+      err(
+        `SURFACE 2: suite binary not found for ${s["binary-id"]} (path=${s["binary-path"]}) — setup failure`,
+      );
       hardSetupFail = true;
       continue;
     }
@@ -1719,7 +2066,12 @@ async function runGate(opts, ctx) {
     // The directly-executed binary needs the runtime Cargo env these tests read — CARGO_MANIFEST_DIR
     // (tests resolve the repo root + read corpus fixtures through it) and CARGO_TARGET_DIR (already on the
     // base cargo env). cwd IS the manifest dir. See buildSuiteEnv for the verified-complete scope.
-    const suiteEnv = buildSuiteEnv(cargoEnv, cwd, sessionPkgInfo, s["binary-name"] || "verter_session");
+    const suiteEnv = buildSuiteEnv(
+      cargoEnv,
+      cwd,
+      sessionPkgInfo,
+      s["binary-name"] || "verter_session",
+    );
     // Preserve the libtest DEFAULT threading (do NOT force --test-threads=1). Optionally pass an explicit
     // passthrough if the caller asked for it.
     const binArgs = [];
@@ -1736,41 +2088,38 @@ async function runGate(opts, ctx) {
       captureStdoutSeparately: true, // keep libtest stdout parseable; still mirror stderr
     });
     if (res.reason) {
-      err(`SURFACE 2: suite ${s["binary-id"]} ${res.reason} after ${Math.round(res.durationMs / 1000)}s`);
+      err(
+        `SURFACE 2: suite ${s["binary-id"]} ${res.reason} after ${Math.round(res.durationMs / 1000)}s`,
+      );
       return mapStepReason(res);
     }
     const libText = res.stdout + "\n" + res.stderr;
-    const libFailNames = extractLibtestFailedNames(libText);
-    if (res.code === 0 && libFailNames.length === 0) {
+    // SURFACE-2 verdict via the shared analyzer (the same code the `--selftest-libtest` hook drives). A
+    // tolerated direct-libtest failure is admitted ONLY under NORMAL libtest failure semantics — exit 101
+    // (not a signal/abort), a parsed `test result: FAILED` summary whose `failed` count EXACTLY equals the
+    // parsed FAILED names, and every name allowlisted. A crash (signal), a missing summary, or any
+    // unaccounted failure is a HARD FAILURE.
+    const a2 = analyzeLibtestSurface(libText, res.code, s["binary-id"]);
+    if (a2.verdict === "pass") {
       s2Passed++;
+    } else if (a2.verdict === "tolerated") {
+      s2Passed++;
+      s2Tolerated += a2.toleratedNames.length;
+      toleratedOccurred = true;
     } else {
-      // Qualify each failed test name with the suite binary-id so a bare libtest name maps to the same
-      // exact-name space the allowlist uses (suite::name) — but also tolerate the bare form.
-      let allTolerated = libFailNames.length > 0;
-      for (const nm of libFailNames) {
-        const qualified = `${s["binary-id"].replace(/^verter_session::?/, "")}::${nm}`;
-        if (TOLERATED_TEST_NAMES.has(nm) || TOLERATED_TEST_NAMES.has(qualified)) {
-          s2Tolerated++;
-          toleratedOccurred = true;
-        } else {
-          allTolerated = false;
-          failures.push({ surface: `libtest:${s["binary-id"]}`, name: nm });
-        }
-      }
-      if (libFailNames.length === 0 && res.code !== 0) {
-        // Non-zero exit with no parseable FAILED line (e.g. a panic/abort) — a real failure.
-        failures.push({ surface: `libtest:${s["binary-id"]}`, name: `<exit ${res.code}>` });
-        allTolerated = false;
-      }
-      if (allTolerated) s2Passed++;
-      else s2Failed++;
+      for (const f of a2.failures) failures.push(f);
+      s2Failed++;
     }
   }
-  log(`SURFACE 2 done: ${s2Passed} suites clean, ${s2Failed} suites with non-tolerated failures, ${s2Tolerated} tolerated test failures`);
+  log(
+    `SURFACE 2 done: ${s2Passed} suites clean, ${s2Failed} suites with non-tolerated failures, ${s2Tolerated} tolerated test failures`,
+  );
 
   // ---------- Aggregate verdict ----------
   if (hardSetupFail) {
-    err("VERDICT: FAIL (a verter_session suite binary was missing from the archive — setup integrity failure)");
+    err(
+      "VERDICT: FAIL (a verter_session suite binary was missing from the archive — setup integrity failure)",
+    );
     return EXIT_FAIL;
   }
   if (failures.length > 0) {
@@ -1779,7 +2128,9 @@ async function runGate(opts, ctx) {
     return EXIT_FAIL;
   }
   if (toleratedOccurred) {
-    log("VERDICT: PASS-WITH-TOLERATED (only the env-only typeinfo_proto_ts_freshness pair failed, by exact name)");
+    log(
+      "VERDICT: PASS-WITH-TOLERATED (only the env-only typeinfo_proto_ts_freshness pair failed, by exact name)",
+    );
     return EXIT_PASS;
   }
   log("VERDICT: PASS (both surfaces green)");
