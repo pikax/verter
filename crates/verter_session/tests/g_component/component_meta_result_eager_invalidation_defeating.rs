@@ -28,7 +28,6 @@
 
 use std::sync::atomic::Ordering::Relaxed;
 
-use serial_test::serial;
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{CompileErrorPolicy, HostConfig, UpsertRequest};
 
@@ -40,13 +39,14 @@ fn metahost() -> ComponentMetaHost {
     })
 }
 
-// The host is process-local (constructed inside the test) but the
-// `MemoryWorkspace` overlay storage may be shared across concurrent
-// tests through internal counters / file-id allocators, so serialise
-// against the same per-host `component_meta_result_cache_misses`
-// provenance resource the F1 cross-file dep-signature test contends.
+// The asserted `component_meta_result_cache_misses` /
+// `component_meta_result_cache_hits` counters are read off THIS test's
+// own `VerterHost`: `ComponentMetaHost::new_standalone` builds a fresh
+// host with a fresh `Arc<MetaProvenance>` and an instance-local
+// `MemoryWorkspace` (its own `next_sink_id` allocator). The deltas this
+// test asserts are entirely host-local, so the test runs in parallel
+// with no shared-process serialization.
 #[test]
-#[serial(component_meta_provenance)]
 fn fact_validation_alone_invalidates_warm_hit_without_eviction() {
     let mh = metahost();
 

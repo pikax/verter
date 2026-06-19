@@ -82,15 +82,15 @@ pub struct HostAuditRuntime {
     #[cfg(not(target_arch = "wasm32"))]
     sampler_thread: parking_lot::Mutex<Option<JoinHandle<()>>>,
     /// Host-owned join observable. Set to `true` by THIS runtime's
-    /// `Drop` impl after — and only after — `JoinHandle::join()` on the
-    /// owned sampler returns. Held behind an `Arc` so a test can clone
+    /// `Drop` impl after — and only after — a CLEAN `JoinHandle::join()`
+    /// on the owned sampler. Held behind an `Arc` so a test can clone
     /// the observable (via [`Self::sampler_join_observer`]) BEFORE
     /// dropping the host and read it AFTER the host (and thus the
-    /// runtime) is gone. This is the per-host successor to the retired
-    /// process-global spawn/join counters: it discriminates a
-    /// non-joining `Drop` (observable stays `false`) from a clean join
-    /// (observable flips `true`) for THIS host alone — immune to
-    /// concurrent samplers spawned/joined by sibling tests.
+    /// runtime) is gone. Scoped to a single host: it discriminates a
+    /// non-joining `Drop` (observable stays `false`) and a panicked
+    /// sampler join (also `false`) from a clean join (observable flips
+    /// `true`) for THIS host alone — immune to concurrent samplers
+    /// spawned/joined by sibling tests.
     #[cfg(not(target_arch = "wasm32"))]
     sampler_join_observed: Arc<AtomicBool>,
 }
@@ -130,7 +130,7 @@ impl HostAuditRuntime {
     /// Test-only — `true` once THIS runtime has spawned its peak-RSS
     /// sampler thread (the `sampler_started` latch has fired). Used by
     /// the host-drop test to assert the sampler spawned for an
-    /// audit-enabled host without consulting any process-global state.
+    /// audit-enabled host, reading only this runtime's per-host latch.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn sampler_spawned(&self) -> bool {
@@ -310,8 +310,8 @@ impl HostAuditRuntime {
             .name("verter-audit-rss-sampler".to_string())
             .spawn(move || sampler_loop(weak))
             .expect("spawning the verter-audit-rss-sampler thread must succeed");
-        // The `sampler_started` latch above is THIS host's spawn signal
-        // (read via `sampler_spawned()`); no process-global counter.
+        // The `sampler_started` latch above is THIS host's spawn signal,
+        // read back per-host via `sampler_spawned()`.
         let mut slot = self.sampler_thread.lock();
         debug_assert!(
             slot.is_none(),
@@ -332,18 +332,24 @@ impl Drop for HostAuditRuntime {
         // termination.
         let handle = self.sampler_thread.lock().take();
         if let Some(handle) = handle {
-            // join() returns Err only if the thread panicked. We
-            // swallow that error here — there is no way to
-            // surface it from Drop, and a panicked sampler does
-            // not threaten the host.
-            let _ = handle.join();
-            // Flip the host-owned observable AFTER the join returns, so
-            // a test holding a clone (taken before the host dropped)
-            // can confirm THIS host joined its sampler. `Release`
-            // pairs with the test's `Acquire` load. A non-joining Drop
-            // would never reach this store — the observable stays
-            // `false` and the test fails (discrimination preserved).
-            self.sampler_join_observed.store(true, Ordering::Release);
+            // join() returns Err only if the thread panicked. A
+            // panicked sampler does not threaten the host, and there is
+            // no way to surface the error from Drop, so we do not
+            // propagate it. We DO discriminate on it: the join outcome
+            // gates the observable below.
+            let joined_cleanly = handle.join().is_ok();
+            // Flip the host-owned observable AFTER — and only after — a
+            // CLEAN join, so a test holding a clone (taken before the
+            // host dropped) can confirm THIS host joined its sampler
+            // without a thread panic. `Release` pairs with the test's
+            // `Acquire` load. A non-joining Drop never reaches this
+            // store, and a panicked sampler (`Err`) leaves it `false`
+            // too — the observable asserts a clean shutdown, not merely
+            // that join returned (discrimination preserved on both
+            // legs).
+            if joined_cleanly {
+                self.sampler_join_observed.store(true, Ordering::Release);
+            }
         }
     }
 }

@@ -30,7 +30,6 @@
 
 use std::sync::atomic::Ordering::Relaxed;
 
-use serial_test::serial;
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{CompileErrorPolicy, HostConfig, UpsertRequest};
 
@@ -42,11 +41,13 @@ fn metahost() -> ComponentMetaHost {
     })
 }
 
-// Serialise so the per-host provenance counter deltas are stable.
-// Shares the `component_meta_provenance` resource with
-// `component_meta_result_eager_invalidation_defeating`.
+// The asserted provenance counter deltas
+// (`component_meta_result_cache_misses` / `_cache_hits`) are read off
+// THIS test's own `VerterHost`: `ComponentMetaHost::new_standalone`
+// builds a fresh host with a fresh `Arc<MetaProvenance>` and an
+// instance-local `MemoryWorkspace`. The deltas are host-local, so the
+// test runs in parallel with no shared-process serialization.
 #[test]
-#[serial(component_meta_provenance)]
 fn admit_threads_cross_file_dep_signature_for_imported_helper() {
     let mh = metahost();
 
