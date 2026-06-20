@@ -1,29 +1,37 @@
-//! The CORE resolved-through-dispatch equivalence contract: a declaration
-//! body resolved END-TO-END through the one shared dispatch into a
-//! component-meta surface produces the same public/member surface,
-//! provenance flags, merge roles, alias terminals and dependency sets the
-//! eager path produces TODAY. These pin the observable component-meta
-//! output a future declaration-body PRODUCER flip (to handle-native carrier
-//! bodies) must reproduce, compared against the retained whole-env oracle.
+//! A characterization safety net for the component-meta publication surface.
+//! Each test resolves a real `.vue`/`.ts` fixture through `get_component_meta`
+//! (the public component-meta entry, the single async native request) and pins
+//! a TARGETED set of observable fields a future declaration-body PRODUCER flip
+//! (to handle-native carrier bodies) must REPRODUCE. The reference is the
+//! CURRENT tree: these tests are GREEN against the path that runs today, and
+//! the carrier-native path must produce byte-identical output for the asserted
+//! fields. There is NO second oracle path computed in-test and no in-test diff
+//! — "the current tree's observable output" IS the reference each assertion
+//! pins; no assertion proves WHICH engine produced that output.
 //!
-//! Each test resolves a real `.vue`/`.ts` fixture through
-//! `get_component_meta` (the public component-meta entry, the single async
-//! native request) and asserts the FULL observable prop/member surface —
-//! not a single field. They are GREEN against the eager path that runs
-//! today and characterize the contract; the carrier-native path must agree.
+//! The fields pinned (the asserted subset, NOT the full surface): the
+//! prop/member NAME set; each asserted prop's `type_expr` carrier or resolved
+//! terminal; `required`; the author-provenance flag (`declared_in_macro_type_arg`)
+//! where asserted; and the cross-file dependency signature (the published
+//! read-set's canonical ids). Fields these tests do NOT assert and therefore do
+//! NOT characterize: `raw_type`/`type_expansion`, defaults, descriptions, tags,
+//! spans, events, slots, models, exposed, and fallthrough.
 //!
-//! Coverage: an alias chain (published shallow), a same-file interface
-//! merge surface, cross-file imported-alias members (interface / primitive /
-//! function-type aliases, each published as a shallow Ref — this fixture pins
-//! Shallow-By-Default publication + import-route / read-set membership, NOT
-//! member-type resolution), a PATH-PROJECTED imported member that DOES force
-//! cross-file member-TYPE resolution (`Foo['bar']` publishes the resolved
-//! terminal `number` — impossible without resolving the imported body), a
-//! `defineProps<T>` generic-default deep-expansion fixture, and the
-//! cross-file readset/fact contract — a cold resolution roots its read-set on
-//! the cross-file carrier, and a content edit to that carrier misses the warm
-//! component-meta read (re-resolving the changed surface rather than serving a
-//! stale warm hit).
+//! Coverage: an alias chain (published shallow), a same-file interface merge
+//! surface whose published members UNION both contributors, cross-file
+//! imported-alias members (interface / primitive / function-type aliases, each
+//! published as a shallow Ref — this fixture pins Shallow-By-Default publication
+//! + import-route / read-set membership, NOT member-type resolution), a
+//! PATH-PROJECTED imported member that DOES force cross-file member-TYPE
+//! resolution (`Foo['bar']` publishes the resolved terminal `number` —
+//! impossible without resolving the imported body), a `defineProps<T>`
+//! generic-default deep-expansion fixture, and the cross-file readset/fact
+//! contract — a cold resolution roots its read-set on the cross-file carrier,
+//! a content edit to that carrier misses the warm component-meta read
+//! (re-resolving the changed surface rather than serving a stale warm hit),
+//! and an UNRELATED warmed component (no dependency on the edited carrier)
+//! STAYS a warm hit across that edit (carrier-precise invalidation, not a
+//! global clear).
 
 use std::sync::Arc;
 
@@ -229,8 +237,9 @@ defineProps<MergedProps>()
 /// the inlined function body), and `item` as `Ref { name: "Foo" }` (NOT Foo's
 /// inlined `Object` body). This is the Component-Meta Shallow-By-Default
 /// contract: imported alias names are NOT eagerly inlined at the publication
-/// surface; the consumer re-resolves `Foo` / `Label` / `Submit` through the
-/// registry on demand. The full surface is pinned: the exact member set and
+/// surface. The published bare `Ref` is the shallow carrier a consumer WOULD
+/// later resolve through the registry on demand — this test does NOT exercise
+/// that consumer step. The asserted surface is the member NAME set and the
 /// required-ness derived from optionality.
 ///
 /// The imported-alias member rides the publication boundary directly (the
@@ -294,7 +303,7 @@ defineProps<MergedProps>()
 /// eager inline to the `string` primitive or the function body fails their
 /// shallow-`Ref` arms.
 #[test]
-fn cross_file_imported_props_resolve_their_member_surface() {
+fn cross_file_imported_props_publish_shallow_refs_and_record_route_deps() {
     let project = make_project();
     project
         .upsert_base("/foo.ts", r#"export interface Foo { bar: number }"#)
@@ -474,7 +483,8 @@ defineProps<{
 /// `Primitive(String)` (the resolved `Foo.baz`). Producing these values is
 /// IMPOSSIBLE without resolving the imported `Foo`'s BODY cross-file — a
 /// bare-`Ref` echo (the Shallow-By-Default carrier the sibling
-/// `cross_file_imported_props_resolve_their_member_surface` pins for a plain
+/// `cross_file_imported_props_publish_shallow_refs_and_record_route_deps` pins
+/// for a plain
 /// imported alias) CANNOT yield `number` / `string` here. Path-projection is
 /// path-precise per Component-Meta Shallow-By-Default: `Foo['bar']`
 /// materialises ONLY the `bar` hop's resolved type, which is exactly the
@@ -643,8 +653,17 @@ defineProps<Props>()
             "the omitted generic default must instantiate to Item's Object body, got {element:?}"
         );
     };
-    // The instantiated `Item` element must expose EXACTLY `{ id }` — a
-    // regression adding/removing members fails the exact-set assertion.
+    // The instantiated `Item` element must expose EXACTLY `{ id }`. The total
+    // member count pins exhaustiveness across ALL `ObjectMember` variants — a
+    // regression adding a stray non-Property member (index/call signature,
+    // method) would be invisible to the Property-only name filter below, so the
+    // length assert is what makes "EXACTLY" earned.
+    assert_eq!(
+        shape.properties.len(),
+        1,
+        "the instantiated `Item` element must carry EXACTLY one member, got {:?}",
+        shape.properties
+    );
     let member_names: Vec<&str> = shape
         .properties
         .iter()
@@ -656,7 +675,7 @@ defineProps<Props>()
     assert_eq!(
         member_names,
         vec!["id"],
-        "the instantiated `Item` element must expose EXACTLY `id`, got {:?}",
+        "the instantiated `Item` element's single member must be the `id` property, got {:?}",
         shape.properties
     );
     // `id`'s type (`string` per the fixture) and optionality (required) are
@@ -698,6 +717,8 @@ defineProps<Props>()
 /// warm hit. This pins the fact/read-set contract the producer flip must
 /// preserve: the dispatch fan-in folds the cross-file carrier's fact into the
 /// published entry, so the warm-cache validation re-roots on the contributor.
+/// The edit is also CARRIER-PRECISE: an UNRELATED warmed component that does
+/// NOT depend on the edited carrier stays a warm hit across the edit.
 ///
 /// Discriminating: (1) an entry published WITHOUT the carrier in its read-set
 /// (a fan-in that failed to fold the carrier's dispatch facts) yields a
@@ -705,8 +726,18 @@ defineProps<Props>()
 /// cache that ignored the recorded carrier fact (no warm invalidation on a
 /// carrier edit) would serve the original `[a, b]` props after the edit and
 /// would NOT advance the miss counter — both the prop-set assert and the
-/// miss-counter assert fail. The producer flip silently breaking either the
-/// fact fan-in or the read-set rooting reddens here.
+/// miss-counter assert fail; the post-edit member-type/required check on
+/// `renamed`/`c` additionally catches a recompute that returned the wrong
+/// member types. (3) PRECISION axis: a GLOBAL "evict every component-meta
+/// entry on any file edit" implementation would ALSO satisfy (1) and (2) —
+/// editing `/types.ts` would invalidate the owner AND everything else. The
+/// unrelated `/UnrelatedLocal.vue` (a purely LOCAL inline-typed `defineProps`
+/// with NO dependency on `/types.ts`) is warmed before the edit and asserted
+/// to STAY a warm hit AFTER the `/types.ts` edit (its hit counter advances and
+/// the miss counter does NOT advance for its re-resolution). That isolated
+/// warm hit discriminates carrier-precise invalidation from a global clear:
+/// only the carrier-dependent owner may miss, the unrelated component must
+/// not be evicted.
 #[test]
 fn cross_file_contributor_edit_misses_warm_and_roots_readset_on_carrier() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -724,6 +755,19 @@ fn cross_file_contributor_edit_misses_warm_and_roots_readset_on_carrier() {
             r#"<script setup lang="ts">
 import type { Props } from './types'
 defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    // An UNRELATED component that does NOT import `/types.ts`: its `defineProps`
+    // is typed by a purely LOCAL inline object literal, so its published
+    // read-set roots only on its OWN file and NEVER on `/types.ts`. It is the
+    // precision control — editing `/types.ts` must NOT evict it.
+    project
+        .upsert_base(
+            "/UnrelatedLocal.vue",
+            r#"<script setup lang="ts">
+defineProps<{ z: string }>()
 </script>
 <template><div /></template>"#,
         )
@@ -752,6 +796,27 @@ defineProps<Props>()
         dep_canonicals.iter().any(|c| c.as_ref() == "/types.ts"),
         "the published component-meta read-set MUST root on the cross-file carrier \
          `/types.ts`; observed {dep_canonicals:?}"
+    );
+
+    // Warm the UNRELATED control cold so it has a published entry to validate
+    // against after the `/types.ts` edit. Its read-set roots only on its own
+    // file (it never imports `/types.ts`), so the carrier edit must leave it
+    // warm.
+    let unrelated_cold = get_meta(&project, "/UnrelatedLocal.vue");
+    assert_eq!(
+        prop_names(&unrelated_cold),
+        vec!["z"],
+        "the unrelated control publishes exactly its local `z` prop"
+    );
+    let unrelated_deps =
+        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
+            project.host(),
+            "/UnrelatedLocal.vue",
+        );
+    assert!(
+        !unrelated_deps.iter().any(|c| c.as_ref() == "/types.ts"),
+        "the unrelated control must NOT depend on the edited carrier `/types.ts` \
+         (it is the precision control); observed {unrelated_deps:?}"
     );
 
     // An unedited re-resolution serves the same surface (warm hit) and counts
@@ -796,5 +861,59 @@ defineProps<Props>()
         "the cross-file contributor edit must MISS the warm component-meta cache \
          (the read-set rooted on `/types.ts` no longer validates), advancing the \
          miss counter"
+    );
+    // The recompute must carry the CHANGED member types, not just the changed
+    // names — a wrong-type recompute (e.g. echoing the old `a: string`/`b: number`
+    // surface under the new names) is caught here.
+    assert!(
+        matches!(
+            &prop(&after, "renamed").type_expr,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "the recomputed `renamed` member must carry its `string` type, got {:?}",
+        prop(&after, "renamed").type_expr
+    );
+    assert!(
+        prop(&after, "renamed").required,
+        "the recomputed non-optional `renamed` must publish as required"
+    );
+    assert!(
+        matches!(
+            &prop(&after, "c").type_expr,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+        ),
+        "the recomputed `c` member must carry its `boolean` type, got {:?}",
+        prop(&after, "c").type_expr
+    );
+
+    // (c) PRECISION: the `/types.ts` edit must NOT evict the UNRELATED control
+    // that never depended on it. Re-resolving `/UnrelatedLocal.vue` AFTER the
+    // edit must serve a WARM hit — its own hit counter advances and the miss
+    // counter does NOT advance for this re-resolution. A GLOBAL "clear every
+    // component-meta entry on any file edit" implementation (which would also
+    // pass the owner-miss asserts above) instead recomputes the unrelated
+    // component, advancing the miss counter and failing this assert. Counters
+    // are host-global, so snapshot BOTH immediately before this single
+    // re-resolution to isolate its delta.
+    let unrelated_hits_before = prov.component_meta_result_cache_hits.load(Relaxed);
+    let unrelated_misses_before = prov.component_meta_result_cache_misses.load(Relaxed);
+    let unrelated_after = get_meta(&project, "/UnrelatedLocal.vue");
+    assert_eq!(
+        prop_names(&unrelated_after),
+        vec!["z"],
+        "the unrelated control still publishes its local `z` prop after the edit"
+    );
+    assert!(
+        prov.component_meta_result_cache_hits.load(Relaxed) > unrelated_hits_before,
+        "the `/types.ts` edit must be CARRIER-PRECISE: the unrelated component \
+         that never depends on `/types.ts` must STAY a warm hit (its hit counter \
+         must advance), not be globally evicted"
+    );
+    assert_eq!(
+        prov.component_meta_result_cache_misses.load(Relaxed),
+        unrelated_misses_before,
+        "the unrelated component's post-edit re-resolution must NOT advance the \
+         miss counter — a miss here means the `/types.ts` edit globally cleared \
+         entries instead of invalidating only the carrier-dependent owner"
     );
 }
