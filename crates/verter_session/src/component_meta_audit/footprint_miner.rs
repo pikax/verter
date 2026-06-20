@@ -90,7 +90,7 @@ pub fn mine_footprint(
         .into_iter()
         .map(|id| {
             let data = graph.node_data(id);
-            let record = build_node_record(data.as_deref());
+            let record = build_node_record(graph, data.as_deref());
             (id, record)
         })
         .collect();
@@ -419,12 +419,14 @@ pub fn mine_footprint(
 // NodeRecord construction
 // ──────────────────────────────────────────────────────────────────────
 
-fn build_node_record(data: Option<&SemanticNodeData>) -> NodeRecord {
+fn build_node_record(graph: &SemanticGraphStore, data: Option<&SemanticNodeData>) -> NodeRecord {
     let kind = data.map(map_node_kind).unwrap_or(SemanticNodeKind::Opaque);
     let display_label = data
         .map(display_label_for)
         .unwrap_or_else(|| Arc::from("<unknown>"));
-    let structural_hash = data.map(structural_hash_of).unwrap_or([0u8; 16]);
+    let structural_hash = data
+        .map(|d| structural_hash_of(graph, d))
+        .unwrap_or([0u8; 16]);
     let named_identity = data.and_then(named_identity_of);
     NodeRecord {
         kind,
@@ -560,18 +562,125 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
     }
 }
 
-fn structural_hash_of(data: &SemanticNodeData) -> Hash16 {
-    // Xxh3-128 of the Debug rendering. Debug is content-deterministic
-    // for these payloads — same content prints the same bytes — so two
-    // arenas that intern equivalent content produce equal hashes.
-    // Intern-order ids appear inside the Debug rendering only as
-    // arena-stable references; for the determinism contract we care
-    // about (same-host repeat requests, test
-    // `mine_footprint_identical_requests_produce_byte_identical_footprints`)
-    // these are themselves stable.
-    let dbg = format!("{data:?}");
-    xxh3_128(dbg.as_bytes()).to_le_bytes()
+/// Recursion ceiling for the carrier-arg structural walk. Carrier `type_args`
+/// children are themselves interned nodes that may in turn be carriers; a
+/// malformed or self-referential graph could otherwise recurse without bound.
+/// At the ceiling the walk stops recursing into a child's structure and folds
+/// only the child's node identity, so the fingerprint stays finite and
+/// deterministic.
+const CARRIER_HASH_MAX_DEPTH: u32 = 32;
+
+/// Variant-aware structural fingerprint of a semantic node.
+///
+/// The three structural carriers (`TypeOf` / `BareRef` / `ImportType`) carry
+/// their `type_args` on a PRIVATE payload field whose `Debug` shape is an
+/// internal representation detail. Hashing the carrier's `Debug` rendering would
+/// make the fingerprint representation-sensitive — it would change if the
+/// carrier's private layout changed, even though the type it denotes did not.
+/// So a carrier is fingerprinted from its public HEAD (the
+/// `typeof_head` / `bare_ref_head` / `import_type_head` views, which expose no
+/// args) PLUS the ORDERED structural fingerprints of its arg CHILD nodes,
+/// resolved through the sole descent accessor
+/// [`SemanticNodeData::carrier_type_args`] and recursed via `graph`. Distinct
+/// args therefore yield distinct fingerprints (`Foo<A>` ≠ `Foo<B>`); identical
+/// args yield identical fingerprints.
+///
+/// Non-carrier variants reference their children by [`SemanticNodeId`] (an
+/// arena-stable integer), never by an embedded carrier value, so their `Debug`
+/// rendering never transitively prints a carrier's private args; it is
+/// content-deterministic (same content prints the same bytes) and is retained as
+/// a stable structural signal. Every arm is prefixed with a variant discriminant
+/// so a carrier and a non-carrier — or two different non-carrier variants — can
+/// never collide on equal payload bytes.
+fn structural_hash_of(graph: &SemanticGraphStore, data: &SemanticNodeData) -> Hash16 {
+    structural_hash_with_depth(graph, data, 0)
 }
+
+fn structural_hash_with_depth(
+    graph: &SemanticGraphStore,
+    data: &SemanticNodeData,
+    depth: u32,
+) -> Hash16 {
+    // Discriminant prefix: a one-byte family tag keeps carriers and
+    // non-carriers (and the three carriers from each other) in disjoint hash
+    // input spaces regardless of payload bytes.
+    let mut buf: Vec<u8> = Vec::with_capacity(64);
+
+    match data {
+        // ── Carrier arms: HEAD (no args) + ordered recursive child hashes.
+        // NEVER `Debug`-render the carrier — its private `type_args` layout is
+        // a representation detail. ──
+        SemanticNodeData::TypeOf(_) => {
+            buf.push(CARRIER_TAG_TYPEOF);
+            let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+            buf.extend_from_slice(format!("{value_root:?}|{path:?}").as_bytes());
+            push_carrier_arg_hashes(&mut buf, graph, data, depth);
+        }
+        SemanticNodeData::BareRef(_) => {
+            buf.push(CARRIER_TAG_BAREREF);
+            let (name, scope) = data.bare_ref_head().expect("BareRef carrier head");
+            buf.extend_from_slice(format!("{name:?}|{scope:?}").as_bytes());
+            push_carrier_arg_hashes(&mut buf, graph, data, depth);
+        }
+        SemanticNodeData::ImportType(_) => {
+            buf.push(CARRIER_TAG_IMPORTTYPE);
+            let (specifier, qualifier, typeof_query) =
+                data.import_type_head().expect("ImportType carrier head");
+            buf.extend_from_slice(
+                format!("{specifier:?}|{qualifier:?}|{typeof_query:?}").as_bytes(),
+            );
+            push_carrier_arg_hashes(&mut buf, graph, data, depth);
+        }
+        // ── Non-carrier arms: discriminant + content-deterministic Debug.
+        // These reference children by SemanticNodeId, never by an embedded
+        // carrier value, so the Debug never prints a carrier's private args. ──
+        _ => {
+            buf.push(NON_CARRIER_TAG);
+            buf.extend_from_slice(format!("{data:?}").as_bytes());
+        }
+    }
+
+    xxh3_128(&buf).to_le_bytes()
+}
+
+/// Fold the ordered structural fingerprints of a carrier's `type_args` child
+/// nodes into `buf` — descending each child through the sole accessor
+/// [`SemanticNodeData::carrier_type_args`] and recursing `structural_hash_with_depth`
+/// (so `Foo<A>` and `Foo<B>` differ on their child structure). The child's
+/// arena identity is also folded in, so even when the recursion ceiling is hit
+/// (or a child id is unresolved in `graph`) distinct args still produce distinct
+/// bytes. Argument ORDER is preserved (`Foo<A, B>` ≠ `Foo<B, A>`).
+fn push_carrier_arg_hashes(
+    buf: &mut Vec<u8>,
+    graph: &SemanticGraphStore,
+    data: &SemanticNodeData,
+    depth: u32,
+) {
+    let args = data.carrier_type_args();
+    buf.extend_from_slice(&(args.len() as u64).to_le_bytes());
+    for child in args {
+        // Fold the child's arena identity unconditionally — the
+        // structural-recursion is the strong signal, the identity is the
+        // floor that survives the depth ceiling and unresolved ids.
+        buf.extend_from_slice(&child.0.to_le_bytes());
+        if depth >= CARRIER_HASH_MAX_DEPTH {
+            continue;
+        }
+        if let Some(child_data) = graph.node_data(*child) {
+            let child_hash = structural_hash_with_depth(graph, &child_data, depth + 1);
+            buf.extend_from_slice(&child_hash);
+        }
+    }
+}
+
+/// Family discriminant tags. The three carrier tags keep `TypeOf` / `BareRef` /
+/// `ImportType` in disjoint hash spaces; [`NON_CARRIER_TAG`] separates every
+/// non-carrier variant (whose own `Debug` discriminator distinguishes them from
+/// each other) from the carriers.
+const CARRIER_TAG_TYPEOF: u8 = 1;
+const CARRIER_TAG_BAREREF: u8 = 2;
+const CARRIER_TAG_IMPORTTYPE: u8 = 3;
+const NON_CARRIER_TAG: u8 = 0;
 
 fn named_identity_of(data: &SemanticNodeData) -> Option<NamedIdentity> {
     match data {
@@ -1135,6 +1244,106 @@ mod tests {
         assert_eq!(
             fp.derivation_subgraph.edges[0].result, fp.derivation_subgraph.edges[1].result,
             "both derivations of the same SemanticNodeId must produce the same NodeId result"
+        );
+    }
+
+    use crate::semantic_query::{NodeScopeId, PrimitiveKind};
+
+    /// Build a `Foo<arg_child>` bare-ref carrier node (head `Foo` in
+    /// `NodeScopeId::Global`, a single structural type argument). The carrier's
+    /// `type_args` are carried IN at construction through the sanctioned
+    /// `SemanticNodeData::new_bare_ref` constructor — never hand-bound — so this
+    /// is a REAL carrier node, not a faked `SemanticNodeData`.
+    fn bare_ref_with_arg(arg_child: SemanticNodeId) -> SemanticNodeData {
+        SemanticNodeData::new_bare_ref(
+            Arc::from("Foo"),
+            NodeScopeId::Global,
+            Arc::from(vec![arg_child].into_boxed_slice()),
+        )
+    }
+
+    /// `structural_hash_of` must DISCRIMINATE a carrier's type arguments: two
+    /// `Foo<…>` carriers that share a head but differ ONLY in their single type
+    /// argument child must produce DIFFERENT fingerprints. This is the contract
+    /// the old `format!("{data:?}")` fingerprint could not guarantee once the
+    /// carrier's private `type_args` layout changed; the variant-aware walk
+    /// hashes the head plus the ordered recursive child hashes, so distinct args
+    /// never collapse to one footprint.
+    #[test]
+    fn structural_hash_discriminates_carrier_type_args_foo_a_vs_foo_b() {
+        let graph = empty_graph();
+        // Two structurally-DISTINCT argument children (`A` = string, `B` =
+        // number), each a real interned node.
+        let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let child_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        assert_ne!(
+            child_a, child_b,
+            "the two argument children must be distinct interned nodes"
+        );
+
+        let foo_a = bare_ref_with_arg(child_a); // Foo<A>
+        let foo_b = bare_ref_with_arg(child_b); // Foo<B>
+
+        let hash_a = structural_hash_of(&graph, &foo_a);
+        let hash_b = structural_hash_of(&graph, &foo_b);
+        assert_ne!(
+            hash_a, hash_b,
+            "DISCRIMINATION: Foo<A> and Foo<B> (same head, different single type argument) must \
+             yield DIFFERENT structural fingerprints — the carrier walk must hash the arg child \
+             structure, not drop it. A fingerprint that ignored the args (or rendered them through \
+             a representation-sensitive Debug that collapsed distinct children) would make these \
+             equal and this assertion fail."
+        );
+    }
+
+    /// Inverse stability contract: two structurally-IDENTICAL `Foo<A>` carriers
+    /// (same head, same single argument child) must produce the SAME fingerprint.
+    /// Together with the discrimination test this pins "distinct args ⇒ distinct
+    /// footprint, identical args ⇒ identical footprint".
+    #[test]
+    fn structural_hash_is_stable_for_identical_carriers() {
+        let graph = empty_graph();
+        let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        // Two independently-constructed but structurally-identical Foo<A>.
+        let foo_a1 = bare_ref_with_arg(child_a);
+        let foo_a2 = bare_ref_with_arg(child_a);
+
+        let hash_a1 = structural_hash_of(&graph, &foo_a1);
+        let hash_a2 = structural_hash_of(&graph, &foo_a2);
+        assert_eq!(
+            hash_a1, hash_a2,
+            "STABILITY: two structurally-identical Foo<A> carriers must yield the SAME structural \
+             fingerprint."
+        );
+    }
+
+    /// The discriminating signal must be the carrier ARGUMENT, not merely the
+    /// carrier HEAD. `Foo<A>` and `Foo<B>` share an identical head (`Foo` /
+    /// `Global`), so a head-only fingerprint would make them equal; this test
+    /// pins that the head is shared yet the fingerprints diverge — proving the
+    /// arg child is what discriminates.
+    #[test]
+    fn structural_hash_carrier_discrimination_comes_from_args_not_head() {
+        let graph = empty_graph();
+        let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let child_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let foo_a = bare_ref_with_arg(child_a);
+        let foo_b = bare_ref_with_arg(child_b);
+
+        // Heads are identical (same name + scope, no args).
+        assert_eq!(
+            foo_a.bare_ref_head().map(|(n, s)| (n.clone(), s.clone())),
+            foo_b.bare_ref_head().map(|(n, s)| (n.clone(), s.clone())),
+            "Foo<A> and Foo<B> must share an identical head — the only difference is the arg child"
+        );
+        // …yet the fingerprints diverge, so the arg child is the discriminator.
+        assert_ne!(
+            structural_hash_of(&graph, &foo_a),
+            structural_hash_of(&graph, &foo_b),
+            "with identical heads, the differing fingerprints prove the carrier ARG child is what \
+             discriminates the fingerprint."
         );
     }
 }

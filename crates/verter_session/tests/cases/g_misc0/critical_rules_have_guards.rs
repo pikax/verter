@@ -410,6 +410,11 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // bodies) and the `mod carrier;` decl is unadorned — so the raw-args
             // surface stays compiler-confined to `carrier.rs`.
             "carrier_variants_are_opaque_tuple_payloads",
+            // Enum-WIDE generalisation of the three-variant carrier check: ANY
+            // `SemanticNodeData` variant exposing a directly bindable named
+            // `type_args` field is rejected, so a future named-struct carrier
+            // cannot re-open the anti-tail bind beside the three opaque carriers.
+            "no_named_type_args_field_outside_opaque_carrier",
             "carrier_module_has_no_public_type_args_surface",
             "carrier_type_args_accessor_is_exhaustive_and_wildcard_free",
             "map_carrier_type_args_is_exhaustive_and_wildcard_free",
