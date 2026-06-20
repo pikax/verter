@@ -84,6 +84,8 @@ async fn main() {
         suggest_tsgo,
         mcp_port: mcp_actual_port,
         type_provider_none_reason,
+        // Production keeps the imported-carrier prewarm (test-only suppression seam).
+        suppress_imported_carrier_prewarm: false,
     };
 
     let client_cell_for_build = Arc::clone(&client_cell);

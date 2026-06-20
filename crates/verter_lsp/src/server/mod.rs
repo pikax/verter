@@ -231,10 +231,25 @@ pub struct VerterLanguageServer {
     cached_verter_diags: Arc<DashMap<String, CachedVerterDiagEntry>>,
     /// Source-keyed provider materialization state shared across background/live sync.
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
+    /// The cross-file-rename provider FENCE. A real (non-advisory) async mutex
+    /// the rename transaction holds across its sync-before-query →
+    /// snapshot-capture → provider-query → response-parse, so a sync it issues
+    /// writes its serialized provider command before the rename request is sent,
+    /// and no other rename transaction interleaves its own surface mutations
+    /// mid-capture. Concurrent background syncs remain harmless because the
+    /// captured snapshots are immutable historical.
+    rename_provider_fence: Arc<tokio::sync::Mutex<()>>,
     /// Which type provider backend is active (TSGO, tsserver, or none).
     type_provider_kind: crate::TypeProviderKind,
     /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
     suggest_tsgo: bool,
+    /// TEST SEAM: when `true`, suppress the `did_open` imported-carrier-API
+    /// prewarm so a cross-file-rename lane can exercise the path where only
+    /// `handle_rename`'s own sync-before-query would sync a closed child's API
+    /// surface. That lane is `#[ignore]`'d (the Block H-membership tsserver
+    /// program-membership gap): suppression does NOT prove `handle_rename`'s own
+    /// sync closes the closed child today.
+    suppress_imported_carrier_prewarm: bool,
     /// Generation counter for completion coalescing. During rapid typing, each keystroke
     /// triggers a completion request. By incrementing this counter, stale requests can
     /// detect they've been superseded and skip the expensive type provider call.
@@ -358,8 +373,10 @@ impl VerterLanguageServer {
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             cached_verter_diags,
             provider_sync_states,
+            rename_provider_fence: Arc::new(tokio::sync::Mutex::new(())),
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
+            suppress_imported_carrier_prewarm: config.suppress_imported_carrier_prewarm,
             completion_generation: std::sync::atomic::AtomicU64::new(0),
             needs_ide_sync,
             needs_deferred_sync,

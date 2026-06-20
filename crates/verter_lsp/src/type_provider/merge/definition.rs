@@ -400,6 +400,28 @@ pub(crate) fn is_carrier_ide_path(path: &str) -> bool {
         && verter_workspace::path_is_carrier(&path[..path.len() - 4])
 }
 
+/// Whether `path` is a carrier PUBLIC-API virtual file (`{carrier}.ts`, e.g.
+/// `MyComp.vue.ts`) backed by a real `.vue`/`.svelte` source — the macro-derived
+/// declaration surface synced for cross-file type resolution. Its byte offsets
+/// index the generated API surface and map back to the carrier source through
+/// that surface's own CodeTransform sourcemap (NOT the `.tsx` IDE sourcemap).
+///
+/// The `carrier_source_exists` guard mirrors [`normalize_carrier_path`]'s `.ts`
+/// arm: a real on-disk `{name}.{carrier}.ts` with no backing carrier source (or a
+/// plain `.ts`) is NOT an API surface and must not be claimed here.
+pub(crate) fn is_carrier_api_path(
+    path: &str,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
+) -> bool {
+    // Exclude `.d.ts` (handled by its own normalization arm) before the `.ts` test.
+    if path.ends_with(".d.ts") {
+        return false;
+    }
+    path.ends_with(".ts")
+        && verter_workspace::path_is_carrier(&path[..path.len() - 3])
+        && carrier_source_exists(&path[..path.len() - 3])
+}
+
 /// Like `normalize_carrier_path` but returns an owned String.
 /// Used by server.rs for inline path normalization.
 pub fn normalize_carrier_path_owned(

@@ -33,6 +33,10 @@ path = "crates/verter_lsp/src/test_utils.rs"
 rationale = "test utilities — temp workspace creation for LSP unit tests"
 
 [[entries]]
+path = "crates/verter_lsp/src/real_provider_tests/rename.rs"
+rationale = "real-provider rename integration tests (`#[cfg(test)] mod real_provider_tests`) — the `read_file` helper reads on-disk fixture content for a CLOSED file to assert the on-disk-vs-LSP-edit contract; same test-fixture-read category as `test_harness.rs`/`test_utils.rs`, never workspace/semantic state"
+
+[[entries]]
 path = "crates/verter_mcp/src/baseline.rs"
 rationale = "MCP baseline output — writes JSON snapshots for regression diffing, not semantic state"
 

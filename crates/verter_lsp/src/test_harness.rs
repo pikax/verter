@@ -116,6 +116,7 @@ pub(crate) struct TestSessionBuilder {
     fixture: Option<String>,
     fixture_files: Vec<String>,
     virtual_files: Vec<(String, String)>,
+    suppress_imported_carrier_prewarm: bool,
 }
 
 impl TestSessionBuilder {
@@ -125,12 +126,29 @@ impl TestSessionBuilder {
             fixture: None,
             fixture_files: Vec::new(),
             virtual_files: Vec::new(),
+            suppress_imported_carrier_prewarm: false,
         }
     }
 
     /// Use an E2E fixture workspace root for the project scaffold.
     pub(crate) fn fixture(mut self, name: &str) -> Self {
         self.fixture = Some(name.to_string());
+        self
+    }
+
+    /// TEST SEAM: suppress the `did_open` imported-carrier-API prewarm.
+    ///
+    /// With this set, opening a parent `.vue` does NOT eagerly sync an imported
+    /// child component's `{carrier}.ts` PUBLIC-API surface — so a cross-file rename
+    /// lane can exercise the path where `handle_rename`'s OWN sync-before-query is
+    /// the only thing that would sync a closed child's API surface. Under tsserver
+    /// that in-`handle_rename` sync opens the child too late to join the parent's
+    /// program (the Block H-membership gap), so the lane this seam feeds is
+    /// `#[ignore]`'d: it does NOT prove `handle_rename`'s own sync closes the closed
+    /// child today — it is the discriminator Block H-membership is validated against.
+    #[allow(dead_code)]
+    pub(crate) fn suppress_imported_carrier_prewarm(mut self, suppress: bool) -> Self {
+        self.suppress_imported_carrier_prewarm = suppress;
         self
     }
 
@@ -226,6 +244,7 @@ impl TestSessionBuilder {
             TestProviderKind::Tsserver => crate::TypeProviderKind::Tsserver,
             TestProviderKind::Tsgo => crate::TypeProviderKind::Tsgo,
         };
+        let suppress_imported_carrier_prewarm = self.suppress_imported_carrier_prewarm;
 
         let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> =
             Arc::new(verter_workspace::FilesystemWorkspace::new(
@@ -245,6 +264,7 @@ impl TestSessionBuilder {
                     suggest_tsgo: false,
                     mcp_port: None,
                     type_provider_none_reason: None,
+                    suppress_imported_carrier_prewarm,
                 },
             )
         });

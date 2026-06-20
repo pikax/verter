@@ -678,7 +678,10 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 .await?;
 
             let locs = {
-                let cache = contents_cache.lock().await;
+                let guard = contents_cache.lock().await;
+                // Bind a `Copy` `&HashMap` so each per-target closure can capture the cache by
+                // shared reference (the `MutexGuard` itself is not `Copy`).
+                let cache: &HashMap<String, String> = &guard;
                 result
                     .get("locs")
                     .and_then(|v| v.as_array())
@@ -692,16 +695,14 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or_default(),
                                 );
-                                let content = cache.get(&file_path).map(|s| s.as_str());
                                 group
                                     .get("locs")
                                     .and_then(|v| v.as_array())
                                     .into_iter()
                                     .flat_map(move |spans| {
                                         let fp = file_path.clone();
-                                        let c = content;
                                         spans.iter().filter_map(move |span| {
-                                            parse_tsserver_rename_span(span, &fp, c)
+                                            parse_tsserver_rename_span(span, &fp, cache)
                                         })
                                     })
                             })

@@ -19,16 +19,80 @@ use crate::documents::provider_projection::ProviderPositionMapper;
 /// file), the merge functions need the target file's TSX line index, position
 /// mapper, and carrier-source line index. This struct carries those, and the
 /// resolver closure produces it.
+///
+/// ## Encoding contract
+///
+/// A `CodeTransform` source map indexes its generated and source positions in
+/// **UTF-16** code units (the source-map column space), independent of the
+/// LSP-negotiated encoding. The mapper ([`ProviderPositionMapper`]) therefore
+/// consumes and produces UTF-16 columns. For the source map to be queried
+/// correctly, `tsx_line_index` and `carrier_line_index` MUST be built in
+/// **UTF-16** (so a provider byte offset converts to a UTF-16 column the map
+/// understands, and the mapped carrier UTF-16 column validates against the same
+/// space) — NOT in the negotiated encoding.
+///
+/// `carrier_negotiated_line_index` is the SAME carrier source measured in the
+/// **negotiated** LSP encoding. When present, an API-surface mapping re-emits
+/// the mapped UTF-16 carrier range into the negotiated encoding (the byte
+/// offset is the encoding-neutral bridge) before returning it as an LSP edit
+/// range — so a prop after non-ASCII text lands on the correct carrier range
+/// under a UTF-8-negotiated session. `None` preserves the legacy IDE path
+/// (which is encoding-correct only under the default UTF-16 negotiation).
 pub struct ExternalIdeContext {
     pub tsx_line_index: LineIndex,
     pub mapper: ProviderPositionMapper,
     pub carrier_line_index: LineIndex,
+    /// The carrier source re-measured in the negotiated LSP encoding, for the
+    /// final UTF-16→negotiated edit-range conversion. `None` on the legacy IDE
+    /// path; `Some` on the carrier-API rename path.
+    pub carrier_negotiated_line_index: Option<LineIndex>,
 }
 
 /// Resolver for looking up IDE context by IDE path (e.g., `/path/to/Comp.vue.tsx`).
 ///
 /// Returns `None` if the file isn't tracked or hasn't been compiled yet.
 pub type ExternalIdeResolver<'a> = &'a dyn Fn(&str) -> Option<ExternalIdeContext>;
+
+/// The 3-state outcome of resolving a carrier PUBLIC-API surface (`{carrier}.ts`)
+/// for the rename merge. This is the fail-closed CLASS distinction a bare
+/// `Option<ExternalIdeContext>` could not express: a returned `None` conflated a
+/// genuinely-not-virtual path with a known-virtual-but-unmappable one, and the
+/// merge then mis-routed the latter into a real same-named file.
+///
+/// A returned `{carrier}.ts` location's provider offsets index either the synced
+/// VIRTUAL surface content OR a real same-named file — never both. The resolver
+/// (which alone knows the captured in-flight virtual-surface set and its
+/// generations) classifies which, and the merge routes accordingly:
+///
+/// - [`Vouched`](Self::Vouched): the path IS the currently-pinned virtual API
+///   surface and its offsets map through the carried source map → map onto the
+///   `.vue` carrier (a vouched-but-range-unmappable hop still drops).
+/// - [`VirtualDrop`](Self::VirtualDrop): the path WAS a captured virtual surface
+///   but can no longer be mapped (its generation was superseded/retired after
+///   capture, or its snapshot carried no source map). Its offsets index VIRTUAL
+///   generated content, so the merge FAILS CLOSED (drops) — it must NEVER fall
+///   through to the real-file branch and edit a same-named real file with
+///   virtual offsets (that is the corruption this variant prevents).
+/// - [`NotVirtual`](Self::NotVirtual): the path was NEVER a captured virtual
+///   surface. Its offsets index that path's OWN real file (a stale surface, or a
+///   hand-written `Child.vue.ts` next to `Child.vue`) → the merge falls through to
+///   the real-file branch and edits it in place.
+///
+/// Not `Debug` — [`ExternalIdeContext`] (held by `Vouched`) is not `Debug`.
+pub enum ApiSurfaceResolution {
+    /// The currently-pinned virtual API surface; map its offsets onto the carrier.
+    Vouched(ExternalIdeContext),
+    /// A known virtual surface that can no longer be mapped → fail closed (drop).
+    VirtualDrop,
+    /// Not a virtual surface; its offsets index its own real file → edit in place.
+    NotVirtual,
+}
+
+/// Resolver for classifying a carrier PUBLIC-API surface path into the 3-state
+/// [`ApiSurfaceResolution`]. The merge consults it (gated by the suffix predicate
+/// `is_carrier_api_path`) to decide whether a returned `{carrier}.ts` rename
+/// location maps onto the `.vue`, drops, or edits its own real file.
+pub type ExternalApiResolver<'a> = &'a dyn Fn(&str) -> ApiSurfaceResolution;
 
 /// Resolver for following a type-provider location through barrel re-exports.
 ///
@@ -332,5 +396,66 @@ pub fn tsx_range_to_carrier_range(
     Some(Range {
         start: start_lsp,
         end: end_lsp,
+    })
+}
+
+/// Map a carrier PUBLIC-API surface byte-offset range back to a carrier-source
+/// LSP [`Range`] in the NEGOTIATED encoding, with the encoding boundary made
+/// explicit and correct.
+///
+/// The provider's `start`/`end` are byte offsets into the synced `{carrier}.ts`
+/// API content. The API surface's `CodeTransform` source map indexes everything
+/// in UTF-16 (the source-map column space), so:
+///
+/// 1. The source-map lookup runs ENTIRELY in UTF-16: `api_utf16_line_index` and
+///    `carrier_utf16_line_index` are both built in UTF-16, so the byte offset →
+///    UTF-16 column → mapper → UTF-16 carrier column chain stays in one space.
+///    This yields the mapped carrier range in UTF-16 columns.
+/// 2. The UTF-16 carrier range is then re-emitted in the negotiated encoding:
+///    each UTF-16 carrier position converts to a byte offset (via the UTF-16
+///    carrier index) and back to a negotiated column (via the negotiated carrier
+///    index). The byte offset is the encoding-neutral bridge, so a prop after
+///    non-ASCII carrier text maps to the CORRECT range under any negotiated
+///    encoding (UTF-8 / UTF-16 / UTF-32).
+///
+/// Returns `None` (FAIL-CLOSED) when any step fails. A wrong rename edit range
+/// would corrupt the user's `.vue`, so on ANY encoding-conversion uncertainty
+/// the edit is dropped, never emitted at a guessed range.
+///
+// TODO(follow-up): the underlying `verter_type_runtime` codec position conversions
+// (`position_to_offset` / `offset_to_position`) can fail OPEN — clamping or rounding
+// a past-EOL or mid-codepoint column to a valid offset rather than returning `None`.
+// This function's fail-closed guarantee therefore relies on the rename data flow never
+// constructing such a column (the source map's UTF-16 columns come from real token
+// positions). A defensive bounds-check here, or hardening the codec to return `None`
+// on an out-of-range/mid-codepoint column, is tracked separately; do NOT change codec
+// behavior from here.
+pub fn api_surface_range_to_carrier_range(
+    api_start: u32,
+    api_end: u32,
+    api_utf16_line_index: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_utf16_line_index: &LineIndex,
+    carrier_negotiated_line_index: &LineIndex,
+) -> Option<Range> {
+    // Step 1: source-map lookup entirely in UTF-16 → UTF-16 carrier range.
+    let utf16_range = tsx_range_to_carrier_range(
+        api_start,
+        api_end,
+        api_utf16_line_index,
+        mapper,
+        carrier_utf16_line_index,
+    )?;
+
+    // Step 2: re-emit the UTF-16 carrier range in the negotiated encoding via a
+    // byte-offset round-trip over the SAME carrier source.
+    let reencode = |utf16_pos: Position| -> Option<Position> {
+        let byte_offset = carrier_utf16_line_index.position_to_offset(&utf16_pos)?;
+        carrier_negotiated_line_index.offset_to_position(byte_offset)
+    };
+
+    Some(Range {
+        start: reencode(utf16_range.start)?,
+        end: reencode(utf16_range.end)?,
     })
 }

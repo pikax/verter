@@ -642,6 +642,7 @@ fn make_hover_test_service(
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -1157,6 +1158,7 @@ async fn make_definition_test_server(
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -2271,6 +2273,7 @@ async fn initialized_returns_before_background_configure_paths_completes() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -3864,6 +3867,7 @@ async fn goto_type_definition_returns_none_without_provider() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -6054,6 +6058,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
     // Drive the no-IDE branch directly: no compiled IDE output this pass.
     let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
+        &crate::provider_surface_store::ProviderSurfaceStore::new(),
         &provider_sync_states,
         "/workspace/src/App.vue",
         false,
@@ -6168,6 +6173,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
     };
     let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
+        &crate::provider_surface_store::ProviderSurfaceStore::new(),
         &provider_sync_states,
         "/workspace/src/App.vue",
         false,
@@ -6810,6 +6816,7 @@ async fn drain_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved(
 
     let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
+        &crate::provider_surface_store::ProviderSurfaceStore::new(),
         &provider_sync_states,
         "/workspace/src/App.vue",
         false,
@@ -7333,6 +7340,7 @@ defineProps<{ msg: string }>()
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -7610,6 +7618,7 @@ defineProps<{ msg: string }>()
         snapshot,
         Arc::clone(&host),
         Arc::clone(&provider_sync_states),
+        crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         transition,
         false,
@@ -7715,6 +7724,7 @@ defineProps<{ msg: string }>()
         snapshot,
         Arc::clone(&host),
         Arc::clone(&provider_sync_states),
+        crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         transition,
         false,
@@ -7782,6 +7792,7 @@ async fn sync_imported_carrier_api_lightweight_opens_snapshot_ide_path_for_tsgo(
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -7845,6 +7856,7 @@ async fn sync_imported_carrier_api_lightweight_preserves_open_unowned_state() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -8012,6 +8024,7 @@ async fn ensure_current_file_synced_queues_unresolved_ide_path_for_snapshot_reco
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -8093,6 +8106,7 @@ async fn ensure_current_file_synced_preserves_open_unresolved_carrier_state_when
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -8193,6 +8207,7 @@ async fn ensure_current_file_synced_reconciles_owned_open_vue_on_owner_loss() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -8859,6 +8874,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -8987,6 +9003,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -9088,6 +9105,7 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -9247,6 +9265,7 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -9339,6 +9358,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -10114,6 +10134,7 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -10233,6 +10254,7 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -10332,6 +10354,7 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -10675,6 +10698,7 @@ async fn rune_module_queryable_before_resolver_ownership() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -10730,6 +10754,7 @@ async fn rune_module_own_buffer_resyncs_on_did_change() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -10805,6 +10830,7 @@ async fn rune_module_self_file_state_closed_on_did_close() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -10883,6 +10909,7 @@ async fn self_file_rename_and_code_actions_gated_off() {
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });

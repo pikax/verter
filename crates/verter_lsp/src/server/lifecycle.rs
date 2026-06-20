@@ -453,7 +453,10 @@ pub(super) async fn handle_did_open(
     }
     let startup_policy = did_open_startup_policy(server.type_provider_kind);
     let prewarm_imported_carrier_apis = startup_policy.sync_imported_carrier_apis
-        && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver);
+        && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver)
+        // TEST SEAM: suppressed so the cross-file-rename child-closed lane proves
+        // `handle_rename`'s own sync-before-query is the sole sync of the child API.
+        && !server.suppress_imported_carrier_prewarm;
     let imported_carrier_priority_ids = server
         .documents
         .get_analysis(uri)
@@ -529,8 +532,15 @@ pub(super) async fn handle_did_open(
         server.sync_self_file_shadow_unresolved(uri).await;
     }
 
-    // Imported carrier API warmup SECOND (Normal priority, never blocks active file)
-    if startup_policy.sync_imported_carrier_apis && !prewarm_imported_carrier_apis {
+    // Imported carrier API warmup SECOND (Normal priority, never blocks active file).
+    // TEST SEAM: also gated off by `suppress_imported_carrier_prewarm` — the cross-
+    // file-rename discrimination lane must leave `handle_rename`'s own
+    // sync-before-query as the SOLE sync of an imported child's API surface, so
+    // BOTH the eager (above) and this deferred did_open warmup are suppressed.
+    if startup_policy.sync_imported_carrier_apis
+        && !prewarm_imported_carrier_apis
+        && !server.suppress_imported_carrier_prewarm
+    {
         for import_id in &imported_carrier_priority_ids {
             let should_sync =
                 !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
@@ -966,6 +976,7 @@ pub(super) async fn handle_did_change_watched_files(
             let sync = sync.clone();
             let vfs_workspace = Arc::clone(&server.vfs_workspace);
             let provider_sync_states = Arc::clone(&server.provider_sync_states);
+            let provider_surfaces = server.documents.provider_surfaces().clone();
             let is_tsgo = matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
             tokio::spawn(async move {
@@ -974,6 +985,7 @@ pub(super) async fn handle_did_change_watched_files(
                         &canonical_id,
                         &host,
                         &sync,
+                        &provider_surfaces,
                         &vfs_workspace,
                         is_tsgo,
                         &provider_sync_states,

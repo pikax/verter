@@ -272,6 +272,14 @@ impl VerterLanguageServer {
                     } else {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
                         synced_kinds.push(ProviderPathKind::Api);
+                        // Record a fresh generation pinning the synced content +
+                        // its same-content source map under this virtual path.
+                        self.record_carrier_api_snapshot(
+                            &canonical_id,
+                            &dts_path,
+                            &api.code,
+                            api.source_map.as_deref(),
+                        );
                     }
                 }
             }
@@ -348,6 +356,16 @@ impl VerterLanguageServer {
             if let Some(transition) =
                 self.prepare_non_carrier_provider_sync_transition(canonical_id)
             {
+                // TODO(follow-up): this non-carrier (shadow/real) write is intentionally NOT
+                // recorded into the ProviderSurfaceStore. It is fail-closed-safe today because
+                // (1) only CarrierApi surfaces are ever recorded/vouched (the rename capture set
+                // filters on `kind == CarrierApi`), (2) a non-carrier `provider_path` lives in a
+                // disjoint namespace from a `{carrier}.ts` virtual path (a real rune module's own
+                // canonical path is never a sibling component's CarrierApi path), and (3)
+                // `close_provider_paths` below retires (forgets) any stale CarrierApi path BEFORE
+                // this write, so no stale CarrierApi generation can survive to vouch over this
+                // content. If the store later grows Real/Shadow snapshot producers, record this
+                // write here so the store stays the complete authority on every synced surface.
                 self.close_provider_paths(&transition.stale_paths).await;
                 if let Err(error) = sync
                     .sync_file(&prepared.provider_path, &prepared.rewritten)
@@ -571,12 +589,14 @@ impl VerterLanguageServer {
         // its prior live path, and must never close or rebind the live IDE `.tsx`.
         let host = self.documents.host_arc();
         let provider_sync_states = Arc::clone(&self.provider_sync_states);
+        let provider_surfaces = self.documents.provider_surfaces().clone();
         tokio::spawn(
             super::background_drain::sync_api_to_provider_background_task(
                 sync,
                 snapshot,
                 host,
                 provider_sync_states,
+                provider_surfaces,
                 canonical_id,
                 transition,
                 is_tsgo,
@@ -1450,6 +1470,11 @@ impl VerterLanguageServer {
 
         match result {
             Ok(()) => {
+                // Record a fresh generation pinning the EXACT content just synced
+                // under this virtual path (before `dts_path` is moved). No source
+                // map in scope here → the choke uses the live map only if it still
+                // byte-matches `api_code`.
+                self.record_carrier_api_snapshot(canonical_id, &dts_path, api_code, None);
                 state.api_path = Some(dts_path);
                 state.api_background_loaded = true;
                 self.commit_provider_sync_state(canonical_id, state);
@@ -1690,6 +1715,14 @@ impl VerterLanguageServer {
                     if result.is_ok() {
                         committed_state.set_background_loaded(ProviderPathKind::Api, true);
                         synced_kinds.push(ProviderPathKind::Api);
+                        // Record a fresh generation pinning the EXACT content +
+                        // its same-content source map under this virtual path.
+                        self.record_carrier_api_snapshot(
+                            canonical_id,
+                            &dts_path,
+                            &api.code,
+                            api.source_map.as_deref(),
+                        );
                     } else if let Err(e) = result {
                         tracing::warn!(
                             "sync_imported_carrier_api_lightweight: failed for {dts_path}: {e}"
@@ -1920,6 +1953,14 @@ impl VerterLanguageServer {
                 if result.is_ok() {
                     committed_state.set_background_loaded(ProviderPathKind::Api, true);
                     synced_kinds.push(ProviderPathKind::Api);
+                    // Record a fresh generation pinning the synced content + its
+                    // same-content source map under this virtual path.
+                    self.record_carrier_api_snapshot(
+                        canonical_id,
+                        &dts_path,
+                        &api.code,
+                        api.source_map.as_deref(),
+                    );
                 }
             }
         }

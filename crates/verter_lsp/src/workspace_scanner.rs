@@ -74,6 +74,12 @@ pub struct WorkspaceScannerConfig {
     pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
     /// Tracks provider materialization per source file (shared with server).
     pub provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
+    /// The generation-stamped provider-surface store (shared with the server's
+    /// `DocumentRegistry`). The background scan records/forgets a generation here
+    /// for each carrier API surface it syncs/closes, so a cross-file rename can
+    /// pin and map against the exact generation — scanner-synced (closed) carrier
+    /// surfaces included.
+    pub provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
     /// Whether the type provider is TSGO (affects sync strategy).
     pub is_tsgo: bool,
     /// Compile profile for IDE output.
@@ -429,6 +435,7 @@ async fn scanner_loop(
                     &config.host,
                     &config.tsx_profile,
                     sync,
+                    &config.provider_surfaces,
                     &config.vfs_workspace,
                     config.is_tsgo,
                     &config.provider_sync_states,
@@ -467,6 +474,7 @@ async fn scanner_loop(
                 path,
                 &config.host,
                 sync,
+                &config.provider_surfaces,
                 &config.vfs_workspace,
                 config.is_tsgo,
                 &config.provider_sync_states,
@@ -478,6 +486,7 @@ async fn scanner_loop(
                 deps,
                 &config.host,
                 sync,
+                &config.provider_surfaces,
                 &config.vfs_workspace,
                 config.is_tsgo,
                 &config.provider_sync_states,
@@ -533,6 +542,7 @@ pub(crate) async fn resync_non_carrier_file(
     canonical_id: &str,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
@@ -550,6 +560,7 @@ pub(crate) async fn resync_non_carrier_file(
         canonical_id,
         host,
         sync,
+        provider_surfaces,
         vfs_workspace,
         is_tsgo,
         sync_states,
@@ -565,6 +576,7 @@ async fn sync_non_carrier_file_to_provider(
     canonical_id: &str,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
@@ -648,7 +660,7 @@ async fn sync_non_carrier_file_to_provider(
                 .await;
         }
         let transition = prepare_sync_transition(sync_states, canonical_id, next);
-        close_stale_paths(sync, &transition.stale_paths).await;
+        close_stale_paths(sync, provider_surfaces, &transition.stale_paths).await;
         let mut committed = transition.next;
 
         if let Err(error) = sync
@@ -701,10 +713,15 @@ async fn sync_non_carrier_file_to_provider(
 /// For each resolved dependency that targets a node_modules file (ProviderTarget::SourceFile
 /// with a node_modules path), reads the file, rewrites its imports, syncs to the provider,
 /// and follows its own dependencies recursively.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "node_modules follow-through threads the provider-surface store alongside its sync inputs"
+)]
 async fn follow_node_modules_deps(
     initial_deps: Vec<crate::project_resolver::ResolveResult>,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
@@ -741,6 +758,7 @@ async fn follow_node_modules_deps(
             &dep.source_id,
             host,
             sync,
+            provider_surfaces,
             vfs_workspace,
             is_tsgo,
             sync_states,
@@ -758,11 +776,16 @@ async fn follow_node_modules_deps(
 }
 
 /// Sync a single compiled file's IDE and DTS output to the type provider.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "carrier file sync threads the provider-surface store alongside its compile/sync inputs"
+)]
 async fn sync_file_to_provider(
     canonical_id: &str,
     host: &VerterHost,
     profile: &CompileProfile,
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
@@ -817,6 +840,18 @@ async fn sync_file_to_provider(
             if result.is_ok() {
                 committed_state.set_background_loaded(ProviderPathKind::Api, true);
                 synced_kinds.push(ProviderPathKind::Api);
+                // Record a fresh generation pinning the synced content + its
+                // same-content source map. The background scan has no
+                // `DocumentRegistry`; the carrier source resolves host/VFS-only.
+                crate::provider_surface_store::record_carrier_api_surface(
+                    provider_surfaces,
+                    None,
+                    host,
+                    canonical_id,
+                    &dts_path,
+                    &api.code,
+                    api.source_map.as_deref(),
+                );
             }
         }
     }
@@ -841,23 +876,50 @@ async fn sync_file_to_provider(
         let genuinely_stale =
             genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
         commit_sync_transition(sync_states, canonical_id, committed_state);
-        close_stale_paths(sync, &genuinely_stale).await;
+        close_stale_paths(sync, provider_surfaces, &genuinely_stale).await;
     }
     // On total failure nothing is committed and nothing is closed: the previous
     // state + provider paths are retained intact.
 }
 
-async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind, String)]) {
+async fn close_stale_paths(
+    sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+    stale_paths: &[(ProviderPathKind, String)],
+) {
     for (kind, path) in stale_paths {
+        // A closing API path is no longer the active synced virtual surface —
+        // retire its active generation under a fresh close EPOCH (in-flight rename
+        // captures stay valid; the `Closing` state keeps it classifying VirtualDrop
+        // until the provider close is CONFIRMED, so a failed close cannot let it
+        // degrade to NotVirtual and corrupt a same-named real file). Capture the
+        // epoch-stamped token so the finalize is scoped to THIS close.
+        let close_token = if *kind == ProviderPathKind::Api {
+            Some(provider_surfaces.forget(path))
+        } else {
+            None
+        };
         let result = match kind {
             ProviderPathKind::Ide => sync.close_tsx(path).await,
             ProviderPathKind::Api => sync.close_dts(path).await,
             ProviderPathKind::Shadow => sync.close_file(path).await,
         };
-        if let Err(error) = result {
-            tracing::warn!(
-                "workspace_scanner: failed to close stale provider path {path}: {error}"
-            );
+        match result {
+            // Only a CONFIRMED API close finalizes, and only via THIS close's token —
+            // a reopen (or newer close) during the await makes the epoch mismatch and
+            // the finalize a no-op (the fresh snapshot survives). An error drops the
+            // token, leaving the `Closing` state (fail closed). Ide/Shadow have no
+            // token.
+            Ok(()) => {
+                if let Some(token) = close_token {
+                    provider_surfaces.finalize_close(token);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "workspace_scanner: failed to close stale provider path {path}: {error}"
+                );
+            }
         }
     }
 }
@@ -1212,6 +1274,7 @@ mod tests {
             &host,
             &profile,
             &sync,
+            &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             false,
             &sync_states,
@@ -1281,6 +1344,7 @@ mod tests {
             &host,
             &profile,
             &sync,
+            &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             false,
             &sync_states,
@@ -1358,6 +1422,7 @@ defineProps<{ msg: string }>()
             &host,
             &profile,
             &sync,
+            &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             true,
             &sync_states,
@@ -1468,6 +1533,7 @@ import Child from '@/Child.vue'
             &host,
             &profile,
             &sync,
+            &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             true,
             &sync_states,
@@ -1876,6 +1942,7 @@ defineProps<{ msg: string }>()
             &host,
             &profile,
             &sync,
+            &crate::provider_surface_store::ProviderSurfaceStore::new(),
             &snapshot,
             false,
             &sync_states,

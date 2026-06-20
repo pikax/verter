@@ -9,10 +9,12 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
         let _mycomp = session.open_fixture_file("src/MyComp.vue").await;
 
-        if !session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await {
-            eprintln!("skipping: provider not warmed up");
-            return;
-        }
+        // `handle_rename` performs its OWN production sync-before-query (the same
+        // `ensure_provider_synced` contract the navigation handlers run), so no
+        // test-only sync helper is needed. `wait_until_ready` runs only as a
+        // best-effort WARM-UP (give the provider time to index); its result NO
+        // LONGER gates the cross-file assertion — a green run always EXECUTES R9.
+        let _warm = session.wait_until_ready(&uri, "action.disabled", 7, "disabled").await;
 
         // R1: prepare rename on `const count = ref(0)` → accepted
         let pos = session.find_position(&uri, "const count = ref(0)", 6);
@@ -66,26 +68,462 @@ real_provider_test!(
         let total = count_edits(&ws_edit);
         assert!(total >= 2, "rename handleCustom should have >= 2 edits, got: {total}");
 
-        // R9: cross-file rename foo prop → ≥2 files
+        // R9: cross-file rename of the `foo` prop must propagate from App.vue's usage into
+        // MyComp.vue's `defineProps` type → edits in ≥ 2 files. The DETERMINISTIC gate for the
+        // carrier-API rename mapping: `handle_rename`'s own production sync-before-query syncs
+        // MyComp's `{carrier}.ts` API surface, the generation-pinned snapshot is captured under
+        // the fence, tsserver reports the renamed prop against that surface, and the merge maps
+        // it back onto MyComp.vue through the pinned snapshot. No skip path guards this.
         let pos = session.find_position(&uri, r#"foo="literal""#, 0);
         let edits = session.rename_edits(&uri, pos, "fooRenamed").await;
         assert!(edits.is_some(), "cross-file rename foo should return edits");
         let ws_edit = edits.unwrap();
         let file_count = count_files(&ws_edit);
         if session.is_tsgo() {
-            // CANARY (TSGO): cross-file prop rename only returns edits in 1 file (the
-            // consumer) instead of propagating to the child component's defineProps type.
-            // tsserver handles this correctly. When TSGO gains cross-file rename, this
-            // canary fires and should be promoted to a real assert.
+            // SCOPE: this fix is tsserver-ONLY. The cross-file Vue-prop rename mapping is asserted
+            // for tsserver below; TSGO's cross-file rename gap is a SEPARATE, independently-tracked
+            // work item (Block H-tgo) and is NOT addressed here. Do not interpret a passing run as
+            // TSGO support.
+            //
+            // CANARY (TSGO): cross-file prop rename only returns edits in 1 file (the consumer)
+            // instead of propagating to the child component's defineProps type. This canary PANICS
+            // the moment TSGO returns >= 2 files, forcing this branch to be promoted to a real
+            // assert (and the Block H-tgo gap closed) rather than silently passing.
             canary_assert_known_limitation!(
                 file_count < 2,
                 "TSGO cross-file rename only affects {file_count} file(s), expected >= 2"
             );
         } else {
+            // tsserver: the cross-file rename MUST touch >= 2 files (App.vue + MyComp.vue). This is
+            // the corruption-fix's end-to-end gate — it fails (not skips) if the edit is dropped.
             assert!(file_count >= 2, "cross-file rename should affect >= 2 files, got: {file_count}");
         }
     }
 );
+
+// R9 (child CLOSED) — cross-file-rename end-to-end coverage, discriminating the
+// generation-pinned snapshot MAPPING.
+//
+// Open ONLY the parent (App.vue), keep the child (MyComp.vue) CLOSED, invoke
+// rename via the PRODUCTION handler (no test-only sync helper), assert the
+// workspace edit touches BOTH files, then APPLY the edit and assert the old prop
+// text is gone + the renamed prop DECLARATION (with its type) present in BOTH.
+//
+// WHAT THIS LANE DISCRIMINATES — the generation-pinned snapshot MAPPING (the
+// mechanism Block H-rename owns): snapshot capture
+// (`capture_current_carrier_api_set`) → `external_ide_context_from_snapshot`
+// (provider_surface_store.rs) → `api_surface_range_to_carrier_range`
+// (type_provider/merge/position.rs). The prewarm is ACTIVE here, so tsserver
+// REPORTS the child rename location; this lane proves the merge maps that
+// `{carrier}.ts` location back onto MyComp.vue at the EXACT byte range. If the
+// mapping regresses (wrong-range or dropped child edit), the child edit lands at
+// the wrong byte range or is missing, so the renamed-declaration assertion
+// (`fooRenamed: string`) and/or the original-prop-gone assertion (`!… foo:
+// string`) FAIL. The strengthened `fooRenamed: string` check (the prop name WITH
+// its declared `: string` type, not a bare `fooRenamed` substring anywhere)
+// catches a mis-ranged edit crisply.
+//
+// WHAT THIS LANE DOES NOT DISCRIMINATE — `handle_rename`'s OWN
+// sync-before-query. Under tsserver, opening the parent EAGERLY prewarms the
+// imported child's `{carrier}.ts` PUBLIC-API surface (the `did_open`
+// imported-carrier prewarm), so the child API surface is already synced BEFORE
+// the rename — this lane would pass even if `handle_rename`'s
+// `ensure_provider_synced` were removed (the prewarm masks that axis). The
+// would-be discriminator for that axis is
+// `rename_cross_file_prop_child_closed_unprewarmed_tsserver` below, which
+// SUPPRESSES the prewarm; it is `#[ignore]`'d on the tsserver program-membership
+// gap tracked as Block H-membership. This lane remains broad end-to-end coverage
+// (apply + text assertions across both files). tsserver-only; tgo keeps the
+// canary.
+real_provider_test!(
+    rename_cross_file_prop_child_closed,
+    fixture = "single-project",
+    async fn run(session) {
+        // Open ONLY the parent. The child MyComp.vue is intentionally NOT opened.
+        let app = session.open_fixture_file("src/App.vue").await;
+        let child_uri = session.workspace_uri("src/MyComp.vue");
+
+        // Best-effort warm-up only (no gating); the production handler syncs.
+        let _warm = session.wait_until_ready(&app, "action.disabled", 7, "disabled").await;
+
+        // Rename the `foo` prop usage in App.vue. `<MyComp foo="literal" …>`.
+        let pos = session.find_position(&app, r#"foo="literal""#, 0);
+        let edits = session.rename_edits(&app, pos, "fooRenamed").await;
+
+        let file_count = edits.as_ref().map(count_files).unwrap_or(0);
+        if session.is_tsgo() {
+            // tgo cross-file rename gap is tracked separately (Block H-tgo). The
+            // canary fires the moment tgo returns >= 2 files (== 1 today).
+            canary_assert_known_limitation!(
+                file_count == 1,
+                "TGO cross-file prop rename (child closed) affects {file_count} file(s), expected 1"
+            );
+            return;
+        }
+
+        // tsserver: BOTH files must be edited (App.vue usage + MyComp.vue decl).
+        let ws_edit = edits.expect("cross-file rename (child closed) must return edits");
+        assert!(
+            edit_touches(&ws_edit, &app),
+            "rename must edit the parent App.vue: {ws_edit:?}"
+        );
+        assert!(
+            edit_touches(&ws_edit, &child_uri),
+            "rename must edit the CLOSED child MyComp.vue carrier: {ws_edit:?}"
+        );
+
+        // APPLY the edit on disk-read content and verify text changed in BOTH.
+        let app_before = read_file(&app);
+        let app_after = apply_edits(&ws_edit, &app, &app_before);
+        assert!(
+            app_after.contains("fooRenamed") && !app_after.contains(r#"foo="literal""#),
+            "App.vue must have the renamed prop applied:\n{app_after}"
+        );
+
+        let child_before = read_file(&child_uri);
+        // Precondition: the fixture child declares `defineProps<{ foo: string; … }>`.
+        // After a CORRECT in-place rename it must read `fooRenamed: string` — the
+        // prop DECLARATION with its type, at the exact mapped byte range.
+        assert!(
+            child_before.contains("foo: string"),
+            "fixture precondition: MyComp.vue must declare `foo: string`:\n{child_before}"
+        );
+        let child_after = apply_edits(&ws_edit, &child_uri, &child_before);
+        // STRONG mapping assertion: the renamed prop must appear in its defineProps
+        // DECLARATION context — `fooRenamed: string` (name WITH its declared type),
+        // not merely the substring `fooRenamed` somewhere. A mis-ranged snapshot
+        // mapping would splice `fooRenamed` at the wrong offset (corrupting the
+        // declaration or landing it off the `: string` type), failing this check.
+        assert!(
+            child_after.contains("fooRenamed: string"),
+            "MyComp.vue defineProps must declare the renamed prop `fooRenamed: string` \
+             (snapshot mapping must land the edit on the prop decl, not a wrong range):\n{child_after}"
+        );
+        // The ORIGINAL `foo:` prop declaration must be gone (renamed in place) —
+        // discriminates a no-op / wrong-range edit that left `foo` intact.
+        assert!(
+            !child_after.contains("foo: string"),
+            "MyComp.vue must no longer declare the original `foo: string` prop:\n{child_after}"
+        );
+    }
+);
+
+// PREWARM REGRESSION GUARD — cross-file rename now DEPENDS on the parent's
+// `did_open` prewarming the imported child's `{carrier}.ts` PUBLIC-API surface
+// into the `ProviderSurfaceStore` (so tsserver can REPORT the cross-file rename
+// location, which the generation-pinned snapshot then maps back onto the `.vue`).
+// This guard proves the post-condition directly: opening ONLY the parent App.vue
+// records a `CarrierApi` snapshot for the imported child MyComp.vue. If a future
+// change removes/breaks the prewarm, the snapshot is absent and this guard fails
+// LOUDLY — independent of the slower end-to-end rename lanes.
+//
+// tsserver-only: the imported-carrier prewarm is gated `matches!(.. Tsserver)`
+// (lifecycle.rs) — tgo never records here, so this is written directly (not via
+// `real_provider_test!`, which would also emit a tgo variant) and mirrors the
+// macro's skip/build gating. Prewarm is LEFT ON (no `suppress_imported_carrier_prewarm`).
+//
+// DISCRIMINATION: setting `suppress_imported_carrier_prewarm(true)` (the inverse
+// of what this guard protects) makes the snapshot never get recorded, so the
+// bounded settle loop exhausts and the assertion fails — verified during
+// development.
+#[tokio::test(flavor = "multi_thread")]
+async fn parent_did_open_prewarms_imported_child_carrier_api() {
+    use crate::test_harness::{TestProviderKind, TestSessionBuilder};
+
+    let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
+        .fixture("single-project")
+        // Prewarm ON — this guard protects exactly that behavior.
+        .build()
+        .await
+    else {
+        return;
+    };
+
+    // Open ONLY the parent. The child MyComp.vue is intentionally NOT opened; the
+    // ONLY thing that can record its API surface is the parent's did_open prewarm.
+    let _app = session.open_fixture_file("src/App.vue").await;
+
+    // The child's recorded identity: its canonical id is what `did_open` computes
+    // and stores as `source_canonical`; its provider path is the carrier API
+    // `{canonical}.ts` virtual path the prewarm syncs/records under.
+    let child_canonical =
+        crate::documents::uri_to_canonical_id(&session.workspace_uri("src/MyComp.vue"));
+    let child_provider_path = verter_workspace::carrier_api_provider_path(&child_canonical);
+
+    // The lightweight imported-carrier sync is async (a no-response provider
+    // notification), so give it a BOUNDED settle — a short retry reading the store,
+    // NOT a fixed long sleep. The loop exits the moment the snapshot appears.
+    let store = session.server().test_documents().provider_surfaces();
+    let mut snapshot = None;
+    for attempt in 0..40 {
+        if let Some(snap) = store.current_snapshot(&child_provider_path) {
+            snapshot = Some(snap);
+            break;
+        }
+        if attempt < 39 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    // The store must hold a CarrierApi snapshot for the imported child — recorded
+    // by the parent's did_open prewarm (the child itself is closed).
+    let snapshot = snapshot.expect(
+        "parent App.vue did_open must prewarm the imported child MyComp.vue's \
+         {carrier}.ts API surface into the ProviderSurfaceStore (no snapshot recorded)",
+    );
+    assert!(
+        store.is_tracked(&child_provider_path),
+        "the child carrier API path {child_provider_path} must be CURRENTLY tracked after prewarm"
+    );
+    // The snapshot must be the imported CHILD's API surface — not some unrelated
+    // path. An empty-store or no-child outcome fails the `expect` above; this
+    // pins the recorded snapshot to MyComp specifically.
+    assert_eq!(
+        &*snapshot.source_canonical,
+        child_canonical.as_str(),
+        "the recorded snapshot must belong to the imported child MyComp.vue"
+    );
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierApi,
+        "the prewarmed surface must be the {{carrier}}.ts PUBLIC-API surface"
+    );
+
+    // The captured CarrierApi set (the in-flight pinned set a cross-file rename
+    // holds) must be NON-EMPTY and contain the child — this is exactly what the
+    // rename's `capture_current_carrier_api_set()` would pin.
+    let captured = store.capture_current_carrier_api_set();
+    assert!(
+        !captured.is_empty(),
+        "captured CarrierApi set must be non-empty after prewarm"
+    );
+    assert!(
+        captured.snapshot_for(&child_provider_path).is_some(),
+        "captured CarrierApi set must contain the imported child MyComp.vue's API surface"
+    );
+
+    session.shutdown().await;
+}
+
+// R9 (child CLOSED, prewarm SUPPRESSED) — the would-be discriminating cross-file
+// rename gate, gated `#[ignore]` on a CONFIRMED production gap (see below).
+//
+// Intent: identical to `rename_cross_file_prop_child_closed`, but the session
+// SUPPRESSES the `did_open` imported-carrier-API prewarm (both the eager and the
+// deferred warmup). With the prewarm off, opening the parent App.vue does NOT
+// pre-sync the closed child MyComp.vue's `{carrier}.ts` API surface — so the ONLY
+// thing that could sync it is `handle_rename`'s own sync-before-query
+// (`ensure_provider_synced`, nav_features_navigation.rs:624). This body asserts
+// BOTH files are edited, so removing line 624 would make it fail (no child edit) —
+// the discrimination the masked default-prewarm lane (which records the child at
+// did_open regardless of line 624) cannot provide.
+//
+// WHY `#[ignore]` (a CONFIRMED production gap, not a flaky/slow test):
+// under tsserver, a closed child is only cross-referenced by a rename initiated
+// from the parent if the child's `{carrier}.ts` was opened in tsserver BEFORE the
+// parent App.vue.tsx program was built. The did_open prewarm achieves that
+// (child opened first, parent IDE synced second). `ensure_provider_synced` runs
+// the OPPOSITE order (parent first, then children) AND at rename time App.vue.tsx
+// is already open from did_open, so the child opens into its own inferred project,
+// OUTSIDE App's configured-project program — tsserver's rename returns ONLY the
+// App.vue group. This was verified at the raw tsserver boundary: prewarmed = 2
+// rename groups (MyComp.vue.ts + App.vue.tsx), unprewarmed = 1 group (App only),
+// stable across 90 one-second retries (so it is project membership, not indexing
+// latency). The child sync itself is NOT a no-op: `ensure_imported_carrier_apis_synced`
+// discovers MyComp and `sync_imported_carrier_api_lightweight` opens its `.d.ts`
+// OK every attempt.
+//
+// Closing this requires a PRODUCTION fix to the tsserver sync ordering /
+// project-membership handling so a child opened at rename time is forced into the
+// parent's configured program (e.g. re-sync the parent IDE TSX to trigger a
+// program rebuild after a NEW child surface is opened, or open imported children
+// before the parent at the relevant sync points). That change affects EVERY
+// navigation handler that calls `ensure_provider_synced` (hover/definition/
+// references/rename), so it is cross-cutting and out of scope for this fail-closed
+// merge/store fix; it is tracked as the separate follow-up Block H-membership
+// (tsserver program-membership for cross-file nav handlers). The
+// `suppress_imported_carrier_prewarm` seam this lane uses is the exact mechanism
+// Block H-membership validates against.
+//
+// tsserver-only (the prewarm/child-sync is on the tsserver path). Written directly
+// (not via `real_provider_test!`) because it needs the builder's
+// `suppress_imported_carrier_prewarm` seam; it mirrors the macro's gating — `build()`
+// returns `None` (skip) when the provider is absent, and HARD-FAILS under
+// `VERTER_REQUIRE_TSSERVER=1`.
+//
+// TODO(follow-up): Block H-membership (tsserver program-membership for cross-file
+// nav handlers) lands the tsserver project-membership ordering fix in
+// `ensure_provider_synced` so a closed-child cross-file rename works WITHOUT the
+// did_open prewarm, then removes `#[ignore]` here — this lane will then go green,
+// and red when nav_features_navigation.rs:624 is removed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "confirmed production gap, tracked as Block H-membership (tsserver program-membership for \
+            cross-file nav handlers): closed-child cross-file rename depends on did_open prewarm \
+            ordering (tsserver project membership); ensure_provider_synced at rename time opens the \
+            child after the parent program is built. Needs the Block H-membership sync-ordering fix \
+            before this discriminating lane can pass — see the test comment."]
+async fn rename_cross_file_prop_child_closed_unprewarmed_tsserver() {
+    use crate::test_harness::{TestProviderKind, TestSessionBuilder};
+
+    let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
+        .fixture("single-project")
+        .suppress_imported_carrier_prewarm(true)
+        .build()
+        .await
+    else {
+        return;
+    };
+
+    // Open ONLY the parent. The child MyComp.vue is intentionally NOT opened, and
+    // — crucially — the imported-carrier prewarm (BOTH the eager and the deferred
+    // did_open warmup) is suppressed, so NOTHING pre-syncs the child's API surface.
+    // Do NOT call `wait_until_ready` here: that would `ensure_synced` and could
+    // pre-sync paths; the production rename handler performs its OWN sync.
+    let app = session.open_fixture_file("src/App.vue").await;
+    let child_uri = session.workspace_uri("src/MyComp.vue");
+
+    // Rename the `foo` prop usage in App.vue. `<MyComp foo="literal" …>`.
+    let pos = session.find_position(&app, r#"foo="literal""#, 0);
+
+    // EACH rename invocation runs `handle_rename`'s own `ensure_provider_synced`,
+    // which syncs the closed child's `{carrier}.ts` API surface to tsserver. That
+    // sync is a no-response notification, so tsserver needs a moment to INDEX the
+    // surface before it reports a cross-file rename location against it; retry the
+    // rename in a bounded settle loop until BOTH files are edited.
+    //
+    // This stays DISCRIMINATING: with `ensure_provider_synced` removed (and the
+    // prewarm suppressed), the child surface is NEVER sent to tsserver, so no
+    // amount of settling produces a child edit — the loop exhausts and the assert
+    // below fails. The settle window only lets tsserver index a surface the
+    // production sync DID send; it never substitutes for that sync.
+    let mut ws_edit = None;
+    for attempt in 0..12 {
+        let edits = session.rename_edits(&app, pos, "fooRenamed").await;
+        if let Some(edit) = edits {
+            if edit_touches(&edit, &app) && edit_touches(&edit, &child_uri) {
+                ws_edit = Some(edit);
+                break;
+            }
+            ws_edit = Some(edit);
+        }
+        if attempt < 11 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    // tsserver: BOTH files must be edited (App.vue usage + MyComp.vue decl). The
+    // child edit can ONLY come from `handle_rename`'s own sync-before-query, since
+    // the prewarm that would otherwise pre-sync the child is suppressed.
+    let ws_edit = ws_edit.expect(
+        "cross-file rename (child closed, prewarm suppressed) must return edits — the production \
+         sync-before-query must sync the closed child's API surface",
+    );
+    assert!(
+        edit_touches(&ws_edit, &app),
+        "rename must edit the parent App.vue: {ws_edit:?}"
+    );
+    assert!(
+        edit_touches(&ws_edit, &child_uri),
+        "rename must edit the CLOSED child MyComp.vue carrier — with the prewarm suppressed this \
+         proves handle_rename's OWN sync-before-query synced the child: {ws_edit:?}"
+    );
+
+    // APPLY the edit on disk-read content and verify text changed in BOTH.
+    let app_before = read_file(&app);
+    let app_after = apply_edits(&ws_edit, &app, &app_before);
+    assert!(
+        app_after.contains("fooRenamed") && !app_after.contains(r#"foo="literal""#),
+        "App.vue must have the renamed prop applied:\n{app_after}"
+    );
+
+    let child_before = read_file(&child_uri);
+    let child_after = apply_edits(&ws_edit, &child_uri, &child_before);
+    assert!(
+        child_after.contains("fooRenamed"),
+        "MyComp.vue defineProps must contain the renamed prop:\n{child_after}"
+    );
+    // The ORIGINAL `foo:` prop declaration must be gone (renamed in place).
+    assert!(
+        !child_after.contains("foo: string"),
+        "MyComp.vue must no longer declare the original `foo: string` prop:\n{child_after}"
+    );
+
+    session.shutdown().await;
+}
+
+/// Whether a workspace edit contains any edit for `uri`.
+fn edit_touches(
+    ws_edit: &tower_lsp_server::ls_types::WorkspaceEdit,
+    uri: &tower_lsp_server::ls_types::Uri,
+) -> bool {
+    if let Some(changes) = &ws_edit.changes {
+        if changes.contains_key(uri) {
+            return true;
+        }
+    }
+    if let Some(tower_lsp_server::ls_types::DocumentChanges::Edits(doc_edits)) =
+        &ws_edit.document_changes
+    {
+        return doc_edits.iter().any(|e| &e.text_document.uri == uri);
+    }
+    false
+}
+
+/// Read the on-disk content for a fixture URI (works for a CLOSED file).
+fn read_file(uri: &tower_lsp_server::ls_types::Uri) -> String {
+    let path = crate::test_harness::RealProviderTestSession::uri_to_path(uri);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+/// Apply the workspace edit's text edits for `uri` to `source`, returning the
+/// new content. Edits are applied from the LATEST offset to the earliest so
+/// earlier-offset edits keep their positions valid.
+fn apply_edits(
+    ws_edit: &tower_lsp_server::ls_types::WorkspaceEdit,
+    uri: &tower_lsp_server::ls_types::Uri,
+    source: &str,
+) -> String {
+    use crate::documents::line_index::LineIndex;
+    use tower_lsp_server::ls_types::PositionEncodingKind;
+
+    let mut edits: Vec<tower_lsp_server::ls_types::TextEdit> = Vec::new();
+    if let Some(changes) = &ws_edit.changes {
+        if let Some(file_edits) = changes.get(uri) {
+            edits.extend(file_edits.iter().cloned());
+        }
+    }
+    if let Some(tower_lsp_server::ls_types::DocumentChanges::Edits(doc_edits)) =
+        &ws_edit.document_changes
+    {
+        for de in doc_edits {
+            if &de.text_document.uri == uri {
+                for e in &de.edits {
+                    if let tower_lsp_server::ls_types::OneOf::Left(te) = e {
+                        edits.push(te.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // The server emits ranges in the negotiated encoding; tests negotiate UTF-16.
+    let li = LineIndex::new(source, PositionEncodingKind::UTF16);
+    let mut spans: Vec<(u32, u32, String)> = edits
+        .into_iter()
+        .filter_map(|e| {
+            let start = li.position_to_offset(&e.range.start)?;
+            let end = li.position_to_offset(&e.range.end)?;
+            Some((start, end, e.new_text))
+        })
+        .collect();
+    // Apply from the end so earlier offsets stay valid.
+    spans.sort_by_key(|s| std::cmp::Reverse(s.0));
+    let mut out = source.to_string();
+    for (start, end, new_text) in spans {
+        out.replace_range(start as usize..end as usize, &new_text);
+    }
+    out
+}
 
 /// Count total text edits across all files in a workspace edit.
 fn count_edits(ws_edit: &tower_lsp_server::ls_types::WorkspaceEdit) -> usize {

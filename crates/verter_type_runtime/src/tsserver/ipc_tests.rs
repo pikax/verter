@@ -448,15 +448,69 @@ fn test_parse_tsserver_location_without_cache_reads_disk_content() {
 #[test]
 fn test_parse_tsserver_rename_span_with_content() {
     let content = "const x = 1;\nconst y = 2;";
+    let mut cache = HashMap::new();
+    cache.insert("d:/test/file.ts".to_string(), content.to_string());
     let span = serde_json::json!({
         "start": { "line": 2, "offset": 7 },
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_tsserver_rename_span(&span, "d:/test/file.ts", Some(content)).unwrap();
+    let parsed = parse_tsserver_rename_span(&span, "d:/test/file.ts", &cache).unwrap();
     assert_eq!(parsed.start, 19, "start should be byte offset");
     assert_eq!(parsed.end, 20, "end should be byte offset");
     assert!(parsed.start < 100, "must not be packed");
+}
+
+/// A cross-file rename span whose GROUP file is absent from the in-memory contents cache must
+/// resolve its byte offsets against THAT file's own on-disk content (the per-target disk
+/// fallback) — the SAME content-resolution `parse_tsserver_location` gives references and the
+/// tsgo rename path gives via `parse_range_to_offsets_with_disk_fallback`.
+///
+/// Discriminating regression for the dropped cross-file rename edit: the pre-fix code packed a
+/// 0-based `(line << 16) | col` sentinel on a cache miss, which the merge layer could not map to
+/// a real range — so the cross-file edit was silently dropped (incomplete rename). The renamed
+/// symbol sits on line 3 (1-based), NOT line 0, so a packed line:col fallback is unmistakably
+/// distinguishable from the real byte offset.
+#[test]
+fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "verter-tsserver-rename-disk-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let file_path = temp_root.join("child.ts");
+    let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
+    std::fs::write(&file_path, content).unwrap();
+    let file_key = file_path.to_string_lossy().replace('\\', "/");
+    // CACHE MISS for this path → forces the per-target disk fallback.
+    let cache = HashMap::new();
+
+    // tsserver positions are 1-based: `renamed` is on line 3, column 14.
+    let span = serde_json::json!({
+        "start": { "line": 3, "offset": 14 },
+        "end": { "line": 3, "offset": 21 },
+    });
+
+    let parsed = parse_tsserver_rename_span(&span, &file_key, &cache).unwrap();
+    let want_start = content.find("renamed").unwrap() as u32;
+    let want_end = want_start + "renamed".len() as u32;
+    assert_eq!(
+        (parsed.start, parsed.end),
+        (want_start, want_end),
+        "cross-file rename span must resolve against the target's own disk content (byte offsets \
+         {want_start}..{want_end}), not pack a line-0 sentinel — got {}..{}",
+        parsed.start,
+        parsed.end,
+    );
+    // Discriminating negative: the pre-fix packed fallback would be `(2 << 16) | 13`.
+    let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
+    assert_ne!(
+        parsed.start, packed_start,
+        "must NOT be the packed (line<<16)|col fallback (the dropped/corrupting path)"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
 }
 
 #[test]

@@ -1522,7 +1522,10 @@ impl TypeProvider for TsserverTypeProvider {
                 .await?;
 
             let locs = {
-                let cache = contents_cache.lock().await;
+                let guard = contents_cache.lock().await;
+                // Bind a `Copy` `&HashMap` so each per-target closure can capture the cache by
+                // shared reference (the `MutexGuard` itself is not `Copy`).
+                let cache: &HashMap<String, String> = &guard;
                 result
                     .get("locs")
                     .and_then(|v| v.as_array())
@@ -1536,16 +1539,14 @@ impl TypeProvider for TsserverTypeProvider {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or_default(),
                                 );
-                                let content = cache.get(&file_path).map(|s| s.as_str());
                                 group
                                     .get("locs")
                                     .and_then(|v| v.as_array())
                                     .into_iter()
                                     .flat_map(move |spans| {
                                         let fp = file_path.clone();
-                                        let c = content;
                                         spans.iter().filter_map(move |span| {
-                                            parse_tsserver_rename_span(span, &fp, c)
+                                            parse_tsserver_rename_span(span, &fp, cache)
                                         })
                                     })
                             })
@@ -2354,12 +2355,22 @@ pub fn parse_tsserver_location(
 
 /// Parse a tsserver rename span into a RenameLocation.
 ///
-/// When `content` is provided, converts 1-based tsserver positions to byte offsets.
-/// Otherwise, falls back to packed 0-based `(line << 16) | col` format.
+/// A tsserver rename response groups spans by file, so each span's REAL byte offset is into the
+/// GROUP's `file` — which may be a cross-file rename target the queried session never opened
+/// (e.g. an imported component's carrier or a `.ts` declaration). Resolve each span against THAT
+/// file's own content: the in-memory `contents_cache` first, then a per-target disk read on a
+/// cache miss — the SAME content-resolution [`parse_tsserver_location`] gives references /
+/// definition, and the tsgo rename path gives via `parse_range_to_offsets_with_disk_fallback`.
+///
+/// Without the disk fallback, a cross-file target absent from the cache packed a 0-based
+/// `(line << 16) | col` sentinel that the merge layer cannot map back to a real range — so the
+/// cross-file rename edit was silently DROPPED, leaving the rename incomplete (dangling
+/// references). The packed fallback survives only as the last resort when neither the cache nor
+/// disk has the content.
 pub fn parse_tsserver_rename_span(
     span: &serde_json::Value,
     file: &str,
-    content: Option<&str>,
+    contents_cache: &HashMap<String, String>,
 ) -> Option<RenameLocation> {
     let start = span.get("start")?;
     let end = span.get("end")?;
@@ -2367,6 +2378,14 @@ pub fn parse_tsserver_rename_span(
     let so = start.get("offset")?.as_u64()? as u32;
     let el = end.get("line")?.as_u64()? as u32;
     let eo = end.get("offset")?.as_u64()? as u32;
+
+    let disk_content;
+    let content = if let Some(content) = contents_cache.get(file) {
+        Some(content.as_str())
+    } else {
+        disk_content = std::fs::read_to_string(file).ok();
+        disk_content.as_deref()
+    };
 
     let (s, e) = if let Some(c) = content {
         (

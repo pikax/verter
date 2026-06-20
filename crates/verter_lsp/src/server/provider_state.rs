@@ -40,7 +40,49 @@ impl VerterLanguageServer {
             tsx_line_index,
             mapper,
             carrier_line_index: doc.line_index.clone(),
+            // The legacy IDE path keeps its in-context (negotiated-encoding)
+            // indexes; the API-only UTF-16→negotiated re-emission is opt-in.
+            carrier_negotiated_line_index: None,
         })
+    }
+
+    /// THE server-side record choke point for an API-surface sync.
+    ///
+    /// Records a fresh generation pinning the EXACT `api_code` synced under
+    /// `dts_path`, together with the source map parsed from the SAME content.
+    /// When the caller already holds the synced content's source map it passes it
+    /// in `source_map_json`; otherwise (`None`) the live `get_public_api()` map is
+    /// used ONLY when its code byte-matches `api_code`, so a snapshot never pairs
+    /// the synced offsets with a source map produced against drifted content.
+    pub(super) fn record_carrier_api_snapshot(
+        &self,
+        canonical_id: &str,
+        dts_path: &str,
+        api_code: &str,
+        source_map_json: Option<&str>,
+    ) {
+        let store = self.documents.provider_surfaces();
+        let host = self.documents.host();
+        match source_map_json {
+            Some(_) => crate::provider_surface_store::record_carrier_api_surface(
+                store,
+                Some(&self.documents),
+                host,
+                canonical_id,
+                dts_path,
+                api_code,
+                source_map_json,
+            ),
+            // No map in scope → use the live map only if it still matches content.
+            None => crate::provider_surface_store::record_carrier_api_surface_code_only(
+                store,
+                Some(&self.documents),
+                host,
+                canonical_id,
+                dts_path,
+                api_code,
+            ),
+        }
     }
 
     /// Pre-extracted data for type provider calls.
@@ -278,13 +320,38 @@ impl VerterLanguageServer {
             return;
         };
         for (kind, path) in paths {
+            // A closing API path is no longer the active synced virtual surface —
+            // retire its active generation under a fresh close EPOCH (historical
+            // snapshots stay valid for any in-flight rename that already captured
+            // them; the `Closing` state keeps the path classifying VirtualDrop
+            // until the provider close is CONFIRMED, so a failed close cannot let it
+            // degrade to NotVirtual and corrupt a same-named real file). Capture the
+            // epoch-stamped close token so the finalize is scoped to THIS close.
+            let close_token = if *kind == ProviderPathKind::Api {
+                Some(self.documents.provider_surfaces().forget(path))
+            } else {
+                None
+            };
             let result = match kind {
                 ProviderPathKind::Ide => sync.close_tsx(path).await,
                 ProviderPathKind::Api => sync.close_dts(path).await,
                 ProviderPathKind::Shadow => sync.close_file(path).await,
             };
-            if let Err(error) = result {
-                tracing::warn!("failed to close provider path {path}: {error}");
+            match result {
+                // Only a CONFIRMED API close finalizes, and only via THIS close's
+                // token — if the path was reopened (or retired again by a newer
+                // close) during the await, the epoch no longer matches and the
+                // finalize is a no-op (the fresh snapshot is preserved). On an error
+                // the token is dropped, so the `Closing` state persists (fail
+                // closed). Ide/Shadow are not carrier-API surfaces (token is None).
+                Ok(()) => {
+                    if let Some(token) = close_token {
+                        self.documents.provider_surfaces().finalize_close(token);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("failed to close provider path {path}: {error}");
+                }
             }
         }
     }

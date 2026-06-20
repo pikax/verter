@@ -39,7 +39,8 @@ pub use hover::merge_hover;
 
 pub(crate) use position::carrier_completion_member_boundary_offset;
 pub use position::{
-    carrier_position_to_tsx_offset, carrier_position_to_tsx_offset_validated,
-    tsx_range_to_carrier_range, BarrelResolver, ExternalIdeContext, ExternalIdeResolver,
+    api_surface_range_to_carrier_range, carrier_position_to_tsx_offset,
+    carrier_position_to_tsx_offset_validated, tsx_range_to_carrier_range, ApiSurfaceResolution,
+    BarrelResolver, ExternalApiResolver, ExternalIdeContext, ExternalIdeResolver,
     ExternalSourceReader,
 };

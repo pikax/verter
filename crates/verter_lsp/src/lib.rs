@@ -7,6 +7,7 @@ pub mod documents;
 pub mod extension_provider;
 pub mod features;
 pub mod project_resolver;
+pub mod provider_surface_store;
 pub mod provider_sync;
 pub mod server;
 pub mod statistics;
@@ -86,6 +87,18 @@ pub struct LspConfig {
     /// Sent to the extension via `$/verter/typeProviderStatus` so it can show a meaningful
     /// status bar warning (e.g., "Node.js not found", "TypeScript not installed").
     pub type_provider_none_reason: Option<String>,
+    /// TEST SEAM: when `true`, `did_open` does NOT eagerly prewarm an imported
+    /// child carrier's `{carrier}.ts` PUBLIC-API surface. Production leaves this
+    /// `false` (the prewarm makes hover/completion/go-to-def on `<ChildComponent>`
+    /// work immediately). With suppression on, the ONLY sync of a closed child's
+    /// API surface would come from INSIDE `handle_rename`'s own sync-before-query —
+    /// so this seam drives the WOULD-BE discriminator for that path. That lane is
+    /// currently `#[ignore]`'d: under tsserver the in-`handle_rename` sync opens the
+    /// child too late to join the parent's program (the Block H-membership
+    /// program-membership gap), so suppression does NOT prove `handle_rename`'s own
+    /// sync closes the closed child today — it pins the seam against which Block
+    /// H-membership is validated.
+    pub suppress_imported_carrier_prewarm: bool,
 }
 
 /// Controls what data `verter_lsp` sends to the type provider.

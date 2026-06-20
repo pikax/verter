@@ -3904,6 +3904,7 @@ dependencies = [
 name = "verter_lsp"
 version = "0.0.1-beta.1"
 dependencies = [
+ "blake3",
  "dashmap 6.2.1",
  "futures-util",
  "glob",

@@ -195,8 +195,13 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             .await;
         } else if snapshot.ownership_ready {
             // A genuinely non-open rune module is removed once ready.
-            clear_provider_sync_state(&deps.project_sync, &deps.provider_sync_states, canonical_id)
-                .await;
+            clear_provider_sync_state(
+                &deps.project_sync,
+                deps.documents.provider_surfaces(),
+                &deps.provider_sync_states,
+                canonical_id,
+            )
+            .await;
         }
         return;
     }
@@ -225,8 +230,13 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
             preserve_open_unresolved_carrier(deps, canonical_id, is_jsx, ide.as_ref()).await;
         } else if snapshot.ownership_ready {
-            clear_provider_sync_state(&deps.project_sync, &deps.provider_sync_states, canonical_id)
-                .await;
+            clear_provider_sync_state(
+                &deps.project_sync,
+                deps.documents.provider_surfaces(),
+                &deps.provider_sync_states,
+                canonical_id,
+            )
+            .await;
         }
         deps.pending_snapshot_provider_sync
             .insert(canonical_id.to_string());
@@ -293,6 +303,17 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 Ok(()) => {
                     committed_state.set_background_loaded(ProviderPathKind::Api, true);
                     synced_kinds.push(ProviderPathKind::Api);
+                    // Record a fresh generation pinning the EXACT content just
+                    // synced under this virtual path (the single choke point).
+                    crate::provider_surface_store::record_carrier_api_surface(
+                        deps.documents.provider_surfaces(),
+                        Some(&deps.documents),
+                        deps.documents.host(),
+                        canonical_id,
+                        &dts_path,
+                        &api.code,
+                        api.source_map.as_deref(),
+                    );
                 }
                 Err(e) => tracing::warn!("sync_coordinator: dts sync failed for {dts_path}: {e}"),
             }
@@ -308,7 +329,15 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         let genuinely_stale =
             genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
         commit_sync_transition(&deps.provider_sync_states, canonical_id, committed_state);
-        close_stale_paths(&deps.project_sync, &genuinely_stale).await;
+        // `close_stale_paths` retires any closed `Api` surface's active generation
+        // in the provider-surface store (forget), so a closed `{carrier}.ts` is
+        // never later vouched as current by a cross-file rename.
+        close_stale_paths(
+            &deps.project_sync,
+            deps.documents.provider_surfaces(),
+            &genuinely_stale,
+        )
+        .await;
     }
     // On total failure nothing is committed and nothing is closed: the previous
     // state + provider paths are retained intact.
@@ -363,32 +392,83 @@ async fn preserve_open_unresolved_carrier(
     let commit = open_unresolved_carrier_commit(previous.as_ref(), target, ide_synced);
     commit_sync_transition(&deps.provider_sync_states, canonical_id, commit.committed);
     if let Some(dropped) = commit.dropped_api {
-        close_stale_paths(&deps.project_sync, std::slice::from_ref(&dropped)).await;
+        close_stale_paths(
+            &deps.project_sync,
+            deps.documents.provider_surfaces(),
+            std::slice::from_ref(&dropped),
+        )
+        .await;
     }
     if let Some(stale) = commit.stale_ide_after_success {
-        close_stale_paths(&deps.project_sync, std::slice::from_ref(&stale)).await;
+        close_stale_paths(
+            &deps.project_sync,
+            deps.documents.provider_surfaces(),
+            std::slice::from_ref(&stale),
+        )
+        .await;
     }
 }
 
 async fn clear_provider_sync_state(
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
 ) {
     if let Some(state) = remove_sync_state(states, canonical_id) {
-        close_stale_paths(sync, &state.active_paths()).await;
+        close_stale_paths(sync, provider_surfaces, &state.active_paths()).await;
     }
 }
 
-async fn close_stale_paths(sync: &ProjectSync, stale_paths: &[(ProviderPathKind, String)]) {
+/// Close stale provider paths AND retire any closed `Api` surface's active
+/// generation in the provider-surface store.
+///
+/// A closed `{carrier}.ts` API path is no longer the active synced virtual
+/// surface: the store must `forget` it so a later cross-file rename's
+/// `current_snapshot()` does not VOUCH the now-closed generation as current
+/// (historical snapshots stay valid for any in-flight rename that already
+/// captured them — `forget` only retires the active generation). This mirrors the
+/// sibling [`crate::background_drain::close_stale_provider_paths`]; the
+/// coordinator MUST forget too, or a coordinator-driven close leaves the store
+/// vouching a stale surface (the fail-closed invariant relies on this).
+async fn close_stale_paths(
+    sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+    stale_paths: &[(ProviderPathKind, String)],
+) {
     for (kind, path) in stale_paths {
+        // Retire the closing API surface under a fresh close EPOCH (see the sibling
+        // `background_drain::close_stale_provider_paths`): the `Closing` state keeps
+        // the path classifying VirtualDrop until the provider close is CONFIRMED, so
+        // a failed close cannot let it degrade to NotVirtual and corrupt a real
+        // file. Capture the epoch-stamped token so the finalize is scoped to THIS
+        // close.
+        let close_token = if *kind == ProviderPathKind::Api {
+            Some(provider_surfaces.forget(path))
+        } else {
+            None
+        };
         let result = match kind {
             ProviderPathKind::Ide => sync.close_tsx(path).await,
             ProviderPathKind::Api => sync.close_dts(path).await,
             ProviderPathKind::Shadow => sync.close_file(path).await,
         };
-        if let Err(error) = result {
-            tracing::warn!("sync_coordinator: failed to close stale provider path {path}: {error}");
+        match result {
+            // Only a CONFIRMED API close finalizes, and only via THIS close's token —
+            // a reopen (or newer close) during the await makes the epoch mismatch and
+            // the finalize a no-op (the fresh snapshot survives). An error drops the
+            // token, leaving the `Closing` state (fail closed). Ide/Shadow have no
+            // token.
+            Ok(()) => {
+                if let Some(token) = close_token {
+                    provider_surfaces.finalize_close(token);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "sync_coordinator: failed to close stale provider path {path}: {error}"
+                );
+            }
         }
     }
 }
@@ -766,7 +846,8 @@ mod tests {
             },
         );
 
-        close_stale_paths(&sync, &transition.stale_paths).await;
+        let provider_surfaces = crate::provider_surface_store::ProviderSurfaceStore::new();
+        close_stale_paths(&sync, &provider_surfaces, &transition.stale_paths).await;
         commit_sync_transition(&states, "/workspace/src/App.vue", transition.next);
 
         let calls = mock.file_sync_calls();
@@ -802,6 +883,68 @@ mod tests {
                 "/workspace/tsconfig.new.json".to_string()
             ),
             "committed state should have the new owner binding"
+        );
+    }
+
+    /// H2 (stale false-vouch): the coordinator's `close_stale_paths` MUST `forget`
+    /// a closed `Api` surface in the provider-surface store. Otherwise the store
+    /// keeps vouching the closed `{carrier}.ts` generation as CURRENT, and a later
+    /// cross-file rename's `current_snapshot()` maps a returned offset through a
+    /// STALE surface — the fail-closed invariant the store exists to guarantee.
+    ///
+    /// Discriminating: it records an `Api` `CarrierApi` snapshot (so the path is
+    /// tracked), drives `close_stale_paths` with that path as a stale `Api` path,
+    /// and asserts the store NO LONGER tracks it. Against the pre-fix
+    /// `close_stale_paths` (which only `close_dts`'d and never `forget`'d) the path
+    /// stays tracked and the assertion FAILS; after the fix it is forgotten.
+    #[tokio::test]
+    async fn close_stale_paths_forgets_closed_api_surface_in_store() {
+        use crate::provider_surface_store::{
+            ProviderSurfaceKind, ProviderSurfaceStore, RecordSurface,
+        };
+
+        let mock = MockTypeProvider::new();
+        let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
+        let provider_surfaces = ProviderSurfaceStore::new();
+
+        // Record a CarrierApi snapshot under the API path → the store tracks it.
+        let api_path = "/workspace/src/Child.vue.ts";
+        provider_surfaces.record(RecordSurface {
+            provider_path: api_path.to_string(),
+            kind: ProviderSurfaceKind::CarrierApi,
+            source_canonical: "/workspace/src/Child.vue".to_string(),
+            provider_content: Arc::from(
+                "declare const Child: { new(props?: { foo: string }): {} }",
+            ),
+            source_map: None,
+            carrier_source: Arc::from(
+                "<script setup lang=\"ts\">\ndefineProps<{ foo: string }>();\n</script>\n",
+            ),
+        });
+        assert!(
+            provider_surfaces.is_tracked(api_path),
+            "precondition: the recorded API surface is tracked before close"
+        );
+
+        // Drive the coordinator close path with the API path stale.
+        let stale_paths = vec![(ProviderPathKind::Api, api_path.to_string())];
+        close_stale_paths(&sync, &provider_surfaces, &stale_paths).await;
+
+        // The provider close still happened (behavior preserved)...
+        let calls = mock.file_sync_calls();
+        assert_eq!(calls.len(), 1, "the API path should be closed once");
+        assert!(
+            matches!(&calls[0], MockCall::CloseFile { path } if path == api_path),
+            "the stale close should target the API path: {:?}",
+            calls[0]
+        );
+
+        // ...AND the store must have forgotten it — no current generation vouches
+        // the now-closed surface to a later cross-file rename.
+        assert!(
+            !provider_surfaces.is_tracked(api_path),
+            "close_stale_paths must forget a closed Api surface so it is no longer vouched as \
+             current; a still-tracked surface would false-vouch a stale generation to a rename"
         );
     }
 

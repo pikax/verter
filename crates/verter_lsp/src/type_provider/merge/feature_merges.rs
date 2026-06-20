@@ -13,10 +13,13 @@ use crate::type_provider::protocol::{
 };
 
 use super::definition::{
-    is_carrier_ide_path, normalize_carrier_path, path_to_uri, resolve_carrier_tsx_range,
-    resolve_external_target_range,
+    is_carrier_api_path, is_carrier_ide_path, normalize_carrier_path, path_to_uri,
+    resolve_carrier_tsx_range, resolve_external_target_range,
 };
-use super::position::{tsx_range_to_carrier_range, ExternalIdeResolver, ExternalSourceReader};
+use super::position::{
+    api_surface_range_to_carrier_range, tsx_range_to_carrier_range, ApiSurfaceResolution,
+    ExternalApiResolver, ExternalIdeResolver, ExternalSourceReader,
+};
 
 // ── References merge ────────────────────────────────────────────────
 
@@ -123,8 +126,15 @@ pub fn merge_references(
 /// Strategy:
 /// - Start with verter's same-file WorkspaceEdit.
 /// - Add TypeProvider's cross-file rename locations as additional TextEdits.
-/// - A carrier IDE target maps its TSX byte offsets back to the carrier source through the
-///   sourcemap (in-context mapper / external resolver).
+/// - A carrier IDE target (`{carrier}.tsx`/`.jsx`) maps its TSX byte offsets back to the carrier
+///   source through that file's CodeTransform sourcemap (in-context mapper / external resolver).
+/// - A carrier PUBLIC-API target (`{carrier}.ts`) — the surface where an imported component's
+///   `defineProps<{ … }>` props are lifted into the `$props` / `new(props?)` declaration — maps its
+///   API-surface byte offsets back to the carrier source through that surface's own CodeTransform
+///   sourcemap (the `external_api_resolver`). This is THE common cross-file `.vue` prop-rename case:
+///   tsserver reports the renamed prop against the child component's `{carrier}.ts`, and without
+///   this branch the edit was dropped by carrier-path normalization → the rename touched only the
+///   queried file (an incomplete rename = dangling references).
 /// - Every other target's `start`/`end` are REAL byte offsets into that file: read its own source
 ///   through the host VFS (`source_reader`) and convert to a line:col `Range` in the negotiated
 ///   `encoding`, exactly as the definition / references merges do.
@@ -134,7 +144,7 @@ pub fn merge_references(
 #[allow(clippy::mutable_key_type)]
 #[expect(
     clippy::too_many_arguments,
-    reason = "rename merging needs the mapper, indexes, resolver, encoding, and VFS reader"
+    reason = "rename merging needs the mapper, indexes, IDE+API resolvers, encoding, and VFS reader"
 )]
 pub fn merge_rename_locations(
     verter_edit: Option<WorkspaceEdit>,
@@ -144,6 +154,7 @@ pub fn merge_rename_locations(
     mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
+    external_api_resolver: Option<ExternalApiResolver<'_>>,
     carrier_source_exists: &dyn Fn(&str) -> bool,
     negotiated_encoding: PositionEncodingKind,
     source_reader: ExternalSourceReader<'_>,
@@ -182,6 +193,95 @@ pub fn merge_rename_locations(
                         range,
                         new_text: new_name.to_string(),
                     });
+                }
+            }
+            continue;
+        }
+
+        // Carrier PUBLIC-API target (`{carrier}.ts`, e.g. `Child.vue.ts`): tsserver reports a
+        // cross-file Vue prop rename against the imported component's macro-derived public-API
+        // surface, whose offsets must map back onto the `.vue` source through that surface's
+        // CodeTransform source map.
+        //
+        // Classification is the resolver's job, not the suffix's. The `external_api_resolver` is
+        // identity-gated against the IN-MEMORY synced-virtual-API set and returns a 3-state
+        // [`ApiSurfaceResolution`]; the suffix predicate only decides whether to CONSULT it.
+        // A bare `Option` could not distinguish "not a virtual surface" from "a known virtual
+        // surface we can no longer map" — and the second case, falling through to the real-file
+        // branch below, would edit a same-named real file with VIRTUAL offsets and corrupt it.
+        // The three outcomes:
+        //
+        //   1. `Vouched(ctx)` → map the API-surface offsets onto the `.vue` carrier via the API
+        //      source map (UTF-16 lookup re-emitted in the negotiated encoding). A vouched surface
+        //      whose offsets fail to map is DROPPED (fail closed) — never line-0'd into the `.vue`.
+        //   2. `VirtualDrop` → a known virtual surface whose generation was superseded/retired or
+        //      whose snapshot has no source map: its offsets index VIRTUAL content, so DROP (fail
+        //      closed). NEVER reach the real-file branch (that is the corruption guard).
+        //   3. `NotVirtual` → not a virtual surface; the offsets index this exact path's REAL file
+        //      (a hand-written `Child.vue.ts` next to `Child.vue`): edit it IN PLACE (read its own
+        //      source). Nothing is mapped into the `.vue`. A path with no real backing file then
+        //      reads back `None` and the edit is dropped (fail closed).
+        if is_carrier_api_path(&loc.path, carrier_source_exists) {
+            match external_api_resolver
+                .map(|resolver| resolver(&loc.path))
+                .unwrap_or(ApiSurfaceResolution::NotVirtual)
+            {
+                ApiSurfaceResolution::Vouched(ctx) => {
+                    // Outcome 1: vouched virtual surface. The negotiated carrier index is mandatory
+                    // — it re-emits the UTF-16 source-map result in the negotiated encoding.
+                    if let Some(range) =
+                        ctx.carrier_negotiated_line_index.as_ref().and_then(|neg| {
+                            api_surface_range_to_carrier_range(
+                                loc.start,
+                                loc.end,
+                                &ctx.tsx_line_index,
+                                &ctx.mapper,
+                                &ctx.carrier_line_index,
+                                neg,
+                            )
+                        })
+                    {
+                        let carrier_path = normalize_carrier_path(&loc.path, carrier_source_exists);
+                        if let Some(uri) = path_to_uri(carrier_path) {
+                            let edits = changes.entry(uri).or_default();
+                            let dup = edits.iter().any(|e| e.range.start == range.start);
+                            if !dup {
+                                edits.push(TextEdit {
+                                    range,
+                                    new_text: new_name.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    // Vouched-but-unmappable falls through here → DROP (fail closed).
+                }
+                ApiSurfaceResolution::VirtualDrop => {
+                    // Outcome 2: known virtual surface, no safe mapping → DROP. Crucially do NOT
+                    // fall through to the real-file branch: the offsets are virtual and a
+                    // same-named real file at this path would be corrupted.
+                }
+                ApiSurfaceResolution::NotVirtual => {
+                    // Outcome 3: not the virtual surface. If a REAL file backs this exact path, the
+                    // offsets index IT: edit it in place (never map into the `.vue`). Otherwise the
+                    // readback returns `None` and the edit is dropped (fail closed).
+                    if let Some(range) = resolve_external_target_range(
+                        &loc.path,
+                        loc.start,
+                        loc.end,
+                        negotiated_encoding.clone(),
+                        source_reader,
+                    ) {
+                        if let Some(uri) = path_to_uri(&loc.path) {
+                            let edits = changes.entry(uri).or_default();
+                            let dup = edits.iter().any(|e| e.range.start == range.start);
+                            if !dup {
+                                edits.push(TextEdit {
+                                    range,
+                                    new_text: new_name.to_string(),
+                                });
+                            }
+                        }
+                    }
                 }
             }
             continue;

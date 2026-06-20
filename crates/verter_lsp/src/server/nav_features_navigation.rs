@@ -613,6 +613,17 @@ pub(super) async fn handle_rename(
         return Ok(None);
     }
 
+    // PRODUCTION sync-before-query: the cross-file rename declaration surfaces via
+    // the imported component's `{carrier}.ts` PUBLIC-API surface, which the
+    // provider must already hold before the query. Peer navigation handlers
+    // (`handle_goto_definition`) sync first; rename MUST too, or a closed child
+    // carrier's API surface is never live and the rename drops the child edit.
+    // Run BEFORE the fence so the sync's own provider commands are written, then
+    // pin the resulting generations under the fence.
+    if !server.is_self_file_projection(uri) {
+        server.ensure_provider_synced(uri).await;
+    }
+
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
@@ -654,11 +665,51 @@ pub(super) async fn handle_rename(
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                 ) {
+                    // FENCE: hold the provider fence across snapshot-capture →
+                    // query → response so the captured carrier-API generations are
+                    // the generations the provider's offsets are interpreted
+                    // against, with no concurrent rename transaction interleaving
+                    // its own surface mutations mid-capture.
+                    let _fence = server.rename_provider_fence.lock().await;
+
+                    // Capture the immutable carrier-API snapshot set BEFORE the
+                    // query. A returned `{carrier}.ts` location maps ONLY against
+                    // the snapshot captured here for that exact path + generation;
+                    // a path absent from the set, or whose generation was later
+                    // superseded by a racing background sync, fails closed (drop).
+                    let query_snapshot = server
+                        .documents
+                        .provider_surfaces()
+                        .capture_current_carrier_api_set();
+
                     if let Ok(type_locs) = tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await
                     {
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let negotiated_encoding = server.position_encoding.read().clone();
+                        let api_resolver = |api_path: &str| {
+                            // 3-state classification — the fail-closed distinction a bare `Option`
+                            // could not make — routed through the single store-owned policy
+                            // `classify_captured_api_surface`, which reads ONLY the captured snapshot
+                            // pinned above (ZERO live-store reads between capture and merge):
+                            //   • captured Current (CarrierApi at capture) + context builds → Vouched
+                            //     (map onto the `.vue` through THAT captured generation's source map).
+                            //   • captured Current but no source map → VirtualDrop (fail closed).
+                            //   • captured KnownNonMappable (Closing at capture, or a non-CarrierApi
+                            //     Current) → VirtualDrop. The store knew the path as virtual; its
+                            //     offsets index VIRTUAL content. Capturing the Closing state here (the
+                            //     prior capture skipped it, forcing a live re-consult) closes the
+                            //     third TOCTOU: a background close `finalize_close`ing the path AFTER
+                            //     capture but BEFORE classify can no longer flip it to NotVirtual and
+                            //     corrupt a same-named real `{carrier}.ts`.
+                            //   • ABSENT from the capture → NotVirtual (a genuinely real same-named
+                            //     file the store did not know as virtual; edit it in place).
+                            crate::provider_surface_store::classify_captured_api_surface(
+                                &query_snapshot,
+                                api_path,
+                                negotiated_encoding.clone(),
+                            )
+                        };
                         return Ok(merge::merge_rename_locations(
                             verter_result,
                             type_locs,
@@ -667,8 +718,9 @@ pub(super) async fn handle_rename(
                             &ctx.mapper,
                             &ctx.carrier_line_index,
                             Some(&|ide_path: &str| server.external_ide_context(ide_path)),
+                            Some(&api_resolver),
                             &carrier_source_exists,
-                            negotiated_encoding,
+                            negotiated_encoding.clone(),
                             &|p: &str| {
                                 block_in_place_if_available(|| {
                                     server.documents.host().workspace_read().read_file(p)

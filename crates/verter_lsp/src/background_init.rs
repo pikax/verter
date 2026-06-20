@@ -346,6 +346,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             project_sync: project_sync.clone(),
             vfs_workspace: Arc::clone(&vfs_workspace),
             provider_sync_states: Arc::clone(&provider_sync_states),
+            provider_surfaces: documents.provider_surfaces().clone(),
             is_tsgo,
             tsx_profile: tsx_profile.read().clone(),
             tsconfig_patterns: Vec::new(),

@@ -1475,6 +1475,7 @@ fn merge_rename_verter_only() {
         &mapper,
         &carrier_li,
         None,
+        None,
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
@@ -1493,6 +1494,7 @@ fn merge_rename_neither() {
         &tsx_li,
         &mapper,
         &carrier_li,
+        None,
         None,
         &carrier_exists,
         PositionEncodingKind::UTF16,
@@ -1850,7 +1852,7 @@ fn merge_definitions_prefers_verter_same_file_over_type_provider() {
 /// A source reader that resolves nothing — every external target fails closed (dropped).
 /// Used by merge tests whose external fixtures only need to verify the carrier / fail-closed
 /// branches; the readback-line:col behavior has its own boundary suite
-/// (`tests/repro_external_refs_rename_line.rs`).
+/// (`tests/cross_file_navigation_ranges_fail_closed.rs`).
 fn no_source(_: &str) -> Option<Arc<str>> {
     None
 }
@@ -2075,6 +2077,344 @@ fn merge_references_vue_dts_is_dropped_not_zeroed() {
     );
 }
 
+/// FIX 3 (merge boundary): a REAL on-disk `{carrier}.ts` (here `Child.vue.ts` alongside an existing
+/// `Child.vue`) whose `is_carrier_api_path` SUFFIX predicate matches, but for which the
+/// identity-gated `external_api_resolver` DECLINES (it is NOT the synced virtual API surface), is
+/// edited IN PLACE as a normal file — its rename edit lands in `Child.vue.ts` at the REAL symbol
+/// span, and NOTHING is mapped into `Child.vue`. This discriminates the suffix-only classification
+/// that would have mapped the real file's offsets into the `.vue` and corrupted it.
+#[test]
+fn merge_rename_real_on_disk_carrier_ts_edits_in_place_never_maps_into_vue() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // A REAL, hand-written `Child.vue.ts` next to `Child.vue`. The renamed symbol sits on line 1.
+    let real_ts = "// hand-written sidecar\nexport const childHelper = 1\n";
+    let off = real_ts.find("childHelper").unwrap() as u32;
+    let real_path = "/src/Child.vue.ts".to_string();
+    let reader_path = real_path.clone();
+    let real_content: Arc<str> = Arc::from(real_ts);
+    let read_source = move |p: &str| (p == reader_path.as_str()).then(|| real_content.clone());
+
+    // `Child.vue` exists → `is_carrier_api_path("/src/Child.vue.ts")` is true (suffix+exists).
+    let carrier_source_exists = |p: &str| p == "/src/Child.vue";
+
+    // The identity-gated API resolver DECLINES this path: it is not the synced virtual surface.
+    let api_resolver = |_p: &str| ApiSurfaceResolution::NotVirtual;
+
+    let type_locations = vec![RenameLocation {
+        path: real_path.clone(),
+        start: off,
+        end: off + "childHelper".len() as u32,
+    }];
+
+    let result = merge_rename_locations(
+        None,
+        type_locations,
+        "childHelperRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &carrier_source_exists,
+        PositionEncodingKind::UTF16,
+        &read_source,
+    );
+
+    let edit = result.expect("the real-file rename edit must be produced in place, not dropped");
+    let changes = edit.changes.expect("changes map");
+
+    // NOTHING is mapped into `Child.vue` — the corruption the suffix-only classifier would cause.
+    let vue_uri = path_to_uri("/src/Child.vue").unwrap();
+    assert!(
+        !changes.contains_key(&vue_uri),
+        "a real on-disk Child.vue.ts must NEVER produce an edit in Child.vue: {changes:?}"
+    );
+
+    // The edit lands in the REAL `Child.vue.ts` at the real symbol line (1), never line 0.
+    let real_uri = path_to_uri(&real_path).unwrap();
+    let edits = changes
+        .get(&real_uri)
+        .unwrap_or_else(|| panic!("rename must edit the real {real_path} in place"));
+    assert_eq!(
+        edits.len(),
+        1,
+        "exactly one in-place edit in the real .vue.ts"
+    );
+    assert_eq!(
+        edits[0].range.start.line, 1,
+        "real-file rename edit must resolve to the real symbol line, not line 0: {:?}",
+        edits[0].range
+    );
+    assert_eq!(edits[0].new_text, "childHelperRenamed");
+    assert_ne!(edits[0].range, Range::default());
+}
+
+/// A cross-file `{carrier}.ts` PUBLIC-API rename target (the common case: tsserver renames an
+/// imported component's `defineProps` prop and reports the edit against `Child.vue.ts`, where the
+/// prop type is lifted into the `$props` / `new(props?)` declaration) maps its API-surface byte
+/// offsets back to the `.vue` source through the API surface's CodeTransform sourcemap (the
+/// `external_api_resolver`) and is INCLUDED at the resolved carrier range.
+///
+/// This is THE root-cause regression for the dropped cross-file `.vue` prop rename: without the
+/// API branch, `Child.vue.ts` fell through to the external branch, where `normalize_carrier_path`
+/// rewrote it to `Child.vue` (≠ original) → the edit was dropped → the rename touched only the
+/// queried file. The mapped prop sits on carrier line 1, so a faithful resolve lands on line 1 —
+/// discriminating against both the drop (no edit) and a line-0 collapse.
+#[test]
+fn merge_rename_carrier_api_target_maps_via_api_sourcemap_and_is_included() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // The foreign component's `.vue` source: `foo` prop on line 1.
+    let api_carrier_source =
+        "<script setup lang=\"ts\">\ndefineProps<{ foo: string }>();\n</script>\n";
+    // Its generated public-API surface: the prop type `{ foo: string }` is inlined; `foo` is the
+    // renamed identifier. Model a minimal API surface whose `foo` is on provider line 0.
+    let api_surface = "declare const Child: { new(props?: { foo: string }): {} }\n";
+    let api_foo = api_surface.find("foo").unwrap() as u32; // provider byte offset of `foo`
+    let carrier_foo_line = 1u32;
+    let carrier_foo_col = api_carrier_source
+        .lines()
+        .nth(1)
+        .unwrap()
+        .find("foo")
+        .unwrap() as u32; // carrier col of `foo` on line 1
+
+    // API-surface sourcemap: provider `foo` position → carrier `foo` position.
+    let (api_foo_line, api_foo_col) = {
+        let before = &api_surface[..api_foo as usize];
+        let line = before.matches('\n').count() as u32;
+        let col = api_foo - before.rfind('\n').map(|i| i as u32 + 1).unwrap_or(0);
+        (line, col)
+    };
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Child.vue", api_carrier_source);
+    builder.add_token(
+        api_foo_line,
+        api_foo_col,
+        carrier_foo_line,
+        carrier_foo_col,
+        Some(source_id),
+        None,
+    );
+    let api_json = builder.into_sourcemap().to_json_string();
+    let api_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&api_json).unwrap());
+    let api_provider_li = LineIndex::new_utf16(api_surface);
+    let api_carrier_li = LineIndex::new_utf16(api_carrier_source);
+
+    // `is_carrier_api_path` requires `path_is_carrier(strip ".ts")` AND the carrier source to exist.
+    let api_path = "/src/Child.vue.ts".to_string();
+    let carrier_source_exists = |p: &str| p == "/src/Child.vue";
+
+    let type_locations = vec![RenameLocation {
+        path: api_path.clone(),
+        start: api_foo,
+        end: api_foo + 3,
+    }];
+
+    // The API resolver hands back the foreign API context for this `{carrier}.ts` path only.
+    let api_resolver = |p: &str| -> ApiSurfaceResolution {
+        if p == api_path {
+            ApiSurfaceResolution::Vouched(ExternalIdeContext {
+                tsx_line_index: api_provider_li.clone(),
+                mapper: api_mapper.clone(),
+                carrier_line_index: api_carrier_li.clone(),
+                // UTF-16-negotiated session: the negotiated carrier index is the same
+                // UTF-16 index, so the re-emission round-trip is the identity.
+                carrier_negotiated_line_index: Some(api_carrier_li.clone()),
+            })
+        } else {
+            ApiSurfaceResolution::NotVirtual
+        }
+    };
+
+    // WITHOUT the API resolver: the `{carrier}.ts` target is dropped (fail-closed) — proving the
+    // resolver is what bridges it, never the current-file `.tsx` mapper.
+    let dropped = merge_rename_locations(
+        None,
+        type_locations.clone(),
+        "fooRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        None,
+        &carrier_source_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    assert!(
+        dropped.is_none(),
+        "a carrier API target with no API resolver must be DROPPED, never line-0'd: {dropped:?}"
+    );
+
+    // WITH the API resolver: the edit is included at the mapped carrier range (line 1).
+    let result = merge_rename_locations(
+        None,
+        type_locations,
+        "fooRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &carrier_source_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+
+    let edit = result.expect("carrier API rename edit must be produced, not dropped");
+    let changes = edit.changes.expect("changes map");
+    let uri = path_to_uri("/src/Child.vue").unwrap();
+    let edits = changes
+        .get(&uri)
+        .unwrap_or_else(|| panic!("rename must map the API target to the .vue carrier source"));
+    assert_eq!(
+        edits.len(),
+        1,
+        "exactly one edit at the mapped carrier prop"
+    );
+    assert_eq!(
+        edits[0].range.start.line, carrier_foo_line,
+        "API-surface offset must map to the carrier prop line, not line 0: {:?}",
+        edits[0].range
+    );
+    assert_eq!(edits[0].range.start.character, carrier_foo_col);
+    assert_eq!(edits[0].new_text, "fooRenamed");
+    assert_ne!(
+        edits[0].range,
+        Range::default(),
+        "carrier API rename edit must never be the (0,0) line-0 placeholder"
+    );
+}
+
+/// FIX 1 (encoding boundary): under a UTF-8-negotiated session, a carrier-API prop rename whose
+/// carrier line begins with NON-ASCII text resolves to the CORRECT carrier range.
+///
+/// The API surface's `CodeTransform` source map indexes positions in UTF-16, while the LSP edit
+/// range must be in the negotiated (UTF-8) encoding. When the carrier line has multibyte text
+/// before the prop, the UTF-16 column (what the source map produces) DIFFERS from the UTF-8 column
+/// (what the editor expects). The encoding-correct path runs the source-map lookup in UTF-16, then
+/// re-emits the mapped range in UTF-8 via a byte-offset round-trip. This test asserts the returned
+/// column equals the UTF-8 byte column of the prop — which is STRICTLY GREATER than its UTF-16
+/// column here — so it FAILS against feeding negotiated columns into the UTF-16 map / returning the
+/// UTF-16 column verbatim as a UTF-8 LSP position.
+#[test]
+fn merge_rename_carrier_api_target_utf8_session_nonascii_prefix_maps_correct_range() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // Carrier `.vue`: line 1 begins with a multibyte identifier (`café` — `é` is 2 bytes / 1 UTF-16
+    // unit) BEFORE the renamed `foo`, so `foo`'s UTF-8 column != its UTF-16 column.
+    let api_carrier_source =
+        "<script setup lang=\"ts\">\nconst café = defineProps<{ foo: string }>();\n</script>\n";
+    let line1 = api_carrier_source.lines().nth(1).unwrap();
+    let foo_byte_in_line = line1.find("foo").unwrap() as u32;
+    // UTF-8 column = byte offset within the line (line is ASCII except `é` = 2 bytes before `foo`).
+    let want_utf8_col = foo_byte_in_line;
+    // UTF-16 column = code units before `foo` (`é` counts as 1, vs 2 bytes), so strictly smaller.
+    let want_utf16_col = line1[..foo_byte_in_line as usize]
+        .chars()
+        .map(|c| c.len_utf16() as u32)
+        .sum::<u32>();
+    assert!(
+        want_utf8_col > want_utf16_col,
+        "fixture precondition: the multibyte prefix must make the UTF-8 col ({want_utf8_col}) \
+         exceed the UTF-16 col ({want_utf16_col})"
+    );
+
+    // API surface (provider side): `foo` is the renamed identifier, ASCII-only so its provider
+    // byte offset is unambiguous.
+    let api_surface = "declare const Child: { new(props?: { foo: string }): {} }\n";
+    let api_foo = api_surface.find("foo").unwrap() as u32;
+
+    // Source map: API `foo` (UTF-16) → carrier `foo` (UTF-16 col on line 1).
+    let (api_foo_line, api_foo_col) = {
+        let before = &api_surface[..api_foo as usize];
+        let line = before.matches('\n').count() as u32;
+        let col = api_foo - before.rfind('\n').map(|i| i as u32 + 1).unwrap_or(0);
+        (line, col)
+    };
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Child.vue", api_carrier_source);
+    builder.add_token(
+        api_foo_line,
+        api_foo_col,
+        1,
+        want_utf16_col,
+        Some(source_id),
+        None,
+    );
+    let api_json = builder.into_sourcemap().to_json_string();
+    let api_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&api_json).unwrap());
+
+    // The encoding contract: provider-surface + carrier indexes in UTF-16 (source-map space); the
+    // negotiated carrier index in UTF-8 for the final re-emission.
+    let api_provider_li = LineIndex::new_utf16(api_surface);
+    let api_carrier_utf16_li = LineIndex::new_utf16(api_carrier_source);
+    let api_carrier_utf8_li = LineIndex::new(api_carrier_source, PositionEncodingKind::UTF8);
+
+    let api_path = "/src/Child.vue.ts".to_string();
+    let carrier_source_exists = |p: &str| p == "/src/Child.vue";
+    let type_locations = vec![RenameLocation {
+        path: api_path.clone(),
+        start: api_foo,
+        end: api_foo + 3,
+    }];
+
+    let api_resolver = |p: &str| -> ApiSurfaceResolution {
+        if p == api_path {
+            ApiSurfaceResolution::Vouched(ExternalIdeContext {
+                tsx_line_index: api_provider_li.clone(),
+                mapper: api_mapper.clone(),
+                carrier_line_index: api_carrier_utf16_li.clone(),
+                carrier_negotiated_line_index: Some(api_carrier_utf8_li.clone()),
+            })
+        } else {
+            ApiSurfaceResolution::NotVirtual
+        }
+    };
+
+    let result = merge_rename_locations(
+        None,
+        type_locations,
+        "fooRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &carrier_source_exists,
+        PositionEncodingKind::UTF8, // ← UTF-8-negotiated session
+        &no_source,
+    );
+
+    let edit = result.expect("carrier API rename edit must be produced under a UTF-8 session");
+    let changes = edit.changes.expect("changes map");
+    let uri = path_to_uri("/src/Child.vue").unwrap();
+    let edits = changes
+        .get(&uri)
+        .unwrap_or_else(|| panic!("rename must map the API target to the .vue carrier source"));
+    assert_eq!(edits.len(), 1);
+    assert_eq!(
+        edits[0].range.start.line, 1,
+        "mapped to carrier prop line 1"
+    );
+    assert_eq!(
+        edits[0].range.start.character, want_utf8_col,
+        "the edit column must be the UTF-8 byte column ({want_utf8_col}), NOT the UTF-16 column \
+         ({want_utf16_col}) — an encoding-mismatched mapping returns the wrong (in-bounds) range \
+         and corrupts the .vue: {:?}",
+        edits[0].range
+    );
+    assert_ne!(
+        edits[0].range.start.character, want_utf16_col,
+        "discriminator: the UTF-8 column must differ from the UTF-16 column for this fixture"
+    );
+    assert_eq!(edits[0].new_text, "fooRenamed");
+}
+
 /// A `{carrier}.d.ts` rename location is FAIL-CLOSED, not line-0'd — a line-0 rename edit would
 /// corrupt the carrier file. Same reasoning as the references twin above.
 #[test]
@@ -2095,6 +2435,7 @@ fn merge_rename_vue_dts_is_dropped_not_zeroed() {
         &mapper,
         &carrier_li,
         None,
+        None,
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
@@ -2104,6 +2445,332 @@ fn merge_rename_vue_dts_is_dropped_not_zeroed() {
         "a {{carrier}}.d.ts rename whose offsets have no carrier sourcemap must be dropped, not \
          emitted at line 0: {result:?}"
     );
+}
+
+/// FIX 2 (merge boundary): a carrier-API rename whose API surface is NOT YET SYNCED (the
+/// identity-gated resolver DECLINES) and which has NO real on-disk backing file is DROPPED
+/// (fail-closed) — never mapped through a fresh source map at a guessed range.
+///
+/// This models the staleness window: the resolver is the authority on whether the surface is the
+/// currently-synced virtual surface; when it declines and the source reader resolves nothing, the
+/// edit must be dropped rather than line-0'd into the `.vue`.
+#[test]
+fn merge_rename_carrier_api_unsynced_surface_no_backing_file_is_dropped() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // `Child.vue` exists → `is_carrier_api_path` matches the suffix; but the surface is NOT synced
+    // (resolver declines as NotVirtual) and there is NO real `Child.vue.ts` on disk (reader returns
+    // None).
+    let carrier_source_exists = |p: &str| p == "/src/Child.vue";
+    let api_resolver = |_p: &str| ApiSurfaceResolution::NotVirtual;
+
+    let type_locations = vec![RenameLocation {
+        path: "/src/Child.vue.ts".to_string(),
+        start: 30,
+        end: 33,
+    }];
+
+    let result = merge_rename_locations(
+        None,
+        type_locations,
+        "fooRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &carrier_source_exists,
+        PositionEncodingKind::UTF16,
+        &no_source, // no real backing file
+    );
+
+    assert!(
+        result.is_none(),
+        "an unsynced carrier-API surface with no backing file must be DROPPED (fail closed), never \
+         mapped at a guessed range: {result:?}"
+    );
+}
+
+/// H1 (corruption): a captured-but-SUPERSEDED virtual `{carrier}.ts` surface (the resolver
+/// returns `VirtualDrop` — it WAS a synced virtual surface, but its generation was retired or its
+/// snapshot has no source map) MUST fail closed, even when a REAL on-disk file backs that EXACT
+/// path. The provider's offsets index the VIRTUAL generated content, so applying them to the
+/// same-named real file would corrupt it.
+///
+/// Discriminating: the pre-fix resolver returned a bare `Option<ExternalIdeContext>`, so a
+/// superseded virtual surface returned `None` — INDISTINGUISHABLE from "not a virtual surface".
+/// The merge then fell through to the real-file branch and edited the real file IN PLACE with the
+/// virtual offsets. The 3-state `ApiSurfaceResolution::VirtualDrop` makes the superseded-virtual
+/// case explicit so the merge drops it. This test FAILS against the bare-`Option` fall-through
+/// (the real file gets a bogus edit) and PASSES once `VirtualDrop` short-circuits to `continue`.
+#[test]
+fn merge_rename_superseded_virtual_surface_with_real_backing_file_fails_closed() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // A REAL on-disk file at the EXACT virtual path. Its `foo` symbol sits at byte offset 30 — but
+    // those bytes are NOT the provider's offsets; the provider's offsets came from the (now
+    // superseded) VIRTUAL surface. If the merge edited this real file it would land at a wrong
+    // span and corrupt it.
+    let real_ts = "// a real same-named sidecar that must NOT be touched\nexport const foo = 1\n";
+    let real_path = "/src/Child.vue.ts".to_string();
+    let reader_path = real_path.clone();
+    let real_content: Arc<str> = Arc::from(real_ts);
+    let read_source = move |p: &str| (p == reader_path.as_str()).then(|| real_content.clone());
+
+    // `Child.vue` exists → `is_carrier_api_path("/src/Child.vue.ts")` is true (suffix + exists), so
+    // the merge CONSULTS the api resolver for this path (the suffix gate is unchanged).
+    let carrier_source_exists = |p: &str| p == "/src/Child.vue";
+
+    // The resolver classifies this path as a KNOWN virtual surface that can no longer be mapped
+    // (generation re-check failed, or its snapshot carried no source map) → VirtualDrop.
+    let api_resolver = |_p: &str| ApiSurfaceResolution::VirtualDrop;
+
+    // The provider reports an offset against the (superseded) virtual surface.
+    let type_locations = vec![RenameLocation {
+        path: real_path.clone(),
+        start: 36, // a virtual-surface offset; meaningless against the real file
+        end: 39,
+    }];
+
+    let result = merge_rename_locations(
+        None,
+        type_locations,
+        "fooRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &carrier_source_exists,
+        PositionEncodingKind::UTF16,
+        &read_source,
+    );
+
+    // FAIL CLOSED: nothing is edited. NOT the real `Child.vue.ts` (corruption the bare-Option
+    // fall-through caused), NOT `Child.vue` (no source map vouched it).
+    assert!(
+        result.is_none(),
+        "a superseded virtual carrier-API surface must DROP even with a real same-named backing \
+         file — editing the real file with virtual offsets corrupts it: {result:?}"
+    );
+}
+
+/// H1 companion: a genuinely `NotVirtual` path (the resolver returns `NotVirtual` — it was NEVER a
+/// captured virtual surface) WITH a real on-disk backing file IS edited in place at the real
+/// symbol span. This proves the 3-state outcome still routes real files correctly (the
+/// `NotVirtual` arm preserves the existing real-file behavior, distinct from `VirtualDrop`).
+///
+/// Discriminating: together with the `VirtualDrop` test above, this pins that `NotVirtual` →
+/// edit-in-place while `VirtualDrop` → drop, for the SAME path shape and the SAME real backing
+/// file. A bare-`Option` resolver cannot express that split — both would be `None`.
+#[test]
+fn merge_rename_not_virtual_path_with_real_backing_file_edits_in_place() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // A REAL hand-written sidecar `Child.vue.ts`; the renamed symbol sits on line 1.
+    let real_ts = "// hand-written sidecar\nexport const childHelper = 1\n";
+    let off = real_ts.find("childHelper").unwrap() as u32;
+    let real_path = "/src/Child.vue.ts".to_string();
+    let reader_path = real_path.clone();
+    let real_content: Arc<str> = Arc::from(real_ts);
+    let read_source = move |p: &str| (p == reader_path.as_str()).then(|| real_content.clone());
+
+    let carrier_source_exists = |p: &str| p == "/src/Child.vue";
+
+    // The resolver classifies this path as NOT a virtual surface (it was never captured/synced).
+    let api_resolver = |_p: &str| ApiSurfaceResolution::NotVirtual;
+
+    let type_locations = vec![RenameLocation {
+        path: real_path.clone(),
+        start: off,
+        end: off + "childHelper".len() as u32,
+    }];
+
+    let result = merge_rename_locations(
+        None,
+        type_locations,
+        "childHelperRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &carrier_source_exists,
+        PositionEncodingKind::UTF16,
+        &read_source,
+    );
+
+    let edit = result.expect("a NotVirtual real-file rename edit must be produced in place");
+    let changes = edit.changes.expect("changes map");
+
+    // NOTHING is mapped into `Child.vue`.
+    let vue_uri = path_to_uri("/src/Child.vue").unwrap();
+    assert!(
+        !changes.contains_key(&vue_uri),
+        "a NotVirtual real Child.vue.ts must NEVER produce an edit in Child.vue: {changes:?}"
+    );
+
+    // The edit lands in the REAL `Child.vue.ts` at the real symbol line (1), never line 0.
+    let real_uri = path_to_uri(&real_path).unwrap();
+    let edits = changes
+        .get(&real_uri)
+        .unwrap_or_else(|| panic!("rename must edit the real {real_path} in place"));
+    assert_eq!(
+        edits.len(),
+        1,
+        "exactly one in-place edit in the real .vue.ts"
+    );
+    assert_eq!(
+        edits[0].range.start.line, 1,
+        "real-file rename edit must resolve to the real symbol line, not line 0: {:?}",
+        edits[0].range
+    );
+    assert_eq!(edits[0].new_text, "childHelperRenamed");
+    assert_ne!(edits[0].range, Range::default());
+}
+
+/// A2 end-to-end (store → classifier → merge): a path the STORE knows as a virtual
+/// surface (tombstoned by an in-flight close) but ABSENT from the rename's in-flight
+/// capture MUST route `VirtualDrop` and edit NEITHER the same-named real file NOR the
+/// `.vue` — even though `close_dts` may have failed and tsserver is still live for the
+/// virtual `{carrier}.ts`. The companion below proves a genuinely UNKNOWN path (never a
+/// virtual surface) with the SAME real backing file DOES edit it in place (`NotVirtual`).
+///
+/// This drives the EXACT production rename closure (`classify_captured_api_surface`) over
+/// a real `ProviderSurfaceStore`, not an injected resolution — so it discriminates the A2
+/// fix end to end: pre-fix the resolver returned `NotVirtual` for every captured-miss, so
+/// the tombstoned path fell through to the real-file branch and corrupted it. Post-fix the
+/// store's tombstone routes it to `VirtualDrop`.
+#[test]
+fn merge_rename_store_known_virtual_absent_from_capture_routes_virtual_drop_end_to_end() {
+    use crate::provider_surface_store::{
+        classify_captured_api_surface, ProviderSurfaceKind, ProviderSurfaceStore, RecordSurface,
+    };
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    let vpath = "/src/Child.vue.ts".to_string();
+    // A REAL same-named sidecar with a renameable symbol on line 1 — the file that would be
+    // corrupted if a virtual-surface miss degraded to NotVirtual.
+    let real_ts = "// real sidecar that must NOT be touched\nexport const foo = 1\n";
+    let real_content: Arc<str> = Arc::from(real_ts);
+    let reader_path = vpath.clone();
+    let read_source = move |p: &str| (p == reader_path.as_str()).then(|| real_content.clone());
+    let carrier_source_exists = |p: &str| p == "/src/Child.vue";
+
+    // Store knows VPATH as a virtual surface, then RETIRES it (close started) — the tombstone
+    // persists because the close is not finalized (simulating a failed/dropped close_dts).
+    let store = ProviderSurfaceStore::new();
+    store.record(RecordSurface {
+        provider_path: vpath.clone(),
+        kind: ProviderSurfaceKind::CarrierApi,
+        source_canonical: "/src/Child.vue".to_string(),
+        provider_content: Arc::from("declare const Child: {}\n"),
+        source_map: None,
+        carrier_source: Arc::from("<script setup>\n</script>\n"),
+    });
+    let _t = store.forget(&vpath);
+    // Capture AFTER the retire → VPATH has no MAPPABLE snapshot (snapshot_for None), but it
+    // is captured as KnownNonMappable (Closing at capture) so classify drops WITHOUT a live
+    // re-consult of the store.
+    let captured = store.capture_current_carrier_api_set();
+    assert!(captured.snapshot_for(&vpath).is_none());
+    assert!(store.is_known_virtual_surface(&vpath));
+
+    // Classify reads ONLY the captured snapshot — no `store` arg (the third-TOCTOU fix).
+    let api_resolver =
+        |p: &str| classify_captured_api_surface(&captured, p, PositionEncodingKind::UTF16);
+
+    let type_locations = vec![RenameLocation {
+        path: vpath.clone(),
+        start: 36, // a virtual-surface offset; meaningless against the real file
+        end: 39,
+    }];
+
+    let result = merge_rename_locations(
+        None,
+        type_locations,
+        "fooRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &carrier_source_exists,
+        PositionEncodingKind::UTF16,
+        &read_source,
+    );
+
+    assert!(
+        result.is_none(),
+        "a store-known virtual surface absent from the capture must DROP (fail closed) — \
+         editing the same-named real file with virtual offsets corrupts it: {result:?}"
+    );
+}
+
+/// A2 companion: the SAME path shape + the SAME real backing file, but the store does NOT
+/// know the path as a virtual surface (never recorded). The classifier routes `NotVirtual`
+/// and the real file IS edited in place — proving the tombstone, not the path shape, drives
+/// the `VirtualDrop` vs `NotVirtual` split.
+#[test]
+fn merge_rename_store_unknown_path_with_real_backing_edits_in_place_end_to_end() {
+    use crate::provider_surface_store::{classify_captured_api_surface, ProviderSurfaceStore};
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    let vpath = "/src/Child.vue.ts".to_string();
+    let real_ts = "// hand-written sidecar\nexport const foo = 1\n";
+    let off = real_ts.find("foo").unwrap() as u32;
+    let real_content: Arc<str> = Arc::from(real_ts);
+    let reader_path = vpath.clone();
+    let read_source = move |p: &str| (p == reader_path.as_str()).then(|| real_content.clone());
+    let carrier_source_exists = |p: &str| p == "/src/Child.vue";
+
+    // Empty store: VPATH is NOT a known virtual surface → absent from the capture → NotVirtual.
+    let store = ProviderSurfaceStore::new();
+    let captured = store.capture_current_carrier_api_set();
+    assert!(!store.is_known_virtual_surface(&vpath));
+
+    // Classify reads ONLY the captured snapshot — no `store` arg (the third-TOCTOU fix).
+    let api_resolver =
+        |p: &str| classify_captured_api_surface(&captured, p, PositionEncodingKind::UTF16);
+
+    let type_locations = vec![RenameLocation {
+        path: vpath.clone(),
+        start: off,
+        end: off + 3,
+    }];
+
+    let result = merge_rename_locations(
+        None,
+        type_locations,
+        "fooRenamed",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        Some(&api_resolver),
+        &carrier_source_exists,
+        PositionEncodingKind::UTF16,
+        &read_source,
+    );
+
+    let edit = result.expect("an unknown-path real-file rename edit must be produced in place");
+    let changes = edit.changes.expect("changes map");
+    let vue_uri = path_to_uri("/src/Child.vue").unwrap();
+    assert!(
+        !changes.contains_key(&vue_uri),
+        "an unknown real Child.vue.ts must NEVER edit Child.vue: {changes:?}"
+    );
+    let real_uri = path_to_uri(&vpath).unwrap();
+    let edits = changes
+        .get(&real_uri)
+        .unwrap_or_else(|| panic!("rename must edit the real {vpath} in place"));
+    assert_eq!(
+        edits[0].range.start.line, 1,
+        "edit lands on the real symbol line"
+    );
+    assert_eq!(edits[0].new_text, "fooRenamed");
 }
 
 // ── Hover merge tests ──────────────────────────────────────────
@@ -2607,6 +3274,7 @@ fn merge_definitions_foreign_carrier_tsx_fails_closed_without_resolver_else_exac
                 tsx_line_index: target_tsx_li.clone(),
                 mapper: target_mapper.clone(),
                 carrier_line_index: target_carrier_li.clone(),
+                carrier_negotiated_line_index: None,
             })
         } else {
             None
@@ -2760,6 +3428,7 @@ fn merge_definitions_filters_vue_when_non_carrier_exists() {
                 tsx_line_index: consumer_tsx_li.clone(),
                 mapper: consumer_mapper.clone(),
                 carrier_line_index: consumer_carrier_li.clone(),
+                carrier_negotiated_line_index: None,
             })
         } else {
             None

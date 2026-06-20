@@ -304,6 +304,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         // active) through the shared discipline.
         if sync_owner_resolved_carrier_with_close_after_sync(
             sync,
+            documents,
             provider_sync_states,
             import_id,
             next_state,
@@ -484,6 +485,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             };
             if sync_owner_resolved_carrier_with_close_after_sync(
                 sync,
+                documents,
                 provider_sync_states,
                 carrier_id,
                 next_state,
@@ -642,6 +644,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
             // so it stays queued (`Nothing`).
             sync_open_unresolved_carrier_provider_file(
                 sync,
+                documents.provider_surfaces(),
                 provider_sync_states,
                 canonical_id,
                 is_jsx,
@@ -656,6 +659,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
         if snapshot.ownership_ready {
             remove_provider_sync_state_and_close_paths(
                 sync,
+                documents.provider_surfaces(),
                 provider_sync_states,
                 canonical_id,
                 "pending_snapshot",
@@ -711,6 +715,17 @@ pub(super) async fn sync_pending_carrier_provider_file(
                     committed_state.set_background_loaded(ProviderPathKind::Api, true);
                 }
                 synced_kinds.push(ProviderPathKind::Api);
+                // Record a fresh generation pinning the synced content + its
+                // same-content source map under this virtual path.
+                crate::provider_surface_store::record_carrier_api_surface(
+                    documents.provider_surfaces(),
+                    Some(documents),
+                    documents.host(),
+                    canonical_id,
+                    &dts_path,
+                    &api.code,
+                    api.source_map.as_deref(),
+                );
             }
             Err(error) => {
                 tracing::warn!(
@@ -763,7 +778,13 @@ pub(super) async fn sync_pending_carrier_provider_file(
         let genuinely_stale =
             genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
         commit_sync_transition(provider_sync_states, canonical_id, committed_state);
-        close_stale_provider_paths(sync, &genuinely_stale, "pending_snapshot").await;
+        close_stale_provider_paths(
+            sync,
+            documents.provider_surfaces(),
+            &genuinely_stale,
+            "pending_snapshot",
+        )
+        .await;
     }
     // Classify the outcome for the drain's dequeue decision (R2-6):
     //   * every intended kind synced → FullyReconciled (dequeue);
@@ -800,6 +821,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
 /// later owner reconciliation.
 pub(super) async fn sync_open_unresolved_carrier_provider_file(
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     is_jsx: bool,
@@ -833,7 +855,13 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
         // path handled it, and `needs_owner_reconcile` picks it up.
         let commit = open_unresolved_carrier_commit(previous.as_ref(), target, false);
         commit_sync_transition(provider_sync_states, canonical_id, commit.committed);
-        close_dropped_owner_api_path(sync, commit.dropped_api.as_ref(), "open_unresolved").await;
+        close_dropped_owner_api_path(
+            sync,
+            provider_surfaces,
+            commit.dropped_api.as_ref(),
+            "open_unresolved",
+        )
+        .await;
         return false;
     };
     let Some(ide_path) = target.ide_path.clone() else {
@@ -863,10 +891,17 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
     // and the orphaned prior IDE path is closed ONLY after a successful flip.
     let commit = open_unresolved_carrier_commit(previous.as_ref(), target, ide_synced);
     commit_sync_transition(provider_sync_states, canonical_id, commit.committed);
-    close_dropped_owner_api_path(sync, commit.dropped_api.as_ref(), "open_unresolved").await;
+    close_dropped_owner_api_path(
+        sync,
+        provider_surfaces,
+        commit.dropped_api.as_ref(),
+        "open_unresolved",
+    )
+    .await;
     if let Some(stale) = commit.stale_ide_after_success.as_ref() {
         close_stale_provider_paths(
             sync,
+            provider_surfaces,
             std::slice::from_ref(stale),
             "open_unresolved_ext_flip",
         )
@@ -885,11 +920,18 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
 /// [`close_stale_provider_paths`] dispatch.
 async fn close_dropped_owner_api_path(
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     dropped_api: Option<&(ProviderPathKind, String)>,
     context: &str,
 ) {
     if let Some(dropped) = dropped_api {
-        close_stale_provider_paths(sync, std::slice::from_ref(dropped), context).await;
+        close_stale_provider_paths(
+            sync,
+            provider_surfaces,
+            std::slice::from_ref(dropped),
+            context,
+        )
+        .await;
     }
 }
 
@@ -917,6 +959,7 @@ async fn reconcile_unowned_carrier_provider_file(
         let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
         sync_open_unresolved_carrier_provider_file(
             sync,
+            documents.provider_surfaces(),
             provider_sync_states,
             canonical_id,
             is_jsx,
@@ -928,6 +971,7 @@ async fn reconcile_unowned_carrier_provider_file(
     if ownership_ready {
         remove_provider_sync_state_and_close_paths(
             sync,
+            documents.provider_surfaces(),
             provider_sync_states,
             canonical_id,
             context,
@@ -946,8 +990,13 @@ async fn reconcile_unowned_carrier_provider_file(
 /// commits, and closes ONLY the genuinely-stale paths (synced kind, not active).
 /// A failed reconciliation leaves the previous path both committed AND open.
 /// Returns `true` if any kind synced.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "carrier sync needs the provider-surface store + documents alongside the sync state"
+)]
 async fn sync_owner_resolved_carrier_with_close_after_sync(
     sync: &ProjectSync,
+    documents: &DocumentRegistry,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     next_state: ProviderSyncState,
@@ -991,6 +1040,16 @@ async fn sync_owner_resolved_carrier_with_close_after_sync(
             Ok(()) => {
                 committed_state.set_background_loaded(ProviderPathKind::Api, true);
                 synced_kinds.push(ProviderPathKind::Api);
+                // Record a fresh generation pinning the synced content (no map in
+                // scope → live map used only if it still matches `api_code`).
+                crate::provider_surface_store::record_carrier_api_surface_code_only(
+                    documents.provider_surfaces(),
+                    Some(documents),
+                    documents.host(),
+                    canonical_id,
+                    &dts_path,
+                    api_code,
+                );
             }
             Err(error) => {
                 tracing::warn!("{context}: failed to sync provider API path {dts_path}: {error}");
@@ -1003,7 +1062,13 @@ async fn sync_owner_resolved_carrier_with_close_after_sync(
         let genuinely_stale =
             genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
         commit_sync_transition(provider_sync_states, canonical_id, committed_state);
-        close_stale_provider_paths(sync, &genuinely_stale, context).await;
+        close_stale_provider_paths(
+            sync,
+            documents.provider_surfaces(),
+            &genuinely_stale,
+            context,
+        )
+        .await;
     }
     // On total failure nothing is committed and nothing is closed: the previous
     // state + provider paths are retained intact.
@@ -1027,11 +1092,16 @@ async fn sync_owner_resolved_carrier_with_close_after_sync(
 ///     path is never closed here);
 ///   * on API-sync failure, nothing is committed and nothing is closed — the
 ///     prior state and prior API path are retained intact (no close-before-sync).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the spawned API-sync task needs the provider-surface store alongside its sync inputs"
+)]
 pub(super) async fn sync_api_to_provider_background_task(
     sync: ProjectSync,
     snapshot: super::PublishedResolverSnapshot,
     host: Arc<verter_session::VerterHost>,
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
+    provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
     canonical_id: String,
     transition: crate::provider_sync::ProviderSyncTransition,
     is_tsgo: bool,
@@ -1064,6 +1134,18 @@ pub(super) async fn sync_api_to_provider_background_task(
         Ok(()) => {
             committed_state.set_background_loaded(ProviderPathKind::Api, true);
             synced_kinds.push(ProviderPathKind::Api);
+            // Record a fresh generation pinning the synced content + its
+            // same-content source map. This spawned task has no
+            // `DocumentRegistry`; the carrier source resolves host/VFS-only.
+            crate::provider_surface_store::record_carrier_api_surface(
+                &provider_surfaces,
+                None,
+                &host,
+                &canonical_id,
+                &dts_path,
+                &api.code,
+                api.source_map.as_deref(),
+            );
         }
         Err(error) => {
             tracing::warn!("sync_api(background): failed for {dts_path}: {error}");
@@ -1078,7 +1160,13 @@ pub(super) async fn sync_api_to_provider_background_task(
         let genuinely_stale =
             genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
         commit_sync_transition(&provider_sync_states, &canonical_id, committed_state);
-        close_stale_provider_paths(&sync, &genuinely_stale, "sync_api(background)").await;
+        close_stale_provider_paths(
+            &sync,
+            &provider_surfaces,
+            &genuinely_stale,
+            "sync_api(background)",
+        )
+        .await;
     }
     // On API-sync failure nothing is committed and nothing is closed: the prior
     // state + prior API path are retained intact.
@@ -1134,7 +1222,13 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
         configure_provider_paths_for_source(sync, snapshot, canonical_id, true).await;
     }
     let transition = prepare_sync_transition(provider_sync_states, canonical_id, next_state);
-    close_stale_provider_paths(sync, &transition.stale_paths, "pending_snapshot").await;
+    close_stale_provider_paths(
+        sync,
+        documents.provider_surfaces(),
+        &transition.stale_paths,
+        "pending_snapshot",
+    )
+    .await;
 
     let mut committed_state = transition.next;
     match sync
@@ -1170,29 +1264,54 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
 
 pub(super) async fn close_stale_provider_paths(
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     stale_paths: &[(ProviderPathKind, String)],
     context: &str,
 ) {
     for (kind, path) in stale_paths {
+        // A closing API path is no longer the active synced virtual surface —
+        // retire its active generation under a fresh close EPOCH (in-flight rename
+        // captures stay valid; the `Closing` state keeps it classifying VirtualDrop
+        // until the provider close is CONFIRMED, so a failed close cannot let it
+        // degrade to NotVirtual and corrupt a same-named real file). Capture the
+        // epoch-stamped token so the finalize is scoped to THIS close.
+        let close_token = if *kind == ProviderPathKind::Api {
+            Some(provider_surfaces.forget(path))
+        } else {
+            None
+        };
         let result = match kind {
             ProviderPathKind::Ide => sync.close_tsx(path).await,
             ProviderPathKind::Api => sync.close_dts(path).await,
             ProviderPathKind::Shadow => sync.close_file(path).await,
         };
-        if let Err(error) = result {
-            tracing::warn!("{context}: failed to close stale provider path {path}: {error}");
+        match result {
+            // Only a CONFIRMED API close finalizes, and only via THIS close's token —
+            // a reopen (or newer close) during the await makes the epoch mismatch and
+            // the finalize a no-op (the fresh snapshot survives). An error drops the
+            // token, leaving the `Closing` state (fail closed). Ide/Shadow have no
+            // token.
+            Ok(()) => {
+                if let Some(token) = close_token {
+                    provider_surfaces.finalize_close(token);
+                }
+            }
+            Err(error) => {
+                tracing::warn!("{context}: failed to close stale provider path {path}: {error}");
+            }
         }
     }
 }
 
 async fn remove_provider_sync_state_and_close_paths(
     sync: &ProjectSync,
+    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     context: &str,
 ) {
     if let Some(state) = crate::provider_sync::remove_sync_state(provider_sync_states, canonical_id)
     {
-        close_stale_provider_paths(sync, &state.active_paths(), context).await;
+        close_stale_provider_paths(sync, provider_surfaces, &state.active_paths(), context).await;
     }
 }

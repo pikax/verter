@@ -1,27 +1,25 @@
-//! Regression guard — Block H: find-references / rename on an EXTERNAL (cross-file) target must
-//! land on the real symbol span, never LINE 0.
+//! Invariant: find-references / rename / code-action on an EXTERNAL (cross-file) target lands on
+//! the real symbol span, never LINE 0 — and FAILS CLOSED (drops the location / edit) when the
+//! span cannot be faithfully resolved.
 //!
-//! Symptom: "Find All References" / "Rename Symbol" on a cross-file symbol (e.g. `formatCount`
-//! declared in `utils.ts`, referenced from `App.vue`) returned `Range::default()` (line 0, char 0)
-//! for every reference / rename edit in another file. A rename edit at line 0 is worse than a
-//! navigation miss: it CORRUPTS the target file.
+//! Why it matters: "Find All References" / "Rename Symbol" / a code-action edit on a cross-file
+//! symbol (e.g. `formatCount` declared in `utils.ts`, referenced from `App.vue`) must resolve the
+//! type provider's REAL byte offsets to a line:col `Range`. Collapsing a failed resolve to
+//! `Range::default()` (line 0, char 0) is worse than a navigation miss for a rename edit: it
+//! CORRUPTS the target file by writing the new name at line 0.
 //!
-//! Root cause: `crates/verter_lsp/src/type_provider/merge/feature_merges.rs` —
-//! `merge_references` and `merge_rename_locations` substituted `Range::default()` for every
-//! non-carrier-IDE target instead of resolving the type provider's byte offsets to line:col.
-//! The provider returns a `TypeLocation`/`RenameLocation { path, start, end }` whose `start`/`end`
-//! are REAL byte offsets into the target file; the merge threw those offsets away.
+//! Contract (`crates/verter_lsp/src/type_provider/merge/feature_merges.rs`): the provider returns a
+//! `TypeLocation`/`RenameLocation`/`TypeCodeEdit { path, start, end }` whose `start`/`end` are REAL
+//! byte offsets into the target file. The merge reads the target's own source through the host VFS,
+//! builds a `LineIndex` in the client-negotiated encoding, converts the byte offsets to a line:col
+//! `Range`, and FAILS CLOSED when the source or offsets cannot be resolved — never a line-0 range.
 //!
-//! The fix mirrors the already-landed definition fix (`repro_external_defn_line.rs`): read the
-//! target's own source through the host VFS, build a `LineIndex` in the client-negotiated
-//! encoding, convert the byte offsets to a line:col `Range`, and FAIL CLOSED (drop the location /
-//! edit) when the source or offsets cannot be resolved — never fabricate a line-0 range.
-//!
-//! These tests exercise the `merge_references` / `merge_rename_locations` boundary directly (no
-//! type-provider process): each constructs a location whose byte offsets point at a known symbol,
-//! hands the merge an in-memory source reader (modeling the host VFS the production merge reads
-//! through — see `VerterHost::workspace_read().read_file`), and asserts the merged result carries
-//! that symbol's EXACT line:col span — never `Range::default()`.
+//! These tests exercise the `merge_references` / `merge_rename_locations` / `merge_code_actions`
+//! boundary directly (no type-provider process): each constructs a location whose byte offsets
+//! point at a known symbol, hands the merge an in-memory source reader (modeling the host VFS the
+//! production merge reads through — see `VerterHost::workspace_read().read_file`), and asserts the
+//! merged result carries that symbol's EXACT line:col span — never `Range::default()` — plus the
+//! fail-closed (dropped) half for unresolvable / unmappable targets.
 
 use std::sync::Arc;
 
@@ -32,8 +30,8 @@ use verter_lsp::documents::line_index::LineIndex;
 use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
 use verter_lsp::type_provider::merge::{
-    merge_code_actions, merge_references, merge_rename_locations, ExternalIdeContext,
-    ExternalIdeResolver,
+    merge_code_actions, merge_references, merge_rename_locations, ExternalApiResolver,
+    ExternalIdeContext, ExternalIdeResolver,
 };
 use verter_lsp::type_provider::protocol::{
     RenameLocation, TypeCodeAction, TypeCodeEdit, TypeLocation,
@@ -267,6 +265,7 @@ fn external_ts_rename_keeps_the_real_line_not_zero() {
         &mapper,
         &carrier_li,
         no_external,
+        None::<ExternalApiResolver>,
         &carrier_never,
         PositionEncodingKind::UTF16,
         &read_source,
@@ -323,6 +322,7 @@ fn external_rename_with_unresolvable_source_is_dropped_not_zeroed() {
         &mapper,
         &carrier_li,
         no_external,
+        None::<ExternalApiResolver>,
         &carrier_never,
         PositionEncodingKind::UTF16,
         &read_source,
@@ -536,6 +536,7 @@ fn carrier_ide_rename_mapping_failure_is_dropped_not_zeroed() {
         &mapper,
         &carrier_li,
         no_external,
+        None::<ExternalApiResolver>,
         &carrier_never,
         PositionEncodingKind::UTF16,
         &read_source,
@@ -577,6 +578,7 @@ fn carrier_ide_reference_with_valid_external_mapper_survives() {
                 )
             },
             carrier_line_index: LineIndex::new_utf16("y"),
+            carrier_negotiated_line_index: None,
         })
     };
     let _ = ctx_mapper; // the mapper used is the one built inside the resolver closure.
@@ -699,6 +701,7 @@ fn barrel_reexport_rename_keeps_real_line() {
         &mapper,
         &carrier_li,
         no_external,
+        None::<ExternalApiResolver>,
         &carrier_never,
         PositionEncodingKind::UTF16,
         &read_source,
