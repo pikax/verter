@@ -15,7 +15,7 @@
 //! Coverage: an alias chain (published shallow), a same-file interface
 //! merge surface, cross-file imported-alias members (interface / primitive /
 //! function-type aliases, each published as a shallow Ref — this fixture pins
-//! Shallow-By-Default publication + import-route/carrier consultation, NOT
+//! Shallow-By-Default publication + import-route / read-set membership, NOT
 //! member-type resolution), a PATH-PROJECTED imported member that DOES force
 //! cross-file member-TYPE resolution (`Foo['bar']` publishes the resolved
 //! terminal `number` — impossible without resolving the imported body), a
@@ -219,7 +219,7 @@ defineProps<MergedProps>()
 // ════════════════════════════════════════════════════════════════════
 
 /// What this test pins (its TRUE axis): Component-Meta Shallow-By-Default
-/// publication PLUS import-route / carrier consultation — NOT cross-file
+/// publication PLUS import-route / dep-signature read-set membership — NOT cross-file
 /// member-TYPE resolution.
 ///
 /// A `defineProps<{ … }>` whose members are typed by IMPORTED alias names
@@ -275,7 +275,9 @@ defineProps<MergedProps>()
 /// optionality — is derivable ENTIRELY from `/component.vue`'s OWN inline
 /// `defineProps<{ ... }>` object literal. These asserts therefore do NOT
 /// discriminate a broken import route: a broken route would STILL publish those
-/// same three optional bare `Ref`s.
+/// same three optional bare `Ref`s (this holds for the inline-object-literal
+/// macro shape this fixture uses; a `defineProps<DirectAlias>()` over a broken
+/// import instead drops to an empty surface).
 ///
 /// (2) Import-route discrimination: ONLY the DEP-SIGNATURE asserts catch a
 /// broken import route. A regression that broke the route drops `/foo.ts` /
@@ -414,14 +416,16 @@ defineProps<{
     // published read-set MUST root on the imported carriers. `Foo` is defined
     // in `/foo.ts`; `Label`/`Submit` in `/types.ts`. Both must appear in the
     // published component-meta entry's dep-signature because the SFC's import
-    // specifiers were route-resolved and the carrier files shallow-consulted.
+    // specifiers were route-resolved and the carrier canonicals recorded in the
+    // published read-set.
     //
     // SCOPE OF THIS ASSERT (what it proves and what it does NOT): it proves the
     // import ROUTE / specifier resolved and the carrier entered the read-set.
     // It does NOT prove the imported TYPE BODY resolved into the member surface
-    // — a carrier enters the dep-signature on SPECIFIER resolution (route +
-    // shallow consult), independent of whether the member's type body was ever
-    // resolved. The member-TYPE-resolution discriminator is the
+    // — a carrier enters the dep-signature on SPECIFIER resolution (route /
+    // specifier resolution recording the carrier in the read-set), independent
+    // of whether the member's type body was ever resolved. The
+    // member-TYPE-resolution discriminator is the
     // `cross_file_imported_type_resolves_through_path_projection` sibling, where
     // the published value is `number`/`string` — IMPOSSIBLE without resolving
     // the imported body.
@@ -432,8 +436,8 @@ defineProps<{
     // `Ref`, so every shallow-`Ref` assertion above would STILL PASS against a
     // regression that broke the import ROUTE. These dep-signature asserts close
     // that ROUTE gap: if the import route to `/foo.ts` (or `/types.ts`) were
-    // removed/broken, the carrier would NOT be consulted, would NOT enter the
-    // read-set, and the corresponding `any(... == "/foo.ts")` assert FAILS.
+    // removed/broken, the carrier would NOT enter the read-set, and the
+    // corresponding `any(... == "/foo.ts")` assert FAILS.
     // (Empirically the dep-signature for this fixture is
     // `["/component.vue", "/foo.ts", "/types.ts"]`.)
     let dep_canonicals =
@@ -443,15 +447,15 @@ defineProps<{
         );
     assert!(
         dep_canonicals.iter().any(|c| c.as_ref() == "/foo.ts"),
-        "import-route resolution must consult the `Foo` carrier `/foo.ts`, recording it \
-         in the published read-set; a broken import route to `/foo.ts` would leave the \
+        "import-route resolution must record the `Foo` carrier `/foo.ts` in the \
+         published read-set; a broken import route to `/foo.ts` would leave the \
          same bare `Ref {{ name: \"Foo\" }}` yet drop `/foo.ts` from the dep-signature. \
          observed {dep_canonicals:?}"
     );
     assert!(
         dep_canonicals.iter().any(|c| c.as_ref() == "/types.ts"),
-        "import-route resolution must consult the `Label`/`Submit` carrier `/types.ts`, \
-         recording it in the published read-set; a broken import route to `/types.ts` \
+        "import-route resolution must record the `Label`/`Submit` carrier `/types.ts` \
+         in the published read-set; a broken import route to `/types.ts` \
          would leave the same bare `Label`/`Submit` refs yet drop `/types.ts` from the \
          dep-signature. observed {dep_canonicals:?}"
     );
@@ -460,7 +464,7 @@ defineProps<{
 // ════════════════════════════════════════════════════════════════════
 // Cross-file imported-TYPE resolution through a PATH-PROJECTED member —
 // the genuine member-TYPE-resolution discriminator (the sibling above
-// proves only Shallow-By-Default publication + import-route consultation).
+// proves only Shallow-By-Default publication + import-route / read-set membership).
 // ════════════════════════════════════════════════════════════════════
 
 /// A `defineProps<{ x: Foo['bar']; y?: Foo['baz'] }>` over an IMPORTED

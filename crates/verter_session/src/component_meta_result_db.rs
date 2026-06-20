@@ -661,12 +661,13 @@ impl<P> ComponentMetaResultDb<P> {
 
 impl ComponentMetaResultDb<CachedComponentMetaResult> {
     /// Test-only accessor returning the merged carrier dep_signature
-    /// canonicals for an owner. Used by dep-signature regression tests
-    /// (the slot-binding merge test
-    /// `slot_bindings_dep_signature_merges_carrier_deps` and the
-    /// component-meta surface-equivalence cross-file tests) to inspect
-    /// the dep-signature carriers stored alongside the cached entry.
-    /// Returns an empty vec when the owner has no cached entry.
+    /// canonicals for an owner. Used by the dep-signature regression
+    /// tests — the slot-binding merge test
+    /// `slot_bindings_dep_signature_merges_carrier_deps`, the
+    /// component-meta surface-equivalence cross-file tests, and the
+    /// warm-invalidation oracle test — to inspect the dep-signature
+    /// carriers stored alongside the cached entry. Returns an empty vec
+    /// when the owner has no cached entry.
     ///
     /// Constructs the lookup key with the same options fingerprint
     /// the production `publish_component_meta_cache_entry` writes
