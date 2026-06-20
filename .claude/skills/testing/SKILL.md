@@ -115,13 +115,14 @@ Extracted file contains module contents directly — `use super::*;`, helpers, a
 
 After TDD loop, run the full verification pass:
 
-1. `cargo nextest run --workspace` — CANONICAL completeness gate; runs every workspace test target INCLUDING the ~25 verter_session integration binaries
-2. `cargo test -p verter_session --tests` — shared-process surface for the verter_session integration suite
-3. `cargo clippy --workspace -- -D warnings`
-4. `cargo fmt --all --check`
-5. `pnpm test` for TypeScript changes
+1. `node scripts/gate.mjs` — CANONICAL Rust gate. Builds the test universe ONCE via `cargo nextest archive` (single compile, no second-command recompile), then runs BOTH surfaces from the same artifacts — SURFACE 1 = `cargo nextest run --workspace` (per-test process isolation, every workspace test target including the ~25 verter_session integration binaries); SURFACE 2 = the verter_session libtest binaries executed DIRECTLY (in-process / multi-test-per-process, the equivalent of `cargo test -p verter_session --tests`). It is a strict SUPERSET of the two-surface pair, not a narrower replacement. Reports PASS-WITH-TOLERATED for the env-only `cases::typeinfo_proto_ts_freshness::*` buf/oxfmt byte-pin (the sole tolerated failure). See `docs/arch/gate-performance.md`.
+2. `cargo clippy --workspace -- -D warnings`
+3. `cargo fmt --all --check`
+4. `pnpm test` for TypeScript changes
 
-Bare `cargo test --workspace --tests` silently SKIPS the verter_session integration suite (~4404 tests): `session_metrics` feature unification drops those binaries from the workspace test set, so the run reports green while never compiling them. Must NOT be used as the sole Rust gate — always run the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair above.
+Without Node, or to debug one surface in isolation, run the two underlying surfaces directly: `cargo nextest run --workspace` then `cargo test -p verter_session --tests`.
+
+Bare `cargo test --workspace --tests` silently SKIPS the verter_session integration suite (~4404 tests): `session_metrics` feature unification drops those binaries from the workspace test set, so the run reports green while never compiling them. Must NOT be used as the sole Rust gate — run `node scripts/gate.mjs` (which runs both surfaces from one archive) or the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair directly.
 
 Do not run bare `cargo test --workspace` (no `--tests`) by default — it also runs doctests and example builds, substantially slower. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or explicitly requested.
 
@@ -156,7 +157,7 @@ When the guard cannot be automated immediately, the owning skill/doc must name i
 
 ### Test Hermeticity (MANDATORY)
 
-Default-run tests must depend only on locally-vendored fixtures. The canonical run (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`) must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
+Default-run tests must depend only on locally-vendored fixtures. The canonical run (`node scripts/gate.mjs`, i.e. its two underlying surfaces `cargo nextest run --workspace` + `cargo test -p verter_session --tests`) must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
 
 When needing fixtures from a third-party project (e.g., `nuxt-ui` Vue corpus), vendor a snapshot into the consuming crate's `tests/<feature>/fixtures/` and refer to them with `include_str!("./fixtures/...")` or path-based loaders. Preserve upstream license attribution in sibling `LICENSE.md` and `README.md` for provenance.
 
@@ -170,8 +171,8 @@ external-corpus = []
 
 ```rust
 #![cfg(feature = "external-corpus")]
-//! Optional drift detector — gated so default `cargo test --workspace`
-//! stays hermetic.
+//! Optional drift detector — gated so the default gate run
+//! (`node scripts/gate.mjs`) stays hermetic.
 ```
 
 Guard `external_corpus_paths_not_present_outside_gated_tests` (in `crates/verter_session/tests/architecture_guards.rs`) rejects `include_str!` / `include!` / path-string references to `.integration-tests/repos/...` from any test file not gated behind such a feature.

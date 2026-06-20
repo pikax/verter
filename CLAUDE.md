@@ -298,12 +298,15 @@ pnpm test                                    # All JS/TS tests
 pnpm vitest --run                            # All tests (non-watch)
 pnpm vitest --run path/to/test.spec.ts       # Specific file
 
-# Rust — CANONICAL agent gate (completeness): nextest + the shared-process verter_session surface
-cargo nextest run --workspace                # Authoritative completeness gate — runs every workspace test target INCLUDING the ~25 verter_session integration binaries
-cargo test -p verter_session --tests         # Shared-process surface for the verter_session integration suite
+# Rust — CANONICAL agent gate
+node scripts/gate.mjs                         # THE Rust gate. Builds the test universe ONCE via `cargo nextest archive` (single compile, no second-command recompile), then runs BOTH surfaces from the same artifacts: SURFACE 1 = nextest run (per-test process isolation), SURFACE 2 = the verter_session libtest binaries executed directly (in-process / multi-test-per-process). Reports PASS-WITH-TOLERATED for the env-only typeinfo_proto_ts_freshness buf/oxfmt byte-pin (the sole tolerated failure). See docs/arch/gate-performance.md.
+
+# The TWO UNDERLYING SURFACES gate.mjs runs — runnable directly (no Node, or debugging one surface in isolation):
+cargo nextest run --workspace                # SURFACE 1 — every workspace test target INCLUDING the ~25 verter_session integration binaries, per-test process isolation
+cargo test -p verter_session --tests         # SURFACE 2 — shared-process (in-process) surface for the verter_session integration suite
 cargo test --workspace --doc                 # Rust doctests only; run when rustdoc examples changed or explicitly requested
 cargo test --package verter_compiler test_name   # Specific Rust test
-# NOTE: bare `cargo test --workspace --tests` SILENTLY SKIPS the verter_session integration suite (~4404 tests) because `session_metrics` feature unification drops those binaries from the workspace test set — it MUST NOT be the sole Rust gate; use the nextest + `-p verter_session` pair above.
+# NOTE: bare `cargo test --workspace --tests` SILENTLY SKIPS the verter_session integration suite (~4404 tests) because `session_metrics` feature unification drops those binaries from the workspace test set — it MUST NOT be the sole Rust gate; run `node scripts/gate.mjs` (which runs both surfaces from one archive) or the two-surface pair above directly.
 cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncated output
 ```
 
@@ -312,8 +315,7 @@ cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncate
 Run after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:
 
 ```bash
-cargo nextest run --workspace 2>&1 | tee /tmp/test-output.txt   # CANONICAL completeness gate — runs the verter_session integration suite
-cargo test -p verter_session --tests 2>&1 | tee -a /tmp/test-output.txt   # shared-process surface
+node scripts/gate.mjs 2>&1 | tee /tmp/test-output.txt   # CANONICAL Rust gate — single-compile archive; runs BOTH surfaces (nextest process-isolation + direct in-process verter_session) with zero second-compile; PASS-WITH-TOLERATED for the env-only freshness pair
 cargo clippy --workspace -- -D warnings
 cargo fmt --all --check
 pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
@@ -323,7 +325,7 @@ pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
 
 For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing even for "small" changes.
 
-**Agent test policy:** the canonical pair above — `cargo nextest run --workspace` (completeness) plus `cargo test -p verter_session --tests` (shared-process surface) — is the default Rust gate (the silent-skip trap is stated once in Running Tests above). Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and example builds without improving the normal verification loop. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or the user explicitly asks.
+**Agent test policy:** `node scripts/gate.mjs` is the default Rust gate — it builds the test universe once and runs BOTH underlying surfaces (`cargo nextest run --workspace` process-isolation + the in-process `verter_session` libtest binaries, the exact equivalent of `cargo test -p verter_session --tests`) from the same archive with no second-command recompile, so it is a strict SUPERSET of the two-surface pair, not a narrower replacement. A contributor without Node, or debugging one surface in isolation, runs `cargo nextest run --workspace` then `cargo test -p verter_session --tests` directly. The only env-tolerated failure is the `cases::typeinfo_proto_ts_freshness::*` buf/oxfmt byte-pin (surfaced as PASS-WITH-TOLERATED). Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and example builds without improving the normal verification loop (and the silent-skip trap is stated once in Running Tests above). Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or the user explicitly asks.
 
 ### Documentation Updates
 
@@ -356,7 +358,7 @@ Coverage: new features need tests, bug fixes need regression tests, refactors mu
 
 ### Testing-Hermeticity (MANDATORY)
 
-Unit tests must only depend on locally-vendored fixtures. They must compile and run without any third-party repository (e.g., `nuxt-ui`, `element-plus`) checked out alongside this repository. Tests that need external corpora must be feature-gated (e.g., `#[cfg(feature = "external-corpus")]`) and excluded from the default canonical run (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`).
+Unit tests must only depend on locally-vendored fixtures. They must compile and run without any third-party repository (e.g., `nuxt-ui`, `element-plus`) checked out alongside this repository. Tests that need external corpora must be feature-gated (e.g., `#[cfg(feature = "external-corpus")]`) and excluded from the default canonical run (`node scripts/gate.mjs`, i.e. its two underlying surfaces `cargo nextest run --workspace` + `cargo test -p verter_session --tests`).
 
 A test that references `.integration-tests/repos/<third-party>/...` from a non-gated test file is a violation. The architecture guard `external_corpus_paths_not_present_outside_gated_tests` enforces this.
 
@@ -488,7 +490,7 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | `/framework-adapters`    | Framework-adapter substrate: registry, descriptor + virtual-file naming column, facts/carrier-only ctx, framework-surface executor, two-pass script-fact seam, Vue as the reference adapter |
 | `/position-encoding`     | Span types, position encoding, coordinate conversions, path normalization                        |
 | `/build-and-profiling`   | Build order, rebuild sequences, profiling, MCP server setup                                      |
-| `/testing`               | Test patterns, TDD workflow, sourcemap testing, server cleanup                                   |
+| `/testing`               | Test patterns, TDD workflow, the canonical `gate.mjs` Rust gate runner, sourcemap testing, server cleanup |
 | `/e2e-vscode-testing`    | VS Code E2E test fixtures, helpers API, adding new tests                                         |
 | `/wsl-e2e-testing`       | WSL E2E tests to reproduce Linux/CI failures, fixture matrix                                     |
 | `/rust-performance`      | Rust optimization patterns, allocation hierarchy, CodeTransform API                              |
