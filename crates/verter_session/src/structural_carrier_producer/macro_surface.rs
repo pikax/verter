@@ -15,30 +15,30 @@
 //!
 //! The hot mirror produces exactly such a handle. On first demand per
 //! `macro_index` it lowers the macro's `parsed_type_argument` ONCE through
-//! the shared query-free structural lowerer
-//! ([`structural_lower::lower_type_expr_structural`]) into a
-//! [`HotTypeRef`] — an interned [`SemanticNodeId`] carrying the unresolved
-//! `BareRef` / `ImportType` / operator-shell carriers, NO resolution. Every
-//! production site that needs a macro type-argument graph node reads THIS
-//! handle and re-enters the ONE shared dispatch
-//! (`SemanticQueryKey` → `ProjectSemanticDispatch::execute`) at its own
-//! demand / mode (Navigate, a `ProjectPath` for an indexed-access or
-//! per-field path, a Shallow surface). Different TERMINAL demands are fine;
+//! the shared query-free structural lowerer (the witness-gated
+//! [`super::lower::emit_macro_arg`]) into a [`HotTypeRef`] — an interned
+//! [`SemanticNodeId`] carrying the unresolved `BareRef` / `ImportType` /
+//! operator-shell carriers, NO resolution. Every production site that needs a
+//! macro type-argument graph node reads THIS handle and re-enters the ONE
+//! shared dispatch (`SemanticQueryKey` → `ProjectSemanticDispatch::execute`)
+//! at its own demand / mode (Navigate, a `ProjectPath` for an indexed-access
+//! or per-field path, a Shallow surface). Different TERMINAL demands are fine;
 //! a second BASE producer of the macro arg's graph node is not — that is the
 //! forbidden callsite-scattered structural-vs-eager dual path.
 //!
-//! ## Single-entry producer / visibility boundary
+//! ## Single-entry producer / witness-gated boundary
 //!
-//! [`structural_lower::lower_type_expr_structural`] is
-//! `pub(in crate::macro_hot_mirror)`: the sole production macro-arg ENTRY is
-//! [`macro_type_arg_hot_ref`] (`macro_type_arg_hot_ref`). The binder-seed
-//! constraint/default lowering inside [`build_script_setup_seed_frames`] is
-//! INTERNAL to the mirror builder — it lowers generic-binder constraint /
-//! default exprs while building the same handle's scope, NOT a second
-//! macro-arg producer. No production module OUTSIDE `macro_hot_mirror` can
-//! name the lowerer, so a second production producer is UNREPRESENTABLE by
-//! construction — the single-engine producer rule is compiler-enforced, not
-//! source-scanned.
+//! The raw structural lowerer is PRIVATE to [`super::lower`]; the macro
+//! surface reaches it ONLY through the witnessed [`super::lower::emit_macro_arg`]
+//! wrapper, presenting the [`MacroProducerWitness`] capability proof. The sole
+//! production macro-arg ENTRY is [`macro_type_arg_hot_ref`]. The binder-seed
+//! constraint/default lowering inside
+//! [`script_setup_binder::build_script_setup_seed_frames`] is INTERNAL to the
+//! mirror builder — it lowers generic-binder constraint / default exprs while
+//! building the same handle's scope, NOT a second macro-arg producer. No
+//! production module OUTSIDE [`crate::structural_carrier_producer`] can forge a
+//! witness, so a second production producer is UNREPRESENTABLE by construction
+//! — the single-engine producer rule is compiler-enforced, not source-scanned.
 //!
 //! ## Laziness / content addressing / singleflight
 //!
@@ -75,15 +75,39 @@
 //! frame is built incrementally so an earlier binder is visible to a later
 //! one's constraint / default (TS scoping).
 
-pub(crate) mod script_setup_binder;
-pub(crate) mod structural_lower;
+#[path = "script_setup_binder.rs"]
+pub(in crate::structural_carrier_producer) mod script_setup_binder;
 
 use std::sync::{Arc, OnceLock};
 
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{HotTypeRef, NodeScopeId};
 
-use structural_lower::StructuralLowerContext;
+use super::lower::{self, StructuralLowerContext};
+
+/// Compile-time capability proof that the macro hot mirror is invoking the
+/// shared structural lowerer through its sanctioned macro-surface entry
+/// ([`super::lower::emit_macro_arg`]).
+///
+/// The field is PRIVATE and the constructor is confined to this surface, so
+/// no other module — not even a sibling under
+/// [`crate::structural_carrier_producer`] — can forge one. The wrapper in
+/// [`super::lower`] can NAME the type (it is module-visible) but cannot
+/// construct it, and a foreign module can do neither. A would-be second
+/// structural-carrier producer therefore cannot present this witness and
+/// cannot reach the lowerer — the single-producer rule is enforced by the
+/// type system, not a scanner.
+pub(in crate::structural_carrier_producer) struct MacroProducerWitness {
+    _private: (),
+}
+
+impl MacroProducerWitness {
+    /// Mint the macro-surface capability proof. Private to this surface
+    /// (`macro_surface`): only the macro hot-mirror builder constructs it.
+    fn new() -> Self {
+        Self { _private: () }
+    }
+}
 
 /// Lazy, singleflight, content-addressed mirror of one file's Vue SFC MACRO
 /// type-argument graph handles.
@@ -227,39 +251,14 @@ fn build_macro_hot_ref(
     let seed_frames = script_setup_binder::build_script_setup_seed_frames(indexed, graph, &scope);
     let lower_ctx = StructuralLowerContext::new(&seed_frames).with_macro_own_body(macro_own_body);
 
-    structural_lower::lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx).ok()
-}
-
-/// Test-only facade so this crate's OWN `#[cfg(test)]` unit tests reach the
-/// raw structural lowerer without making the production entry `pub(crate)`.
-/// Lives inside `macro_hot_mirror` (the ancestor) so the
-/// `pub(in crate::macro_hot_mirror)` entry is in scope; the module is
-/// `#[cfg(test)]` and NOT `pub`, so it compiles ONLY in this crate's test
-/// build and is unreachable from any production profile (release OR debug
-/// non-test) — single-entry holds by construction in every profile, with NO
-/// crate-internal second wrapper around the lowerer outside
-/// `macro_type_arg_hot_ref`.
-#[cfg(test)]
-mod for_tests {
-    use super::structural_lower::{self, StructuralLowerContext, StructuralLowerError};
-    use crate::semantic_query::{HotTypeRef, NodeScopeId};
-    use crate::semantic_query_memo::SemanticGraphStore;
-    use verter_type_expr::TypeExpr;
-
-    /// Raw structural-lowerer access for this crate's `#[cfg(test)]` unit
-    /// tests. Test-build only and not `pub`-exported, so the production lib
-    /// build (any profile) sees no caller. (A private `#[cfg(test)]` module is
-    /// not reachable from integration tests, which compile as a separate
-    /// crate.)
-    #[allow(dead_code)]
-    pub fn lower_type_expr_structural_for_tests(
-        graph: &SemanticGraphStore,
-        expr: &TypeExpr,
-        scope: NodeScopeId,
-        ctx: &StructuralLowerContext<'_>,
-    ) -> Result<HotTypeRef, StructuralLowerError> {
-        structural_lower::lower_type_expr_structural(graph, expr, scope, ctx)
-    }
+    lower::emit_macro_arg(
+        graph,
+        parsed_arg,
+        scope,
+        &lower_ctx,
+        &MacroProducerWitness::new(),
+    )
+    .ok()
 }
 
 #[cfg(test)]

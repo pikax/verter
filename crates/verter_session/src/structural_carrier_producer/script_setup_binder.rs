@@ -6,42 +6,28 @@
 //! a seed [`BinderScope`] stack, so a `<script setup generic="T">` SFC's open
 //! generics lower to their `TypeParam` binder rather than an unbound `BareRef`.
 //!
-//! This is a SHARED, route-free helper: it re-sources the clause from the
-//! owner's LOCAL [`IndexedReady`] data (`raw_source` + `framework_parse`)
-//! through
+//! This is a route-free helper: it re-sources the clause from the owner's
+//! LOCAL [`IndexedReady`] data (`raw_source` + `framework_parse`) through
 //! [`sfc_script_setup_type_params`](crate::host_resolve::sfc_script_setup_type_params)
-//! — NO host route lookup — so it is a pure structural producer. Its ONLY
-//! production caller today is the macro hot mirror's macro-arg builder
-//! (`macro_hot_mirror/mod.rs`); the in-module isolation tests also build the
-//! seed binder shape from it directly. A future decl-body structural producer
-//! (the global declaration-body structural producer flip, NOT landed) would
-//! build the SAME seed binder shape, but it does NOT call this helper today.
+//! — NO host route lookup — so it stays a pure structural producer. Its only
+//! production caller is the macro hot mirror's macro-arg builder
+//! ([`super::build_macro_hot_ref`]); the isolation tests build the same seed
+//! binder shape from it directly.
 //!
-//! It lives UNDER `crate::macro_hot_mirror` (not a foreign module) so it can
-//! reach the ancestor-private
-//! [`structural_lower::lower_type_expr_structural`](super::structural_lower)
-//! entry to lower each binder's constraint / default expression — the
-//! documented INTERNAL binder-seed lowering, NOT a second macro-arg producer.
-//! It is `pub(in crate::macro_hot_mirror)` — ancestor-private to the mirror,
-//! mirroring the lowerer's own confinement — so NO foreign module can NAME it.
-//! That by-construction, compiler-enforced privacy (a foreign reference is a
-//! compile error, not a lint) is the load-bearing guarantee that no second
-//! binder-seed producer can be opened outside this module (the secondary
-//! token-tripwire guard is bounded defense-in-depth on top of it). The ONLY
-//! caller that builds the seed shape today — the mirror's macro-arg builder
-//! (plus the in-module isolation tests) — reaches it from WITHIN this module
-//! subtree; the ordinary decl-body structural producer does NOT call it today
-//! (that routing is the unlanded global declaration-body structural producer
-//! flip). If that flip later routes a decl-body structural producer through
-//! this helper from a module OUTSIDE the subtree, the helper must be
-//! DELIBERATELY re-homed (or re-scoped to the new caller's shared
-//! ancestor-private boundary, e.g. `pub(in crate::<shared-ancestor>)`) —
-//! preserving a COMPILER boundary, never passively widened to `pub(crate)`,
-//! which would re-open the cross-module producer surface.
+//! It is a CHILD of [`super`] (the macro surface), so it reaches the
+//! structural lowerer through the witnessed [`super::super::lower::emit_macro_arg`]
+//! wrapper (presenting the macro-surface witness it mints via
+//! [`super::MacroProducerWitness`]) to lower each binder's constraint /
+//! default expression — the binder-seed lowering is an INTERNAL part of
+//! building the macro handle's scope, NOT a second macro-arg producer. It is
+//! `pub(in crate::structural_carrier_producer)` — confined to the owner
+//! module, mirroring the lowerer's own confinement — so no foreign module can
+//! NAME it.
 
 use std::sync::Arc;
 
-use super::structural_lower::{self, BinderScope, StructuralLowerContext};
+use super::super::lower::{BinderScope, StructuralLowerContext};
+use super::MacroProducerWitness;
 use crate::semantic_query::{
     DeclIdentity, HashValue, HotTypeRef, NodeScopeId, SemanticNodeData, SemanticNodeId,
 };
@@ -64,7 +50,7 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// shape is identical. The helper does NOT read the prepared-decl bundle
 /// (whose cold path can route-resolve imports) — that would make the producer
 /// impure.
-pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(
+pub(in crate::structural_carrier_producer) fn build_script_setup_seed_frames(
     indexed: &crate::project_type_store::IndexedReady,
     graph: &SemanticGraphStore,
     scope: &NodeScopeId,
@@ -100,18 +86,33 @@ pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(
 
     let mut frame = BinderScope::default();
     for (idx, param) in params.iter().enumerate() {
-        // The constraint / default see the binders accumulated so far.
+        // The constraint / default see the binders accumulated so far. The
+        // binder-seed lowering reaches the structural lowerer through the
+        // witnessed macro-surface entry — it is part of building the macro
+        // handle's scope, not a second producer.
         let head_frames = vec![frame.clone()];
         let head_ctx = StructuralLowerContext::new(&head_frames);
         let constraint = param.constraint.as_ref().and_then(|c| {
-            structural_lower::lower_type_expr_structural(graph, c, scope.clone(), &head_ctx)
-                .ok()
-                .map(HotTypeRef::node)
+            super::super::lower::emit_macro_arg(
+                graph,
+                c,
+                scope.clone(),
+                &head_ctx,
+                &MacroProducerWitness::new(),
+            )
+            .ok()
+            .map(HotTypeRef::node)
         });
         let default = param.default.as_ref().and_then(|d| {
-            structural_lower::lower_type_expr_structural(graph, d, scope.clone(), &head_ctx)
-                .ok()
-                .map(HotTypeRef::node)
+            super::super::lower::emit_macro_arg(
+                graph,
+                d,
+                scope.clone(),
+                &head_ctx,
+                &MacroProducerWitness::new(),
+            )
+            .ok()
+            .map(HotTypeRef::node)
         });
         // The clause-position index is the ordinal / `param_index` the eager
         // path and prepared-decl bundle assign — matching identity tuples.

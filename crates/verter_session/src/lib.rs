@@ -152,7 +152,6 @@ pub(crate) mod decl_body_memo;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
 pub mod framework;
-pub(crate) mod macro_hot_mirror;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
 #[cfg(test)]
@@ -290,6 +289,7 @@ pub(crate) mod source_map_remap;
 mod store_view_manager_tests;
 #[cfg(test)]
 mod store_view_non_current_contract_tests;
+pub(crate) mod structural_carrier_producer;
 pub(crate) mod template_convert;
 /// Test-only re-exports for integration tests in `tests/`.
 ///

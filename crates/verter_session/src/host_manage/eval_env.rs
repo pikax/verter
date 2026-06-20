@@ -1059,7 +1059,7 @@ impl VerterHost {
                                     // different DEMAND on the same handle, not
                                     // a second lowering of the macro arg.
                                     if let Some(base_id) =
-                                        crate::macro_hot_mirror::macro_type_arg_hot_ref(
+                                        crate::structural_carrier_producer::macro_type_arg_hot_ref(
                                             engine.ctx(),
                                             canonical,
                                             ctx.macro_index,
@@ -1167,7 +1167,7 @@ impl VerterHost {
                                         // DEMAND on the same handle, never a
                                         // second lowering of the macro arg).
                                         let lowered =
-                                            crate::macro_hot_mirror::macro_type_arg_hot_ref(
+                                            crate::structural_carrier_producer::macro_type_arg_hot_ref(
                                                 engine.ctx(),
                                                 canonical,
                                                 ctx.macro_index,

@@ -425,7 +425,7 @@ impl VerterHost {
         // shared path walker runs intermediate hops in `Navigate` and the
         // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
         // argument decomposes to `(handle_node, [])`.
-        let handle = crate::macro_hot_mirror::macro_type_arg_hot_ref(
+        let handle = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             ctx,
             request.owner_canonical.as_ref(),
             request.macro_index,

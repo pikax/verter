@@ -834,12 +834,14 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 }
 
 // ===========================================================================
-// Macro hot-mirror producer guard SET — the single-engine macro-arg producer
-// is defended by five guards: the TWO module-visibility privacy-shape guards
-// (`structural_lowerer_production_entry_is_macro_hot_mirror_private` on the
-// lowerer + `script_setup_binder_helper_is_module_private` on the shared
-// binder-seed helper — the compiler-enforced LOAD-BEARING confinement), the
-// file-scope ordering tripwire
+// Structural-carrier producer guard SET — the single structural-carrier producer
+// is defended by seven guards: the PRIMARY module-private lowerer guard
+// (`structural_carrier_producer_lowerer_is_module_private`), the PARENT-SHAPE
+// narrowness guard (`structural_carrier_producer_module_is_narrow`), the
+// WITNESS-unforgeability guard (`structural_carrier_producer_witnesses_are_unforgeable`)
+// — together the compiler-enforced make-unrepresentable layer — plus the
+// binder-seed-helper privacy guard (`script_setup_binder_helper_is_module_private`),
+// the file-scope ordering tripwire
 // (`no_production_macro_arg_eager_lowering_outside_mirror`), the purity guard
 // (`macro_hot_mirror_producer_is_pure_no_route_resolution`), and the BOUNDED
 // entry-surface token tripwire
@@ -848,57 +850,79 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 // ===========================================================================
 
 #[test]
-fn macro_hot_mirror_producer_privacy_guard_remains_registered() {
-    // The macro hot-mirror producer wiring landed: the structural lowerer's
-    // production entry is now `pub(in crate::macro_hot_mirror)` ancestor-private,
-    // and the dormancy guard was REPLACED by the privacy-shape guard. This
-    // witness pins the new guard name into BOTH the registry and the assertion
-    // file, catching an accidental removal of the single-engine producer
-    // defense.
+fn structural_carrier_producer_guards_remain_registered() {
+    // The structural-carrier producer owner module owns the module-private raw
+    // lowerer (reachable only through two unforgeable-witness-gated wrappers).
+    // This witness pins the replacement guard SET into BOTH the registry and the
+    // assertion file, catching an accidental removal of the single-engine
+    // producer defense.
     let registry = read_rel("tests/cases/g_misc0/critical_rules_have_guards.rs");
-    assert!(
-        registry.contains("structural_lowerer_production_entry_is_macro_hot_mirror_private"),
-        "the macro-hot-mirror producer-privacy guard must remain registered — it is the \
-         compiler-enforced single-engine producer defense (ancestor-private entry)"
-    );
     let guards = read_rel("tests/cases/architecture_guards.rs");
+
+    // Every guard in the SET must be BOTH registered (in the registry) AND
+    // defined as a real `fn …(` test in architecture_guards.rs — a renamed
+    // hollow reference (registry mention without the assertion) fails here.
+    const REQUIRED_GUARDS: &[(&str, &str)] = &[
+        (
+            "structural_carrier_producer_lowerer_is_module_private",
+            "the PRIMARY make-unrepresentable guard: the raw structural lowerer is module-private \
+             in `lower.rs` and not re-exported, so no other module can name it",
+        ),
+        (
+            "structural_carrier_producer_module_is_narrow",
+            "the PARENT-SHAPE guard: the owner directory contains ONLY the raw lowerer, the two \
+             witness-gated producer surfaces, the binder helper, mod.rs, and test modules",
+        ),
+        (
+            "structural_carrier_producer_witnesses_are_unforgeable",
+            "the WITNESS-unforgeability guard: exactly two private-field producer witnesses, \
+             neither forgeable nor returned crate-visibly outside its owning surface",
+        ),
+        (
+            "script_setup_binder_helper_is_module_private",
+            "the binder-seed-helper privacy guard: `build_script_setup_seed_frames` is \
+             `pub(in crate::structural_carrier_producer)`, confined to the owner module",
+        ),
+        (
+            "no_production_macro_arg_eager_lowering_outside_mirror",
+            "the file-scope ordering tripwire: no production macro-arg eager lowering outside the \
+             structural-carrier producer module",
+        ),
+        (
+            "macro_hot_mirror_producer_is_pure_no_route_resolution",
+            "the PURITY guard: the producer must not route-resolve imports / read the prepared-decl \
+             bundle (pure structural-carrier lowering; seeding re-sources from the route-free \
+             IndexedReady)",
+        ),
+        (
+            "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
+            "the BOUNDED entry-surface tripwire: only the sanctioned witness-gated entries are \
+             crate-visible producer fns of the owner module",
+        ),
+    ];
+
+    for (guard, why) in REQUIRED_GUARDS {
+        assert!(
+            registry.contains(guard),
+            "the structural-carrier producer guard `{guard}` must remain registered — {why}"
+        );
+        // The guard must exist as a REAL `fn …(` test definition in
+        // architecture_guards.rs — a registry-only mention is a hollow rename.
+        let def_needle = format!("fn {guard}(");
+        assert!(
+            guards.contains(&def_needle),
+            "the guard `{guard}` must have a REAL `{def_needle}` test definition in \
+             architecture_guards.rs (not just a registry/prose mention) — {why}"
+        );
+    }
+
+    // The RETIRED guard names must NOT linger anywhere (renamed faithfully, not
+    // duplicated): the old privacy-guard identity is gone.
     assert!(
-        guards.contains("structural_lowerer_production_entry_is_macro_hot_mirror_private"),
-        "the producer-privacy guard's assertion must remain in architecture_guards.rs"
-    );
-    assert!(
-        registry.contains("script_setup_binder_helper_is_module_private"),
-        "the binder-seed-helper module-privacy guard must remain registered — \
-         `build_script_setup_seed_frames` is `pub(in crate::macro_hot_mirror)` ancestor-private, the \
-         compiler-enforced load-bearing confinement against a second binder-seed producer"
-    );
-    assert!(
-        guards.contains("script_setup_binder_helper_is_module_private"),
-        "the binder-seed-helper module-privacy guard's assertion must remain in \
-         architecture_guards.rs"
-    );
-    assert!(
-        guards.contains("no_production_macro_arg_eager_lowering_outside_mirror"),
-        "the secondary ordering tripwire (no production macro-arg eager lowering outside the \
-         mirror) must remain in architecture_guards.rs"
-    );
-    assert!(
-        registry.contains("macro_hot_mirror_producer_is_pure_no_route_resolution"),
-        "the macro-hot-mirror PURITY guard must remain registered — the producer must not \
-         route-resolve imports / read the prepared-decl bundle (pure structural-carrier \
-         lowering; seeding re-sources from the route-free IndexedReady)"
-    );
-    assert!(
-        guards.contains("macro_hot_mirror_producer_is_pure_no_route_resolution"),
-        "the macro-hot-mirror purity guard's assertion must remain in architecture_guards.rs"
-    );
-    assert!(
-        registry.contains("macro_hot_mirror_exposes_single_crate_visible_producer_entry"),
-        "the macro-hot-mirror ENTRY-SURFACE guard must remain registered — `macro_type_arg_hot_ref` \
-         is the SOLE crate-visible module-level producer entry of the mirror module"
-    );
-    assert!(
-        guards.contains("macro_hot_mirror_exposes_single_crate_visible_producer_entry"),
-        "the macro-hot-mirror entry-surface guard's assertion must remain in architecture_guards.rs"
+        !registry.contains("structural_lowerer_production_entry_is_macro_hot_mirror_private")
+            && !guards.contains("structural_lowerer_production_entry_is_macro_hot_mirror_private"),
+        "the retired guard `structural_lowerer_production_entry_is_macro_hot_mirror_private` must \
+         be fully replaced by `structural_carrier_producer_lowerer_is_module_private` — no stale \
+         reference may linger in the registry or assertion file"
     );
 }

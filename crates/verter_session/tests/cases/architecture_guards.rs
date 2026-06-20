@@ -4653,11 +4653,13 @@ mod foundations_guards {
         // Crate-private: the materialise closure and the memo are its
         // only callers.
         "pub(crate) mod decl_lowering",
-        // Macro hot mirror — the single-entry producer of a Vue SFC macro
-        // type-argument's mode-neutral graph handle (owns the re-housed
-        // query-free structural lowerer, ancestor-private). Crate-private: the
-        // four macro graph-lowering sites read it; no downstream crate touches it.
-        "pub(crate) mod macro_hot_mirror",
+        // Structural-carrier producer — the single owner of the query-free
+        // `TypeExpr` → dormant-graph-carrier lowering. Owns the module-private
+        // raw lowerer plus the two witness-gated producer surfaces (the macro
+        // hot mirror + the declaration-body producer). Crate-private: the four
+        // macro graph-lowering sites read its `macro_type_arg_hot_ref`
+        // re-export; no downstream crate touches it.
+        "pub(crate) mod structural_carrier_producer",
         // R3/R26/R28 — fact-validation helpers shared by the inner
         // component-meta caches (Family A/B). Carries
         // `validate_fact_signature`, `bubble_fact_signature`, and the
@@ -21202,7 +21204,7 @@ fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
 /// concern; the lowerer only emits typed carriers.
 #[test]
 fn session_graph_lowerer_makes_no_query() {
-    let src = read_workspace_file("crates/verter_session/src/macro_hot_mirror/structural_lower.rs");
+    let src = read_workspace_file("crates/verter_session/src/structural_carrier_producer/lower.rs");
     let production = carrier_production_code(&src);
     // Anti-vacuity: the extractor found the real lowerer production code.
     assert!(
@@ -21269,7 +21271,7 @@ fn session_graph_lowerer_makes_no_query() {
 /// carrier.
 #[test]
 fn unresolved_carriers_not_materialized_during_emission() {
-    let src = read_workspace_file("crates/verter_session/src/macro_hot_mirror/structural_lower.rs");
+    let src = read_workspace_file("crates/verter_session/src/structural_carrier_producer/lower.rs");
     let production = carrier_production_code(&src);
     assert!(
         production.contains("fn lower_type_expr_structural"),
@@ -21460,120 +21462,673 @@ fn carrier_production_code_scans_post_cfg_test_and_strips_block_comments() {
     );
 }
 
-/// The structural lowerer's defining module after the macro-hot-mirror
-/// re-housing: the entry lives under `crate::macro_hot_mirror::structural_lower`
-/// and is `pub(in crate::macro_hot_mirror)` — ancestor-private to the mirror, so
-/// no other production module can NAME it. This makes a second production
-/// producer of a macro-arg graph node UNREPRESENTABLE by construction
+/// The structural lowerer's defining module: the raw entry
+/// `lower_type_expr_structural` lives under
+/// `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
+/// visibility modifier), so no other module — not even a sibling under the
+/// owner module — can NAME it. The only paths to it are the two witness-gated
+/// wrappers (`emit_macro_arg` / `emit_decl_body_arm`). This makes a third
+/// production structural-carrier producer UNREPRESENTABLE by construction
 /// (compiler-enforced single-engine producer rule), which is why the primary
-/// guard here is a PRIVACY-SHAPE assertion on the moved file, not a caller
+/// guard here is a PRIVACY-SHAPE assertion on the owner file, not a caller
 /// scanner.
-const STRUCTURAL_LOWERER_DEFINING_MODULE: &str = "macro_hot_mirror/structural_lower.rs";
+const STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE: &str = "structural_carrier_producer/lower.rs";
 
 /// Classify the visibility shape of the `lower_type_expr_structural` definition
-/// in the given source body. Returns the offending reason when the entry is NOT
-/// the required `pub(in crate::macro_hot_mirror)` ancestor-private shape (the
-/// shape that makes a second production producer unrepresentable), or `None`
-/// when the shape is correct. Looks at the DEFINITION line only.
-fn structural_lowerer_privacy_violation(body: &str) -> Option<String> {
+/// in the given source body. Returns the offending reason when the entry
+/// carries ANY visibility modifier (the required shape is a bare module-private
+/// `fn lower_type_expr_structural(` — no `pub`, no `pub(crate)`, no `pub(in
+/// …)`), or `None` when the shape is correct. Looks at the DEFINITION line
+/// only.
+fn structural_carrier_producer_lowerer_privacy_violation(body: &str) -> Option<String> {
     let needle = "fn lower_type_expr_structural(";
     let def_line = body.lines().find(|l| l.contains(needle))?;
     let trimmed = def_line.trim_start();
-    if trimmed.starts_with("pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(") {
+    // The ONLY accepted shape is the bare module-private `fn` — the definition
+    // line starts directly with `fn lower_type_expr_structural(`. ANY visibility
+    // modifier (`pub`, `pub(crate)`, `pub(super)`, `pub(in …)`) lets some other
+    // module name the entry and is the forbidden second/third-producer shape.
+    if trimmed.starts_with("fn lower_type_expr_structural(") {
         return None;
     }
-    // Any broader visibility (`pub`, `pub(crate)`, `pub(super)`, bare) lets a
-    // second production module name the entry — the forbidden second-producer
-    // shape.
     Some(format!(
-        "the structural lowerer's production entry must be \
-         `pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(` (ancestor-private to the \
-         macro hot mirror, so no other production module can name it); found: `{}`",
+        "the structural lowerer's entry must be a bare module-private \
+         `fn lower_type_expr_structural(` (NO visibility modifier at all — not `pub`, \
+         `pub(crate)`, or `pub(in …)`), so no other module can name it and only the witness-gated \
+         wrappers can reach it; found: `{}`",
         trimmed
     ))
 }
 
-/// PRIMARY single-engine producer guard (make-unrepresentable): the
-/// production structural-lowering entry `lower_type_expr_structural` lives
-/// under `crate::macro_hot_mirror::structural_lower` and is
-/// `pub(in crate::macro_hot_mirror)`. Its SOLE production caller is the macro
-/// hot mirror builder; ancestor-privacy makes a second production producer
-/// UNREPRESENTABLE (a foreign module cannot name the fn — a compile error, not
-/// a lint), so the single-engine producer rule needs no caller scanner here.
+/// Whether `body` re-exports the structural lowerer with a `pub use … as` /
+/// `pub use …::lower_type_expr_structural` binding — a re-export would mint a
+/// NAMEABLE alias of the otherwise-private lowerer, re-opening the producer
+/// surface. The accepted module-private fn cannot be `pub use`-re-exported at
+/// all (that is itself a compile error), so this scan finds nothing on the
+/// genuine tree; it RED-proves a re-export evasion.
+fn structural_lowerer_reexport_violation(body: &str) -> bool {
+    body.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("pub use ") && trimmed.contains("lower_type_expr_structural")
+    })
+}
+
+/// PRIMARY single-engine producer guard (make-unrepresentable): the raw
+/// structural-lowering entry `lower_type_expr_structural` lives ONLY under
+/// `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
+/// visibility modifier) AND is NOT re-exported anywhere in the crate. No other
+/// module can name it — a foreign reference is a compile error, not a lint — so
+/// a third structural-carrier producer is UNREPRESENTABLE by construction and
+/// the single-engine producer rule needs no caller scanner here. The witnessed
+/// wrappers `emit_macro_arg` / `emit_decl_body_arm` are the only reachable
+/// surfaces, each gated by an unforgeable capability witness.
 #[test]
-fn structural_lowerer_production_entry_is_macro_hot_mirror_private() {
-    let rel = "crates/verter_session/src/macro_hot_mirror/structural_lower.rs";
+fn structural_carrier_producer_lowerer_is_module_private() {
+    let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
     let body = std::fs::read_to_string(workspace_path(rel))
         .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
-    // Anti-vacuity: the defining module must exist at the re-housed path and
-    // carry the definition — its absence means the move regressed.
+    // (a) Anti-vacuity: the owner module must exist at this path and carry the
+    // definition — its absence means the owner re-home regressed.
     assert!(
         body.contains("fn lower_type_expr_structural("),
         "anti-vacuity: the structural lowerer definition must live at `{rel}` \
-         (`{STRUCTURAL_LOWERER_DEFINING_MODULE}`) — its absence means the macro-hot-mirror \
-         re-housing regressed"
+         (`{STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE}`) — its absence means the \
+         structural-carrier-producer owner re-home regressed"
     );
-    if let Some(reason) = structural_lowerer_privacy_violation(&body) {
+    // (a) The raw lowerer is defined NOWHERE ELSE in the crate — exactly one
+    // definition, in `lower.rs`. (The witness-gated wrappers `emit_macro_arg` /
+    // `emit_decl_body_arm` CALL it but never re-define it.)
+    let definitions: Vec<String> = session_production_src_files()
+        .into_iter()
+        .filter(|(_, src)| src.contains("fn lower_type_expr_structural("))
+        .map(|(rel, _)| rel)
+        .collect();
+    assert_eq!(
+        definitions,
+        vec!["crates/verter_session/src/structural_carrier_producer/lower.rs".to_string()],
+        "the raw `fn lower_type_expr_structural(` must be defined ONLY in \
+         `structural_carrier_producer/lower.rs`; found in {definitions:#?}"
+    );
+    // (b) The definition line carries NO visibility modifier.
+    if let Some(reason) = structural_carrier_producer_lowerer_privacy_violation(&body) {
         panic!(
-            "single-engine producer rule violated: {reason}. The entry must stay \
-             ancestor-private to `crate::macro_hot_mirror` so a second macro-arg graph \
-             producer is unrepresentable by construction."
+            "single-engine producer rule violated: {reason}. The entry must stay module-private to \
+             `crate::structural_carrier_producer::lower` so a third structural-carrier producer is \
+             unrepresentable by construction."
+        );
+    }
+    // (c) The lowerer is NOT re-exported anywhere in the crate — a `pub use`
+    // re-export would mint a nameable alias and re-open the producer surface.
+    for (file_rel, src) in session_production_src_files() {
+        assert!(
+            !structural_lowerer_reexport_violation(&src),
+            "the raw structural lowerer must NOT be re-exported (found a `pub use … \
+             lower_type_expr_structural` in `{file_rel}`) — a re-export mints a nameable alias of \
+             the otherwise-private lowerer, re-opening the single-engine producer surface"
         );
     }
 }
 
-/// Self-test for [`structural_lowerer_privacy_violation`]: the correct
-/// `pub(in crate::macro_hot_mirror)` shape passes; a `pub(crate)` (or any
-/// broader) shape reddens.
+/// Self-test for the structural-carrier-producer lowerer privacy classifiers:
+/// the bare module-private `fn lower_type_expr_structural(` shape passes; ANY
+/// visibility modifier (`pub` / `pub(crate)` / `pub(in …)`) reddens; a `pub use`
+/// re-export of the lowerer is reported.
 #[test]
-fn structural_lowerer_privacy_classifier_discriminates() {
-    // CORRECT — ancestor-private to the mirror.
-    let ok = "    pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(\n";
+fn structural_carrier_producer_lowerer_privacy_classifier_discriminates() {
+    // CORRECT — bare module-private fn (no visibility modifier).
+    let ok = "fn lower_type_expr_structural(\n";
     assert!(
-        structural_lowerer_privacy_violation(ok).is_none(),
-        "the ancestor-private `pub(in crate::macro_hot_mirror)` shape must PASS"
+        structural_carrier_producer_lowerer_privacy_violation(ok).is_none(),
+        "the bare module-private `fn lower_type_expr_structural(` shape must PASS"
     );
-    // WRONG — `pub(crate)` lets any production module name the entry.
-    let wrong = "    pub(crate) fn lower_type_expr_structural(\n";
+    // CORRECT — indented bare module-private fn (the real shape inside `lower.rs`).
+    let ok_indented = "    fn lower_type_expr_structural(\n";
     assert!(
-        structural_lowerer_privacy_violation(wrong).is_some(),
-        "a `pub(crate)` entry shape must be reported as a single-engine violation"
+        structural_carrier_producer_lowerer_privacy_violation(ok_indented).is_none(),
+        "an indented bare module-private fn must PASS (the def line is trimmed first)"
     );
-    // WRONG — bare `pub`.
+    // WRONG — bare `pub` lets any module name the entry.
     let wrong_pub = "pub fn lower_type_expr_structural(\n";
     assert!(
-        structural_lowerer_privacy_violation(wrong_pub).is_some(),
+        structural_carrier_producer_lowerer_privacy_violation(wrong_pub).is_some(),
         "a bare `pub` entry shape must be reported as a single-engine violation"
+    );
+    // WRONG — `pub(crate)` is crate-wide visibility.
+    let wrong_crate = "    pub(crate) fn lower_type_expr_structural(\n";
+    assert!(
+        structural_carrier_producer_lowerer_privacy_violation(wrong_crate).is_some(),
+        "a `pub(crate)` entry shape must be reported as a single-engine violation"
+    );
+    // WRONG — a `pub(in …)` owner-subtree path lets a sibling under the owner
+    // module name the entry, which would defeat the witness gate.
+    let wrong_in =
+        "    pub(in crate::structural_carrier_producer) fn lower_type_expr_structural(\n";
+    assert!(
+        structural_carrier_producer_lowerer_privacy_violation(wrong_in).is_some(),
+        "even a `pub(in crate::structural_carrier_producer)` shape must be reported — a sibling \
+         surface could then name the raw lowerer and bypass the witness gate"
+    );
+    // The re-export classifier: a `pub use … lower_type_expr_structural` is a
+    // violation; the bare def line is not.
+    assert!(
+        structural_lowerer_reexport_violation(
+            "pub use crate::structural_carrier_producer::lower::lower_type_expr_structural;\n"
+        ),
+        "a `pub use … lower_type_expr_structural` re-export must be reported"
+    );
+    assert!(
+        !structural_lowerer_reexport_violation("fn lower_type_expr_structural() {}\n"),
+        "a bare definition (not a `pub use`) must NOT be flagged as a re-export"
+    );
+    // The REAL owner source is the genuine module-private shape and is not
+    // re-exported (revert proof: the production tree is pristine).
+    let real = std::fs::read_to_string(workspace_path(
+        "crates/verter_session/src/structural_carrier_producer/lower.rs",
+    ))
+    .expect("the structural lowerer's owner module must be readable");
+    assert!(
+        structural_carrier_producer_lowerer_privacy_violation(&real).is_none(),
+        "the REAL `lower_type_expr_structural` in `lower.rs` MUST be a bare module-private fn — if \
+         this reddens, the lowerer's visibility was widened, re-opening the producer surface"
+    );
+    assert!(
+        !structural_lowerer_reexport_violation(&real),
+        "the REAL `lower.rs` must NOT re-export the lowerer"
+    );
+}
+
+/// PARENT-SHAPE guard (load-bearing): the `structural_carrier_producer/`
+/// owner directory contains ONLY the sanctioned members — the raw lowerer
+/// (`lower.rs`), the two witness-gated producer surfaces (`macro_surface.rs`,
+/// `decl_body_surface.rs`), the moved binder helper (`script_setup_binder.rs`),
+/// the module root (`mod.rs`), and test modules (`*_tests.rs`). This stops the
+/// owner module's boundary silently growing a THIRD producer surface (a new
+/// non-test, non-sanctioned `.rs` module that could open a fourth path to the
+/// lowerer or hold a forged producer).
+#[test]
+fn structural_carrier_producer_module_is_narrow() {
+    let dir = workspace_path("crates/verter_session/src/structural_carrier_producer");
+    const SANCTIONED: &[&str] = &[
+        "mod.rs",
+        "lower.rs",
+        "macro_surface.rs",
+        "decl_body_surface.rs",
+        "script_setup_binder.rs",
+    ];
+    let mut found_modules: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read owner dir: {e}")) {
+        let path = entry.expect("dir entry").path();
+        // Only the OWNER directory's own `.rs` files are members; the guard
+        // does not descend (there are no subdirectories today).
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("utf-8 file name")
+            .to_string();
+        // Test modules (`*_tests.rs`) are always allowed — they carry no
+        // production producer surface.
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        found_modules.push(name);
+    }
+    found_modules.sort();
+    // Anti-vacuity: the sanctioned production members must all be present —
+    // their absence means the owner re-home regressed.
+    for sanctioned in SANCTIONED {
+        assert!(
+            found_modules.iter().any(|m| m == sanctioned),
+            "anti-vacuity: the sanctioned owner member `{sanctioned}` must exist in \
+             `structural_carrier_producer/` — found {found_modules:#?}"
+        );
+    }
+    // No NON-sanctioned production `.rs` module may live in the owner directory.
+    let extra: Vec<&String> = found_modules
+        .iter()
+        .filter(|m| !SANCTIONED.contains(&m.as_str()))
+        .collect();
+    assert!(
+        extra.is_empty(),
+        "owner-module narrowness violation: `structural_carrier_producer/` may contain ONLY the raw \
+         lowerer (`lower.rs`), the two witness-gated producer surfaces (`macro_surface.rs`, \
+         `decl_body_surface.rs`), the binder helper (`script_setup_binder.rs`), `mod.rs`, and test \
+         modules (`*_tests.rs`). A new non-test module here could open a THIRD producer surface or \
+         forge a witness. Found extra modules: {extra:#?}"
+    );
+}
+
+/// Self-test for the owner-module narrowness classifier: the sanctioned member
+/// set passes; a planted extra non-test module name is reported; a `*_tests.rs`
+/// module is allowed.
+#[test]
+fn structural_carrier_producer_narrowness_classifier_discriminates() {
+    // Reuse the SAME sanctioned-set membership predicate the live guard uses by
+    // re-stating it here over an in-memory file list, so a divergence in the
+    // allowlist reddens.
+    const SANCTIONED: &[&str] = &[
+        "mod.rs",
+        "lower.rs",
+        "macro_surface.rs",
+        "decl_body_surface.rs",
+        "script_setup_binder.rs",
+    ];
+    let classify = |names: &[&str]| -> Vec<String> {
+        names
+            .iter()
+            .filter(|n| !n.ends_with("_tests.rs"))
+            .filter(|n| !SANCTIONED.contains(*n))
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+    };
+    // The genuine member set (production + tests) has NO extras.
+    let genuine = [
+        "mod.rs",
+        "lower.rs",
+        "macro_surface.rs",
+        "decl_body_surface.rs",
+        "script_setup_binder.rs",
+        "structural_lower_tests.rs",
+        "macro_hot_mirror_tests.rs",
+        "script_setup_binder_tests.rs",
+    ];
+    assert!(
+        classify(&genuine).is_empty(),
+        "the genuine owner member set (sanctioned production + `*_tests.rs`) must have NO extras"
+    );
+    // A planted extra non-test module IS reported.
+    let with_extra = ["mod.rs", "lower.rs", "second_producer.rs"];
+    assert_eq!(
+        classify(&with_extra),
+        vec!["second_producer.rs".to_string()],
+        "a planted non-test, non-sanctioned module in the owner directory must be reported"
+    );
+    // A `*_tests.rs` module is NOT reported (test modules are always allowed).
+    let only_test = ["mod.rs", "lower.rs", "extra_invariant_tests.rs"];
+    assert!(
+        classify(&only_test).is_empty(),
+        "a `*_tests.rs` module must be allowed and not reported as an extra"
+    );
+}
+
+/// The two sanctioned producer-capability witnesses and their owning surface
+/// files. A witness is the unforgeable proof a producer surface presents to the
+/// witness-gated lowerer wrappers; there must be EXACTLY these two.
+const STRUCTURAL_CARRIER_PRODUCER_WITNESSES: &[(&str, &str)] = &[
+    ("MacroProducerWitness", "macro_surface.rs"),
+    ("DeclBodyProducerWitness", "decl_body_surface.rs"),
+];
+
+/// One discovered witness struct: its name, the owner-dir file it lives in, and
+/// whether EVERY field carries inherited (private) visibility (so it cannot be
+/// struct-literal-constructed from outside its module).
+struct WitnessStruct {
+    name: String,
+    file: String,
+    all_fields_private: bool,
+}
+
+/// Walk a parsed file's items (descending inline modules) collecting every
+/// `struct …Witness` definition, recording whether all its fields are private.
+fn collect_witness_structs_in_items(items: &[syn::Item], file: &str, out: &mut Vec<WitnessStruct>) {
+    for item in items {
+        match item {
+            syn::Item::Struct(s) => {
+                let name = s.ident.to_string();
+                if !name.ends_with("Witness") {
+                    continue;
+                }
+                // EVERY field must be private (inherited visibility) so the
+                // struct cannot be literal-constructed (`Witness { … }`) outside
+                // its module. A unit struct (no fields) would be trivially
+                // constructible, so it does NOT count as having a private field.
+                let fields: Vec<&syn::Field> = s.fields.iter().collect();
+                let all_fields_private = !fields.is_empty()
+                    && fields
+                        .iter()
+                        .all(|f| matches!(f.vis, syn::Visibility::Inherited));
+                out.push(WitnessStruct {
+                    name,
+                    file: file.to_string(),
+                    all_fields_private,
+                });
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    collect_witness_structs_in_items(inner, file, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a fn signature's RETURN type names `witness_name` (directly or as
+/// `Self` is NOT considered here — we match the explicit type name, plus the
+/// bare `Self` case is checked by the caller against the impl's self type). The
+/// render is the token-spaced `render_type` form.
+fn return_type_names(sig: &syn::Signature, witness_name: &str) -> bool {
+    match &sig.output {
+        syn::ReturnType::Type(_, ty) => {
+            let rendered = render_type(ty);
+            // Whole-identifier containment so `MacroProducerWitness` does not
+            // match a longer identifier.
+            ident_appears_whole(&rendered, witness_name)
+        }
+        syn::ReturnType::Default => false,
+    }
+}
+
+/// Collect violations where a fn RETURNS a witness type with crate-visible (or
+/// wider) visibility, OR returns a witness from a file OTHER than the witness's
+/// owning surface — either re-opens forging the capability proof from outside
+/// the owning surface. The witness-gated wrapper fns in `lower.rs` take a
+/// `&Witness` PARAMETER and never RETURN one, so they are not flagged.
+fn witness_return_violations(items: &[syn::Item], file: &str, out: &mut Vec<String>) {
+    // Map witness name → its sanctioned owning file.
+    let owning_file = |witness: &str| -> Option<&'static str> {
+        STRUCTURAL_CARRIER_PRODUCER_WITNESSES
+            .iter()
+            .find(|(n, _)| *n == witness)
+            .map(|(_, f)| *f)
+    };
+    fn walk(
+        items: &[syn::Item],
+        file: &str,
+        owning_file: &dyn Fn(&str) -> Option<&'static str>,
+        out: &mut Vec<String>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Fn(f) => {
+                    for (witness, owner) in STRUCTURAL_CARRIER_PRODUCER_WITNESSES {
+                        if return_type_names(&f.sig, witness) {
+                            let crate_vis = visibility_is_crate_visible(&f.vis);
+                            let wrong_file = !file.ends_with(owner);
+                            if crate_vis || wrong_file {
+                                out.push(format!(
+                                    "free fn `{}` in `{file}` returns witness `{witness}` \
+                                     (crate_visible={crate_vis}, wrong_file={wrong_file}; the \
+                                     witness's sole owning surface is `{owner}` and its constructor \
+                                     must stay private to it)",
+                                    f.sig.ident
+                                ));
+                            }
+                        }
+                    }
+                }
+                syn::Item::Impl(imp) => {
+                    // The impl's self type (for a `-> Self` return inside an
+                    // `impl Witness` block).
+                    let self_ty = render_type(&imp.self_ty);
+                    for impl_item in &imp.items {
+                        if let syn::ImplItem::Fn(m) = impl_item {
+                            for (witness, owner) in STRUCTURAL_CARRIER_PRODUCER_WITNESSES {
+                                let returns_named = return_type_names(&m.sig, witness);
+                                // `-> Self` inside `impl Witness { … }` also
+                                // returns the witness.
+                                let returns_self = matches!(&m.sig.output, syn::ReturnType::Type(_, ty) if render_type(ty) == "Self")
+                                    && ident_appears_whole(&self_ty, witness);
+                                if returns_named || returns_self {
+                                    let crate_vis = visibility_is_crate_visible(&m.vis);
+                                    let wrong_file = !file.ends_with(owner);
+                                    if crate_vis || wrong_file {
+                                        out.push(format!(
+                                            "associated fn `{}` in `{file}` returns witness \
+                                             `{witness}` (crate_visible={crate_vis}, \
+                                             wrong_file={wrong_file}); the witness's constructor must \
+                                             stay private to its owning surface `{owner}`",
+                                            m.sig.ident
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let _ = owning_file; // owning_file is consulted via the table above.
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, inner)) = &m.content {
+                        walk(inner, file, owning_file, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(items, file, &owning_file, out);
+}
+
+/// Collect every production `.rs` file in the owner directory as
+/// `(file-name, parsed-items)`. Test modules (`*_tests.rs`) are excluded — a
+/// test may legitimately mint a witness from within the owning surface subtree.
+fn structural_carrier_producer_owner_files() -> Vec<(String, syn::File)> {
+    let dir = workspace_path("crates/verter_session/src/structural_carrier_producer");
+    let mut out: Vec<(String, syn::File)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read owner dir: {e}")) {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("utf-8 file name")
+            .to_string();
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let parsed =
+            syn::parse_file(&src).unwrap_or_else(|e| panic!("parse owner file `{name}`: {e}"));
+        out.push((name, parsed));
+    }
+    out
+}
+
+/// WITNESS-UNFORGEABILITY guard (make-unrepresentable): there are EXACTLY two
+/// producer-capability witnesses — `MacroProducerWitness` (in `macro_surface.rs`)
+/// and `DeclBodyProducerWitness` (in `decl_body_surface.rs`) — each with a
+/// PRIVATE field (so it cannot be struct-literal-constructed outside its
+/// module), and NO function anywhere RETURNS a witness type with crate-visible
+/// (or wider) visibility or from a file other than the witness's owning surface.
+/// Together with the module-private raw lowerer, this makes a THIRD
+/// structural-carrier producer unrepresentable: a would-be producer can neither
+/// name the lowerer nor forge a witness to reach the witness-gated wrappers.
+#[test]
+fn structural_carrier_producer_witnesses_are_unforgeable() {
+    let owner_files = structural_carrier_producer_owner_files();
+    // Anti-vacuity: the scan found a real, non-trivial owner surface.
+    assert!(
+        owner_files.len() >= 4,
+        "anti-vacuity: expected at least mod.rs + lower.rs + the two producer surfaces; found {}",
+        owner_files.len()
+    );
+
+    // 1) Collect every `…Witness` struct across the owner directory.
+    let mut witnesses: Vec<WitnessStruct> = Vec::new();
+    for (file, parsed) in &owner_files {
+        collect_witness_structs_in_items(&parsed.items, file, &mut witnesses);
+    }
+    // EXACTLY two witnesses, with the sanctioned names + owning files.
+    let mut found: Vec<(String, String)> = witnesses
+        .iter()
+        .map(|w| (w.name.clone(), w.file.clone()))
+        .collect();
+    found.sort();
+    let mut expected: Vec<(String, String)> = STRUCTURAL_CARRIER_PRODUCER_WITNESSES
+        .iter()
+        .map(|(n, f)| (n.to_string(), f.to_string()))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "there must be EXACTLY two producer-capability witnesses at their sanctioned owning \
+         surfaces ({expected:#?}); found {found:#?}. A third `…Witness` struct (or one in the \
+         wrong file) is a new forging surface."
+    );
+
+    // 2) Each witness has a PRIVATE field (cannot be literal-constructed
+    //    outside its module).
+    for w in &witnesses {
+        assert!(
+            w.all_fields_private,
+            "witness `{}` in `{}` must carry at least one PRIVATE field so it cannot be \
+             struct-literal-constructed (`{} {{ … }}`) outside its module — a forgeable witness \
+             defeats the single-producer gate",
+            w.name, w.file, w.name
+        );
+    }
+
+    // 3) No fn RETURNS a witness type crate-visibly or from a foreign file.
+    let mut violations: Vec<String> = Vec::new();
+    for (file, parsed) in &owner_files {
+        witness_return_violations(&parsed.items, file, &mut violations);
+    }
+    assert!(
+        violations.is_empty(),
+        "witness-unforgeability violation: no function may RETURN a producer witness with \
+         crate-visible (or wider) visibility, nor from a file other than the witness's owning \
+         surface — that would let an outside caller obtain the capability proof and reach the \
+         witness-gated lowerer. The witnessed wrapper fns in `lower.rs` take a `&Witness` PARAMETER \
+         and never return one. Found: {violations:#?}"
+    );
+}
+
+/// Self-test for the witness-unforgeability classifiers: a private-field
+/// witness with a private constructor passes; a PUBLIC-field witness (literal-
+/// constructible) is reported as forgeable; a `pub(crate) fn new -> Witness`
+/// constructor is reported; a witness returned from a foreign file is reported.
+#[test]
+fn structural_carrier_producer_witness_classifier_discriminates() {
+    // A genuine private-field witness with a private constructor.
+    let ok_src =
+        "pub(in crate::structural_carrier_producer) struct MacroProducerWitness { _private: () }\n\
+                  impl MacroProducerWitness { fn new() -> Self { Self { _private: () } } }\n";
+    let ok = syn::parse_file(ok_src).expect("parse ok witness");
+    let mut ok_structs: Vec<WitnessStruct> = Vec::new();
+    collect_witness_structs_in_items(&ok.items, "macro_surface.rs", &mut ok_structs);
+    assert_eq!(ok_structs.len(), 1, "exactly one witness struct found");
+    assert!(
+        ok_structs[0].all_fields_private,
+        "a private-field witness must classify as not-literal-constructible"
+    );
+    let mut ok_returns: Vec<String> = Vec::new();
+    witness_return_violations(&ok.items, "macro_surface.rs", &mut ok_returns);
+    assert!(
+        ok_returns.is_empty(),
+        "a private `fn new -> Self` in the witness's OWN owning file is not a violation, got \
+         {ok_returns:?}"
+    );
+
+    // A PUBLIC-field witness is literal-constructible → forgeable.
+    let pub_field_src =
+        "pub(in crate::structural_carrier_producer) struct MacroProducerWitness { pub seed: () }\n";
+    let pub_field = syn::parse_file(pub_field_src).expect("parse pub-field witness");
+    let mut pf_structs: Vec<WitnessStruct> = Vec::new();
+    collect_witness_structs_in_items(&pub_field.items, "macro_surface.rs", &mut pf_structs);
+    assert!(
+        !pf_structs[0].all_fields_private,
+        "a witness with a `pub` field must be reported as literal-constructible (forgeable)"
+    );
+
+    // A unit-struct witness (no fields) is trivially constructible → NOT
+    // private-field-protected.
+    let unit_src = "pub(in crate::structural_carrier_producer) struct DeclBodyProducerWitness;\n";
+    let unit = syn::parse_file(unit_src).expect("parse unit witness");
+    let mut unit_structs: Vec<WitnessStruct> = Vec::new();
+    collect_witness_structs_in_items(&unit.items, "decl_body_surface.rs", &mut unit_structs);
+    assert!(
+        !unit_structs[0].all_fields_private,
+        "a fieldless unit-struct witness is trivially constructible and must NOT be treated as \
+         private-field-protected"
+    );
+
+    // A `pub(crate) fn new -> Self` constructor in the witness's owning file is
+    // a crate-visible returner → violation.
+    let pub_ctor_src =
+        "pub(in crate::structural_carrier_producer) struct MacroProducerWitness { _p: () }\n\
+         impl MacroProducerWitness { pub(crate) fn new() -> Self { Self { _p: () } } }\n";
+    let pub_ctor = syn::parse_file(pub_ctor_src).expect("parse pub-ctor witness");
+    let mut pc_returns: Vec<String> = Vec::new();
+    witness_return_violations(&pub_ctor.items, "macro_surface.rs", &mut pc_returns);
+    assert!(
+        !pc_returns.is_empty(),
+        "a `pub(crate) fn new -> Self` constructor (crate-visible witness returner) must be reported"
+    );
+
+    // A witness RETURNED from a FOREIGN file (not its owning surface) is a
+    // violation even at private visibility.
+    let foreign_src = "fn forge() -> MacroProducerWitness { unimplemented!() }\n";
+    let foreign = syn::parse_file(foreign_src).expect("parse foreign returner");
+    let mut foreign_returns: Vec<String> = Vec::new();
+    // `decl_body_surface.rs` is NOT the owning file of `MacroProducerWitness`.
+    witness_return_violations(&foreign.items, "decl_body_surface.rs", &mut foreign_returns);
+    assert!(
+        !foreign_returns.is_empty(),
+        "a fn returning `MacroProducerWitness` from a file other than its owning surface \
+         (`macro_surface.rs`) must be reported"
+    );
+
+    // The REAL owner sources: exactly two witnesses, both private-field, no
+    // crate-visible/foreign returners (revert proof).
+    let real_files = structural_carrier_producer_owner_files();
+    let mut real_witnesses: Vec<WitnessStruct> = Vec::new();
+    let mut real_returns: Vec<String> = Vec::new();
+    for (file, parsed) in &real_files {
+        collect_witness_structs_in_items(&parsed.items, file, &mut real_witnesses);
+        witness_return_violations(&parsed.items, file, &mut real_returns);
+    }
+    assert_eq!(
+        real_witnesses.len(),
+        2,
+        "the REAL owner module must define EXACTLY two witnesses"
+    );
+    assert!(
+        real_witnesses.iter().all(|w| w.all_fields_private),
+        "both REAL witnesses must carry a private field"
+    );
+    assert!(
+        real_returns.is_empty(),
+        "the REAL owner module must expose NO crate-visible / foreign witness returner, got \
+         {real_returns:?}"
     );
 }
 
 /// The defining module of the shared binder-seed helper. It lives UNDER
-/// `crate::macro_hot_mirror` and is `pub(in crate::macro_hot_mirror)` —
-/// ancestor-private to the mirror, mirroring the structural lowerer's own
-/// confinement — so no FOREIGN production module can NAME it. That makes a
+/// `crate::structural_carrier_producer` and is
+/// `pub(in crate::structural_carrier_producer)` — confined to the owner module,
+/// mirroring the structural lowerer's own confinement — so no FOREIGN production
+/// module can NAME it. That makes a
 /// second binder-seed producer reachable from outside the module UNREPRESENTABLE
 /// by construction (compiler-enforced — a foreign reference is a compile error,
 /// not a lint). This is the LOAD-BEARING anti-rogue guarantee for the helper;
 /// the bounded token tripwire
 /// (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`) is
 /// defense-in-depth on top of it.
-const SCRIPT_SETUP_BINDER_DEFINING_MODULE: &str = "macro_hot_mirror/script_setup_binder.rs";
+const SCRIPT_SETUP_BINDER_DEFINING_MODULE: &str =
+    "structural_carrier_producer/script_setup_binder.rs";
 
 /// Classify the visibility shape of the `build_script_setup_seed_frames`
 /// DEFINITION in the given source body. Returns the offending reason when the
-/// entry is NOT the required `pub(in crate::macro_hot_mirror)` ancestor-private
-/// shape (the shape that makes a foreign-module binder-seed producer
-/// unrepresentable), or `None` when the shape is correct. Looks at the
+/// entry is NOT the required `pub(in crate::structural_carrier_producer)`
+/// owner-confined shape (the shape that makes a foreign-module binder-seed
+/// producer unrepresentable), or `None` when the shape is correct. Looks at the
 /// DEFINITION line only. ANY broader visibility — bare `pub`, `pub(crate)`,
 /// `pub(super)`, or even `pub(in crate)` (the crate root) — lets a foreign
 /// production module name the helper, re-opening the cross-module producer
-/// surface, and is rejected; only the EXACT `pub(in crate::macro_hot_mirror)`
-/// subtree path passes.
+/// surface, and is rejected; only the EXACT
+/// `pub(in crate::structural_carrier_producer)` subtree path passes.
 fn script_setup_binder_privacy_violation(body: &str) -> Option<String> {
     let needle = "fn build_script_setup_seed_frames(";
     let def_line = body.lines().find(|l| l.contains(needle))?;
     let trimmed = def_line.trim_start();
-    if trimmed.starts_with("pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(") {
+    if trimmed.starts_with(
+        "pub(in crate::structural_carrier_producer) fn build_script_setup_seed_frames(",
+    ) {
         return None;
     }
     // Any broader visibility (`pub`, `pub(crate)`, `pub(in crate)`,
@@ -21581,37 +22136,36 @@ fn script_setup_binder_privacy_violation(body: &str) -> Option<String> {
     // forbidden cross-module-producer shape.
     Some(format!(
         "the shared binder-seed helper must be declared \
-         `pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(` (ancestor-private to \
-         the macro hot mirror, so no foreign production module can name it and open a second \
-         binder-seed producer); found: `{}`",
+         `pub(in crate::structural_carrier_producer) fn build_script_setup_seed_frames(` (confined \
+         to the structural-carrier-producer owner module, so no foreign production module can name \
+         it and open a second binder-seed producer); found: `{}`",
         trimmed
     ))
 }
 
 /// PRIMARY by-construction confinement guard for the shared binder-seed helper
 /// (make-unrepresentable): the production helper `build_script_setup_seed_frames`
-/// lives under `crate::macro_hot_mirror::script_setup_binder` and is
-/// `pub(in crate::macro_hot_mirror)`. Its only callers (the mirror's macro-arg
-/// builder and the in-module tests) are within the module subtree;
-/// ancestor-privacy makes a SECOND binder-seed producer reachable from a foreign
-/// module UNREPRESENTABLE (a foreign module cannot name the fn — a compile
-/// error, not a lint), so the no-second-producer rule needs no caller scanner
-/// here. This is the COMPILER-ENFORCED load-bearing layer; the bounded token
-/// tripwire `macro_hot_mirror_exposes_single_crate_visible_producer_entry` is
-/// defense-in-depth on top of it (it is NOT exhaustive — see its doc comment for
-/// the documented residual evasion tail). The TWO together mirror the structural
-/// lowerer's own two-layer confinement
-/// (`structural_lowerer_production_entry_is_macro_hot_mirror_private` + the same
-/// token tripwire).
+/// lives under `crate::structural_carrier_producer::macro_surface::script_setup_binder`
+/// and is `pub(in crate::structural_carrier_producer)`. Its only callers (the
+/// mirror's macro-arg builder and the in-module tests) are within the owner
+/// module subtree; owner-confinement makes a SECOND binder-seed producer
+/// reachable from a foreign module UNREPRESENTABLE (a foreign module cannot name
+/// the fn — a compile error, not a lint), so the no-second-producer rule needs
+/// no caller scanner here. This is the COMPILER-ENFORCED load-bearing layer; the
+/// bounded token tripwire `macro_hot_mirror_exposes_single_crate_visible_producer_entry`
+/// is defense-in-depth on top of it (it is NOT exhaustive — see its doc comment
+/// for the documented residual evasion tail). The TWO together mirror the
+/// structural lowerer's own two-layer confinement
+/// (`structural_carrier_producer_lowerer_is_module_private` + the same token
+/// tripwire).
 ///
-/// GOVERNANCE: if the helper's visibility is ever WIDENED (e.g. to `pub(crate)`
-/// to let a relocated decl-body producer in another module call it), this guard
-/// REDs — the widening must be a DELIBERATE re-home to the new caller's shared
-/// ancestor-private boundary, reviewed against this guard, never a passive
-/// `pub(crate)` that silently re-opens the cross-module producer surface.
+/// GOVERNANCE: if the helper's visibility is ever WIDENED (e.g. to `pub(crate)`),
+/// this guard REDs — the widening must be a DELIBERATE re-home to the new
+/// caller's shared owner-confined boundary, reviewed against this guard, never a
+/// passive `pub(crate)` that silently re-opens the cross-module producer surface.
 #[test]
 fn script_setup_binder_helper_is_module_private() {
-    let rel = "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs";
+    let rel = "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs";
     let body = std::fs::read_to_string(workspace_path(rel))
         .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
     // Anti-vacuity: the defining module must exist at the expected path and carry
@@ -21624,29 +22178,29 @@ fn script_setup_binder_helper_is_module_private() {
     );
     if let Some(reason) = script_setup_binder_privacy_violation(&body) {
         panic!(
-            "binder-seed-helper confinement rule violated: {reason}. The helper must stay \
-             ancestor-private to `crate::macro_hot_mirror` so a second binder-seed producer \
-             reachable from a foreign module is unrepresentable by construction. A widening must be \
-             a deliberate re-home to the new caller's shared ancestor-private boundary, not a \
-             passive `pub(crate)`."
+            "binder-seed-helper confinement rule violated: {reason}. The helper must stay confined \
+             to `crate::structural_carrier_producer` so a second binder-seed producer reachable \
+             from a foreign module is unrepresentable by construction. A widening must be a \
+             deliberate re-home to the new caller's shared owner-confined boundary, not a passive \
+             `pub(crate)`."
         );
     }
 }
 
 /// Self-test for [`script_setup_binder_privacy_violation`] (ANTI-ROGUE
-/// RED-PROOF): the genuine `pub(in crate::macro_hot_mirror)` shape is ACCEPTED;
-/// a `pub(crate)` / bare `pub` / `pub(in crate)` (crate-root) WIDENING is
-/// REJECTED. A privacy guard that cannot fail on a widening is a stub — these
+/// RED-PROOF): the genuine `pub(in crate::structural_carrier_producer)` shape is
+/// ACCEPTED; a `pub(crate)` / bare `pub` / `pub(in crate)` (crate-root) WIDENING
+/// is REJECTED. A privacy guard that cannot fail on a widening is a stub — these
 /// plants prove it catches the exact re-opening of the cross-module producer
 /// surface the load-bearing confinement forbids.
 #[test]
 fn script_setup_binder_privacy_classifier_discriminates() {
-    // ACCEPT — the genuine ancestor-private-to-the-mirror shape.
-    let ok = "    pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(\n";
+    // ACCEPT — the genuine owner-confined shape.
+    let ok = "    pub(in crate::structural_carrier_producer) fn build_script_setup_seed_frames(\n";
     assert!(
         script_setup_binder_privacy_violation(ok).is_none(),
-        "the genuine `pub(in crate::macro_hot_mirror)` shape MUST pass — it is ancestor-private to \
-         the mirror, so no foreign module can name the helper"
+        "the genuine `pub(in crate::structural_carrier_producer)` shape MUST pass — it is confined \
+         to the owner module, so no foreign module can name the helper"
     );
     // REJECT — `pub(crate)` (the exact passive widening the ruling forbids): any
     // foreign production module can now name the helper.
@@ -21664,26 +22218,26 @@ fn script_setup_binder_privacy_classifier_discriminates() {
     );
     // REJECT — `pub(in crate)` (the crate ROOT): Rust treats `pub(in crate)` as
     // identical crate-wide visibility to `pub(crate)`, so a foreign module can
-    // name the helper. Only the DEEPER `pub(in crate::macro_hot_mirror)` subtree
-    // path is module-private.
+    // name the helper. Only the DEEPER `pub(in crate::structural_carrier_producer)`
+    // subtree path is owner-confined.
     let wrong_pub_in_crate = "    pub(in crate) fn build_script_setup_seed_frames(\n";
     assert!(
         script_setup_binder_privacy_violation(wrong_pub_in_crate).is_some(),
         "a `pub(in crate)` (crate-root) shape MUST be reported — it is crate-wide visibility \
-         (identical to `pub(crate)`), not the module-private `pub(in crate::macro_hot_mirror)` \
+         (identical to `pub(crate)`), not the owner-confined `pub(in crate::structural_carrier_producer)` \
          subtree path"
     );
     // The REAL helper source is the genuine shape (revert proof: the production
-    // tree is pristine — the helper is module-private to the mirror).
+    // tree is pristine — the helper is confined to the owner module).
     let real = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs",
+        "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs",
     ))
     .expect("the binder-seed helper's defining file must be readable");
     assert!(
         script_setup_binder_privacy_violation(&real).is_none(),
         "the REAL `build_script_setup_seed_frames` in `script_setup_binder.rs` MUST be \
-         `pub(in crate::macro_hot_mirror)` (ancestor-private to the mirror) — if this reddens, the \
-         helper's visibility was widened, re-opening the cross-module producer surface"
+         `pub(in crate::structural_carrier_producer)` (confined to the owner module) — if this \
+         reddens, the helper's visibility was widened, re-opening the cross-module producer surface"
     );
 }
 
@@ -21712,8 +22266,9 @@ fn script_setup_binder_privacy_classifier_discriminates() {
 ///     `param_ty` in another fn — the flow check requires the lowered subject
 ///     to be the macro-arg-derived binding, not merely co-present.
 fn macro_arg_eager_lowering_violations(rel: &str, body: &str) -> bool {
-    // The mirror module is the sanctioned producer/accessor home.
-    if rel.contains("macro_hot_mirror/") {
+    // The structural-carrier producer module is the sanctioned producer/accessor
+    // home.
+    if rel.contains("structural_carrier_producer/") {
         return false;
     }
     // Comment-stripped, cfg(test)-stripped production body (mirrors
@@ -22137,9 +22692,9 @@ fn no_production_macro_arg_eager_lowering_outside_mirror() {
         violations.is_empty(),
         "ordering tripwire: a non-test verter_session production file co-locates \
          `parsed_type_argument` with an eager `lower_type_expr_in_scope_with_*` call OUTSIDE the \
-         macro hot mirror — a forbidden second macro-arg lowering path. The four macro sites must \
-         read `crate::macro_hot_mirror::macro_type_arg_hot_ref`; only the mirror builder lowers \
-         the macro arg. Files: {violations:#?}"
+         structural-carrier producer module — a forbidden second macro-arg lowering path. The four \
+         macro sites must read `crate::structural_carrier_producer::macro_type_arg_hot_ref`; only \
+         the mirror builder lowers the macro arg. Files: {violations:#?}"
     );
 }
 
@@ -22245,10 +22800,10 @@ fn macro_arg_eager_lowering_tripwire_discriminates() {
     );
     assert!(
         !macro_arg_eager_lowering_violations(
-            "crates/verter_session/src/macro_hot_mirror/mod.rs",
+            "crates/verter_session/src/structural_carrier_producer/macro_surface.rs",
             both
         ),
-        "the mirror module is the sanctioned producer/accessor — exempt"
+        "the structural-carrier producer module is the sanctioned producer/accessor — exempt"
     );
     // A test-gated co-presence is NOT a production violation (cfg(test) strip).
     let gated = "#[cfg(test)]\nmod t {\n    fn f() { let a = mac.parsed_type_argument; dispatch.lower_type_expr_in_scope_with_mode(x); }\n}\n";
@@ -22323,7 +22878,7 @@ fn macro_hot_mirror_impurity_hits(body: &str) -> Vec<String> {
 fn macro_hot_mirror_producer_is_pure_no_route_resolution() {
     let mut violations: Vec<String> = Vec::new();
     for (rel, src) in session_production_src_files() {
-        if !rel.contains("macro_hot_mirror/") {
+        if !rel.contains("structural_carrier_producer/") {
             continue;
         }
         for ident in macro_hot_mirror_impurity_hits(&src) {
@@ -22332,9 +22887,9 @@ fn macro_hot_mirror_producer_is_pure_no_route_resolution() {
     }
     assert!(
         violations.is_empty(),
-        "purity violation: the macro hot mirror producer (`macro_hot_mirror/**`) must NOT route-\
-         resolve imports or read the prepared-decl bundle — resolution + dep recording belong at \
-         the resolving DEMAND. Script-setup seeding re-sources from the owner's route-free \
+        "purity violation: the structural-carrier producer (`structural_carrier_producer/**`) must \
+         NOT route-resolve imports or read the prepared-decl bundle — resolution + dep recording \
+         belong at the resolving DEMAND. Script-setup seeding re-sources from the owner's route-free \
          `IndexedReady` (`raw_source` + `framework_parse`). Found: {violations:#?}"
     );
 }
@@ -22440,45 +22995,52 @@ fn macro_hot_mirror_purity_scanner_discriminates() {
         .is_empty(),
         "a #[cfg(test)]-gated route-resolving call is not a production violation"
     );
-    // The REAL mirror module source is clean (revert proof: the production
-    // `macro_hot_mirror/mod.rs` carries none of the banned idents).
+    // The REAL macro-surface producer source is clean (revert proof: the
+    // production `macro_surface.rs` carries none of the banned idents).
     let mirror_src = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/macro_hot_mirror/mod.rs",
+        "crates/verter_session/src/structural_carrier_producer/macro_surface.rs",
     ))
-    .expect("the mirror module source must be readable");
+    .expect("the macro-surface producer source must be readable");
     assert!(
         macro_hot_mirror_impurity_hits(&mirror_src).is_empty(),
-        "the production `macro_hot_mirror/mod.rs` must be route-free (pure producer)"
+        "the production `structural_carrier_producer/macro_surface.rs` must be route-free (pure \
+         producer)"
     );
 }
 
-/// The SANCTIONED sole crate-visible production producer entry of the macro hot
-/// mirror module.
-const MIRROR_SOLE_PRODUCER_ENTRY: &str = "macro_type_arg_hot_ref";
+/// The SANCTIONED crate-visible PRODUCER entries of the structural-carrier
+/// producer module. Each is a witness-gated PUBLIC entry whose single private
+/// implementation is the shared structural lowerer (`lower_type_expr_structural`,
+/// module-private in `lower.rs`): the macro-arg accessor `macro_type_arg_hot_ref`
+/// and the declaration-body producer entry `emit_decl_body_arm`. No OTHER
+/// crate-visible producer fn may appear in the owner module — a third would be a
+/// new outward producer entry. The witnessed wrapper fns
+/// (`emit_macro_arg`/`emit_decl_body_arm` on `lower.rs`) and the binder-seed
+/// helper are `pub(in crate::structural_carrier_producer)`, NOT crate-visible, so
+/// they never appear in this scan.
+const MIRROR_SANCTIONED_PRODUCER_ENTRIES: &[&str] =
+    &["macro_type_arg_hot_ref", "emit_decl_body_arm"];
 
-/// Mirror fns that are NOT macro-arg producer entries and are therefore the
-/// SANCTIONED-NAME subjects of the bounded token tripwire alongside
-/// [`MIRROR_SOLE_PRODUCER_ENTRY`]. Each is a shared STRUCTURAL helper — it does
-/// NOT produce a macro-arg graph node (the single-engine producer concern), so
-/// it does not re-open a second outward macro-arg producer entry. The token
-/// tripwire enumerates the NAME (regardless of visibility) and pins it to one
-/// genuine free-fn occurrence; the LOAD-BEARING confinement for each is the
-/// COMPILER module-privacy on its own definition (pinned by a dedicated
-/// privacy-shape guard), not this name-tracking list.
+/// Structural helpers that are NOT macro-arg producer entries and are the
+/// SANCTIONED-NAME subjects of the bounded crate-wide-uniqueness token tripwire.
+/// Each is a shared STRUCTURAL helper — it does NOT produce a macro-arg graph
+/// node, so it does not re-open a second outward producer entry. The tripwire
+/// pins the NAME (regardless of visibility) to one genuine free-fn occurrence;
+/// the LOAD-BEARING confinement for each is the COMPILER module-privacy on its
+/// own definition (pinned by a dedicated privacy-shape guard), not this list.
 ///
 /// - `build_script_setup_seed_frames`: the shared `<script setup generic="…">`
 ///   binder-frame builder. It interns the owner's script-setup generics as
 ///   `TypeParam` binder nodes and returns a seed `BinderScope` stack; the ONLY
-///   production caller today is the mirror's macro-arg builder (the in-module
-///   isolation tests also build the seed binder shape from it directly). It is
-///   `pub(in crate::macro_hot_mirror)` — ancestor-private to the mirror — so NO
-///   foreign module can NAME it (a compile error, not a lint): the by-
-///   construction, compiler-enforced single-producer guarantee, pinned by
-///   [`script_setup_binder_helper_is_module_private`]. The only caller today is
-///   inside the module subtree; a FUTURE decl-body structural producer that
-///   needs this seed shape from a module OUTSIDE the subtree must DELIBERATELY
-///   re-home / re-scope the helper to the new caller's shared ancestor-private
-///   boundary, never passively widen it to `pub(crate)`.
+///   production caller is the mirror's macro-arg builder (the isolation tests
+///   build the seed binder shape from it directly). It is
+///   `pub(in crate::structural_carrier_producer)` — confined to the owner module
+///   — so NO foreign module can NAME it (a compile error, not a lint): the
+///   by-construction, compiler-enforced single-producer guarantee, pinned by
+///   [`script_setup_binder_helper_is_module_private`]. It is NOT crate-visible,
+///   so it never appears in the crate-visible producer scan; the crate-wide
+///   uniqueness pin (a single genuine free-fn occurrence) is visibility-
+///   independent defense-in-depth.
 const MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES: &[&str] = &["build_script_setup_seed_frames"];
 
 /// The ONE production file the sanctioned non-producer helper
@@ -22487,12 +23049,14 @@ const MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES: &[&str] = &["build_script_setup_se
 /// else in `verter_session` production source). Path tail (not anchored) so the
 /// check is OS-portable — `session_production_src_files()` already normalises
 /// separators to `/`.
-const SANCTIONED_HELPER_DEFINING_FILE: &str = "macro_hot_mirror/script_setup_binder.rs";
+const SANCTIONED_HELPER_DEFINING_FILE: &str = "structural_carrier_producer/script_setup_binder.rs";
 
-/// Whether `name` is a sanctioned mirror crate-visible entry — the sole macro-arg
-/// producer entry OR a sanctioned non-producer structural helper.
+/// Whether `name` is a sanctioned structural-carrier-producer crate-visible
+/// entry — a witness-gated PRODUCER entry OR a sanctioned non-producer
+/// structural helper.
 fn mirror_entry_is_sanctioned(name: &str) -> bool {
-    name == MIRROR_SOLE_PRODUCER_ENTRY || MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES.contains(&name)
+    MIRROR_SANCTIONED_PRODUCER_ENTRIES.contains(&name)
+        || MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES.contains(&name)
 }
 
 /// Whether an attribute list test-gates an item — `#[cfg(test)]`,
@@ -22510,7 +23074,7 @@ fn mirror_entry_is_sanctioned(name: &str) -> bool {
 /// (e.g. `X = debug_assertions` or `feature = "…"`) is PRODUCTION-satisfiable
 /// in a non-test build that satisfies `X`. This classifier deliberately
 /// over-excludes that exotic shape; it is NOT relied on as the load-bearing
-/// single-entry guarantee (the by-construction `pub(in crate::macro_hot_mirror)`
+/// single-entry guarantee (the by-construction `pub(in crate::structural_carrier_producer)`
 /// visibility is). The narrowing of this `any`-arm exclusion is tracked debt,
 /// out of scope for the producer-entry surface guard's current contract.
 ///
@@ -22611,7 +23175,7 @@ fn cfg_tokens_test_gate(tokens: proc_macro2::TokenStream, negated: bool) -> bool
 /// wider) is crate-visible; so is a restricted path of EXACTLY `crate`, spelled
 /// `pub(crate)` OR `pub(in crate)` — Rust treats the two as identical crate-wide
 /// visibility. An inherited (module-private) visibility and any DEEPER restricted
-/// form (`pub(in crate::macro_hot_mirror)` / other `pub(in crate::…)` subtree
+/// form (`pub(in crate::structural_carrier_producer)` / other `pub(in crate::…)` subtree
 /// path / `pub(super)` / `pub(self)`) are NOT crate-visible: they cannot be named
 /// from an arbitrary other production module to act as a second outward entry.
 fn visibility_is_crate_visible(vis: &syn::Visibility) -> bool {
@@ -22621,7 +23185,7 @@ fn visibility_is_crate_visible(vis: &syn::Visibility) -> bool {
         // A restricted path of EXACTLY `crate` is crate-wide visibility WHETHER
         // spelled `pub(crate)` (no `in` token) or `pub(in crate)` (with the `in`
         // token) — both name the crate root, so both are crate-visible. Any
-        // DEEPER path (`pub(in crate::macro_hot_mirror)`, `pub(in crate::a::b)`),
+        // DEEPER path (`pub(in crate::structural_carrier_producer)`, `pub(in crate::a::b)`),
         // `pub(super)`, and `pub(self)` are restricted BELOW crate scope and are
         // NOT crate-visible.
         syn::Visibility::Restricted(r) => r.path.is_ident("crate"),
@@ -22808,7 +23372,7 @@ struct SanctionedOccurrence {
 /// surfaces below are the high-value ones a routine refactor / copy-paste would
 /// hit, and closing them is worthwhile defense-in-depth — but the LOAD-BEARING
 /// no-second-producer guarantee for the helper is the COMPILER module-privacy of
-/// `build_script_setup_seed_frames` (`pub(in crate::macro_hot_mirror)`, pinned by
+/// `build_script_setup_seed_frames` (`pub(in crate::structural_carrier_producer)`, pinned by
 /// `script_setup_binder_helper_is_module_private`), NOT this scanner. See the
 /// guard `macro_hot_mirror_exposes_single_crate_visible_producer_entry` for the
 /// documented residual evasion tail this scanner deliberately does NOT chase.
@@ -23254,26 +23818,30 @@ fn positive_pin_sanctioned_helper(
     Ok(())
 }
 
-/// BOUNDED defense-in-depth tripwire (NOT exhaustive): assert
-/// `macro_type_arg_hot_ref` is the SOLE crate-visible (`pub(crate)` /
-/// `pub(in crate)` / bare `pub`) PRODUCTION producer entry of the
-/// `macro_hot_mirror` module — covering BOTH module-level FREE functions AND
-/// ASSOCIATED functions inside INHERENT `impl` blocks (trait-impl methods inherit
-/// the trait's visibility and cannot be independently crate-visible, so they are
-/// not a producer-entry vector). No OTHER crate-visible fn (free or associated)
-/// in `macro_hot_mirror/**` may expose a second macro-arg producer entry. The
-/// `#[cfg(test)]` test facade (`for_tests::lower_type_expr_structural_for_tests`)
-/// and the `#[cfg(test)]` `MacroHotMirror::demanded_count` test accessor are
-/// excluded by attribute, and the raw structural lowerer is
-/// `pub(in crate::macro_hot_mirror)` (restricted visibility — NOT crate-visible),
-/// so none widens the crate-visible producer surface.
+/// BOUNDED defense-in-depth tripwire (NOT exhaustive): assert the SANCTIONED
+/// witness-gated producer entries (`macro_type_arg_hot_ref`, `emit_decl_body_arm`)
+/// are the ONLY crate-visible (`pub(crate)` / `pub(in crate)` / bare `pub`)
+/// PRODUCTION producer entries of the `structural_carrier_producer` module —
+/// covering BOTH module-level FREE functions AND ASSOCIATED functions inside
+/// INHERENT `impl` blocks (trait-impl methods inherit the trait's visibility and
+/// cannot be independently crate-visible, so they are not a producer-entry
+/// vector). No OTHER crate-visible fn (free or associated) in
+/// `structural_carrier_producer/**` may expose a third outward producer entry. The
+/// `#[cfg(test)]` `MacroHotMirror::demanded_count` test accessor is excluded by
+/// attribute; the witnessed wrapper fns (`emit_macro_arg` / `emit_decl_body_arm`
+/// on `lower.rs`) and the binder-seed helper are
+/// `pub(in crate::structural_carrier_producer)` (restricted visibility — NOT
+/// crate-visible); and the raw structural lowerer is MODULE-PRIVATE (no visibility
+/// modifier), so none widens the crate-visible producer surface.
 ///
 /// LAYER ORDER. This is the SECONDARY layer. The LOAD-BEARING confinement is the
-/// COMPILER module-privacy of the producer-capable helpers:
-/// - the structural lowerer is `pub(in crate::macro_hot_mirror)`, pinned by
-///   `structural_lowerer_production_entry_is_macro_hot_mirror_private`;
-/// - the shared binder-seed helper `build_script_setup_seed_frames` is likewise
-///   `pub(in crate::macro_hot_mirror)`, pinned by
+/// COMPILER privacy of the producer-capable code:
+/// - the raw structural lowerer is MODULE-PRIVATE in `lower.rs` and reachable
+///   only through the two unforgeable-witness-gated wrappers, pinned by
+///   `structural_carrier_producer_lowerer_is_module_private` +
+///   `structural_carrier_producer_witnesses_are_unforgeable`;
+/// - the shared binder-seed helper `build_script_setup_seed_frames` is
+///   `pub(in crate::structural_carrier_producer)`, pinned by
 ///   `script_setup_binder_helper_is_module_private`.
 ///
 /// A foreign module cannot NAME either (a compile error, not a lint), so a second
@@ -23313,12 +23881,12 @@ fn positive_pin_sanctioned_helper(
 fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     let mut crate_visible: Vec<(String, String)> = Vec::new();
     let mut scanned_mirror_files = 0usize;
-    // Retain each mirror file's source so the POSITIVE STRUCTURAL PIN below can
-    // parse every mirror file and aggregate occurrences of the sanctioned helper
+    // Retain each owner file's source so the POSITIVE STRUCTURAL PIN below can
+    // parse every owner file and aggregate occurrences of the sanctioned helper
     // name module-wide.
     let mut mirror_sources: Vec<(String, String)> = Vec::new();
     for (rel, src) in session_production_src_files() {
-        if !rel.contains("macro_hot_mirror/") {
+        if !rel.contains("structural_carrier_producer/") {
             continue;
         }
         scanned_mirror_files += 1;
@@ -23328,34 +23896,35 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
         mirror_sources.push((rel, src));
     }
     // Anti-vacuity: the module must exist and the scan must have found the
-    // sanctioned entry — its absence means the producer-entry move regressed.
+    // sanctioned entries — their absence means the producer-entry move regressed.
     assert!(
-        scanned_mirror_files >= 2,
-        "anti-vacuity: expected at least the `mod.rs` + `structural_lower.rs` mirror production \
-         files, found {scanned_mirror_files}"
+        scanned_mirror_files >= 4,
+        "anti-vacuity: expected at least `mod.rs` + `lower.rs` + the two producer surfaces, found \
+         {scanned_mirror_files}"
     );
-    assert!(
-        crate_visible
-            .iter()
-            .any(|(_, name)| name == MIRROR_SOLE_PRODUCER_ENTRY),
-        "anti-vacuity: the sanctioned sole producer entry `{MIRROR_SOLE_PRODUCER_ENTRY}` must be \
-         present as a crate-visible fn in `macro_hot_mirror/**`"
-    );
+    for sanctioned in MIRROR_SANCTIONED_PRODUCER_ENTRIES {
+        assert!(
+            crate_visible.iter().any(|(_, name)| name == sanctioned),
+            "anti-vacuity: the sanctioned producer entry `{sanctioned}` must be present as a \
+             crate-visible fn in `structural_carrier_producer/**`"
+        );
+    }
     let extra: Vec<&(String, String)> = crate_visible
         .iter()
         .filter(|(_, name)| !mirror_entry_is_sanctioned(name))
         .collect();
     assert!(
         extra.is_empty(),
-        "mirror entry-surface violation (GOV finding c + round-4/5): `{MIRROR_SOLE_PRODUCER_ENTRY}` \
-         must be the SOLE crate-visible (`pub(crate)`/`pub(in crate)`/`pub`) PRODUCTION producer \
-         entry of `macro_hot_mirror/**` (beyond the cfg-gated test facade + the sanctioned \
-         non-producer structural helpers in `MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES`) — covering BOTH \
-         module-level FREE functions AND ASSOCIATED functions inside INHERENT `impl` blocks. A second \
-         crate-visible producer fn (free OR associated) re-opens a second outward entry into the \
-         single-entry mirror. Found extra entries: {extra:#?}. If the module legitimately needs \
-         another crate-visible fn for a NON-producer reason, scope it to a non-producer surface \
-         and add it to the sanctioned set with justification."
+        "structural-carrier-producer entry-surface violation: the crate-visible \
+         (`pub(crate)`/`pub(in crate)`/`pub`) PRODUCTION producer entries of \
+         `structural_carrier_producer/**` must be EXACTLY the sanctioned witness-gated entries \
+         {MIRROR_SANCTIONED_PRODUCER_ENTRIES:?} (the macro-arg accessor + the decl-body producer \
+         entry; both wrap the single module-private structural lowerer through an unforgeable \
+         witness) — covering BOTH module-level FREE functions AND ASSOCIATED functions inside \
+         INHERENT `impl` blocks. A third crate-visible producer fn (free OR associated) re-opens a \
+         new outward entry into the single-producer module. Found extra entries: {extra:#?}. If the \
+         module legitimately needs another crate-visible fn for a NON-producer reason, scope it to a \
+         non-producer surface and add it to the sanctioned set with justification."
     );
 
     // POSITIVE STRUCTURAL AST PIN (ANTI-ROGUE): the name-only sanction is
@@ -23389,16 +23958,17 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     }
 
     // CRATE-WIDE SANCTIONED-NAME UNIQUENESS (BOUNDED POSITIVE TRIPWIRE). The
-    // mirror-scoped pin above proves the sanctioned helper is the one genuine
-    // free fn WITHIN `macro_hot_mirror/**`. This broadens that to the whole crate:
-    // the sanctioned name `build_script_setup_seed_frames` should appear in ALL
-    // WALKED `verter_session` production source — not just the mirror directory —
-    // ONLY as that one genuine free fn in `script_setup_binder.rs`, and nowhere
-    // else among the SURFACES THE SCANNER CAN SEE (no fn in another module, no
-    // `use … as` reexport binding, no cfg-gated variant, no item-position macro
+    // owner-scoped pin above proves the sanctioned helper is the one genuine
+    // free fn WITHIN `structural_carrier_producer/**`. This broadens that to the
+    // whole crate: the sanctioned name `build_script_setup_seed_frames` should
+    // appear in ALL WALKED `verter_session` production source — not just the owner
+    // directory — ONLY as that one genuine free fn in `script_setup_binder.rs`, and
+    // nowhere else among the SURFACES THE SCANNER CAN SEE (no fn in another module,
+    // no `use … as` reexport binding, no cfg-gated variant, no item-position macro
     // invocation token-mentioning the name). Scanning the WHOLE walked tree (not
-    // just `macro_hot_mirror/**`) narrows the out-of-module producer vector (a
-    // usurper under the name in any OTHER walked production module is now visible);
+    // just `structural_carrier_producer/**`) narrows the out-of-module producer
+    // vector (a usurper under the name in any OTHER walked production module is now
+    // visible);
     // the surface-broadened, cfg-independent `collect_sanctioned_occurrences` (run
     // by `positive_pin_sanctioned_helper`) narrows the macro-generated, reexport,
     // and cfg-gated vectors. This is BOUNDED, not exhaustive: a `#[path]` module
@@ -23407,8 +23977,8 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     // const/static fn-pointer binding are the documented residuals this scanner
     // does NOT cover (the helper's compiler module-privacy is the airtight
     // guarantee). A bare CALL EXPRESSION of the helper inside a fn body (the
-    // legitimate call site in `mod.rs`) is NOT an item-level occurrence and is
-    // correctly NOT counted — only DEFINITIONS / BINDINGS / macro-invocation
+    // legitimate call site in `macro_surface.rs`) is NOT an item-level occurrence
+    // and is correctly NOT counted — only DEFINITIONS / BINDINGS / macro-invocation
     // surfaces are.
     let all_sources = session_production_src_files();
     let mut crate_wide_occurrences: Vec<(String, SanctionedOccurrenceKind)> = Vec::new();
@@ -23479,7 +24049,7 @@ fn mirror_entry_surface_classifier_discriminates() {
     // `demanded_count` is `#[cfg(test)]`) → only the sanctioned entry is
     // reported. The restricted lowerer (`pub(in …)`) is not crate-visible.
     let ok = "pub(crate) fn macro_type_arg_hot_ref(ctx: &C) -> Option<H> { None }\n\
-              pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+              pub(in crate::structural_carrier_producer) fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
               impl Ctx {\n    fn new(b: &[B]) -> Self { Self }\n    #[cfg(test)]\n    pub(crate) fn demanded_count(&self) -> usize { 0 }\n}\n";
     assert_eq!(
         crate_visible_producer_fn_names(ok),
@@ -23555,23 +24125,23 @@ fn mirror_entry_surface_classifier_discriminates() {
         "a (valid) trait-impl method is not a crate-visible producer entry — the collector skips \
          trait impls"
     );
-    // A `pub(in crate::macro_hot_mirror)` ASSOCIATED fn is module-private
+    // A `pub(in crate::structural_carrier_producer)` ASSOCIATED fn is module-private
     // (restricted BELOW crate scope) → NOT crate-visible → guard stays GREEN.
     let restricted_assoc =
-        "impl MacroHotMirror {\n    pub(in crate::macro_hot_mirror) fn inner(&self) {}\n}\n";
+        "impl MacroHotMirror {\n    pub(in crate::structural_carrier_producer) fn inner(&self) {}\n}\n";
     assert!(
         crate_visible_producer_fn_names(restricted_assoc).is_empty(),
-        "a `pub(in crate::macro_hot_mirror)` associated fn is restricted (not crate-visible) and \
+        "a `pub(in crate::structural_carrier_producer)` associated fn is restricted (not crate-visible) and \
          must stay green"
     );
-    // A `pub(in crate::macro_hot_mirror)` FREE fn is likewise module-private →
+    // A `pub(in crate::structural_carrier_producer)` FREE fn is likewise module-private →
     // NOT crate-visible → stays GREEN (distinct from `pub(in crate)`).
     assert!(
         crate_visible_producer_fn_names(
-            "pub(in crate::macro_hot_mirror) fn inner(g: &G) -> R { todo!() }\n"
+            "pub(in crate::structural_carrier_producer) fn inner(g: &G) -> R { todo!() }\n"
         )
         .is_empty(),
-        "a `pub(in crate::macro_hot_mirror)` FREE fn is restricted below crate scope and must stay \
+        "a `pub(in crate::structural_carrier_producer)` FREE fn is restricted below crate scope and must stay \
          green — only an EXACT `crate` restricted path is crate-visible"
     );
     // A bare `pub fn` module-level entry is also crate-visible (wider).
@@ -23612,16 +24182,14 @@ fn mirror_entry_surface_classifier_discriminates() {
     // modifier.
     assert!(
         crate_visible_producer_fn_names(
-            "pub(in crate::macro_hot_mirror) unsafe fn restricted() {}\n"
+            "pub(in crate::structural_carrier_producer) unsafe fn restricted() {}\n"
         )
         .is_empty(),
         "a `pub(in …) unsafe fn` restricted-visibility entry is NOT crate-visible"
     );
-    // A `#[cfg(test)]`-gated module (the real `for_tests` facade shape) is
-    // test-only and excluded — its `pub fn` inside does NOT widen the
-    // production producer surface.
-    let facade =
-        "#[cfg(test)]\nmod for_tests {\n    pub fn lower_type_expr_structural_for_tests() {}\n}\n";
+    // A `#[cfg(test)]`-gated module's `pub fn` is test-only and excluded — it
+    // does NOT widen the production producer surface.
+    let facade = "#[cfg(test)]\nmod tests {\n    pub fn structural_lower_probe() {}\n}\n";
     assert!(
         crate_visible_producer_fn_names(facade).is_empty(),
         "a `#[cfg(test)]`-gated module's `pub fn` must be excluded (it does not widen the \
@@ -23688,22 +24256,31 @@ fn mirror_entry_surface_classifier_discriminates() {
         "a `#[cfg(all(unix, not(test)))] pub(crate) fn` is production (test only under `not`) and \
          MUST be counted"
     );
-    // The REAL mirror source exposes exactly the one sanctioned entry (revert
-    // proof: the production tree is pristine — free + associated coverage).
+    // The REAL owner source exposes EXACTLY the two sanctioned witness-gated
+    // producer entries (revert proof: the production tree is pristine — free +
+    // associated coverage across the owner module).
     let mut real: Vec<String> = Vec::new();
     for rel in [
-        "crates/verter_session/src/macro_hot_mirror/mod.rs",
-        "crates/verter_session/src/macro_hot_mirror/structural_lower.rs",
+        "crates/verter_session/src/structural_carrier_producer/mod.rs",
+        "crates/verter_session/src/structural_carrier_producer/lower.rs",
+        "crates/verter_session/src/structural_carrier_producer/macro_surface.rs",
+        "crates/verter_session/src/structural_carrier_producer/decl_body_surface.rs",
     ] {
         let src = std::fs::read_to_string(workspace_path(rel))
             .unwrap_or_else(|e| panic!("could not read {rel}: {e}"));
         real.extend(crate_visible_producer_fn_names(&src));
     }
+    real.sort();
+    let mut expected: Vec<String> = MIRROR_SANCTIONED_PRODUCER_ENTRIES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
     assert_eq!(
-        real,
-        vec![MIRROR_SOLE_PRODUCER_ENTRY.to_string()],
-        "the REAL mirror module must expose EXACTLY `{MIRROR_SOLE_PRODUCER_ENTRY}` as its \
-         crate-visible producer entry (free OR associated)"
+        real, expected,
+        "the REAL owner module must expose EXACTLY the sanctioned witness-gated producer entries \
+         {MIRROR_SANCTIONED_PRODUCER_ENTRIES:?} as its crate-visible producer fns (free OR \
+         associated); found {real:?}"
     );
 
     // ---- POSITIVE STRUCTURAL AST PIN — ANTI-ROGUE RED-PROOFS. ----
@@ -23717,17 +24294,18 @@ fn mirror_entry_surface_classifier_discriminates() {
     // catch; a guard that cannot fail on these is a stub.
     let real_name = "build_script_setup_seed_frames";
     let binder_rel =
-        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string();
-    let mod_rel = "crates/verter_session/src/macro_hot_mirror/mod.rs".to_string();
+        "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs".to_string();
+    let mod_rel =
+        "crates/verter_session/src/structural_carrier_producer/macro_surface.rs".to_string();
 
     // ACCEPT — the REAL `script_setup_binder.rs` source. Read its actual bytes and
     // run the SAME classifier the live guard uses. The genuine helper is the lone
     // module-level free fn with the genuine three params and the `Vec<BinderScope>`
-    // return, so it passes all five structural properties. (The other mirror
-    // sources carry no occurrence of the name, so the real `mod.rs` /
-    // `structural_lower.rs` are included to mirror the live module-global view.)
+    // return, so it passes all five structural properties. (The other owner
+    // sources carry no occurrence of the name, so the real `macro_surface.rs` /
+    // `lower.rs` are included to mirror the live module-global view.)
     let real_binder_src = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs",
+        "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs",
     ))
     .expect("the sanctioned helper's defining file must be readable");
     let real_sources = vec![(binder_rel.clone(), real_binder_src)];
@@ -23780,7 +24358,7 @@ fn mirror_entry_surface_classifier_discriminates() {
         );
     }
 
-    // REJECT (#1, duplicate) — the genuine free fn DUPLICATED across two mirror
+    // REJECT (#1, duplicate) — the genuine free fn DUPLICATED across two owner
     // files. Two occurrences of the sanctioned name ⇒ #1 fails (a second
     // definition anywhere is the usurpation vector). Both are genuine-shaped, so
     // ONLY the occurrence-count property catches this.
@@ -23802,8 +24380,8 @@ fn mirror_entry_surface_classifier_discriminates() {
     // aggregate is genuinely module-wide and not single-file-scoped.
     let dup_msg = positive_pin_sanctioned_helper(&duplicate_sources, real_name).unwrap_err();
     assert!(
-        dup_msg.contains("mod.rs") && dup_msg.contains("script_setup_binder.rs"),
-        "the duplicate-definition reject must name both offending mirror files via provenance — \
+        dup_msg.contains("macro_surface.rs") && dup_msg.contains("script_setup_binder.rs"),
+        "the duplicate-definition reject must name both offending owner files via provenance — \
          got: {dup_msg}"
     );
 
@@ -24027,7 +24605,7 @@ fn mirror_entry_surface_classifier_discriminates() {
     // uniqueness scan (the genuine helper may be legitimately imported elsewhere).
     assert!(
         occurrence_kinds(
-            "use crate::macro_hot_mirror::script_setup_binder::build_script_setup_seed_frames;\n",
+            "use crate::structural_carrier_producer::script_setup_binder::build_script_setup_seed_frames;\n",
             real_name,
         )
         .is_empty(),
@@ -24037,10 +24615,8 @@ fn mirror_entry_surface_classifier_discriminates() {
 
     // REJECT (F3, out-of-module duplicate) — a SECOND genuine-looking
     // `build_script_setup_seed_frames` free fn in a DIFFERENT file OUTSIDE
-    // `macro_hot_mirror/`. The former mirror-directory-only scan never looked
-    // outside `macro_hot_mirror/**`, so a producer under the name in another
-    // module was invisible. The crate-wide scan aggregates BOTH files → two
-    // occurrences ⇒ #1 rejects it. Both fns are genuine-shaped, so ONLY the
+    // `structural_carrier_producer/`. The crate-wide scan aggregates BOTH files →
+    // two occurrences ⇒ #1 rejects it. Both fns are genuine-shaped, so ONLY the
     // occurrence-count (crate-wide uniqueness) property catches this.
     let out_of_module_rel = "crates/verter_session/src/host_resolve/seed_smuggler.rs".to_string();
     let out_of_module_sources = vec![
@@ -24057,14 +24633,15 @@ fn mirror_entry_surface_classifier_discriminates() {
         "positive-pin #1",
         "F3 out-of-module duplicate (second genuine fn in a non-mirror file)",
     );
-    // The #1 message names the OUT-OF-MODULE offender by its non-mirror path,
-    // proving the crate-wide aggregate genuinely reaches outside `macro_hot_mirror/`.
+    // The #1 message names the OUT-OF-MODULE offender by its non-owner path,
+    // proving the crate-wide aggregate genuinely reaches outside
+    // `structural_carrier_producer/`.
     let oom_msg = positive_pin_sanctioned_helper(&out_of_module_sources, real_name).unwrap_err();
     assert!(
         oom_msg.contains("host_resolve/seed_smuggler.rs"),
-        "F3: the out-of-module duplicate reject must name the non-mirror offender path \
+        "F3: the out-of-module duplicate reject must name the non-owner offender path \
          `host_resolve/seed_smuggler.rs` (proving the crate-wide scan reaches outside \
-         `macro_hot_mirror/`) — got: {oom_msg}"
+         `structural_carrier_producer/`) — got: {oom_msg}"
     );
 
     // REJECT (F4, cfg-gated production usurper) — `#[cfg(any(test,

@@ -427,35 +427,40 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "carrier_module_has_no_public_type_args_surface",
             "carrier_type_args_accessor_is_exhaustive_and_wildcard_free",
             "map_carrier_type_args_is_exhaustive_and_wildcard_free",
-            // MACRO HOT MIRROR — single-engine producer (make-unrepresentable):
-            // the structural lowerer's production entry `lower_type_expr_structural`
-            // is re-housed under `crate::macro_hot_mirror::structural_lower` and is
-            // `pub(in crate::macro_hot_mirror)` ancestor-private, so its SOLE
-            // production caller is the macro hot-mirror builder and a second
-            // macro-arg graph producer is unrepresentable by construction. The
-            // PRIVACY-SHAPE guards pin that visibility on BOTH producer-capable
-            // helpers — the lowerer AND the shared binder-seed helper
-            // `build_script_setup_seed_frames` (likewise `pub(in
-            // crate::macro_hot_mirror)`, so no foreign module can open a second
-            // binder-seed producer); those compiler-enforced privacies are the
-            // LOAD-BEARING confinement. The ENTRY-SURFACE guard is a BOUNDED
-            // defense-in-depth token tripwire (NOT exhaustive — documented residual
-            // tail) that pins `macro_type_arg_hot_ref` as the SOLE crate-visible
-            // module-level producer entry of the module (no second outward producer
-            // fn beyond the cfg-gated test facade); the ORDERING TRIPWIRE bans a
-            // production macro-arg eager-lowering path outside the mirror (a
-            // FILE-SCOPE catch: whole-function co-presence PLUS the
+            // STRUCTURAL-CARRIER PRODUCER — single producer (make-unrepresentable):
+            // the raw structural lowerer `lower_type_expr_structural` is owned by
+            // `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
+            // visibility modifier), reachable ONLY through two WITNESS-GATED wrappers
+            // (`emit_macro_arg` / `emit_decl_body_arm`). Each wrapper requires an
+            // unforgeable capability witness (`MacroProducerWitness` /
+            // `DeclBodyProducerWitness`, private field + constructor confined to its
+            // owning surface), so a THIRD structural-carrier producer can neither name
+            // the lowerer nor forge a witness — unrepresentable by construction. The
+            // MODULE-PRIVATE lowerer guard, the PARENT-SHAPE narrowness guard (the
+            // owner directory holds ONLY the lowerer, the two producer surfaces, the
+            // binder helper, mod.rs, and tests), and the WITNESS-unforgeability guard
+            // together are the compiler-enforced LOAD-BEARING confinement; the
+            // binder-seed helper `build_script_setup_seed_frames` is
+            // `pub(in crate::structural_carrier_producer)` (confined to the owner
+            // module), pinned by its own privacy guard. The ENTRY-SURFACE guard is a
+            // BOUNDED defense-in-depth token tripwire (NOT exhaustive — documented
+            // residual tail) that pins the sanctioned witness-gated entries
+            // (`macro_type_arg_hot_ref`, `emit_decl_body_arm`) as the ONLY
+            // crate-visible producer fns of the owner module; the ORDERING TRIPWIRE
+            // bans a production macro-arg eager-lowering path outside the producer
+            // module (a FILE-SCOPE catch: whole-function co-presence PLUS the
             // cross-function-same-file binding-flow helper split); the PURITY guard
             // bans the full route/import/cross-file-symbol/carrier-head resolution
             // surface (`prepared_decl_bundle`, `cached_import_route_resolution`,
             // `resolve_route_type_edge`, `resolve_type_dependency_canonical`,
             // `resolve_owner_direct_import`, `routed_shallow_state`,
-            // `resolve_*_head`, …) inside the mirror producer — resolution + dep
-            // recording belong at the resolving DEMAND, so the producer stays a
-            // pure structural-carrier lowering and script-setup seeding re-sources
-            // from the owner's route-free `IndexedReady` (`raw_source` +
-            // `framework_parse`).
-            "structural_lowerer_production_entry_is_macro_hot_mirror_private",
+            // `resolve_*_head`, …) inside the producer — resolution + dep recording
+            // belong at the resolving DEMAND, so the producer stays a pure
+            // structural-carrier lowering and script-setup seeding re-sources from the
+            // owner's route-free `IndexedReady` (`raw_source` + `framework_parse`).
+            "structural_carrier_producer_lowerer_is_module_private",
+            "structural_carrier_producer_module_is_narrow",
+            "structural_carrier_producer_witnesses_are_unforgeable",
             "script_setup_binder_helper_is_module_private",
             "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
             "no_production_macro_arg_eager_lowering_outside_mirror",

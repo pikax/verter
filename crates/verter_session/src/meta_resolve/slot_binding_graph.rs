@@ -764,14 +764,15 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             ));
             break 'macro_loop;
         }
-        let type_args: Arc<[SemanticNodeId]> = match crate::macro_hot_mirror::macro_type_arg_hot_ref(
-            ctx.ctx,
-            owner_canonical,
-            macro_index,
-        ) {
-            Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
-            None => continue,
-        };
+        let type_args: Arc<[SemanticNodeId]> =
+            match crate::structural_carrier_producer::macro_type_arg_hot_ref(
+                ctx.ctx,
+                owner_canonical,
+                macro_index,
+            ) {
+                Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
+                None => continue,
+            };
         // Carrier-fact propagation: walk the lowered macro arg and
         // accumulate `(canonical_id, WholeHash)` for any cross-file
         // `DeclRef` / `InstantiationRef` carrier so the per-request

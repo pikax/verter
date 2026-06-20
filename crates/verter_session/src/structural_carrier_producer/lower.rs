@@ -1,5 +1,5 @@
-//! Session-owned, query-free **structural** lowering of an owned
-//! [`TypeExpr`] into the dormant semantic-graph carriers.
+//! Query-free **structural** lowering of an owned [`TypeExpr`] into the
+//! dormant semantic-graph carriers.
 //!
 //! This is the forward boundary that EMITS the unresolved carriers
 //! (`BareRef`, `ImportType`, `RawFallback`, `ConstructorType`,
@@ -27,17 +27,22 @@
 //! context, a `SemanticQueryKey`, or any host / type-provider state — the
 //! `session_graph_lowerer_makes_no_query` guard locks that statically.
 //!
-//! ## Visibility boundary
+//! ## Single-producer boundary
 //!
-//! [`lower_type_expr_structural`] is `pub(in crate::macro_hot_mirror)` — its
-//! SOLE production entry is the macro hot-mirror builder
-//! ([`super::macro_type_arg_hot_ref`]). The mirror is the single-entry
-//! producer of macro-type-argument graph handles; making the lowerer entry
-//! ancestor-private to `crate::macro_hot_mirror` makes a second production
-//! caller UNREPRESENTABLE by construction (no other module can name the fn),
-//! so the single-engine producer rule needs no source scanner here. Raw
-//! lowerer access for cross-module tests goes through
-//! [`super::for_tests`](super) only.
+//! [`lower_type_expr_structural`] is PRIVATE to this module: it carries NO
+//! visibility modifier, so no other module — not even a sibling under
+//! [`crate::structural_carrier_producer`] — can NAME it. The only way to
+//! reach it is through the two WITNESS-GATED wrappers this module exposes,
+//! [`emit_macro_arg`] and [`emit_decl_body_arm`]. Each takes a capability
+//! witness defined in its owning surface
+//! ([`super::macro_surface::MacroProducerWitness`] /
+//! [`super::decl_body_surface::DeclBodyProducerWitness`]) with a private
+//! field and a constructor confined to that surface, so a THIRD production
+//! caller cannot forge a witness and therefore cannot lower structurally —
+//! the single structural-carrier producer rule is compiler-enforced, not
+//! source-scanned. The structural-lowerer unit tests live alongside this
+//! module (`structural_lower_tests.rs`) and call the private lowerer directly
+//! as an in-module child.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -53,6 +58,8 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
+use super::{decl_body_surface, macro_surface};
+
 /// A lexical binder frame: the syntactic type-parameter / `infer` /
 /// mapped-type-parameter names in scope at one nesting level, each mapped
 /// to the already-interned binder node (a `TypeParam` or `Infer`
@@ -63,20 +70,21 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// lowerer performs is this purely syntactic, in-scope binder lookup, which
 /// needs no host query.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct BinderScope {
+pub(in crate::structural_carrier_producer) struct BinderScope {
     names: FxHashMap<Arc<str>, SemanticNodeId>,
 }
 
 impl BinderScope {
     /// Bind a syntactic type-parameter name to its interned binder node.
     ///
-    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
-    /// this is a mirror-internal binder-frame BUILDER used by `mod.rs`'s
-    /// script-setup seed construction, never an outward macro-arg producer
-    /// entry. The mirror's SOLE crate-visible producer entry is the free
-    /// `macro_type_arg_hot_ref`; the entry-surface guard pins that, so any
-    /// helper a foreign module does not need stays module-private.
-    pub(in crate::macro_hot_mirror) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
+    /// Confined to [`crate::structural_carrier_producer`]: this is an
+    /// owner-internal binder-frame BUILDER used by the macro surface's
+    /// script-setup seed construction, never an outward producer entry.
+    pub(in crate::structural_carrier_producer) fn bind(
+        &mut self,
+        name: Arc<str>,
+        node: SemanticNodeId,
+    ) {
         self.names.insert(name, node);
     }
 
@@ -125,10 +133,10 @@ impl<'a> StructuralLowerContext<'a> {
     /// provenance: an `Authored` merge role and not-a-macro-own-body. The
     /// empty slice is the no-binders-in-scope root.
     ///
-    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
-    /// a mirror-internal CONTEXT constructor used by `mod.rs`'s builder, never a
+    /// Confined to [`crate::structural_carrier_producer`]: an owner-internal
+    /// CONTEXT constructor used by the macro surface's builder, never a
     /// producer entry.
-    pub(in crate::macro_hot_mirror) fn new(binders: &'a [BinderScope]) -> Self {
+    pub(in crate::structural_carrier_producer) fn new(binders: &'a [BinderScope]) -> Self {
         Self {
             binders,
             merge_role: MemberMergeRole::Authored,
@@ -160,17 +168,23 @@ impl<'a> StructuralLowerContext<'a> {
     /// Replace the surface-merge role (the owner stamps `OwnBody` on an
     /// interface/class own-body arm and `Heritage` on a heritage arm).
     #[cfg(test)]
-    pub(crate) fn with_merge_role(mut self, merge_role: MemberMergeRole) -> Self {
+    pub(in crate::structural_carrier_producer) fn with_merge_role(
+        mut self,
+        merge_role: MemberMergeRole,
+    ) -> Self {
         self.merge_role = merge_role;
         self
     }
 
     /// Mark whether this context lowers the macro type-argument's own body.
     ///
-    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
-    /// a mirror-internal CONTEXT builder used by `mod.rs`'s builder, never a
-    /// producer entry.
-    pub(in crate::macro_hot_mirror) fn with_macro_own_body(mut self, macro_own_body: bool) -> Self {
+    /// Confined to [`crate::structural_carrier_producer`]: an owner-internal
+    /// CONTEXT builder used by the macro surface's builder, never a producer
+    /// entry.
+    pub(in crate::structural_carrier_producer) fn with_macro_own_body(
+        mut self,
+        macro_own_body: bool,
+    ) -> Self {
         self.macro_own_body = macro_own_body;
         self
     }
@@ -229,12 +243,45 @@ pub(crate) enum StructuralLowerError {
     UnsupportedWithoutResolution { shape: &'static str },
 }
 
+/// Emit the macro type-argument's structural carrier graph: the
+/// WITNESS-GATED macro-surface entry to the private structural lowerer. Its
+/// production caller is the macro hot-mirror builder, which holds the
+/// [`macro_surface::MacroProducerWitness`] capability proof.
+pub(in crate::structural_carrier_producer) fn emit_macro_arg(
+    graph: &SemanticGraphStore,
+    expr: &TypeExpr,
+    scope: NodeScopeId,
+    ctx: &StructuralLowerContext<'_>,
+    _witness: &macro_surface::MacroProducerWitness,
+) -> Result<HotTypeRef, StructuralLowerError> {
+    lower_type_expr_structural(graph, expr, scope, ctx)
+}
+
+/// Emit a declaration body's structural carrier graph: the WITNESS-GATED
+/// decl-body-surface entry to the private structural lowerer. Its production
+/// caller is the declaration-body producer, which holds the
+/// [`decl_body_surface::DeclBodyProducerWitness`] capability proof.
+pub(in crate::structural_carrier_producer) fn emit_decl_body_arm(
+    graph: &SemanticGraphStore,
+    expr: &TypeExpr,
+    scope: NodeScopeId,
+    ctx: &StructuralLowerContext<'_>,
+    _witness: &decl_body_surface::DeclBodyProducerWitness,
+) -> Result<HotTypeRef, StructuralLowerError> {
+    lower_type_expr_structural(graph, expr, scope, ctx)
+}
+
 /// Structurally lower an owned [`TypeExpr`] into the dormant semantic-graph
 /// carriers, rooted at the owner-supplied `scope`, performing no resolution.
 ///
 /// Returns a [`HotTypeRef`] wrapping the interned root node, or a typed
 /// [`StructuralLowerError`] for a shape with no unresolved representation.
-pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(
+///
+/// PRIVATE (no visibility modifier): reachable only from this module's
+/// witness-gated wrappers ([`emit_macro_arg`] / [`emit_decl_body_arm`]) and
+/// this module's in-module unit tests. No other module can name it, so a
+/// third structural-carrier producer is unrepresentable by construction.
+fn lower_type_expr_structural(
     graph: &SemanticGraphStore,
     expr: &TypeExpr,
     scope: NodeScopeId,

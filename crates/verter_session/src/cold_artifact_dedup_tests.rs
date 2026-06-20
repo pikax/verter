@@ -979,7 +979,7 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
         snapshot: Arc::clone(&built.snapshot),
         external_type_analysis: Arc::clone(&built.external_type_analysis),
         declares_interface_app_config: built.declares_interface_app_config,
-        macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror::default(),
+        macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
     };
     let mut moved_env = live_env;
     moved_env[0] = moved_env[0].wrapping_add(1);

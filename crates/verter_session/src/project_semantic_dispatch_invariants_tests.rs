@@ -1968,10 +1968,11 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
     //      skeleton caller would silently lower at a publication demand it never
     //      asked for); and
     //   2. the QUERY-FREE structural producer `lower_type_expr_structural`
-    //      (re-housed under `crate::macro_hot_mirror::structural_lower` as the
-    //      macro hot mirror's `pub(in crate::macro_hot_mirror)` entry), which
-    //      emits the dormant graph carriers from the owned `TypeExpr` without
-    //      performing any name / import / type resolution.
+    //      (owned by `crate::structural_carrier_producer::lower`, where it is
+    //      module-private and reachable only through the witness-gated
+    //      `emit_macro_arg` / `emit_decl_body_arm` wrappers), which emits the
+    //      dormant graph carriers from the owned `TypeExpr` without performing
+    //      any name / import / type resolution.
     // The two are distinct and non-overlapping; neither may grow a second
     // definition, and the retired bare-`mode` eager wrapper stays absent.
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");

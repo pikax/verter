@@ -8,7 +8,7 @@
 //!
 //! Authority chain:
 //!
-//! 1. `crate::macro_hot_mirror::macro_type_arg_hot_ref(ctx, file, macro_index)`
+//! 1. `crate::structural_carrier_producer::macro_type_arg_hot_ref(ctx, file, macro_index)`
 //!    reads the macro arg's mode-neutral hot-mirror handle (the ONE producer)
 //!    so the dispatch can resolve the macro payload from the structural
 //!    carrier.
@@ -516,7 +516,7 @@ pub(crate) fn macro_payload_surface_provenance(
 /// Resolve a type-based macro's payload through `ResolveMacroPayload`.
 ///
 /// Reads the macro arg's ONE mode-neutral mirror handle
-/// (`crate::macro_hot_mirror::macro_type_arg_hot_ref`) — the producer lowered
+/// (`crate::structural_carrier_producer::macro_type_arg_hot_ref`) — the producer lowered
 /// the `parsed_type_argument` once — then RE-ENTERS the shared dispatch with
 /// `ResolveMacroPayload` (Navigate) for the terminal demand over that carrier
 /// handle and returns the macro payload node on success. This is a different
@@ -548,7 +548,11 @@ pub(crate) fn resolve_macro_payload(
     // from the carrier handle — a different DEMAND on the same producer, NOT
     // a second lowering of the macro arg.
     let type_args: Arc<[SemanticNodeId]> =
-        match crate::macro_hot_mirror::macro_type_arg_hot_ref(dispatch.ctx, file, macro_index) {
+        match crate::structural_carrier_producer::macro_type_arg_hot_ref(
+            dispatch.ctx,
+            file,
+            macro_index,
+        ) {
             Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
             None => {
                 diag_sink.push(macro_expansion_for_query_error(
@@ -677,7 +681,7 @@ pub(crate) fn resolve_macro_payload(
             // ONE Navigate hop through the shared dispatch so the structural
             // root carrier becomes the resolved `DeclRef` / `Opaque(Miss)`
             // the discrimination below inspects.
-            let probe_node = crate::macro_hot_mirror::macro_type_arg_hot_ref(
+            let probe_node = crate::structural_carrier_producer::macro_type_arg_hot_ref(
                 dispatch.ctx,
                 file,
                 macro_index,
