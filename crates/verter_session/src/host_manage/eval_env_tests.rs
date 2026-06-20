@@ -1173,3 +1173,110 @@ fn c3_graph_native_dep_reader_does_not_materialize_dependency_whole_env() {
         "C3 graph-native dep reader must NOT materialise the re-export barrel's whole_env()"
     );
 }
+
+/// The canonical ids carrying a `FileWholeHash` fact in a `FactVersionRef`
+/// list — the participant identities the resolver recorded for invalidation.
+#[cfg(not(target_arch = "wasm32"))]
+fn whole_hash_participants(
+    facts: &[crate::resolver_core::FactVersionRef],
+) -> std::collections::BTreeSet<String> {
+    facts
+        .iter()
+        .filter_map(|f| match f {
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. } => {
+                Some(canonical_id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// FIX A — the VIEW-AWARE value-export root resolver
+/// (`resolve_value_export_root_with_facts_with_store_view`) resolves a
+/// MULTI-HOP value re-export to its FINAL defining value AND returns the
+/// FULL participant chain facts — a `FileWholeHash` for EVERY file on the
+/// walk (`barrel`, `mid`, `a`), not just the immediate barrel. It also peels
+/// the terminal same-file `typeof` value alias (`V: typeof realImpl` →
+/// `realImpl`). This mirrors the type rail's
+/// `resolve_imported_type_root_with_facts_with_store_view`.
+///
+/// Why this is the discriminating surface (per architecture review + codex
+/// adjudication): the value rail of `build_prepared_import_canonicalization`
+/// is pre-empted by the symbol-space-NEUTRAL type rail for any CROSS-FILE
+/// re-export hop (the type-export route walk follows value-only re-exports
+/// too and records the same chain, then `continue`s), so a prep-integration
+/// multi-hop test cannot isolate the value-rail fold. The resolver itself IS
+/// the regression surface this fix changed: the OLD `resolve_value_export_target`
+/// returned NO chain facts (only the caller recorded the immediate barrel) AND
+/// routed through `peel_value_decl_alias` → `base_eval_env_arc` → `whole_env()`.
+///
+/// Discriminating (RED-proof): neutralizing the chain-fact fold inside the
+/// resolver (returning `Vec::new()` / dropping `chain_facts`) makes the
+/// `whole_hash_participants` assertion FAIL — the inner `mid` and the final
+/// `a` are no longer recorded, so a retarget of either would stale-serve. The
+/// full chain facts are the SOLE record of the inner participants AT THIS
+/// resolver.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal() {
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    // Terminal file: `V` is a same-file `typeof realImpl` alias, so the
+    // resolver's terminal peel must land on `realImpl` (NOT `V`).
+    upsert_ts(
+        &host,
+        "/src/a.ts",
+        "export const realImpl = { from: 'a' }\nexport const V: typeof realImpl = realImpl\n",
+    );
+    upsert_ts(&host, "/src/mid.ts", "export { V } from './a'\n");
+    upsert_ts(&host, "/src/barrel.ts", "export { V } from './mid'\n");
+
+    let view = host
+        .resolver_store_view_read()
+        .into_cold_seed_view()
+        .into_inner();
+    let (identity, facts) =
+        host.resolve_value_export_root_with_facts_with_store_view(&view, "/src/barrel.ts", "V");
+
+    // (1) Final defining value: the cross-file chain resolves to /src/a.ts and
+    // the terminal same-file `typeof` alias peels `V` -> `realImpl`.
+    let identity =
+        identity.expect("the value export root must resolve through the multi-hop chain");
+    assert_eq!(
+        (identity.canonical_id.as_str(), identity.name.as_str()),
+        ("/src/a.ts", "realImpl"),
+        "the resolver must resolve the multi-hop value chain to /src/a.ts AND peel the terminal \
+         same-file `typeof realImpl` alias to `realImpl` (not the intermediate barrel/mid, not the \
+         unpeeled `V`)"
+    );
+
+    // (2) FULL participant chain facts: a `FileWholeHash` for EVERY file on the
+    // walk — barrel, mid, AND a. The pre-fix value rail recorded ONLY the
+    // immediate barrel; the inner `mid` (and the final `a`) being present is the
+    // discriminator that catches an inner-barrel retarget.
+    let participants = whole_hash_participants(&facts);
+    for required in ["/src/barrel.ts", "/src/mid.ts", "/src/a.ts"] {
+        assert!(
+            participants.contains(required),
+            "the value-export root resolver must record a FileWholeHash for EVERY participant on \
+             the value re-export chain — missing `{required}` (recorded: {participants:?}). The \
+             inner participant facts are the SOLE catcher of an inner-barrel retarget; the pre-fix \
+             value rail recorded only the immediate barrel."
+        );
+    }
+
+    // (3) BOUND: the resolver is graph-native — it does NOT materialise any
+    // participant's whole_env() (the correctness defect the fix removes: the
+    // OLD `resolve_value_export_target` routed through
+    // `peel_value_decl_alias` -> `base_eval_env_arc` -> `whole_env()`).
+    for participant in ["/src/barrel.ts", "/src/mid.ts", "/src/a.ts"] {
+        assert!(
+            !whole_env_materialized(&host, participant),
+            "the value-export root resolver must NOT materialise `{participant}`'s whole_env() \
+             during prep — it is graph-native (export-graph walk + per-symbol header peel), never \
+             the legacy `peel_value_decl_alias`/`base_eval_env_arc` oracle"
+        );
+    }
+}

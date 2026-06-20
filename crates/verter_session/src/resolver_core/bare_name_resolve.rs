@@ -163,8 +163,17 @@ fn symbol_exists_in_facts(
     entry: &crate::project_type_store::IndexedReady,
     symbol_name: &str,
 ) -> bool {
-    entry.shallow_state.symbol(symbol_name).is_some()
-        || entry.shallow_state.value_symbol(symbol_name).is_some()
+    // Local PRESENCE through the CENTRALIZED effective header lookup so a rune
+    // module's ambient `$state`/`$derived`/… (value or type) resolves at the
+    // bare-name surface without this site knowing about the rune prelude. A
+    // plain `.ts` is unaffected (the effective lookup is rune-module-gated and
+    // reduces to the header-index probe).
+    entry
+        .shallow_state
+        .effective_type_header_present(symbol_name)
+        || entry
+            .shallow_state
+            .effective_value_header_present(symbol_name)
 }
 
 /// Resolve a local import binding for `local_name` declared in

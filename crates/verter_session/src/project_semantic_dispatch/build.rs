@@ -222,8 +222,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;
 
-        let has_type_symbol = shallow.symbol(key.name.as_ref()).is_some();
-        let has_value_symbol = shallow.value_symbol(key.name.as_ref()).is_some();
+        // Local PRESENCE through the CENTRALIZED effective header lookup — a
+        // user/synthesized declaration first, then (rune-module-gated) the
+        // ambient rune inventory, so a Svelte rune module's `$state`/`$derived`/
+        // `$effect`/`$inspect` is treated as locally declared and resolves at
+        // this dispatch surface. A plain `.ts` is unaffected (the effective
+        // lookup is rune-module-gated, so it reduces to the header-index probe).
+        // No per-site rune branch — the single authority lives on
+        // `ShallowFileState`.
+        let has_type_symbol = shallow.effective_type_header_present(key.name.as_ref());
+        let has_value_symbol = shallow.effective_value_header_present(key.name.as_ref());
         let has_export = shallow.exports.contains_key(key.name.as_ref());
         let has_import_local = shallow.import_targets.contains_key(key.name.as_ref());
         // A `declare global { ... }` declaration is not on the file surface but
@@ -365,11 +373,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;
 
-        let has_value = shallow.value_symbol(value_root.name.as_ref()).is_some();
+        // Local PRESENCE through the CENTRALIZED effective header lookup so a
+        // rune module's ambient `$state`/`$derived`/… value (and the rune
+        // namespace types) is seen as locally declared at the `typeof`-rooted
+        // dispatch surface. Plain `.ts` is unaffected (rune-module-gated).
+        let has_value = shallow.effective_value_header_present(value_root.name.as_ref());
         let has_import_local = shallow
             .import_targets
             .contains_key(value_root.name.as_ref());
-        let has_type_symbol = shallow.symbol(value_root.name.as_ref()).is_some();
+        let has_type_symbol = shallow.effective_type_header_present(value_root.name.as_ref());
         // Namespace-qualified root: `Ns.Member` where `Ns` is an import
         // alias (`import * as Ns from './m'`). The shallow state indexes
         // only the top-level alias; the dotted name itself never appears

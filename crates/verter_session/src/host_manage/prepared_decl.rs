@@ -627,20 +627,31 @@ impl VerterHost {
     /// records the FINAL definition rather than the intermediate barrel.
     ///
     /// For each import target whose resolved canonical is known, both rails are
-    /// tried: the TYPE-export authority
-    /// ([`Self::resolve_imported_type_root_with_facts_with_store_view`], which
-    /// also returns the full route-chain fact list) and the VALUE-export
-    /// authority ([`Self::resolve_value_export_target`]). The rail that follows
-    /// a re-export hop to a DIFFERENT final `(canonical, name)` wins; an import
-    /// that resolves to itself on both rails is NOT a hop and is omitted (the
-    /// barrel fallback covers it).
+    /// VIEW-AWARE, FULL-CHAIN-fact resolvers: the TYPE-export authority
+    /// ([`Self::resolve_imported_type_root_with_facts_with_store_view`]) is tried
+    /// FIRST, then the VALUE-export authority
+    /// ([`Self::resolve_value_export_root_with_facts_with_store_view`]). Each
+    /// returns the full route-chain fact list. The rail that follows a re-export
+    /// hop to a DIFFERENT final `(canonical, name)` wins; an import that resolves
+    /// to itself on both rails is NOT a hop and is omitted (the barrel fallback
+    /// covers it).
+    ///
+    /// The type-export route walk is symbol-space-NEUTRAL (it follows ANY
+    /// re-export, value-only included, and terminates at ANY local symbol), so it
+    /// already canonicalizes a CROSS-FILE value re-export and records its full
+    /// chain — the value rail is reached only when the type route resolves to the
+    /// barrel itself (a local binding, no cross-file hop), where its distinct work
+    /// is the terminal SAME-FILE `typeof` value-alias peel. Both rails return the
+    /// full chain regardless, so whichever wins records the same complete fact set.
     ///
     /// The returned `route_facts` carry every barrel/re-export participant's
-    /// version so the bundle's fact rail INVALIDATES on a barrel retarget — a
-    /// content edit to a re-export clause (or a route change) anywhere on the
-    /// walked chain misses the warm bundle. The value-rail hop additionally
-    /// records the barrel's own `FileWholeHash` + `ImportRoute`, the version
-    /// surface a value re-export edit moves.
+    /// version (each participant's `FileWholeHash` + route surface) so the
+    /// bundle's fact rail INVALIDATES on a retarget ANYWHERE on the winning chain —
+    /// a content edit to a re-export clause (or a route change) on the IMMEDIATE
+    /// barrel OR a MULTI-HOP inner barrel (`owner → barrel → mid → final`,
+    /// retargeting `mid`) misses the warm bundle. Both rails resolve
+    /// graph-native; neither materialises a dependency's `whole_env()` during
+    /// prep.
     fn build_prepared_import_canonicalization(
         &self,
         view: &dyn crate::resolver_core::StoreView,
@@ -715,31 +726,28 @@ impl VerterHost {
                 continue;
             }
 
-            // VALUE rail: peel the value re-export alias to the final defining
-            // value. Record the barrel's own version facts so a value re-export
-            // edit on the barrel invalidates this bundle.
-            if let Some(value_final) =
-                self.resolve_value_export_target(&barrel_canonical, &target.imported_name)
-            {
+            // VALUE rail (reached only when the type route resolved to the
+            // barrel itself — see the doc-comment: the symbol-space-neutral type
+            // rail above pre-empts every CROSS-FILE re-export hop, value-only
+            // included). Resolve the value through the VIEW-AWARE, FULL-CHAIN-fact
+            // resolver (symmetric with the type rail). It records EVERY
+            // participant it walks and peels the terminal SAME-FILE `typeof`
+            // value alias — its distinct work over the type rail. NEVER routes
+            // through `peel_value_decl_alias` / `base_eval_env_arc` /
+            // `whole_env()` (the legacy whole-env oracle path) during prep.
+            let (value_final, value_chain_facts) = self
+                .resolve_value_export_root_with_facts_with_store_view(
+                    view,
+                    &barrel_canonical,
+                    &target.imported_name,
+                );
+            if let Some(value_final) = value_final {
                 if value_final.canonical_id != barrel_canonical {
                     canonicalization.final_resolution.insert(
                         local_name.clone(),
                         ResolvedRootIdentity::new(&value_final.canonical_id, &value_final.name),
                     );
-                    if let Some(hash) = self.authoritative_current_content_hash(&barrel_canonical) {
-                        route_facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
-                            canonical_id: barrel_canonical.clone(),
-                            hash,
-                        });
-                    }
-                    if let Some(hash) = self.generation_current_import_route_hash(&barrel_canonical)
-                    {
-                        route_facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
-                            canonical_id: barrel_canonical.clone(),
-                            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                            hash,
-                        });
-                    }
+                    route_facts.extend(value_chain_facts.iter().cloned());
                 }
             }
         }

@@ -379,6 +379,69 @@ impl VerterHost {
         ))
     }
 
+    /// View-aware, FULL-CHAIN-fact value-export root resolver — the VALUE
+    /// counterpart of
+    /// [`Self::resolve_imported_type_root_with_facts_with_store_view`].
+    ///
+    /// Resolves a value re-export to its FINAL defining value AND returns the
+    /// version facts of EVERY file on the re-export walk (each participant's
+    /// `FileWholeHash` + route surface). A consumer that records these facts
+    /// invalidates on a retarget ANYWHERE on the chain — including a MULTI-HOP
+    /// inner barrel (`owner → barrel → mid → final`, retargeting the inner
+    /// `mid`). The pre-fix value rail recorded ONLY the immediate barrel's
+    /// whole-hash, which does not move when an INNER barrel retargets, so it
+    /// stale-served the final root; this resolver's full chain closes that gap
+    /// (and never materialises a dependency's `whole_env()`).
+    ///
+    /// Two graph-native sub-walks, both whole-env-free; NEVER routes through
+    /// `peel_value_decl_alias` / `base_eval_env_arc` / `whole_env()`:
+    ///
+    /// 1. The re-export CHAIN walk reuses
+    ///    [`Self::build_named_type_export_route_entry`] — the shared
+    ///    participant-accumulating walk over `ShallowFileState::export_target`
+    ///    (`Local` / `Reexport`, module resolution is symbol-space-neutral, so
+    ///    a `export { V } from './mid'` value re-export traverses identically to
+    ///    a type re-export). It returns the terminal defining `(canonical,
+    ///    name)` plus the participant `FileWholeHash` + `Route` facts; a
+    ///    fenced-serve walk returns EMPTY facts (the strict-admission
+    ///    negative-cache contract), so this resolver inherits it.
+    /// 2. The terminal value `typeof`-alias is peeled graph-native via
+    ///    [`Self::peel_value_decl_alias_graph_native`] (per-symbol value memo +
+    ///    header PRESENCE). The peeled identity is the final defining value.
+    ///
+    /// `view` carries the request boundary, symmetric with the type rail's
+    /// `_with_store_view` entry: the participant CHAIN walk (shared
+    /// `build_named_type_export_route_entry`) is the view-INDEPENDENT cold
+    /// compute — exactly as the type rail's identically-named cold closure is —
+    /// and the recorded chain facts are validated against `view` by the
+    /// consuming bundle's `ReadSetSignature` fact rail at warm-read time. The
+    /// parameter is the seam through which a future value-space route cache can
+    /// validate a cached value-export entry against the supplied view.
+    pub(crate) fn resolve_value_export_root_with_facts_with_store_view(
+        &self,
+        _view: &dyn crate::resolver_core::StoreView,
+        dep_canonical_id: &str,
+        imported_name: &str,
+    ) -> (
+        Option<ValueDeclIdentity>,
+        Vec<crate::resolver_core::FactVersionRef>,
+    ) {
+        let Some((route_result, chain_facts)) =
+            self.build_named_type_export_route_entry(dep_canonical_id, imported_name)
+        else {
+            return (None, Vec::new());
+        };
+        let Some((final_canonical, final_name)) = route_result.resolved() else {
+            // A stable Miss carries the participant facts so a later-appearing
+            // export still invalidates a recorded miss; no value identity.
+            return (None, chain_facts);
+        };
+        // Peel the terminal value alias graph-native (no whole-env). A pure
+        // `export const V` terminal peels to itself.
+        let identity = self.peel_value_decl_alias_graph_native(final_canonical, final_name);
+        (Some(identity), chain_facts)
+    }
+
     pub(crate) fn build_snapshot_from_parse(parse: crate::ParseSnapshot) -> FileAnalysisSnapshot {
         // The snapshot is shared by `Arc`; this builder consumes a freshly
         // parsed `ParseSnapshot` whose snapshot is uniquely held, so

@@ -71,6 +71,70 @@ fn resolve_decl_misses_for_unknown_name() {
     }
 }
 
+/// A dispatch `ResolveDecl` for an ambient rune name (`$state`) RESOLVES in a
+/// Svelte rune module and MISSES in a plain `.ts` — the dispatch presence
+/// determination routes through the CENTRALIZED `effective_*_header_present`
+/// lookup (the single rune authority on `ShallowFileState`), so dispatch never
+/// special-cases the rune prelude. Per-file scoped: the plain `.ts` is
+/// unaffected.
+///
+/// Discriminating (RED-proof): reverting the build.rs presence checks to the
+/// raw `shallow.symbol(name)` / `shallow.value_symbol(name)` form (the
+/// header-index probe WITHOUT the rune-ambient fallback) makes `$state` absent
+/// from the rune module's header index → `has_local_declaration = false` →
+/// dispatch falls through to re-export resolution → MISS (the rune is not
+/// exported). The effective header lookup is the SOLE reason the rune name
+/// resolves at the dispatch surface; the plain `.ts` assertion is unchanged by
+/// either form (rune-module-gated).
+#[test]
+fn resolve_decl_resolves_rune_name_in_rune_module_and_misses_in_plain_ts() {
+    let host = host();
+    // A standalone Svelte rune module: `$state` is ambient (not user-declared,
+    // not exported). The user value `c` is a real `$state(0)` call site.
+    let rune_lang = FileLanguage::adapter_module(
+        verter_language::ScriptSourceType::Ts,
+        verter_language::FrameworkAdapterId::svelte(),
+        verter_language::LanguageId::new(verter_language::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+    );
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/w/r.svelte.ts".to_string()),
+            input_id: "/w/r.svelte.ts".to_string(),
+            source: Arc::from("export const c = $state(0)\n"),
+            file_language: rune_lang,
+            aliases: Vec::new(),
+        })
+        .expect("rune module upsert");
+    // A plain `.ts` with no `$state` declaration/import/export.
+    upsert_ts(&host, "/w/plain.ts", "export const k = 1\n");
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // RUNE module: `$state` is locally present via the effective header lookup
+    // → dispatch resolves it to a value node (the DeclPlaceholder), NOT a miss
+    // and NOT an unresolved re-export fall-through.
+    let rune_key = resolve_decl_key("/w/r.svelte.ts", "$state");
+    match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(rune_key)) {
+        QueryResult::Value(_) => {}
+        other => panic!(
+            "a rune name `$state` in a rune module must resolve at the dispatch surface via the \
+             centralized effective header lookup, got {other:?}"
+        ),
+    }
+
+    // PLAIN `.ts`: `$state` is not declared/imported/exported → dispatch falls
+    // through and MISSES (per-file scoping — the effective lookup is
+    // rune-module-gated, so a plain file behaves exactly as the raw probe).
+    let plain_key = resolve_decl_key("/w/plain.ts", "$state");
+    match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(plain_key)) {
+        QueryResult::Error(QueryError::Miss) => {}
+        other => panic!(
+            "a rune name `$state` in a PLAIN `.ts` must MISS (the effective lookup is \
+             rune-module-gated; per-file scoping), got {other:?}"
+        ),
+    }
+}
+
 /// The shared memo survives across distinct higher-level requests — a
 /// second `VerterHost` call against the same key observes the warm id.
 #[test]
