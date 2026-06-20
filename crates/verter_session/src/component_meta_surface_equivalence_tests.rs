@@ -30,8 +30,9 @@
 //! a content edit to that carrier misses the warm component-meta read
 //! (re-resolving the changed surface rather than serving a stale warm hit),
 //! and an UNRELATED warmed component (no dependency on the edited carrier)
-//! STAYS a warm hit across that edit (carrier-precise invalidation, not a
-//! global clear).
+//! STAYS a warm hit across that edit (no global clear: an unrelated component
+//! that does not depend on the edited carrier stays warm; this is not
+//! exhaustive carrier-precision).
 
 use std::sync::Arc;
 
@@ -771,7 +772,7 @@ defineProps<Props>()
         .unwrap();
     // An UNRELATED component that does NOT import `/types.ts`: its `defineProps`
     // is typed by a purely LOCAL inline object literal, so its published
-    // read-set roots only on its OWN file and NEVER on `/types.ts`. It is the
+    // read-set does NOT include the edited carrier `/types.ts`. It is the
     // precision control — editing `/types.ts` must NOT evict it.
     project
         .upsert_base(
@@ -794,9 +795,9 @@ defineProps<{ z: string }>()
     );
 
     // (a) Read-set rooting: the published entry's dep-signature MUST include
-    // the cross-file carrier `/types.ts` (the dispatch fan-in folds the
-    // carrier's whole-hash fact). Without it a carrier edit could not
-    // invalidate the warm result.
+    // the cross-file carrier `/types.ts`; without that observable read-set
+    // root, a carrier edit could not be validated through the read-set
+    // contract and could not invalidate the warm result.
     let dep_canonicals =
         crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
             project.host(),
@@ -809,9 +810,9 @@ defineProps<{ z: string }>()
     );
 
     // Warm the UNRELATED control cold so it has a published entry to validate
-    // against after the `/types.ts` edit. Its read-set roots only on its own
-    // file (it never imports `/types.ts`), so the carrier edit must leave it
-    // warm.
+    // against after the `/types.ts` edit. Its read-set does NOT include the
+    // edited carrier `/types.ts` (it never imports it), so the carrier edit
+    // must leave it warm.
     let unrelated_cold = get_meta(&project, "/UnrelatedLocal.vue");
     assert_eq!(
         prop_names(&unrelated_cold),
@@ -862,15 +863,15 @@ defineProps<{ z: string }>()
     assert_eq!(
         after_names,
         vec!["c", "renamed"],
-        "the carrier edit MUST invalidate the warm result — the recorded carrier \
-         fact no longer validates, so the entry recomputes the changed prop set \
-         [c, renamed] (a stale warm hit would still report [a, b]): {after_names:?}"
+        "the carrier edit MUST invalidate the warm result — a stale warm hit \
+         would still report [a, b]; the recompute to [c, renamed] plus the \
+         miss-counter advance show the warm entry was not reused: {after_names:?}"
     );
     assert!(
         prov.component_meta_result_cache_misses.load(Relaxed) > misses_before,
-        "the cross-file contributor edit must MISS the warm component-meta cache \
-         (the read-set rooted on `/types.ts` no longer validates), advancing the \
-         miss counter"
+        "the cross-file contributor edit must MISS the warm component-meta cache, \
+         advancing the miss counter — a reused warm entry would leave the miss \
+         counter unchanged"
     );
     // The recompute must carry the CHANGED member types, not just the changed
     // names — a wrong-type recompute (e.g. echoing the old `a: string`/`b: number`
@@ -894,6 +895,10 @@ defineProps<{ z: string }>()
         ),
         "the recomputed `c` member must carry its `boolean` type, got {:?}",
         prop(&after, "c").type_expr
+    );
+    assert!(
+        prop(&after, "c").required,
+        "the recomputed non-optional `c` must publish as required"
     );
 
     // (c) PRECISION: the `/types.ts` edit must NOT evict the UNRELATED control
@@ -925,7 +930,8 @@ defineProps<{ z: string }>()
         prov.component_meta_result_cache_misses.load(Relaxed),
         unrelated_misses_before,
         "the unrelated component's post-edit re-resolution must NOT advance the \
-         miss counter — a miss here means the `/types.ts` edit globally cleared \
-         entries instead of invalidating only the carrier-dependent owner"
+         miss counter — a miss here means the `/types.ts` edit evicted or failed \
+         to reuse this unrelated LOCAL entry, rejecting global-clear / \
+         over-eviction behavior for this local control"
     );
 }
