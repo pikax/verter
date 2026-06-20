@@ -14762,174 +14762,58 @@ mod single_resolution_engine_guards {
         String::from_utf8_lossy(&out).into_owned()
     }
 
-    /// Blank (with whitespace, newlines preserved) the FULL span of every
-    /// test-ONLY item in a production source file: any item whose `#[cfg(...)]`
-    /// attribute REQUIRES the `test` flag — not only `#[cfg(test)] mod NAME
-    /// { … }`, but also a test-only `fn` / `const` / `static` / `struct` /
-    /// `enum` / `impl` / `trait` / `use` fixture sitting OUTSIDE an inline test
-    /// module. Such items live in production source but are UNREACHABLE in any
-    /// non-test build; guard scans MUST NOT classify them as production
-    /// violations.
-    ///
-    /// "Requires test" is decided by `predicate_requires_test` (boolean
-    /// reachability): `#[cfg(test)]` and `#[cfg(all(test, …))]` REQUIRE test
-    /// (stripped); `#[cfg(any(test, X))]` does NOT (it compiles under `X` alone
-    /// — `#[cfg(any(test, debug_assertions))]` is live in a DEBUG PRODUCTION
-    /// build, so it is NOT stripped — a doomed-engine use inside it must still
-    /// be seen by the shrinking-ledger guards); `#[cfg(not(test))]` is the
-    /// production arm (NOT stripped); `#[cfg(feature = "test_util")]` has no
-    /// bare `test` leaf (NOT stripped).
-    ///
-    /// The decorated item's span runs from the attribute to either its matching
-    /// `}` (a brace-bodied item — the first top-level `{` is the body, found by
-    /// tracking `<> () []` nesting and skipping literals, then brace-balanced
-    /// literal-aware) or its terminating `;` (a semicolon item: `use …;`,
-    /// `const … = …;`, `type … = …;`, a unit/tuple struct). Only the matched
-    /// item is blanked, so adjacent production code is preserved (the
-    /// non-test-item ACCEPT case is unit-pinned in the discriminator). Literal
-    /// awareness via `skip_literal` keeps a `{`/`}`/`;` inside a string / char /
-    /// raw-string from desyncing the nesting counters (P3).
-    /// (Generalizes / mirrors `typed_ir_resolver_guards::strip_inline_test_modules`.)
-    ///
-    /// Scoped deliberately to the VueMacroElements producer-surface scan
-    /// (`vue_macro_preprocess`), NOT the shared `preprocess`: the shrinking
-    /// single-engine LEDGER guards key their floors off the shared
-    /// `strip_inline_test_modules` (inline-`mod`-only) and intentionally still
-    /// count `#[cfg(test)] fn` helper references — changing their input here
-    /// would shift those floors. Stripping every test-only item is correct for
-    /// the producer-bound facts (a test fixture must never false-trip them);
-    /// applying the SAME breadth to the ledger floors is a separate, larger
-    /// change left out of this scope.
-    fn strip_cfg_test_items(src: &str) -> String {
+    /// Replace the body of every `#[cfg(test)] mod NAME { ... }` block with
+    /// whitespace (newlines preserved). Inline test modules live in
+    /// production source files but are test-only — guard scans must NOT
+    /// classify them as production violations. (Mirrors
+    /// `typed_ir_resolver_guards::strip_inline_test_modules`.)
+    fn strip_inline_test_modules(src: &str) -> String {
         let bytes = src.as_bytes();
         let n = bytes.len();
         let mut out = bytes.to_vec();
-        let cfg_open = b"#[cfg(";
+        let needle = b"#[cfg(test)]";
         let mut i = 0usize;
-        while i < n {
-            // Skip literals at top level so a `#[cfg(` lookalike inside a string
-            // is never treated as an attribute.
-            if let Some(next) = skip_literal(bytes, i) {
-                i = next;
-                continue;
-            }
-            if i + cfg_open.len() <= n && &bytes[i..i + cfg_open.len()] == cfg_open {
-                // Balance-match the attribute's `( … )` then require a closing
-                // `]` to confirm it is the `#[cfg( … )]` attribute form.
-                let pred_start = i + cfg_open.len();
-                let mut depth = 1i32;
-                let mut p = pred_start;
-                while p < n && depth > 0 {
-                    if let Some(next) = skip_literal(bytes, p) {
-                        p = next;
-                        continue;
-                    }
-                    match bytes[p] {
-                        b'(' => depth += 1,
-                        b')' => depth -= 1,
-                        _ => {}
-                    }
-                    p += 1;
-                }
-                // `p` is one past the matching `)`. Require the `]` that closes
-                // the attribute. `pred` is the predicate text (between the outer
-                // parens), used only to test for a bare `test` identifier.
-                let pred_end = p.saturating_sub(1);
-                let closes_attr = p < n && bytes[p] == b']';
-                let pred = &src[pred_start..pred_end.min(src.len())];
-                if closes_attr && predicate_requires_test(pred) {
-                    // Item begins after the attribute(s) + whitespace. Skip any
-                    // further attributes (`#[...]`) and outer/inner-doc lines —
-                    // already-stripped by `strip_comments`, so only `#[...]`
-                    // attribute lines remain to skip.
-                    let mut s = p + 1; // one past `]`
-                    loop {
-                        while s < n && (bytes[s] as char).is_whitespace() {
-                            s += 1;
-                        }
-                        if s + 1 < n && bytes[s] == b'#' && bytes[s + 1] == b'[' {
-                            // Balance-match this nested attribute's `[ … ]`.
-                            let mut d = 1i32;
-                            let mut q = s + 2;
-                            while q < n && d > 0 {
-                                if let Some(next) = skip_literal(bytes, q) {
-                                    q = next;
-                                    continue;
-                                }
-                                match bytes[q] {
-                                    b'[' => d += 1,
-                                    b']' => d -= 1,
-                                    _ => {}
-                                }
-                                q += 1;
-                            }
-                            s = q;
-                            continue;
-                        }
+        while i + needle.len() <= n {
+            if &bytes[i..i + needle.len()] == needle {
+                let mut j = i + needle.len();
+                let limit = (i + 200).min(n);
+                while j < limit {
+                    if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
                         break;
                     }
-                    // Forward-scan to the item terminator, tracking `() [] <>`
-                    // nesting so a `;` inside an array type (`[u8; 4]`) or a `{`
-                    // inside generics is never mistaken for the top-level
-                    // terminator. The FIRST top-level `{` ⇒ brace-bodied item
-                    // (blank through its matching `}`); the FIRST top-level `;`
-                    // ⇒ semicolon item (blank through it).
-                    let mut paren = 0i32;
-                    let mut bracket = 0i32;
-                    let mut angle = 0i32;
-                    let mut m = s;
-                    let mut item_end: Option<usize> = None;
-                    while m < n {
-                        if let Some(next) = skip_literal(bytes, m) {
-                            m = next;
-                            continue;
-                        }
-                        match bytes[m] {
-                            b'(' => paren += 1,
-                            b')' => paren -= 1,
-                            b'[' => bracket += 1,
-                            b']' => bracket -= 1,
-                            b'<' => angle += 1,
-                            b'>' => {
-                                if angle > 0 {
-                                    angle -= 1;
-                                }
-                            }
-                            b'{' if paren == 0 && bracket == 0 && angle == 0 => {
-                                // Brace-bodied: balance to the matching `}`.
-                                let mut bd = 1i32;
-                                let mut b = m + 1;
-                                while b < n && bd > 0 {
-                                    if let Some(next) = skip_literal(bytes, b) {
-                                        b = next;
-                                        continue;
-                                    }
-                                    match bytes[b] {
-                                        b'{' => bd += 1,
-                                        b'}' => bd -= 1,
-                                        _ => {}
-                                    }
-                                    b += 1;
-                                }
-                                item_end = Some(b); // one past matching `}`
-                                break;
-                            }
-                            b';' if paren == 0 && bracket == 0 && angle == 0 => {
-                                item_end = Some(m + 1); // include the `;`
-                                break;
-                            }
-                            _ => {}
-                        }
-                        m += 1;
+                    j += 1;
+                }
+                if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
+                    let mut k = j + 4;
+                    while k < n && bytes[k] != b'{' && bytes[k] != b';' {
+                        k += 1;
                     }
-                    if let Some(end) = item_end {
-                        let stop = end.min(out.len());
-                        for slot in &mut out[i..stop] {
-                            if *slot != b'\n' {
-                                *slot = b' ';
+                    if k < n && bytes[k] == b'{' {
+                        let mut depth = 1i32;
+                        let mut m = k + 1;
+                        while m < n && depth > 0 {
+                            // Skip string / char / raw-string literals so a
+                            // `{` or `}` inside a literal in the test-mod body
+                            // cannot desync the brace depth counter (P3).
+                            if let Some(next) = skip_literal(bytes, m) {
+                                m = next;
+                                continue;
+                            }
+                            match bytes[m] {
+                                b'{' => depth += 1,
+                                b'}' => depth -= 1,
+                                _ => {}
+                            }
+                            m += 1;
+                        }
+                        if m > k + 1 {
+                            for slot in &mut out[(k + 1)..(m - 1)] {
+                                if *slot != b'\n' {
+                                    *slot = b' ';
+                                }
                             }
                         }
-                        i = end;
+                        i = m;
                         continue;
                     }
                 }
@@ -14939,180 +14823,10 @@ mod single_resolution_engine_guards {
         String::from_utf8_lossy(&out).into_owned()
     }
 
-    /// True iff a `#[cfg( … )]` predicate REQUIRES the `test` cfg flag — i.e.
-    /// the item is UNREACHABLE in every build where `test` is OFF (so blanking
-    /// it cannot over-strip any production — incl. debug-production — code).
-    ///
-    /// This is STRICTER than "mentions test": `cfg(test)` and `cfg(all(test, …))`
-    /// REQUIRE test (strip); `cfg(any(test, X))` does NOT (it compiles under `X`
-    /// alone — `any(test, debug_assertions)` is LIVE in a debug production
-    /// build, so a doomed-engine use inside it must still be seen by the
-    /// shrinking-ledger guards — DON'T strip); `cfg(not(test))` is the
-    /// production arm (DON'T strip). Decided by boolean reachability: substitute
-    /// `test = false`, leave every other flag FREE, and ask whether the
-    /// predicate can still be TRUE; it requires test iff it CANNOT.
-    ///
-    /// The predicate is parsed into a tiny `all`/`any`/`not`/leaf tree
-    /// (string-literal-masked so `feature = "test"` is not a `test` leaf, and
-    /// identifier-boundary matched so `test_util` / `unittest` are distinct
-    /// leaves). A malformed / unparsable predicate is treated as NOT requiring
-    /// test (fail-safe: do not strip — never over-strip on a parse miss).
-    fn predicate_requires_test(pred: &str) -> bool {
-        // Mask string literals so `feature = "test"` is not seen as a `test`
-        // leaf.
-        let bytes = pred.as_bytes();
-        let n = bytes.len();
-        let mut masked: Vec<u8> = bytes.to_vec();
-        let mut i = 0usize;
-        while i < n {
-            if let Some(next) = skip_literal(bytes, i) {
-                let stop = next.min(masked.len());
-                for slot in &mut masked[i..stop] {
-                    *slot = b' ';
-                }
-                i = next;
-                continue;
-            }
-            i += 1;
-        }
-        let s = String::from_utf8_lossy(&masked);
-
-        /// A parsed cfg predicate node.
-        enum Cfg {
-            /// The bare `test` flag.
-            Test,
-            /// Any non-`test` leaf (`feature = "…"`, `debug_assertions`, `unix`,
-            /// `target_os = "…"`, …) — a FREE variable for reachability.
-            Other,
-            Not(Box<Cfg>),
-            All(Vec<Cfg>),
-            Any(Vec<Cfg>),
-        }
-
-        // Recursive-descent parser over the masked predicate. Returns the parsed
-        // node and the byte offset consumed, or `None` on a parse miss.
-        fn parse(s: &str) -> Option<(Cfg, usize)> {
-            let b = s.as_bytes();
-            let mut i = 0usize;
-            while i < b.len() && (b[i] as char).is_whitespace() {
-                i += 1;
-            }
-            // Read an identifier head.
-            let start = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
-            }
-            let ident = &s[start..i];
-            // A combinator `all( … )` / `any( … )` / `not( … )`.
-            let mut j = i;
-            while j < b.len() && (b[j] as char).is_whitespace() {
-                j += 1;
-            }
-            if j < b.len() && b[j] == b'(' && matches!(ident, "all" | "any" | "not") {
-                let mut k = j + 1;
-                let mut children: Vec<Cfg> = Vec::new();
-                loop {
-                    while k < b.len() && (b[k] as char).is_whitespace() {
-                        k += 1;
-                    }
-                    if k < b.len() && b[k] == b')' {
-                        k += 1;
-                        break;
-                    }
-                    let (child, used) = parse(&s[k..])?;
-                    children.push(child);
-                    k += used;
-                    while k < b.len() && (b[k] as char).is_whitespace() {
-                        k += 1;
-                    }
-                    if k < b.len() && b[k] == b',' {
-                        k += 1;
-                        continue;
-                    }
-                    if k < b.len() && b[k] == b')' {
-                        k += 1;
-                        break;
-                    }
-                    // Unexpected token.
-                    return None;
-                }
-                let node = match ident {
-                    "not" => {
-                        if children.len() != 1 {
-                            return None;
-                        }
-                        Cfg::Not(Box::new(children.into_iter().next().unwrap()))
-                    }
-                    "all" => Cfg::All(children),
-                    _ => Cfg::Any(children),
-                };
-                return Some((node, k));
-            }
-            // A leaf: bare `test`, or any other flag (possibly `key = "value"`
-            // — skip a trailing `= …` up to the next `,` / `)` at depth 0).
-            if ident.is_empty() {
-                return None;
-            }
-            // Consume an optional `= value` tail (already literal-masked).
-            let mut k = i;
-            while k < b.len() && (b[k] as char).is_whitespace() {
-                k += 1;
-            }
-            if k < b.len() && b[k] == b'=' {
-                k += 1;
-                let mut depth = 0i32;
-                while k < b.len() {
-                    match b[k] {
-                        b'(' | b'[' => depth += 1,
-                        b')' | b']' if depth == 0 => break,
-                        b')' | b']' => depth -= 1,
-                        b',' if depth == 0 => break,
-                        _ => {}
-                    }
-                    k += 1;
-                }
-            }
-            let leaf = if ident == "test" {
-                Cfg::Test
-            } else {
-                Cfg::Other
-            };
-            Some((leaf, k))
-        }
-
-        // Can the predicate be TRUE when test = false (every other leaf free)?
-        fn can_be_true(c: &Cfg) -> bool {
-            match c {
-                Cfg::Test => false, // test is fixed false
-                Cfg::Other => true, // free → choose true
-                Cfg::Not(p) => can_be_false(p),
-                Cfg::All(v) => v.iter().all(can_be_true),
-                Cfg::Any(v) => v.iter().any(can_be_true),
-            }
-        }
-        // Can the predicate be FALSE when test = false (every other leaf free)?
-        fn can_be_false(c: &Cfg) -> bool {
-            match c {
-                Cfg::Test => true,  // test is fixed false → already false
-                Cfg::Other => true, // free → choose false
-                Cfg::Not(p) => can_be_true(p),
-                Cfg::All(v) => v.iter().any(can_be_false),
-                Cfg::Any(v) => v.iter().all(can_be_false),
-            }
-        }
-
-        match parse(&s) {
-            // Requires test iff it CANNOT be true with test = false.
-            Some((node, _)) => !can_be_true(&node),
-            None => false, // parse miss → fail-safe: do not strip
-        }
-    }
-
     /// If `bytes[at]` begins a string, raw-string, byte-string, or char
     /// literal, return the index just past its closing delimiter; otherwise
-    /// `None`. Used by `strip_cfg_test_items` so braces / parens / brackets
-    /// inside literals within a `#[cfg(test)]` item span do not desync the
-    /// nesting counters.
+    /// `None`. Used by `strip_inline_test_modules` so braces inside literals
+    /// inside a `#[cfg(test)] mod` body do not desync the depth counter.
     ///
     /// A leading `b` (byte string / byte char) is consumed transparently. A
     /// `'` that does NOT close as a well-formed char literal (i.e. a lifetime
@@ -15204,82 +14918,8 @@ mod single_resolution_engine_guards {
         None
     }
 
-    /// Blank the BODY of every inline `#[cfg(test)] mod NAME { … }` block with
-    /// whitespace (newlines preserved) — the SHARED, narrow stripper used by the
-    /// general `preprocess` (and therefore the shrinking single-engine ledger
-    /// guards). It intentionally stays inline-`mod`-only so those ledgers' floors
-    /// are stable; the broader `strip_cfg_test_items` (all test-only items) is
-    /// scoped to the VueMacroElements producer-surface scan via
-    /// `vue_macro_preprocess`. (Mirrors
-    /// `typed_ir_resolver_guards::strip_inline_test_modules`.)
-    fn strip_inline_test_modules(src: &str) -> String {
-        let bytes = src.as_bytes();
-        let n = bytes.len();
-        let mut out = bytes.to_vec();
-        let needle = b"#[cfg(test)]";
-        let mut i = 0usize;
-        while i + needle.len() <= n {
-            if &bytes[i..i + needle.len()] == needle {
-                let mut j = i + needle.len();
-                let limit = (i + 200).min(n);
-                while j < limit {
-                    if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
-                        break;
-                    }
-                    j += 1;
-                }
-                if j + 4 <= n && &bytes[j..j + 4] == b"mod " {
-                    let mut k = j + 4;
-                    while k < n && bytes[k] != b'{' && bytes[k] != b';' {
-                        k += 1;
-                    }
-                    if k < n && bytes[k] == b'{' {
-                        let mut depth = 1i32;
-                        let mut m = k + 1;
-                        while m < n && depth > 0 {
-                            if let Some(next) = skip_literal(bytes, m) {
-                                m = next;
-                                continue;
-                            }
-                            match bytes[m] {
-                                b'{' => depth += 1,
-                                b'}' => depth -= 1,
-                                _ => {}
-                            }
-                            m += 1;
-                        }
-                        if m > k + 1 {
-                            let stop = (m - 1).min(out.len());
-                            for slot in &mut out[(k + 1)..stop] {
-                                if *slot != b'\n' {
-                                    *slot = b' ';
-                                }
-                            }
-                        }
-                        i = m;
-                        continue;
-                    }
-                }
-            }
-            i += 1;
-        }
-        String::from_utf8_lossy(&out).into_owned()
-    }
-
-    /// The SHARED preprocessing rail (comments + inline `#[cfg(test)] mod`
-    /// bodies). Used by every ledger / token guard EXCEPT the VueMacroElements
-    /// producer-surface scan, which uses the broader `vue_macro_preprocess`.
     fn preprocess(src: &str) -> String {
         strip_inline_test_modules(&strip_comments(src))
-    }
-
-    /// Preprocessing for the VueMacroElements producer-surface scan: comments
-    /// PLUS every test-ONLY item (`strip_cfg_test_items`), so a `#[cfg(test)]`
-    /// fixture that constructs `VueMacroElements` / mints a carrier / calls
-    /// `insert_resolved_named_type` OUTSIDE an inline test module can never
-    /// false-trip the producer-bound facts.
-    fn vue_macro_preprocess(src: &str) -> String {
-        strip_cfg_test_items(&strip_comments(src))
     }
 
     /// Identifier-boundary matcher: `needle` matches at `line` ONLY when its
@@ -17527,7 +17167,7 @@ mod tests {\n\
     }
 
     #[test]
-    fn strip_cfg_test_items_is_literal_aware() {
+    fn strip_inline_test_modules_is_string_literal_aware() {
         // [P3] A `{` / `}` inside a string, char, or raw-string literal within
         // a `#[cfg(test)] mod` body must NOT desync the brace-depth counter.
         // If it did, the strip would end early and a forbidden token AFTER the
@@ -17544,7 +17184,7 @@ mod tests {\n\
     let _ = from_eager_meta();\n\
 }\n\
 pub fn after() {}\n";
-        let processed = vue_macro_preprocess(src_str);
+        let processed = preprocess(src_str);
         assert!(
             !line_contains_identifier(&processed, "from_eager_meta"),
             "string-literal `{{` must not desync brace counting — the \
@@ -17564,7 +17204,7 @@ mod tests {\n\
     let _ = from_eager_meta();\n\
 }\n\
 pub fn after() {}\n";
-        let processed = vue_macro_preprocess(src_char);
+        let processed = preprocess(src_char);
         assert!(
             !line_contains_identifier(&processed, "from_eager_meta"),
             "char-literal `}}` must not desync brace counting"
@@ -17582,7 +17222,7 @@ mod tests {\n\
     let _ = from_eager_meta();\n\
 }\n\
 pub fn after() {}\n";
-        let processed = vue_macro_preprocess(src_raw);
+        let processed = preprocess(src_raw);
         assert!(
             !line_contains_identifier(&processed, "from_eager_meta"),
             "raw-string `}}`/`{{` must not desync brace counting"
@@ -17601,119 +17241,12 @@ mod tests {\n\
     fn g<'a>(x: &'a str) { let _ = from_eager_meta(); }\n\
 }\n\
 pub fn after() {}\n";
-        let processed = vue_macro_preprocess(src_lifetime);
+        let processed = preprocess(src_lifetime);
         assert!(
             !line_contains_identifier(&processed, "from_eager_meta"),
             "lifetime `'a` must not be mistaken for a char literal; the test \
              module body must still be fully erased"
         );
-
-        // F4: a `#[cfg(test)] fn` fixture OUTSIDE an inline test module — a
-        // construction inside it must be erased, and a NON-test item directly
-        // adjacent to it must be PRESERVED (attribute-scoped span blanking, no
-        // over-strip).
-        let src_test_fn = "\
-pub fn live_before() { let _ = real_call(); }\n\
-#[cfg(test)]\n\
-fn fixture() {\n\
-    let c = SemanticNodeData::VueMacroElements(Arc::new(elements));\n\
-}\n\
-pub fn live_after() { let _ = also_real(); }\n";
-        let processed = vue_macro_preprocess(src_test_fn);
-        assert!(
-            !line_contains_identifier(&processed, "VueMacroElements"),
-            "a `#[cfg(test)] fn` fixture's body must be fully erased (the \
-             test-only construction must not reach the production scan)"
-        );
-        assert!(
-            line_contains_identifier(&processed, "live_before")
-                && line_contains_identifier(&processed, "real_call")
-                && line_contains_identifier(&processed, "live_after")
-                && line_contains_identifier(&processed, "also_real"),
-            "production items SURROUNDING a `#[cfg(test)] fn` must be preserved \
-             — the stripper must blank only the attributed item's span"
-        );
-
-        // F4: a `#[cfg(all(test, feature = \"x\"))]` SEMICOLON item (a `use`)
-        // REQUIRES test (unreachable without it) → erased. (`all(test, …)`.)
-        let src_test_use = "\
-#[cfg(all(test, feature = \"x\"))]\n\
-use crate::probe::VueMacroElements;\n\
-pub fn keep_me() {}\n";
-        let processed = vue_macro_preprocess(src_test_use);
-        assert!(
-            !line_contains_identifier(&processed, "VueMacroElements"),
-            "an `#[cfg(all(test, …))]` semicolon item REQUIRES test → must be erased"
-        );
-        assert!(
-            line_contains_identifier(&processed, "keep_me"),
-            "a non-test item after an `#[cfg(all(test, …))]` `use` must be kept"
-        );
-
-        // F4 (NOT test-only): `#[cfg(any(test, debug_assertions))]` is LIVE in a
-        // debug PRODUCTION build (compiles under `debug_assertions` alone) — it
-        // does NOT require test, so a doomed-engine use inside it MUST still be
-        // visible to the shrinking-ledger guards. MUST be preserved.
-        let src_any_debug = "\
-#[cfg(any(test, debug_assertions))]\n\
-fn diag() { let _ = type_surface::analyze(); }\n";
-        let processed = vue_macro_preprocess(src_any_debug);
-        assert!(
-            line_contains_identifier(&processed, "type_surface"),
-            "`#[cfg(any(test, debug_assertions))]` is debug-PRODUCTION-live — it \
-             must NOT be stripped (a doomed-engine use inside it must stay \
-             visible to the ledgers)"
-        );
-
-        // F4 (non-test-not-stripped): `#[cfg(feature = \"test_util\")]` — `test`
-        // appears ONLY inside the `\"test_util\"` string and as part of a longer
-        // ident, NOT as a bare `test` cfg flag — so the item is NOT test-gated
-        // and MUST be preserved.
-        let src_feature = "\
-#[cfg(feature = \"test_util\")]\n\
-fn probe() { let _ = production_path(); }\n";
-        let processed = vue_macro_preprocess(src_feature);
-        assert!(
-            line_contains_identifier(&processed, "production_path"),
-            "`#[cfg(feature = \"test_util\")]` is NOT a `cfg(test)` gate — the \
-             item must NOT be stripped (no bare `test` ident in the predicate)"
-        );
-
-        // F4 (non-test-not-stripped, no over-strip): `#[cfg(not(test))]` is the
-        // PRODUCTION arm — `test` is under a `not( … )` negation, so the
-        // predicate does NOT select for test and the item MUST be preserved. A
-        // `#[cfg(not(test))] fn` that constructed a carrier in production would
-        // therefore still reach the ledgers — the guard does not blind itself
-        // to the production build.
-        let src_not_test =
-            "#[cfg(not(test))]\nfn only_prod() { let _ = SemanticNodeData::VueMacroElements(x); }\n";
-        let processed = vue_macro_preprocess(src_not_test);
-        assert!(
-            line_contains_identifier(&processed, "only_prod")
-                && line_contains_identifier(&processed, "VueMacroElements"),
-            "`#[cfg(not(test))]` is the production arm (test under `not`) — the \
-             item MUST be preserved, not over-stripped"
-        );
-        // And `#[cfg(all(not(test), feature = \"x\"))]` is also production.
-        let src_all_not = "#[cfg(all(not(test), feature = \"x\"))]\nfn prod2() {}\n";
-        assert!(
-            line_contains_identifier(&vue_macro_preprocess(src_all_not), "prod2"),
-            "`#[cfg(all(not(test), …))]` selects AGAINST test — must be preserved"
-        );
-        // Direct unit coverage of the `requires test` (reachability) classifier.
-        // REQUIRES test (strip) — unreachable without test:
-        assert!(predicate_requires_test("test"));
-        assert!(predicate_requires_test("all(test, unix)"));
-        assert!(predicate_requires_test("all(test, feature = \"x\")"));
-        assert!(predicate_requires_test("all(test, not(windows))"));
-        // Does NOT require test (do NOT strip) — reachable without test:
-        assert!(!predicate_requires_test("any(test, feature = \"x\")"));
-        assert!(!predicate_requires_test("any(test, debug_assertions)"));
-        assert!(!predicate_requires_test("not(test)"));
-        assert!(!predicate_requires_test("all(not(test), feature = \"x\")"));
-        assert!(!predicate_requires_test("feature = \"test_util\""));
-        assert!(!predicate_requires_test("test_util"));
-        assert!(!predicate_requires_test("debug_assertions"));
     }
 
     // -----------------------------------------------------------------------
@@ -17935,58 +17468,44 @@ fn probe() { let _ = production_path(); }\n";
             .sum()
     }
 
-    /// Count CALL sites of `fn_name` in PREPROCESSED `src`, SPELLING-ROBUST
-    /// across every call form, EXCLUDING the function DEFINITION and rustdoc
-    /// links (the latter already stripped with comments by `preprocess`).
-    ///
-    /// A call is an identifier-boundary occurrence of `fn_name` immediately
-    /// (modulo whitespace) followed by `(`, that is NOT preceded by the `fn`
-    /// keyword (the definition `fn insert_resolved_named_type(`). It is counted
-    /// REGARDLESS of the call form before it:
-    ///   * method form `…value.insert_resolved_named_type(`;
-    ///   * UFCS / fully-qualified path form
-    ///     `SemanticGraphStore::insert_resolved_named_type(&store, …)`;
-    ///   * bare / free-function form `insert_resolved_named_type(`.
-    ///
-    /// The trailing identifier boundary keeps `insert_resolved_named_type_v2(`
-    /// from satisfying the ledger; the leading-`fn` exclusion keeps the single
-    /// `pub fn insert_resolved_named_type(` definition out of the call count.
-    fn count_call_sites(src: &str, fn_name: &str) -> usize {
+    /// Count METHOD-CALL sites of `method` in PREPROCESSED `src` — occurrences
+    /// of `.<method>(` (a `.`-prefixed call, then `(`). This distinguishes a
+    /// production caller (`self.graph.insert_resolved_named_type(...)`) from the
+    /// `fn insert_resolved_named_type(` DEFINITION (preceded by `fn `, no `.`)
+    /// and from rustdoc `[`Self::insert_resolved_named_type`]` links (stripped
+    /// by `preprocess`). Identifier-bounded on the trailing side so
+    /// `.insert_resolved_named_type_v2(` never satisfies the ledger.
+    fn count_dot_call_sites(src: &str, method: &str) -> usize {
         let bytes = src.as_bytes();
-        let mb = fn_name.as_bytes();
+        let mb = method.as_bytes();
         let n = mb.len();
         if n == 0 {
             return 0;
         }
         let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let is_ws = |b: u8| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r';
         let mut count = 0usize;
         let mut i = 0usize;
         while i + n <= bytes.len() {
             if &bytes[i..i + n] == mb {
-                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                // Must be `.`-prefixed (a method call), and the char BEFORE the
+                // dot must not extend an identifier into `.` (it never does —
+                // the dot itself is the boundary). The dot prefix is what
+                // separates a call from a `fn name(` definition.
+                let dot_ok = i >= 1 && bytes[i - 1] == b'.';
+                // Must be followed by `(` (allowing intervening whitespace for a
+                // call whose `(` wrapped to the next line), and the trailing
+                // char must be an identifier boundary.
                 let after = i + n;
                 let after_ok = after == bytes.len() || !is_ident_char(bytes[after]);
-                if before_ok && after_ok {
-                    // Exclude the DEFINITION `fn <name>(`: the nearest
-                    // non-whitespace token before the identifier is the `fn`
-                    // keyword.
-                    let mut p = i;
-                    while p > 0 && is_ws(bytes[p - 1]) {
-                        p -= 1;
-                    }
-                    let preceded_by_fn = p >= 2
-                        && &bytes[p - 2..p] == b"fn"
-                        && (p == 2 || !is_ident_char(bytes[p - 3]));
-                    // Must be followed by `(` (whitespace-tolerant).
-                    let mut k = after;
-                    while k < bytes.len() && is_ws(bytes[k]) {
-                        k += 1;
-                    }
-                    let paren_ok = k < bytes.len() && bytes[k] == b'(';
-                    if paren_ok && !preceded_by_fn {
-                        count += 1;
-                    }
+                let mut k = after;
+                while k < bytes.len()
+                    && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
+                {
+                    k += 1;
+                }
+                let paren_ok = k < bytes.len() && bytes[k] == b'(';
+                if dot_ok && after_ok && paren_ok {
+                    count += 1;
                     i = after;
                     continue;
                 }
@@ -17996,301 +17515,53 @@ fn probe() { let _ = production_path(); }\n";
         count
     }
 
-    /// The variant IDENTIFIER (path-qualifier-free) whose CONSTRUCTION sites
-    /// are fact (3). Scanned by bare name — verified unique in the codebase (no
-    /// `fn`/`struct` named `VueMacroElements`), so any path qualifier
-    /// (`SemanticNodeData::`, `Self::`, an aliased `X::`, or a bare imported
-    /// name) is matched identically.
-    const VUE_MACRO_ELEMENTS_IDENT: &str = "VueMacroElements";
+    /// The fully-qualified variant whose CONSTRUCTION sites are fact (3).
+    const VUE_MACRO_ELEMENTS_VARIANT: &str = "SemanticNodeData::VueMacroElements";
 
-    /// Returns `true` iff the occurrence of a constructor-shaped identifier
-    /// whose path starts at `path_start` and whose APPLICATION (the `(…)` /
-    /// `{…}`) ends at `app_end` (one past the closing delimiter) is a PATTERN,
-    /// not a construction. Recognizes EVERY pattern context the GOV review
-    /// enumerated (F3):
-    ///   * a `match`-arm tail — the next significant token after `app_end` is
-    ///     `=>` (arm body) or `|` (alternation continues);
-    ///   * a GUARDED arm — the next significant token after `app_end` is the
-    ///     `if` keyword (`Variant(b) if <expr> =>`);
-    ///   * an `if let` / `while let` / `let … =` binding — the path is
-    ///     immediately preceded (past whitespace) by the `let` keyword
-    ///     (`if let` / `while let` end in `let`; a plain `let PAT =` likewise);
-    ///   * a `matches!( … )` invocation — the path lies inside the argument
-    ///     list of a `matches!(` macro call;
-    ///   * a TUPLE-pattern arm — the path is enclosed in a parenthesized
-    ///     PATTERN group (a `(` that is NOT a call — not preceded by an
-    ///     identifier / `)` / `]`) whose matching `)` is followed by `=>` (e.g.
-    ///     `(Self::VueMacroElements(a), Self::VueMacroElements(b)) => …` in a
-    ///     `PartialEq`/`Hash` `match (self, other)`).
+    /// Count CONSTRUCTION sites (NOT pattern arms) of
+    /// `SemanticNodeData::VueMacroElements(...)` in PREPROCESSED `src`.
     ///
-    /// A `_`-wildcard tuple body is handled by the caller (you cannot construct
-    /// a tuple variant with `_`). All offsets are byte indices into `bytes`.
-    fn is_pattern_context(bytes: &[u8], path_start: usize, app_end: usize) -> bool {
-        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let is_ws = |b: u8| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r';
-        let next_significant = |from: usize| -> usize {
-            let mut t = from;
-            while t < bytes.len() && is_ws(bytes[t]) {
-                t += 1;
-            }
-            t
-        };
-
-        // (a) Trailing token after the application: `=>` / `|` / `if`.
-        let t = next_significant(app_end);
-        if t + 1 < bytes.len() && bytes[t] == b'=' && bytes[t + 1] == b'>' {
-            return true; // arm tail `=>`
-        }
-        if t < bytes.len() && bytes[t] == b'|' {
-            return true; // alternation `|`
-        }
-        if t + 2 <= bytes.len()
-            && &bytes[t..t + 2] == b"if"
-            && (t + 2 == bytes.len() || !is_ident_char(bytes[t + 2]))
-        {
-            return true; // guarded arm `) if <expr> =>`
-        }
-
-        // (b) Leading `let` binding: the path is preceded (past whitespace) by
-        // the `let` keyword. Covers `if let PAT`, `while let PAT`, `let PAT =`,
-        // and `let … else`.
-        let mut p = path_start;
-        while p > 0 && is_ws(bytes[p - 1]) {
-            p -= 1;
-        }
-        if p >= 3 && &bytes[p - 3..p] == b"let" && (p == 3 || !is_ident_char(bytes[p - 4])) {
-            return true;
-        }
-
-        // (c) / (d) Backward scan for the NEAREST enclosing unmatched `(`:
-        //   * if it is a `matches!(` macro call → (c) `matches!` pattern arg;
-        //   * else if it is a PATTERN group (the `(` is not a call — its
-        //     preceding significant char is not an identifier / `)` / `]`) and
-        //     its matching `)` is followed by `=>` → (d) tuple-pattern arm.
-        // A plain CALL group (`foo(`) enclosing a genuine construction is
-        // neither, so the scan falls through to `false`.
-        let mut depth = 0i32;
-        let mut q = path_start;
-        while q > 0 {
-            q -= 1;
-            match bytes[q] {
-                b')' => depth += 1,
-                b'(' => {
-                    if depth == 0 {
-                        // Nearest unmatched `(` enclosing the path. Identify the
-                        // token before it.
-                        let mut r = q;
-                        while r > 0 && is_ws(bytes[r - 1]) {
-                            r -= 1;
-                        }
-                        // (c) `matches!(` — optional `!`, then `matches`.
-                        if r > 0 && bytes[r - 1] == b'!' {
-                            let mut m = r - 1;
-                            while m > 0 && is_ws(bytes[m - 1]) {
-                                m -= 1;
-                            }
-                            if m >= 7
-                                && &bytes[m - 7..m] == b"matches"
-                                && (m == 7 || !is_ident_char(bytes[m - 8]))
-                            {
-                                return true;
-                            }
-                        }
-                        // (d) PATTERN group: the `(` is not a call/index (its
-                        // preceding char is not an ident char, `)`, or `]`).
-                        let is_call_or_index = r > 0
-                            && (is_ident_char(bytes[r - 1])
-                                || bytes[r - 1] == b')'
-                                || bytes[r - 1] == b']');
-                        if !is_call_or_index {
-                            // Find the matching `)` of this group and test its
-                            // tail for `=>`.
-                            let mut d2 = 1i32;
-                            let mut g = q + 1;
-                            while g < bytes.len() && d2 > 0 {
-                                match bytes[g] {
-                                    b'(' => d2 += 1,
-                                    b')' => d2 -= 1,
-                                    _ => {}
-                                }
-                                g += 1;
-                            }
-                            let after = next_significant(g);
-                            if after + 1 < bytes.len()
-                                && bytes[after] == b'='
-                                && bytes[after + 1] == b'>'
-                            {
-                                return true;
-                            }
-                        }
-                        // Otherwise this enclosing `(` is a call group — fall
-                        // through (a construction can be a call argument).
-                        break;
-                    }
-                    depth -= 1;
-                }
-                b';' | b'{' | b'}' => break, // statement / block boundary
-                _ => {}
-            }
-        }
-        false
-    }
-
-    /// Returns `true` iff a BARE (path-qualifier-free) tuple occurrence
-    /// `ident( … )` whose name starts at `name_start` is a tuple-VARIANT
-    /// DECLARATION — i.e. it sits DIRECTLY inside an `enum … { … }` body (e.g.
-    /// the `VueMacroElements(Arc<…>),` arm of `enum SemanticNodeData { … }`),
-    /// NOT a construction. The enclosing block is found by a backward
-    /// brace-depth scan; its head (the text from the enclosing `{` back to the
-    /// previous statement/block boundary) is tested for the `enum` keyword.
+    /// Construction vs pattern is decided structurally per occurrence:
+    ///   * the variant must be tuple-applied — immediately (past whitespace)
+    ///     followed by `(`;
+    ///   * if the tuple body is the wildcard `_` it is a PATTERN (you cannot
+    ///     construct a tuple variant with `_`) — never counted;
+    ///   * otherwise the token AFTER the balanced `(...)` decides: `=>` (arm
+    ///     separator) or `|` (alternation pattern continues) ⇒ PATTERN; any
+    ///     other continuation (`)`, `;`, `,`, `.`, end) ⇒ CONSTRUCTION (the
+    ///     variant is an EXPRESSION — an argument / RHS / return value).
     ///
-    /// Only the BARE form can be a declaration — a path-qualified `X::ident(` is
-    /// always a USE — so the caller gates this on `path_start == name_start`.
-    /// This keeps the qualifier-agnostic construction scan from counting the
-    /// variant's own declaration while still counting a bare-IMPORTED
-    /// construction used in expression position (its enclosing block head is a
-    /// `fn`/closure, not an `enum`).
-    fn is_enum_variant_decl(bytes: &[u8], name_start: usize) -> bool {
-        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let mut depth = 0i32;
-        let mut i = name_start;
-        let mut enclosing_open: Option<usize> = None;
-        while i > 0 {
-            i -= 1;
-            match bytes[i] {
-                b'}' => depth += 1,
-                b'{' => {
-                    if depth == 0 {
-                        enclosing_open = Some(i);
-                        break;
-                    }
-                    depth -= 1;
-                }
-                _ => {}
-            }
-        }
-        let open = match enclosing_open {
-            Some(o) => o,
-            None => return false,
-        };
-        // Head = text from the previous statement/block boundary up to `open`.
-        let mut h = open;
-        while h > 0 {
-            match bytes[h - 1] {
-                b'{' | b'}' | b';' => break,
-                _ => h -= 1,
-            }
-        }
-        let head = &bytes[h..open];
-        // Whole-word `enum` in the head.
-        let kw = b"enum";
-        let mut j = 0usize;
-        while j + kw.len() <= head.len() {
-            if &head[j..j + kw.len()] == kw {
-                let before_ok = j == 0 || !is_ident_char(head[j - 1]);
-                let after_ok = j + kw.len() == head.len() || !is_ident_char(head[j + kw.len()]);
-                if before_ok && after_ok {
-                    return true;
-                }
-            }
-            j += 1;
-        }
-        false
-    }
-
-    /// Count CONSTRUCTION sites (NOT pattern uses) of the type/variant `ident`
-    /// in PREPROCESSED `src`, SPELLING-ROBUST: `ident` is matched at an
-    /// identifier boundary REGARDLESS of any leading path qualifier
-    /// (`A::B::ident`, `Self::ident`, a bare imported `ident`), and a
-    /// construction is recognized in any of these forms:
-    ///   * TUPLE application — `ident( … )` in EXPRESSION position (a tuple
-    ///     struct / tuple variant constructor, or a free-function-style mint);
-    ///     excluded when the body is `_` or the surrounding context is a
-    ///     pattern (`is_pattern_context`);
-    ///   * STRUCT literal — `ident { … }` in EXPRESSION position, excluded when
-    ///     it is a type DEFINITION (`struct`/`enum`/`union`/`trait` keyword, or
-    ///     `impl … ident {` / `impl ident {`) or a struct PATTERN
-    ///     (`is_pattern_context` on the `{…}` application);
-    ///   * ASSOCIATED constructor — `ident::new(` / `ident::default(` /
-    ///     `ident::with…(`.
-    ///
-    /// A bare type NAME in a turbofish / `Arc<ident>` / a `: ident` field type /
-    /// a `-> ident` return type is NOT a construction (it is followed by `>`,
-    /// `,`, `;`, `)`, `.`, `+`, or whitespace-then-non-`{`).
-    ///
-    /// Used for fact (3) (`ident = "VueMacroElements"` — the variant tuple
-    /// construction) AND, in `host_manage.rs`, for fact (4) (the carrier /
-    /// result-type CONSTRUCTION ban — distinguishing a struct-literal / ctor
-    /// build from a mere type NAME in the `insert(value: Arc<…>)` signature).
-    fn count_constructions_of(src: &str, ident: &str) -> usize {
+    /// This classifies every live occurrence correctly: the sole construction
+    /// (`intern_node(SemanticNodeData::VueMacroElements(elements))`, body
+    /// `elements`, followed by `)`) counts; the `Debug`/display arms (body
+    /// `elements`, followed by an arm body — i.e. the `)` is followed by `=>`),
+    /// the binding arm (`VueMacroElements(arc) =>`), the `_` arms, the `|`
+    /// alternations, and the `matches!(.., VueMacroElements(_))` macro do not.
+    /// A genuine construction can NEVER be followed by `=>` (a syntax error),
+    /// so the classifier cannot misread a construction as a pattern or vice
+    /// versa. Operates on an arbitrary source string for the discriminator.
+    fn count_vue_macro_elements_constructions(src: &str) -> usize {
         let bytes = src.as_bytes();
-        let ib = ident.as_bytes();
-        let n = ib.len();
-        if n == 0 {
-            return 0;
-        }
+        let vb = VUE_MACRO_ELEMENTS_VARIANT.as_bytes();
+        let n = vb.len();
         let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let is_ws = |b: u8| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r';
         let mut count = 0usize;
         let mut i = 0usize;
         while i + n <= bytes.len() {
-            if &bytes[i..i + n] == ib {
+            if &bytes[i..i + n] == vb {
                 let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
                 let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
                 if before_ok && after_ok {
-                    // The PATH start: walk back over `::`-joined identifier
-                    // segments so the pattern-context check sees the keyword
-                    // before the WHOLE path, not the bare last segment.
-                    let mut path_start = i;
-                    loop {
-                        let mut q = path_start;
-                        while q > 0 && is_ident_char(bytes[q - 1]) {
-                            q -= 1;
-                        }
-                        if q >= 2 && &bytes[q - 2..q] == b"::" {
-                            path_start = q - 2;
-                            continue;
-                        }
-                        path_start = q;
-                        break;
+                    // Skip whitespace to the tuple `(`.
+                    let mut k = i + n;
+                    while k < bytes.len()
+                        && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
+                    {
+                        k += 1;
                     }
-
-                    // Associated constructor: `ident::new(` / `::default(` /
-                    // `::with…(`.
-                    let mut a = i + n;
-                    if a + 2 <= bytes.len() && &bytes[a..a + 2] == b"::" {
-                        let ctor_start = a + 2;
-                        let mut c = ctor_start;
-                        while c < bytes.len() && is_ident_char(bytes[c]) {
-                            c += 1;
-                        }
-                        let ctor = &src[ctor_start..c];
-                        let mut d = c;
-                        while d < bytes.len() && is_ws(bytes[d]) {
-                            d += 1;
-                        }
-                        let applied = d < bytes.len() && bytes[d] == b'(';
-                        if applied
-                            && (ctor == "new" || ctor == "default" || ctor.starts_with("with"))
-                        {
-                            count += 1;
-                            i += n;
-                            continue;
-                        }
-                        // Some other `::seg` — a path reference, not a
-                        // construction by itself; fall through (do not count).
-                        i += n;
-                        continue;
-                    }
-
-                    // Skip whitespace to the application delimiter.
-                    while a < bytes.len() && is_ws(bytes[a]) {
-                        a += 1;
-                    }
-
-                    // TUPLE application `ident( … )`.
-                    if a < bytes.len() && bytes[a] == b'(' {
-                        let body_start = a + 1;
+                    if k < bytes.len() && bytes[k] == b'(' {
+                        // Walk the balanced tuple body to its closing `)`.
+                        let body_start = k + 1;
                         let mut depth = 1usize;
                         let mut j = body_start;
                         while j < bytes.len() && depth > 0 {
@@ -18302,80 +17573,21 @@ fn probe() { let _ = production_path(); }\n";
                             j += 1;
                         }
                         let body = src[body_start..j.saturating_sub(1)].trim();
+                        // Wildcard body ⇒ pattern, never a construction.
                         let is_wildcard = body == "_";
-                        // A BARE (unqualified) tuple occurrence DIRECTLY inside
-                        // an `enum { }` body is the variant's own DECLARATION
-                        // (`VueMacroElements(Arc<…>),`), not a construction; only
-                        // the bare form can be a declaration (a path-qualified
-                        // `X::ident(` is always a use).
-                        let is_decl = path_start == i && is_enum_variant_decl(bytes, i);
-                        if !is_wildcard && !is_decl && !is_pattern_context(bytes, path_start, j) {
+                        // Token after the balanced `(...)` decides arm vs expr.
+                        let mut t = j; // `j` is one past the closing `)`
+                        while t < bytes.len()
+                            && (bytes[t] == b' ' || bytes[t] == b'\n' || bytes[t] == b'\t')
+                        {
+                            t += 1;
+                        }
+                        let tail = &src[t..];
+                        let is_arm = tail.starts_with("=>") || tail.starts_with('|');
+                        if !is_wildcard && !is_arm {
                             count += 1;
                         }
-                        i += n;
-                        continue;
                     }
-
-                    // STRUCT literal `ident { … }` — exclude type-definition
-                    // contexts and struct patterns.
-                    if a < bytes.len() && bytes[a] == b'{' {
-                        // Definition keyword before the PATH: `struct` / `enum`
-                        // / `union` / `trait` / `impl` / `for` (the `impl … for
-                        // Ident {` head). If so, this `{` opens a definition
-                        // body, not a literal.
-                        let mut p = path_start;
-                        while p > 0 && is_ws(bytes[p - 1]) {
-                            p -= 1;
-                        }
-                        let prev_word_is = |kw: &[u8]| -> bool {
-                            let k = kw.len();
-                            p >= k
-                                && &bytes[p - k..p] == kw
-                                && (p == k || !is_ident_char(bytes[p - k - 1]))
-                        };
-                        // A `-> Ident {` is a RETURN TYPE followed by the fn
-                        // body block, NOT a struct literal: the `{` opens the
-                        // function body. `as Ident {` (rare) is similar. These
-                        // are the EXPRESSION-position `{` look-alikes that are
-                        // not literals.
-                        let preceded_by_arrow = p >= 2 && &bytes[p - 2..p] == b"->";
-                        let is_def = prev_word_is(b"struct")
-                            || prev_word_is(b"enum")
-                            || prev_word_is(b"union")
-                            || prev_word_is(b"trait")
-                            || prev_word_is(b"impl")
-                            || prev_word_is(b"for")
-                            || prev_word_is(b"as")
-                            || prev_word_is(b"where")
-                            || preceded_by_arrow;
-                        if !is_def {
-                            // Balance the `{ … }` and apply the pattern-context
-                            // tail check (a struct PATTERN `Ident { f } =>`).
-                            let mut depth = 1usize;
-                            let mut j = a + 1;
-                            while j < bytes.len() && depth > 0 {
-                                if let Some(next) = skip_literal(bytes, j) {
-                                    j = next;
-                                    continue;
-                                }
-                                match bytes[j] {
-                                    b'{' => depth += 1,
-                                    b'}' => depth -= 1,
-                                    _ => {}
-                                }
-                                j += 1;
-                            }
-                            if !is_pattern_context(bytes, path_start, j) {
-                                count += 1;
-                            }
-                        }
-                        i += n;
-                        continue;
-                    }
-
-                    // Anything else after the ident (`>`, `,`, `;`, `)`, `.`,
-                    // `+`, `::`-already-handled) — a NAME / reference, not a
-                    // construction.
                     i += n;
                     continue;
                 }
@@ -18394,106 +17606,59 @@ fn probe() { let _ = production_path(); }\n";
     }
 
     /// The single expected `insert_resolved_named_type` production caller file
-    /// (fact 2). An `insert_resolved_named_type(` call (any form — method,
-    /// UFCS/path, or bare) in ANY OTHER production file, or a SECOND call inside
-    /// this file, fails the guard.
+    /// (fact 2). A `.insert_resolved_named_type(` call in ANY OTHER production
+    /// file, or a SECOND call inside this file, fails the guard.
     const EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER: &str =
         "crates/verter_session/src/host_manage.rs";
 
-    /// The single expected `VueMacroElements(...)` production construction file
-    /// (fact 3) — any path-qualifier spelling.
+    /// The single expected `SemanticNodeData::VueMacroElements(...)` production
+    /// construction file (fact 3).
     const EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION: &str =
         "crates/verter_session/src/semantic_query_memo/mod.rs";
-
-    /// The second-engine result types whose CONSTRUCTION inside the sole caller
-    /// file is fact (4): the "forwards the parser payload UNCHANGED" pin. The
-    /// caller receives an `Arc<ResolvedElements>` from the parser and threads it
-    /// into the `VueMacroElements` slot UNCHANGED; if it ever CONSTRUCTS one of
-    /// these (a struct literal / `::new` / `::default` / `::with…`), it could
-    /// rebuild a carrier-bearing surface (`ResolvedProp.type_expr` /
-    /// `ResolvedNamedCallSignature.type_expr` are public) — making the encoder's
-    /// ordinal `Debug` reachable while keeping exactly one insert call. NAMING
-    /// the type in the `insert(value: Arc<…ResolvedElements>)` signature is fine
-    /// (a NAME is not a construction).
-    const FORWARD_UNCHANGED_RESULT_TYPES: &[&str] = &[
-        "ResolvedElements",
-        "ResolvedProp",
-        "ResolvedNamedCallSignature",
-    ];
 
     /// Per-file `(repo_relative_path, occurrence_count)` observation rows.
     type FileCounts = Vec<(String, usize)>;
 
-    /// The four pinned producer-surface observation sets:
-    /// `(carrier_hits, insert_caller_counts, construction_counts, caller_rebuild_hits)`.
-    type ProducerSurfaceObservations = (FileCounts, FileCounts, FileCounts, FileCounts);
+    /// The three pinned producer-surface observation sets:
+    /// `(carrier_hits, insert_caller_counts, construction_counts)`.
+    type ProducerSurfaceObservations = (FileCounts, FileCounts, FileCounts);
 
     /// Scan the live production tree and return, for each pinned fact, the
     /// per-file observation set. Shared between the live guard and the
     /// discriminator self-test (which substitutes a synthetic file set), so
     /// the two cannot diverge.
     ///
-    /// Returns `(carrier_hits, insert_caller_counts, construction_counts,
-    /// caller_rebuild_hits)`:
+    /// Returns `(carrier_hits, insert_caller_counts, construction_counts)`:
     ///   * `carrier_hits`: `(rel, count)` for each carrier-free-crate file with
     ///     ≥1 synthetic-carrier token (MUST be empty).
     ///   * `insert_caller_counts`: `(rel, count)` for each file with ≥1
-    ///     `insert_resolved_named_type(` call (any form).
+    ///     `.insert_resolved_named_type(` call.
     ///   * `construction_counts`: `(rel, count)` for each file with ≥1
-    ///     `VueMacroElements(...)` construction (any path qualifier).
-    ///   * `caller_rebuild_hits`: `(rel, count)` for the SOLE caller file with
-    ///     ≥1 forbidden REBUILD signal — a synthetic-carrier CONSTRUCTION or a
-    ///     CONSTRUCTION of a `FORWARD_UNCHANGED_RESULT_TYPES` type (MUST be
-    ///     empty: the caller forwards the parser payload unchanged, fact 4).
+    ///     `SemanticNodeData::VueMacroElements(...)` construction.
     fn scan_vue_macro_elements_producer_surface(
         files: &[(String, String)],
     ) -> ProducerSurfaceObservations {
         let mut carrier_hits: FileCounts = Vec::new();
         let mut insert_caller_counts: FileCounts = Vec::new();
         let mut construction_counts: FileCounts = Vec::new();
-        let mut caller_rebuild_hits: FileCounts = Vec::new();
         for (rel, src) in files {
-            let stripped = vue_macro_preprocess(src);
+            let stripped = preprocess(src);
             if is_carrier_free_crate_file(rel) {
                 let c = count_synthetic_carrier_tokens(&stripped);
                 if c > 0 {
                     carrier_hits.push((rel.clone(), c));
                 }
             }
-            let calls = count_call_sites(&stripped, "insert_resolved_named_type");
+            let calls = count_dot_call_sites(&stripped, "insert_resolved_named_type");
             if calls > 0 {
                 insert_caller_counts.push((rel.clone(), calls));
             }
-            let ctors = count_constructions_of(&stripped, VUE_MACRO_ELEMENTS_IDENT);
+            let ctors = count_vue_macro_elements_constructions(&stripped);
             if ctors > 0 {
                 construction_counts.push((rel.clone(), ctors));
             }
-            // FACT (4): the sole caller file must build NO carrier and rebuild
-            // NONE of the second-engine result types — it forwards the parser
-            // `Arc<ResolvedElements>` UNCHANGED. A whole-file scan over CARRIER
-            // and RESULT-TYPE CONSTRUCTIONS (not bare token presence): the file
-            // legitimately NAMES `ResolvedElements` in the `insert` signature
-            // and pattern-matches `TypeExpr::SyntheticSlotBinding(_)` in an
-            // unrelated fn — neither is a construction, so neither trips this.
-            if rel == EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER {
-                let mut rebuilds = 0usize;
-                for tok in SYNTHETIC_CARRIER_TOKENS {
-                    rebuilds += count_constructions_of(&stripped, tok);
-                }
-                for ty in FORWARD_UNCHANGED_RESULT_TYPES {
-                    rebuilds += count_constructions_of(&stripped, ty);
-                }
-                if rebuilds > 0 {
-                    caller_rebuild_hits.push((rel.clone(), rebuilds));
-                }
-            }
         }
-        (
-            carrier_hits,
-            insert_caller_counts,
-            construction_counts,
-            caller_rebuild_hits,
-        )
+        (carrier_hits, insert_caller_counts, construction_counts)
     }
 
     /// Read every production `src/` file as `(rel, raw_source)` for the
@@ -18505,12 +17670,12 @@ fn probe() { let _ = production_path(); }\n";
             .collect()
     }
 
-    /// Assert the four pinned producer-surface facts against an arbitrary
+    /// Assert the three pinned producer-surface facts against an arbitrary
     /// observation set. Shared by the live guard and the discriminator (fed a
     /// synthetic file set with planted violations). PANICS on any mismatch —
     /// the discriminator catches the panic via `guard_reports_violation`.
     fn assert_vue_macro_elements_producer_surface(files: &[(String, String)]) {
-        let (carrier_hits, insert_caller_counts, construction_counts, caller_rebuild_hits) =
+        let (carrier_hits, insert_caller_counts, construction_counts) =
             scan_vue_macro_elements_producer_surface(files);
 
         // FACT (1): parser/compiler carrier-free.
@@ -18549,45 +17714,17 @@ fn probe() { let _ = production_path(); }\n";
         );
 
         // FACT (3): exactly one `VueMacroElements` production construction, once,
-        // in `semantic_query_memo/mod.rs` — ANY path-qualifier spelling
-        // (`SemanticNodeData::`, `Self::`, an aliased `X::`, a bare import).
+        // in `semantic_query_memo/mod.rs`.
         let ctor_expected: FileCounts =
             vec![(EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION.to_string(), 1)];
         assert_eq!(
             sorted(construction_counts.clone()),
             ctor_expected,
             "VueMacroElements ordinal-leak guard FACT (3) BROKEN — the production \
-             CONSTRUCTION sites of `VueMacroElements(...)` (any path-qualifier \
-             spelling) are no longer EXACTLY \
-             {{ {EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION}: 1 }}. A second \
-             construction site is a new producer that could intern a \
+             CONSTRUCTION sites of `SemanticNodeData::VueMacroElements(...)` are no \
+             longer EXACTLY {{ {EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION}: 1 }}. A \
+             second construction site is a new producer that could intern a \
              carrier-bearing `ResolvedElements`. Observed: {construction_counts:?}",
-        );
-
-        // FACT (4): the sole caller file forwards the parser `Arc<ResolvedElements>`
-        // UNCHANGED — it CONSTRUCTS neither a synthetic carrier nor any
-        // second-engine result type. (Combined with carrier-free parser/compiler
-        // + single caller + single construction, this closes the in-caller
-        // REBUILD path: no production site can mint a carrier-bearing
-        // `ResolvedElements` that reaches the `VueMacroElements` slot.)
-        assert!(
-            caller_rebuild_hits.is_empty(),
-            "VueMacroElements ordinal-leak guard FACT (4) BROKEN — the sole \
-             `insert_resolved_named_type` caller ({EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER}) \
-             now CONSTRUCTS a synthetic carrier ({SYNTHETIC_CARRIER_TOKENS:?}) or a \
-             second-engine result type ({FORWARD_UNCHANGED_RESULT_TYPES:?}) instead \
-             of forwarding the parser-provided `Arc<ResolvedElements>` UNCHANGED. A \
-             rebuild can splice a `TypeExpr::SyntheticSlotBinding` into a \
-             `ResolvedProp.type_expr` / `ResolvedNamedCallSignature.type_expr` \
-             (both public) while keeping exactly one insert call — making the \
-             encoder's ordinal `Debug` reachable. Forward the parser payload \
-             unchanged, or move the encoder arm to an explicit ordinal-free \
-             encoder first. Offending:\n  {}",
-            caller_rebuild_hits
-                .iter()
-                .map(|(f, c)| format!("{f}  ({c} rebuild signal(s))"))
-                .collect::<Vec<_>>()
-                .join("\n  "),
         );
     }
 
@@ -18602,15 +17739,10 @@ fn probe() { let _ = production_path(); }\n";
     /// footprint encoder's `SemanticNodeData::VueMacroElements` `Debug` arm can
     /// never receive a `TypeExpr::SyntheticSlotBinding` ordinal, because the
     /// producer surface is pinned to (1) carrier-free parser/compiler, (2) a
-    /// single `insert_resolved_named_type` caller (any call spelling), (3) a
-    /// single `VueMacroElements` construction (any path-qualifier spelling), and
-    /// (4) that sole caller forwards the parser `Arc<ResolvedElements>` UNCHANGED
-    /// (constructs no carrier and rebuilds no second-engine result type). This
-    /// is the architecture-authority-mandated closure of the
+    /// single `insert_resolved_named_type` caller, (3) a single `VueMacroElements`
+    /// construction. This is the architecture-authority-mandated closure of the
     /// (provably-unreachable-today) ordinal-leak class — a STATIC producer-bound
-    /// guard, NOT an encoder change and NOT a second-engine allowlist. The
-    /// scanners are spelling-robust (variant identifier / call form / construct
-    /// vs name), so a synonym-spelled future producer cannot evade the pin.
+    /// guard, NOT an encoder change and NOT a second-engine allowlist.
     #[test]
     fn vue_macro_elements_ordinal_leak_is_producer_unreachable() {
         let files = read_production_sources();
@@ -18729,25 +17861,6 @@ fn probe() { let _ = production_path(); }\n";
              INSIDE the allowlisted caller file MUST be REJECTED (in-file growth)"
         );
 
-        // REJECT (b''): F1 — a SECOND caller in a UFCS / fully-qualified PATH
-        // call form (`SemanticGraphStore::insert_resolved_named_type(&store, …)`)
-        // — the spelling the old method-only `.insert_resolved_named_type(`
-        // scanner was BLIND to. MUST be REJECTED.
-        let mut planted_ufcs_caller = baseline.clone();
-        planted_ufcs_caller.push((
-            "crates/verter_session/src/sneaky_ufcs_named_type_writer.rs".to_string(),
-            "let _ = SemanticGraphStore::insert_resolved_named_type(&store, key, value, g);\n"
-                .to_string(),
-        ));
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_ufcs_caller
-            )),
-            "F1 discriminator: a UFCS/path-form \
-             `SemanticGraphStore::insert_resolved_named_type(&store, …)` caller \
-             MUST be REJECTED — the call scanner is no longer method-only"
-        );
-
         // REJECT (c): a SECOND production CONSTRUCTION of
         // `SemanticNodeData::VueMacroElements(Arc::new(...))`.
         let mut planted_second_ctor = baseline.clone();
@@ -18765,267 +17878,48 @@ fn probe() { let _ = production_path(); }\n";
              construction MUST be REJECTED"
         );
 
-        // REJECT (c'): F1 — a SECOND construction in the `Self::VueMacroElements(…)`
-        // SYNONYM spelling (the qualifier the old fully-qualified-byte-string
-        // scanner was BLIND to). MUST be REJECTED.
-        let mut planted_self_ctor = baseline.clone();
-        planted_self_ctor.push((
-            "crates/verter_session/src/sneaky_self_qualified_producer.rs".to_string(),
-            "fn mint(&self) -> SemanticNodeId {\n    \
-             self.intern_node(Self::VueMacroElements(Arc::new(other_elements)))\n}\n"
-                .to_string(),
-        ));
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_self_ctor
-            )),
-            "F1 discriminator: a `Self::VueMacroElements(Arc::new(…))` construction \
-             MUST be REJECTED — the construction scanner is path-qualifier-agnostic"
+        // Unit-level proof of the construction-vs-pattern classifier (the
+        // load-bearing primitive): the construction form counts, every pattern
+        // form does not.
+        assert_eq!(
+            count_vue_macro_elements_constructions(
+                "self.intern_node(SemanticNodeData::VueMacroElements(elements))"
+            ),
+            1,
+            "the construction form (variant tuple-applied to an expr, followed \
+             by `)`) MUST count as 1"
         );
-
-        // REJECT (c''): F1 — a SECOND construction in the BARE imported spelling
-        // (`use …::SemanticNodeData::VueMacroElements;` then a bare
-        // `VueMacroElements(Arc::new(…))`). MUST be REJECTED.
-        let mut planted_bare_ctor = baseline.clone();
-        planted_bare_ctor.push((
-            "crates/verter_session/src/sneaky_glob_imported_producer.rs".to_string(),
-            "use crate::semantic_query::SemanticNodeData::VueMacroElements;\n\
-             fn mint(&self) -> SemanticNodeId {\n    \
-             self.intern_node(VueMacroElements(Arc::new(other_elements)))\n}\n"
-                .to_string(),
-        ));
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_bare_ctor
-            )),
-            "F1 discriminator: a BARE imported `VueMacroElements(Arc::new(…))` \
-             construction MUST be REJECTED — the scanner matches the variant \
-             identifier regardless of qualifier"
-        );
-
-        // REJECT (d): F2 — an in-caller REBUILD. `host_manage.rs` keeps EXACTLY
-        // one insert call (so FACT (2) stays green) but rebuilds a NEW
-        // `ResolvedElements { ... }` with a `SyntheticSlotBinding` spliced into a
-        // `ResolvedProp.type_expr` — the leak becomes reachable. MUST be REJECTED
-        // by FACT (4).
-        let mut planted_caller_rebuild = baseline.clone();
-        if let Some(slot) = planted_caller_rebuild
-            .iter_mut()
-            .find(|(rel, _)| rel == EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER)
-        {
-            slot.1.push_str(
-                "let rebuilt = ResolvedElements {\n    \
-                 props: vec![ResolvedProp {\n        \
-                 type_expr: TypeExpr::SyntheticSlotBinding(Arc::new(key)),\n    }],\n};\n\
-                 let value = Arc::new(rebuilt);\n",
-            );
-        }
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_caller_rebuild
-            )),
-            "F2 discriminator: an in-caller REBUILD constructing a fresh \
-             `ResolvedElements {{ … }}` with a spliced `SyntheticSlotBinding` — \
-             while keeping exactly one insert call — MUST be REJECTED by FACT (4)"
-        );
-
-        // REJECT (d'): F2 — the rebuild via the associated constructor
-        // `ResolvedElements::new(...)` (not a struct literal) is ALSO a rebuild.
-        let mut planted_caller_ctor_call = baseline.clone();
-        if let Some(slot) = planted_caller_ctor_call
-            .iter_mut()
-            .find(|(rel, _)| rel == EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER)
-        {
-            slot.1
-                .push_str("let value = Arc::new(ResolvedElements::new(rebuilt_props));\n");
-        }
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_caller_ctor_call
-            )),
-            "F2 discriminator: an in-caller `ResolvedElements::new(...)` rebuild \
-             MUST be REJECTED by FACT (4) (associated-constructor form)"
-        );
-
-        // ACCEPT (e): F2 — the caller may NAME the result type in the `insert`
-        // signature (`value: Arc<…ResolvedElements>`) and in a turbofish; a NAME
-        // is not a construction and MUST NOT trip FACT (4).
-        let mut accept_caller_names_type = baseline.clone();
-        if let Some(slot) = accept_caller_names_type
-            .iter_mut()
-            .find(|(rel, _)| rel == EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER)
-        {
-            slot.1 = "fn insert(&self, value: \
-                      std::sync::Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>) {\n    \
-                      let _ = self.graph.insert_resolved_named_type(host_key, value, g);\n}\n"
-                .to_string();
-        }
-        assert!(
-            !guard_reports_violation({
-                let accept_caller_names_type = accept_caller_names_type.clone();
-                move || assert_vue_macro_elements_producer_surface(&accept_caller_names_type)
-            }),
-            "F2 discriminator (ACCEPT): NAMING `Arc<…ResolvedElements>` in the \
-             `insert` signature is fine — a type NAME is not a construction and \
-             must not trip FACT (4)"
-        );
-
-        // ACCEPT (f): F3 — a production file whose ONLY `VueMacroElements`
-        // references are the newly-recognized PATTERN contexts: an `if let`
-        // binding, a GUARDED arm, and a `matches!(.., VueMacroElements(elements))`
-        // with a BINDING (not `_`). None is a construction; MUST be ACCEPTED.
-        let mut accept_pattern_forms = baseline.clone();
-        accept_pattern_forms.push((
-            "crates/verter_session/src/project_semantic_dispatch/walk.rs".to_string(),
-            "if let SemanticNodeData::VueMacroElements(elements) = data {\n    \
-             use_it(elements);\n}\n\
-             match data {\n    \
-             SemanticNodeData::VueMacroElements(elements) if elements.is_empty() => skip(),\n    \
-             _ => {}\n}\n\
-             let is_vue = matches!(data, SemanticNodeData::VueMacroElements(elements) if ok(elements));\n\
-             while let SemanticNodeData::VueMacroElements(e) = next() {\n    drain(e);\n}\n"
-                .to_string(),
-        ));
-        assert!(
-            !guard_reports_violation({
-                let accept_pattern_forms = accept_pattern_forms.clone();
-                move || assert_vue_macro_elements_producer_surface(&accept_pattern_forms)
-            }),
-            "F3 discriminator (ACCEPT): `if let` / guarded-arm / `matches!`-with-\
-             binding / `while let` are PATTERNS, not constructions — they must NOT \
-             false-positive"
-        );
-
-        // ── Unit-level proofs of the SHARED construction primitive (F1 + F3) ──
-        // The genuine construction form (any qualifier) counts as 1.
-        for ctor in [
-            "self.intern_node(SemanticNodeData::VueMacroElements(elements))",
-            "self.intern_node(Self::VueMacroElements(Arc::new(e)))",
-            "self.intern_node(VueMacroElements(Arc::new(e)))",
-            "aliased::S::VueMacroElements(payload)",
-        ] {
-            assert_eq!(
-                count_constructions_of(ctor, VUE_MACRO_ELEMENTS_IDENT),
-                1,
-                "a construction (variant tuple-applied to an expr in expression \
-                 position, any qualifier: `{ctor}`) MUST count as 1"
-            );
-        }
-        // Every PATTERN form (incl. the F3 additions) counts as 0.
         for pattern in [
             "SemanticNodeData::VueMacroElements(_) => false,",
             "| SemanticNodeData::VueMacroElements(_) => true,",
             "SemanticNodeData::VueMacroElements(arc) => Some(arc),",
             "let v = matches!(data, SemanticNodeData::VueMacroElements(_));",
             "SemanticNodeData::VueMacroElements(elements) => self.push(elements),",
-            "if let SemanticNodeData::VueMacroElements(elements) = data {",
-            "while let SemanticNodeData::VueMacroElements(e) = next() {",
-            "SemanticNodeData::VueMacroElements(e) if e.is_empty() => skip(),",
-            "let v = matches!(data, SemanticNodeData::VueMacroElements(e) if ok(e));",
         ] {
             assert_eq!(
-                count_constructions_of(pattern, VUE_MACRO_ELEMENTS_IDENT),
+                count_vue_macro_elements_constructions(pattern),
                 0,
-                "a PATTERN form (`{pattern}`) MUST NOT count as a construction — \
-                 it is an arm tail / alternation / guard / `let` binding / \
-                 `matches!` / `_` wildcard"
-            );
-        }
-        // The enum-variant DECLARATION (bare name + TYPE body, directly inside
-        // an `enum { }` body) is NOT a construction — only the bare form can be
-        // a declaration, and the qualifier-agnostic scan must not count it.
-        assert_eq!(
-            count_constructions_of(
-                "pub enum SemanticNodeData {\n    Object,\n    \
-                 VueMacroElements(Arc<ResolvedElements>),\n    Other,\n}",
-                VUE_MACRO_ELEMENTS_IDENT
-            ),
-            0,
-            "the `VueMacroElements(Arc<…>)` enum-variant DECLARATION MUST NOT \
-             count as a construction"
-        );
-        // But a bare-IMPORTED construction in expression position (inside a
-        // `fn` body, NOT an enum) DOES count — the decl exclusion is enum-scoped.
-        assert_eq!(
-            count_constructions_of(
-                "fn mint(&self) -> SemanticNodeId {\n    \
-                 self.intern_node(VueMacroElements(Arc::new(e)))\n}",
-                VUE_MACRO_ELEMENTS_IDENT
-            ),
-            1,
-            "a BARE imported `VueMacroElements(Arc::new(e))` construction inside a \
-             `fn` body MUST count — the decl exclusion applies only inside `enum`"
-        );
-        // A bare type NAME (turbofish / `Arc<…>` / field type / return type) is
-        // NOT a construction.
-        for name in [
-            "fn f(v: Arc<ResolvedElements>) {}",
-            "let x: ResolvedElements = todo!();",
-            "fn g() -> ResolvedElements { todo!() }",
-            "Vec::<ResolvedElements>::new()",
-        ] {
-            assert_eq!(
-                count_constructions_of(name, "ResolvedElements"),
-                0,
-                "a type NAME (`{name}`) MUST NOT count as a construction"
-            );
-        }
-        // The construction forms of a result type DO count (F2 primitive).
-        for ctor in [
-            "let r = ResolvedElements { props: vec![] };",
-            "let r = ResolvedElements::new(props);",
-            "let r = ResolvedElements::default();",
-            "let r = ResolvedProp { type_expr: te };",
-            "let r = type_surface::ResolvedElements { props };",
-        ] {
-            assert!(
-                count_constructions_of(ctor, "ResolvedElements")
-                    + count_constructions_of(ctor, "ResolvedProp")
-                    >= 1,
-                "a result-type CONSTRUCTION (`{ctor}`) MUST count ≥ 1"
-            );
-        }
-        // A struct/enum/impl DEFINITION head is NOT a construction.
-        for def in [
-            "pub struct ResolvedElements { props: Vec<ResolvedProp> }",
-            "impl ResolvedElements { fn new() {} }",
-            "enum ResolvedElements { A, B }",
-        ] {
-            assert_eq!(
-                count_constructions_of(def, "ResolvedElements"),
-                0,
-                "a type DEFINITION head (`{def}`) MUST NOT count as a construction"
+                "a PATTERN-MATCH form (`{pattern}`) MUST NOT count as a \
+                 construction — it is followed by `=>` or `|`, or its body is `_`"
             );
         }
 
-        // ── Unit-level proofs of the SPELLING-ROBUST call scanner (F1) ──
-        for call in [
-            "let _ = self.graph.insert_resolved_named_type(k, v, g);",
-            "let _ = SemanticGraphStore::insert_resolved_named_type(&store, k, v, g);",
-            "insert_resolved_named_type(store, k, v, g);",
-        ] {
-            assert_eq!(
-                count_call_sites(call, "insert_resolved_named_type"),
-                1,
-                "a call (method / UFCS-path / bare form: `{call}`) MUST count as 1"
-            );
-        }
-        // The DEFINITION (preceded by `fn`) and a suffixed name MUST NOT count.
+        // Unit-level proof of the call-vs-definition discriminator.
         assert_eq!(
-            count_call_sites(
+            count_dot_call_sites(
+                "let _ = self.graph.insert_resolved_named_type(k, v, g);",
+                "insert_resolved_named_type"
+            ),
+            1,
+            "a `.`-prefixed call MUST count"
+        );
+        assert_eq!(
+            count_dot_call_sites(
                 "pub fn insert_resolved_named_type(&self, key: K) -> V {",
                 "insert_resolved_named_type"
             ),
             0,
-            "the `fn …(` DEFINITION MUST NOT count as a call"
-        );
-        assert_eq!(
-            count_call_sites(
-                "let _ = self.graph.insert_resolved_named_type_v2(k, v, g);",
-                "insert_resolved_named_type"
-            ),
-            0,
-            "a suffixed `insert_resolved_named_type_v2(` MUST NOT satisfy the ledger"
+            "the `fn …(` DEFINITION (no `.` prefix) MUST NOT count as a call"
         );
     }
 }

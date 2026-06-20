@@ -1136,14 +1136,20 @@ impl StructuralEncoder<'_> {
                 // `TypeExpr::SyntheticSlotBinding` (the sole ordinal-bearing
                 // `TypeExpr` variant — its `SyntheticCarrierKey.value_node: u64` is
                 // a store/generation-relative `SemanticNodeId` arena ordinal).
-                // ENFORCED by the static guard
+                // ENFORCED at the single construction site by the runtime checked
+                // invariant in `SemanticGraphStore::insert_resolved_named_type`,
+                // which scans every incoming member `type_expr` recursively (via
+                // `type_expr_contains_synthetic_slot_binding`) and hard-fails before
+                // interning the `VueMacroElements` node — it checks the real value,
+                // so it holds regardless of how a carrier could be spelled or
+                // threaded. The coarse producer-surface guard
                 // `vue_macro_elements_ordinal_leak_is_producer_unreachable`
                 // (parser/compiler carrier-free + single `insert_resolved_named_type`
-                // caller + single `VueMacroElements` producer). Therefore the
-                // `Debug` of `ResolvedElements` here folds NO `SemanticNodeId`
-                // ordinal — its rendering is content-only and is the stable
-                // identity available at this arm (the type exposes no
-                // structural-hash accessor).
+                // caller + single `VueMacroElements` producer) remains a cheap
+                // static tripwire over the same surface. Therefore the `Debug` of
+                // `ResolvedElements` here folds NO `SemanticNodeId` ordinal — its
+                // rendering is content-only and is the stable identity available at
+                // this arm (the type exposes no structural-hash accessor).
                 //
                 // The "lower crate" relationship is NOT the guarantee — a lower
                 // crate can still carry a raw `u64` ordinal on a payload (as

@@ -53,6 +53,7 @@ mod inflight;
 mod interner;
 mod reverse_index;
 mod stats;
+pub(crate) mod synthetic_carrier_guard;
 #[cfg(any(test, debug_assertions))]
 mod test_gates;
 // Test-only observability surface for `SemanticGraphStore` (in-flight
@@ -1486,30 +1487,29 @@ impl SemanticGraphStore {
     /// rejected). There is no interleaving in which a stale entry
     /// survives — see `insert_if_generation_matches`'s no-window proof.
     /// The snapshot is frozen at adapter construction, so a build aborted
-    /// by the bump carries the pre-bump epoch however long it straggles.
-    ///
-    /// The cheap pre-filter below is an optimization only; the in-guard
-    /// check in `insert_if_generation_matches` is the airtight authority.
+    /// by the bump carries the pre-bump epoch however long it straggles. (The
+    /// pre-filter below is an optimization only — the in-guard check is the
+    /// airtight authority.)
     pub fn insert_resolved_named_type(
         &self,
         key: HostResolvedNamedTypeKey,
         elements: Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
         observed_named_type_generation: u64,
     ) -> Option<SemanticNodeId> {
-        // Cheap pre-filter — reject the common straggler without interning
-        // a node the in-gate fence would only discard. Optimization only,
-        // NOT the airtight authority (this load is unsynchronised against
-        // a concurrent `clear_and_bump_generation`).
+        // Cheap pre-filter — reject the common straggler without interning a
+        // node the in-gate fence would only discard (see the doc above).
         if observed_named_type_generation != self.named_type_generation() {
             return None;
         }
+        // Checked invariant BEFORE interning — no carrier ordinal (see helper).
+        let prop_tes = elements.props.iter().map(|prop| &prop.type_expr);
+        let sig_tes = elements.call_signatures.iter().map(|sig| &sig.type_expr);
+        synthetic_carrier_guard::assert_no_synthetic_carrier(prop_tes.chain(sig_tes));
         let node_id = self.intern_node(SemanticNodeData::VueMacroElements(elements));
-        // Airtight fence: `insert_if_generation_matches` re-reads + compares
-        // the epoch UNDER the same `retention_gate.read()` guard that
-        // performs the map insert, so a concurrent reset's bump+clear
-        // (write guard) is fully ordered against the whole check+insert.
-        // On a rejected straggler the interned `node_id` is left
-        // unreferenced — harmless: the node arena is append-only.
+        // Airtight fence: `insert_if_generation_matches` re-reads + compares the
+        // epoch UNDER the same `retention_gate.read()` map-insert guard (see the
+        // no-window proof in the doc above). A rejected straggler leaves the
+        // interned `node_id` unreferenced — harmless on the append-only arena.
         if self.named_type_index.insert_if_generation_matches(
             key,
             node_id,
