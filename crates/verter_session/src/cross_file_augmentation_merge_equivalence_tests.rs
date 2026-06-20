@@ -1,7 +1,6 @@
-//! Characterization of the OBSERVABLE cross-file ambient-augmentation merge
-//! contract a future declaration-body PRODUCER flip (to handle-native carrier
-//! bodies) must preserve, compared against an independently-computed retained
-//! `EvalEnv` oracle.
+//! Pins the OBSERVABLE cross-file ambient-augmentation merge contract: the
+//! resolved-through-dispatch merged surface equals an independently-computed
+//! retained `EvalEnv` oracle, and a divergence between them fails the assertion.
 //!
 //! `interface Foo { base }` in `/types.ts` + `declare module './types' {
 //! interface Foo { fromAug } }` in a sibling `/aug.ts` reaches dispatch as ONE
@@ -17,15 +16,15 @@
 //! inventory), so the oracle here is a genuine SECOND source that walks the two
 //! retained scopes directly, not the dispatch stitch re-run.
 //!
-//! Every assertion DISCRIMINATES: it would FAIL if a regressed flip dropped an
+//! Every assertion DISCRIMINATES: it would FAIL if a regression dropped an
 //! augmenter contributor or the base contributor (the union member set would
 //! shrink), diverged a merged member's type from the oracle, or lost the
 //! `MergedDecl` carrier and collapsed the merge into a bare `Intersection`
 //! (whose heritage-shadow reducer cannot accumulate the peer merge — the
-//! Declaration Augmentation / Declaration Merging carrier invariant). The merge
-//! is already observable on this tree (the cold stitch mints the `MergedDecl`
-//! and Expanded dispatch materialises its unioned object surface), so this is
-//! written GREEN against the eager path.
+//! Declaration Augmentation / Declaration Merging carrier invariant). The cold
+//! stitch mints the `MergedDecl` and Expanded dispatch materialises its unioned
+//! object surface, so the dispatch surface and the retained-inventory oracle are
+//! two independent sources of the same merged shape.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -83,11 +82,20 @@ fn object_member_surface(ty: &TypeExpr) -> Vec<(String, String)> {
     members
 }
 
-/// The fixture: a base interface, a sibling ambient augmenter, and a file that
-/// imports the base AND side-effect-imports the augmenter. The side-effect
-/// `import './aug'` is REQUIRED — it makes `/aug.ts` a reverse-dependency of
-/// `/types.ts`, which is exactly the candidate-augmenter set the stitch walks;
-/// without it the augmenter is silently dropped.
+/// The fixture: a base interface, a sibling ambient augmenter, and a consumer
+/// that imports the base. Augmenter discovery (`ensure_augmentation_index_populated`
+/// → `collect_augmenter_candidates`) COLD-SCANS every LOADED artifact for a
+/// matching `declare module` fact — it does NOT use the consumer's import edges
+/// to discover the augmenter. `/aug.ts` is found because it is UPSERTED (loaded)
+/// and carries a `declare module './types'` fact whose specifier resolves to
+/// `/types.ts`; the augmenter's OWN `import type { Foo } from './types'` is what
+/// associates it with the augmentation target, NOT any side-effect import in the
+/// consumer. The reverse-deps walk in `stitch_module_augmentations` only
+/// PRE-LOADS lazily-unloaded augmenters before the cold scan, so it is a no-op
+/// when every file is already upserted (as here). The consumer's
+/// `import './aug'` is therefore harmless but immaterial to the merge: entry
+/// point (a) below resolves `Foo` directly from `/types.ts` and never touches
+/// `/use.ts`, yet still unions both contributors.
 fn upsert_augmentation_fixture(host: &VerterHost) {
     upsert_ts(host, "/types.ts", "export interface Foo { base: string }\n");
     upsert_ts(

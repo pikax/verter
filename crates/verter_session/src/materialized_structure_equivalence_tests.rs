@@ -1,6 +1,7 @@
-//! Characterization of the OBSERVABLE output-boundary MATERIALIZED-structure
-//! contract a future declaration-body PRODUCER flip (to handle-native carrier
-//! bodies) must preserve, compared against an independently-resolved structure.
+//! Pins the OBSERVABLE output-boundary MATERIALIZED-structure contract: the
+//! structure published at the output boundary equals an independently-sourced
+//! structure read from the retained `EvalEnv` inventory, and a divergence
+//! between them fails the assertion.
 //!
 //! The materialized structure produced at the output boundary
 //! (`MaterializeStructureDb` → `MaterializeOutcome::Value(SemanticNodeId)`) is
@@ -8,26 +9,27 @@
 //! A `defineProps<Props>` where `Props<T = Item> { items?: T[] }` and `Item {
 //! id: string }` materialises `items.type_expr` to a NESTED structure
 //! `Array { element: Object({ id: string }) }` — a genuine materialised shape,
-//! not a bare carrier. The element structure is compared against an
-//! INDEPENDENTLY-resolved oracle: `Item` resolved on its own through the shared
-//! dispatch (`resolve_named_symbol` + `project_node_to_type_expr`) — a different
-//! entry point than the prop-surface materialisation, so the equality is real
-//! cross-rail agreement.
+//! not a bare carrier. The element structure is compared against an oracle read
+//! from a GENUINELY INDEPENDENT source: the retained `EvalEnv` type-symbol
+//! inventory (`base_eval_env_arc(canonical).type_symbols["Item"].primary().body`,
+//! a `TypeExpr`). The output-boundary side is a dispatch-driven materialisation;
+//! the oracle side is a direct read of the retained, already-lowered declaration
+//! body — not a second dispatch resolve that shares the materialiser's
+//! `SemanticGraphStore` memo.
 //!
-//! Each assertion DISCRIMINATES: a flip that left the prop a shallow carrier
-//! (a bare `Ref`, or an unresolved `IndexedAccess`, or `T[]` with `T` still
-//! unbound) instead of materialising the generic-default `Item[]` fails the
-//! `Array`/`Object` decomposition; a flip that materialised a DIFFERENT element
-//! shape (a missing/renamed/retyped member) fails the `assert_eq!` against the
-//! independently-resolved `Item` surface. Written GREEN against the current
-//! tree (the deep-expand materialisation already runs).
+//! Each assertion DISCRIMINATES: leaving the prop a shallow carrier (a bare
+//! `Ref`, or an unresolved `IndexedAccess`, or `T[]` with `T` still unbound)
+//! instead of materialising the generic-default `Item[]` fails the
+//! `Array`/`Object` decomposition; materialising a DIFFERENT element shape (a
+//! missing/renamed/retyped member) fails the `assert_eq!` against the
+//! retained-inventory `Item` surface.
 //!
 //! HONESTY FLAG — `MaterializeStructureDb` has NO test-callable query: its
 //! producer (`materialize_component_meta_structure`) takes a
 //! `&dyn ResolverContext`, so a test cannot call it directly. The materialized
 //! shape is therefore reached ONLY through `get_component_meta` props, and the
-//! oracle is computed by an INDEPENDENT dispatch resolve of the underlying
-//! `Item` type — NOT a second materialize call.
+//! oracle is read from the retained `EvalEnv` inventory — NOT a second
+//! materialize call, and NOT a second dispatch resolve.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -37,7 +39,6 @@ use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
 use verter_type_expr::{ObjectExpr, ObjectMember, TypeExpr};
 
 use crate::meta::MetaProject;
-use crate::semantic_query::ProjectionMode;
 use crate::types::HostConfig;
 use crate::VerterHost;
 
@@ -70,7 +71,12 @@ fn get_meta(project: &Arc<MetaProject>, canonical_id: &str) -> ComponentMetaAnal
 
 /// The sorted `(member-name, debug-rendered member type, optional)` triples of
 /// an `Object`'s direct properties — the comparable surface both the
-/// materialised prop element and the independently-resolved oracle reduce to.
+/// materialised prop element and the retained-inventory oracle reduce to.
+///
+/// Property-only by design: index signatures, call signatures, and spreads are
+/// intentionally out of scope for these `{ id: string }`-style property
+/// fixtures and are filtered out; if a fixture grew such members this helper
+/// would need widening.
 fn object_surface(shape: &ObjectExpr) -> Vec<(String, String, bool)> {
     let mut members: Vec<(String, String, bool)> = shape
         .properties
@@ -88,20 +94,21 @@ fn object_surface(shape: &ObjectExpr) -> Vec<(String, String, bool)> {
 
 /// A `defineProps<Props>` with a generic-default array prop materialises the
 /// prop's `type_expr` to a nested `Array { element: Object(...) }` at the output
-/// boundary, and that materialised element structure equals the independently
-/// dispatch-resolved `Item` surface.
+/// boundary, and that materialised element structure equals the `Item` surface
+/// read from the retained `EvalEnv` inventory.
 ///
 /// Discriminating: (1) the `Array`-then-`Object` decomposition reds if the prop
 /// stayed a shallow carrier — the explicit anti-`Ref` / anti-`IndexedAccess`
-/// assertions catch a flip that published `Ref { name: "Props" }` / an
-/// unresolved `Item[]` / an unbound `T[]` instead of the materialised shape.
-/// (2) The `assert_eq!` of the materialised element surface against the
-/// SECOND-SOURCE `Item` resolution (`{ id: Primitive(String), optional=false }`)
+/// assertions catch a published `Ref { name: "Props" }` / an unresolved
+/// `Item[]` / an unbound `T[]` instead of the materialised shape. (2) The
+/// `assert_eq!` of the materialised element surface against the SECOND-SOURCE
+/// retained-inventory `Item` body (`{ id: Primitive(String), optional=false }`)
 /// reds if the materialiser produced a divergent element — a missing/renamed
-/// member, a wrong member type, or a wrong optionality. The oracle is resolved
-/// through a different entry point (a direct `resolve_named_symbol` on `Item`,
-/// not the prop-surface materialisation), so the equality is genuine cross-rail
-/// agreement, not a tautology.
+/// member, a wrong member type, or a wrong optionality. The oracle is read from
+/// the retained `EvalEnv` type-symbol inventory (a direct read of the
+/// already-lowered declaration body), NOT a dispatch resolve that shares the
+/// materialiser's `SemanticGraphStore` memo — so the equality is genuinely
+/// independent agreement, not a same-memo tautology.
 #[test]
 fn materialized_generic_default_prop_structure_matches_oracle() {
     let project = make_project();
@@ -117,27 +124,32 @@ defineProps<Props>()
         )
         .unwrap();
 
-    // INDEPENDENT oracle: resolve `Item` on its own through the shared dispatch
-    // and project it. This is the structure the omitted generic-default `T =
-    // Item` must materialise into the array element — computed via a DIFFERENT
-    // entry point than the prop-surface materialisation.
-    let item_node = project
+    // INDEPENDENT oracle: read `Item`'s already-lowered body straight from the
+    // retained `EvalEnv` type-symbol inventory (the `<script setup>` interface
+    // lands in the script's type inventory). This is the structure the omitted
+    // generic-default `T = Item` must materialise into the array element —
+    // sourced from the retained inventory, NOT re-resolved through the dispatch
+    // that backs the materialiser (so it does not share the materialiser's
+    // `SemanticGraphStore` memo).
+    let item_env = project
         .host()
-        .resolve_named_symbol("/Generic.vue", "Item", &[], Some(ProjectionMode::Expanded))
-        .expect("Item must resolve Expanded");
-    let item_projected = project
-        .host()
-        .project_node_to_type_expr(item_node)
-        .expect("Item must project");
-    let TypeExpr::Object(item_shape) = &item_projected else {
-        panic!("the oracle `Item` must resolve to an Object body, got {item_projected:?}");
+        .base_eval_env_arc("/Generic.vue")
+        .expect("the retained eval env for /Generic.vue must build");
+    let item_body = &item_env
+        .type_symbols
+        .get("Item")
+        .expect("the `<script setup>` interface `Item` must land in the retained type_symbols")
+        .primary()
+        .body;
+    let TypeExpr::Object(item_shape) = item_body else {
+        panic!("the oracle `Item` retained body must be an Object, got {item_body:?}");
     };
     let oracle_surface = object_surface(item_shape);
     assert_eq!(
         oracle_surface,
         vec![("id".to_string(), "Primitive(String)".to_string(), false)],
-        "the INDEPENDENT oracle `Item` must resolve to exactly {{ id: string }} (non-optional); \
-         got {oracle_surface:?}"
+        "the INDEPENDENT retained-inventory oracle `Item` must be exactly {{ id: string }} \
+         (non-optional); got {oracle_surface:?}"
     );
 
     // Output boundary: the materialised prop `type_expr`.
@@ -188,13 +200,15 @@ defineProps<Props>()
         );
     };
 
-    // Equivalence: the materialised element surface equals the INDEPENDENTLY
-    // dispatch-resolved `Item` surface — full structural decomposition (member
-    // name + type + optionality), so a divergence in any member is caught.
+    // Equivalence: the materialised element surface equals the retained-inventory
+    // `Item` surface — full structural decomposition (member name + type +
+    // optionality), so a divergence in any member is caught. The two sides are
+    // genuinely independent: a dispatch-driven output-boundary materialisation vs
+    // a direct read of the retained, already-lowered `EvalEnv` declaration body.
     let materialized_surface = object_surface(materialized_shape);
     assert_eq!(
         materialized_surface, oracle_surface,
-        "the materialised array element structure must equal the independently dispatch-resolved \
-         `Item` surface; materialised={materialized_surface:?} oracle={oracle_surface:?}"
+        "the materialised array element structure must equal the retained-inventory `Item` \
+         surface; materialised={materialized_surface:?} oracle={oracle_surface:?}"
     );
 }
