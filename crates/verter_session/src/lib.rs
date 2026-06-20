@@ -145,12 +145,18 @@ mod component_meta_terminal_mode_tests;
 mod component_meta_warm_invalidation_oracle_tests;
 pub mod cross_file;
 #[cfg(test)]
+mod cross_file_augmentation_merge_equivalence_tests;
+#[cfg(test)]
 mod decl_body_dispatch_equivalence_tests;
 pub(crate) mod decl_body_memo;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
 pub mod framework;
 pub(crate) mod macro_hot_mirror;
+#[cfg(test)]
+mod materialized_structure_equivalence_tests;
+#[cfg(test)]
+mod value_symbol_depth_equivalence_tests;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
 // implementation detail. The only externally-needed type is
 // `ReadSetSignature` — the return type of the public inspector
