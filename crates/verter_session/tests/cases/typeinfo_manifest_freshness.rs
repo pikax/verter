@@ -3,14 +3,14 @@
 //! Every file under `crates/verter_session/tests/manifest_data/`
 //! (`typeinfo_ignored_test_manifest_rows.rs`,
 //! `typeinfo_additional_proof_rows.rs`, `typeinfo_parity_blocks.rs`) is
-//! produced from `scripts/gen-typeinfo-ignore-manifest.py`
+//! produced from `scripts/gen-typeinfo-ignore-manifest.mjs`
 //! (`pnpm gen:typeinfo-manifest`) — the SOLE writer of all three files.
 //! The authoritative §10.4.1 row→block partition feeds ONLY each
 //! `IgnoredTestRow`'s `block_id` (joined with the live `#[ignore]`
 //! discovery and the Capability Map). The `AdditionalProofRow` table and
 //! the `TYPEINFO_PARITY_BLOCKS` block contracts (each block's
 //! required_guards/verification_labels/prereqs/mechanisms) come from the
-//! generator's own Python maps, NOT from §10.4.1. Whenever the generator
+//! generator's own maps, NOT from §10.4.1. Whenever the generator
 //! or its inputs change, the committed files must be regenerated and
 //! committed in the same change.
 //!
@@ -22,9 +22,9 @@
 //! naming the stale file(s). A hand-edit to ANY generated manifest file —
 //! or a generator change without regen — makes this test FAIL.
 //!
-//! The check gracefully skips when `python3` is absent (running `cargo
-//! test` on a machine without python), exactly as the proto freshness
-//! test skips when `buf` is absent. CI ships python3, so the
+//! The check gracefully skips when `node` is absent (running `cargo
+//! test` on a machine without node), exactly as the proto freshness
+//! test skips when `buf` is absent. CI ships node, so the
 //! discrimination holds in CI.
 
 use std::path::{Path, PathBuf};
@@ -39,30 +39,26 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Locate a runnable `python3` interpreter.
+/// Locate a runnable `node` interpreter.
 ///
-/// 1. Prefer an explicit `PYTHON3` / `PYTHON` env override (CI hook).
-/// 2. Fall back to `python3` / `python` on `PATH`.
+/// 1. Prefer an explicit `NODE` env override (CI hook).
+/// 2. Fall back to `node` on `PATH`.
 /// 3. Return `None` when none resolves — the test then skips gracefully
-///    (running on a python-free machine), mirroring how the proto
+///    (running on a node-free machine), mirroring how the proto
 ///    freshness test skips when `buf` is absent.
-fn locate_python(workspace_root: &Path) -> Option<PathBuf> {
-    for var in ["PYTHON3", "PYTHON"] {
-        if let Some(val) = std::env::var_os(var) {
-            let candidate = PathBuf::from(&val);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            // Bare name in the override → resolve via PATH below.
-            if let Some(found) = which_on_path(&candidate) {
-                return Some(found);
-            }
+fn locate_node(workspace_root: &Path) -> Option<PathBuf> {
+    if let Some(val) = std::env::var_os("NODE") {
+        let candidate = PathBuf::from(&val);
+        if candidate.is_file() {
+            return Some(candidate);
         }
-    }
-    for name in ["python3", "python"] {
-        if let Some(found) = which_on_path(Path::new(name)) {
+        // Bare name in the override → resolve via PATH below.
+        if let Some(found) = which_on_path(&candidate) {
             return Some(found);
         }
+    }
+    if let Some(found) = which_on_path(Path::new("node")) {
+        return Some(found);
     }
     let _ = workspace_root;
     None
@@ -104,26 +100,28 @@ fn which_on_path(name: &Path) -> Option<PathBuf> {
 #[test]
 fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
     let root = workspace_root();
-    let script = root.join("scripts").join("gen-typeinfo-ignore-manifest.py");
+    let script = root
+        .join("scripts")
+        .join("gen-typeinfo-ignore-manifest.mjs");
     assert!(
         script.is_file(),
         "manifest generator script missing at {}",
         script.display(),
     );
 
-    let Some(python) = locate_python(&root) else {
-        // Skip gracefully when python3 isn't installed (e.g. running
-        // `cargo test` on a python-free machine), exactly as the proto
-        // freshness test skips when `buf` is absent. CI ships python3.
+    let Some(node) = locate_node(&root) else {
+        // Skip gracefully when node isn't installed (e.g. running
+        // `cargo test` on a node-free machine), exactly as the proto
+        // freshness test skips when `buf` is absent. CI ships node.
         eprintln!(
-            "skipping manifest freshness check: no `python3`/`python` found via \
-             $PYTHON3/$PYTHON or on `PATH`. Install python3 (CI ships it) to run \
-             `python3 scripts/gen-typeinfo-ignore-manifest.py --check`."
+            "skipping manifest freshness check: no `node` found via \
+             $NODE or on `PATH`. Install node (CI ships it) to run \
+             `node scripts/gen-typeinfo-ignore-manifest.mjs --check`."
         );
         return;
     };
 
-    let output = Command::new(&python)
+    let output = Command::new(&node)
         .arg(&script)
         .arg("--check")
         .current_dir(&root)
@@ -131,7 +129,7 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
         .unwrap_or_else(|err| {
             panic!(
                 "invoke `{} {} --check`: {err}",
-                python.display(),
+                node.display(),
                 script.display(),
             )
         });
@@ -142,7 +140,7 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
     assert!(
         output.status.success(),
         "the committed typeinfo manifest data is STALE w.r.t. \
-         `scripts/gen-typeinfo-ignore-manifest.py`. The generator is the SOLE \
+         `scripts/gen-typeinfo-ignore-manifest.mjs`. The generator is the SOLE \
          writer of `crates/verter_session/tests/cases/manifest_data/*.rs`; regenerate \
          with `pnpm gen:typeinfo-manifest` and commit the result.\n\
          generator exit: {status}\n\
