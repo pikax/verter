@@ -22,12 +22,12 @@
 //! `scripts/gen-typeinfo-ignore-manifest.mjs` (`pnpm gen:typeinfo-manifest`).
 //! The authoritative row→block partition is the source ONLY for
 //! each `IgnoredTestRow`'s `block_id`: the generator PARSES it
-//! (`parse_partition`) and joins it with the live `#[ignore]` discovery +
+//! (`parsePartition`) and joins it with the live `#[ignore]` discovery +
 //! the Capability Map to emit `typeinfo_ignored_test_manifest_rows.rs`. The
 //! `AdditionalProofRow` table and the `TYPEINFO_PARITY_BLOCKS` DAG (each
 //! block's `required_guards`/`verification_labels`/prereqs/mechanisms) are
-//! authored in the generator's own Python maps (`build_additional_rows` /
-//! `JSX_NO_NEW_KEY_ROWS`; `emit_block_rows`, `BLOCK_TO_REQUIRED_GUARDS`,
+//! authored in the generator's own data maps (`buildAdditionalRows` /
+//! `JSX_NO_NEW_KEY_ROWS`; `emitBlockRows`, `BLOCK_TO_REQUIRED_GUARDS`,
 //! `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps), NOT from the
 //! partition. The guards below only diff/fail — they never write the
 //! generated source (repo rule: generators are scripts, not tests).
@@ -173,7 +173,7 @@ enum TargetSubstrate {
 // `IgnoredTestRow`'s `block_id` column (the generator PARSES it, joined
 // with the live `#[ignore]` discovery + the Capability Map); the
 // `AdditionalProofRow` table and the DAG come from the generator's own
-// Python maps, NOT from the partition. The guards below only diff/fail,
+// data maps, NOT from the partition. The guards below only diff/fail,
 // never write the generated source.
 // ──────────────────────────────────────────────────────────────────
 
@@ -3163,7 +3163,7 @@ fn registry_entry_count_matches_declared() {
             );
         }
         // Three-way agreement: the manifest row's declared count (the
-        // `IgnoredTestRow` side, Python-generated) matches the retained metadata.
+        // `IgnoredTestRow` side, generator-emitted) matches the retained metadata.
         let row = EXPECTED_IGNORE_MANIFEST
             .iter()
             .find(|r| r.file == m.row_file && r.function == m.row_function)

@@ -8,7 +8,7 @@
 // generator-side block override. The AdditionalProofRow
 // table and the TYPEINFO_PARITY_BLOCKS DAG (each block's
 // required_guards/verification_labels/prereqs/mechanisms) are
-// authored in the generator's own Python maps, NOT in §10.4.1.
+// authored in the generator's own data maps, NOT in §10.4.1.
 // The Rust guards only diff/fail; they never write this file.
 
 

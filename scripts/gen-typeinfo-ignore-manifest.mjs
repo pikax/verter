@@ -19,7 +19,7 @@
  * 362 times. The `AdditionalProofRow` table (file 2) and the
  * `TYPEINFO_PARITY_BLOCKS` DAG (file 3, with each block's
  * `required_guards`/`verification_labels`/prereqs/mechanisms) are
- * authored in this generator's own Python maps (`buildAdditionalRows`,
+ * authored in this generator's own data maps (`buildAdditionalRows`,
  * `emitBlockRows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
  * the prereq/mechanism maps), NOT derived from §10.4.1. The Rust
  * guard tests only diff/fail; they never write the generated source (repo
@@ -2623,7 +2623,7 @@ const GENERATED_HEADER =
   "// generator-side block override. The AdditionalProofRow\n" +
   "// table and the TYPEINFO_PARITY_BLOCKS DAG (each block's\n" +
   "// required_guards/verification_labels/prereqs/mechanisms) are\n" +
-  "// authored in the generator's own Python maps, NOT in §10.4.1.\n" +
+  "// authored in the generator's own data maps, NOT in §10.4.1.\n" +
   "// The Rust guards only diff/fail; they never write this file.\n";
 
 function emitIgnoredRows(rows) {
@@ -2932,6 +2932,43 @@ function main(checkOnly = false) {
   if (rows.length !== 362) {
     process.stderr.write(`error: expected 362 IgnoredTestRows, built ${rows.length}\n`);
     return 5;
+  }
+
+  // Unicode `\w` parity self-check (NON-circular): assert PY_WORD_SRC matches
+  // CPython 3 `re.UNICODE` `\w` on the boundary set, NOT Node's looser
+  // `[\p{L}\p{N}\p{Pc}]`/`\p{M}`-inclusive interpretations. A regression to the
+  // connector-punctuation class (`\p{Pc}`) or a combining-mark class (`\p{M}`)
+  // — the exact over-match this port replaced — flips a named case and throws
+  // here, on every write AND `--check`. CPython `\w` ACCEPTS L*/N*/`_`; it
+  // REJECTS the non-`_` Pc connectors (e.g. U+203F ‿) and combining marks
+  // (e.g. U+0301, an Mn). The class is anchored so each probe is a whole match.
+  const PY_WORD_ONE = new RegExp("^(?:" + PY_WORD_SRC + ")$", "u");
+  const WORD_PARITY_CASES = [
+    // [codepoint, label, mustMatch]
+    [0x61, "ASCII letter 'a'", true],
+    [0x35, "ASCII digit '5'", true],
+    [0x5f, "underscore '_' (the sole Pc CPython treats as word)", true],
+    [0xe9, "non-ASCII letter 'é' (U+00E9, category L)", true],
+    [0x660, "non-ASCII digit '٠' (U+0660, category N)", true],
+    [0x203f, "connector punctuation '‿' (U+203F, Pc but not '_')", false],
+    [0x0301, "combining acute accent (U+0301, Mn — a \\p{M} mark)", false],
+    [0x2d, "hyphen-minus '-' (U+002D, not a word char)", false],
+    [0x20, "space (U+0020, not a word char)", false],
+  ];
+  for (const [cp, label, mustMatch] of WORD_PARITY_CASES) {
+    const got = PY_WORD_ONE.test(String.fromCodePoint(cp));
+    if (got !== mustMatch) {
+      throw new SystemExit(
+        1,
+        `PY_WORD_SRC Unicode \\w parity broken: ${label} (U+` +
+          cp.toString(16).toUpperCase().padStart(4, "0") +
+          `) ${got ? "MATCHED" : "did NOT match"} but CPython 3 ` +
+          `re.UNICODE \\w ${mustMatch ? "accepts" : "rejects"} it. ` +
+          `Keep PY_WORD_SRC = [\\p{L}\\p{N}_] (literal '_'); do NOT widen to ` +
+          `\\p{Pc} (over-matches connectors) or include \\p{M} (over-matches ` +
+          `combining marks).`,
+      );
+    }
   }
 
   // Generation-time self-consistency assertions (NON-circular).

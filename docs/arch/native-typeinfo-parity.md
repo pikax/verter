@@ -2645,13 +2645,13 @@ is created. Both tables live in this one module.
 > authority is SCOPED: it is the source ONLY for the row→`block_id` PARTITION the generator
 > READS to assign each `IgnoredTestRow`'s `block_id` (joined with the live `#[ignore]`
 > discovery + the Capability Map). It lives in the BEGIN/END coverage block in §10.4.1, and
-> the Node manifest generator's `parse_partition` READS it (it does not emit it) to derive
+> the Node manifest generator's `parsePartition` READS it (it does not emit it) to derive
 > each `IgnoredTestRow`'s `block_id`. The OTHER two manifest-data files are NOT derived from
 > §10.4.1: the `AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) is built from
-> the generator's own maps (`build_additional_rows`, e.g. `JSX_NO_NEW_KEY_ROWS`), and
+> the generator's own maps (`buildAdditionalRows`, e.g. `JSX_NO_NEW_KEY_ROWS`), and
 > the `TYPEINFO_PARITY_BLOCKS` DAG (`typeinfo_parity_blocks.rs`) — including each block's
 > `required_guards`/`verification_labels`/prereqs/mechanisms — is authored in the generator's
-> own block maps (`emit_block_rows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
+> own block maps (`emitBlockRows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
 > the prereq/mechanism maps), NOT from §10.4.1. `--check` regenerates all three files
 > (`typeinfo_ignored_test_manifest_rows.rs`, `typeinfo_additional_proof_rows.rs`,
 > `typeinfo_parity_blocks.rs`) from these inputs and byte-compares. The U0-FINISH-B
@@ -2862,7 +2862,7 @@ full-parity completeness MECHANICAL, the design is a row-exact coverage table
 (GENERATED FROM and CHECKED against the manifest — NOT yet built; it is the one §10
 deliverable that survived U0-FINISH-B's landing as a residual, forward-declared on the
 `U13.PROJECTION` / `U15.FINAL_LIFT` block-contract rows; today the built artifact is
-the §10.4.1 hand-authored partition the Python generator reads) that maps EVERY manifest row
+the §10.4.1 hand-authored partition the Node generator reads) that maps EVERY manifest row
 through its full mechanism chain:
 
 ```
@@ -2886,7 +2886,7 @@ row (file::function)
   `AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) and the block DAG
   (`typeinfo_parity_blocks.rs`) — each block's `required_guards`/`verification_labels`/
   prereqs/mechanisms — are NOT derived from §10.4.1; they are authored in the generator's own
-  maps (`build_additional_rows` / `JSX_NO_NEW_KEY_ROWS`; `emit_block_rows`,
+  maps (`buildAdditionalRows` / `JSX_NO_NEW_KEY_ROWS`; `emitBlockRows`,
   `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps). The
   Rust guard tests only diff/fail and never write tracked source. The authoritative
   `row → block_id` projection over all 362 `IgnoredTestRow`s is enumerated in full in
@@ -2970,12 +2970,12 @@ bucket is split into per-mechanism sub-blocks (`U6.NARROW_*`).
 
 This is the **authoritative, exhaustive, HAND-AUTHORED** `row → block_id` map that the
 Node manifest generator (`scripts/gen-typeinfo-ignore-manifest.mjs`) READS — it does not
-emit this partition; it parses it (`parse_partition`) and uses it ONLY to assign each
+emit this partition; it parses it (`parsePartition`) and uses it ONLY to assign each
 `IgnoredTestRow`'s `block_id` when it emits `typeinfo_ignored_test_manifest_rows.rs`. The
 other two checked-in manifest-data files are NOT derived from this partition: the
 `AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) and the
 `TYPEINFO_PARITY_BLOCKS` DAG (`typeinfo_parity_blocks.rs`) are authored in the generator's
-own maps (`build_additional_rows` / `JSX_NO_NEW_KEY_ROWS`; `emit_block_rows`,
+own maps (`buildAdditionalRows` / `JSX_NO_NEW_KEY_ROWS`; `emitBlockRows`,
 `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps). This
 partition is a total function over the 362 `IgnoredTestRow`s: **every** row appears exactly
 once under exactly one owning `block_id`, no row is owned by two blocks, and the union is
@@ -2993,7 +2993,7 @@ yet built (the residual that survived U0-FINISH-B's landing, gated at `U13`/`U15
 `every_manifest_row_has_non_placeholder_mechanism_and_executable_proof` appear as
 forward-declared guard NAMES in `BlockContractRow.required_guards` (on `U13.PROJECTION` /
 `U15.FINAL_LIFT`) but have no implementing test on this tree; today the built check is the
-Python generator's `--check`.
+Node generator's `--check`.
 
 The owning `block_id` for each row is its **dominant mechanism** per the Capability Map
 (§Capability Map) and the row-level-split notes in the subplans: a row's substrate maps it to
@@ -3137,12 +3137,12 @@ engine), which is exactly why their measured trace re-homes them to
 
 The complete partition (each entry `file::function — substrate`):
 <!-- BEGIN U0 row→block coverage table (362 rows). [Marker name is a fixed parse contract
-     consumed by scripts/gen-typeinfo-ignore-manifest.mjs parse_partition — do NOT rename.
+     consumed by scripts/gen-typeinfo-ignore-manifest.mjs parsePartition — do NOT rename.
      This region is §10.4.1: the HAND-AUTHORED row→block_id PARTITION (the generator INPUT),
      NOT the distinct §10.4 row-exact coverage table, which is the U13/U15-gated generated
      residual (NOT built; generated FROM the manifest when it lands).] HAND-AUTHORED authoritative source for the
      row→block_id PARTITION ONLY: the manifest generator (scripts/gen-typeinfo-ignore-manifest.mjs)
-     READS this partition (parse_partition) to assign each IgnoredTestRow's block_id and EMITS
+     READS this partition (parsePartition) to assign each IgnoredTestRow's block_id and EMITS
      crates/verter_session/tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs. The
      AdditionalProofRow table (typeinfo_additional_proof_rows.rs) and the TYPEINFO_PARITY_BLOCKS
      DAG (typeinfo_parity_blocks.rs) come from the generator's own maps, NOT from this
