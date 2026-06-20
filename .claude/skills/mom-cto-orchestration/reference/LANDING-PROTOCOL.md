@@ -7,7 +7,7 @@ The block MANAGER lands; the CTO never lands and dispatches the independent conf
 ## Preconditions
 
 Do not start landing until all hold:
-- Full block diff has 3/3 LAND: 2 codex + 1 claude, or only NIT residuals carried forward.
+- Full block diff has 3/3 LAND: 1 adversarial claude + 1 claims-aware codex + 1 unprimed codex, or only NIT residuals carried forward.
 - §1a `VERDICT:LAND`: diff-scope, every new/changed correctness-bearing test/guard proven discriminating (plant/revert RED→GREEN) plus unplanted control, cold full gate, rule/plan integrity.
 - Anti-rogue layer 1 complete per `PROTOCOL.md`: full discovery over all changed paths, deleted hunks, deletions/renames/copies, and clean unprimed adversarial codex confirmation for each rule-bearing change.
 - No in-flight worker for this block — Agent status/stop result confirms none live on the default path, `ps` count 0 on the opt-in `claude -p` path; no uncommitted junk.

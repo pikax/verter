@@ -24,7 +24,7 @@ A single 15-minute blocking call can hit idle timeout; chunking plus brief model
 
 ## Gates / Concurrent Work
 
-If a gate is expected under 5 minutes, run foreground with `timeout 300`. Otherwise detach + chunk-poll. Dispatch concurrent work in background (gate, 2 codex reviewers, 1 claude reviewer, sub-agents), each with a marker, then run ONE foreground watchdog over all markers. When any marker is ready, collect it and re-enter the watchdog for remaining markers. Never background the watchdog and yield.
+If a gate is expected under 5 minutes, run foreground with `timeout 300`. Otherwise detach + chunk-poll. Dispatch concurrent work in background (gate, 1 adversarial claude reviewer, 1 claims-aware codex reviewer, 1 unprimed codex reviewer, sub-agents), each with a marker, then run ONE foreground watchdog over all markers. When any marker is ready, collect it and re-enter the watchdog for remaining markers. Never background the watchdog and yield.
 
 ## Recovery
 

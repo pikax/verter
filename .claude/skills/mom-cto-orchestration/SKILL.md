@@ -39,8 +39,9 @@ Every block/stage/phase runs: manager-owned implementation → full 3/3 review �
 | CTO | interactive session | orchestration only | dispatch/decide/checkpoint; never implements |
 | Block manager | Agent sub-agent (fresh ctx) | full worktree | owns one unit through land |
 | Implementer/fix | Agent sub-agent | full | writes all code/tests/fixes; new commit per finding |
-| Review legs x2 | codex | read-only | latest/high reasoning, distinct lenses |
-| Review leg x1 | Agent sub-agent (fresh ctx) | read-only | separate fresh agent from author; separate account when available/opt-in |
+| Review leg — claims-aware codex x1 | codex | read-only | latest/high reasoning; handed the change's claims as ASSERTIONS TO TEST/REFUTE — attacks each claim that does not hold; the claims are untrusted assertions, never a desired conclusion (no Never-Prime violation) |
+| Review leg — unprimed codex x1 | codex | read-only | latest/high reasoning; gets the artifact blind, hunts issues |
+| Review leg — adversarial claude x1 | Agent sub-agent (fresh ctx) | read-only | ADVERSARIAL, refute-first (CLAUDE-REVIEWER MANDATE); separate fresh agent from author; LAND only when it tried to break it and could not |
 | §1a verifier | Agent sub-agent (fresh ctx) | full/throwaway | proves discrimination + gate + rule integrity |
 | Confirm manager | Agent sub-agent (fresh ctx) | full/throwaway | independent post-land best-implementation gate |
 | Architect/decider | codex only | read-only | all architecture forks; never code |
@@ -54,10 +55,10 @@ Role separation is required; account separation is optional. On one account, use
 
 - Architecture is always codex-owned. Modes differ only by whether codex's verdict is auto-adopted or user-ratified and where product/priority forks go.
 - Never prime any reviewer, consult, verifier, confirmer, or adjudicator. Ask neutral questions; do not state the desired conclusion.
-- Every codex architecture/review/approval/adversarial/best-impl prompt prepends the mandate in `reference/PROTOCOL.md`.
+- Every codex architecture/review/approval/adversarial/best-impl prompt prepends the CODEX-ARCHITECT MANDATE (`reference/PROTOCOL.md`); every claude-reviewer dispatch prepends the CLAUDE-REVIEWER MANDATE (`reference/CLAUDE-REVIEWER-MANDATE.md`).
 - Multiple-choice/high-stakes architecture forks use two neutral codex legs; disagreement uses a third code-verifying codex decider. Claude implements; codex never writes code.
 - Default Agent-tool dispatch is harness-managed: a blocking Agent call returns the manager's report; a background (`run_in_background`) Agent call notifies the CTO on completion — no watchdog, no liveness-by-mtime. The watchdog / foreground-poll discipline (`reference/WAIT-PROTOCOL.md`) applies ONLY to the opt-in `claude -p` path, where headless `-p` managers and sub-agents never background-then-yield.
-- Every review round is 2 codex + 1 claude, parallel, neutral, distinct lenses, to 3/3 LAND or NIT-only carried forward. Designs/docs/skills get the same bar; skill/design/doc codex review rounds cap at 3 except substantive or anti-rogue findings.
+- Every review round is 1 ADVERSARIAL claude + 1 claims-aware codex + 1 unprimed codex, parallel, distinct lenses, to 3/3 LAND or NIT-only carried forward. The claude leg is adversarial (refute-first, default-to-reject — CLAUDE-REVIEWER MANDATE; LAND only when it tried to break the change and could not), the claims-aware codex is handed the change's claims as assertions to TEST/REFUTE and attacks the ones that do not hold (untrusted assertions, never a desired conclusion — no Never-Prime violation), the unprimed codex hunts issues blind; the claude leg's question stays neutral even though its stance is adversarial. Designs/docs/skills get the same bar; skill/design/doc codex review rounds cap at 3 except substantive or anti-rogue findings.
 - After land, the CTO — never the block manager — dispatches a separate confirm MANAGER that must prove: correct/additive/full-gate green, not shallow, no stubs, and best implementation by unprimed codex judgment. `VERDICT:CONFIRMED` alone closes.
 - Integration-confirm MANAGER runs at phase/milestone boundaries, before dependent phases, before final close-out, and after every 5 confirmed blocks. Only `VERDICT:INTEGRATION-CONFIRMED` closes a phase.
 - Plan-end has zero open deferrals. Mid-plan deferrals require a codex-DEFER ruling and a `docs/arch` debt ledger row.
@@ -71,6 +72,7 @@ Role separation is required; account separation is optional. On one account, use
 ## Protocol Files
 
 - `reference/PROTOCOL.md` — Verter overlay and full rule detail: governance, mandate, decision modes, dispatch, review, gates, invariants, cleanliness, anti-rogue, confirm/integration.
+- `reference/CLAUDE-REVIEWER-MANDATE.md` — the adversarial refute-first mandate prepended to every claude-reviewer dispatch (per-block 3/3 claude leg, independent confirm leg, integration-confirm leg, fix re-reviews).
 - `reference/LANDING-PROTOCOL.md` — pre-land sync, re-review triggers, design mirror, teeth'd squash, true ff, cleanup, CTO confirm handoff.
 - `reference/CHECKPOINT-PROTOCOL.md` — append-only progress ledger, artifact validity, idempotence, corruption recovery.
 - `reference/WAIT-PROTOCOL.md` — OPT-IN `claude -p` path only: headless `-p` waiting via foreground chunked poll-loop; no background-then-yield. Default Agent-tool dispatch is harness-managed and needs none of it.

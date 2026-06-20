@@ -46,34 +46,57 @@ Pass this brief as the Agent tool's `prompt` (the default mechanism) — or writ
 
 ## 2. Reviewer sub-agent prompt
 
+This skeleton is ADVERSARIAL by default — it must dispatch a refute-first reviewer, not a confirmatory one. Its semantics match the CTO-tier CLAUDE-REVIEWER MANDATE. It is the claude leg of the base two-leg dual review (claude + second-opinion/codex); when MoM/CTO orchestration is in force its three-leg composition (1 adversarial claude + 1 claims-aware codex + 1 unprimed codex) SUPERSEDES the base loop — but the adversarial claude STANCE below is identical in both tiers. Standalone `/multi-agent-orchestration` may dispatch this self-contained skeleton as-is (no external mandate file required); under MoM/CTO, prepend `CLAUDE-REVIEWER-MANDATE.md` verbatim first, then append this gate-specific prompt.
+
 ```
-You are an independent, harsh, production-ready code reviewer. You did NOT write
-this code — review it adversarially. Read-only; modify nothing. Do NOT run the
-test suite (a separate integration-verify does that, and the second-opinion
-review runs concurrently — avoid memory contention).
+You are an ADVERSARIAL, independent, production-ready code reviewer. You did NOT
+write this code. Your job is to BREAK this change, not to bless it — default to
+REJECT. Read-only; modify nothing. Do NOT run the test suite (a separate
+integration-verify does that, and the second-opinion review runs concurrently —
+avoid memory contention).
 
 Review commit <SHA> on branch <branch> (diff <base>..<branch>).
 
 Context: <the block's purpose; point at the brief>.
-The implementer's self-report (verify these claims against the actual diff): <embed it>.
+The implementer's self-report — treat every claim as an assertion to TEST, not a
+fact, and verify it against the actual diff: <embed it>.
 
+Review to REFUTE: actively hunt the bug, the over-claim, the missed case, the
+silent weakening, the non-discriminating test. Assume a defect is present until
+you have genuinely tried and failed to find one. Check: correctness; scope
+completeness vs the brief; test quality — read EVERY new test body and prove it
+discriminates (would FAIL pre-change, PASS post-change); architecture & legacy
+deletion (no dual paths/shims); rule compliance.
+
+Your report MUST include:
+- A "what I tried to break + the result of each attempt" section (the cases,
+  inputs, paths, and claims you attacked, and what happened).
+- The STRONGEST counter-argument you found and why it does or does not sink the
+  change.
+- A list of every risk, uncertainty, scope gap, and weakly-supported claim.
 For every finding assign [P0] (blocks landing) / [P1] (must fix) / [P2] (should
-fix) / [P3] (nit). Check: correctness; scope completeness vs the brief; test
-quality (do new tests discriminate? read every body); architecture & legacy
-deletion (no dual paths/shims); rule compliance. End with a one-line verdict:
-LAND (clean / only P3) or CHANGES REQUIRED. Be specific — vague findings are
-useless to a fix-agent. If nothing is wrong, say so; do not invent issues.
+fix) / [P3] (nit), and make each finding enumerated and actionable with its
+file / section / exact change. Be specific — vague findings are useless to a fix-agent.
+
+End with a one-line verdict: LAND ONLY IF you genuinely tried to find a
+bug / over-claim / weakening / non-discriminating test and could not (a stub,
+always-true assert, or non-discriminating characterization is a finding, not a
+pass); otherwise CHANGES REQUIRED. Never invent issues to look thorough, and
+never soften a real one to be agreeable — if the change is wrong, say so plainly.
 ```
 
 ## 3. Fix-agent prompt
 
 ```
-You are the fix-agent for Block <N>. A dual review found issues. Apply the fixes
-as a NEW commit on <branch> (never amend). You implement, test, commit, report.
+You are the fix-agent for Block <N>. The block's review found issues. Apply the
+fixes as a NEW commit on <branch> (never amend). You implement, test, commit,
+report.
 
 Worktree, gotchas, commit convention: <as in the implementer brief>.
 
-The findings (from BOTH the independent reviewer and the second-opinion review):
+The findings (from EVERY review leg that ran — under the base tier the adversarial
+claude reviewer + the second-opinion/codex review; under MoM/CTO orchestration the
+adversarial claude leg + the claims-aware codex leg + the unprimed codex leg):
 <embed every finding verbatim, with the prescribed fix direction>.
 
 For each finding: fix it; if a finding is one instance of a class, fix the whole

@@ -48,7 +48,7 @@ Lightweight mechanics the orchestrator *may* do directly: `git worktree add/remo
 |---|---|---|
 | **Orchestrator** | Decompose, brief, dispatch, verify, decide, manage git/state | this session |
 | **Implementer** | Implement one block from a self-contained brief | full |
-| **Reviewer** | Independent, harsh, production-ready review of one block | read-only |
+| **Reviewer (claude — ADVERSARIAL)** | Independent, harsh, refute-first review of one block — reviews to BREAK the change, default-to-reject; LAND only when it tried hard to find a bug/over-claim/weakening/non-discriminating test and could not | read-only |
 | **Fix-agent** | Consume review findings, apply fixes as a new commit | full |
 | **Extraction agent** | Gather/extract source into one file | read-only |
 | **Diagnostic agent** | Empirically reproduce + instrument a failure to establish ground truth | full, throwaway edits |
@@ -63,8 +63,8 @@ The **second-opinion model** is load-bearing, not optional — escalation path f
 3. **Brief.** Write a self-contained brief. Implementer starts cold with zero shared context; brief carries everything (see `references/templates.md`).
 4. **Dispatch the implementer.**
 5. **Verify git state.** Report states *intent*, not *fact*. Check directly: commit exists, is scoped to expected files/area, untouched what should be untouched. Report vs `git show --stat` disagreement is a real signal.
-6. **Dual review.** In parallel: (a) independent reviewer sub-agent, (b) second-opinion model code review. They catch different problem classes.
-7. **Fix cycle.** Fix-agent consumes **both** reviews, fixes findings as a *new* commit (never amend). Then re-review. Clean re-review by the second-opinion model is the gate. Repeat fix → re-review until clean.
+6. **Dual review.** In parallel: (a) independent ADVERSARIAL claude reviewer sub-agent — reviews to refute/break the change, default-to-reject, never a rubber-stamp; (b) second-opinion model code review. They catch different problem classes.
+7. **Fix cycle.** Fix-agent consumes **both** reviews, fixes findings as a *new* commit (never amend). Then re-review with the SAME review set — the adversarial claude reviewer AND the second-opinion model; a genuinely clean re-review across both is the gate (the adversarial claude re-review is part of the gate, not only the second-opinion model). Repeat fix → re-review until clean.
 8. **Land.** Re-verify integration branch hasn't moved; merge/cherry-pick block onto it; sub-agent runs full verification gate on integration branch; record landing (feedback-log entry); remove block's worktree.
 
 Move to next block without pausing — plan is already approved. Re-planning only for genuine plan-invalidating discoveries, routed through the second-opinion model.
@@ -79,7 +79,9 @@ Move to next block without pausing — plan is already approved. Re-planning onl
 
 **Comprehensive-audit pattern.** When a finding is one instance of a class — per-cache, per-field, per-call-site, per-scan gap — fix brief must instruct fix-agent to audit and fix the *whole class*, not just the named site. One symptom almost always has siblings.
 
-**Dual review on every block.** Block is not landable until second-opinion re-review is genuinely clean — not "clean enough", not "only nits remain unaddressed". A real but deferred finding is tracked explicitly as a carry-forward item, never silently dropped.
+**Dual review on every block.** Block is not landable until BOTH the adversarial claude reviewer re-review AND the second-opinion re-review are genuinely clean — not "clean enough", not "only nits remain unaddressed". A real but deferred finding is tracked explicitly as a carry-forward item, never silently dropped. The claude reviewer leg is ADVERSARIAL — always: it reviews to break the change, defaults to skepticism, and a `LAND` means "I tried hard to break this and could not," never a confirmatory pass; it states the strongest counter-argument it found and why it does or does not sink the change.
+
+**Review-leg tiers.** This is the base two-leg dual review (one adversarial claude reviewer + one second-opinion/codex leg) — correct for standalone single-block use on one account. When MoM/CTO orchestration is in force, its three-leg composition (1 adversarial claude + 1 claims-aware codex + 1 unprimed codex — see `/mom-cto-orchestration`) SUPERSEDES this two-leg loop; both tiers stay valid. The adversarial-claude STANCE applies in BOTH tiers regardless of leg count, and the fix cycle consumes findings from ALL review legs that actually ran.
 
 **Discriminating tests only.** Reject stubs, empty test bodies, always-true assertions (`assert(true)`, `expect(1).toBe(1)`), and characterization tests that pass regardless of the change. A test must *fail* against the pre-change tree and *pass* against the post-change tree. Briefs must demand it; reviewers must check it by reading every new test body.
 
@@ -120,4 +122,4 @@ Output is large — grep for findings, read the tail for verdict. Don't run conc
 - Pausing between approved blocks to ask "should I continue?" — execute the approved plan through.
 - Letting a block land with re-review flagging a real issue as "deferred" without an explicit tracked carry-forward.
 
-See `references/templates.md` for the brief / reviewer / fix-agent / consult prompt skeletons and the exact second-opinion CLI invocations.
+See `references/templates.md` for the brief / reviewer / fix-agent / consult prompt skeletons and the exact second-opinion CLI invocations. The §2 reviewer skeleton is the self-contained adversarial-reviewer mandate (default-to-reject, refute-first, "what I tried to break" + strongest-counter-argument, read every test body) the orchestrator dispatches — copy it verbatim so every claude review and re-review leg stays adversarial, never confirmatory.
