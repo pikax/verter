@@ -328,7 +328,7 @@ defineProps<{
     assert_eq!(
         names,
         vec!["item", "label", "onSubmit"],
-        "the imported member surface must resolve all three members across the file boundary"
+        "the inline macro prop surface must publish exactly the three author-written members"
     );
     for name in ["item", "label", "onSubmit"] {
         assert!(
