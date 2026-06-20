@@ -38,12 +38,14 @@
 // CANONICAL FEATURE SET (why no `-p verter_session`)
 //   `cargo nextest run --workspace` and `cargo test --workspace` SHARE Cargo feature unification, which
 //   activates `verter_session`'s `session_metrics` feature (a downstream crate — `verter_lsp` — depends on
-//   `verter_session` with `features = ["session_metrics"]`, and the real LSP binary + napi binding force it
-//   ON). The package-scoped `cargo test -p verter_session` resolution builds `verter_session` with
+//   `verter_session` with `features = ["session_metrics"]`, so the real LSP binary forces it ON in the
+//   workspace build; `verter_napi` only exposes an opt-in `session_metrics` forwarding feature, default off).
+//   The package-scoped `cargo test -p verter_session` resolution builds `verter_session` with
 //   `session_metrics` OFF (its default) and a different dev-dep closure ⇒ a different unit hash ⇒ an
 //   artifact-reuse miss ⇒ a full recompile of the verter_session reverse-dependency chain on the very next
 //   gate command. This gate deliberately tests the workspace-unified (`session_metrics` ON) configuration —
-//   the PRODUCTION-REACHABLE one (it is what the shipping LSP/napi build uses) — which is exactly why it
+//   the PRODUCTION-REACHABLE one (what the shipped LSP binary uses; also reachable from an opt-in
+//   `verter_napi/session_metrics` build) — which is exactly why it
 //   never issues the package-scoped resolution. It does NOT use `--all-features` (the repo has slow/external
 //   feature gates) and does NOT mutate any Cargo.toml.
 //

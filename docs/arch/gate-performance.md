@@ -18,10 +18,16 @@ compile**:
   builds). Surfaces shared-process state bugs the isolated path structurally
   cannot.
 
-The aggregated verdict over both surfaces is the gate result. `gate.mjs` is a
-**strict superset** of the historical two-command gate: it runs every test the
-old pair ran, preserves nextest's per-test process isolation **and** the
-in-process `verter_session` surface, and weakens nothing. Clippy
+The aggregated verdict over both surfaces is the gate result. `gate.mjs` runs the
+same workspace nextest surface **and** the same `verter_session` lib/test binaries
+directly, preserving nextest's per-test process isolation **and** the in-process
+`verter_session` surface. It runs those `verter_session` binaries under the
+workspace-unified `session_metrics` feature set (ON — see below), intentionally
+replacing the old package-scoped default-feature (`session_metrics` OFF) rebuild
+surface rather than reproducing its feature config; that ON config is the one the
+shipped LSP binary actually uses, and it is what eliminates the second compile. No
+gate is weakened: every test target the old pair compiled is still run, plus the
+same direct `verter_session` surface. Clippy
 (`cargo clippy --workspace -- -D warnings`), formatting
 (`cargo fmt --all --check`), hermeticity, and on-demand doctests remain separate
 end-of-change checks layered on top of the gate, exactly as before.
@@ -37,9 +43,10 @@ cargo test -p verter_session --tests
 
 `cargo nextest run --workspace` and `cargo test --workspace` share Cargo's
 feature unification. A downstream crate (`verter_lsp`) depends on
-`verter_session` with `features = ["session_metrics"]`, and the real LSP binary
-and the napi binding force that feature **on**. So the workspace build resolves
-`verter_session` with `session_metrics` **ON**.
+`verter_session` with `features = ["session_metrics"]`, so the real LSP binary
+forces that feature **on** in the workspace build (`verter_napi` exposes an opt-in
+`session_metrics` forwarding feature but does not enable it by default). So the
+workspace build resolves `verter_session` with `session_metrics` **ON**.
 
 The package-scoped `cargo test -p verter_session` resolution builds
 `verter_session` with `session_metrics` **OFF** (its default) and a different
@@ -52,9 +59,9 @@ recompiling the same source under a second feature resolution.
 `gate.mjs` issues exactly **one** build command — the single `--workspace`
 archive build — and never issues the package-scoped `-p verter_session`
 resolution. It therefore tests the **workspace-unified (`session_metrics` ON)**
-configuration, which is the **production-reachable** one (it is what the shipping
-LSP and napi builds use), and structurally cannot incur the second-resolution
-recompile. Surface 2 runs the same `verter_session` suite the package-scoped
+configuration, which is the **production-reachable** one (it is what the shipped
+LSP binary uses, and it is also reachable from an opt-in `verter_napi/session_metrics`
+build), and structurally cannot incur the second-resolution recompile. Surface 2 runs the same `verter_session` suite the package-scoped
 command would have run — same tests, same `cwd` (the `verter_session` manifest
 dir) and the runtime Cargo env those tests read (`CARGO_MANIFEST_DIR` +
 `CARGO_TARGET_DIR`) — modulo the `session_metrics` cfg being ON (the production
@@ -176,8 +183,9 @@ The double-compile this design eliminates is a direct consequence of Cargo's
 feature unification, not a tooling bug:
 
 - `cargo nextest run --workspace` builds `verter_session` with `session_metrics`
-  **ON** (forced by `verter_lsp` / napi in the unified workspace graph) — and the
-  archive build reuses exactly those artifacts, so a re-run is **noop-warm**.
+  **ON** (forced by `verter_lsp` in the unified workspace graph; `verter_napi` only
+  exposes an opt-in forwarding feature) — and the archive build reuses exactly those
+  artifacts, so a re-run is **noop-warm**.
 - `cargo test -p verter_session` builds `verter_session` with `session_metrics`
   **OFF** (the crate default) and a narrower dev-dep closure ⇒ a different unit
   hash ⇒ an artifact-reuse **miss** ⇒ a full recompile of the reverse-dependency
@@ -200,13 +208,17 @@ configuration under test is the production-reachable workspace-unified one.
 | Cold gate wall-clock | ~323 s (201 s build + 58 s recompile + 64 s run) | 243 s (4 m 3 s) single-compile, both surfaces — 15551 pass / 0 fail / 547 skip |
 | `target/` after `cargo clean` | 79.3 GB / 289,371 files (accumulated) | 10.6 GB / 26,972 files (clean cold gate build) |
 
-The **47 distinct nextest binaries** is the full nextest binary count (21 lib +
-10 bin + 1 proc-macro + 15 integration targets); the **15 integration targets**
-is the test-kind subset. They measure different things and are both kept — do not
-conflate them.
+The **47 distinct nextest binaries** is the full post-consolidation
+`cargo nextest list` binary count (its recorded decomposition at measurement time
+was 21 lib + 10 bin + 1 proc-macro + 15 integration targets — a nextest-list
+breakdown, which counts test-runnable binaries and is not the same axis as a raw
+`cargo metadata` target list); the **15 integration targets** is the test-kind
+subset. They measure different things and are both kept — do not conflate them.
 
-A `cargo clean` reclaimed the accumulated **79.3 GiB / 289,371 files**; the cold
-gate then rebuilds clean to **10.6 GB / 26,972 files**.
+A `cargo clean` reclaimed the accumulated **79.3 GiB / 289,371 files** (as the
+`cargo clean` report stated it); the cold gate then rebuilds clean to **~10.6 GB /
+26,972 files** (`du` report). The two figures come from different tools, hence the
+GiB/GB suffix difference.
 
 ## L1 — DROPPED (measured no-op)
 
@@ -219,7 +231,7 @@ measured no-op: the `test` profile already inherits
 
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
-| L6 | Opt-in build linker + CI sccache | DEFERRED | Alternate linker config (`.cargo/config.perf.toml` for lld/mold/zld) plus CI-only `sccache`. Deferred because it is not a default contributor or canonical-gate behavior, requires per-platform availability/correctness validation on macOS/Windows/Linux, and the already-landed single-compile archive runner plus integration-test binary consolidation removed the dominant measured gate waste. Rough value: incremental link/build latency reduction for opted-in local users and warm CI jobs, likely meaningful only after measuring current post-consolidation link time. Pick up when post-landing gate profiling shows link time or repeated CI cold builds remain a top bottleneck, or when CI queue cost justifies a hermetic cache-key rollout. Risk of not doing it: leaves some local opt-in and warm-CI compile/link savings unrealized; no known correctness, coverage, or default gate-performance regression. |
+| L6 | Opt-in build linker + CI sccache | DEFERRED | Alternate linker config (`.cargo/config.perf.toml` for lld/mold/zld) plus CI-only `sccache`. Deferred because it is not a default contributor or canonical-gate behavior, requires per-platform availability/correctness validation on macOS/Windows/Linux, and the already-landed single-compile archive runner plus integration-test binary consolidation removed the dominant measured gate waste. Rough value: incremental link/build latency reduction for opted-in local users and warm CI jobs, likely meaningful only after measuring the current consolidated-gate link time. Pick up when future gate profiling shows link time or repeated CI cold builds remain a top bottleneck, or when CI queue cost justifies a hermetic cache-key rollout. Risk of not doing it: leaves some local opt-in and warm-CI compile/link savings unrealized; no known correctness, coverage, or default gate-performance regression. |
 
 ## Tooling
 
