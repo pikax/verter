@@ -1132,22 +1132,27 @@ impl StructuralEncoder<'_> {
             }
             SemanticNodeData::VueMacroElements(elements) => {
                 self.buf.push(VariantTag::VueMacroElements as u8);
-                // `ResolvedElements` (defined in `verter_parser`) holds only
-                // parser-domain resolved data — `props`, `call_signatures`,
-                // `has_call_signature`, `root_runtime_types` — and NO
-                // `SemanticNodeId` / `value_node` ordinal: no live producer
-                // inserts a session-origin handle into it. So for the CURRENT
-                // payload shape its `Debug` rendering is content-only (no arena
-                // ordinal), and a content hash of it is the stable identity
-                // available here (it exposes no structural-hash accessor).
+                // `ResolvedElements` is parser-built and provably never carries a
+                // `TypeExpr::SyntheticSlotBinding` (the sole ordinal-bearing
+                // `TypeExpr` variant — its `SyntheticCarrierKey.value_node: u64` is
+                // a store/generation-relative `SemanticNodeId` arena ordinal).
+                // ENFORCED by the static guard
+                // `vue_macro_elements_ordinal_leak_is_producer_unreachable`
+                // (parser/compiler carrier-free + single `insert_resolved_named_type`
+                // caller + single `VueMacroElements` producer). Therefore the
+                // `Debug` of `ResolvedElements` here folds NO `SemanticNodeId`
+                // ordinal — its rendering is content-only and is the stable
+                // identity available at this arm (the type exposes no
+                // structural-hash accessor).
                 //
                 // The "lower crate" relationship is NOT the guarantee — a lower
                 // crate can still carry a raw `u64` ordinal on a payload (as
-                // `SyntheticBinding.value_node` does). The guarantee is the live
-                // field shape above. If session-origin typed IR carrying a
-                // `SemanticNodeId` / ordinal could ever enter `ResolvedElements`,
-                // this arm MUST become an explicit child-descending encoder (like
-                // `SyntheticBinding`), not a `Debug` of the ordinal.
+                // `SyntheticBinding.value_node` does). The guarantee is the pinned
+                // producer surface. If that producer invariant ever changes (e.g.
+                // `ResolvedElements` survives the second-engine deletion or a
+                // session-origin carrier is threaded in), the guard FIRES and this
+                // arm MUST move to an explicit ordinal-free child-descending
+                // encoder (like `SyntheticBinding`), not a `Debug` of the ordinal.
                 self.push_str(&format!("{elements:?}"));
             }
         }

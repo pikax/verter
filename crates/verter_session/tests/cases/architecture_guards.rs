@@ -17397,6 +17397,531 @@ pub fn after() {}\n";
              NOT count as a `test_only` consumption"
         );
     }
+
+    // =======================================================================
+    // Producer-bound unreachability guard — the footprint encoder's
+    // `SemanticNodeData::VueMacroElements(Arc<ResolvedElements>)` arm
+    // (`component_meta_audit/footprint_miner.rs`) blanket-`Debug`s the
+    // `ResolvedElements` payload. The ONLY `SemanticNodeId` arena ordinal a
+    // `TypeExpr` can carry is `SyntheticCarrierKey.value_node: u64` behind
+    // `TypeExpr::SyntheticSlotBinding` (`verter_type_expr/src/lib.rs`). IF such
+    // a carrier ever reached a `ResolvedElements.props[].type_expr` /
+    // `.call_signatures[].type_expr`, that `Debug` would fold a
+    // store/generation-relative ordinal into the content-only footprint
+    // fingerprint — a cross-host byte-identity break.
+    //
+    // The architectural disposition is that this is PROVABLY UNREACHABLE, so
+    // the encoder arm stays a `Debug` (descending the second-engine result
+    // type from the encoder would force naming `ResolvedElements` /
+    // `type_surface` there, raising the single-resolution-engine shrinking
+    // ledger — the wrong fix). This guard MECHANICALLY pins the three
+    // producer-surface facts that make the leak unreachable. If any fact
+    // changes, this guard fires BEFORE the silent fingerprint break can ship,
+    // and the encoder arm must move to an explicit ordinal-free child-descending
+    // encoder (the disposition itself would have to be revisited).
+    //
+    // The three pinned facts (all over PREPROCESSED production `src/`, so
+    // comments + `#[cfg(test)]` modules + `_tests.rs`/`tests/` files are NOT
+    // counted — test fixtures that legitimately build a `SyntheticSlotBinding`
+    // never trip it):
+    //   (1) `verter_parser/src/**` AND `verter_compiler/src/**` reference the
+    //       synthetic carrier ZERO times (no `SyntheticSlotBinding` /
+    //       `SyntheticCarrierKey` / `synthetic_slot_binding` token). `ResolvedElements`
+    //       is parser-built; the parser/compiler must never mint the carrier.
+    //   (2) The ONLY production CALL site of `insert_resolved_named_type` is
+    //       `host_manage.rs` (`HostNamedTypeCacheAdapter::insert`), which forwards
+    //       the parser-provided `Arc<ResolvedElements>` UNCHANGED.
+    //   (3) The ONLY production CONSTRUCTION of
+    //       `SemanticNodeData::VueMacroElements(...)` is in
+    //       `semantic_query_memo/mod.rs` (`SemanticGraphStore::insert_resolved_named_type`).
+    //       Pattern-match arms (`VueMacroElements(_) =>`, `| ...VueMacroElements(_)`,
+    //       `matches!(.., VueMacroElements(_))`, binding `VueMacroElements(arc) =>`)
+    //       are NOT constructions and are correctly ignored.
+    // =======================================================================
+
+    /// The synthetic-carrier tokens whose absence from `verter_parser` /
+    /// `verter_compiler` production source is fact (1). `TypeExpr::SyntheticSlotBinding`
+    /// is the sole ordinal-bearing `TypeExpr` variant; `SyntheticCarrierKey`
+    /// is its payload struct (`value_node: u64` = the arena ordinal); the
+    /// `synthetic_slot_binding` constructor is the snake-case mint entry.
+    const SYNTHETIC_CARRIER_TOKENS: &[&str] = &[
+        "SyntheticSlotBinding",
+        "SyntheticCarrierKey",
+        "synthetic_slot_binding",
+    ];
+
+    /// The crates that build `ResolvedElements` and must stay carrier-free
+    /// (fact 1). Repo-relative `src/` prefixes — a production file outside
+    /// these prefixes is irrelevant to fact (1).
+    const CARRIER_FREE_CRATE_SRC_PREFIXES: &[&str] =
+        &["crates/verter_parser/src/", "crates/verter_compiler/src/"];
+
+    /// Count identifier-boundary occurrences, in PREPROCESSED `src`, of any
+    /// `SYNTHETIC_CARRIER_TOKENS` entry. Reuses `count_identifier_in_source`
+    /// so `SyntheticCarrierKeyV2` / `synthetic_slot_binding_helper` never
+    /// false-match a stale-but-renamed token. Operates on an arbitrary source
+    /// string so the discriminator can feed a synthetic parser-shaped file.
+    fn count_synthetic_carrier_tokens(src: &str) -> usize {
+        SYNTHETIC_CARRIER_TOKENS
+            .iter()
+            .map(|tok| count_identifier_in_source(src, tok))
+            .sum()
+    }
+
+    /// Count METHOD-CALL sites of `method` in PREPROCESSED `src` — occurrences
+    /// of `.<method>(` (a `.`-prefixed call, then `(`). This distinguishes a
+    /// production caller (`self.graph.insert_resolved_named_type(...)`) from the
+    /// `fn insert_resolved_named_type(` DEFINITION (preceded by `fn `, no `.`)
+    /// and from rustdoc `[`Self::insert_resolved_named_type`]` links (stripped
+    /// by `preprocess`). Identifier-bounded on the trailing side so
+    /// `.insert_resolved_named_type_v2(` never satisfies the ledger.
+    fn count_dot_call_sites(src: &str, method: &str) -> usize {
+        let bytes = src.as_bytes();
+        let mb = method.as_bytes();
+        let n = mb.len();
+        if n == 0 {
+            return 0;
+        }
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut count = 0usize;
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == mb {
+                // Must be `.`-prefixed (a method call), and the char BEFORE the
+                // dot must not extend an identifier into `.` (it never does —
+                // the dot itself is the boundary). The dot prefix is what
+                // separates a call from a `fn name(` definition.
+                let dot_ok = i >= 1 && bytes[i - 1] == b'.';
+                // Must be followed by `(` (allowing intervening whitespace for a
+                // call whose `(` wrapped to the next line), and the trailing
+                // char must be an identifier boundary.
+                let after = i + n;
+                let after_ok = after == bytes.len() || !is_ident_char(bytes[after]);
+                let mut k = after;
+                while k < bytes.len()
+                    && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
+                {
+                    k += 1;
+                }
+                let paren_ok = k < bytes.len() && bytes[k] == b'(';
+                if dot_ok && after_ok && paren_ok {
+                    count += 1;
+                    i = after;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        count
+    }
+
+    /// The fully-qualified variant whose CONSTRUCTION sites are fact (3).
+    const VUE_MACRO_ELEMENTS_VARIANT: &str = "SemanticNodeData::VueMacroElements";
+
+    /// Count CONSTRUCTION sites (NOT pattern arms) of
+    /// `SemanticNodeData::VueMacroElements(...)` in PREPROCESSED `src`.
+    ///
+    /// Construction vs pattern is decided structurally per occurrence:
+    ///   * the variant must be tuple-applied — immediately (past whitespace)
+    ///     followed by `(`;
+    ///   * if the tuple body is the wildcard `_` it is a PATTERN (you cannot
+    ///     construct a tuple variant with `_`) — never counted;
+    ///   * otherwise the token AFTER the balanced `(...)` decides: `=>` (arm
+    ///     separator) or `|` (alternation pattern continues) ⇒ PATTERN; any
+    ///     other continuation (`)`, `;`, `,`, `.`, end) ⇒ CONSTRUCTION (the
+    ///     variant is an EXPRESSION — an argument / RHS / return value).
+    ///
+    /// This classifies every live occurrence correctly: the sole construction
+    /// (`intern_node(SemanticNodeData::VueMacroElements(elements))`, body
+    /// `elements`, followed by `)`) counts; the `Debug`/display arms (body
+    /// `elements`, followed by an arm body — i.e. the `)` is followed by `=>`),
+    /// the binding arm (`VueMacroElements(arc) =>`), the `_` arms, the `|`
+    /// alternations, and the `matches!(.., VueMacroElements(_))` macro do not.
+    /// A genuine construction can NEVER be followed by `=>` (a syntax error),
+    /// so the classifier cannot misread a construction as a pattern or vice
+    /// versa. Operates on an arbitrary source string for the discriminator.
+    fn count_vue_macro_elements_constructions(src: &str) -> usize {
+        let bytes = src.as_bytes();
+        let vb = VUE_MACRO_ELEMENTS_VARIANT.as_bytes();
+        let n = vb.len();
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut count = 0usize;
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == vb {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
+                if before_ok && after_ok {
+                    // Skip whitespace to the tuple `(`.
+                    let mut k = i + n;
+                    while k < bytes.len()
+                        && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
+                    {
+                        k += 1;
+                    }
+                    if k < bytes.len() && bytes[k] == b'(' {
+                        // Walk the balanced tuple body to its closing `)`.
+                        let body_start = k + 1;
+                        let mut depth = 1usize;
+                        let mut j = body_start;
+                        while j < bytes.len() && depth > 0 {
+                            match bytes[j] {
+                                b'(' => depth += 1,
+                                b')' => depth -= 1,
+                                _ => {}
+                            }
+                            j += 1;
+                        }
+                        let body = src[body_start..j.saturating_sub(1)].trim();
+                        // Wildcard body ⇒ pattern, never a construction.
+                        let is_wildcard = body == "_";
+                        // Token after the balanced `(...)` decides arm vs expr.
+                        let mut t = j; // `j` is one past the closing `)`
+                        while t < bytes.len()
+                            && (bytes[t] == b' ' || bytes[t] == b'\n' || bytes[t] == b'\t')
+                        {
+                            t += 1;
+                        }
+                        let tail = &src[t..];
+                        let is_arm = tail.starts_with("=>") || tail.starts_with('|');
+                        if !is_wildcard && !is_arm {
+                            count += 1;
+                        }
+                    }
+                    i += n;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        count
+    }
+
+    /// Returns `true` iff repo-relative `rel` lives under a
+    /// `CARRIER_FREE_CRATE_SRC_PREFIXES` crate `src/`.
+    fn is_carrier_free_crate_file(rel: &str) -> bool {
+        CARRIER_FREE_CRATE_SRC_PREFIXES
+            .iter()
+            .any(|p| rel.starts_with(p))
+    }
+
+    /// The single expected `insert_resolved_named_type` production caller file
+    /// (fact 2). A `.insert_resolved_named_type(` call in ANY OTHER production
+    /// file, or a SECOND call inside this file, fails the guard.
+    const EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER: &str =
+        "crates/verter_session/src/host_manage.rs";
+
+    /// The single expected `SemanticNodeData::VueMacroElements(...)` production
+    /// construction file (fact 3).
+    const EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION: &str =
+        "crates/verter_session/src/semantic_query_memo/mod.rs";
+
+    /// Per-file `(repo_relative_path, occurrence_count)` observation rows.
+    type FileCounts = Vec<(String, usize)>;
+
+    /// The three pinned producer-surface observation sets:
+    /// `(carrier_hits, insert_caller_counts, construction_counts)`.
+    type ProducerSurfaceObservations = (FileCounts, FileCounts, FileCounts);
+
+    /// Scan the live production tree and return, for each pinned fact, the
+    /// per-file observation set. Shared between the live guard and the
+    /// discriminator self-test (which substitutes a synthetic file set), so
+    /// the two cannot diverge.
+    ///
+    /// Returns `(carrier_hits, insert_caller_counts, construction_counts)`:
+    ///   * `carrier_hits`: `(rel, count)` for each carrier-free-crate file with
+    ///     ≥1 synthetic-carrier token (MUST be empty).
+    ///   * `insert_caller_counts`: `(rel, count)` for each file with ≥1
+    ///     `.insert_resolved_named_type(` call.
+    ///   * `construction_counts`: `(rel, count)` for each file with ≥1
+    ///     `SemanticNodeData::VueMacroElements(...)` construction.
+    fn scan_vue_macro_elements_producer_surface(
+        files: &[(String, String)],
+    ) -> ProducerSurfaceObservations {
+        let mut carrier_hits: FileCounts = Vec::new();
+        let mut insert_caller_counts: FileCounts = Vec::new();
+        let mut construction_counts: FileCounts = Vec::new();
+        for (rel, src) in files {
+            let stripped = preprocess(src);
+            if is_carrier_free_crate_file(rel) {
+                let c = count_synthetic_carrier_tokens(&stripped);
+                if c > 0 {
+                    carrier_hits.push((rel.clone(), c));
+                }
+            }
+            let calls = count_dot_call_sites(&stripped, "insert_resolved_named_type");
+            if calls > 0 {
+                insert_caller_counts.push((rel.clone(), calls));
+            }
+            let ctors = count_vue_macro_elements_constructions(&stripped);
+            if ctors > 0 {
+                construction_counts.push((rel.clone(), ctors));
+            }
+        }
+        (carrier_hits, insert_caller_counts, construction_counts)
+    }
+
+    /// Read every production `src/` file as `(rel, raw_source)` for the
+    /// producer-surface scan (the scan does its own `preprocess`).
+    fn read_production_sources() -> Vec<(String, String)> {
+        collect_production_rs_files()
+            .into_iter()
+            .filter_map(|(path, rel)| fs::read_to_string(&path).ok().map(|s| (rel, s)))
+            .collect()
+    }
+
+    /// Assert the three pinned producer-surface facts against an arbitrary
+    /// observation set. Shared by the live guard and the discriminator (fed a
+    /// synthetic file set with planted violations). PANICS on any mismatch —
+    /// the discriminator catches the panic via `guard_reports_violation`.
+    fn assert_vue_macro_elements_producer_surface(files: &[(String, String)]) {
+        let (carrier_hits, insert_caller_counts, construction_counts) =
+            scan_vue_macro_elements_producer_surface(files);
+
+        // FACT (1): parser/compiler carrier-free.
+        assert!(
+            carrier_hits.is_empty(),
+            "VueMacroElements ordinal-leak guard FACT (1) BROKEN — \
+             `verter_parser`/`verter_compiler` production src now references the \
+             synthetic carrier ({SYNTHETIC_CARRIER_TOKENS:?}). `ResolvedElements` is \
+             parser-built and feeds the footprint encoder's `VueMacroElements` arm, \
+             which blanket-`Debug`s it; a `SyntheticSlotBinding` reaching it would \
+             leak a `SemanticNodeId` arena ordinal into the content-only \
+             fingerprint. If the carrier genuinely belongs here, the encoder arm \
+             must FIRST move to an explicit ordinal-free encoder. Offending \
+             files:\n  {}",
+            carrier_hits
+                .iter()
+                .map(|(f, c)| format!("{f}  ({c} token(s))"))
+                .collect::<Vec<_>>()
+                .join("\n  "),
+        );
+
+        // FACT (2): exactly one `insert_resolved_named_type` production caller,
+        // exactly once, and it is `host_manage.rs`.
+        let insert_expected: FileCounts =
+            vec![(EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER.to_string(), 1)];
+        assert_eq!(
+            sorted(insert_caller_counts.clone()),
+            insert_expected,
+            "VueMacroElements ordinal-leak guard FACT (2) BROKEN — the production \
+             callers of `insert_resolved_named_type` are no longer EXACTLY \
+             {{ {EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER}: 1 }}. A new caller (or a \
+             second call in `host_manage.rs`) could thread a session-origin \
+             `Arc<ResolvedElements>` carrying a `SyntheticSlotBinding` into the \
+             `VueMacroElements` slot, making the encoder's ordinal `Debug` \
+             reachable. Observed: {insert_caller_counts:?}",
+        );
+
+        // FACT (3): exactly one `VueMacroElements` production construction, once,
+        // in `semantic_query_memo/mod.rs`.
+        let ctor_expected: FileCounts =
+            vec![(EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION.to_string(), 1)];
+        assert_eq!(
+            sorted(construction_counts.clone()),
+            ctor_expected,
+            "VueMacroElements ordinal-leak guard FACT (3) BROKEN — the production \
+             CONSTRUCTION sites of `SemanticNodeData::VueMacroElements(...)` are no \
+             longer EXACTLY {{ {EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION}: 1 }}. A \
+             second construction site is a new producer that could intern a \
+             carrier-bearing `ResolvedElements`. Observed: {construction_counts:?}",
+        );
+    }
+
+    /// Stable-sort a `(String, usize)` observation set for order-independent
+    /// equality against an expected set.
+    fn sorted(mut v: FileCounts) -> FileCounts {
+        v.sort();
+        v
+    }
+
+    /// CRITICAL (Macro Type Traversal Rule / single-resolution-engine): the
+    /// footprint encoder's `SemanticNodeData::VueMacroElements` `Debug` arm can
+    /// never receive a `TypeExpr::SyntheticSlotBinding` ordinal, because the
+    /// producer surface is pinned to (1) carrier-free parser/compiler, (2) a
+    /// single `insert_resolved_named_type` caller, (3) a single `VueMacroElements`
+    /// construction. This is the architecture-authority-mandated closure of the
+    /// (provably-unreachable-today) ordinal-leak class — a STATIC producer-bound
+    /// guard, NOT an encoder change and NOT a second-engine allowlist.
+    #[test]
+    fn vue_macro_elements_ordinal_leak_is_producer_unreachable() {
+        let files = read_production_sources();
+        assert_vue_macro_elements_producer_surface(&files);
+    }
+
+    /// Anti-rogue discriminator: PROVES the producer-bound guard catches a real
+    /// violation of each pinned fact, and does NOT false-positive on a bare
+    /// match arm or the real tree. A guard that cannot fail is a stub
+    /// (CLAUDE.md Stub Prevention). Each planted violation is fed to the SAME
+    /// `assert_vue_macro_elements_producer_surface` the live guard uses and is
+    /// asserted to PANIC (via `guard_reports_violation`); the real tree and a
+    /// bare-match-arm-only tree are asserted to PASS.
+    #[test]
+    fn vue_macro_elements_producer_guard_discriminates() {
+        // Baseline: the REAL production tree ACCEPTS (green baseline, and proof
+        // the planted-reject cases below are not vacuously failing on the real
+        // tree's own contents).
+        let real = read_production_sources();
+        assert!(
+            !guard_reports_violation({
+                let real = real.clone();
+                move || assert_vue_macro_elements_producer_surface(&real)
+            }),
+            "producer-surface guard must PASS on the real tree (the ruling: the \
+             leak is provably unreachable today)"
+        );
+
+        // The minimal ACCEPTED baseline file set — exactly the three real
+        // producer-surface anchors, reduced to their load-bearing lines. The
+        // discriminator perturbs THIS set so each planted reject is isolated to
+        // one fact.
+        let host_manage = (
+            EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER.to_string(),
+            "let _ = self.graph.insert_resolved_named_type(host_key, value, g);\n".to_string(),
+        );
+        let memo = (
+            EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION.to_string(),
+            "let node_id = self.intern_node(SemanticNodeData::VueMacroElements(elements));\n"
+                .to_string(),
+        );
+        // A production file that is NOT a parser/compiler file and only PATTERN-
+        // MATCHES the variant (the ubiquitous, allowed shape). MUST be accepted.
+        let bare_match_arm = (
+            "crates/verter_session/src/project_semantic_dispatch/raise.rs".to_string(),
+            "match data {\n    SemanticNodeData::VueMacroElements(_) => false,\n    \
+             | SemanticNodeData::VueMacroElements(_) => true,\n    \
+             SemanticNodeData::VueMacroElements(arc) => Some(arc.clone()),\n}\n\
+             let is_vue = matches!(data, SemanticNodeData::VueMacroElements(_));\n"
+                .to_string(),
+        );
+        let baseline: Vec<(String, String)> =
+            vec![host_manage.clone(), memo.clone(), bare_match_arm.clone()];
+        // ACCEPT: the minimal baseline (one insert caller, one construction, no
+        // parser carrier, plus a pure match-arm file) — proves NO false positive
+        // on pattern matches.
+        assert!(
+            !guard_reports_violation({
+                let baseline = baseline.clone();
+                move || assert_vue_macro_elements_producer_surface(&baseline)
+            }),
+            "producer-surface guard must PASS on a minimal valid baseline whose \
+             only extra `VueMacroElements` references are PATTERN-MATCH arms — a \
+             match arm is not a construction and must not false-positive"
+        );
+
+        // REJECT (a): a synthetic `verter_parser` source that MINTS the carrier
+        // (`TypeExpr::SyntheticSlotBinding(...)` + `SyntheticCarrierKey { ... }`).
+        let mut planted_carrier = baseline.clone();
+        planted_carrier.push((
+            "crates/verter_parser/src/utils/oxc/script/type_surface/elements.rs".to_string(),
+            "let carrier = TypeExpr::SyntheticSlotBinding(Arc::new(SyntheticCarrierKey {\n    \
+             value_node: id.0,\n}));\n"
+                .to_string(),
+        ));
+        assert!(
+            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
+                &planted_carrier
+            )),
+            "FACT (1) discriminator: a synthetic `verter_parser` source minting a \
+             `SyntheticSlotBinding`/`SyntheticCarrierKey` MUST be REJECTED — a \
+             guard that cannot fail is a stub"
+        );
+
+        // REJECT (b): a SECOND production `.insert_resolved_named_type(` caller
+        // (a non-test, non-`host_manage.rs` file).
+        let mut planted_second_caller = baseline.clone();
+        planted_second_caller.push((
+            "crates/verter_session/src/brand_new_named_type_writer.rs".to_string(),
+            "let _ = self.graph.insert_resolved_named_type(other_key, other_value, g);\n"
+                .to_string(),
+        ));
+        assert!(
+            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
+                &planted_second_caller
+            )),
+            "FACT (2) discriminator: a SECOND production `insert_resolved_named_type` \
+             caller MUST be REJECTED"
+        );
+
+        // REJECT (b'): a SECOND `.insert_resolved_named_type(` call INSIDE
+        // `host_manage.rs` (in-file growth, not a new file).
+        let mut planted_in_file_caller = baseline.clone();
+        if let Some(slot) = planted_in_file_caller
+            .iter_mut()
+            .find(|(rel, _)| rel == EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER)
+        {
+            slot.1
+                .push_str("let _ = other.graph.insert_resolved_named_type(k2, v2, g2);\n");
+        }
+        assert!(
+            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
+                &planted_in_file_caller
+            )),
+            "FACT (2) discriminator: a SECOND `insert_resolved_named_type` call \
+             INSIDE the allowlisted caller file MUST be REJECTED (in-file growth)"
+        );
+
+        // REJECT (c): a SECOND production CONSTRUCTION of
+        // `SemanticNodeData::VueMacroElements(Arc::new(...))`.
+        let mut planted_second_ctor = baseline.clone();
+        planted_second_ctor.push((
+            "crates/verter_session/src/brand_new_vue_macro_producer.rs".to_string(),
+            "let n = self.intern_node(SemanticNodeData::VueMacroElements(Arc::new(\n    \
+             other_elements,\n)));\n"
+                .to_string(),
+        ));
+        assert!(
+            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
+                &planted_second_ctor
+            )),
+            "FACT (3) discriminator: a SECOND production `VueMacroElements` \
+             construction MUST be REJECTED"
+        );
+
+        // Unit-level proof of the construction-vs-pattern classifier (the
+        // load-bearing primitive): the construction form counts, every pattern
+        // form does not.
+        assert_eq!(
+            count_vue_macro_elements_constructions(
+                "self.intern_node(SemanticNodeData::VueMacroElements(elements))"
+            ),
+            1,
+            "the construction form (variant tuple-applied to an expr, followed \
+             by `)`) MUST count as 1"
+        );
+        for pattern in [
+            "SemanticNodeData::VueMacroElements(_) => false,",
+            "| SemanticNodeData::VueMacroElements(_) => true,",
+            "SemanticNodeData::VueMacroElements(arc) => Some(arc),",
+            "let v = matches!(data, SemanticNodeData::VueMacroElements(_));",
+            "SemanticNodeData::VueMacroElements(elements) => self.push(elements),",
+        ] {
+            assert_eq!(
+                count_vue_macro_elements_constructions(pattern),
+                0,
+                "a PATTERN-MATCH form (`{pattern}`) MUST NOT count as a \
+                 construction — it is followed by `=>` or `|`, or its body is `_`"
+            );
+        }
+
+        // Unit-level proof of the call-vs-definition discriminator.
+        assert_eq!(
+            count_dot_call_sites(
+                "let _ = self.graph.insert_resolved_named_type(k, v, g);",
+                "insert_resolved_named_type"
+            ),
+            1,
+            "a `.`-prefixed call MUST count"
+        );
+        assert_eq!(
+            count_dot_call_sites(
+                "pub fn insert_resolved_named_type(&self, key: K) -> V {",
+                "insert_resolved_named_type"
+            ),
+            0,
+            "the `fn …(` DEFINITION (no `.` prefix) MUST NOT count as a call"
+        );
+    }
 }
 
 /// Architecture guard (CRITICAL: typeinfo spans-not-strings) — the typeinfo
