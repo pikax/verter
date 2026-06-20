@@ -38,7 +38,7 @@ Every block/stage/phase runs: manager-owned implementation → full 3/3 review �
 |---|---|---|---|
 | CTO | interactive session | orchestration only | dispatch/decide/checkpoint; never implements |
 | Block manager | Agent sub-agent (fresh ctx) | full worktree | owns one unit through land |
-| Implementer/fix | Agent sub-agent | full | writes all code/tests/fixes; new commit per finding |
+| Implementer/fix | Agent sub-agent | full | writes all code/tests/fixes; new commit per finding; receives one decided solution + steps, makes no architecture/solution choice |
 | Review leg — claims-aware codex x1 | codex | read-only | latest/high reasoning; handed the change's claims as ASSERTIONS TO TEST/REFUTE — attacks each claim that does not hold; the claims are untrusted assertions, never a desired conclusion (no Never-Prime violation) |
 | Review leg — unprimed codex x1 | codex | read-only | latest/high reasoning; gets the artifact blind, hunts issues |
 | Review leg — adversarial claude x1 | Agent sub-agent (fresh ctx) | read-only | ADVERSARIAL, refute-first (CLAUDE-REVIEWER MANDATE); separate fresh agent from author; LAND only when it tried to break it and could not |
@@ -54,6 +54,7 @@ Role separation is required; account separation is optional. On one account, use
 ## CTO Rules
 
 - Architecture is always codex-owned. Modes differ only by whether codex's verdict is auto-adopted or user-ratified and where product/priority forks go.
+- Implementer briefs carry ONE decided path + steps, never a menu: managers decide routine implementation choices directly and route any architecture / high-stakes-design / public-behavior / cross-module-contract / performance-cache / ownership / plan-deviation choice NOT already settled by an approved binding plan/design or a prior codex verdict through the existing codex decision modes — regardless of manager confidence, never self-declaring it "resolved" — before briefing; implementers never choose the architecture/solution.
 - Never prime any reviewer, consult, verifier, confirmer, or adjudicator. Ask neutral questions; do not state the desired conclusion.
 - Every codex architecture/review/approval/adversarial/best-impl prompt prepends the CODEX-ARCHITECT MANDATE (`reference/PROTOCOL.md`); every claude-reviewer dispatch prepends the CLAUDE-REVIEWER MANDATE (`reference/CLAUDE-REVIEWER-MANDATE.md`).
 - Multiple-choice/high-stakes architecture forks use two neutral codex legs; disagreement uses a third code-verifying codex decider. Claude implements; codex never writes code.

@@ -132,6 +132,8 @@ Modes:
 - `full-autonomous`: auto-adopt codex architecture verdict; derive product/priority from approved plan.
 User never adjudicates architecture instead of codex. Stop/user boundaries: no implementation agent capacity (on opt-in `claude -p`, no usable implementation account), destructive operation (force-push/history rewrite/irreversible shared state), unrecoverable lost/corrupt worktree with no trusted commit, codex unavailable/contradicts evidence, or product/priority choice not derivable from plan.
 
+Implementer briefs contain ONE decided implementation path plus its steps, never a menu of choices. Managers resolve options BEFORE dispatch: routine local implementation choices (naming, small refactors, sequencing, mechanics) the manager decides directly; any architecture / high-stakes-design / public-behavior / cross-module-contract / performance-cache / ownership / plan-deviation choice NOT already settled by an approved binding plan/design or a prior codex verdict routes through the existing codex decision modes above — regardless of manager confidence; the manager may not self-declare such a choice "resolved" — and codex returns the chosen path plus steps. The implementer executes the chosen path and escalates newly-discovered conflicts; it never chooses the architecture/solution. The choice belongs upstream, never punted to the code-writing agent.
+
 ## Verification Gate
 
 Delegate heavy gates to a verify agent in the worktree and serialize globally.

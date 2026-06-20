@@ -1,6 +1,6 @@
 # Orchestration templates & mechanics
 
-Copy-and-fill skeletons for the orchestrator. These are starting points — adapt them to the block. The principle behind every one: a sub-agent or an external model sees *only* what you give it, so give it enough to make judgement calls, not just follow a narrow instruction.
+Copy-and-fill skeletons for the orchestrator. These are starting points — adapt them to the block. The principle behind every one: a sub-agent or an external model sees *only* what you give it, so give it enough context to do its job well — for the judging roles (reviewer, consult, diagnostic) that means enough to make real judgement calls, not just follow a narrow instruction; for the implementer it means one fully decided solution + steps (the implementer executes, it does not choose the architecture/solution — see Scope / deliverables below).
 
 ## 1. Self-contained implementer brief
 
@@ -15,9 +15,17 @@ Pass this brief as the Agent tool's `prompt` (the default mechanism) — or writ
 - Why this block exists — the problem it solves.
 
 ## Scope / deliverables
-- Concretely what to build or change. For a block whose design came from a
-  second-opinion consult, paste the consult's verdict here verbatim and say
-  "implement all of it; do not narrow it".
+- Concretely what to build or change. ONE decided solution + its steps — never a
+  menu of options. Resolve every option BEFORE writing this brief: decide routine
+  implementation choices directly; route any architecture / high-stakes-design /
+  public-behavior / cross-module-contract / performance-cache / ownership /
+  plan-deviation choice not already settled by the approved plan or a prior
+  second-opinion verdict through the second-opinion / codex decision path first
+  (the architecture-decision path) — regardless of confidence, never
+  self-declaring it resolved. The implementer executes the chosen path and
+  makes no architecture/solution choice.
+- For a block whose design came from a second-opinion consult, paste the consult's
+  verdict here verbatim and say "implement all of it; do not narrow it".
 - Number the deliverables so the report-back can map to them.
 
 ## Legacy deletions (explicit)

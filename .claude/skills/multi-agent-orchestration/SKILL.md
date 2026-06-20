@@ -36,7 +36,7 @@ Use per-block loop (steps 3–8) for any single substantial block even outside a
 
 ## The orchestrator role
 
-**Only**: decompose plan; write briefs; dispatch sub-agents; read reports; verify git state; run reviews; make decisions; consult second-opinion model on doubt; manage branches, worktrees, plan-state file.
+**Only**: decompose plan; write briefs; dispatch sub-agents; read reports; verify git state; run reviews; make decisions; consult second-opinion model on doubt; manage branches, worktrees, plan-state file. Resolve every option before the implementer brief — decide routine implementation choices directly; route any architecture / high-stakes-design / public-behavior / cross-module-contract / performance-cache / ownership / plan-deviation choice NOT already settled by the approved plan or a prior second-opinion verdict to the second-opinion model (the architecture-decision path; under MoM/CTO this is the codex decision modes) regardless of confidence, never self-declaring it "resolved"; and brief the implementer ONE decided solution. Never hand a menu down; the implementer makes no architecture/solution choice.
 
 **Never**: write/edit production code; run test suite; investigate a bug by reading source; review a diff line-by-line. The instant the orchestrator does the work, its context fills with detail and it loses the plot.
 
@@ -47,7 +47,7 @@ Lightweight mechanics the orchestrator *may* do directly: `git worktree add/remo
 | Agent | Job | Tool access |
 |---|---|---|
 | **Orchestrator** | Decompose, brief, dispatch, verify, decide, manage git/state | this session |
-| **Implementer** | Implement one block from a self-contained brief | full |
+| **Implementer** | Implement one block from a self-contained brief — one decided solution + steps, makes no architecture/solution choice | full |
 | **Reviewer (claude — ADVERSARIAL)** | Independent, harsh, refute-first review of one block — reviews to BREAK the change, default-to-reject; LAND only when it tried hard to find a bug/over-claim/weakening/non-discriminating test and could not | read-only |
 | **Fix-agent** | Consume review findings, apply fixes as a new commit | full |
 | **Extraction agent** | Gather/extract source into one file | read-only |
