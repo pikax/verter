@@ -138,10 +138,14 @@ pub mod component_meta_result_db;
 #[cfg(test)]
 mod component_meta_slot_binding_skip_tests;
 #[cfg(test)]
+mod component_meta_surface_equivalence_tests;
+#[cfg(test)]
 mod component_meta_terminal_mode_tests;
 #[cfg(test)]
 mod component_meta_warm_invalidation_oracle_tests;
 pub mod cross_file;
+#[cfg(test)]
+mod decl_body_dispatch_equivalence_tests;
 pub(crate) mod decl_body_memo;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
