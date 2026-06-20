@@ -22573,33 +22573,65 @@ const MIRROR_MACRO_ARG_PRODUCT_TYPE: &str = "HotTypeRef";
 /// helper produces — token-spaced exactly as `render_type` emits it.
 const MIRROR_BINDER_SEED_RETURN_TYPE: &str = "Vec < BinderScope >";
 
-/// Collect the `syn::Signature` of EVERY CRATE-VISIBLE function named `name`
-/// across a source's items — module-level FREE fns (`ItemFn`), ASSOCIATED fns
-/// inside INHERENT `impl` blocks (`ImplItemFn`), and both forms nested in inline
-/// `mod` blocks. This is the exact surface
-/// [`collect_crate_visible_fns_in_items`] enumerates for the entry-NAME scan, so
-/// the SIGNATURE anti-usurpation validation covers the same surface the name scan
-/// does — closing the associated-fn hole where a producer-shaped
-/// `impl X { pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }`
-/// was name-allowlisted but never signature-checked (the old free-fn-only
-/// validator skipped `impl` blocks).
-///
-/// Visibility/test-gating filters mirror the name collector exactly: a TRAIT impl
-/// (`imp.trait_` set) is SKIPPED (its methods inherit the trait's visibility and
-/// can never be an independently crate-visible producer entry); a `#[cfg(test)]`
-/// (or `any(test, …)`) gated fn / impl / mod is excluded; only crate-visible
-/// (`pub` / `pub(crate)` / `pub(in crate)`) fns are collected.
-fn find_all_crate_visible_fn_signatures(items: &[syn::Item], name: &str) -> Vec<syn::Signature> {
-    let mut sigs = Vec::new();
-    collect_crate_visible_fn_signatures_named(items, name, &mut sigs);
-    sigs
+/// Where an occurrence of the sanctioned name is DEFINED. The positive
+/// structural pin requires the SOLE occurrence to be a module-level FREE
+/// [`syn::ItemFn`]; every other definition kind — an associated fn inside ANY
+/// `impl` (inherent OR trait), a trait-item declaration — is a usurpation of the
+/// sanctioned name, regardless of how the offending fn aliases the macro-arg
+/// product (`Self` inside `impl HotTypeRef`, a generic bound, a type alias). The
+/// kind is recorded so a violation can say exactly which non-free surface the
+/// usurper took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SanctionedOccurrenceKind {
+    /// A module-level free `fn` — the only sanctioned shape.
+    Free,
+    /// An associated `fn` inside an inherent `impl` block.
+    InherentAssoc,
+    /// An associated `fn` inside a trait `impl` block (`impl Trait for T`).
+    TraitImplAssoc,
+    /// A trait-item `fn` declaration (`trait T { fn … }`).
+    TraitItem,
 }
 
-/// Recursive worker for [`find_all_crate_visible_fn_signatures`].
-fn collect_crate_visible_fn_signatures_named(
+impl SanctionedOccurrenceKind {
+    fn describe(self) -> &'static str {
+        match self {
+            SanctionedOccurrenceKind::Free => "a module-level free fn",
+            SanctionedOccurrenceKind::InherentAssoc => "an associated fn inside an inherent impl",
+            SanctionedOccurrenceKind::TraitImplAssoc => {
+                "an associated fn inside a trait impl (`impl Trait for T`)"
+            }
+            SanctionedOccurrenceKind::TraitItem => "a trait-item fn declaration",
+        }
+    }
+}
+
+/// One discovered definition of the sanctioned name: where it lives (`rel`), the
+/// surface kind, and its parsed signature. The positive pin reasons over the
+/// PARSED STRUCTURE of the signature (free-fn-ness, generics, receiver, the
+/// param/return shape) — never over rendered whitespace, arg names, or raw
+/// source bytes.
+struct SanctionedOccurrence {
+    rel: String,
+    kind: SanctionedOccurrenceKind,
+    sig: syn::Signature,
+}
+
+/// Collect EVERY definition of the sanctioned name `name` across a source's
+/// items — a module-level FREE `fn`, an associated `fn` inside ANY `impl`
+/// (inherent OR trait), a trait-item `fn` declaration, and all of those nested in
+/// inline `mod` blocks. This is intentionally BROADER than a crate-visibility
+/// scan: the positive pin asserts the name has EXACTLY ONE definition and that it
+/// is the genuine free-fn shape, so ANY second definition (in any surface, at any
+/// visibility) is a usurpation — there is no visibility spelling a usurper can
+/// hide behind. `#[cfg(test)]`-gated items are excluded (a test fixture is not a
+/// production surface); production `#[cfg(not(test))]` / `debug_assertions` items
+/// are kept (they compile in production builds).
+fn collect_sanctioned_occurrences(
     items: &[syn::Item],
     name: &str,
-    sigs: &mut Vec<syn::Signature>,
+    rel: &str,
+    out: &mut Vec<SanctionedOccurrence>,
 ) {
     for item in items {
         match item {
@@ -22607,24 +22639,53 @@ fn collect_crate_visible_fn_signatures_named(
                 if attrs_test_gate(&f.attrs) {
                     continue;
                 }
-                if f.sig.ident == name && visibility_is_crate_visible(&f.vis) {
-                    sigs.push(f.sig.clone());
+                if f.sig.ident == name {
+                    out.push(SanctionedOccurrence {
+                        rel: rel.to_string(),
+                        kind: SanctionedOccurrenceKind::Free,
+                        sig: f.sig.clone(),
+                    });
                 }
             }
             syn::Item::Impl(imp) => {
-                // Trait-impl methods are not an independently crate-visible
-                // producer-entry vector — skip them, exactly as the name
-                // collector does. A test-gated impl is skipped wholesale.
-                if imp.trait_.is_some() || attrs_test_gate(&imp.attrs) {
+                if attrs_test_gate(&imp.attrs) {
                     continue;
                 }
+                let kind = if imp.trait_.is_some() {
+                    SanctionedOccurrenceKind::TraitImplAssoc
+                } else {
+                    SanctionedOccurrenceKind::InherentAssoc
+                };
                 for impl_item in &imp.items {
                     if let syn::ImplItem::Fn(m) = impl_item {
                         if attrs_test_gate(&m.attrs) {
                             continue;
                         }
-                        if m.sig.ident == name && visibility_is_crate_visible(&m.vis) {
-                            sigs.push(m.sig.clone());
+                        if m.sig.ident == name {
+                            out.push(SanctionedOccurrence {
+                                rel: rel.to_string(),
+                                kind,
+                                sig: m.sig.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            syn::Item::Trait(tr) => {
+                if attrs_test_gate(&tr.attrs) {
+                    continue;
+                }
+                for trait_item in &tr.items {
+                    if let syn::TraitItem::Fn(m) = trait_item {
+                        if attrs_test_gate(&m.attrs) {
+                            continue;
+                        }
+                        if m.sig.ident == name {
+                            out.push(SanctionedOccurrence {
+                                rel: rel.to_string(),
+                                kind: SanctionedOccurrenceKind::TraitItem,
+                                sig: m.sig.clone(),
+                            });
                         }
                     }
                 }
@@ -22634,7 +22695,7 @@ fn collect_crate_visible_fn_signatures_named(
                     continue;
                 }
                 if let Some((_, inner)) = &m.content {
-                    collect_crate_visible_fn_signatures_named(inner, name, sigs);
+                    collect_sanctioned_occurrences(inner, name, rel, out);
                 }
             }
             _ => {}
@@ -22642,209 +22703,183 @@ fn collect_crate_visible_fn_signatures_named(
     }
 }
 
-/// Validate that the sanctioned non-producer name `fn_name` has EXACTLY ONE
-/// crate-visible definition in `src` AND that it is a genuine non-producer by
-/// signature. This is the FULL anti-usurpation gate, covering EVERY crate-visible
-/// occurrence — free fn, inherent-`impl` associated fn, and inline-mod nesting —
-/// not just the first free fn:
-///
-/// - ZERO crate-visible definitions ⇒ `Err` (the sanctioned name vanished; the
-///   guard's anti-vacuity locator already panics earlier, but this keeps the
-///   validator self-consistent for the self-test).
-/// - MORE THAN ONE crate-visible definition ⇒ `Err`. A sanctioned name must have
-///   exactly one genuine non-producer definition; a SECOND definition under the
-///   same name (e.g. a real free helper PLUS an associated-fn usurper) is the
-///   usurpation vector — the producer-shaped second entry would otherwise hide
-///   behind the name allowlist.
-/// - Each definition's signature is checked by [`signature_is_non_producer`]
-///   (returns the binder-seed `Vec<BinderScope>`, neither returns nor accepts the
-///   macro-arg product `HotTypeRef`); ANY producer-shaped occurrence ⇒ `Err`.
-fn validate_sanctioned_entry_all_occurrences(src: &str, fn_name: &str) -> Result<(), String> {
-    let file = syn::parse_file(src).map_err(|e| {
-        format!("sanctioned-entry signature parse of source defining {fn_name}: {e}")
-    })?;
-    let sigs = find_all_crate_visible_fn_signatures(&file.items, fn_name);
-    if sigs.is_empty() {
-        return Err(format!(
-            "sanctioned non-producer entry `{fn_name}` has NO crate-visible definition in its \
-             source — it must be defined exactly once as a genuine non-producer"
-        ));
-    }
-    if sigs.len() > 1 {
-        return Err(format!(
-            "sanctioned non-producer entry `{fn_name}` is defined {} times across crate-visible \
-             surfaces (free fns + inherent-impl associated fns) — a sanctioned name must have \
-             EXACTLY ONE genuine non-producer definition; a second definition under the same name \
-             is the usurpation vector (e.g. a real free helper plus an associated-fn usurper)",
-            sigs.len()
-        ));
-    }
-    signature_is_non_producer(&sigs[0], fn_name)
-}
+/// The genuine sanctioned helper's parameter types, rendered token-spaced
+/// exactly as [`render_type`] emits them. The positive pin requires the SOLE
+/// occurrence to carry these three typed params in order. Pinning the parsed
+/// parameter TYPES (not arg names, not whitespace) makes a direct-product param
+/// (`seed: HotTypeRef`) or an alias-shaped param fail; the upstream free-fn /
+/// no-generics / no-receiver / single-occurrence properties already close the
+/// alias/`Self`/generic-bound class, so this is a redundant structural belt.
+const MIRROR_SEED_FRAMES_PARAM_TYPES: &[&str] = &[
+    "& crate :: project_type_store :: IndexedReady",
+    "& SemanticGraphStore",
+    "& NodeScopeId",
+];
 
-/// MODULE-GLOBAL anti-usurpation gate for a sanctioned non-producer name: the
-/// AGGREGATE of EVERY crate-visible occurrence across ALL scanned
-/// `macro_hot_mirror/**` production sources — not a single file. `mirror_sources`
-/// is the per-file `(rel, src)` list the entry-surface guard already retains.
+/// POSITIVE STRUCTURAL AST PIN for the sanctioned binder-seed helper `fn_name`,
+/// aggregated across ALL scanned `macro_hot_mirror/**` production sources
+/// (`mirror_sources` is the per-file `(rel, src)` list the entry-surface guard
+/// already retains).
 ///
-/// Why this exists beyond [`validate_sanctioned_entry_all_occurrences`]: that
-/// validator parses ONE `src` and so only covers occurrences WITHIN a single
-/// file. The genuine helper is a free fn in `script_setup_binder.rs`, so a
-/// file-located validator (locate the defining free-fn file, validate only that
-/// file's source) would NEVER see a producer-shaped associated-fn usurper of the
-/// sanctioned name placed in a DIFFERENT mirror file
-/// (`impl X { pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }`
-/// in `mod.rs`/`structural_lower.rs`) — it would be name-allowlisted but never
-/// signature-checked. The module-global aggregate closes that cross-file vector:
+/// This REPLACES the former negative token-rendering confinement
+/// (`render_type(..).contains("HotTypeRef")`), which was structurally LEAKY: a
+/// usurper could alias the macro-arg product behind `Self` in `impl HotTypeRef`,
+/// a generic bound / `where` clause, a `type H = HotTypeRef` alias, a reexport
+/// (`use … as H`), or an associated-type projection — none of which RENDER the
+/// token `HotTypeRef`, so the negative scan passed them. A POSITIVE contract
+/// closes the whole evasion class AT ONCE: it asserts the sanctioned name IS
+/// EXACTLY the one genuine production shape, so ANYTHING that is not that shape —
+/// however it aliases the product — fails. The pin reasons over PARSED STRUCTURE
+/// (free-fn-ness, generics, receiver, the param/return shape), never over a
+/// rendered spelling or raw source bytes, so a legitimate signature change
+/// correctly turns it RED until the sanctioned surface is reviewed and re-pinned
+/// (that is the intended governance, not brittleness).
 ///
-/// - Collect EVERY crate-visible occurrence (free fn + inherent-impl associated
-///   fn + inline-mod nesting — the surface [`collect_crate_visible_fn_signatures_named`]
-///   enumerates, matching the name scan) across ALL files, WITH file provenance
-///   `(rel, sig)` so a violation can name the offending file.
-/// - ZERO occurrences ⇒ `Err` (the sanctioned name vanished module-wide).
-/// - The AGGREGATE occurrence count must be EXACTLY ONE: a SECOND crate-visible
-///   definition under the sanctioned name ANYWHERE in the module — in ANY mirror
-///   file — is the usurpation vector and FAILS (the error names every file).
-/// - Each occurrence is signature-checked via [`signature_is_non_producer`]
-///   (returns the binder-seed `Vec<BinderScope>`, neither returns nor accepts the
-///   macro-arg product `HotTypeRef`); ANY producer-shaped occurrence in ANY file
-///   FAILS — not just the free-fn-defining file's occurrences.
-fn validate_sanctioned_entry_module_global(
+/// The five structural assertions (each independently fatal):
+///
+/// 1. EXACTLY ONE occurrence of the name across ALL mirror sources and ALL item
+///    kinds (free fn, inherent-`impl` assoc fn, trait-`impl` assoc fn, trait-item
+///    fn, inline-mod nesting). ZERO ⇒ the name vanished. >1 ⇒ a second definition
+///    anywhere is the usurpation vector.
+/// 2. That one occurrence IS a module-level FREE `ItemFn` — NOT an associated fn
+///    inside any `impl`, NOT a trait method. (A `Self`-aliasing or receiver
+///    usurper is necessarily an associated fn, so it dies here.)
+/// 3. Its signature has NO generic params, NO `where` clause, and NO receiver. (A
+///    generic-bound usurper `fn …<T: From<HotTypeRef>>(…)` dies here; a receiver
+///    usurper dies here too, redundantly with #2.)
+/// 4. Its parameters are EXACTLY the three genuine typed params in order
+///    ([`MIRROR_SEED_FRAMES_PARAM_TYPES`]). A direct-product param
+///    (`seed: HotTypeRef`) or any other shape fails.
+/// 5. Its return type is EXACTLY the genuine binder-seed shape
+///    [`MIRROR_BINDER_SEED_RETURN_TYPE`] (`Vec<BinderScope>`). A product return
+///    (`-> HotTypeRef` / `-> Option<HotTypeRef>`) fails.
+fn positive_pin_sanctioned_helper(
     mirror_sources: &[(String, String)],
     fn_name: &str,
 ) -> Result<(), String> {
-    // (rel, signature) for every crate-visible occurrence of the name, across
-    // ALL mirror files — the module-global aggregate.
-    let mut occurrences: Vec<(String, syn::Signature)> = Vec::new();
+    let mut occurrences: Vec<SanctionedOccurrence> = Vec::new();
     for (rel, src) in mirror_sources {
-        let file = syn::parse_file(src).map_err(|e| {
-            format!("sanctioned-entry module-global signature parse of `{rel}` for {fn_name}: {e}")
-        })?;
-        for sig in find_all_crate_visible_fn_signatures(&file.items, fn_name) {
-            occurrences.push((rel.clone(), sig));
-        }
+        let file = syn::parse_file(src)
+            .map_err(|e| format!("positive-pin parse of `{rel}` while pinning `{fn_name}`: {e}"))?;
+        collect_sanctioned_occurrences(&file.items, fn_name, rel, &mut occurrences);
     }
+
+    // #1 — EXACTLY ONE occurrence module-wide, across every item kind.
     if occurrences.is_empty() {
         return Err(format!(
-            "sanctioned non-producer entry `{fn_name}` has NO crate-visible definition anywhere in \
-             `macro_hot_mirror/**` — it must be defined exactly once as a genuine non-producer"
+            "positive-pin #1: the sanctioned helper `{fn_name}` has NO definition anywhere in \
+             `macro_hot_mirror/**` — it must be defined EXACTLY ONCE as the genuine module-level \
+             free fn (its disappearance means the binder-seed producer regressed)"
         ));
     }
     if occurrences.len() > 1 {
-        let files: Vec<&str> = occurrences.iter().map(|(rel, _)| rel.as_str()).collect();
+        let where_found: Vec<String> = occurrences
+            .iter()
+            .map(|o| format!("{} ({})", o.rel, o.kind.describe()))
+            .collect();
         return Err(format!(
-            "sanctioned non-producer entry `{fn_name}` is defined {} times across crate-visible \
-             surfaces (free fns + inherent-impl associated fns) MODULE-WIDE in `macro_hot_mirror/**` \
-             — a sanctioned name must have EXACTLY ONE genuine non-producer definition across the \
-             WHOLE module; a second crate-visible definition under the same name in ANY mirror file \
-             is the usurpation vector (e.g. the genuine free helper in one file plus an associated-fn \
-             usurper in another). Occurrences found in: {files:?}",
+            "positive-pin #1: the sanctioned helper `{fn_name}` is defined {} times across \
+             `macro_hot_mirror/**` — it MUST have EXACTLY ONE definition. A second definition \
+             under the sanctioned name (in ANY file, ANY item kind, ANY visibility) is the \
+             usurpation vector: it cannot be distinguished from the genuine helper by name, so it \
+             rides the allowlist. Occurrences: {where_found:?}",
             occurrences.len()
         ));
     }
-    // Exactly one occurrence module-wide — signature-check it (and, defensively,
-    // every occurrence if the count ever loosened: a producer-shaped occurrence
-    // in ANY file fails, naming the file).
-    for (rel, sig) in &occurrences {
-        signature_is_non_producer(sig, fn_name)
-            .map_err(|reason| format!("in `{rel}`: {reason}"))?;
-    }
-    Ok(())
-}
 
-/// Whether a single `syn::Signature` is a genuine non-producer per the
-/// anti-usurpation rule: (1) its return type is the binder-seed shape
-/// `Vec<BinderScope>` (NOT the producer's `Option<HotTypeRef>`), (2) NEITHER the
-/// return type NOR any TYPED input type mentions the macro-arg product type
-/// `HotTypeRef`, and (3) it has NO `self` receiver — the genuine helper is a
-/// module-level FREE fn, so a receiver-bearing associated fn (which carries the
-/// macro-arg product through `self`, e.g. inside `impl HotTypeRef { … }`) is a
-/// usurpation regardless of the receiver's spelling. Signature-only (never the
-/// body): the genuine helper legitimately calls `HotTypeRef::node(..)` internally.
-/// Returns `Err(reason)` on a usurpation, `Ok(())` for a genuine non-producer.
-fn signature_is_non_producer(sig: &syn::Signature, fn_name: &str) -> Result<(), String> {
-    // (1) Return type must be the binder-seed shape.
+    let occurrence = &occurrences[0];
+
+    // #2 — the SOLE occurrence is a module-level FREE fn (not associated, not a
+    // trait method). This is the single property that closes the `Self`-aliasing
+    // vector (`impl HotTypeRef { fn …(seed: Self) -> … }`) the negative scan could
+    // not see: `Self` renders no `HotTypeRef` token, but the fn is an associated
+    // fn, so it is rejected structurally.
+    if occurrence.kind != SanctionedOccurrenceKind::Free {
+        return Err(format!(
+            "positive-pin #2: the sanctioned helper `{fn_name}` in `{}` is {} — it MUST be a \
+             module-level FREE fn. An associated/trait fn can alias the macro-arg product through \
+             `Self` (inside `impl HotTypeRef`), the impl self-type, or a receiver WITHOUT rendering \
+             the token `{MIRROR_MACRO_ARG_PRODUCT_TYPE}`, which a negative spelling scan cannot \
+             catch; pinning the free-fn shape rejects it structurally",
+            occurrence.rel,
+            occurrence.kind.describe()
+        ));
+    }
+
+    let sig = &occurrence.sig;
+
+    // #3 — NO generics, NO `where`, NO receiver. Closes the generic-bound vector
+    // (`fn …<T: From<HotTypeRef>>(t: T) -> …`) and any receiver usurper.
+    if !sig.generics.params.is_empty() {
+        return Err(format!(
+            "positive-pin #3: the sanctioned helper `{fn_name}` declares generic parameters — the \
+             genuine helper is NON-generic. A generic usurper can alias the macro-arg product \
+             through a bound (`<T: From<{MIRROR_MACRO_ARG_PRODUCT_TYPE}>>`) the negative scan never \
+             rendered; a non-generic pin rejects it"
+        ));
+    }
+    if sig.generics.where_clause.is_some() {
+        return Err(format!(
+            "positive-pin #3: the sanctioned helper `{fn_name}` has a `where` clause — the genuine \
+             helper has none. A `where` bound can carry the macro-arg product (or an alias of it) \
+             invisibly to a token scan; a no-`where` pin rejects it"
+        ));
+    }
+    if sig
+        .inputs
+        .iter()
+        .any(|input| matches!(input, syn::FnArg::Receiver(_)))
+    {
+        return Err(format!(
+            "positive-pin #3: the sanctioned helper `{fn_name}` has a `self` receiver — the genuine \
+             helper is a free fn with NO receiver. A receiver carries the impl self-type (e.g. \
+             `impl {MIRROR_MACRO_ARG_PRODUCT_TYPE}`) into the fn without naming the product in a \
+             typed arm; rejecting any receiver closes that vector"
+        ));
+    }
+
+    // #4 — EXACTLY the three genuine typed params, in order, by rendered type. A
+    // direct-product param (`seed: HotTypeRef`) or any reshaping fails. The typed
+    // params are read structurally; their rendered TYPES are fixed and pinned (not
+    // their arg names).
+    let param_types: Vec<String> = sig
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(pat_type) => Some(render_type(&pat_type.ty)),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect();
+    if param_types.len() != MIRROR_SEED_FRAMES_PARAM_TYPES.len()
+        || param_types
+            .iter()
+            .zip(MIRROR_SEED_FRAMES_PARAM_TYPES)
+            .any(|(actual, expected)| actual != expected)
+    {
+        return Err(format!(
+            "positive-pin #4: the sanctioned helper `{fn_name}` parameter types do not match the \
+             genuine binder-seed shape. Expected (in order) {MIRROR_SEED_FRAMES_PARAM_TYPES:?}; \
+             found {param_types:?}. A usurper that accepts the macro-arg product directly \
+             (`seed: {MIRROR_MACRO_ARG_PRODUCT_TYPE}`) or reshapes the params fails here"
+        ));
+    }
+
+    // #5 — EXACTLY the genuine binder-seed return shape. A product return
+    // (`-> HotTypeRef` / `-> Option<HotTypeRef>`) fails.
     let return_rendered = match &sig.output {
         syn::ReturnType::Type(_, ty) => render_type(ty),
-        // A unit return is not the binder-seed shape — and a producer never
-        // returns unit either, but a sanctioned binder-seed builder MUST return
-        // `Vec<BinderScope>`, so a unit return is a usurpation of the slot.
         syn::ReturnType::Default => "()".to_string(),
     };
     if return_rendered != MIRROR_BINDER_SEED_RETURN_TYPE {
         return Err(format!(
-            "sanctioned non-producer `{fn_name}` must return the binder-seed shape \
-             `{MIRROR_BINDER_SEED_RETURN_TYPE}` (NOT a macro-arg product); found return type \
-             `{return_rendered}` — a producer-shaped usurpation of the sanctioned name"
+            "positive-pin #5: the sanctioned helper `{fn_name}` must return the genuine binder-seed \
+             shape `{MIRROR_BINDER_SEED_RETURN_TYPE}`; found `{return_rendered}`. A usurper that \
+             returns the macro-arg product (`-> {MIRROR_MACRO_ARG_PRODUCT_TYPE}` / \
+             `-> Option<{MIRROR_MACRO_ARG_PRODUCT_TYPE}>`) fails here"
         ));
     }
-    // (2) Neither return nor any input may mention the macro-arg product type.
-    if return_rendered.contains(MIRROR_MACRO_ARG_PRODUCT_TYPE) {
-        return Err(format!(
-            "sanctioned non-producer `{fn_name}` return type mentions the macro-arg product \
-             `{MIRROR_MACRO_ARG_PRODUCT_TYPE}` (`{return_rendered}`) — it exposes the producer surface"
-        ));
-    }
-    for input in &sig.inputs {
-        match input {
-            // (3) A RECEIVER (`self` / `&self` / `&mut self` / `self: T` /
-            // `self: Box<…>` / `Arc<Self>`) carries the impl self-type INTO the
-            // fn. `HotTypeRef` is a `pub` crate-visible type, so
-            // `impl HotTypeRef { fn build_script_setup_seed_frames(self) -> … }`
-            // is a real crate-visible inherent-method surface that takes the
-            // macro-arg product THROUGH the receiver — and the receiver type is
-            // not in `sig.inputs` as a `Typed` arm, so a receiver-blind input
-            // scan would skip it. The genuine sanctioned helper is a module-level
-            // FREE fn with NO receiver (`(indexed, graph, scope) -> Vec<…>`), so a
-            // sanctioned entry has NO legitimate reason to be a method with a
-            // receiver. REJECT any receiver-bearing entry — this closes the
-            // receiver vector regardless of the receiver's exact spelling, since
-            // the genuine helper never has one.
-            syn::FnArg::Receiver(_) => {
-                return Err(format!(
-                    "sanctioned non-producer `{fn_name}` is an associated fn with a `self` receiver \
-                     — a sanctioned non-producer entry must be a FREE fn with no receiver. A \
-                     receiver-bearing associated fn carries the macro-arg product \
-                     `{MIRROR_MACRO_ARG_PRODUCT_TYPE}` through `self` (e.g. inside \
-                     `impl {MIRROR_MACRO_ARG_PRODUCT_TYPE} {{ … }}`) and is a usurpation of the \
-                     sanctioned name"
-                ));
-            }
-            syn::FnArg::Typed(pat_type) => {
-                let input_rendered = render_type(&pat_type.ty);
-                if input_rendered.contains(MIRROR_MACRO_ARG_PRODUCT_TYPE) {
-                    return Err(format!(
-                        "sanctioned non-producer `{fn_name}` accepts the macro-arg product \
-                         `{MIRROR_MACRO_ARG_PRODUCT_TYPE}` as an input (`{input_rendered}`) — it \
-                         takes the producer surface"
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
 
-/// SIGNATURE anti-usurpation check for a sanctioned non-producer mirror entry
-/// (FIX C — ANTI-ROGUE). The name-only allowlist
-/// ([`MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES`]) is necessary but NOT sufficient:
-/// a function USURPING the sanctioned name with a real macro-arg producer body
-/// would pass a bare-name check. Delegates to
-/// [`validate_sanctioned_entry_all_occurrences`], which covers EVERY
-/// crate-visible occurrence of the name — module-level FREE fns, ASSOCIATED fns
-/// inside INHERENT `impl` blocks, and inline-mod nesting — rejecting a DUPLICATE
-/// definition (a second crate-visible def under the same name is itself the
-/// usurpation vector) and requiring each occurrence to be a genuine non-producer
-/// by signature (returns the binder-seed `Vec<BinderScope>`, neither returns nor
-/// accepts the macro-arg product `HotTypeRef`).
-///
-/// The previous free-fn-only validator (`find_free_fn_signature`) skipped `impl`
-/// blocks, so a producer-shaped ASSOCIATED-fn usurper
-/// (`impl X { pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }`)
-/// was name-allowlisted but NEVER signature-checked → it PASSED. The
-/// all-occurrences validation closes that hole.
-fn sanctioned_non_producer_signature_is_genuine(src: &str, fn_name: &str) -> Result<(), String> {
-    validate_sanctioned_entry_all_occurrences(src, fn_name)
+    Ok(())
 }
 
 /// GOV finding (c) + round-4/5 extension: assert `macro_type_arg_hot_ref` is the
@@ -22868,8 +22903,9 @@ fn sanctioned_non_producer_signature_is_genuine(src: &str, fn_name: &str) -> Res
 fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     let mut crate_visible: Vec<(String, String)> = Vec::new();
     let mut scanned_mirror_files = 0usize;
-    // Retain each mirror file's source so the sanctioned-entry SIGNATURE check
-    // below (FIX C) can re-parse the file that DEFINES each sanctioned helper.
+    // Retain each mirror file's source so the POSITIVE STRUCTURAL PIN below can
+    // parse every mirror file and aggregate occurrences of the sanctioned helper
+    // name module-wide.
     let mut mirror_sources: Vec<(String, String)> = Vec::new();
     for (rel, src) in session_production_src_files() {
         if !rel.contains("macro_hot_mirror/") {
@@ -22912,33 +22948,30 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
          and add it to the sanctioned set with justification."
     );
 
-    // FIX C (ANTI-ROGUE): the name-only sanction is necessary but NOT
-    // sufficient — a fn USURPING a sanctioned name with a real macro-arg
-    // producer body would pass the bare-name allowlist. For EVERY sanctioned
-    // non-producer entry, verify by SIGNATURE that it is a genuine non-producer
-    // (returns the binder-seed `Vec<BinderScope>`, neither returns nor accepts
-    // the macro-arg product `HotTypeRef`). A producer-shaped usurpation FAILS
-    // here even though its name is on the allowlist.
-    //
-    // The validation is MODULE-GLOBAL: it aggregates EVERY crate-visible
-    // occurrence of the sanctioned name across ALL scanned `macro_hot_mirror/**`
-    // sources (free fns + inherent-impl associated fns + inline-mod nesting),
-    // requires the aggregate count to be EXACTLY ONE module-wide, and
-    // signature-checks every occurrence. A file-located validator (locate the
-    // free-fn-defining file, validate only that file) would never see a
-    // producer-shaped associated-fn usurper of the sanctioned name placed in a
-    // DIFFERENT mirror file — it would be name-allowlisted but never
-    // signature-checked. Aggregating across all files closes that cross-file
-    // vector: a second crate-visible occurrence ANYWHERE (or a producer-shaped
-    // occurrence in ANY file) reddens.
+    // POSITIVE STRUCTURAL AST PIN (ANTI-ROGUE): the name-only sanction is
+    // necessary but NOT sufficient — a fn USURPING a sanctioned name could carry
+    // a real macro-arg producer surface. The former confinement rendered each
+    // signature and rejected the token `HotTypeRef` (a NEGATIVE scan); that was
+    // structurally leaky — `Self` inside `impl HotTypeRef`, a generic bound /
+    // `where`, a `type H = HotTypeRef` alias, a reexport, or an associated-type
+    // projection all alias the product WITHOUT rendering its token, so the scan
+    // passed them. The POSITIVE pin instead asserts the sanctioned name IS
+    // EXACTLY the one genuine production shape across ALL mirror sources: exactly
+    // one occurrence (any second definition in any item kind/visibility fails),
+    // a module-level FREE fn (no associated/trait fn), no generics/`where`/
+    // receiver, the genuine three typed params, and the binder-seed
+    // `Vec<BinderScope>` return. Anything that is not that exact shape — however
+    // it aliases the macro-arg product — fails, closing the whole evasion class
+    // at once. (See `positive_pin_sanctioned_helper`.)
     for sanctioned in MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES {
-        if let Err(reason) = validate_sanctioned_entry_module_global(&mirror_sources, sanctioned) {
+        if let Err(reason) = positive_pin_sanctioned_helper(&mirror_sources, sanctioned) {
             panic!(
-                "sanctioned non-producer MODULE-GLOBAL SIGNATURE violation (FIX C): {reason}. The \
-                 name-only allowlist is not enough — a sanctioned entry must be a genuine \
-                 non-producer (binder-seed `Vec<BinderScope>` return, no `HotTypeRef` in/out) with \
-                 EXACTLY ONE crate-visible definition across the WHOLE module. A producer-shaped fn \
-                 USURPING the sanctioned name — in ANY mirror file — is forbidden."
+                "sanctioned helper POSITIVE STRUCTURAL PIN violation: {reason}. The name-only \
+                 allowlist is not enough — the sanctioned helper must BE the one genuine \
+                 module-level free fn (no generics/`where`/receiver, the genuine param/return \
+                 shape) with EXACTLY ONE definition across the WHOLE module. Any other shape under \
+                 the sanctioned name — however it aliases the macro-arg product `HotTypeRef` — is a \
+                 usurpation."
             )
         }
     }
@@ -23186,297 +23219,218 @@ fn mirror_entry_surface_classifier_discriminates() {
          crate-visible producer entry (free OR associated)"
     );
 
-    // ---- FIX C ANTI-ROGUE RED-PROOF: the strengthened sanction is by
-    // SIGNATURE, not name. ----
+    // ---- POSITIVE STRUCTURAL AST PIN — ANTI-ROGUE RED-PROOFS. ----
     //
-    // (a) The REAL sanctioned helper passes the signature check — it returns
-    // the binder-seed shape and never names the macro-arg product. Read it from
-    // its defining file (`script_setup_binder.rs`).
+    // The SAME classifier the live guard calls (`positive_pin_sanctioned_helper`)
+    // is run here over the REAL source and over each planted evasion vector. The
+    // classifier is SHARED live↔self-test, so a regression that loosens it (e.g.
+    // re-introduces a token-rendering leak) reddens BOTH the live guard and these
+    // proofs together — they cannot diverge. Each plant below RED-proves a
+    // distinct evasion the former NEGATIVE `contains("HotTypeRef")` scan could not
+    // catch; a guard that cannot fail on these is a stub.
+    let real_name = "build_script_setup_seed_frames";
+    let binder_rel =
+        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string();
+    let mod_rel = "crates/verter_session/src/macro_hot_mirror/mod.rs".to_string();
+
+    // ACCEPT — the REAL `script_setup_binder.rs` source. Read its actual bytes and
+    // run the SAME classifier the live guard uses. The genuine helper is the lone
+    // module-level free fn with the genuine three params and the `Vec<BinderScope>`
+    // return, so it passes all five structural properties. (The other mirror
+    // sources carry no occurrence of the name, so the real `mod.rs` /
+    // `structural_lower.rs` are included to mirror the live module-global view.)
     let real_binder_src = std::fs::read_to_string(workspace_path(
         "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs",
     ))
     .expect("the sanctioned helper's defining file must be readable");
+    let real_sources = vec![(binder_rel.clone(), real_binder_src)];
     assert!(
-        sanctioned_non_producer_signature_is_genuine(
-            &real_binder_src,
-            "build_script_setup_seed_frames"
-        )
-        .is_ok(),
-        "the REAL `build_script_setup_seed_frames` must pass the non-producer signature check — it \
-         returns `Vec<BinderScope>` and neither returns nor accepts `HotTypeRef` (it only calls \
-         `HotTypeRef::node(..)` internally, which the signature-only check correctly ignores)"
+        positive_pin_sanctioned_helper(&real_sources, real_name).is_ok(),
+        "ACCEPT: the REAL `build_script_setup_seed_frames` in `script_setup_binder.rs` MUST pass \
+         the positive structural pin — it is the lone module-level free fn with no \
+         generics/`where`/receiver, the genuine three typed params, and the `Vec<BinderScope>` \
+         return. If this reddens, either the genuine helper's shape changed (re-pin after review) \
+         or the classifier regressed"
     );
 
-    // (b) A fn USURPING the sanctioned name but SHAPED like the producer
-    // (returns `Option<HotTypeRef>`) FAILS the strengthened check — the name
-    // alone is no longer sufficient to pass. This is the exact name-usurpation
-    // the strengthening now catches.
-    let usurper_return =
-        "pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n";
-    let usurp_return_result = sanctioned_non_producer_signature_is_genuine(
-        usurper_return,
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        usurp_return_result.is_err(),
-        "a fn USURPING the sanctioned name `build_script_setup_seed_frames` but RETURNING the \
-         macro-arg product `Option<HotTypeRef>` MUST fail the strengthened signature sanction \
-         (name alone is insufficient) — got {usurp_return_result:?}"
-    );
-
-    // (c) A usurper that ACCEPTS the macro-arg product as an input — even if it
-    // returns the binder-seed shape — also FAILS: it takes the producer
-    // surface. This covers the input-side of the producer shape.
-    let usurper_input = "pub(crate) fn build_script_setup_seed_frames(seed: &HotTypeRef) -> Vec<BinderScope> { Vec::new() }\n";
-    let usurp_input_result = sanctioned_non_producer_signature_is_genuine(
-        usurper_input,
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        usurp_input_result.is_err(),
-        "a fn USURPING the sanctioned name but ACCEPTING the macro-arg product `&HotTypeRef` as an \
-         input MUST fail the strengthened sanction (it takes the producer surface) — got \
-         {usurp_input_result:?}"
-    );
-
-    // (d) A genuine non-producer SHAPE under the sanctioned name passes (the
-    // revert/positive control): binder-seed return, no `HotTypeRef` in/out. A
-    // body that internally calls `HotTypeRef::node(..)` is fine — the check is
-    // signature-only, mirroring the real helper.
-    let genuine = "pub(crate) fn build_script_setup_seed_frames(g: &G, s: &S) -> Vec<BinderScope> { let _ = HotTypeRef::node; Vec::new() }\n";
-    assert!(
-        sanctioned_non_producer_signature_is_genuine(genuine, "build_script_setup_seed_frames")
-            .is_ok(),
-        "a genuine non-producer SHAPE under the sanctioned name (binder-seed return, no \
-         `HotTypeRef` in the signature) must pass — an internal `HotTypeRef::node(..)` body call \
-         is not a producer-surface exposure"
-    );
-
-    // (e) ANTI-ROGUE RED-PROOF (WITHIN one source). The REAL free helper
-    // (genuine non-producer) PLUS a producer-shaped ASSOCIATED-fn usurper of the
-    // SAME sanctioned name inside an INHERENT `impl`, in ONE source. An earlier
-    // free-fn-only validator located ONLY the genuine free fn and NEVER
-    // signature-checked the `impl` method, so this source PASSED before the
-    // all-occurrences strengthening. The single-source all-occurrences validator
-    // FAILS it on TWO counts: a DUPLICATE crate-visible definition of the
-    // sanctioned name AND the associated-fn occurrence being producer-shaped
-    // (`-> Option<HotTypeRef>`). (Arm (i) below covers the CROSS-FILE variant —
-    // the usurper in a DIFFERENT source — which only the module-global validator
-    // catches.)
-    let assoc_usurper = "pub(crate) fn build_script_setup_seed_frames(g: &G, s: &S) -> Vec<BinderScope> { Vec::new() }\n\
-                         impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n}\n";
-    let assoc_usurper_result = sanctioned_non_producer_signature_is_genuine(
-        assoc_usurper,
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        assoc_usurper_result.is_err(),
-        "a producer-shaped ASSOCIATED-fn usurper of the sanctioned name \
-         (`impl MacroHotMirror {{ pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }}`) \
-         MUST fail the strengthened sanction — it would have PASSED the old free-fn-only validator \
-         (which never descended `impl` blocks). The all-occurrences validation signature-checks \
-         the associated fn and rejects the duplicate sanctioned name (got {assoc_usurper_result:?})"
-    );
-
-    // (f) A SOLE associated-fn occurrence (no free def) that is producer-shaped
-    // also FAILS — proving the associated-fn surface is signature-checked in its
-    // OWN right, not merely caught as a duplicate. This is the exact gap an
-    // earlier free-fn-only validator left: an `impl`-only producer usurping the
-    // name with NO free fn would have yielded no free-fn match and (under that
-    // guard's free-fn `.find` locator) never reached signature validation at all.
-    let assoc_only_usurper =
-        "impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n}\n";
-    let assoc_only_result = sanctioned_non_producer_signature_is_genuine(
-        assoc_only_usurper,
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        assoc_only_result.is_err(),
-        "a SOLE producer-shaped ASSOCIATED-fn occurrence of the sanctioned name (no free def) MUST \
-         fail the signature sanction — the associated-fn surface is validated in its own right \
-         (got {assoc_only_result:?})"
-    );
-
-    // (g) A DUPLICATE sanctioned name where BOTH occurrences are genuine
-    // non-producers (binder-seed return, no `HotTypeRef`) STILL FAILS: a
-    // sanctioned name must have EXACTLY ONE definition. A second crate-visible
-    // definition under the same name is the usurpation vector regardless of its
-    // shape — it ambiguates which definition the allowlist sanctions.
-    let duplicate_genuine = "pub(crate) fn build_script_setup_seed_frames(g: &G) -> Vec<BinderScope> { Vec::new() }\n\
-                             impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(g: &G) -> Vec<BinderScope> { Vec::new() }\n}\n";
-    let duplicate_result = sanctioned_non_producer_signature_is_genuine(
-        duplicate_genuine,
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        duplicate_result.is_err(),
-        "TWO crate-visible definitions of the sanctioned name (a free fn + an associated fn), even \
-         both genuine non-producers, MUST fail — a sanctioned name must have exactly one definition \
-         (got {duplicate_result:?})"
-    );
-
-    // (h) The genuine free helper as the SOLE crate-visible definition still
-    // passes (positive control for the all-occurrences path: exactly one
-    // occurrence, genuine signature). A module-private `impl` method of the same
-    // name is NOT crate-visible, so it does not count as a duplicate.
-    let sole_genuine_with_private_impl =
-        "pub(crate) fn build_script_setup_seed_frames(g: &G) -> Vec<BinderScope> { Vec::new() }\n\
-         impl MacroHotMirror {\n    fn build_script_setup_seed_frames(g: &G) -> Vec<BinderScope> { Vec::new() }\n}\n";
-    assert!(
-        sanctioned_non_producer_signature_is_genuine(
-            sole_genuine_with_private_impl,
-            "build_script_setup_seed_frames"
-        )
-        .is_ok(),
-        "the genuine free helper as the SOLE crate-visible definition must pass even with a \
-         module-private (inherited-visibility) `impl` method of the same name present — the private \
-         method is not crate-visible and is not a duplicate"
-    );
-
-    // (i) ANTI-ROGUE RED-PROOF — THE HEART OF THIS FIX (CROSS-FILE). The genuine
-    // free helper lives in ONE mirror file; a producer-shaped ASSOCIATED-fn
-    // usurper of the SAME sanctioned name lives in a SEPARATE mirror file. This
-    // is the exact gap a file-located validator leaves: locate the file that
-    // declares the helper as a free fn, validate ONLY that file's source — the
-    // usurper in the OTHER file is name-allowlisted but NEVER signature-checked.
-    let genuine_src = (
-        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string(),
-        "pub(crate) fn build_script_setup_seed_frames(g: &G, s: &S) -> Vec<BinderScope> { Vec::new() }\n"
+    // A synthetic genuine source (the exact genuine free-fn shape) is the positive
+    // control: it ACCEPTS, anchoring that the plants below are rejected for the
+    // SHAPE they perturb, not because the classifier rejects everything.
+    let synthetic_genuine = (
+        binder_rel.clone(),
+        "pub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> Vec<BinderScope> { let _ = HotTypeRef::node; Vec::new() }\n"
             .to_string(),
     );
-    let usurper_src = (
-        "crates/verter_session/src/macro_hot_mirror/mod.rs".to_string(),
-        "impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n}\n"
+    assert!(
+        positive_pin_sanctioned_helper(std::slice::from_ref(&synthetic_genuine), real_name).is_ok(),
+        "ACCEPT (positive control): a synthetic source with the exact genuine free-fn shape MUST \
+         pass — an internal `HotTypeRef::node(..)` body call is not a producer-surface exposure \
+         (the pin is signature-structural, never body-scanning)"
+    );
+
+    // Shared reject helper: run the classifier and assert it fails AND that the
+    // failure message names the expected property number (so each reject is
+    // DISCRIMINATING — it fails for the right structural reason, not incidentally).
+    fn assert_rejected(
+        sources: &[(String, String)],
+        name: &str,
+        expected_marker: &str,
+        vector: &str,
+    ) {
+        let result = positive_pin_sanctioned_helper(sources, name);
+        let msg = match result {
+            Ok(()) => panic!(
+                "REJECT FAILED — the {vector} vector PASSED the positive structural pin. A guard \
+                 that cannot fail on a planted evasion is a stub. This vector MUST be rejected by \
+                 {expected_marker}"
+            ),
+            Err(msg) => msg,
+        };
+        assert!(
+            msg.contains(expected_marker),
+            "the {vector} vector was rejected, but by the wrong property — expected the failure to \
+             cite `{expected_marker}` (a discriminating reject), got: {msg}"
+        );
+    }
+
+    // REJECT (#1, duplicate) — the genuine free fn DUPLICATED across two mirror
+    // files. Two occurrences of the sanctioned name ⇒ #1 fails (a second
+    // definition anywhere is the usurpation vector). Both are genuine-shaped, so
+    // ONLY the occurrence-count property catches this.
+    let duplicate_sources = vec![
+        synthetic_genuine.clone(),
+        (
+            mod_rel.clone(),
+            "pub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> Vec<BinderScope> { Vec::new() }\n"
+                .to_string(),
+        ),
+    ];
+    assert_rejected(
+        &duplicate_sources,
+        real_name,
+        "positive-pin #1",
+        "duplicate-definition (genuine fn declared twice across files)",
+    );
+    // The #1 message names BOTH offending files (provenance), proving the
+    // aggregate is genuinely module-wide and not single-file-scoped.
+    let dup_msg = positive_pin_sanctioned_helper(&duplicate_sources, real_name).unwrap_err();
+    assert!(
+        dup_msg.contains("mod.rs") && dup_msg.contains("script_setup_binder.rs"),
+        "the duplicate-definition reject must name both offending mirror files via provenance — \
+         got: {dup_msg}"
+    );
+
+    // REJECT (#2, `Self`-aliasing associated fn) — `impl HotTypeRef { fn …(seed:
+    // Self) -> Vec<BinderScope> }`. The receiver-LESS `Self`-aliasing vector codex
+    // flagged: `seed: Self` aliases the macro-arg product (`Self` == `HotTypeRef`
+    // inside `impl HotTypeRef`) and RENDERS no `HotTypeRef` token, so the former
+    // negative scan passed it. It is an ASSOCIATED fn ⇒ #2 (not-a-free-fn) rejects
+    // it structurally, independent of the alias.
+    let self_assoc_sources = vec![(
+        binder_rel.clone(),
+        "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(seed: Self) -> Vec<BinderScope> { Vec::new() }\n}\n"
             .to_string(),
-    );
-    let cross_file_sources = vec![genuine_src.clone(), usurper_src];
-
-    // The MODULE-GLOBAL validator aggregates across BOTH files → it sees the
-    // duplicate sanctioned name AND the producer-shaped associated-fn occurrence
-    // in the other file → FAILS.
-    let module_global_result = validate_sanctioned_entry_module_global(
-        &cross_file_sources,
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        module_global_result.is_err(),
-        "a producer-shaped ASSOCIATED-fn usurper of the sanctioned name in a SEPARATE mirror file \
-         (the genuine free helper in `script_setup_binder.rs` PLUS \
-         `impl MacroHotMirror {{ pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }}` \
-         in `mod.rs`) MUST fail the MODULE-GLOBAL sanction — the aggregate across files sees TWO \
-         crate-visible occurrences AND a producer-shaped one. Got {module_global_result:?}"
-    );
-    // The failure names the offending OTHER file (provenance), proving the
-    // aggregate is genuinely cross-file and not single-file-scoped.
-    let module_global_msg = module_global_result.unwrap_err();
-    assert!(
-        module_global_msg.contains("mod.rs"),
-        "the MODULE-GLOBAL violation message must name the offending mirror file (`mod.rs`) via file \
-         provenance — got: {module_global_msg}"
+    )];
+    assert_rejected(
+        &self_assoc_sources,
+        real_name,
+        "positive-pin #2",
+        "`Self`-aliasing associated fn inside `impl HotTypeRef` (non-receiver)",
     );
 
-    // DEMONSTRATE the single-file-scoped form would have PASSED: a file-located
-    // validator picks the file that declares the helper as a free fn
-    // (`script_setup_binder.rs`) and validates ONLY that source — which is a lone,
-    // genuine, non-producer free fn → `Ok`. It NEVER sees the usurper in the other
-    // file. This is precisely the cross-file hole the module-global form closes.
-    let single_file_scoped_result = sanctioned_non_producer_signature_is_genuine(
-        &genuine_src.1,
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        single_file_scoped_result.is_ok(),
-        "the single-file-scoped validator, fed ONLY the genuine free-helper file (as a file-located \
-         validator would pick it), PASSES — it never sees the cross-file usurper. This is the hole \
-         the module-global form closes; got {single_file_scoped_result:?}"
-    );
-
-    // Positive control for the module-global path: the genuine helper as the SOLE
-    // occurrence across BOTH files (the other file has NO occurrence of the name)
-    // PASSES — the aggregate count is exactly one and its signature is genuine.
-    let other_file_no_occurrence = (
-        "crates/verter_session/src/macro_hot_mirror/structural_lower.rs".to_string(),
-        "pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(g: &G) -> R { todo!() }\n"
-            .to_string(),
-    );
-    let module_global_ok_sources = vec![genuine_src, other_file_no_occurrence];
-    assert!(
-        validate_sanctioned_entry_module_global(
-            &module_global_ok_sources,
-            "build_script_setup_seed_frames"
-        )
-        .is_ok(),
-        "the genuine free helper as the SOLE crate-visible occurrence across all mirror files \
-         (the other file declares only the restricted lowerer) must PASS the module-global sanction"
-    );
-
-    // (j) ANTI-ROGUE RED-PROOF — the RECEIVER vector. `HotTypeRef` is a `pub`
-    // crate-visible type, so `impl HotTypeRef { ... }` is a real crate-visible
-    // inherent-method surface. A usurper can carry the macro-arg product THROUGH
-    // a `self` receiver: a SOLE associated fn `fn build_script_setup_seed_frames(
-    // self) -> Vec<BinderScope>` inside `impl HotTypeRef` returns the binder-seed
-    // shape (passes the return check) and names no product in any TYPED input, so
-    // a receiver-blind input loop (one that handled only `FnArg::Typed`) skipped
-    // the `self` receiver entirely and the source PASSED. The signature check now
-    // REJECTS any receiver-bearing sanctioned entry — the genuine helper is a free
-    // fn with no receiver, so a receiver is itself the usurpation. This SOLE
-    // occurrence is caught by the RECEIVER check, not the duplicate check (there
-    // is exactly one definition module-wide).
-    let receiver_usurper = (
-        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string(),
+    // REJECT (#2, receiver) — `impl HotTypeRef { fn …(self) -> Vec<BinderScope> }`.
+    // The `self` receiver carries the impl self-type (`HotTypeRef`) into the fn
+    // without a typed arm naming it. It is an associated fn ⇒ #2 rejects it (the
+    // free-fn property fires before the receiver property; both would catch it).
+    let receiver_sources = vec![(
+        binder_rel.clone(),
         "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(self) -> Vec<BinderScope> { Vec::new() }\n}\n"
             .to_string(),
-    );
-    let receiver_usurper_result = validate_sanctioned_entry_module_global(
-        std::slice::from_ref(&receiver_usurper),
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        receiver_usurper_result.is_err(),
-        "a SOLE receiver-bearing associated fn of the sanctioned name \
-         (`impl HotTypeRef {{ pub(crate) fn build_script_setup_seed_frames(self) -> Vec<BinderScope> }}`) \
-         MUST fail the signature sanction — the `self` receiver carries the macro-arg product \
-         `HotTypeRef`, which a receiver-blind input loop skipped (so it PASSED before this fix). The \
-         genuine helper is a free fn with no receiver, so a receiver-bearing entry is the usurpation \
-         (got {receiver_usurper_result:?})"
+    )];
+    assert_rejected(
+        &receiver_sources,
+        real_name,
+        "positive-pin #2",
+        "receiver-bearing associated fn inside `impl HotTypeRef`",
     );
 
-    // (k) The receiver rejection is independent of the receiver's exact spelling:
-    // `&self` (a borrowing receiver, the `Receiver.reference` form) is likewise
-    // rejected — the receiver still aliases the product type `HotTypeRef` via the
-    // impl self-type.
-    let ref_receiver_usurper = (
-        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string(),
-        "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(&self) -> Vec<BinderScope> { Vec::new() }\n}\n"
+    // REJECT (#3, generic bound) — `fn …<T: From<HotTypeRef>>(t: T) ->
+    // Vec<BinderScope>`. The macro-arg product is aliased through a generic BOUND
+    // (`From<HotTypeRef>`), which the former scan rendered only on the bound, not
+    // on the param type `T` — leaky. The fn is a FREE fn (passes #2) but DECLARES
+    // generics ⇒ #3 (no-generics) rejects it.
+    let generic_sources = vec![(
+        binder_rel.clone(),
+        "pub(crate) fn build_script_setup_seed_frames<T: From<HotTypeRef>>(t: T) -> Vec<BinderScope> { let _ = t; Vec::new() }\n"
             .to_string(),
-    );
-    let ref_receiver_result = validate_sanctioned_entry_module_global(
-        std::slice::from_ref(&ref_receiver_usurper),
-        "build_script_setup_seed_frames",
-    );
-    assert!(
-        ref_receiver_result.is_err(),
-        "a `&self`-receiver associated fn of the sanctioned name MUST also fail — the receiver \
-         rejection is independent of receiver spelling (got {ref_receiver_result:?})"
+    )];
+    assert_rejected(
+        &generic_sources,
+        real_name,
+        "positive-pin #3",
+        "generic-bound usurper `<T: From<HotTypeRef>>`",
     );
 
-    // (l) The explicit-type receiver spelling `self: HotTypeRef` (the
-    // `Receiver` variant with a `colon_token`/`ty`, naming the product type
-    // OUTRIGHT in the receiver position) is rejected too — same vector, different
-    // surface spelling.
-    let typed_receiver_usurper = (
-        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string(),
-        "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(self: HotTypeRef) -> Vec<BinderScope> { Vec::new() }\n}\n"
+    // REJECT (#4, direct product param) — `fn …(seed: HotTypeRef) ->
+    // Vec<BinderScope>`. A free, non-generic, no-receiver fn that returns the
+    // binder-seed shape (passes #1/#2/#3/#5) but takes the macro-arg product
+    // DIRECTLY as a param. Its param types do not match the genuine three ⇒ #4
+    // (param-shape) rejects it.
+    let product_param_sources = vec![(
+        binder_rel.clone(),
+        "pub(crate) fn build_script_setup_seed_frames(seed: HotTypeRef) -> Vec<BinderScope> { let _ = seed; Vec::new() }\n"
             .to_string(),
+    )];
+    assert_rejected(
+        &product_param_sources,
+        real_name,
+        "positive-pin #4",
+        "direct-product param `seed: HotTypeRef`",
     );
-    let typed_receiver_result = validate_sanctioned_entry_module_global(
-        std::slice::from_ref(&typed_receiver_usurper),
-        "build_script_setup_seed_frames",
+
+    // REJECT (#5, product return) — `fn …(<genuine params>) -> HotTypeRef`. A
+    // free, non-generic, no-receiver fn with the genuine three params (passes
+    // #1/#2/#3/#4) but RETURNS the macro-arg product. Its return type is not the
+    // binder-seed shape ⇒ #5 (return-shape) rejects it.
+    let product_return_sources = vec![(
+        binder_rel.clone(),
+        "pub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> HotTypeRef { todo!() }\n"
+            .to_string(),
+    )];
+    assert_rejected(
+        &product_return_sources,
+        real_name,
+        "positive-pin #5",
+        "product-return usurper `-> HotTypeRef`",
     );
-    assert!(
-        typed_receiver_result.is_err(),
-        "a `self: HotTypeRef` explicit-type receiver associated fn of the sanctioned name MUST also \
-         fail — the receiver position names the macro-arg product outright (got \
-         {typed_receiver_result:?})"
+
+    // REJECT (#2, trait-item declaration) — `trait T { fn …(…) -> HotTypeRef; }`.
+    // A trait-item fn declaration under the sanctioned name. It is NOT a free fn
+    // (it is a trait method) ⇒ #2 rejects it (a usurper could route the product
+    // through a trait-method surface invisible to a free-fn-only scan).
+    let trait_item_sources = vec![(
+        binder_rel.clone(),
+        "trait Producer {\n    fn build_script_setup_seed_frames(&self) -> HotTypeRef;\n}\n"
+            .to_string(),
+    )];
+    assert_rejected(
+        &trait_item_sources,
+        real_name,
+        "positive-pin #2",
+        "trait-item fn declaration under the sanctioned name",
+    );
+
+    // REJECT (#1, vanished) — the sanctioned name is absent from all sources.
+    // Anti-vacuity: if the genuine helper disappears (e.g. renamed away), the
+    // binder-seed producer regressed and the pin must redden, not silently pass.
+    let vanished_sources = vec![(
+        binder_rel.clone(),
+        "pub(crate) fn unrelated_helper(g: &G) -> Vec<BinderScope> { Vec::new() }\n".to_string(),
+    )];
+    assert_rejected(
+        &vanished_sources,
+        real_name,
+        "positive-pin #1",
+        "vanished sanctioned name (no definition anywhere)",
     );
 }
