@@ -39,11 +39,18 @@
 //!   widened) either rail flips the divergence and fails the pin.
 //!
 //! The cross-file "dep-fact" facet is the C2 peeler-pair `(canonical,
-//! source_name)` terminal agreement through a RENAMED barrel re-export (so the
-//! exported name differs from the source name and the cross-file route is
-//! genuinely exercised, not a same-file read); the peeled terminal is fed into
-//! BOTH the graph-native body reader and the oracle so the body-depth
-//! equivalence is proven THROUGH the re-export route.
+//! source_name)` terminal agreement. The plain renamed exports
+//! (`cfg`/`Color`/`single`) exercise the cross-file ROUTE (exported ≠ source)
+//! plus the body-depth equivalence — the peeled terminal is fed into BOTH the
+//! graph-native body reader and the oracle. They do NOT exercise the divergent
+//! `typeof`-peel branch (a plain value's declaration carries no `typeof`
+//! annotation, so `peel_value_decl_alias` breaks at the first hop). That branch
+//! is exercised SEPARATELY by a `typeof`-aliased value (`export const aliased:
+//! typeof base = base`) re-exported RENAMED through the barrel: both peelers
+//! must HOP through `typeof base` and land on the FINAL underlying `base`, on
+//! the direct `typeof`-alias peeler (`peel_value_decl_alias[_graph_native]`) AND
+//! through the renamed-barrel export-target peeler — so a no-op peeler that
+//! skipped the `typeof` hop is caught.
 //!
 //! HONESTY FLAGS — characterized known-absences, NOT omissions:
 //!
@@ -113,6 +120,19 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
 /// route. The explicit `("/dep.ts", source_name)` pin proves the barrel
 /// re-export peels to the FINAL defining file, not the intermediate barrel
 /// binding. The miss case (`None`) guards the negative.
+///
+/// The plain renamed exports above exercise the cross-file ROUTE + body-depth,
+/// but NOT the divergent `typeof`-peel branch (a plain const/enum/function
+/// declaration carries no `typeof` annotation, so `peel_value_decl_alias`
+/// breaks at the first hop — a no-op peeler that skipped the `typeof` hop would
+/// still pass). That branch is exercised by the `typeof`-aliased value (`export
+/// const aliased: typeof base = base`) re-exported RENAMED as `aliasedExport`:
+/// the trailing block asserts BOTH peelers (oracle vs graph-native) HOP through
+/// `typeof base` and land on the FINAL underlying `(/dep.ts, base)`, NOT the
+/// intermediate `aliased` — on the direct `typeof`-alias peeler
+/// (`peel_value_decl_alias[_graph_native]_for_test`, the API that genuinely
+/// follows the `typeof` chain) AND through the renamed-barrel export-target
+/// peeler (`resolve_value_export_target[_graph_native]`).
 #[test]
 fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     let host = make_host();
@@ -128,15 +148,22 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         "/dep.ts",
         "export const cfg: { a: number } = { a: 1 }\n\
          export enum Color { Red, Green }\n\
-         export function single(x: string): number { return x.length }\n",
+         export function single(x: string): number { return x.length }\n\
+         export const base = { v: 1 }\n\
+         export const aliased: typeof base = base\n",
     );
     // RENAMED barrel re-exports: the exported name differs from the source name,
     // so peeling genuinely traverses the cross-file route (exported ≠ source) —
-    // not a same-file read.
+    // not a same-file read. `aliased as aliasedExport` re-exports the
+    // `typeof`-aliased value renamed, so the export-target peeler must FIRST
+    // resolve `aliasedExport` → source `(/dep.ts, aliased)` and THEN follow the
+    // `typeof base` hop to the FINAL underlying `base` — genuinely exercising the
+    // divergent `typeof`-peel branch on BOTH rails.
     upsert_ts(
         &host,
         "/barrel.ts",
-        "export { cfg as cfgAlias, Color as ColorAlias, single as singleAlias } from './dep'\n",
+        "export { cfg as cfgAlias, Color as ColorAlias, single as singleAlias, \
+         aliased as aliasedExport } from './dep'\n",
     );
 
     for name in ["cfg", "Color", "single"] {
@@ -337,6 +364,74 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
             "routed-through-barrel enum_members divergence for peeled ({peeled_canonical}, {peeled_name})"
         );
     }
+
+    // The `typeof`-peel branch (the peeler-SPECIFIC divergent logic). The
+    // export-target peeler loop above resolves the cross-file ROUTE + the
+    // body-depth equivalence, but `cfg`/`Color`/`single` are plain values whose
+    // declarations carry no `typeof` annotation, so `peel_value_decl_alias`
+    // breaks at the first hop — the `typeof` chain is never walked, and a no-op
+    // peeler that skipped the `typeof` hop would still pass that loop. `aliased`
+    // (`export const aliased: typeof base = base`) forces the divergent
+    // `typeof`-peel branch: both peelers must HOP through `typeof base` and land
+    // on the FINAL underlying `(/dep.ts, base)`, not the intermediate `aliased`.
+    //
+    // Asserted on BOTH peeler APIs:
+    //  - `peel_value_decl_alias[_graph_native]_for_test` is the API that
+    //    DIRECTLY follows the `typeof` chain (the same API the cycle test in
+    //    `decl_body_dispatch_equivalence_tests.rs` uses). Run on the SOURCE
+    //    `(/dep.ts, aliased)` it walks `typeof base` → `base`.
+    //  - `resolve_value_export_target[_graph_native]` through the RENAMED
+    //    barrel re-export (`aliased as aliasedExport`) proves the FULL route:
+    //    resolve `aliasedExport` → source `(/dep.ts, aliased)`, THEN the same
+    //    `typeof` peel to `(/dep.ts, base)`.
+    // Both rails (oracle vs graph-native) must AGREE and land on `base`.
+
+    // (i) The direct `typeof`-alias peeler on the source value. This is the
+    // API that genuinely exercises the `typeof`-peel branch — it walks the
+    // single-segment `typeof base` chain `aliased` → `base`.
+    let oracle_peel = host.peel_value_decl_alias_for_test("/dep.ts", "aliased");
+    let graph_peel = host.peel_value_decl_alias_graph_native_for_test("/dep.ts", "aliased");
+    assert_eq!(
+        oracle_peel, graph_peel,
+        "the direct `typeof`-alias peeler must AGREE across rails for `(/dep.ts, aliased)`: \
+         oracle={oracle_peel:?} graph_native={graph_peel:?}"
+    );
+    assert_eq!(
+        oracle_peel,
+        ("/dep.ts".to_string(), "base".to_string()),
+        "the direct `typeof`-alias peeler must HOP through `typeof base` and land on the FINAL \
+         underlying `(/dep.ts, base)`, NOT the intermediate `aliased`; got {oracle_peel:?}"
+    );
+
+    // (ii) The export-target peeler through the RENAMED barrel re-export: the
+    // full cross-file route THEN the `typeof` peel. `resolve_value_export_target`
+    // resolves `aliasedExport` → source `(/dep.ts, aliased)` (the rename) and
+    // then peels the `typeof base` chain to the FINAL `(/dep.ts, base)`.
+    let oracle_route = host
+        .resolve_value_export_target("/barrel.ts", "aliasedExport")
+        .expect("oracle peeler must resolve the renamed `aliasedExport`");
+    let graph_route = host
+        .resolve_value_export_target_graph_native("/barrel.ts", "aliasedExport")
+        .expect("graph-native peeler must resolve the renamed `aliasedExport`");
+    assert_eq!(
+        (
+            oracle_route.canonical_id.as_str(),
+            oracle_route.name.as_str()
+        ),
+        (graph_route.canonical_id.as_str(), graph_route.name.as_str()),
+        "the renamed-barrel `typeof`-aliased export must AGREE across rails: \
+         oracle={oracle_route:?} graph_native={graph_route:?}"
+    );
+    assert_eq!(
+        (
+            oracle_route.canonical_id.as_str(),
+            oracle_route.name.as_str()
+        ),
+        ("/dep.ts", "base"),
+        "the renamed re-export `aliasedExport` must resolve to the source `aliased` AND THEN peel \
+         the `typeof base` chain to the FINAL underlying `(/dep.ts, base)`, NOT the intermediate \
+         `aliased` and NOT the barrel binding; got {oracle_route:?}"
+    );
 }
 
 /// The DIVERGING-facet half: pins the CURRENT cross-rail divergence on the two

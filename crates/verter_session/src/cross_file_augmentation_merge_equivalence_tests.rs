@@ -87,10 +87,14 @@ fn object_member_surface(ty: &TypeExpr) -> Vec<(String, String)> {
 /// → `collect_augmenter_candidates`) COLD-SCANS every LOADED artifact for a
 /// matching `declare module` fact — it does NOT use the consumer's import edges
 /// to discover the augmenter. `/aug.ts` is found because it is UPSERTED (loaded)
-/// and carries a `declare module './types'` fact whose specifier resolves to
-/// `/types.ts`; the augmenter's OWN `import type { Foo } from './types'` is what
-/// associates it with the augmentation target, NOT any side-effect import in the
-/// consumer. The reverse-deps walk in `stitch_module_augmentations` only
+/// and carries a `declare module './types'` fact whose SPECIFIER resolves
+/// (relative to `/aug.ts`) to `/types.ts` — the specifier is the SOLE
+/// association key (`augmenter_matches_target` →
+/// `resolve_relative_canonical(augmenter_canonical, fact.specifier)`, the fact
+/// derived from the `declare module` header by `collect_augmentations`). The
+/// augmenter's OWN `import type { Foo } from './types'` is incidental, NOT the
+/// discovery key; the consumer's side-effect import is immaterial too. The
+/// reverse-deps walk in `stitch_module_augmentations` only
 /// PRE-LOADS lazily-unloaded augmenters before the cold scan, so it is a no-op
 /// when every file is already upserted (as here). The consumer's
 /// `import './aug'` is therefore harmless but immaterial to the merge: entry
