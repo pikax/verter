@@ -1778,3 +1778,206 @@ fn type_expr_contains_synthetic_slot_binding_descends_nested_carriers() {
         "a carrier-free TypeExpr is not flagged"
     );
 }
+
+/// Build a single-type-parameter `FunctionExpr` whose sole `TypeParam` carries
+/// `constraint` / `default` exactly as supplied. A function signature's OWN type
+/// parameters (`<T extends C = D>`) are a `TypeExpr`-bearing field the
+/// parameters-and-return-only predecessor predicate skipped — this helper
+/// threads a carrier through that field for the discriminating tests below.
+#[cfg(test)]
+fn function_with_type_param(
+    constraint: Option<verter_type_expr::TypeExpr>,
+    default: Option<verter_type_expr::TypeExpr>,
+) -> verter_type_expr::FunctionExpr {
+    use std::sync::Arc as StdArc;
+    use verter_type_expr::{FunctionExpr, TypeParam};
+    FunctionExpr::synthetic(
+        Vec::new(),
+        None,
+        vec![TypeParam {
+            name: "T".to_string(),
+            constraint: constraint.map(StdArc::new),
+            default: default.map(StdArc::new),
+        }],
+    )
+}
+
+/// A `TypeExpr::SyntheticSlotBinding` reached ONLY through a function type's own
+/// `<T extends SyntheticSlotBinding>` constraint is rejected by the
+/// construction-site invariant — the insert panics before interning the
+/// `VueMacroElements` node.
+///
+/// Discriminating regression: the parameters-and-return-only predecessor
+/// predicate walked a `FunctionExpr`'s `parameters` + `return_type` only, NOT
+/// its `type_parameters`, so the carrier escaped detection and the insert
+/// silently succeeded ("did not panic"). Post-fix the `type_parameters`
+/// constraint is descended, so the invariant fires. This case FAILS against the
+/// pre-fix tree and PASSES post-fix.
+#[test]
+#[should_panic(expected = "must never carry a `TypeExpr::SyntheticSlotBinding` ordinal")]
+fn insert_resolved_named_type_rejects_carrier_in_function_type_param_constraint() {
+    use std::sync::Arc as StdArc;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+    use verter_type_expr::TypeExpr;
+
+    let host = host();
+    let graph = host.project_type_store().semantic_graph();
+    // `(...) => unknown` whose sole type parameter is `<T extends Carrier>`.
+    let func_with_constrained_param = TypeExpr::Function(StdArc::new(function_with_type_param(
+        Some(carrier_type_expr()),
+        None,
+    )));
+    let elements = ResolvedElements {
+        props: vec![prop_with_type_expr("handler", func_with_constrained_param)],
+        ..ResolvedElements::default()
+    };
+    let _ = graph.insert_resolved_named_type(
+        synthetic_key(),
+        Arc::new(elements),
+        graph.named_type_generation(),
+    );
+}
+
+/// A `TypeExpr::SyntheticSlotBinding` reached ONLY through a function type's own
+/// `<T = SyntheticSlotBinding>` DEFAULT is rejected by the construction-site
+/// invariant. Same discriminating story as the constraint case: the
+/// parameters-and-return-only predecessor predicate never looked at
+/// `type_parameters`, so the default-position carrier escaped (the insert did
+/// not panic); post-fix it is descended.
+#[test]
+#[should_panic(expected = "must never carry a `TypeExpr::SyntheticSlotBinding` ordinal")]
+fn insert_resolved_named_type_rejects_carrier_in_function_type_param_default() {
+    use std::sync::Arc as StdArc;
+    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+    use verter_type_expr::TypeExpr;
+
+    let host = host();
+    let graph = host.project_type_store().semantic_graph();
+    // `(...) => unknown` whose sole type parameter is `<T = Carrier>`.
+    let func_with_defaulted_param = TypeExpr::Function(StdArc::new(function_with_type_param(
+        None,
+        Some(carrier_type_expr()),
+    )));
+    let elements = ResolvedElements {
+        props: vec![prop_with_type_expr("handler", func_with_defaulted_param)],
+        ..ResolvedElements::default()
+    };
+    let _ = graph.insert_resolved_named_type(
+        synthetic_key(),
+        Arc::new(elements),
+        graph.named_type_generation(),
+    );
+}
+
+/// Unit-test the recogniser directly on a function signature's own type
+/// parameters: `true` for a carrier in the `<T extends …>` constraint, `true`
+/// for a carrier in the `<T = …>` default, `false` for a function whose type
+/// parameters are carrier-free.
+///
+/// This is the targeted unit characterization of the false-negative the
+/// parameters-and-return-only predecessor predicate carried: it returned
+/// `false` for the first two cases (it never descended
+/// `FunctionExpr.type_parameters`), so it would have FAILED these `assert!`
+/// lines; post-fix all three hold.
+#[test]
+fn type_expr_contains_synthetic_slot_binding_descends_function_type_parameters() {
+    use crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding as contains;
+    use std::sync::Arc as StdArc;
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    // Carrier in the constraint of a `Function`'s own type parameter.
+    let in_constraint = TypeExpr::Function(StdArc::new(function_with_type_param(
+        Some(carrier_type_expr()),
+        None,
+    )));
+    assert!(
+        contains(&in_constraint),
+        "a carrier under a function's `<T extends Carrier>` constraint is detected"
+    );
+
+    // Carrier in the default of a `ConstructorType`'s own type parameter —
+    // exercises the constructor-type arm too (both route through the shared
+    // FunctionExpr child-pusher).
+    let in_default = TypeExpr::ConstructorType(StdArc::new(function_with_type_param(
+        None,
+        Some(carrier_type_expr()),
+    )));
+    assert!(
+        contains(&in_default),
+        "a carrier under a constructor-type's `<T = Carrier>` default is detected"
+    );
+
+    // Carrier reached through a method's function type parameters, inside an
+    // object surface — exercises the `ObjectMember::Method` arm's FunctionExpr
+    // descent.
+    let method_carrier = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
+        properties: vec![verter_type_expr::ObjectMember::Method(
+            verter_type_expr::MethodSignature::synthetic_public(
+                "run".to_string(),
+                function_with_type_param(Some(carrier_type_expr()), None),
+                false,
+            ),
+        )],
+    }));
+    assert!(
+        contains(&method_carrier),
+        "a carrier under an object method's `<T extends Carrier>` constraint is detected"
+    );
+
+    // Carrier-free function type parameters (a real constraint + default, no
+    // carrier anywhere) returns false — no false positive on the new field.
+    let carrier_free = TypeExpr::Function(StdArc::new(function_with_type_param(
+        Some(TypeExpr::Primitive(PrimitiveName::String)),
+        Some(TypeExpr::Primitive(PrimitiveName::Number)),
+    )));
+    assert!(
+        !contains(&carrier_free),
+        "carrier-free function type parameters are not flagged"
+    );
+}
+
+/// The recogniser walk is depth-safe: a carrier buried at the bottom of a
+/// pathologically deep `Array<Array<… Carrier …>>` chain is detected WITHOUT
+/// overflowing the native stack.
+///
+/// A naive call-stack recursion would recurse once per `Array` wrapper and
+/// abort on a chain this deep in a debug build; the iterative explicit-stack
+/// walk keeps the native stack flat regardless of tree depth (mirroring the
+/// crate's depth-safe `Drop`/`Hash` walkers). The depth is chosen well past the
+/// naive-recursion debug overflow threshold.
+#[test]
+fn type_expr_contains_synthetic_slot_binding_is_depth_safe() {
+    use crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding as contains;
+    use std::sync::Arc as StdArc;
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    // 200k `Array` wrappers around a carrier at the bottom. A per-wrapper
+    // recursive descent would blow the thread stack long before this depth in a
+    // debug build; the iterative walk drains it on the heap.
+    const DEPTH: usize = 200_000;
+    let mut deep = carrier_type_expr();
+    for _ in 0..DEPTH {
+        deep = TypeExpr::Array {
+            element: StdArc::new(deep),
+            readonly: false,
+        };
+    }
+    assert!(
+        contains(&deep),
+        "a carrier under {DEPTH} nested Array wrappers is detected without stack overflow"
+    );
+
+    // The same depth without a carrier returns false (still no overflow) — the
+    // depth-safety holds for the negative path too.
+    let mut deep_free = TypeExpr::Primitive(PrimitiveName::String);
+    for _ in 0..DEPTH {
+        deep_free = TypeExpr::Array {
+            element: StdArc::new(deep_free),
+            readonly: false,
+        };
+    }
+    assert!(
+        !contains(&deep_free),
+        "a carrier-free {DEPTH}-deep Array chain returns false without stack overflow"
+    );
+}
