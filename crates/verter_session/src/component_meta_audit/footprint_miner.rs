@@ -1149,8 +1149,9 @@ impl StructuralEncoder<'_> {
                 // crate can still carry a raw `u64` ordinal on a payload (as
                 // `SyntheticBinding.value_node` does). The guarantee is the pinned
                 // producer surface. If that producer invariant ever changes (e.g.
-                // `ResolvedElements` survives the second-engine deletion or a
-                // session-origin carrier is threaded in), the guard FIRES and this
+                // `ResolvedElements` is ever retained beyond the
+                // single-resolution-engine consolidation, or a session-origin
+                // carrier is ever threaded into it), the guard FIRES and this
                 // arm MUST move to an explicit ordinal-free child-descending
                 // encoder (like `SyntheticBinding`), not a `Debug` of the ordinal.
                 self.push_str(&format!("{elements:?}"));
