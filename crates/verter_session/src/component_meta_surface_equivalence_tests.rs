@@ -20,8 +20,9 @@
 //! Coverage: an alias chain (published shallow), a same-file interface merge
 //! surface whose published members UNION both contributors, cross-file
 //! imported-alias members (interface / primitive / function-type aliases, each
-//! published as a shallow Ref — this fixture pins Shallow-By-Default publication
-//! + import-route / read-set membership, NOT member-type resolution), a
+//! published as a shallow Ref — this fixture pins Shallow-By-Default
+//! publication + import-route / read-set membership, NOT member-type
+//! resolution), a
 //! PATH-PROJECTED imported member that DOES force cross-file member-TYPE
 //! resolution (`Foo['bar']` publishes the resolved terminal `number` —
 //! impossible without resolving the imported body), a `defineProps<T>`
