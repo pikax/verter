@@ -835,8 +835,13 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 
 // ===========================================================================
 // Structural-carrier producer guard SET — the single structural-carrier producer
-// is defended by seven guards: the PRIMARY module-private lowerer guard
-// (`structural_carrier_producer_lowerer_is_module_private`), the PARENT-SHAPE
+// is defended by eight guards: the PRIMARY module-private lowerer guard
+// (`structural_carrier_producer_lowerer_is_module_private`), the IN-FILE
+// SINGLE-CALL pin (`structural_lowerer_called_only_through_the_witness_gated_wrapper`
+// — the raw lowerer is CALLED exactly once, inside the witness-gated
+// `emit_macro_arg` wrapper, closing the in-file case where a second un-gated
+// `pub(in …)` wrapper added inside `lower.rs` could name and call the lowerer),
+// the PARENT-SHAPE
 // narrowness guard (`structural_carrier_producer_module_is_narrow`), the
 // WITNESS-unforgeability guard (`structural_carrier_producer_witnesses_are_unforgeable`)
 // — together the compiler-enforced make-unrepresentable layer — plus the
@@ -852,7 +857,8 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 #[test]
 fn structural_carrier_producer_guards_remain_registered() {
     // The structural-carrier producer owner module owns the module-private raw
-    // lowerer (reachable only through two unforgeable-witness-gated wrappers).
+    // lowerer (reachable only through one unforgeable-witness-gated wrapper,
+    // `emit_macro_arg`).
     // This witness pins the replacement guard SET into BOTH the registry and the
     // assertion file, catching an accidental removal of the single-engine
     // producer defense.
@@ -867,6 +873,13 @@ fn structural_carrier_producer_guards_remain_registered() {
             "structural_carrier_producer_lowerer_is_module_private",
             "the PRIMARY make-unrepresentable guard: the raw structural lowerer is module-private \
              in `lower.rs` and not re-exported, so no other module can name it",
+        ),
+        (
+            "structural_lowerer_called_only_through_the_witness_gated_wrapper",
+            "the IN-FILE SINGLE-CALL pin: the raw lowerer is CALLED exactly once, inside the \
+             witness-gated `emit_macro_arg` wrapper, so a second un-gated `pub(in …)` wrapper added \
+             inside `lower.rs` (which the compiler privacy cannot catch within the file) cannot \
+             re-open the producer surface",
         ),
         (
             "structural_carrier_producer_module_is_narrow",

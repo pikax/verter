@@ -386,7 +386,8 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // QueryError), never a raw `TypeExpr::Unknown` control sentinel
             // (scoped to the carrier surface; the global fence lands later).
             "carrier_constructors_do_not_use_unknown_as_control_flow",
-            // The query-free structural lowerer (`structural_lower.rs`) emits
+            // The query-free structural lowerer
+            // (`structural_carrier_producer/lower.rs`) emits
             // the typed carriers from the owned `TypeExpr` WITHOUT any
             // resolution / host query, and never materialises a carrier back
             // to `TypeExpr` during emission — it is a producer, not a second
@@ -435,7 +436,11 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // witness (`MacroProducerWitness`, private field + constructor confined to
             // its owning surface), so a SECOND structural-carrier producer can neither
             // name the lowerer nor forge a witness — unrepresentable by construction.
-            // The MODULE-PRIVATE lowerer guard, the PARENT-SHAPE narrowness guard (the
+            // The MODULE-PRIVATE lowerer guard, the IN-FILE SINGLE-CALL pin (the raw
+            // lowerer is CALLED exactly once, inside the witness-gated `emit_macro_arg`
+            // wrapper — closing the in-file case where a future edit adds a SECOND
+            // un-gated `pub(in …)` wrapper that the compiler privacy cannot catch within
+            // `lower.rs`), the PARENT-SHAPE narrowness guard (the
             // owner directory holds ONLY the lowerer, the macro producer surface, the
             // binder helper, mod.rs, and tests), and the WITNESS-unforgeability guard
             // together are the compiler-enforced LOAD-BEARING confinement; the
@@ -458,6 +463,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // structural-carrier lowering and script-setup seeding re-sources from the
             // owner's route-free `IndexedReady` (`raw_source` + `framework_parse`).
             "structural_carrier_producer_lowerer_is_module_private",
+            "structural_lowerer_called_only_through_the_witness_gated_wrapper",
             "structural_carrier_producer_module_is_narrow",
             "structural_carrier_producer_witnesses_are_unforgeable",
             "script_setup_binder_helper_is_module_private",

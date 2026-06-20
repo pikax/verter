@@ -21465,12 +21465,18 @@ fn carrier_production_code_scans_post_cfg_test_and_strips_block_comments() {
 /// The structural lowerer's defining module: the raw entry
 /// `lower_type_expr_structural` lives under
 /// `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
-/// visibility modifier), so no other module — not even a sibling under the
+/// visibility modifier), so no FOREIGN module — not even a sibling under the
 /// owner module — can NAME it. The only path to it is the witness-gated wrapper
 /// (`emit_macro_arg`). This makes a second production structural-carrier
-/// producer UNREPRESENTABLE by construction (compiler-enforced single-engine
-/// producer rule), which is why the primary guard here is a PRIVACY-SHAPE
-/// assertion on the owner file, not a caller scanner.
+/// producer in any OTHER module UNREPRESENTABLE by construction
+/// (compiler-enforced single-engine producer rule), which is why the primary
+/// guard here is a PRIVACY-SHAPE assertion on the owner file, not a foreign
+/// caller scanner. The COMPLEMENTARY in-file case — a future edit adding a
+/// SECOND `pub(in …)` wrapper INSIDE `lower.rs` that names and calls the lowerer
+/// without a `MacroProducerWitness` (which compiler privacy cannot catch within
+/// the defining file) — is pinned by
+/// `structural_lowerer_called_only_through_the_witness_gated_wrapper` (the raw
+/// lowerer is CALLED exactly once, inside `emit_macro_arg`).
 const STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE: &str = "structural_carrier_producer/lower.rs";
 
 /// Classify the visibility shape of the `lower_type_expr_structural` definition
@@ -21515,12 +21521,16 @@ fn structural_lowerer_reexport_violation(body: &str) -> bool {
 /// PRIMARY single-engine producer guard (make-unrepresentable): the raw
 /// structural-lowering entry `lower_type_expr_structural` lives ONLY under
 /// `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
-/// visibility modifier) AND is NOT re-exported anywhere in the crate. No other
+/// visibility modifier) AND is NOT re-exported anywhere in the crate. No FOREIGN
 /// module can name it — a foreign reference is a compile error, not a lint — so
-/// a second structural-carrier producer is UNREPRESENTABLE by construction and
-/// the single-engine producer rule needs no caller scanner here. The witnessed
-/// wrapper `emit_macro_arg` is the only reachable surface, gated by an
-/// unforgeable capability witness.
+/// a second structural-carrier producer in any OTHER module is UNREPRESENTABLE
+/// by construction and the single-engine producer rule needs no FOREIGN caller
+/// scanner here. The witnessed wrapper `emit_macro_arg` is the only reachable
+/// surface, gated by an unforgeable capability witness. (The COMPLEMENTARY
+/// in-file case — a second `pub(in …)` wrapper added inside `lower.rs` that the
+/// compiler privacy cannot catch within the defining file — is pinned by
+/// `structural_lowerer_called_only_through_the_witness_gated_wrapper`: the raw
+/// lowerer is CALLED exactly once, inside `emit_macro_arg`.)
 #[test]
 fn structural_carrier_producer_lowerer_is_module_private() {
     let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
@@ -21633,6 +21643,358 @@ fn structural_carrier_producer_lowerer_privacy_classifier_discriminates() {
     assert!(
         !structural_lowerer_reexport_violation(&real),
         "the REAL `lower.rs` must NOT re-export the lowerer"
+    );
+}
+
+/// Comment-strip a Rust source body for the single-call scan: every `//` line
+/// comment and `/* … */` block comment (nested) is replaced by spaces, AND
+/// string / raw-string literal CONTENTS are blanked to spaces (the delimiters
+/// kept, newlines preserved) — a `lower_type_expr_structural(` mention inside a
+/// comment OR a string is therefore never mistaken for a call. This mirrors the
+/// proven `strip_comments` helper used elsewhere in this file (the literal/raw
+/// scanner is identical; this variant additionally blanks string CONTENTS since
+/// no real call can live inside a literal). The single-call guard below feeds it
+/// the owner source so commented-out / doc-comment / string mentions of the
+/// lowerer cannot inflate the call count.
+fn strip_comments_for_single_call_scan(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        let c = bytes[i];
+        // Raw string: r"..."  /  r#"..."#  /  r##"..."##  ...  — blank the
+        // CONTENT (keep the opening / closing delimiters and newlines).
+        if c == b'r' {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < n && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < n && bytes[j] == b'"' {
+                out.extend_from_slice(&bytes[i..=j]);
+                let close: Vec<u8> = std::iter::once(b'"')
+                    .chain(std::iter::repeat_n(b'#', hashes))
+                    .collect();
+                let mut k = j + 1;
+                while k + close.len() <= n {
+                    if &bytes[k..k + close.len()] == close.as_slice() {
+                        out.extend_from_slice(close.as_slice());
+                        i = k + close.len();
+                        break;
+                    }
+                    out.push(if bytes[k] == b'\n' { b'\n' } else { b' ' });
+                    k += 1;
+                }
+                if k + close.len() > n {
+                    for b in &bytes[(j + 1)..n] {
+                        out.push(if *b == b'\n' { b'\n' } else { b' ' });
+                    }
+                    i = n;
+                }
+                continue;
+            }
+        }
+        // Regular string literal "..." (with \" escape handling) — blank the
+        // CONTENT (keep the quotes and newlines).
+        if c == b'"' {
+            out.push(b'"');
+            let mut k = i + 1;
+            while k < n {
+                if bytes[k] == b'\\' && k + 1 < n {
+                    out.push(b' ');
+                    out.push(if bytes[k + 1] == b'\n' { b'\n' } else { b' ' });
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'"' {
+                    out.push(b'"');
+                    k += 1;
+                    break;
+                }
+                out.push(if bytes[k] == b'\n' { b'\n' } else { b' ' });
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        // Line comment //
+        if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            let mut k = i;
+            while k < n && bytes[k] != b'\n' {
+                out.push(b' ');
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        // Block comment /* ... */ with nesting support.
+        if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            let mut depth = 1u32;
+            out.push(b' ');
+            out.push(b' ');
+            let mut k = i + 2;
+            while k < n && depth > 0 {
+                if k + 1 < n && bytes[k] == b'/' && bytes[k + 1] == b'*' {
+                    depth += 1;
+                    out.push(b' ');
+                    out.push(b' ');
+                    k += 2;
+                    continue;
+                }
+                if k + 1 < n && bytes[k] == b'*' && bytes[k + 1] == b'/' {
+                    depth -= 1;
+                    out.push(b' ');
+                    out.push(b' ');
+                    k += 2;
+                    continue;
+                }
+                if bytes[k] == b'\n' {
+                    out.push(b'\n');
+                } else {
+                    out.push(b' ');
+                }
+                k += 1;
+            }
+            i = k;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The byte offsets of every WORD-BOUNDED `lower_type_expr_structural(` CALL
+/// site in `stripped` (comment-stripped source), EXCLUDING the definition
+/// (`fn lower_type_expr_structural(`). A "call" is the identifier on a leading
+/// word boundary immediately followed by `(`; a leading `fn ` (the definition)
+/// is excluded.
+fn structural_lowerer_call_offsets(stripped: &str) -> Vec<usize> {
+    let needle = "lower_type_expr_structural(";
+    let bytes = stripped.as_bytes();
+    let mut offsets = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = stripped[search_from..].find(needle) {
+        let abs = search_from + rel;
+        search_from = abs + needle.len();
+        // Leading word boundary: reject a mid-identifier match
+        // (`xlower_type_expr_structural(`).
+        let is_word_start =
+            abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+        if !is_word_start {
+            continue;
+        }
+        // The DEFINITION line is `fn lower_type_expr_structural(` — exclude it.
+        // The token immediately preceding the identifier (skipping whitespace)
+        // being `fn` marks the definition, never a call.
+        let preceding = stripped[..abs].trim_end();
+        if preceding.ends_with(" fn") || preceding.ends_with("\nfn") || preceding == "fn" {
+            continue;
+        }
+        offsets.push(abs);
+    }
+    offsets
+}
+
+/// The name of the nearest preceding `fn <name>(` definition before `offset`
+/// in `stripped`, or `None` when no `fn …(` precedes it (a free / top-level
+/// call). Used to assert the single structural-lowerer call sits inside
+/// `emit_macro_arg`'s body. BOUND: this is a NEAREST-PRECEDING-fn check, not a
+/// full brace-balanced containment scan — a call placed textually after
+/// `emit_macro_arg`'s opening `fn emit_macro_arg(` but before any later `fn`
+/// would still attribute to `emit_macro_arg`; combined with the EXACTLY-ONE
+/// call assertion (a second wrapper introduces a second call, which the count
+/// rejects regardless), this bound is sufficient to pin the single witnessed
+/// call.
+fn nearest_preceding_fn_name(stripped: &str, offset: usize) -> Option<String> {
+    let needle = "fn ";
+    let prefix = &stripped[..offset];
+    let bytes = stripped.as_bytes();
+    let mut best: Option<usize> = None;
+    let mut search_from = 0usize;
+    while let Some(rel) = prefix[search_from..].find(needle) {
+        let abs = search_from + rel;
+        search_from = abs + needle.len();
+        // `fn` must be on a leading word boundary so `…rfn `-like substrings do
+        // not match.
+        let is_word_start =
+            abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+        if is_word_start {
+            best = Some(abs);
+        }
+    }
+    let fn_at = best?;
+    let after = fn_at + needle.len();
+    // Read the identifier following `fn `.
+    let rest = &stripped[after..];
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Classify whether `body` (RAW owner source — the classifier comment-strips
+/// internally) satisfies the single-witnessed-call invariant: the raw
+/// `lower_type_expr_structural` is CALLED exactly once outside its definition,
+/// and that one call is inside `emit_macro_arg`'s body. Returns `None` when the
+/// invariant holds, or `Some(reason)` describing the violation. Anti-vacuity:
+/// the definition and the one call must BOTH be present (their absence is
+/// itself a violation — the wrapper structure regressed).
+fn structural_lowerer_single_witnessed_call_violation(body: &str) -> Option<String> {
+    let stripped = strip_comments_for_single_call_scan(body);
+    // Anti-vacuity (a): the definition must exist.
+    if !stripped.contains("fn lower_type_expr_structural(") {
+        return Some(
+            "anti-vacuity: the raw `fn lower_type_expr_structural(` definition is missing — the \
+             single-producer wrapper structure regressed"
+                .to_string(),
+        );
+    }
+    let calls = structural_lowerer_call_offsets(&stripped);
+    // Anti-vacuity (b): there must be exactly one call (its absence means the
+    // witnessed wrapper no longer calls the lowerer; more than one means a
+    // second un-gated wrapper was added in-file, bypassing the witness gate).
+    if calls.is_empty() {
+        return Some(
+            "anti-vacuity: the raw `lower_type_expr_structural` is never CALLED outside its \
+             definition — the witness-gated wrapper `emit_macro_arg` must call it exactly once"
+                .to_string(),
+        );
+    }
+    if calls.len() != 1 {
+        return Some(format!(
+            "the raw `lower_type_expr_structural` must be CALLED exactly once (only by the \
+             witness-gated `emit_macro_arg` wrapper) — found {} call sites in `lower.rs`. A SECOND \
+             same-file caller is an un-gated wrapper that bypasses the `MacroProducerWitness` gate \
+             and re-opens the single-producer surface",
+            calls.len()
+        ));
+    }
+    // The one call must be inside `emit_macro_arg`'s body.
+    let enclosing = nearest_preceding_fn_name(&stripped, calls[0]);
+    match enclosing.as_deref() {
+        Some("emit_macro_arg") => None,
+        other => Some(format!(
+            "the single `lower_type_expr_structural` call must sit inside the witness-gated \
+             `emit_macro_arg` wrapper, but its nearest enclosing fn is `{}` — a call from any other \
+             fn reaches the raw lowerer without presenting the `MacroProducerWitness`",
+            other.unwrap_or("<no enclosing fn>")
+        )),
+    }
+}
+
+/// SINGLE-PRODUCER HARDENING guard (in-file single-call pin): the raw
+/// `lower_type_expr_structural` is module-private, so the COMPILER already
+/// makes it unrepresentable to any FOREIGN / sibling module — but WITHIN
+/// `lower.rs` itself the lowerer is nameable, so a future edit could add a
+/// SECOND wrapper there that calls it WITHOUT requiring a `MacroProducerWitness`,
+/// and that un-gated wrapper would be callable by the owner surfaces, bypassing
+/// the witness gate. No other guard catches that in-file case (the privacy guard
+/// scans the definition's visibility; the entry-surface guard scans CRATE-VISIBLE
+/// entries, not `pub(in …)` wrappers). This guard PINS the in-file shape: the raw
+/// lowerer is CALLED exactly once outside its definition, and that single call is
+/// inside the witness-gated `emit_macro_arg` wrapper — so the only path to the
+/// lowerer in `lower.rs` is the witnessed one.
+#[test]
+fn structural_lowerer_called_only_through_the_witness_gated_wrapper() {
+    let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
+    let body = std::fs::read_to_string(workspace_path(rel))
+        .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
+    if let Some(reason) = structural_lowerer_single_witnessed_call_violation(&body) {
+        panic!(
+            "single-producer in-file pin violated in `{rel}`: {reason}. The raw \
+             `lower_type_expr_structural` must be reachable in `lower.rs` ONLY through the \
+             witness-gated `emit_macro_arg` wrapper — exactly one call, inside that wrapper."
+        );
+    }
+}
+
+/// Self-test for the single-witnessed-call classifier: the REAL single-call
+/// shape passes; a SECOND same-file `pub(in crate::structural_carrier_producer)`
+/// wrapper calling the raw lowerer is reported; a call moved into a FREE fn (not
+/// `emit_macro_arg`) is reported; commented-out / string mentions do not count;
+/// a missing definition or missing call is reported (anti-vacuity).
+#[test]
+fn structural_lowerer_single_call_classifier_discriminates() {
+    // CORRECT — the genuine single-call shape: one witnessed wrapper calling the
+    // raw lowerer exactly once.
+    let ok = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+              pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+              lower_type_expr_structural(g)\n\
+              }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(ok).is_none(),
+        "the genuine single-witnessed-call shape (one call, inside `emit_macro_arg`) must PASS"
+    );
+    // WRONG — a SECOND same-file wrapper calling the raw lowerer (the exact
+    // bypass the guard exists to catch): two calls now exist.
+    let two_wrappers = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                        pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                        lower_type_expr_structural(g)\n\
+                        }\n\
+                        pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
+                        lower_type_expr_structural(g)\n\
+                        }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(two_wrappers).is_some(),
+        "a SECOND same-file wrapper calling the raw lowerer must be REPORTED — it is an un-gated \
+         bypass of the witness gate"
+    );
+    // WRONG — the single call moved into a FREE fn that is NOT `emit_macro_arg`.
+    let wrong_encloser = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                          fn some_free_fn(g: &G) -> R {\n\
+                          lower_type_expr_structural(g)\n\
+                          }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(wrong_encloser).is_some(),
+        "a call NOT inside `emit_macro_arg` must be REPORTED — only the witnessed wrapper may reach \
+         the raw lowerer"
+    );
+    // Comment / string mentions do NOT count as calls: a body whose only call is
+    // the witnessed one, plus a commented-out call and a string mention, passes.
+    let with_noise = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                      // lower_type_expr_structural(g) is the raw entry\n\
+                      const D: &str = \"lower_type_expr_structural(x)\";\n\
+                      pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                      lower_type_expr_structural(g)\n\
+                      }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(with_noise).is_none(),
+        "a commented-out call and a string mention must NOT inflate the call count — only the one \
+         real witnessed call counts"
+    );
+    // ANTI-VACUITY — a missing definition is reported.
+    let no_def =
+        "pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G) -> R { other(g) }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(no_def).is_some(),
+        "a missing `fn lower_type_expr_structural(` definition must be REPORTED (anti-vacuity)"
+    );
+    // ANTI-VACUITY — a definition with NO call is reported.
+    let no_call = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(no_call).is_some(),
+        "a definition that is never CALLED must be REPORTED (anti-vacuity — the witnessed wrapper \
+         must call it once)"
+    );
+    // The REAL owner source satisfies the invariant (revert proof: the
+    // production tree has exactly one witnessed call).
+    let real = std::fs::read_to_string(workspace_path(
+        "crates/verter_session/src/structural_carrier_producer/lower.rs",
+    ))
+    .expect("the structural lowerer's owner module must be readable");
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(&real).is_none(),
+        "the REAL `lower.rs` MUST have exactly one `lower_type_expr_structural` call, inside \
+         `emit_macro_arg` — if this reddens, a second in-file caller was added, re-opening the \
+         single-producer surface"
     );
 }
 
@@ -21948,7 +22310,7 @@ fn structural_carrier_producer_witnesses_are_unforgeable() {
     for (file, parsed) in &owner_files {
         collect_witness_structs_in_items(&parsed.items, file, &mut witnesses);
     }
-    // EXACTLY two witnesses, with the sanctioned names + owning files.
+    // EXACTLY one witness, with the sanctioned name + owning file.
     let mut found: Vec<(String, String)> = witnesses
         .iter()
         .map(|w| (w.name.clone(), w.file.clone()))
@@ -22071,7 +22433,7 @@ fn structural_carrier_producer_witness_classifier_discriminates() {
          (`macro_surface.rs`) must be reported"
     );
 
-    // The REAL owner sources: exactly two witnesses, both private-field, no
+    // The REAL owner sources: exactly one witness, private-field, no
     // crate-visible/foreign returners (revert proof).
     let real_files = structural_carrier_producer_owner_files();
     let mut real_witnesses: Vec<WitnessStruct> = Vec::new();
@@ -23703,9 +24065,9 @@ const MIRROR_SEED_FRAMES_PARAM_TYPES: &[&str] = &[
 ];
 
 /// POSITIVE STRUCTURAL AST PIN for the sanctioned binder-seed helper `fn_name`,
-/// aggregated across ALL scanned `macro_hot_mirror/**` production sources
-/// (`mirror_sources` is the per-file `(rel, src)` list the entry-surface guard
-/// already retains).
+/// aggregated across ALL scanned `structural_carrier_producer/**` production
+/// sources (the `mirror_sources` parameter is the per-file `(rel, src)` list the
+/// entry-surface guard already retains).
 ///
 /// This REPLACES the former negative token-rendering confinement
 /// (`render_type(..).contains("HotTypeRef")`), which was structurally LEAKY: a
@@ -23909,8 +24271,10 @@ fn positive_pin_sanctioned_helper(
 /// LAYER ORDER. This is the SECONDARY layer. The LOAD-BEARING confinement is the
 /// COMPILER privacy of the producer-capable code:
 /// - the raw structural lowerer is MODULE-PRIVATE in `lower.rs` and reachable
-///   only through the two unforgeable-witness-gated wrappers, pinned by
-///   `structural_carrier_producer_lowerer_is_module_private` +
+///   only through the one unforgeable-witness-gated wrapper (`emit_macro_arg`),
+///   pinned by `structural_carrier_producer_lowerer_is_module_private` +
+///   `structural_lowerer_called_only_through_the_witness_gated_wrapper` (the
+///   in-file single-call pin) +
 ///   `structural_carrier_producer_witnesses_are_unforgeable`;
 /// - the shared binder-seed helper `build_script_setup_seed_frames` is
 ///   `pub(in crate::structural_carrier_producer)`, pinned by
