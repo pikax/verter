@@ -22468,17 +22468,17 @@ const MIRROR_SOLE_PRODUCER_ENTRY: &str = "macro_type_arg_hot_ref";
 ///
 /// - `build_script_setup_seed_frames`: the shared `<script setup generic="…">`
 ///   binder-frame builder. It interns the owner's script-setup generics as
-///   `TypeParam` binder nodes and returns a seed `BinderScope` stack; both the
-///   mirror's macro-arg builder AND the ordinary decl-body structural producer
-///   build the SAME seed binder shape from it. It is
+///   `TypeParam` binder nodes and returns a seed `BinderScope` stack; the ONLY
+///   production caller today is the mirror's macro-arg builder (the in-module
+///   isolation tests also build the seed binder shape from it directly). It is
 ///   `pub(in crate::macro_hot_mirror)` — ancestor-private to the mirror — so NO
 ///   foreign module can NAME it (a compile error, not a lint): the by-
 ///   construction, compiler-enforced single-producer guarantee, pinned by
-///   [`script_setup_binder_helper_is_module_private`]. Both seed-shape callers
-///   reach it from WITHIN the module subtree today; a later move of the
-///   decl-body producer out of the subtree must DELIBERATELY re-home / re-scope
-///   the helper to the new caller's shared ancestor-private boundary, never
-///   passively widen it to `pub(crate)`.
+///   [`script_setup_binder_helper_is_module_private`]. The only caller today is
+///   inside the module subtree; a FUTURE decl-body structural producer that
+///   needs this seed shape from a module OUTSIDE the subtree must DELIBERATELY
+///   re-home / re-scope the helper to the new caller's shared ancestor-private
+///   boundary, never passively widen it to `pub(crate)`.
 const MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES: &[&str] = &["build_script_setup_seed_frames"];
 
 /// The ONE production file the sanctioned non-producer helper

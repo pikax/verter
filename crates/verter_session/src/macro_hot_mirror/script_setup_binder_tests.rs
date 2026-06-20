@@ -2,11 +2,12 @@
 //! ([`super::build_script_setup_seed_frames`]).
 //!
 //! These call the EXTRACTED helper DIRECTLY (not through the macro hot mirror)
-//! to prove it is the shared `pub(crate)` entry both the mirror and the
-//! ordinary decl-body producer build the seed binder shape from. Each lowers a
-//! bare `Ref` through the returned frame and asserts it resolves to the
-//! script-setup `TypeParam` binder rather than an unbound `BareRef` — the exact
-//! contract a `<script setup generic="…">` SFC's open generics depend on.
+//! to prove the shared `pub(in crate::macro_hot_mirror)` entry — the helper the
+//! mirror's macro-arg builder builds the seed binder shape from — produces the
+//! correct binder shape. Each lowers a bare `Ref` through the returned frame and
+//! asserts it resolves to the script-setup `TypeParam` binder rather than an
+//! unbound `BareRef` — the exact contract a `<script setup generic="…">` SFC's
+//! open generics depend on.
 
 use std::sync::Arc;
 
