@@ -536,7 +536,7 @@ defineProps<{
     assert_eq!(
         names,
         vec!["x", "y"],
-        "both path-projected members must publish across the file boundary"
+        "the path-projected macro surface must publish exactly the two author-written members"
     );
     assert!(
         prop(&meta, "x").required,
