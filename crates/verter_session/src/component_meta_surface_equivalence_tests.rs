@@ -14,7 +14,11 @@
 //!
 //! Coverage: an alias chain (published shallow), a same-file interface
 //! merge surface, cross-file imported-alias members (interface / primitive /
-//! function-type aliases, each published as a shallow Ref), a
+//! function-type aliases, each published as a shallow Ref — this fixture pins
+//! Shallow-By-Default publication + import-route/carrier consultation, NOT
+//! member-type resolution), a PATH-PROJECTED imported member that DOES force
+//! cross-file member-TYPE resolution (`Foo['bar']` publishes the resolved
+//! terminal `number` — impossible without resolving the imported body), a
 //! `defineProps<T>` generic-default deep-expansion fixture, and the
 //! cross-file readset/fact contract — a cold resolution roots its read-set on
 //! the cross-file carrier, and a content edit to that carrier misses the warm
@@ -214,17 +218,20 @@ defineProps<MergedProps>()
 // shallow.
 // ════════════════════════════════════════════════════════════════════
 
-/// A `defineProps<{ … }>` over members imported across the file boundary
-/// resolves their surface AND keeps a member whose type is itself an
-/// IMPORTED alias as a SHALLOW `Ref { name: "Foo" }` — the Component-Meta
-/// Shallow-By-Default contract: imported alias names are NOT eagerly inlined
-/// at the publication surface; the consumer re-resolves `Foo` through the
-/// registry on demand. The full surface is pinned: the exact member set,
-/// required-ness derived from optionality, and all three imported-alias member
-/// types published as shallow `Ref`s — `label` as `Ref { name: "Label" }`
-/// (NOT the inlined `string` primitive), `onSubmit` as `Ref { name: "Submit" }`
-/// (NOT the inlined function body), and `item` as `Ref { name: "Foo" }` (NOT
-/// Foo's inlined `Object` body).
+/// What this test pins (its TRUE axis): Component-Meta Shallow-By-Default
+/// publication PLUS import-route / carrier consultation — NOT cross-file
+/// member-TYPE resolution.
+///
+/// A `defineProps<{ … }>` whose members are typed by IMPORTED alias names
+/// publishes each member's type as a SHALLOW `Ref` carrier derived from the
+/// SFC's own inline macro syntax: `label` as `Ref { name: "Label" }` (NOT the
+/// inlined `string` primitive), `onSubmit` as `Ref { name: "Submit" }` (NOT
+/// the inlined function body), and `item` as `Ref { name: "Foo" }` (NOT Foo's
+/// inlined `Object` body). This is the Component-Meta Shallow-By-Default
+/// contract: imported alias names are NOT eagerly inlined at the publication
+/// surface; the consumer re-resolves `Foo` / `Label` / `Submit` through the
+/// registry on demand. The full surface is pinned: the exact member set and
+/// required-ness derived from optionality.
 ///
 /// The imported-alias member rides the publication boundary directly (the
 /// macro type arg is the inline object literal), where the shallow-by-default
@@ -232,17 +239,31 @@ defineProps<MergedProps>()
 /// `published_bare_alias_ref_stays_shallow` contract observed end-to-end
 /// through the equivalence net.
 ///
-/// Cross-file-resolution proof (the discriminator that the shallow `Ref`s
-/// alone do NOT provide): the published read-set's dep-signature MUST include
-/// the imported carriers `/foo.ts` and `/types.ts`. A bare `Ref { name: "Foo" }`
-/// is EXACTLY what `/component.vue` would publish in isolation if the import
-/// route to `/foo.ts` were broken (an unresolved import leaves the bare name),
-/// so the shallow-`Ref` asserts cannot tell a resolved import from a broken
-/// one. The dep-signature assert closes that gap — see the negative-control
-/// note on the assertion itself.
+/// Why this fixture CANNOT prove cross-file TYPE resolution: because the
+/// members deliberately stay bare `Ref`s, the published member surface is
+/// fully derivable from `/component.vue`'s OWN inline object literal — the
+/// imported carriers' BODIES (`Foo`'s `{ bar }`, `Label`'s `string`, etc.)
+/// never enter the published surface. A bare `Ref { name: "Foo" }` is EXACTLY
+/// what `/component.vue` would publish in isolation, and is identical whether
+/// or not `Foo`'s type body was resolved. The genuine cross-file
+/// member-TYPE-resolution discriminator (a PATH-PROJECTED imported member
+/// whose published value can ONLY come from resolving the imported type's
+/// body) lives in the sibling
+/// `cross_file_imported_type_resolves_through_path_projection` below.
 ///
-/// Discriminating: if the cross-file import resolution regressed, the surface
-/// would be empty / wrong (the imported members unresolved); the
+/// What the dep-signature DOES discriminate here: import-route / SPECIFIER
+/// resolution and carrier consultation. The published read-set's dep-signature
+/// MUST include the imported carriers `/foo.ts` and `/types.ts` — the
+/// specifiers were route-resolved and the carrier files shallow-consulted. A
+/// regression that broke the import ROUTE would drop the carrier from the
+/// read-set (the shallow `Ref` asserts alone could not tell a route-resolved
+/// import from a broken one — both leave the bare name). The dep-signature
+/// asserts close that ROUTE gap; they do NOT prove the member TYPE resolved
+/// (the `cross_file_imported_type_resolves_through_path_projection` sibling
+/// does).
+///
+/// Discriminating: if the import-route resolution regressed, the imported
+/// members would be unresolved (surface empty / wrong); the
 /// `["item", "label", "onSubmit"]` set + required asserts fail, and the
 /// imported carriers drop out of the dep-signature. If the producer flip
 /// EAGERLY inlined the imported alias `Foo` at the member surface, `item`'s
@@ -368,21 +389,32 @@ defineProps<{
         "the imported-alias member `item` must NOT expand `Foo` inline to an Object body"
     );
 
-    // Cross-file-resolution PROOF (the discriminator the shallow `Ref`s above
-    // cannot provide on their own): the published read-set MUST root on the
-    // imported carriers. `Foo` is defined in `/foo.ts`; `Label`/`Submit` in
-    // `/types.ts`. Both must appear in the published component-meta entry's
-    // dep-signature because resolving the macro's member surface consulted
-    // those files cross-file.
+    // Import-route / specifier-resolution PROOF (the ROUTE discriminator the
+    // shallow `Ref`s above cannot provide on their own — NOT a member-TYPE
+    // resolution proof; for that see the path-projection sibling below): the
+    // published read-set MUST root on the imported carriers. `Foo` is defined
+    // in `/foo.ts`; `Label`/`Submit` in `/types.ts`. Both must appear in the
+    // published component-meta entry's dep-signature because the SFC's import
+    // specifiers were route-resolved and the carrier files shallow-consulted.
     //
-    // NEGATIVE CONTROL: a bare `Ref { name: "Foo" }` is EXACTLY what
-    // `/component.vue` publishes in ISOLATION when the import route to
+    // SCOPE OF THIS ASSERT (what it proves and what it does NOT): it proves the
+    // import ROUTE / specifier resolved and the carrier entered the read-set.
+    // It does NOT prove the imported TYPE BODY resolved into the member surface
+    // — a carrier enters the dep-signature on SPECIFIER resolution (route +
+    // shallow consult), independent of whether the member's type body was ever
+    // resolved. The member-TYPE-resolution discriminator is the
+    // `cross_file_imported_type_resolves_through_path_projection` sibling, where
+    // the published value is `number`/`string` — IMPOSSIBLE without resolving
+    // the imported body.
+    //
+    // NEGATIVE CONTROL (route-level): a bare `Ref { name: "Foo" }` is EXACTLY
+    // what `/component.vue` publishes in ISOLATION when the import route to
     // `/foo.ts` is broken — an unresolved import leaves the bare name as a
     // `Ref`, so every shallow-`Ref` assertion above would STILL PASS against a
-    // regression that broke cross-file import resolution. These dep-signature
-    // asserts close that gap: if the import route to `/foo.ts` (or `/types.ts`)
-    // were removed/broken, the carrier would NOT be consulted, would NOT enter
-    // the read-set, and the corresponding `any(... == "/foo.ts")` assert FAILS.
+    // regression that broke the import ROUTE. These dep-signature asserts close
+    // that ROUTE gap: if the import route to `/foo.ts` (or `/types.ts`) were
+    // removed/broken, the carrier would NOT be consulted, would NOT enter the
+    // read-set, and the corresponding `any(... == "/foo.ts")` assert FAILS.
     // (Empirically the dep-signature for this fixture is
     // `["/component.vue", "/foo.ts", "/types.ts"]`.)
     let dep_canonicals =
@@ -392,17 +424,140 @@ defineProps<{
         );
     assert!(
         dep_canonicals.iter().any(|c| c.as_ref() == "/foo.ts"),
-        "cross-file resolution must consult the `Foo` carrier `/foo.ts`, recording it \
+        "import-route resolution must consult the `Foo` carrier `/foo.ts`, recording it \
          in the published read-set; a broken import route to `/foo.ts` would leave the \
          same bare `Ref {{ name: \"Foo\" }}` yet drop `/foo.ts` from the dep-signature. \
          observed {dep_canonicals:?}"
     );
     assert!(
         dep_canonicals.iter().any(|c| c.as_ref() == "/types.ts"),
-        "cross-file resolution must consult the `Label`/`Submit` carrier `/types.ts`, \
+        "import-route resolution must consult the `Label`/`Submit` carrier `/types.ts`, \
          recording it in the published read-set; a broken import route to `/types.ts` \
          would leave the same bare `Label`/`Submit` refs yet drop `/types.ts` from the \
          dep-signature. observed {dep_canonicals:?}"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Cross-file imported-TYPE resolution through a PATH-PROJECTED member —
+// the genuine member-TYPE-resolution discriminator (the sibling above
+// proves only Shallow-By-Default publication + import-route consultation).
+// ════════════════════════════════════════════════════════════════════
+
+/// A `defineProps<{ x: Foo['bar']; y?: Foo['baz'] }>` over an IMPORTED
+/// interface `Foo` (defined in `/foo.ts`) publishes the path-projected
+/// members as the RESOLVED terminal member types: `x` is
+/// `Primitive(Number)` (the resolved `Foo.bar`) and `y` is
+/// `Primitive(String)` (the resolved `Foo.baz`). Producing these values is
+/// IMPOSSIBLE without resolving the imported `Foo`'s BODY cross-file — a
+/// bare-`Ref` echo (the Shallow-By-Default carrier the sibling
+/// `cross_file_imported_props_resolve_their_member_surface` pins for a plain
+/// imported alias) CANNOT yield `number` / `string` here. Path-projection is
+/// path-precise per Component-Meta Shallow-By-Default: `Foo['bar']`
+/// materialises ONLY the `bar` hop's resolved type, which is exactly the
+/// cross-file member-type-resolution work a declaration-body PRODUCER flip
+/// must preserve. This is the discriminator the sibling's dep-signature alone
+/// cannot provide (the dep-signature proves the import ROUTE / specifier
+/// resolved; this test proves the imported member TYPE resolved).
+///
+/// Discriminating (the asserted values are impossible without cross-file
+/// resolution): if cross-file member-type resolution regressed (the producer
+/// flip echoed the macro member refs as shallow carriers without resolving
+/// `Foo`'s body, or the indexed-access projection failed), `x` would be an
+/// unresolved carrier (a bare `Ref`/`IndexedAccess`, NOT `Primitive(Number)`)
+/// and the `Primitive(Number)` arm panics. The fixture deliberately uses
+/// DIFFERENT primitives per key (`bar: number`, `baz: string`) so the
+/// assertion discriminates the SPECIFIC resolved terminal — a regression that
+/// mis-routed `x` to `baz` would land on `string` and fail.
+///
+/// NEGATIVE CONTROL (empirically verified by a throwaway edit, then reverted):
+/// breaking `/foo.ts`'s `Foo.bar` type — e.g. removing the `bar` member, or
+/// breaking the import route to `/foo.ts` — makes the published `x` an
+/// unresolved carrier (NO LONGER `Primitive(Number)`), so the
+/// `Primitive(Number)` assertion FAILS. The asserted value therefore genuinely
+/// requires resolving the imported type's body; the test cannot pass against a
+/// regression that only route-resolves imports without resolving the member
+/// type. The dep-signature assert (below) additionally pins that `/foo.ts`
+/// entered the read-set — so this test pins ROUTE + member-TYPE resolution
+/// together.
+#[test]
+fn cross_file_imported_type_resolves_through_path_projection() {
+    let project = make_project();
+    // The interface body lives in a SEPARATE file: the only way to publish a
+    // resolved `number`/`string` for the path-projected members is to resolve
+    // `Foo`'s body across the file boundary. Distinct primitives per key make
+    // the terminal assertion discriminate the SPECIFIC resolved hop.
+    project
+        .upsert_base(
+            "/foo.ts",
+            r#"export interface Foo { bar: number; baz: string }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/component.vue",
+            r#"<script setup lang="ts">
+import type { Foo } from './foo';
+defineProps<{
+  x: Foo['bar'];
+  y?: Foo['baz'];
+}>();
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/component.vue");
+    let mut names = prop_names(&meta);
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["x", "y"],
+        "both path-projected members must publish across the file boundary"
+    );
+    assert!(
+        prop(&meta, "x").required,
+        "the non-optional `x` must publish as required"
+    );
+    assert!(
+        !prop(&meta, "y").required,
+        "the optional `y?` must publish as not-required"
+    );
+
+    // `x: Foo['bar']` MUST publish the RESOLVED terminal `number` — impossible
+    // without resolving `Foo`'s body in `/foo.ts`. A bare-`Ref`/`IndexedAccess`
+    // carrier (broken cross-file member-type resolution) fails this arm.
+    match &prop(&meta, "x").type_expr {
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number) => {}
+        other => panic!(
+            "the path-projected imported member `x: Foo['bar']` must publish the RESOLVED \
+             terminal `Primitive(Number)` (cross-file resolution of `Foo.bar`); a bare carrier \
+             means cross-file member-type resolution regressed. got {other:?}"
+        ),
+    }
+    // `y: Foo['baz']` MUST publish the RESOLVED terminal `string` — the
+    // distinct primitive proves the projection routed to `baz`, not `bar`.
+    match &prop(&meta, "y").type_expr {
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String) => {}
+        other => panic!(
+            "the path-projected imported member `y: Foo['baz']` must publish the RESOLVED \
+             terminal `Primitive(String)` (cross-file resolution of `Foo.baz`); got {other:?}"
+        ),
+    }
+
+    // Pin ROUTE + member-TYPE resolution together: the resolved `number`/
+    // `string` above already prove `Foo`'s body resolved cross-file; this
+    // additionally asserts `/foo.ts` entered the published read-set (a content
+    // edit to `/foo.ts` must therefore miss the warm component-meta read).
+    let dep_canonicals =
+        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
+            project.host(),
+            "/component.vue",
+        );
+    assert!(
+        dep_canonicals.iter().any(|c| c.as_ref() == "/foo.ts"),
+        "cross-file member-type resolution of `Foo['bar']`/`Foo['baz']` must root the published \
+         read-set on the `Foo` carrier `/foo.ts`. observed {dep_canonicals:?}"
     );
 }
 
