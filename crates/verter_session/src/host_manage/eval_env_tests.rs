@@ -893,6 +893,124 @@ fn c3_fallthrough_runtime_value_deps_graph_native_equals_materializer_touched_fu
     );
 }
 
+/// C3 runtime-value SURFACE equivalence — the oracle
+/// `build_fallthrough_eval_env_lightweight` hydrates the SAME runtime-value
+/// surface (`EvalEnv.value_symbols`) that the graph-native dep set
+/// (`fallthrough_runtime_value_deps_graph_native`) + the per-symbol value
+/// readers describe. The dep-pair SET equivalence is pinned by
+/// `c3_fallthrough_runtime_value_deps_graph_native_equals_materializer_touched_full_pairs`;
+/// this is its surface complement: the oracle env MATERIALISES exactly the
+/// required cross-file binding (`theme`) and NOT the unused one (`helper`),
+/// and the materialised binding's value content matches the graph-native
+/// per-symbol reader for the source the dep pair names. So the two whole-env
+/// consumers agree on the hydrated surface, not only on the dep set — the
+/// dimension that becomes impossible to compare once the oracle is deleted.
+///
+/// Discrimination proof (break → red → revert):
+/// - If the oracle hydrated the unused `helper` (dropping the required-name
+///   filter), the negative `!contains_key("helper")` surface assert reddens.
+/// - If the oracle failed to hydrate the required `theme` (the materialiser
+///   skipping the binding), the positive `contains_key("theme")` reddens.
+/// - If the oracle hydrated `theme` from the WRONG source (a barrel-stop
+///   instead of `(/src/dep.ts, themeImpl)`), the hydrated binding's value
+///   content would diverge from the graph-native reader for the dep pair the
+///   set names → the value-content equivalence reddens. A name-only check
+///   would have hidden this (the binding name `theme` is identical either
+///   way) — the content tie to the graph-native source pair discriminates.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
+    use crate::types::{FileLanguage, HostConfig, UpsertRequest};
+    use crate::VerterHost;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    // `themeImpl`/`helperImpl` defined in dep.ts under names DIFFERENT from
+    // the importing bindings; a barrel re-exports them aliased.
+    upsert_ts(
+        &host,
+        "/src/dep.ts",
+        "export const themeImpl = { color: 'dark' }\n\
+         export const helperImpl = { x: 1 }\n",
+    );
+    upsert_ts(
+        &host,
+        "/src/barrel.ts",
+        "export { themeImpl as theme, helperImpl as helper } from './dep'\n",
+    );
+    // Only `theme` is template-referenced on the single native root → only
+    // `theme` is a required runtime value; `helper` is imported but unused.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/src/Owner.vue".to_string()),
+            input_id: "/src/Owner.vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\n\
+                 import { theme, helper } from './barrel'\n\
+                 </script>\n\
+                 <template><div :data-c=\"theme\" /></template>\n",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("owner upsert");
+
+    let snapshot = host
+        .get_analysis("/src/Owner.vue")
+        .expect("owner analysis snapshot");
+
+    // The graph-native dep SET (the selection the surface must match).
+    let deps: std::collections::BTreeSet<(String, String)> =
+        host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
+    assert_eq!(
+        deps,
+        std::collections::BTreeSet::from([("/src/dep.ts".to_string(), "themeImpl".to_string())]),
+        "the required `theme` resolves through the barrel to its single source pair: {deps:?}"
+    );
+
+    // The oracle whole-env consumer: the materialised runtime-value SURFACE.
+    let env = host
+        .build_fallthrough_eval_env_lightweight("/src/Owner.vue", &snapshot, None, None)
+        .expect("the oracle must build the lightweight fallthrough env");
+
+    // SURFACE positive: the required cross-file binding `theme` is hydrated.
+    assert!(
+        env.value_symbols.contains_key("theme"),
+        "the oracle must hydrate the required cross-file binding `theme` into its \
+         runtime-value surface (matching the graph-native dep set's required selection)"
+    );
+    // SURFACE negative: the unused `helper` is NOT hydrated — the surface
+    // reflects the SAME required-name filter the dep set applies.
+    assert!(
+        !env.value_symbols.contains_key("helper"),
+        "the oracle must NOT hydrate the unused `helper` binding (it is not in the \
+         graph-native dep set); a surface that hydrated it would diverge from the set"
+    );
+
+    // SURFACE-to-SET content tie: the hydrated `theme` binding's value content
+    // equals the graph-native per-symbol reader for the SOURCE the single dep
+    // pair names (`(/src/dep.ts, themeImpl)`) — so the oracle hydrated from the
+    // SAME source the graph-native set resolves, not a barrel-stop.
+    let (source_canonical, source_name) = deps.iter().next().expect("one dep pair").clone();
+    let graph_source = host
+        .dependency_value_symbol_graph_native(&source_canonical, &source_name)
+        .expect("graph-native reader must resolve the dep-pair source");
+    let oracle_binding = env
+        .value_symbols
+        .get("theme")
+        .map(|group| group.primary().clone())
+        .expect("the oracle-hydrated `theme` binding must be present");
+    assert_eq!(
+        oracle_binding.object_shape, graph_source.object_shape,
+        "the oracle-hydrated `theme` surface must carry the SAME value content as the \
+         graph-native reader for the dep-pair source `({source_canonical}, {source_name})` \
+         — proving both consumers hydrated from the same source, not a barrel-stop"
+    );
+    assert_eq!(
+        oracle_binding.type_annotation, graph_source.type_annotation,
+        "the oracle-hydrated `theme` type_annotation must match the graph-native source reader"
+    );
+}
+
 /// C3 double-alias soundness — two distinct bindings aliased onto the
 /// SAME source (`import { x as a, x as b }`, both template-referenced so
 /// both are required runtime values) drive the C3 readiness path WITHOUT a

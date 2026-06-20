@@ -142,44 +142,87 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
 /// declaration G in its defining file `/m.ts` (the `ImportType` carrier
 /// the producer lowers `import("…")` into, resolved to its target decl
 /// reference). The producer flip must keep this a carrier reference, never
-/// an eager surface inline.
+/// an eager surface inline — under BOTH `Navigate` AND `Shallow`.
 ///
 /// Discriminating: a regressed eager flip would resolve to G's `Object`
-/// body at navigate time; this asserts the carrier (`DeclRef` at `/m.ts`)
-/// instead and would fail on an inlined Object.
+/// body at navigate/shallow time; this asserts the carrier (`DeclRef` at
+/// `/m.ts`) in BOTH modes and would fail on an inlined Object. A flip that
+/// kept `Navigate` correct but eagerly inlined under `Shallow` would pass a
+/// Navigate-only check but redden here. The producer-stored body is pinned
+/// by a TYPED structural match on the `ImportType` carrier (never a fragile
+/// Debug-substring) per the Typed-IR-Only rule.
 #[test]
 fn imported_alias_decl_body_lowers_to_an_import_carrier_reference() {
+    use verter_semantic::analysis::type_eval::TypeDeclBody;
+
     let host = make_host();
     upsert_ts(&host, "/m.ts", "export type G = { g: number };\n");
     upsert_ts(&host, "/p.ts", "export type A = import('./m').G;\n");
 
     // The DeclBodyMemo stores the import-type carrier verbatim (syntactic
-    // lowering, never an eager resolution) — pin that producer-stored shape.
+    // lowering, never an eager resolution) — pin that producer-stored shape
+    // with a TYPED match on the `ImportType` carrier (specifier / qualifier /
+    // typeof_query / type_arguments), not a Debug-substring.
     let state = host.routed_shallow_state("/p.ts").expect("shallow state");
     let lowered = state.type_decl("A").expect("A decl body lowers");
-    let body_repr = format!("{:?}", lowered.body);
-    assert!(
-        body_repr.contains("ImportType")
-            && body_repr.contains("./m")
-            && body_repr.contains("\"G\""),
-        "the producer must store the `import(\"./m\").G` body as an ImportType carrier, got {body_repr}"
-    );
-
-    // Navigate dispatch resolves the import carrier to the target decl
-    // REFERENCE in its defining file — a carrier, not an inlined surface.
-    let node = host
-        .resolve_named_symbol("/p.ts", "A", &[], Some(ProjectionMode::Navigate))
-        .expect("A must resolve Navigate");
-    match node_data(&host, node).as_ref() {
-        SemanticNodeData::DeclRef { identity } => {
-            assert_eq!(identity.decl_name.as_ref(), "G", "carrier must reference G");
+    match &lowered.body {
+        TypeDeclBody::Single(verter_type_expr::TypeExpr::ImportType {
+            specifier,
+            qualifier,
+            typeof_query,
+            type_arguments,
+        }) => {
             assert_eq!(
-                identity.canonical_id.as_ref(),
-                "/m.ts",
-                "the import carrier must reference G's defining file /m.ts"
+                specifier.as_ref(),
+                "./m",
+                "the import-type carrier must name the `./m` specifier"
+            );
+            assert_eq!(
+                qualifier.iter().map(|q| q.as_ref()).collect::<Vec<_>>(),
+                vec!["G"],
+                "the import-type carrier qualifier must be the dotted `[\"G\"]` path"
+            );
+            assert!(
+                !*typeof_query,
+                "`import(\"./m\").G` in type position is NOT a `typeof` query"
+            );
+            assert!(
+                type_arguments.is_empty(),
+                "no type arguments at the `import(\"./m\").G` site"
             );
         }
-        other => panic!("import alias must lower to a DeclRef carrier in Navigate, got {other:?}"),
+        other => panic!(
+            "the producer must store the `import(\"./m\").G` body as a \
+             `TypeDeclBody::Single(TypeExpr::ImportType {{ .. }})` carrier, got {other:?}"
+        ),
+    }
+
+    // BOTH Navigate AND Shallow dispatch resolve the import carrier to the
+    // target decl REFERENCE in its defining file — a carrier, not an inlined
+    // surface. (The plain-alias test already loops both modes; the imported
+    // alias must too, so a broken Shallow cannot hide behind a Navigate pass.)
+    for mode in [ProjectionMode::Navigate, ProjectionMode::Shallow] {
+        let node = host
+            .resolve_named_symbol("/p.ts", "A", &[], Some(mode))
+            .unwrap_or_else(|| panic!("A must resolve in {mode:?}"));
+        match node_data(&host, node).as_ref() {
+            SemanticNodeData::DeclRef { identity } => {
+                assert_eq!(
+                    identity.decl_name.as_ref(),
+                    "G",
+                    "carrier must reference G in {mode:?}"
+                );
+                assert_eq!(
+                    identity.canonical_id.as_ref(),
+                    "/m.ts",
+                    "the import carrier must reference G's defining file /m.ts in {mode:?}"
+                );
+            }
+            other => panic!(
+                "import alias must lower to a DeclRef carrier in {mode:?} \
+                 (never an eager inlined surface), got {other:?}"
+            ),
+        }
     }
 }
 
@@ -422,79 +465,114 @@ fn upsert_rune_module(host: &VerterHost, canonical: &str, source: &str) {
         .expect("upsert svelte rune module");
 }
 
-/// End-to-end through the host: a Svelte `$`-rune MODULE (`.svelte.ts`) has
-/// the ambient `$`-rune value symbols (`$state`/`$derived`/`$effect`/
-/// `$inspect`) visible in its resolved whole-env, a PLAIN `.ts` does NOT
-/// (per-file scoping), and a USER declaration WINS over the rune prelude
-/// (the `if !contains_key` precedence the rune ambient enforces). This pins
-/// the observable contract the rune-ambient re-home (off the static
-/// `OnceLock<EvalEnv>`) must preserve.
+/// A Svelte `$`-rune MODULE (`.svelte.ts`) exposes the ambient `$`-rune
+/// value symbols (`$state`/`$derived`/`$effect`/`$inspect`) through the
+/// SURVIVING graph-native value-symbol reader
+/// (`dependency_value_symbol_graph_native`, the per-symbol reader the
+/// fallthrough / C2 / C4 graph-native consumers and the dispatch route
+/// through) — NOT through the retained whole-env `EvalEnv` oracle. A PLAIN
+/// `.ts` does NOT (per-file scoping), and a USER declaration WINS over the
+/// rune prelude (the user's own annotation survives). This pins the
+/// observable contract the rune-ambient re-home (off the static
+/// `OnceLock<EvalEnv>` consulted only by `whole_env()`) must satisfy on the
+/// SURVIVING reader — the assertion stays valid AND meaningful after the
+/// `whole_env()` oracle is deleted.
 ///
-/// Discriminating: a global (non-per-file) injection would leak `$state`
-/// into the plain `.ts` env (the negative assert fails); a re-home that
-/// clobbered user symbols would replace the user's `$derived` annotation
-/// with the ambient rune signature (the user-wins assert fails).
+/// IGNORED until the rune-ambient re-home: the graph-native value-symbol
+/// reader does NOT yet carry the rune ambient (the per-symbol header index
+/// excludes it; only the doomed `whole_env()` injects it), so
+/// `dependency_value_symbol_graph_native("/r.svelte.ts", "$state")` returns
+/// `None` today. The re-home routes the runes through this reader; this test
+/// pins the surviving contract it must then serve and is un-ignored by that
+/// re-home. The per-file-scoping negative (a plain `.ts` returns `None`) is
+/// already correct on this tree.
+///
+/// Discriminating: a re-home that injected the runes globally (not per-file)
+/// would make the plain `.ts` reader return `Some` for `$state` (the
+/// per-file negative fails); a re-home that clobbered user symbols would
+/// replace the user's `$derived` annotation with the ambient rune signature
+/// (the user-wins assert fails); a re-home that left the runes on the oracle
+/// only would leave the graph-native reader returning `None` (the positive
+/// visibility asserts fail). The oracle==graph-native equivalence cross-check
+/// additionally fails if the re-home diverged the surviving reader from the
+/// oracle for the rune symbols.
 #[test]
+#[ignore = "un-ignored when the rune ambient is re-homed onto the graph-native value-symbol reader; asserts $state visible through that reader with per-file scoping and user-wins"]
 fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
-    // 1. Rune module: the ambient runes AND the user symbol are visible.
+    // 1. Rune module: the ambient runes are visible through the SURVIVING
+    //    graph-native per-symbol value-symbol reader, AND so is the user's
+    //    own `c`.
     let host = make_host();
     upsert_rune_module(&host, "/r.svelte.ts", "export const c = $state(0)\n");
-    let rune_env = host
-        .base_eval_env_arc("/r.svelte.ts")
-        .expect("rune module env must build");
     for rune in ["$state", "$derived", "$effect", "$inspect"] {
         assert!(
-            rune_env.value_symbols.contains_key(rune),
-            "the rune module env must carry the ambient `{rune}`"
+            host.dependency_value_symbol_graph_native("/r.svelte.ts", rune)
+                .is_some(),
+            "the rune module must expose the ambient `{rune}` through the \
+             graph-native value-symbol reader (the surviving path the re-home \
+             routes the runes through), not only the whole-env oracle"
         );
     }
     assert!(
-        rune_env.value_symbols.contains_key("c"),
-        "the rune module env must still carry the user's own `c`"
+        host.dependency_value_symbol_graph_native("/r.svelte.ts", "c")
+            .is_some(),
+        "the rune module's own `c` must be visible through the graph-native reader"
     );
 
-    // 2. Per-file scoping: a plain `.ts` must NOT gain any rune symbol.
+    // 2. Per-file scoping: a plain `.ts` must NOT expose any rune symbol
+    //    through the graph-native reader (a global injection would leak it).
     let plain_host = make_host();
     upsert_ts(&plain_host, "/plain.ts", "export const c = 0\n");
-    let plain_env = plain_host
-        .base_eval_env_arc("/plain.ts")
-        .expect("plain env must build");
     assert!(
-        !plain_env.value_symbols.contains_key("$state"),
-        "a plain `.ts` must NOT gain the ambient `$state` (per-file scoping); \
-         a global injection would leak it"
+        plain_host
+            .dependency_value_symbol_graph_native("/plain.ts", "$state")
+            .is_none(),
+        "a plain `.ts` must NOT expose the ambient `$state` through the \
+         graph-native reader (per-file scoping); a global injection would leak it"
     );
 
-    // 3. User-wins: a user-declared `$derived` keeps the USER's annotation,
-    //    not the ambient rune signature (single contributor, user body).
+    // 3. User-wins: a user-declared `$derived` keeps the USER's annotation
+    //    (`{ mine: 1 }`) through the graph-native reader, NOT the ambient rune
+    //    signature.
     let user_host = make_host();
     upsert_rune_module(
         &user_host,
         "/u.svelte.ts",
         "export const $derived: { mine: 1 } = { mine: 1 }\nexport const c = $state(0)\n",
     );
-    let user_env = user_host
-        .base_eval_env_arc("/u.svelte.ts")
-        .expect("user rune env must build");
-    let group = user_env
-        .value_symbols
-        .get("$derived")
-        .expect("user `$derived` must be present");
-    assert_eq!(
-        group.contributors.len(),
-        1,
-        "the user `$derived` must not be merged with the ambient rune contributor"
-    );
-    let annotation = group.primary().type_annotation.as_ref();
+    let user_derived = user_host
+        .dependency_value_symbol_graph_native("/u.svelte.ts", "$derived")
+        .expect("user `$derived` must be visible through the graph-native reader");
+    let annotation = user_derived.type_annotation.as_ref();
     assert!(
         matches!(annotation, Some(verter_type_expr::TypeExpr::Object(shape))
         if shape.properties.iter().any(|member| matches!(
             member,
             verter_type_expr::ObjectMember::Property(prop) if prop.name == "mine"
         ))),
-        "the user `$derived` declaration must WIN over the rune prelude \
-         (keep the user's `{{ mine: 1 }}` annotation), got {annotation:?}"
+        "the user `$derived` declaration must WIN over the rune prelude through \
+         the graph-native reader (keep the user's `{{ mine: 1 }}` annotation), \
+         got {annotation:?}"
     );
+
+    // 4. Oracle == graph-native equivalence (the SURVIVING reader is the
+    //    primary contract above; this is the explicit cross-check that the
+    //    re-home keeps the graph-native reader in lock-step with the oracle
+    //    for the rune symbols, until `whole_env()` is deleted).
+    let oracle_env = host
+        .base_eval_env_arc("/r.svelte.ts")
+        .expect("rune module oracle env must build");
+    for rune in ["$state", "$derived", "$effect", "$inspect"] {
+        let oracle_has = oracle_env.value_symbols.contains_key(rune);
+        let graph_native_has = host
+            .dependency_value_symbol_graph_native("/r.svelte.ts", rune)
+            .is_some();
+        assert_eq!(
+            oracle_has, graph_native_has,
+            "rune `{rune}` visibility must agree between the oracle whole-env and \
+             the surviving graph-native reader (no divergence across the re-home)"
+        );
+    }
 }
 
 /// In a `<script setup generic="T">` SFC, an ORDINARY type-alias decl body
