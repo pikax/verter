@@ -89,10 +89,13 @@ fn prop<'m>(
 
 /// A `defineProps<T>` over a prop whose type is a local ALIAS CHAIN
 /// (`type Outer = Inner`, `type Inner = { … }`) publishes the prop type as
-/// the bare `Ref { name: "Outer" }` carrier — the alias is NOT eagerly
-/// inlined at the publication surface (shallow-by-default). The full
-/// surface is pinned: prop name, the shallow `Ref` type, required-ness, and
-/// the author-declared provenance flag.
+/// the bare `Ref { name: "Outer" }` carrier — the alias is published shallow
+/// (the chain is NOT resolved into the surface; `Outer` is NOT inlined to
+/// `Inner`/its body at the publication surface, and a consumer would resolve
+/// it on demand). This test does NOT exercise alias-chain resolution — it
+/// proves the published type STAYS the bare `Ref { name: "Outer" }` carrier.
+/// The asserted subset is pinned: prop name, the shallow `Ref` type,
+/// required-ness, and the author-declared provenance flag.
 ///
 /// Discriminating: if the producer flip eagerly inlined the alias body at
 /// publication, `type_expr` would be an `Object` (or the inner alias) and
@@ -154,9 +157,9 @@ defineProps<{ node: Outer }>()
 /// A `defineProps<MergedProps>` over a SAME-FILE merged interface
 /// (`interface MergedProps { a } + interface MergedProps { b }`) publishes
 /// a surface carrying BOTH merged members — the merge unions members across
-/// contributors (never last-wins, never one-contributor-only). The full
-/// observable surface is pinned: exactly `{a, b}`, both required, both
-/// author-declared.
+/// contributors (never last-wins, never one-contributor-only). The asserted
+/// observable subset is pinned: exactly `{a, b}` (`a: number`, `b: string`),
+/// both required, both author-declared.
 ///
 /// Discriminating: a regressed flip that lost the merge (e.g. lowered the
 /// merge as a single `Object`/`Intersection` keeping only one contributor)
@@ -245,8 +248,8 @@ defineProps<MergedProps>()
 /// The imported-alias member rides the publication boundary directly (the
 /// macro type arg is the inline object literal), where the shallow-by-default
 /// `BareCarrier` rule holds for an imported alias — exactly the
-/// `published_bare_alias_ref_stays_shallow` contract observed end-to-end
-/// through the equivalence net.
+/// `published_bare_alias_ref_stays_shallow` contract observed here by the
+/// shallow `Ref` assertions through `get_component_meta`.
 ///
 /// Why this fixture CANNOT prove cross-file TYPE resolution: because the
 /// members deliberately stay bare `Ref`s, the published member surface is
@@ -602,7 +605,7 @@ defineProps<{
 /// generic argument deep-expands the omitted default `Item` into the
 /// member surface: `items?: T[]` materialises to `Item[]` exposing `Item`'s
 /// `id` member. This pins the cross-declaration generic-default expansion
-/// the dispatch performs for component-meta deep expansion.
+/// (the deep-expansion path) for component-meta deep expansion.
 ///
 /// Discriminating: if the generic-default substitution regressed (left `T`
 /// unbound or failed to instantiate `Item`), the `items` element would not
@@ -715,13 +718,16 @@ defineProps<Props>()
 /// edit to that contributor INVALIDATES the warm component-meta result — the
 /// re-resolution recomputes the CHANGED surface rather than serving a stale
 /// warm hit. This pins the fact/read-set contract the producer flip must
-/// preserve: the dispatch fan-in folds the cross-file carrier's fact into the
-/// published entry, so the warm-cache validation re-roots on the contributor.
-/// The edit is also CARRIER-PRECISE: an UNRELATED warmed component that does
-/// NOT depend on the edited carrier stays a warm hit across the edit.
+/// preserve: the cross-file carrier's fact is folded into the published
+/// entry's read-set, so the warm-cache validation re-roots on the contributor.
+/// The edit also does NOT GLOBALLY clear every entry: an UNRELATED warmed
+/// component that does NOT depend on the edited carrier stays a warm hit
+/// across the edit (this local control proves no global clear; it does not
+/// exhaustively prove the eviction is scoped to exactly the carrier's
+/// dependents among other cross-file entries).
 ///
 /// Discriminating: (1) an entry published WITHOUT the carrier in its read-set
-/// (a fan-in that failed to fold the carrier's dispatch facts) yields a
+/// (a read-set fold that failed to include the carrier's fact) yields a
 /// dep-signature missing `/types.ts`, failing the read-set assertion. (2) A
 /// cache that ignored the recorded carrier fact (no warm invalidation on a
 /// carrier edit) would serve the original `[a, b]` props after the edit and
@@ -735,9 +741,13 @@ defineProps<Props>()
 /// with NO dependency on `/types.ts`) is warmed before the edit and asserted
 /// to STAY a warm hit AFTER the `/types.ts` edit (its hit counter advances and
 /// the miss counter does NOT advance for its re-resolution). That isolated
-/// warm hit discriminates carrier-precise invalidation from a global clear:
-/// only the carrier-dependent owner may miss, the unrelated component must
-/// not be evicted.
+/// warm hit proves the edit did NOT do a GLOBAL clear (an unrelated LOCAL
+/// component that does not depend on the edited carrier stays warm): the
+/// carrier-dependent owner may miss while the unrelated component is not
+/// evicted. It does NOT exhaustively prove the eviction is scoped to exactly
+/// the carrier's dependents among other cross-file/imported entries — the
+/// control is purely LOCAL, so it rules out a global clear, not over-eviction
+/// of a DIFFERENT carrier's dependents.
 #[test]
 fn cross_file_contributor_edit_misses_warm_and_roots_readset_on_carrier() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -905,9 +915,11 @@ defineProps<{ z: string }>()
     );
     assert!(
         prov.component_meta_result_cache_hits.load(Relaxed) > unrelated_hits_before,
-        "the `/types.ts` edit must be CARRIER-PRECISE: the unrelated component \
-         that never depends on `/types.ts` must STAY a warm hit (its hit counter \
-         must advance), not be globally evicted"
+        "the `/types.ts` edit must NOT GLOBALLY clear every entry: the unrelated \
+         LOCAL component that never depends on `/types.ts` must STAY a warm hit \
+         (its hit counter must advance), not be globally evicted (this local \
+         control proves no global clear; it does not exhaustively prove the \
+         eviction is scoped to exactly the carrier's dependents)"
     );
     assert_eq!(
         prov.component_meta_result_cache_misses.load(Relaxed),
