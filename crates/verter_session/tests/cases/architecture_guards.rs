@@ -22754,11 +22754,14 @@ fn validate_sanctioned_entry_module_global(
 
 /// Whether a single `syn::Signature` is a genuine non-producer per the
 /// anti-usurpation rule: (1) its return type is the binder-seed shape
-/// `Vec<BinderScope>` (NOT the producer's `Option<HotTypeRef>`), and (2) NEITHER
-/// the return type NOR any input type mentions the macro-arg product type
-/// `HotTypeRef`. Signature-only (never the body): the genuine helper legitimately
-/// calls `HotTypeRef::node(..)` internally. Returns `Err(reason)` on a
-/// usurpation, `Ok(())` for a genuine non-producer.
+/// `Vec<BinderScope>` (NOT the producer's `Option<HotTypeRef>`), (2) NEITHER the
+/// return type NOR any TYPED input type mentions the macro-arg product type
+/// `HotTypeRef`, and (3) it has NO `self` receiver — the genuine helper is a
+/// module-level FREE fn, so a receiver-bearing associated fn (which carries the
+/// macro-arg product through `self`, e.g. inside `impl HotTypeRef { … }`) is a
+/// usurpation regardless of the receiver's spelling. Signature-only (never the
+/// body): the genuine helper legitimately calls `HotTypeRef::node(..)` internally.
+/// Returns `Err(reason)` on a usurpation, `Ok(())` for a genuine non-producer.
 fn signature_is_non_producer(sig: &syn::Signature, fn_name: &str) -> Result<(), String> {
     // (1) Return type must be the binder-seed shape.
     let return_rendered = match &sig.output {
@@ -22783,14 +22786,39 @@ fn signature_is_non_producer(sig: &syn::Signature, fn_name: &str) -> Result<(), 
         ));
     }
     for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input {
-            let input_rendered = render_type(&pat_type.ty);
-            if input_rendered.contains(MIRROR_MACRO_ARG_PRODUCT_TYPE) {
+        match input {
+            // (3) A RECEIVER (`self` / `&self` / `&mut self` / `self: T` /
+            // `self: Box<…>` / `Arc<Self>`) carries the impl self-type INTO the
+            // fn. `HotTypeRef` is a `pub` crate-visible type, so
+            // `impl HotTypeRef { fn build_script_setup_seed_frames(self) -> … }`
+            // is a real crate-visible inherent-method surface that takes the
+            // macro-arg product THROUGH the receiver — and the receiver type is
+            // not in `sig.inputs` as a `Typed` arm, so a receiver-blind input
+            // scan would skip it. The genuine sanctioned helper is a module-level
+            // FREE fn with NO receiver (`(indexed, graph, scope) -> Vec<…>`), so a
+            // sanctioned entry has NO legitimate reason to be a method with a
+            // receiver. REJECT any receiver-bearing entry — this closes the
+            // receiver vector regardless of the receiver's exact spelling, since
+            // the genuine helper never has one.
+            syn::FnArg::Receiver(_) => {
                 return Err(format!(
-                    "sanctioned non-producer `{fn_name}` accepts the macro-arg product \
-                     `{MIRROR_MACRO_ARG_PRODUCT_TYPE}` as an input (`{input_rendered}`) — it takes \
-                     the producer surface"
+                    "sanctioned non-producer `{fn_name}` is an associated fn with a `self` receiver \
+                     — a sanctioned non-producer entry must be a FREE fn with no receiver. A \
+                     receiver-bearing associated fn carries the macro-arg product \
+                     `{MIRROR_MACRO_ARG_PRODUCT_TYPE}` through `self` (e.g. inside \
+                     `impl {MIRROR_MACRO_ARG_PRODUCT_TYPE} {{ … }}`) and is a usurpation of the \
+                     sanctioned name"
                 ));
+            }
+            syn::FnArg::Typed(pat_type) => {
+                let input_rendered = render_type(&pat_type.ty);
+                if input_rendered.contains(MIRROR_MACRO_ARG_PRODUCT_TYPE) {
+                    return Err(format!(
+                        "sanctioned non-producer `{fn_name}` accepts the macro-arg product \
+                         `{MIRROR_MACRO_ARG_PRODUCT_TYPE}` as an input (`{input_rendered}`) — it \
+                         takes the producer surface"
+                    ));
+                }
             }
         }
     }
@@ -23380,5 +23408,75 @@ fn mirror_entry_surface_classifier_discriminates() {
         .is_ok(),
         "the genuine free helper as the SOLE crate-visible occurrence across all mirror files \
          (the other file declares only the restricted lowerer) must PASS the module-global sanction"
+    );
+
+    // (j) ANTI-ROGUE RED-PROOF — the RECEIVER vector. `HotTypeRef` is a `pub`
+    // crate-visible type, so `impl HotTypeRef { ... }` is a real crate-visible
+    // inherent-method surface. A usurper can carry the macro-arg product THROUGH
+    // a `self` receiver: a SOLE associated fn `fn build_script_setup_seed_frames(
+    // self) -> Vec<BinderScope>` inside `impl HotTypeRef` returns the binder-seed
+    // shape (passes the return check) and names no product in any TYPED input, so
+    // a receiver-blind input loop (one that handled only `FnArg::Typed`) skipped
+    // the `self` receiver entirely and the source PASSED. The signature check now
+    // REJECTS any receiver-bearing sanctioned entry — the genuine helper is a free
+    // fn with no receiver, so a receiver is itself the usurpation. This SOLE
+    // occurrence is caught by the RECEIVER check, not the duplicate check (there
+    // is exactly one definition module-wide).
+    let receiver_usurper = (
+        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string(),
+        "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(self) -> Vec<BinderScope> { Vec::new() }\n}\n"
+            .to_string(),
+    );
+    let receiver_usurper_result = validate_sanctioned_entry_module_global(
+        std::slice::from_ref(&receiver_usurper),
+        "build_script_setup_seed_frames",
+    );
+    assert!(
+        receiver_usurper_result.is_err(),
+        "a SOLE receiver-bearing associated fn of the sanctioned name \
+         (`impl HotTypeRef {{ pub(crate) fn build_script_setup_seed_frames(self) -> Vec<BinderScope> }}`) \
+         MUST fail the signature sanction — the `self` receiver carries the macro-arg product \
+         `HotTypeRef`, which a receiver-blind input loop skipped (so it PASSED before this fix). The \
+         genuine helper is a free fn with no receiver, so a receiver-bearing entry is the usurpation \
+         (got {receiver_usurper_result:?})"
+    );
+
+    // (k) The receiver rejection is independent of the receiver's exact spelling:
+    // `&self` (a borrowing receiver, the `Receiver.reference` form) is likewise
+    // rejected — the receiver still aliases the product type `HotTypeRef` via the
+    // impl self-type.
+    let ref_receiver_usurper = (
+        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string(),
+        "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(&self) -> Vec<BinderScope> { Vec::new() }\n}\n"
+            .to_string(),
+    );
+    let ref_receiver_result = validate_sanctioned_entry_module_global(
+        std::slice::from_ref(&ref_receiver_usurper),
+        "build_script_setup_seed_frames",
+    );
+    assert!(
+        ref_receiver_result.is_err(),
+        "a `&self`-receiver associated fn of the sanctioned name MUST also fail — the receiver \
+         rejection is independent of receiver spelling (got {ref_receiver_result:?})"
+    );
+
+    // (l) The explicit-type receiver spelling `self: HotTypeRef` (the
+    // `Receiver` variant with a `colon_token`/`ty`, naming the product type
+    // OUTRIGHT in the receiver position) is rejected too — same vector, different
+    // surface spelling.
+    let typed_receiver_usurper = (
+        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string(),
+        "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(self: HotTypeRef) -> Vec<BinderScope> { Vec::new() }\n}\n"
+            .to_string(),
+    );
+    let typed_receiver_result = validate_sanctioned_entry_module_global(
+        std::slice::from_ref(&typed_receiver_usurper),
+        "build_script_setup_seed_frames",
+    );
+    assert!(
+        typed_receiver_result.is_err(),
+        "a `self: HotTypeRef` explicit-type receiver associated fn of the sanctioned name MUST also \
+         fail — the receiver position names the macro-arg product outright (got \
+         {typed_receiver_result:?})"
     );
 }
