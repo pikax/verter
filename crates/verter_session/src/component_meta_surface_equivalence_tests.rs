@@ -715,23 +715,23 @@ defineProps<Props>()
 // ════════════════════════════════════════════════════════════════════
 
 /// A `defineProps<Props>` whose `Props` is IMPORTED cross-file records the
-/// contributor's whole-hash fact onto the published read-set, and a content
+/// contributor canonical in the published read-set, and a content
 /// edit to that contributor INVALIDATES the warm component-meta result — the
 /// re-resolution recomputes the CHANGED surface rather than serving a stale
 /// warm hit. This pins the fact/read-set contract the producer flip must
-/// preserve: the cross-file carrier's fact is folded into the published
-/// entry's read-set, so the warm-cache validation re-roots on the contributor.
+/// preserve: the published dep signature includes the cross-file carrier, so
+/// a content edit to that carrier misses the warm read.
 /// The edit also does NOT GLOBALLY clear every entry: an UNRELATED warmed
 /// component that does NOT depend on the edited carrier stays a warm hit
 /// across the edit (this local control proves no global clear; it does not
 /// exhaustively prove the eviction is scoped to exactly the carrier's
 /// dependents among other cross-file entries).
 ///
-/// Discriminating: (1) an entry published WITHOUT the carrier in its read-set
-/// (a read-set fold that failed to include the carrier's fact) yields a
-/// dep-signature missing `/types.ts`, failing the read-set assertion. (2) A
-/// cache that ignored the recorded carrier fact (no warm invalidation on a
-/// carrier edit) would serve the original `[a, b]` props after the edit and
+/// Discriminating: (1) an entry published without the carrier canonical in its
+/// read-set yields a dep-signature missing `/types.ts`, failing the read-set
+/// assertion. (2) A cache that failed to invalidate the owner for changed
+/// carrier content (no warm invalidation on a carrier edit) would serve the
+/// original `[a, b]` props after the edit and
 /// would NOT advance the miss counter — both the prop-set assert and the
 /// miss-counter assert fail; the post-edit member-type/required check on
 /// `renamed`/`c` additionally catches a recompute that returned the wrong
