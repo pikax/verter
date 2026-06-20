@@ -10,9 +10,12 @@
 //! owner's LOCAL [`IndexedReady`] data (`raw_source` + `framework_parse`)
 //! through
 //! [`sfc_script_setup_type_params`](crate::host_resolve::sfc_script_setup_type_params)
-//! — NO host route lookup — so it is a pure structural producer. Both the macro
-//! hot mirror's macro-arg builder AND the ordinary decl-body structural
-//! producer build the SAME seed binder shape from it.
+//! — NO host route lookup — so it is a pure structural producer. Its ONLY
+//! production caller today is the macro hot mirror's macro-arg builder
+//! (`macro_hot_mirror/mod.rs`); the in-module isolation tests also build the
+//! seed binder shape from it directly. A future decl-body structural producer
+//! (the global declaration-body structural producer flip, NOT landed) would
+//! build the SAME seed binder shape, but it does NOT call this helper today.
 //!
 //! It lives UNDER `crate::macro_hot_mirror` (not a foreign module) so it can
 //! reach the ancestor-private
@@ -24,13 +27,17 @@
 //! That by-construction, compiler-enforced privacy (a foreign reference is a
 //! compile error, not a lint) is the load-bearing guarantee that no second
 //! binder-seed producer can be opened outside this module (the secondary
-//! token-tripwire guard is bounded defense-in-depth on top of it). Both callers
-//! that build the seed shape — the mirror's macro-arg builder and the ordinary
-//! decl-body structural producer — reach it from WITHIN this module subtree
-//! today. If the decl-body producer is later moved out of the subtree, the
-//! helper must be DELIBERATELY re-homed (or widened to the right ancestor-
-//! private boundary the new caller shares) — never passively widened to
-//! `pub(crate)`, which would re-open the cross-module producer surface.
+//! token-tripwire guard is bounded defense-in-depth on top of it). The ONLY
+//! caller that builds the seed shape today — the mirror's macro-arg builder
+//! (plus the in-module isolation tests) — reaches it from WITHIN this module
+//! subtree; the ordinary decl-body structural producer does NOT call it today
+//! (that routing is the unlanded global declaration-body structural producer
+//! flip). If that flip later routes a decl-body structural producer through
+//! this helper from a module OUTSIDE the subtree, the helper must be
+//! DELIBERATELY re-homed (or re-scoped to the new caller's shared
+//! ancestor-private boundary, e.g. `pub(in crate::<shared-ancestor>)`) —
+//! preserving a COMPILER boundary, never passively widened to `pub(crate)`,
+//! which would re-open the cross-module producer surface.
 
 use std::sync::Arc;
 
