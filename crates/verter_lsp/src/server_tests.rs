@@ -9395,8 +9395,11 @@ fn test_materialize_first_call_creates_files() {
     let tmp = tempfile::tempdir().unwrap();
     let nm = tmp.path().join("node_modules/@verter/types");
     assert!(!nm.exists());
-    // materialize_verter_types expects URI strings but falls back to path
-    let root = format!("file://{}", tmp.path().display());
+    // materialize_verter_types expects URI strings but falls back to path.
+    // Build the root through the portable helper so the URI is the valid
+    // 3-slash `file:///…` form on every OS (a raw `format!("file://{path}")`
+    // yields a malformed 2-slash, backslash URI on Windows).
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
     let result = materialize_verter_types(&[root]);
     assert!(!result.any_failed, "should not fail on first call");
     assert!(result.wrote_any, "should write stub files on first call");
@@ -9412,7 +9415,7 @@ fn test_materialize_first_call_creates_files() {
 #[test]
 fn test_materialize_second_call_is_noop() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = format!("file://{}", tmp.path().display());
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
     let first = materialize_verter_types(&[root.clone()]);
     assert!(!first.any_failed, "first materialization should succeed");
     assert!(first.wrote_any, "first materialization should write files");
@@ -9437,7 +9440,7 @@ fn test_materialize_skips_real_installed_package() {
     std::fs::write(dist.join("index.d.ts"), real_dts).unwrap();
     std::fs::write(nm.join("package.json"), real_pkg).unwrap();
 
-    let root = format!("file://{}", tmp.path().display());
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
     let result = materialize_verter_types(&[root]);
     assert!(
         !result.any_failed,
@@ -9463,6 +9466,48 @@ fn test_materialize_skips_real_installed_package() {
         !nm.join("index.d.ts").exists(),
         "materialization should not create a stub index.d.ts for a real package"
     );
+}
+
+#[test]
+fn test_materialize_root_uri_is_portable_three_slash_form() {
+    // Anti-regression for the materialize roots above: the URI fed to
+    // `materialize_verter_types` MUST be the valid 3-slash `file:///…` form on
+    // every OS. The old `format!("file://{}", path.display())` produced a
+    // malformed 2-slash / backslash URI on Windows; this test discriminates
+    // against that shape (it would FAIL on a 2-slash or backslash result).
+
+    // Unix-shaped absolute path.
+    let unix = crate::uri::path_to_file_uri_string("/tmp/verter-x/proj");
+    assert!(
+        unix.starts_with("file:///"),
+        "expected 3-slash file URI, got {unix}"
+    );
+    assert!(
+        !unix.starts_with("file:////"),
+        "must not have 4 slashes: {unix}"
+    );
+    assert_eq!(unix, "file:///tmp/verter-x/proj");
+
+    // Windows-shaped drive-letter path: backslashes must become forward slashes
+    // and the result must be `file:///C:/…` (NOT the malformed `file://C:\…`).
+    let win = crate::uri::path_to_file_uri_string(r"C:\Users\dev\proj");
+    assert!(
+        win.starts_with("file:///"),
+        "expected 3-slash file URI, got {win}"
+    );
+    assert!(
+        !win.starts_with("file:////"),
+        "must not have 4 slashes: {win}"
+    );
+    assert!(
+        !win.contains('\\'),
+        "backslashes must be normalized to forward slashes: {win}"
+    );
+    assert!(
+        win.contains("C:/"),
+        "drive letter must be preserved with a forward slash: {win}"
+    );
+    assert_eq!(win, "file:///C:/Users/dev/proj");
 }
 
 #[test]
