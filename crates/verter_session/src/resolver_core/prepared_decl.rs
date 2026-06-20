@@ -25,6 +25,27 @@ pub struct ImportBinding {
     pub exported_name: String,
 }
 
+/// FINAL defining-file canonicalization of a file's import targets, computed
+/// at bundle materialization through the SAME route authority the carrier
+/// fallback / dispatch fallthrough use, so the eager/prepared `name_resolution`
+/// records the FINAL definition rather than the intermediate barrel.
+///
+/// One entry per re-export-hop import, keyed by the importer's LOCAL name.
+/// Each import is canonicalized SYMMETRICALLY across BOTH rails: the
+/// type-export authority (`resolve_named_type_export_target` /
+/// `resolve_imported_type_root`) AND the value-export authority
+/// (`resolve_value_export_target`); the rail that follows a re-export hop to a
+/// DIFFERENT final `(canonical, name)` wins (a type re-export resolves on the
+/// type rail, a value re-export on the value rail). A `local_name` absent from
+/// the map was not a re-export hop on either rail and resolves through the
+/// unchanged barrel fallback.
+#[derive(Debug, Clone, Default)]
+pub struct ImportCanonicalization {
+    /// `local_name → FINAL (canonical, name)` for every re-export-hop import,
+    /// canonicalized through whichever rail (type or value) followed the hop.
+    pub final_resolution: FxHashMap<String, ResolvedRootIdentity>,
+}
+
 /// Script-setup generic type-parameter binding for
 /// `<script setup lang="ts" generic="T extends Item = Item">`
 /// parameters.
@@ -53,6 +74,31 @@ pub struct TypeParamBinding {
     pub ordinal: u16,
     pub constraint: Option<Arc<verter_type_expr::TypeExpr>>,
     pub default: Option<Arc<verter_type_expr::TypeExpr>>,
+}
+
+/// Canonicalize ONE import target to the FINAL defining-file identity for the
+/// prepared/eager `name_resolution`. A re-export-hop import takes its
+/// precomputed final `(canonical, name)` from `import_canonicalization`
+/// (resolved at bundle materialisation through the shared route authority);
+/// every other import falls back to the barrel/direct resolution
+/// ([`resolve_import_target`] + the import's own `imported_name`).
+fn canonicalize_import_target(
+    import_canonicalization: &ImportCanonicalization,
+    owner_canonical_id: &str,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    local_name: &str,
+    target: &super::shallow_file_state::ImportTarget,
+) -> ResolvedRootIdentity {
+    if let Some(final_identity) = import_canonicalization.final_resolution.get(local_name) {
+        return final_identity.clone();
+    }
+    let resolved_id = resolve_import_target(
+        owner_canonical_id,
+        dep_edges,
+        &target.source_specifier,
+        Some(target.canonical_id.as_str()),
+    );
+    ResolvedRootIdentity::new(&resolved_id, &target.imported_name)
 }
 
 fn resolve_import_target(
@@ -97,6 +143,7 @@ pub fn prepare_local_type_decl(
     state: &ShallowFileState,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
 ) -> Option<PreparedTypeDecl> {
     use verter_semantic::analysis::type_eval::AugmentationScopeKind;
     // A name absent from the file surface but present in the file's own
@@ -138,6 +185,7 @@ pub fn prepare_local_type_decl(
         deps.as_deref(),
         dep_edges,
         origin,
+        import_canonicalization,
     ))
 }
 
@@ -161,6 +209,9 @@ pub fn prepare_augmentation_type_decl(
     dep_edges: Option<&FxHashMap<String, String>>,
 ) -> Option<PreparedTypeDecl> {
     let lowered = state.augmentation_type_decl(scope, symbol_name)?;
+    // Augmentation-scope decls are off the barrel-final import path (their
+    // bodies stitch onto another module's surface, not a re-export hop), so the
+    // barrel fallback applies for any import they reference.
     Some(prepare_type_decl_from_lowered(
         canonical_id,
         state,
@@ -169,6 +220,7 @@ pub fn prepare_augmentation_type_decl(
         None,
         dep_edges,
         Some(scope),
+        &ImportCanonicalization::default(),
     ))
 }
 
@@ -184,6 +236,7 @@ pub fn prepare_augmentation_type_decl(
 /// file-scope symbol), threaded to [`add_namespace_sibling_resolutions`] so a
 /// namespaced member binds bare sibling names ONLY from the inventory visible
 /// for that origin.
+#[allow(clippy::too_many_arguments)]
 fn prepare_type_decl_from_lowered(
     canonical_id: &str,
     state: &ShallowFileState,
@@ -192,6 +245,7 @@ fn prepare_type_decl_from_lowered(
     deps: Option<&ClassifiedTypeDeps>,
     dep_edges: Option<&FxHashMap<String, String>>,
     origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
+    import_canonicalization: &ImportCanonicalization,
 ) -> PreparedTypeDecl {
     #[cfg(test)]
     PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| {
@@ -260,18 +314,24 @@ fn prepare_type_decl_from_lowered(
         canonical_id,
         origin,
     );
-    // External deps resolve through import bindings → canonical_id
+    // External deps resolve through import bindings → the FINAL defining
+    // file. When the import is a re-export hop, the canonicalization
+    // (precomputed at bundle materialisation through the SAME route authority
+    // the carrier fallback / dispatch fallthrough use) carries the final
+    // `(canonical, name)`; otherwise the barrel fallback applies. This keeps
+    // the eager fast-path's stored identity at the FINAL definition rather than
+    // the intermediate barrel.
     for (local_name, target) in state.import_targets.iter() {
-        let resolved_id = resolve_import_target(
+        let resolved = canonicalize_import_target(
+            import_canonicalization,
             canonical_id,
             dep_edges,
-            &target.source_specifier,
-            Some(target.canonical_id.as_str()),
+            local_name,
+            target,
         );
-        prepared.name_resolution.insert(
-            local_name.clone(),
-            ResolvedRootIdentity::new(&resolved_id, &target.imported_name),
-        );
+        prepared
+            .name_resolution
+            .insert(local_name.clone(), resolved);
     }
 
     // Populate cache deps for invalidation
@@ -382,7 +442,17 @@ pub fn prepare_exported_type_decl(
         return None;
     };
 
-    let mut prepared = prepare_local_type_decl(canonical_id, state, symbol_name, dep_edges)?;
+    // The direct/standalone prep entry carries no precomputed barrel-final
+    // canonicalization (that is threaded by the host-materialised caches); a
+    // re-export hop falls back to the barrel here. Production resolution goes
+    // through the caches, which thread the real canonicalization.
+    let mut prepared = prepare_local_type_decl(
+        canonical_id,
+        state,
+        symbol_name,
+        dep_edges,
+        &ImportCanonicalization::default(),
+    )?;
     prepared.exported_name = Some(exported_name.to_string());
     prepared.provenance.route_kind = Some("direct".to_string());
     Some(prepared)
@@ -394,6 +464,7 @@ pub fn prepare_local_value_decl(
     state: &ShallowFileState,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
 ) -> Option<PreparedValueDecl> {
     let lowered: Arc<LoweredValueDecl> = state.value_decl(symbol_name)?;
     if state.is_import_local(symbol_name) {
@@ -422,20 +493,22 @@ pub fn prepare_local_value_decl(
         );
     }
 
-    // Build name_resolution for type annotations that reference
-    // imported or local types in the defining file
-    // Index all import targets as potential name resolution entries
+    // Build name_resolution for type annotations / `typeof` references that
+    // reference imported or local symbols in the defining file. A re-export-hop
+    // import canonicalizes to the FINAL defining file (the barrel-final
+    // canonicalization, same authority as the type rail); otherwise the barrel
+    // fallback applies.
     for (local_name, target) in state.import_targets.iter() {
-        let resolved_id = resolve_import_target(
+        let resolved = canonicalize_import_target(
+            import_canonicalization,
             canonical_id,
             dep_edges,
-            &target.source_specifier,
-            Some(target.canonical_id.as_str()),
+            local_name,
+            target,
         );
-        prepared.name_resolution.insert(
-            local_name.clone(),
-            ResolvedRootIdentity::new(&resolved_id, &target.imported_name),
-        );
+        prepared
+            .name_resolution
+            .insert(local_name.clone(), resolved);
     }
 
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
@@ -456,7 +529,13 @@ pub fn prepare_exported_value_decl(
         return None;
     };
 
-    let mut prepared = prepare_local_value_decl(canonical_id, state, symbol_name, dep_edges)?;
+    let mut prepared = prepare_local_value_decl(
+        canonical_id,
+        state,
+        symbol_name,
+        dep_edges,
+        &ImportCanonicalization::default(),
+    )?;
     prepared.exported_name = Some(exported_name.to_string());
     Some(prepared)
 }
@@ -466,6 +545,7 @@ pub struct PreparedTypeDeclCache {
     canonical_id: Arc<str>,
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
+    import_canonicalization: Arc<ImportCanonicalization>,
     slots: PreparedTypeDeclSlots,
 }
 
@@ -507,6 +587,7 @@ impl PreparedTypeDeclCache {
                 self.state.as_ref(),
                 symbol_name,
                 (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+                &self.import_canonicalization,
             )
             .map(Arc::new)
         })
@@ -519,6 +600,7 @@ pub struct PreparedValueDeclCache {
     canonical_id: Arc<str>,
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
+    import_canonicalization: Arc<ImportCanonicalization>,
     slots: PreparedValueDeclSlots,
 }
 
@@ -543,6 +625,7 @@ impl PreparedValueDeclCache {
                 self.state.as_ref(),
                 symbol_name,
                 (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+                &self.import_canonicalization,
             )
             .map(Arc::new)
         })
@@ -601,8 +684,10 @@ pub fn build_prepared_decl_bundle(
     state: Arc<ShallowFileState>,
     dep_edges: FxHashMap<String, String>,
     script_setup_type_bindings: FxHashMap<String, TypeParamBinding>,
+    import_canonicalization: ImportCanonicalization,
 ) -> PreparedDeclBundle {
     let dep_edges = Arc::new(dep_edges);
+    let import_canonicalization = Arc::new(import_canonicalization);
 
     // Build import bindings from shallow state import_targets + dep_edges.
     let mut import_bindings = FxHashMap::default();
@@ -636,11 +721,13 @@ pub fn build_prepared_decl_bundle(
             canonical_id,
             Arc::clone(&state),
             Arc::clone(&dep_edges),
+            Arc::clone(&import_canonicalization),
         ),
         prepared_value_decls: build_prepared_value_decl_cache(
             canonical_id,
             Arc::clone(&state),
             Arc::clone(&dep_edges),
+            Arc::clone(&import_canonicalization),
         ),
         dep_edges,
         import_bindings,
@@ -655,6 +742,7 @@ pub fn build_prepared_type_decl_cache(
     canonical_id: &str,
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
+    import_canonicalization: Arc<ImportCanonicalization>,
 ) -> PreparedTypeDeclCache {
     let mut slots: FxHashMap<String, Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>> = state
         .type_symbol_names()
@@ -681,6 +769,7 @@ pub fn build_prepared_type_decl_cache(
         canonical_id: Arc::from(canonical_id),
         state,
         dep_edges,
+        import_canonicalization,
         slots: Arc::new(slots),
     }
 }
@@ -690,6 +779,7 @@ pub fn build_prepared_value_decl_cache(
     canonical_id: &str,
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
+    import_canonicalization: Arc<ImportCanonicalization>,
 ) -> PreparedValueDeclCache {
     let slots = state
         .value_symbol_names()
@@ -701,6 +791,7 @@ pub fn build_prepared_value_decl_cache(
         canonical_id: Arc::from(canonical_id),
         state,
         dep_edges,
+        import_canonicalization,
         slots: Arc::new(slots),
     }
 }
@@ -919,11 +1010,13 @@ export const defaults: Props = { label: 'ok' }
             "/src/types.ts",
             Arc::new(state.clone()),
             Arc::new(FxHashMap::default()),
+            Arc::new(ImportCanonicalization::default()),
         );
         let value_cache = build_prepared_value_decl_cache(
             "/src/types.ts",
             Arc::new(state),
             Arc::new(FxHashMap::default()),
+            Arc::new(ImportCanonicalization::default()),
         );
 
         assert!(type_cache.contains_key("Props"));
@@ -1017,8 +1110,14 @@ declare global { namespace JSX {
         let env = parse_and_build_env(source);
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
 
-        let prepared = prepare_local_type_decl("/src/aug.ts", &state, "JSX.El", None)
-            .expect("JSX.El should prepare");
+        let prepared = prepare_local_type_decl(
+            "/src/aug.ts",
+            &state,
+            "JSX.El",
+            None,
+            &ImportCanonicalization::default(),
+        )
+        .expect("JSX.El should prepare");
 
         // Positive control: the global TYPE sibling still binds (proves the
         // Global TYPE scan is retained, not gutted along with the value scan).

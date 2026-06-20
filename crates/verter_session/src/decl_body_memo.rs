@@ -274,6 +274,25 @@ impl DeclBodyMemo {
         &self.header_index
     }
 
+    /// The file's statically-classified [`FileLanguage`], derived from the
+    /// memo's canonical id through the global registry (no host needed) so the
+    /// lazy memo path stays self-contained. This is the rune-ambient
+    /// classification source for both the whole-env oracle and the centralized
+    /// effective-lookup.
+    fn rune_module_file_language(&self) -> verter_language::FileLanguage {
+        verter_language::LanguageRegistry::global()
+            .classify_static(self.key.canonical.as_ref())
+            .static_resolution()
+    }
+
+    /// Whether this file is a Svelte standalone rune module — the gate the
+    /// centralized effective-lookup applies before consulting the rune
+    /// ambient inventory (per-file scoping). Classified from the canonical id,
+    /// so a plain `.ts` / `.js` never reports `true`.
+    pub(crate) fn is_rune_module(&self) -> bool {
+        crate::host_resolve::is_svelte_rune_module(&self.rune_module_file_language())
+    }
+
     /// The retained framework parse artifact for this content generation, when
     /// the file is a framework carrier. This is the SAME artifact the indexing
     /// flight resolved — exposed so the component-default synth seam can read
@@ -500,13 +519,14 @@ impl DeclBodyMemo {
                 // A Svelte rune module (`.svelte.ts` / `.svelte.js`) merges the
                 // module-valid runes into its whole env so its exported
                 // rune-derived types infer correctly — per-file scoped, no
-                // eval_source byte change. Classify from the canonical via the
-                // static registry (no host needed) so the lazy memo path stays
-                // self-contained.
-                let file_language = verter_language::LanguageRegistry::global()
-                    .classify_static(self.key.canonical.as_ref())
-                    .static_resolution();
-                crate::host_resolve::apply_svelte_rune_ambient_env(&mut env, &file_language);
+                // eval_source byte change. The runes are sourced from the SAME
+                // centralized rune ambient inventory the graph-native
+                // effective-lookup consults, so the oracle and the per-symbol
+                // readers agree on rune visibility. Classify from the canonical
+                // via the static registry (no host needed) so the lazy memo
+                // path stays self-contained.
+                let file_language = self.rune_module_file_language();
+                crate::host_resolve::merge_rune_ambient_into_env(&mut env, &file_language);
                 Arc::new(env)
             })
             .clone()

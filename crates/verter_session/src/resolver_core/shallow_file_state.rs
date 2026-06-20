@@ -1012,6 +1012,66 @@ impl ShallowFileState {
         self.decl_bodies.value_decl(name)
     }
 
+    /// The CENTRALIZED effective VALUE-symbol lookup — the single authority
+    /// applying ambient-overlay precedence so per-symbol graph-native readers
+    /// never special-case any ambient surface:
+    ///
+    /// 1. A user/synthesized declaration WINS ([`Self::value_decl`]).
+    /// 2. If absent AND the file is a Svelte rune module, the symbol resolves
+    ///    to the centralized rune ambient inventory (`$state`/`$derived`/
+    ///    `$effect`/`$inspect`).
+    /// 3. Otherwise it is a miss.
+    ///
+    /// Rune visibility roots on the rune module's own content-addressed
+    /// identity: the prelude version is folded into the file's `parse_env_hash`
+    /// (via the workspace parser flag), so a prelude-surface change invalidates
+    /// the file's whole cache lineage — the synthetic ambient root is observed
+    /// transitively through the rune module's own facts, never a fail-closed
+    /// synthetic canonical.
+    pub fn effective_value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
+        if let Some(decl) = self.value_decl(name) {
+            return Some(decl);
+        }
+        if self.decl_bodies.is_rune_module() {
+            return crate::host_resolve::rune_ambient_value_decl(name);
+        }
+        None
+    }
+
+    /// VALUE-symbol PRESENCE under the centralized effective lookup — header
+    /// presence first (no body materialisation), then the rune ambient
+    /// inventory for a rune module. Mirrors [`Self::effective_value_decl`]'s
+    /// precedence without lowering a body.
+    pub fn effective_value_header_present(&self, name: &str) -> bool {
+        if self.decl_bodies.header_index().value_header(name).is_some()
+            || self.synthesised_value_bodies.contains_key(name)
+        {
+            return true;
+        }
+        self.decl_bodies.is_rune_module() && crate::host_resolve::rune_ambient_has_value(name)
+    }
+
+    /// TYPE-space counterpart of [`Self::effective_value_decl`]: a user
+    /// declaration wins, else the rune ambient inventory's TYPE symbols (the
+    /// rune namespace types) for a rune module, else a miss.
+    pub fn effective_type_decl(&self, name: &str) -> Option<Arc<LoweredTypeDecl>> {
+        if let Some(decl) = self.type_decl(name) {
+            return Some(decl);
+        }
+        if self.decl_bodies.is_rune_module() {
+            return crate::host_resolve::rune_ambient_type_decl(name);
+        }
+        None
+    }
+
+    /// TYPE-symbol PRESENCE under the centralized effective lookup.
+    pub fn effective_type_header_present(&self, name: &str) -> bool {
+        if self.decl_bodies.header_index().type_header(name).is_some() {
+            return true;
+        }
+        self.decl_bodies.is_rune_module() && crate::host_resolve::rune_ambient_has_type(name)
+    }
+
     /// Demand the dependency-edge classification of a local TYPE symbol —
     /// the local/external split over its reference graph, baked against
     /// THIS state's import targets and cached per name. Returns `Some`

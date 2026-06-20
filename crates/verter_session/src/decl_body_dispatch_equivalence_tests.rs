@@ -497,7 +497,6 @@ fn upsert_rune_module(host: &VerterHost, canonical: &str, source: &str) {
 /// additionally fails if the re-home diverged the surviving reader from the
 /// oracle for the rune symbols.
 #[test]
-#[ignore = "un-ignored when the rune ambient is re-homed onto the graph-native value-symbol reader; asserts $state visible through that reader with per-file scoping and user-wins"]
 fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     // 1. Rune module: the ambient runes are visible through the SURVIVING
     //    graph-native per-symbol value-symbol reader, AND so is the user's

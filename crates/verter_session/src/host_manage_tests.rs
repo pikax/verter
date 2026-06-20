@@ -609,6 +609,170 @@ fn prepared_type_decl_bundle_invalidates_when_exact_resolution_changes() {
     );
 }
 
+/// A type / value imported through a re-export BARREL must store the FINAL
+/// defining-file canonical in the prepared/eager `name_resolution`, NOT the
+/// intermediate barrel. The carrier fallback already walks to the final file;
+/// the eager fast-path used to stop at the barrel (the divergence). This pins
+/// that the eager `name_resolution` now canonicalizes BOTH rails (type imports
+/// via the type-export authority, value imports via the value-export
+/// authority) to the final defining file at preparation time.
+///
+/// Discriminating: a build that left the eager `name_resolution` pinned to the
+/// barrel canonical would return `/src/barrel.ts` for both `Node` and
+/// `theme` — the asserts demand the final `/src/defining.ts`.
+#[test]
+fn prepared_decl_name_resolution_canonicalizes_barrel_reexport_to_final_defining_file() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/defining.ts",
+        "export type Node = { label: string }\nexport const themeImpl = { color: 'dark' }\n",
+    );
+    ws.inject_file(
+        "/src/barrel.ts",
+        "export type { Node } from './defining'\nexport { themeImpl as theme } from './defining'\n",
+    );
+    ws.inject_file(
+        "/src/owner.ts",
+        "import type { Node } from './barrel'\n\
+         import { theme } from './barrel'\n\
+         export interface Props { n: Node; t: typeof theme }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    for owner in ["/src/owner.ts", "/src/barrel.ts"] {
+        let _ = host
+            .ensure_indexed_ready(owner)
+            .unwrap_or_else(|| panic!("{owner} should index"));
+    }
+    host.set_import_dependencies(
+        "/src/owner.ts",
+        vec![exact_dependency("./barrel", "/src/barrel.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![exact_dependency("./defining", "/src/defining.ts")],
+    );
+
+    let prepared = host
+        .prepared_type_decl("/src/owner.ts", "Props")
+        .expect("Props should prepare through the barrel");
+
+    // TYPE rail: `Node` imported through the barrel canonicalizes to the
+    // FINAL defining file (not the intermediate `/src/barrel.ts`).
+    assert_eq!(
+        prepared.name_resolution.get("Node").map(|identity| (
+            identity.canonical_id.as_str(),
+            identity.symbol_name.as_str()
+        )),
+        Some(("/src/defining.ts", "Node")),
+        "the barrel-imported TYPE `Node` must canonicalize to the FINAL defining file \
+         /src/defining.ts in the eager name_resolution, not the intermediate barrel",
+    );
+
+    // VALUE rail: `theme` imported through the barrel canonicalizes to the
+    // FINAL defining `themeImpl` (the value-export authority peels the alias).
+    assert_eq!(
+        prepared.name_resolution.get("theme").map(|identity| (
+            identity.canonical_id.as_str(),
+            identity.symbol_name.as_str()
+        )),
+        Some(("/src/defining.ts", "themeImpl")),
+        "the barrel-imported VALUE `theme` must canonicalize to the FINAL defining \
+         (/src/defining.ts, themeImpl), not the intermediate barrel binding",
+    );
+}
+
+/// Editing the barrel's re-export TARGET must invalidate the owner's prepared
+/// `name_resolution` — the recorded barrel route facts catch the retarget so a
+/// stale final-root is never served. This pins the invalidation rail P6a's
+/// canonicalization must preserve.
+///
+/// Discriminating: if the canonicalization did NOT record the barrel route
+/// facts (or rooted only on the owner + final file), retargeting the barrel
+/// from `/src/a.ts` to `/src/b.ts` would keep serving the stale `/src/a.ts`
+/// final root — the second assert demands `/src/b.ts`.
+#[test]
+fn prepared_decl_name_resolution_barrel_retarget_invalidates_final_canonical() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/a.ts", "export type Node = { from: 'a' }\n");
+    ws.inject_file("/src/b.ts", "export type Node = { from: 'b' }\n");
+    ws.inject_file("/src/barrel.ts", "export type { Node } from './a'\n");
+    ws.inject_file(
+        "/src/owner.ts",
+        "import type { Node } from './barrel'\nexport interface Props { n: Node }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    for owner in ["/src/owner.ts", "/src/barrel.ts"] {
+        let _ = host
+            .ensure_indexed_ready(owner)
+            .unwrap_or_else(|| panic!("{owner} should index"));
+    }
+    host.set_import_dependencies(
+        "/src/owner.ts",
+        vec![exact_dependency("./barrel", "/src/barrel.ts")],
+    );
+    host.set_import_dependencies("/src/barrel.ts", vec![exact_dependency("./a", "/src/a.ts")]);
+
+    let initial = host
+        .prepared_type_decl("/src/owner.ts", "Props")
+        .expect("Props should prepare through the barrel pointing at /src/a.ts");
+    assert_eq!(
+        initial
+            .name_resolution
+            .get("Node")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/a.ts"),
+        "before the barrel retarget the final canonical is /src/a.ts",
+    );
+
+    // Retarget the barrel's re-export from ./a to ./b (a content edit to the
+    // barrel's re-export clause + its route).
+    ws.inject_file("/src/barrel.ts", "export type { Node } from './b'\n");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/src/barrel.ts".to_string()),
+            input_id: "/src/barrel.ts".to_string(),
+            source: Arc::from("export type { Node } from './b'\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("barrel retarget upsert");
+    host.set_import_dependencies("/src/barrel.ts", vec![exact_dependency("./b", "/src/b.ts")]);
+    // Re-index the retargeted barrel (mirrors the initial setup) so it is
+    // present for the canonicalization walk on the owner's bundle rebuild.
+    let _ = host
+        .ensure_indexed_ready("/src/barrel.ts")
+        .expect("retargeted barrel should re-index");
+
+    let rebuilt = host
+        .prepared_type_decl("/src/owner.ts", "Props")
+        .expect("Props should rebuild after the barrel retarget");
+    assert_eq!(
+        rebuilt
+            .name_resolution
+            .get("Node")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/b.ts"),
+        "the barrel retarget must invalidate the owner's prepared name_resolution so the \
+         final canonical follows the barrel to /src/b.ts (no stale-served final root)",
+    );
+}
+
 #[test]
 fn prepared_decl_bundle_without_store_view_reuses_stable_cache() {
     let host = make_host();

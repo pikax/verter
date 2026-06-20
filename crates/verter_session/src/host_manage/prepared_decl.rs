@@ -286,7 +286,7 @@ impl VerterHost {
                     {
                         note_empty(serve_published);
                     }
-                    match self.materialize_prepared_decl_bundle(canonical_id) {
+                    match self.materialize_prepared_decl_bundle(view, canonical_id) {
                         Some(BundleMaterialization::Built { bundle, admitted }) => {
                             Some((bundle, admitted))
                         }
@@ -520,12 +520,20 @@ impl VerterHost {
             rustc_hash::FxHashMap::default()
         };
 
+        // Canonicalize re-export-hop imports against the request-bound view
+        // (overlay-aware). Route facts are NOT retained here: per R17 this
+        // overlay bundle is never admitted to the shared cache, so its fact
+        // rail is irrelevant — the per-call bundle is request-scoped.
+        let (import_canonicalization, _import_route_facts) = self
+            .build_prepared_import_canonicalization(ctx.store_view(), state.as_ref(), &dep_edges);
+
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 bundle_canonical_id,
                 std::sync::Arc::clone(state),
                 dep_edges,
                 script_setup_type_bindings,
+                import_canonicalization,
             ),
         );
 
@@ -613,6 +621,132 @@ impl VerterHost {
         (dep_edges, import_route_hash)
     }
 
+    /// Canonicalize a file's import targets to their FINAL defining-file
+    /// identity through the SAME route authority the carrier fallback /
+    /// dispatch fallthrough use, so the eager/prepared `name_resolution`
+    /// records the FINAL definition rather than the intermediate barrel.
+    ///
+    /// For each import target whose resolved canonical is known, both rails are
+    /// tried: the TYPE-export authority
+    /// ([`Self::resolve_imported_type_root_with_facts_with_store_view`], which
+    /// also returns the full route-chain fact list) and the VALUE-export
+    /// authority ([`Self::resolve_value_export_target`]). The rail that follows
+    /// a re-export hop to a DIFFERENT final `(canonical, name)` wins; an import
+    /// that resolves to itself on both rails is NOT a hop and is omitted (the
+    /// barrel fallback covers it).
+    ///
+    /// The returned `route_facts` carry every barrel/re-export participant's
+    /// version so the bundle's fact rail INVALIDATES on a barrel retarget — a
+    /// content edit to a re-export clause (or a route change) anywhere on the
+    /// walked chain misses the warm bundle. The value-rail hop additionally
+    /// records the barrel's own `FileWholeHash` + `ImportRoute`, the version
+    /// surface a value re-export edit moves.
+    fn build_prepared_import_canonicalization(
+        &self,
+        view: &dyn crate::resolver_core::StoreView,
+        state: &crate::resolver_core::ShallowFileState,
+        dep_edges: &rustc_hash::FxHashMap<String, String>,
+    ) -> (
+        crate::resolver_core::prepared_decl::ImportCanonicalization,
+        Vec<crate::resolver_core::FactVersionRef>,
+    ) {
+        use verter_semantic::analysis::type_solver::ResolvedRootIdentity;
+
+        let mut canonicalization =
+            crate::resolver_core::prepared_decl::ImportCanonicalization::default();
+        let mut route_facts: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
+
+        for (local_name, target) in state.import_targets.iter() {
+            // The import's resolved barrel canonical (dep_edges → target →
+            // raw): the same precedence `resolve_import_target` applies.
+            let barrel_canonical =
+                if let Some(resolved) = dep_edges.get(&target.source_specifier).cloned() {
+                    resolved
+                } else if !target.canonical_id.is_empty() {
+                    target.canonical_id.clone()
+                } else {
+                    // No resolvable canonical → cannot walk; barrel fallback covers it.
+                    continue;
+                };
+            if barrel_canonical.is_empty() {
+                continue;
+            }
+
+            // Canonicalize ONLY when the import's direct target is ALREADY
+            // indexed. A re-export barrel the owner imports through is warmed by
+            // the route resolution that produced the import edge, so its
+            // re-export surface is available to walk cheaply. A direct import to
+            // an as-yet-untouched defining file is NOT walked — that would force
+            // a cold read of a target the eager fast-path historically never
+            // touched (it is a direct definition, never a barrel hop), and the
+            // dispatch fallthrough still canonicalizes such an edge lazily at
+            // query time. This keeps the eager prep read-set identical to the
+            // pre-canonicalization fast-path for direct imports while
+            // canonicalizing the genuine warm barrel hops. The OBSERVE-only
+            // content-pinned peek (`observe_content_pinned_indexed`) never
+            // re-indexes — it answers for BOTH a scheduler-tracked and an
+            // artifact-only barrel, and an absent barrel declines, no
+            // materialise.
+            if self
+                .observe_content_pinned_indexed(&barrel_canonical)
+                .is_none()
+            {
+                continue;
+            }
+
+            // TYPE rail: walk the re-export chain to the final defining file,
+            // recording every participant's facts. A CROSS-FILE final canonical
+            // (a different file than the import's direct target) is a real
+            // barrel hop; a same-file resolution (the target declares the name,
+            // or re-aliases it within itself) is NOT a hop and keeps the
+            // import's own resolved identity (the barrel fallback).
+            let ((type_final_canonical, type_final_name), type_chain_facts) = self
+                .resolve_imported_type_root_with_facts_with_store_view(
+                    view,
+                    &barrel_canonical,
+                    &target.imported_name,
+                );
+            if type_final_canonical != barrel_canonical {
+                canonicalization.final_resolution.insert(
+                    local_name.clone(),
+                    ResolvedRootIdentity::new(&type_final_canonical, &type_final_name),
+                );
+                route_facts.extend(type_chain_facts.iter().cloned());
+                continue;
+            }
+
+            // VALUE rail: peel the value re-export alias to the final defining
+            // value. Record the barrel's own version facts so a value re-export
+            // edit on the barrel invalidates this bundle.
+            if let Some(value_final) =
+                self.resolve_value_export_target(&barrel_canonical, &target.imported_name)
+            {
+                if value_final.canonical_id != barrel_canonical {
+                    canonicalization.final_resolution.insert(
+                        local_name.clone(),
+                        ResolvedRootIdentity::new(&value_final.canonical_id, &value_final.name),
+                    );
+                    if let Some(hash) = self.authoritative_current_content_hash(&barrel_canonical) {
+                        route_facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
+                            canonical_id: barrel_canonical.clone(),
+                            hash,
+                        });
+                    }
+                    if let Some(hash) = self.generation_current_import_route_hash(&barrel_canonical)
+                    {
+                        route_facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
+                            canonical_id: barrel_canonical.clone(),
+                            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                            hash,
+                        });
+                    }
+                }
+            }
+        }
+
+        (canonicalization, route_facts)
+    }
+
     /// Routed-shallow cold producer (declaration files only). Returns
     /// `None` when the lane does not apply (non-declaration extension)
     /// or the canonical is unloadable; otherwise a
@@ -659,12 +793,17 @@ impl VerterHost {
 
         let (dep_edges, _legacy_import_route_hash) =
             self.prepared_decl_bundle_route_dep_edges(canonical_id, state.as_ref());
+        // Canonicalize re-export-hop imports to the FINAL defining file; the
+        // accumulated barrel route facts join the bundle's fact rail below.
+        let (import_canonicalization, import_route_facts) =
+            self.build_prepared_import_canonicalization(view, state.as_ref(), &dep_edges);
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 canonical_id,
                 std::sync::Arc::clone(&state),
                 dep_edges,
                 rustc_hash::FxHashMap::default(),
+                import_canonicalization,
             ),
         );
 
@@ -698,6 +837,9 @@ impl VerterHost {
                 hash: import_route_hash,
             });
         }
+        // Fold in the barrel route-chain facts so a re-export retarget on any
+        // walked barrel invalidates this bundle (no stale-served final root).
+        facts.extend(import_route_facts);
 
         // Promote the just-materialised canonical's facts into the request
         // overlay BEFORE the bundle insert. Without this promotion the
@@ -812,6 +954,7 @@ impl VerterHost {
     /// canonical is unloadable (no serve at all).
     fn materialize_prepared_decl_bundle(
         &self,
+        view: &dyn crate::resolver_core::StoreView,
         canonical_id: &str,
     ) -> Option<BundleMaterialization> {
         // Wall-clock fence for the cold materialisation envelope —
@@ -851,6 +994,15 @@ impl VerterHost {
             rustc_hash::FxHashMap::default()
         };
 
+        // 4b. Canonicalize re-export-hop imports to the FINAL defining file
+        // through the shared route authority, against the request-bound `view`
+        // (currentness-preserving — a stale seed fails the route cache's
+        // validation closed, never serves a stale final root). The accumulated
+        // barrel route facts are folded into the bundle's fact rail (step 6) so
+        // a barrel retarget invalidates this bundle.
+        let (import_canonicalization, import_route_facts) =
+            self.build_prepared_import_canonicalization(view, state.as_ref(), &dep_edges);
+
         // 5. Build the bundle atomically.
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
@@ -858,6 +1010,7 @@ impl VerterHost {
                 std::sync::Arc::clone(state),
                 dep_edges,
                 script_setup_type_bindings,
+                import_canonicalization,
             ),
         );
 
@@ -905,6 +1058,9 @@ impl VerterHost {
                 hash: import_route_hash,
             });
         }
+        // Fold in the barrel route-chain facts so a re-export retarget on any
+        // walked barrel invalidates this bundle (no stale-served final root).
+        fact_versions.extend(import_route_facts);
 
         // 7. Insert into the stable cache. Strict admission — bundles always
         // carry `FileWholeHash` — gated on the IndexedReady serve's

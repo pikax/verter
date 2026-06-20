@@ -192,20 +192,13 @@ impl VerterHost {
         }
 
         // Non-breaking readiness cross-check (debug/test only): the
-        // graph-native peeler must land on the SAME terminal identity.
-        // The plain .ts / non-rune-module case is exact; a `$`-rune
-        // ambient hop in a Svelte rune MODULE is the one documented
-        // scoped exception (the reader's doc) — the oracle's `whole_env()`
-        // injects ambient `$`-rune value symbols post-build that the
-        // per-symbol header index does not carry, so a `typeof $rune` hop
-        // would terminate one hop earlier graph-natively. That scoped
-        // exception is ACTUALLY excluded here by gating the assert on the
-        // ORIGIN file's rune-module classification (reusing the shared
-        // `is_svelte_rune_module` language classifier).
+        // graph-native peeler must land on the SAME terminal identity. The
+        // rune-module case is now covered too — both peelers resolve a
+        // `$`-rune ambient hop through the SAME centralized effective lookup
+        // (`ShallowFileState::effective_value_decl` / `effective_value_header_present`),
+        // so there is no rune-module exception.
         #[cfg(debug_assertions)]
-        if !crate::host_resolve::is_svelte_rune_module(
-            &self.language_classifier.classify(canonical_id),
-        ) {
+        {
             let graph_native = self.peel_value_decl_alias_graph_native(canonical_id, name);
             debug_assert_eq!(
                 current, graph_native,
@@ -221,23 +214,23 @@ impl VerterHost {
     ///
     /// Walks the same single-segment `typeof` alias chain, but per hop
     /// reads exactly the ONE demanded value symbol's lowered body via
-    /// `routed_shallow_state(cur).value_decl(name)` (the lazy per-symbol
-    /// memo) and resolves the `env.value_symbols.contains_key(next)`
-    /// membership through the per-symbol declaration-header index
-    /// (`value_header(next).is_some()` — PRESENCE, no body lowering),
-    /// NEVER `whole_env()` / `base_eval_env_arc`. The visited-set,
-    /// same-name, and path-length guards are byte-identical to the
-    /// oracle.
+    /// `routed_shallow_state(cur).effective_value_decl(name)` (the lazy
+    /// per-symbol memo, with the centralized rune-ambient overlay) and
+    /// resolves the `env.value_symbols.contains_key(next)` membership
+    /// through `effective_value_header_present(next)` (per-symbol
+    /// declaration-header PRESENCE plus the rune ambient — no body
+    /// lowering), NEVER `whole_env()` / `base_eval_env_arc`. The
+    /// visited-set, same-name, and path-length guards are byte-identical
+    /// to the oracle.
     ///
-    /// SCOPED LIMITATION (oracle retained in production): a Svelte rune
-    /// MODULE (`.svelte.ts` / `.svelte.js`) injects ambient `$`-rune
-    /// value symbols (`$state`, `$derived`, …) into the oracle's
-    /// `whole_env()` post-build that are absent from the per-symbol
-    /// header index. A `typeof` hop that targets a `$`-rune ambient name
-    /// would terminate one hop EARLIER here than in the oracle. The
-    /// fixture coverage proves equivalence for user-declared symbols
-    /// (the actual runtime-value import surface); a `$`-rune alias target
-    /// is not a real export and never reaches this consumer in practice.
+    /// Rune ambient parity: a Svelte rune MODULE (`.svelte.ts` /
+    /// `.svelte.js`) exposes its ambient `$`-rune value symbols (`$state`,
+    /// `$derived`, …) through the CENTRALIZED effective lookup
+    /// ([`crate::resolver_core::ShallowFileState::effective_value_decl`] /
+    /// `effective_value_header_present`) — the SAME single authority the
+    /// oracle's `whole_env()` folds in. So a `typeof $rune` hop terminates
+    /// identically here and in the oracle; there is no rune-module
+    /// exception.
     fn peel_value_decl_alias_graph_native(
         &self,
         canonical_id: &str,
@@ -257,7 +250,10 @@ impl VerterHost {
             let Some(state) = self.routed_shallow_state(current.canonical_id.as_str()) else {
                 break;
             };
-            let Some(lowered) = state.value_decl(current.name.as_str()) else {
+            // The CENTRALIZED effective lookup surfaces rune-ambient symbols in
+            // a rune module too, so the peeler agrees with the oracle for rune
+            // modules without this body knowing about the rune prelude.
+            let Some(lowered) = state.effective_value_decl(current.name.as_str()) else {
                 break;
             };
             let Some(verter_type_expr::TypeExpr::TypeOf(value_ref)) =
@@ -272,13 +268,9 @@ impl VerterHost {
                 break;
             }
             // Membership via header PRESENCE — no body lowering of the
-            // next symbol just to learn it exists.
-            if state
-                .decl_bodies()
-                .header_index()
-                .value_header(next_name)
-                .is_none()
-            {
+            // next symbol just to learn it exists; effective presence so a
+            // `typeof $rune` hop in a rune module is seen too.
+            if !state.effective_value_header_present(next_name) {
                 break;
             }
 
@@ -312,7 +304,11 @@ impl VerterHost {
         source_name: &str,
     ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
         let state = self.routed_shallow_state(source_canonical_id)?;
-        let lowered = state.value_decl(source_name)?;
+        // The CENTRALIZED effective lookup applies user-wins → rune-ambient →
+        // miss, so a Svelte rune module's ambient `$state`/`$derived`/`$effect`/
+        // `$inspect` resolve here WITHOUT this reader knowing anything about the
+        // rune prelude — the single authority lives on `ShallowFileState`.
+        let lowered = state.effective_value_decl(source_name)?;
         Some(verter_semantic::analysis::type_eval::ValueDeclInfo {
             name: source_name.to_string(),
             declaration_id: 0,

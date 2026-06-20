@@ -5,28 +5,33 @@
 //! type-resolution engine to infer the exported rune-derived types correctly
 //! (Channel A — the session side), the module-valid rune declarations
 //! (`$state`/`$derived`/`$effect`/`$inspect`) must be in scope when the
-//! module's eval environment is built.
+//! module's declarations are resolved.
 //!
-//! This injects them as AMBIENT symbols into the rune module's
-//! [`EvalEnv`](verter_semantic::analysis::type_eval::EvalEnv), exactly the way
-//! `<script setup generic>` type parameters are merged in — WITHOUT touching
-//! `eval_source` (its bytes stay the real module verbatim, so every OXC span is
-//! source-absolute and cross-file resolution / diagnostics / hover are
-//! unaffected). The merge is PER-FILE scoped: only a file the language
-//! classifier resolves to the Svelte rune-module flavor receives the runes, so
-//! a plain `.ts` / `.js` never sees `$state`.
+//! The runes enter through the CENTRALIZED effective-lookup
+//! ([`crate::resolver_core::ShallowFileState::effective_value_decl`] and its
+//! siblings): a name the user did NOT declare, in a file classified as a
+//! Svelte rune module, resolves to the rune ambient inventory — WITHOUT
+//! touching the real module source (its bytes stay the verbatim module, so
+//! every OXC span is source-absolute and cross-file resolution / diagnostics /
+//! hover are unaffected). The merge is PER-FILE scoped: only a file the
+//! language classifier resolves to the Svelte rune-module flavor sees the
+//! runes, so a plain `.ts` / `.js` never sees `$state`.
 //!
 //! The rune declaration text is the SINGLE shared rune source
 //! ([`verter_compiler::svelte::ide::prelude::module_rune_ambient_source`]) — no
 //! second declaration list. Its version
 //! ([`verter_compiler::svelte::ide::prelude::RUNE_AMBIENT_PRELUDE_VERSION`])
-//! feeds the rune module's type/eval-env cache key so a prelude fix invalidates
-//! stale inferred exports.
+//! feeds the rune module's `parse_env_hash` (via the workspace parser flag) so
+//! a prelude fix invalidates a rune module's stale inferred exports through the
+//! whole content-addressed cache lineage.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
+use rustc_hash::FxHashMap;
 use verter_language::FileLanguage;
 use verter_semantic::analysis::type_eval::EvalEnv;
+
+use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 
 /// Whether `language` is a Svelte standalone rune module (the
 /// [`ScriptFlavor::AdapterModule`](verter_language::ScriptFlavor::AdapterModule)
@@ -40,43 +45,168 @@ pub(crate) fn is_svelte_rune_module(language: &FileLanguage) -> bool {
         })
 }
 
-/// The isolated env built ONCE from the shared module-rune declarations. Its
-/// value/type symbols are cloned into each rune module's env on demand.
+/// The graph-native rune ambient inventory: the module-valid rune
+/// declarations lowered ONCE from the shared prelude source into per-name
+/// declaration RECORDS (`LoweredValueDecl` / `LoweredTypeDecl`) — the SAME
+/// per-symbol shape the lazy declaration-body memo hands the graph-native
+/// readers, plus the folded `EvalEnv` form the whole-env oracle consumes.
 ///
-/// This is the single static rune-prelude env build: a fixed declaration
-/// string (NOT a workspace file) lowered ONCE into a process-wide `OnceLock`,
-/// using the production env-build primitive `build_eval_env` over a one-shot
-/// OXC parse of the prelude source. It is NOT the per-file second parse the
-/// `no_production_parse_and_build_env_in_session` guard targets — no file's
-/// materialise flight is re-parsed; the prelude has no canonical id.
-fn rune_ambient_env() -> &'static EvalEnv {
-    static ENV: OnceLock<EvalEnv> = OnceLock::new();
-    ENV.get_or_init(|| {
+/// This is the SINGLE authority for rune visibility: both the centralized
+/// effective-lookup (graph-native readers) and the whole-env oracle obtain
+/// the runes from THIS inventory, so the two can never diverge for the rune
+/// symbols.
+#[derive(Debug)]
+pub(crate) struct RuneAmbientInventory {
+    /// Per-name lowered VALUE declarations (`$state`/`$derived`/`$effect`/
+    /// `$inspect`, the rune functions + namespace values).
+    value_decls: FxHashMap<String, Arc<LoweredValueDecl>>,
+    /// Per-name lowered TYPE declarations (the rune namespace types).
+    type_decls: FxHashMap<String, Arc<LoweredTypeDecl>>,
+    /// The folded eval-env form — the value/type symbol groups the
+    /// whole-env oracle merges in. Built from the same single prelude
+    /// lowering, so it is byte-for-byte the symbols the per-name records
+    /// above carry.
+    env: EvalEnv,
+}
+
+impl RuneAmbientInventory {
+    /// The lowered VALUE declaration for `name`, if the rune ambient
+    /// declares it.
+    fn value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
+        self.value_decls.get(name).cloned()
+    }
+
+    /// The lowered TYPE declaration for `name`, if the rune ambient
+    /// declares it.
+    fn type_decl(&self, name: &str) -> Option<Arc<LoweredTypeDecl>> {
+        self.type_decls.get(name).cloned()
+    }
+
+    /// Whether the rune ambient declares a VALUE symbol named `name`.
+    fn has_value(&self, name: &str) -> bool {
+        self.value_decls.contains_key(name)
+    }
+
+    /// Whether the rune ambient declares a TYPE symbol named `name`.
+    fn has_type(&self, name: &str) -> bool {
+        self.type_decls.contains_key(name)
+    }
+}
+
+/// The process-wide rune ambient inventory, lowered ONCE from the shared
+/// module-rune declarations.
+///
+/// A fixed declaration string (NOT a workspace file) lowered ONCE into a
+/// process-wide `OnceLock`, using the production env-build primitive
+/// `build_eval_env` over a one-shot OXC parse of the prelude source, then
+/// CONVERTED into per-name declaration records. It is NOT the per-file
+/// second parse the `no_production_parse_and_build_env_in_session` guard
+/// targets — no file's materialise flight is re-parsed; the prelude has no
+/// canonical id.
+fn rune_ambient_inventory() -> &'static RuneAmbientInventory {
+    static INVENTORY: OnceLock<RuneAmbientInventory> = OnceLock::new();
+    INVENTORY.get_or_init(|| {
         let source = verter_compiler::svelte::ide::prelude::module_rune_ambient_source();
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
             oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
-        verter_semantic::analysis::type_eval_build::build_eval_env(&parsed.program, source)
+        let env =
+            verter_semantic::analysis::type_eval_build::build_eval_env(&parsed.program, source);
+
+        // Convert the folded value/type groups into the per-name lowered
+        // records the graph-native readers consume. `primary()` is the
+        // last-wins representative the per-symbol lazy memo also hands out
+        // for a single-contributor (or overload) group; the merged
+        // signature set carries the overloads.
+        let mut value_decls: FxHashMap<String, Arc<LoweredValueDecl>> = FxHashMap::default();
+        for (name, group) in &env.value_symbols {
+            let primary = group.primary();
+            value_decls.insert(
+                name.clone(),
+                Arc::new(LoweredValueDecl {
+                    kind: primary.kind,
+                    type_annotation: primary.type_annotation.clone(),
+                    signatures: group.merged_signatures(),
+                    object_shape: primary.object_shape.clone(),
+                    enum_members: primary.enum_members.clone(),
+                }),
+            );
+        }
+
+        let mut type_decls: FxHashMap<String, Arc<LoweredTypeDecl>> = FxHashMap::default();
+        for (name, group) in &env.type_symbols {
+            let primary = group.primary();
+            type_decls.insert(
+                name.clone(),
+                Arc::new(LoweredTypeDecl {
+                    kind: primary.kind,
+                    body: verter_semantic::analysis::type_eval::TypeDeclBody::Single(
+                        primary.body.clone(),
+                    ),
+                    type_parameters: primary.type_parameters.clone(),
+                    dep_names: rustc_hash::FxHashSet::default(),
+                    structural_dep_names: rustc_hash::FxHashSet::default(),
+                    member_deps: FxHashMap::default(),
+                    typeof_root_names: Vec::new(),
+                }),
+            );
+        }
+
+        RuneAmbientInventory {
+            value_decls,
+            type_decls,
+            env,
+        }
     })
 }
 
-/// Merge the module-valid rune ambient declarations into `env` when the file is
-/// a Svelte rune module. No-op for every other file (per-file scoping).
+/// The lowered VALUE declaration for `name` from the rune ambient inventory.
+/// The centralized effective-lookup consults this AFTER a user/synthesized
+/// declaration miss, gated on the file's rune-module classification.
+pub(crate) fn rune_ambient_value_decl(name: &str) -> Option<Arc<LoweredValueDecl>> {
+    rune_ambient_inventory().value_decl(name)
+}
+
+/// The lowered TYPE declaration for `name` from the rune ambient inventory.
+pub(crate) fn rune_ambient_type_decl(name: &str) -> Option<Arc<LoweredTypeDecl>> {
+    rune_ambient_inventory().type_decl(name)
+}
+
+/// Whether the rune ambient inventory declares a VALUE symbol named `name`
+/// (header-presence probe — no body materialisation).
+pub(crate) fn rune_ambient_has_value(name: &str) -> bool {
+    rune_ambient_inventory().has_value(name)
+}
+
+/// Whether the rune ambient inventory declares a TYPE symbol named `name`.
+pub(crate) fn rune_ambient_has_type(name: &str) -> bool {
+    rune_ambient_inventory().has_type(name)
+}
+
+/// Merge the module-valid rune ambient declarations into `env` when the file
+/// is a Svelte rune module — sourced from the SAME centralized inventory the
+/// graph-native effective-lookup consults. No-op for every other file
+/// (per-file scoping).
 ///
 /// User declarations win: a name the user already declared (a local `$state`
-/// shadow, an import) is NOT clobbered — the rune symbol is added only when the
-/// name is absent in the target env.
-pub(crate) fn apply_svelte_rune_ambient_env(env: &mut EvalEnv, language: &FileLanguage) {
+/// shadow, an import) is NOT clobbered — the rune symbol is added only when
+/// the name is absent in the target env.
+///
+/// This is the whole-env ORACLE's rune-visibility entry: it folds the runes
+/// in from the centralized inventory so the oracle and the graph-native
+/// readers agree on rune visibility (the `whole_env()` → graph-native
+/// equivalence cross-check).
+pub(crate) fn merge_rune_ambient_into_env(env: &mut EvalEnv, language: &FileLanguage) {
     if !is_svelte_rune_module(language) {
         return;
     }
-    let ambient = rune_ambient_env();
-    for (name, group) in &ambient.value_symbols {
+    let ambient = rune_ambient_inventory();
+    for (name, group) in &ambient.env.value_symbols {
         if !env.value_symbols.contains_key(name) {
             env.value_symbols.insert(name.clone(), group.clone());
         }
     }
-    for (name, group) in &ambient.type_symbols {
+    for (name, group) in &ambient.env.type_symbols {
         if !env.type_symbols.contains_key(name) {
             env.type_symbols.insert(name.clone(), group.clone());
         }
@@ -112,10 +242,30 @@ mod tests {
     }
 
     #[test]
+    fn rune_ambient_inventory_carries_the_module_runes_as_value_decls() {
+        // The inventory exposes $state/$derived/$effect/$inspect as per-name
+        // lowered VALUE declarations — the graph-native effective-lookup shape.
+        for rune in ["$state", "$derived", "$effect", "$inspect"] {
+            assert!(
+                rune_ambient_value_decl(rune).is_some(),
+                "the rune ambient inventory must carry {rune} as a lowered value decl"
+            );
+            assert!(
+                rune_ambient_has_value(rune),
+                "the rune ambient inventory must report {rune} present (header probe)"
+            );
+        }
+        // A non-rune name is absent (the inventory is exactly the rune surface).
+        assert!(rune_ambient_value_decl("notARune").is_none());
+        assert!(!rune_ambient_has_value("notARune"));
+    }
+
+    #[test]
     fn rune_module_env_gains_the_module_runes_but_a_plain_env_does_not() {
-        // A rune module's env gains $state/$derived/$effect/$inspect.
+        // A rune module's oracle env gains $state/$derived/$effect/$inspect
+        // from the centralized inventory.
         let mut rune_env = EvalEnv::default();
-        apply_svelte_rune_ambient_env(&mut rune_env, &rune_module_ts());
+        merge_rune_ambient_into_env(&mut rune_env, &rune_module_ts());
         for rune in ["$state", "$derived", "$effect", "$inspect"] {
             assert!(
                 rune_env.value_symbols.contains_key(rune),
@@ -126,7 +276,7 @@ mod tests {
         // DISCRIMINATING per-file scoping: a PLAIN script env is untouched —
         // no rune leaks (req 4). A global injection would fail this.
         let mut plain_env = EvalEnv::default();
-        apply_svelte_rune_ambient_env(&mut plain_env, &FileLanguage::script_ts());
+        merge_rune_ambient_into_env(&mut plain_env, &FileLanguage::script_ts());
         assert!(
             plain_env.value_symbols.is_empty(),
             "a plain script must NOT gain any rune symbols, got {:?}",
@@ -173,7 +323,7 @@ mod tests {
             .value_symbols
             .get("$state")
             .map(|g| g.contributors.len());
-        apply_svelte_rune_ambient_env(&mut env, &rune_module_ts());
+        merge_rune_ambient_into_env(&mut env, &rune_module_ts());
         let after = env
             .value_symbols
             .get("$state")

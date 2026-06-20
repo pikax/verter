@@ -22316,6 +22316,28 @@ fn macro_hot_mirror_purity_scanner_discriminates() {
 /// mirror module.
 const MIRROR_SOLE_PRODUCER_ENTRY: &str = "macro_type_arg_hot_ref";
 
+/// Crate-visible mirror fns that are NOT macro-arg producer entries and are
+/// therefore sanctioned alongside [`MIRROR_SOLE_PRODUCER_ENTRY`]. Each is a
+/// shared STRUCTURAL helper a foreign module legitimately calls — it does NOT
+/// produce a macro-arg graph node (the single-engine producer concern), so it
+/// does not re-open a second outward macro-arg producer entry.
+///
+/// - `build_script_setup_seed_frames`: the shared `<script setup generic="…">`
+///   binder-frame builder. It interns the owner's script-setup generics as
+///   `TypeParam` binder nodes and returns a seed `BinderScope` stack; both the
+///   mirror's macro-arg builder AND the ordinary decl-body structural producer
+///   build the SAME seed binder shape from it. It must be `pub(crate)` so the
+///   decl-body producer (a foreign module) can call it WITHOUT naming the
+///   ancestor-private structural lowerer — the single-engine boundary on the
+///   lowerer (`pub(in crate::macro_hot_mirror)`) stays intact.
+const MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES: &[&str] = &["build_script_setup_seed_frames"];
+
+/// Whether `name` is a sanctioned mirror crate-visible entry — the sole macro-arg
+/// producer entry OR a sanctioned non-producer structural helper.
+fn mirror_entry_is_sanctioned(name: &str) -> bool {
+    name == MIRROR_SOLE_PRODUCER_ENTRY || MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES.contains(&name)
+}
+
 /// Whether an attribute list test-gates an item — `#[cfg(test)]`,
 /// `#[cfg(any(test, …))]`, or `#[cfg(any(…, test))]`. The mirror's `for_tests`
 /// facade is `#[cfg(test)]`. ONLY a positive (un-negated) `test` predicate is a
@@ -22587,13 +22609,14 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     );
     let extra: Vec<&(String, String)> = crate_visible
         .iter()
-        .filter(|(_, name)| name != MIRROR_SOLE_PRODUCER_ENTRY)
+        .filter(|(_, name)| !mirror_entry_is_sanctioned(name))
         .collect();
     assert!(
         extra.is_empty(),
         "mirror entry-surface violation (GOV finding c + round-4/5): `{MIRROR_SOLE_PRODUCER_ENTRY}` \
          must be the SOLE crate-visible (`pub(crate)`/`pub(in crate)`/`pub`) PRODUCTION producer \
-         entry of `macro_hot_mirror/**` (beyond the cfg-gated test facade) — covering BOTH \
+         entry of `macro_hot_mirror/**` (beyond the cfg-gated test facade + the sanctioned \
+         non-producer structural helpers in `MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES`) — covering BOTH \
          module-level FREE functions AND ASSOCIATED functions inside INHERENT `impl` blocks. A second \
          crate-visible producer fn (free OR associated) re-opens a second outward entry into the \
          single-entry mirror. Found extra entries: {extra:#?}. If the module legitimately needs \

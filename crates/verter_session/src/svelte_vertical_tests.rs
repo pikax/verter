@@ -246,10 +246,10 @@ fn ts_importing_svelte_resolves_public_type_and_circular_terminates() {
 #[test]
 fn ts_consumer_resolves_rune_module_export_through_own_engine() {
     // Channel A end-to-end through Verter's OWN engine (NOT tsgo): a `.svelte.ts`
-    // rune module's module-scope runes are merged into its eval env by the host's
-    // `apply_svelte_rune_ambient_env` (keyed off the host language classifier), so
-    // the rune module indexes and a TS consumer importing its rune-derived export
-    // resolves through the shared `Instantiate` dispatch without hanging.
+    // rune module's module-scope runes resolve through the centralized rune
+    // ambient effective-lookup (keyed off the file's rune-module classification),
+    // so the rune module indexes and a TS consumer importing its rune-derived
+    // export resolves through the shared `Instantiate` dispatch without hanging.
     //
     // DISCRIMINATING: if the rune ambient merge did NOT fire on the real host
     // path, `$state` would be an undefined free identifier in the rune module's

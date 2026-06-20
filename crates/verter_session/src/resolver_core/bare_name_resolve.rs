@@ -343,3 +343,80 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
 
     ctx.prepared_type_decl(&final_canonical_id, &final_symbol_name)
 }
+
+/// Resolve an unqualified namespace-member reference to its QUALIFIED sibling
+/// identity, reconstructing the sibling visibility from SHALLOW file state.
+///
+/// This is the content-free local-scope resolver hook the
+/// [`LocalScopePayload::Namespace`](crate::semantic_query::LocalScopePayload)
+/// carrier feeds: a carrier inside `namespace NS { ... }` stores ONLY the
+/// scope id (the prefix + origin); this hook re-prefixes the bare `name` with
+/// the namespace prefix and looks `NS.name` up in the SHALLOW type/value
+/// headers visible for the scope's origin — NO sibling map is stored on the
+/// carrier, NO body is lowered. It mirrors EXACTLY the three origin rules of
+/// the eager `add_namespace_sibling_resolutions`:
+///
+/// - [`File`](crate::semantic_query::LocalScopeOrigin::File): a file-scope
+///   `namespace NS { ... }` binds a direct TYPE or VALUE sibling indexed under
+///   its qualified `NS.name` name (single-segment members only; a deeper
+///   `NS.Sub.X` is not reachable as a bare name from `NS`).
+/// - [`Global`](crate::semantic_query::LocalScopeOrigin::Global): a
+///   `declare global { namespace NS { ... } }` binds a global TYPE sibling
+///   ONLY (a global value sibling has no prepared-value slot).
+/// - [`Module`](crate::semantic_query::LocalScopeOrigin::Module): binds
+///   nothing (no consumable module-scope sibling is addressable today).
+///
+/// Returns the resolved `(scope_canonical_id, "NS.name")` identity, or `None`
+/// when the namespace has no such direct sibling under the origin's inventory.
+///
+/// NOTE — scaffolding: this hook is the model + reader for the producer stage
+/// that stamps the namespace `LocalScopeId` onto a body `BareRef` carrier. It
+/// is NOT yet wired into the live carrier-resolution flow (the eager
+/// `add_namespace_sibling_resolutions` path remains the active producer of
+/// namespace-sibling `name_resolution` entries); it is exercised in isolation
+/// against synthetic shallow state. `allow(dead_code)`: the live caller lands
+/// when the structural producer stamps the scope id (a later stage).
+#[allow(dead_code)]
+pub(crate) fn resolve_namespace_sibling_in_scope(
+    payload: &crate::semantic_query::LocalScopePayload,
+    state: &crate::resolver_core::ShallowFileState,
+    scope_canonical_id: &str,
+    name: &str,
+) -> Option<ResolvedRootIdentity> {
+    use crate::semantic_query::{LocalScopeOrigin, LocalScopePayload};
+
+    let LocalScopePayload::Namespace { prefix, origin } = payload;
+    // A bare member name binds to `<prefix>.<name>`; only a DIRECT (single
+    // additional segment) sibling is reachable as a bare name.
+    if name.contains('.') {
+        return None;
+    }
+    let qualified = format!("{prefix}.{name}");
+
+    match origin {
+        // File-scope namespace: a direct TYPE or VALUE sibling, indexed under
+        // its qualified `NS.name` name in the file-scope header inventory.
+        LocalScopeOrigin::File => {
+            let is_sibling = state
+                .type_symbol_names()
+                .chain(state.value_symbol_names())
+                .any(|sym| sym == qualified);
+            is_sibling.then(|| ResolvedRootIdentity::new(scope_canonical_id, &qualified))
+        }
+        // Global-augmentation namespace: a global TYPE sibling ONLY.
+        LocalScopeOrigin::Global => {
+            use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+            let is_global_type_sibling = state.augmentation_type_keys().any(|(scope, sym)| {
+                matches!(scope, AugmentationScopeKind::Global) && sym == qualified
+            });
+            is_global_type_sibling
+                .then(|| ResolvedRootIdentity::new(scope_canonical_id, &qualified))
+        }
+        // Module-augmentation namespace: no consumable sibling today.
+        LocalScopeOrigin::Module => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "bare_name_resolve_namespace_tests.rs"]
+mod bare_name_resolve_namespace_tests;

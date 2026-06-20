@@ -261,6 +261,74 @@ impl NodeScopeId {
     }
 }
 
+/// The typed local-scope id that [`NodeScopeId::File::local_scope`] indexes.
+///
+/// `NodeScopeId::File` carries a `local_scope: Option<u32>` to disambiguate an
+/// inner lexical scope (a namespace body, a block, a lambda body, a type-param
+/// scope) from the file's top-level scope. `LocalScopeId` is the typed index
+/// into the owning file's [`IndexedReady`](crate::project_type_store::IndexedReady)
+/// / [`ShallowFileState`](crate::resolver_core::ShallowFileState) local-scope
+/// table that the raw `u32` denotes — a CONTENT-FREE id (an index, never a
+/// sibling map), so a carrier that stores it stays compact and the resolver
+/// reconstructs the scope's sibling visibility from shallow file state on
+/// demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocalScopeId(pub u32);
+
+impl LocalScopeId {
+    /// The raw `u32` index this id wraps — the value stored in
+    /// [`NodeScopeId::File::local_scope`].
+    #[must_use]
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// The origin scope a namespaced declaration's sibling inventory is drawn
+/// from — mirrors the three `add_namespace_sibling_resolutions` origin cases
+/// (a file-scope `namespace`, a `declare global { namespace }`, or a
+/// `declare module "X" { namespace }`). CONTENT-FREE: it names WHICH inventory
+/// to consult, never the siblings themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LocalScopeOrigin {
+    /// A file-scope `namespace NS { ... }`. Binds file-scope TYPE + VALUE
+    /// siblings indexed under their qualified `NS.M` name.
+    File,
+    /// A `declare global { namespace NS { ... } }`. Binds global TYPE siblings
+    /// only (a global VALUE sibling has no prepared-value slot).
+    Global,
+    /// A `declare module "X" { namespace NS { ... } }`. Binds no consumable
+    /// sibling today (module-scope prepared decls are not addressable yet).
+    Module,
+}
+
+/// The CONTENT-FREE payload a [`LocalScopeId`] resolves to — a compact scope
+/// descriptor stored beside the carrier, NOT a sibling map. The resolver
+/// reconstructs sibling visibility from the shallow file state's type/value
+/// headers using the descriptor's `prefix` + `origin`.
+///
+/// Today the only modelled local scope is a TS namespace body. A namespaced
+/// member's unqualified body reference (`Ref("Sib")` inside
+/// `namespace NS { ... }`) resolves to its qualified sibling identity `NS.Sib`
+/// by re-prefixing with [`Namespace::prefix`](Self::Namespace) and consulting
+/// the shallow headers for the [`origin`](LocalScopeOrigin) scope — the exact
+/// rules `add_namespace_sibling_resolutions` encodes, reconstructed from
+/// shallow state rather than materialised into a per-carrier map.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LocalScopePayload {
+    /// A TS namespace body scope: an enclosing `namespace <prefix> { ... }`.
+    /// A bare member name binds to `<prefix>.<name>` in the shallow headers
+    /// visible for `origin`.
+    Namespace {
+        /// The enclosing namespace's dotted prefix WITHOUT the trailing dot
+        /// (`"NS"` for `namespace NS { ... }`, `"NS.Inner"` for a nested
+        /// `namespace NS { namespace Inner { ... } }`).
+        prefix: Arc<str>,
+        /// Which sibling inventory the namespace's members are drawn from.
+        origin: LocalScopeOrigin,
+    },
+}
+
 /// Resolved-declaration lookup key. Two callers from the same scope for the
 /// same name produce the same key and dedup automatically.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

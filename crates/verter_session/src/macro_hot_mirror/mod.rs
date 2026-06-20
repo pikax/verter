@@ -75,17 +75,15 @@
 //! frame is built incrementally so an earlier binder is visible to a later
 //! one's constraint / default (TS scoping).
 
+pub(crate) mod script_setup_binder;
 pub(crate) mod structural_lower;
 
 use std::sync::{Arc, OnceLock};
 
 use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{
-    DeclIdentity, HashValue, HotTypeRef, NodeScopeId, SemanticNodeData, SemanticNodeId,
-};
-use crate::semantic_query_memo::SemanticGraphStore;
+use crate::semantic_query::{HotTypeRef, NodeScopeId};
 
-use structural_lower::{BinderScope, StructuralLowerContext};
+use structural_lower::StructuralLowerContext;
 
 /// Lazy, singleflight, content-addressed mirror of one file's Vue SFC MACRO
 /// type-argument graph handles.
@@ -226,96 +224,10 @@ fn build_macro_hot_ref(
     // a `BareRef(T)`. Built from the owner's ROUTE-FREE local `IndexedReady`
     // data (`raw_source` + `framework_parse`) — NO host route lookup, so the
     // mirror stays a pure producer.
-    let seed_frames = build_script_setup_seed_frames(indexed, graph, &scope);
+    let seed_frames = script_setup_binder::build_script_setup_seed_frames(indexed, graph, &scope);
     let lower_ctx = StructuralLowerContext::new(&seed_frames).with_macro_own_body(macro_own_body);
 
     structural_lower::lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx).ok()
-}
-
-/// Build the seed [`BinderScope`] stack from the owner's script-setup type
-/// bindings. Returns a one-frame stack (or an empty stack when there are no
-/// script-setup generics). Each binder interns a
-/// [`SemanticNodeData::TypeParam`] node matching the eager path's shape
-/// (`<script-setup>` decl sentinel + the binding ordinal + lowered
-/// constraint / default + display name). The constraint / default lower
-/// under the seed frame accumulated SO FAR, so an earlier generic is visible
-/// to a later one's constraint (`generic="T, U extends T">`) per TS scoping.
-///
-/// The `<script setup generic="…">` clause is re-sourced from the owner's
-/// ROUTE-FREE local [`IndexedReady`] data (`raw_source` + `framework_parse`)
-/// through [`sfc_script_setup_type_params`](crate::host_resolve::sfc_script_setup_type_params)
-/// — the SAME route-free extraction `host_manage` uses to populate the
-/// prepared-decl bundle's `script_setup_type_bindings`, so the seed binder
-/// shape is identical. The mirror does NOT read the prepared-decl bundle
-/// (whose cold path can route-resolve imports) — that would make the producer
-/// impure.
-fn build_script_setup_seed_frames(
-    indexed: &crate::project_type_store::IndexedReady,
-    graph: &SemanticGraphStore,
-    scope: &NodeScopeId,
-) -> Vec<BinderScope> {
-    // Re-source the `<script setup generic="…">` clause from the owner's local
-    // route-free parse artifact. The clause-position index IS the ordinal (the
-    // same `param_index` the eager path / prepared-decl bundle assigns), so the
-    // interned `TypeParam` identity tuple matches.
-    let params = crate::host_resolve::sfc_script_setup_type_params(
-        indexed.raw_source.as_ref(),
-        indexed.framework_parse.as_deref(),
-    );
-    if params.is_empty() {
-        return Vec::new();
-    }
-
-    let decl = match scope {
-        NodeScopeId::Global => DeclIdentity {
-            canonical_id: Arc::from(""),
-            whole_hash: HashValue::default(),
-            decl_name: Arc::from("<script-setup>"),
-        },
-        NodeScopeId::File {
-            canonical_id,
-            whole_hash,
-            ..
-        } => DeclIdentity {
-            canonical_id: Arc::clone(canonical_id),
-            whole_hash: *whole_hash,
-            decl_name: Arc::from("<script-setup>"),
-        },
-    };
-
-    let mut frame = BinderScope::default();
-    for (idx, param) in params.iter().enumerate() {
-        // The constraint / default see the binders accumulated so far.
-        let head_frames = vec![frame.clone()];
-        let head_ctx = StructuralLowerContext::new(&head_frames);
-        let constraint = param.constraint.as_ref().and_then(|c| {
-            structural_lower::lower_type_expr_structural(graph, c, scope.clone(), &head_ctx)
-                .ok()
-                .map(HotTypeRef::node)
-        });
-        let default = param.default.as_ref().and_then(|d| {
-            structural_lower::lower_type_expr_structural(graph, d, scope.clone(), &head_ctx)
-                .ok()
-                .map(HotTypeRef::node)
-        });
-        // The clause-position index is the ordinal / `param_index` the eager
-        // path and prepared-decl bundle assign — matching identity tuples.
-        let ordinal = u16::try_from(idx).unwrap_or(u16::MAX);
-        let display_name: Arc<str> = Arc::from(param.name.as_str());
-        let node: SemanticNodeId = graph.intern_node_with_scope(
-            SemanticNodeData::TypeParam {
-                decl: decl.clone(),
-                param_index: ordinal,
-                constraint,
-                default,
-                display_name: Arc::clone(&display_name),
-            },
-            scope.clone(),
-        );
-        frame.bind(display_name, node);
-    }
-
-    vec![frame]
 }
 
 /// Test-only facade so this crate's OWN `#[cfg(test)]` unit tests reach the
