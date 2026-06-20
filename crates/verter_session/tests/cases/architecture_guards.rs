@@ -22332,6 +22332,14 @@ const MIRROR_SOLE_PRODUCER_ENTRY: &str = "macro_type_arg_hot_ref";
 ///   lowerer (`pub(in crate::macro_hot_mirror)`) stays intact.
 const MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES: &[&str] = &["build_script_setup_seed_frames"];
 
+/// The ONE production file the sanctioned non-producer helper
+/// `build_script_setup_seed_frames` is confined to. The crate-wide uniqueness
+/// pin asserts the name appears as a definition/binding ONLY here (and nowhere
+/// else in `verter_session` production source). Path tail (not anchored) so the
+/// check is OS-portable — `session_production_src_files()` already normalises
+/// separators to `/`.
+const SANCTIONED_HELPER_DEFINING_FILE: &str = "macro_hot_mirror/script_setup_binder.rs";
+
 /// Whether `name` is a sanctioned mirror crate-visible entry — the sole macro-arg
 /// producer entry OR a sanctioned non-producer structural helper.
 fn mirror_entry_is_sanctioned(name: &str) -> bool {
@@ -22573,14 +22581,15 @@ const MIRROR_MACRO_ARG_PRODUCT_TYPE: &str = "HotTypeRef";
 /// helper produces — token-spaced exactly as `render_type` emits it.
 const MIRROR_BINDER_SEED_RETURN_TYPE: &str = "Vec < BinderScope >";
 
-/// Where an occurrence of the sanctioned name is DEFINED. The positive
-/// structural pin requires the SOLE occurrence to be a module-level FREE
-/// [`syn::ItemFn`]; every other definition kind — an associated fn inside ANY
-/// `impl` (inherent OR trait), a trait-item declaration — is a usurpation of the
-/// sanctioned name, regardless of how the offending fn aliases the macro-arg
-/// product (`Self` inside `impl HotTypeRef`, a generic bound, a type alias). The
-/// kind is recorded so a violation can say exactly which non-free surface the
-/// usurper took.
+/// Where an occurrence of the sanctioned name appears. The positive structural
+/// pin requires the SOLE occurrence to be a module-level FREE [`syn::ItemFn`];
+/// every other surface — an associated fn inside ANY `impl` (inherent OR trait),
+/// a trait-item declaration, a MACRO INVOCATION whose tokens mention the name, or
+/// a `use … as <name>` REEXPORT binding — is a usurpation of the sanctioned name,
+/// regardless of how the offending surface aliases the macro-arg product (`Self`
+/// inside `impl HotTypeRef`, a generic bound, a type alias, a macro that expands
+/// to a producer, a reexport that aliases one). The kind is recorded so a
+/// violation can say exactly which non-free surface the usurper took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SanctionedOccurrenceKind {
     /// A module-level free `fn` — the only sanctioned shape.
@@ -22591,6 +22600,14 @@ enum SanctionedOccurrenceKind {
     TraitImplAssoc,
     /// A trait-item `fn` declaration (`trait T { fn … }`).
     TraitItem,
+    /// A macro INVOCATION (item / impl-item / trait-item position, including
+    /// `include!` / `macro_rules!`) whose token stream mentions the sanctioned
+    /// name — a surface that could EXPAND to a producer under the name. A `syn`
+    /// scan cannot expand it, so its mere mention of the name is the usurpation.
+    MacroInvocation,
+    /// A `use … as <name>` REEXPORT binding minting a callable entry under the
+    /// sanctioned name.
+    UseRename,
 }
 
 impl SanctionedOccurrenceKind {
@@ -22602,31 +22619,70 @@ impl SanctionedOccurrenceKind {
                 "an associated fn inside a trait impl (`impl Trait for T`)"
             }
             SanctionedOccurrenceKind::TraitItem => "a trait-item fn declaration",
+            SanctionedOccurrenceKind::MacroInvocation => {
+                "a macro invocation whose tokens mention the sanctioned name (a surface that could \
+                 expand to a producer under the name)"
+            }
+            SanctionedOccurrenceKind::UseRename => {
+                "a `use … as <name>` reexport binding under the sanctioned name"
+            }
         }
     }
 }
 
-/// One discovered definition of the sanctioned name: where it lives (`rel`), the
-/// surface kind, and its parsed signature. The positive pin reasons over the
-/// PARSED STRUCTURE of the signature (free-fn-ness, generics, receiver, the
-/// param/return shape) — never over rendered whitespace, arg names, or raw
-/// source bytes.
+/// One discovered occurrence of the sanctioned name: where it lives (`rel`), the
+/// surface kind, and — for a fn surface — its parsed signature (`None` for a
+/// macro-invocation or use-rename surface, which carries no fn signature). The
+/// positive pin reasons over the PARSED STRUCTURE of the signature (free-fn-ness,
+/// generics, receiver, the param/return shape) — never over rendered whitespace,
+/// arg names, or raw source bytes.
 struct SanctionedOccurrence {
     rel: String,
     kind: SanctionedOccurrenceKind,
-    sig: syn::Signature,
+    sig: Option<syn::Signature>,
 }
 
-/// Collect EVERY definition of the sanctioned name `name` across a source's
+/// Collect EVERY occurrence of the sanctioned name `name` across a source's
 /// items — a module-level FREE `fn`, an associated `fn` inside ANY `impl`
-/// (inherent OR trait), a trait-item `fn` declaration, and all of those nested in
-/// inline `mod` blocks. This is intentionally BROADER than a crate-visibility
-/// scan: the positive pin asserts the name has EXACTLY ONE definition and that it
-/// is the genuine free-fn shape, so ANY second definition (in any surface, at any
+/// (inherent OR trait), a trait-item `fn` declaration, a MACRO INVOCATION at
+/// item / impl-item / trait-item position whose token stream mentions the name
+/// (including `include!` / `macro_rules!`, which parse as item-position macro
+/// invocations), a `use … as <name>` REEXPORT binding, and all of those nested
+/// in inline `mod` blocks. This is intentionally BROADER than a crate-visibility
+/// scan: the positive pin asserts the name has EXACTLY ONE occurrence and that it
+/// is the genuine free-fn shape, so ANY second occurrence (in any surface, at any
 /// visibility) is a usurpation — there is no visibility spelling a usurper can
-/// hide behind. `#[cfg(test)]`-gated items are excluded (a test fixture is not a
-/// production surface); production `#[cfg(not(test))]` / `debug_assertions` items
-/// are kept (they compile in production builds).
+/// hide behind.
+///
+/// CFG-INDEPENDENT BY DESIGN (closes the cfg over-exclusion vector): the genuine
+/// helper is UNCONDITIONAL — it carries no `#[cfg(...)]` at all. So the airtight
+/// invariant is that the sanctioned name appears EXACTLY ONCE in production
+/// source, full stop, regardless of cfg. This collector therefore does NOT apply
+/// `attrs_test_gate`: a same-name item under ANY cfg (`#[cfg(test)]`,
+/// `#[cfg(debug_assertions)]`, `#[cfg(any(test, debug_assertions))]`,
+/// `#[cfg(not(test))]`, `#[cfg(feature = "…")]`) is necessarily a SECOND
+/// occurrence (the genuine one is cfg-free), so it must be counted and rejected —
+/// not over-excluded as the `attrs_test_gate` `any(test, …)` arm would. The
+/// genuine fn (cfg-free) is counted unchanged; any cfg-gated same-name item is
+/// now visible and rejected by the occurrence-count / not-a-free-fn properties.
+///
+/// MACRO TOKEN-STREAM DEFENSE (closes the macro-generated-producer vector): a
+/// `syn` scan cannot expand macros, so a macro emitting `fn <name>(...)` would be
+/// invisible to a fn-definition-only walk. The genuine helper uses NO macro and
+/// NO `include!`, so the defense is to ban the sanctioned NAME appearing inside
+/// ANY item-position macro invocation token stream: any macro whose tokens
+/// mention the name is a usurpation surface (it could generate a producer under
+/// the name) → recorded as a `MacroInvocation` occurrence (which is not a free
+/// fn ⇒ rejected). A bare call EXPRESSION inside a fn body
+/// (`script_setup_binder::build_script_setup_seed_frames(…)`, the legitimate
+/// call site in `mod.rs`) is NOT an item-position macro and is NOT seen here, so
+/// it is not flagged.
+///
+/// USE-REEXPORT DEFENSE (closes the reexport-under-the-name vector): a
+/// `use some::producer as <name>` creates a callable entry under the sanctioned
+/// name that a fn-definition scan misses. The genuine helper needs NO reexport,
+/// so any `use … as <name>` rename binding is a usurpation → recorded as a
+/// `UseRename` occurrence (not a free fn ⇒ rejected).
 fn collect_sanctioned_occurrences(
     items: &[syn::Item],
     name: &str,
@@ -22636,70 +22692,197 @@ fn collect_sanctioned_occurrences(
     for item in items {
         match item {
             syn::Item::Fn(f) => {
-                if attrs_test_gate(&f.attrs) {
-                    continue;
-                }
                 if f.sig.ident == name {
                     out.push(SanctionedOccurrence {
                         rel: rel.to_string(),
                         kind: SanctionedOccurrenceKind::Free,
-                        sig: f.sig.clone(),
+                        sig: Some(f.sig.clone()),
                     });
                 }
             }
             syn::Item::Impl(imp) => {
-                if attrs_test_gate(&imp.attrs) {
-                    continue;
-                }
                 let kind = if imp.trait_.is_some() {
                     SanctionedOccurrenceKind::TraitImplAssoc
                 } else {
                     SanctionedOccurrenceKind::InherentAssoc
                 };
                 for impl_item in &imp.items {
-                    if let syn::ImplItem::Fn(m) = impl_item {
-                        if attrs_test_gate(&m.attrs) {
-                            continue;
+                    match impl_item {
+                        syn::ImplItem::Fn(m) => {
+                            if m.sig.ident == name {
+                                out.push(SanctionedOccurrence {
+                                    rel: rel.to_string(),
+                                    kind,
+                                    sig: Some(m.sig.clone()),
+                                });
+                            }
                         }
-                        if m.sig.ident == name {
-                            out.push(SanctionedOccurrence {
-                                rel: rel.to_string(),
-                                kind,
-                                sig: m.sig.clone(),
-                            });
+                        // An impl-item-position macro invocation that mentions
+                        // the name — a macro that could generate an associated
+                        // fn under the sanctioned name.
+                        syn::ImplItem::Macro(mac) => {
+                            if macro_tokens_mention(&mac.mac, name) {
+                                out.push(SanctionedOccurrence {
+                                    rel: rel.to_string(),
+                                    kind: SanctionedOccurrenceKind::MacroInvocation,
+                                    sig: None,
+                                });
+                            }
                         }
+                        _ => {}
                     }
                 }
             }
             syn::Item::Trait(tr) => {
-                if attrs_test_gate(&tr.attrs) {
-                    continue;
-                }
                 for trait_item in &tr.items {
-                    if let syn::TraitItem::Fn(m) = trait_item {
-                        if attrs_test_gate(&m.attrs) {
-                            continue;
+                    match trait_item {
+                        syn::TraitItem::Fn(m) => {
+                            if m.sig.ident == name {
+                                out.push(SanctionedOccurrence {
+                                    rel: rel.to_string(),
+                                    kind: SanctionedOccurrenceKind::TraitItem,
+                                    sig: Some(m.sig.clone()),
+                                });
+                            }
                         }
-                        if m.sig.ident == name {
-                            out.push(SanctionedOccurrence {
-                                rel: rel.to_string(),
-                                kind: SanctionedOccurrenceKind::TraitItem,
-                                sig: m.sig.clone(),
-                            });
+                        // A trait-item-position macro invocation that mentions
+                        // the name.
+                        syn::TraitItem::Macro(mac) => {
+                            if macro_tokens_mention(&mac.mac, name) {
+                                out.push(SanctionedOccurrence {
+                                    rel: rel.to_string(),
+                                    kind: SanctionedOccurrenceKind::MacroInvocation,
+                                    sig: None,
+                                });
+                            }
                         }
+                        _ => {}
                     }
                 }
             }
-            syn::Item::Mod(m) => {
-                if attrs_test_gate(&m.attrs) {
-                    continue;
+            // An item-position macro invocation — `some_macro! { ... }`,
+            // `macro_rules! m { ... }`, OR `include!("…")` (all parse as
+            // `Item::Macro`). If its token stream mentions the sanctioned name,
+            // it is a usurpation surface (it could expand to a producer under the
+            // name), so it is recorded and rejected. `macro_rules!` definitions
+            // carry their body in `mac.tokens`, so a `macro_rules!` whose body
+            // emits `fn <name>` is caught too.
+            syn::Item::Macro(item_mac) => {
+                if macro_tokens_mention(&item_mac.mac, name) {
+                    out.push(SanctionedOccurrence {
+                        rel: rel.to_string(),
+                        kind: SanctionedOccurrenceKind::MacroInvocation,
+                        sig: None,
+                    });
                 }
+            }
+            // A `use … as <name>` REEXPORT binding — a callable entry under the
+            // sanctioned name a fn-definition scan misses.
+            syn::Item::Use(use_item) => {
+                if use_tree_renames_to(&use_item.tree, name) {
+                    out.push(SanctionedOccurrence {
+                        rel: rel.to_string(),
+                        kind: SanctionedOccurrenceKind::UseRename,
+                        sig: None,
+                    });
+                }
+            }
+            syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
                     collect_sanctioned_occurrences(inner, name, rel, out);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// Whether a macro invocation's token stream mentions the sanctioned `name`. A
+/// `syn` scan cannot expand macros, so any macro invocation (or `macro_rules!` /
+/// `include!` / `include_str!`) whose tokens reference the sanctioned name is
+/// treated as a usurpation surface that could generate a producer under that
+/// name. Walks the token tree recursively, descending into every parenthesised /
+/// braced / bracketed group, and matches the name in TWO positions:
+///
+/// - an `Ident` token whose text equals `name` (an exact identifier match, not a
+///   substring — `build_script_setup_seed_frames_v2` does not match
+///   `build_script_setup_seed_frames`) — catches `macro_rules!`/function-like
+///   macros whose body emits `fn <name>`; and
+/// - a string / byte-string `Literal` whose decoded text CONTAINS the name as a
+///   whole word (word-boundary-delimited) — catches `include!("<name>.rs")` and
+///   `include!(concat!(env!("OUT_DIR"), "/<name>.rs"))`, where the name lives in a
+///   path string literal rather than as a bare ident token. (The genuine helper
+///   uses NO macro and NO `include!`, so any macro referencing the name — ident
+///   OR literal — is suspect.)
+fn macro_tokens_mention(mac: &syn::Macro, name: &str) -> bool {
+    token_stream_mentions_ident(mac.tokens.clone(), name)
+}
+
+/// Recursively walk a `proc_macro2::TokenStream` for the sanctioned `name`,
+/// descending into every `Group` (`(...)` / `{...}` / `[...]`). Matches an
+/// `Ident` token equal to `name` OR a `Literal` token whose rendered text
+/// contains `name` as a whole word (see [`literal_mentions_name_as_word`]).
+fn token_stream_mentions_ident(tokens: proc_macro2::TokenStream, name: &str) -> bool {
+    use proc_macro2::TokenTree;
+    tokens.into_iter().any(|tt| match tt {
+        TokenTree::Ident(ident) => ident == name,
+        TokenTree::Literal(lit) => literal_mentions_name_as_word(&lit.to_string(), name),
+        TokenTree::Group(group) => token_stream_mentions_ident(group.stream(), name),
+        TokenTree::Punct(_) => false,
+    })
+}
+
+/// Whether a rendered literal token (`"…"` / `b"…"` / `r#"…"#` / a numeric or
+/// char literal) contains `name` as a WHOLE WORD — `name` appears with a
+/// non-identifier character (or string boundary) on each side. This matches the
+/// name inside an `include!("<name>.rs")` path literal (delimiter `.` after the
+/// name) while NOT matching `"<name>_v2"` (an identifier character `_` follows the
+/// name, so it is a different symbol). Walks every `name` substring occurrence
+/// (via `find` over the remaining slice), gating each on both neighbours being
+/// non-`[A-Za-z0-9_]` (or the string boundary).
+fn literal_mentions_name_as_word(rendered_literal: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let is_ident_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let bytes = rendered_literal.as_bytes();
+    let name_bytes = name.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = rendered_literal[start..].find(name) {
+        let abs = start + pos;
+        let before_ok =
+            abs == 0 || !is_ident_char(rendered_literal[..abs].chars().next_back().unwrap());
+        let after_idx = abs + name_bytes.len();
+        let after_ok = after_idx >= bytes.len()
+            || !is_ident_char(rendered_literal[after_idx..].chars().next().unwrap());
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// Whether a `use` tree introduces a binding RENAMED to the sanctioned `name` via
+/// `as <name>` — `use a::b as <name>;`, `use a::{c as <name>};`, a nested-group
+/// rename, or a glob-free path whose terminal rename targets the name. Walks the
+/// `UseTree` recursively. A plain `use a::<name>;` (no rename) is NOT a match: the
+/// final path segment being the name without an `as` rename re-exports under the
+/// ORIGINAL module's name, not a freshly minted binding usurping the sanctioned
+/// name — but a `use a::<name> as <name>;` (explicit self-rename) DOES introduce a
+/// fresh binding under the name and is matched by the `Rename` arm. (The genuine
+/// helper needs no `use` at all, so any rename-to-the-name is suspect.)
+fn use_tree_renames_to(tree: &syn::UseTree, name: &str) -> bool {
+    match tree {
+        syn::UseTree::Rename(rename) => rename.rename == name,
+        syn::UseTree::Path(path) => use_tree_renames_to(&path.tree, name),
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_renames_to(item, name)),
+        // `use a::b;` (plain) and `use a::*;` (glob) do not mint a fresh binding
+        // under a renamed-to name.
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => false,
     }
 }
 
@@ -22737,13 +22920,19 @@ const MIRROR_SEED_FRAMES_PARAM_TYPES: &[&str] = &[
 ///
 /// The five structural assertions (each independently fatal):
 ///
-/// 1. EXACTLY ONE occurrence of the name across ALL mirror sources and ALL item
-///    kinds (free fn, inherent-`impl` assoc fn, trait-`impl` assoc fn, trait-item
-///    fn, inline-mod nesting). ZERO ⇒ the name vanished. >1 ⇒ a second definition
-///    anywhere is the usurpation vector.
+/// 1. EXACTLY ONE occurrence of the name across ALL scanned sources and ALL
+///    surface kinds (free fn, inherent-`impl` assoc fn, trait-`impl` assoc fn,
+///    trait-item fn, a MACRO INVOCATION whose tokens mention the name — including
+///    `include!` / `macro_rules!` — a `use … as <name>` REEXPORT binding, and
+///    inline-mod nesting), REGARDLESS of cfg (the genuine helper is cfg-free, so a
+///    cfg-gated same-name occurrence is necessarily a second occurrence). ZERO ⇒
+///    the name vanished. >1 ⇒ a second occurrence anywhere is the usurpation
+///    vector.
 /// 2. That one occurrence IS a module-level FREE `ItemFn` — NOT an associated fn
-///    inside any `impl`, NOT a trait method. (A `Self`-aliasing or receiver
-///    usurper is necessarily an associated fn, so it dies here.)
+///    inside any `impl`, NOT a trait method, NOT a macro invocation, NOT a
+///    use-rename. (A `Self`-aliasing or receiver usurper is necessarily an
+///    associated fn; a macro-generated or reexported producer is necessarily a
+///    macro-invocation / use-rename occurrence — all die here.)
 /// 3. Its signature has NO generic params, NO `where` clause, and NO receiver. (A
 ///    generic-bound usurper `fn …<T: From<HotTypeRef>>(…)` dies here; a receiver
 ///    usurper dies here too, redundantly with #2.)
@@ -22764,11 +22953,12 @@ fn positive_pin_sanctioned_helper(
         collect_sanctioned_occurrences(&file.items, fn_name, rel, &mut occurrences);
     }
 
-    // #1 — EXACTLY ONE occurrence module-wide, across every item kind.
+    // #1 — EXACTLY ONE occurrence across every scanned source and every surface
+    // kind (fn definition, macro invocation, use-rename), regardless of cfg.
     if occurrences.is_empty() {
         return Err(format!(
-            "positive-pin #1: the sanctioned helper `{fn_name}` has NO definition anywhere in \
-             `macro_hot_mirror/**` — it must be defined EXACTLY ONCE as the genuine module-level \
+            "positive-pin #1: the sanctioned helper `{fn_name}` has NO occurrence anywhere in the \
+             scanned production source — it must appear EXACTLY ONCE as the genuine module-level \
              free fn (its disappearance means the binder-seed producer regressed)"
         ));
     }
@@ -22778,11 +22968,12 @@ fn positive_pin_sanctioned_helper(
             .map(|o| format!("{} ({})", o.rel, o.kind.describe()))
             .collect();
         return Err(format!(
-            "positive-pin #1: the sanctioned helper `{fn_name}` is defined {} times across \
-             `macro_hot_mirror/**` — it MUST have EXACTLY ONE definition. A second definition \
-             under the sanctioned name (in ANY file, ANY item kind, ANY visibility) is the \
-             usurpation vector: it cannot be distinguished from the genuine helper by name, so it \
-             rides the allowlist. Occurrences: {where_found:?}",
+            "positive-pin #1: the sanctioned name `{fn_name}` appears {} times across the scanned \
+             production source — it MUST appear EXACTLY ONCE. A second occurrence under the \
+             sanctioned name (in ANY file, ANY surface kind — a fn definition, a macro invocation \
+             whose tokens mention the name, a `use … as <name>` reexport — ANY visibility, ANY \
+             cfg) is the usurpation vector: it cannot be distinguished from the genuine helper by \
+             name, so it rides the allowlist. Occurrences: {where_found:?}",
             occurrences.len()
         ));
     }
@@ -22806,7 +22997,15 @@ fn positive_pin_sanctioned_helper(
         ));
     }
 
-    let sig = &occurrence.sig;
+    // The sole occurrence is `Free` (asserted by #2), and only the fn surfaces
+    // (`Free`/`InherentAssoc`/`TraitImplAssoc`/`TraitItem`) record a signature;
+    // `Free` always carries one by construction. A macro-invocation / use-rename
+    // surface records `sig = None`, but those are never `Free`, so they are
+    // rejected by #2 above and never reach here.
+    let sig = occurrence
+        .sig
+        .as_ref()
+        .expect("a Free sanctioned occurrence always carries a parsed signature");
 
     // #3 — NO generics, NO `where`, NO receiver. Closes the generic-bound vector
     // (`fn …<T: From<HotTypeRef>>(t: T) -> …`) and any receiver usurper.
@@ -22975,6 +23174,74 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
             )
         }
     }
+
+    // CRATE-WIDE SANCTIONED-NAME UNIQUENESS (AIRTIGHT POSITIVE PIN). The
+    // mirror-scoped pin above proves the sanctioned helper is the one genuine
+    // free fn WITHIN `macro_hot_mirror/**`. But the stated invariant is stronger:
+    // the sanctioned name `build_script_setup_seed_frames` must appear in ALL
+    // `verter_session` PRODUCTION source — not just the mirror directory — ONLY
+    // as that one genuine free fn in `script_setup_binder.rs`, and NOWHERE else
+    // (no fn in another module, no `#[path = "…"]` child outside the directory,
+    // no macro that could expand to a producer under the name, no `use … as`
+    // reexport, no cfg-gated variant). Scanning the WHOLE crate (not just
+    // `macro_hot_mirror/**`) closes the out-of-module producer vector (a usurper
+    // under the name in any OTHER production module is now visible); the
+    // surface-broadened, cfg-independent `collect_sanctioned_occurrences` (run by
+    // `positive_pin_sanctioned_helper`) closes the macro-generated, reexport, and
+    // cfg-gated vectors. A bare CALL EXPRESSION of the helper inside a fn body
+    // (the legitimate call site in `mod.rs`) is NOT an item-level occurrence and
+    // is correctly NOT counted — only DEFINITIONS / BINDINGS / macro-invocation
+    // surfaces are.
+    let all_sources = session_production_src_files();
+    let mut crate_wide_occurrences: Vec<(String, SanctionedOccurrenceKind)> = Vec::new();
+    for (rel, src) in &all_sources {
+        let file = syn::parse_file(src)
+            .unwrap_or_else(|e| panic!("crate-wide sanctioned-name scan parse of `{rel}`: {e}"));
+        let mut found: Vec<SanctionedOccurrence> = Vec::new();
+        collect_sanctioned_occurrences(
+            &file.items,
+            MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
+            rel,
+            &mut found,
+        );
+        for occ in found {
+            crate_wide_occurrences.push((occ.rel, occ.kind));
+        }
+    }
+    // Anti-vacuity: the crate-wide scan MUST find the one genuine occurrence — its
+    // absence means the scan is broken or the helper vanished.
+    assert_eq!(
+        crate_wide_occurrences.len(),
+        1,
+        "crate-wide sanctioned-name uniqueness: `{}` must appear EXACTLY ONCE as a \
+         definition/binding across ALL `verter_session` production source — found {} occurrences \
+         {:#?}. A second occurrence under the sanctioned name in ANY production file (a fn in \
+         another module, a `#[path]` child outside `macro_hot_mirror/`, a macro invocation whose \
+         tokens mention the name, a `use … as` reexport, or a cfg-gated variant) is a usurpation: \
+         the airtight invariant is that the name is the ONE genuine free fn in \
+         `script_setup_binder.rs` and NOWHERE else. (A bare call expression of the helper is not \
+         an item-level occurrence and is not counted.)",
+        MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
+        crate_wide_occurrences.len(),
+        crate_wide_occurrences,
+    );
+    let (sole_rel, sole_kind) = &crate_wide_occurrences[0];
+    assert!(
+        sole_rel.ends_with(SANCTIONED_HELPER_DEFINING_FILE),
+        "crate-wide sanctioned-name uniqueness: the sole occurrence of `{}` must live in \
+         `{SANCTIONED_HELPER_DEFINING_FILE}`, but it was found in `{sole_rel}`. The genuine helper \
+         is confined to that one file; an occurrence elsewhere is a usurpation.",
+        MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
+    );
+    assert_eq!(
+        *sole_kind,
+        SanctionedOccurrenceKind::Free,
+        "crate-wide sanctioned-name uniqueness: the sole occurrence of `{}` must be {} — found {}. \
+         The genuine helper is a plain free fn with no macro / reexport / cfg surface.",
+        MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
+        SanctionedOccurrenceKind::Free.describe(),
+        sole_kind.describe(),
+    );
 }
 
 /// Self-test for [`crate_visible_producer_fn_names`] + the entry-surface guard:
@@ -23432,5 +23699,186 @@ fn mirror_entry_surface_classifier_discriminates() {
         real_name,
         "positive-pin #1",
         "vanished sanctioned name (no definition anywhere)",
+    );
+
+    // ---- AIRTIGHT EXTENSION — RED-PROOFS FOR THE FOUR RESIDUAL VECTORS. ----
+    //
+    // The positive pin above closed the ORDINARY parsed-fn evasion class. These
+    // four plants RED-prove the surfaces that a fn-definition-only,
+    // mirror-directory-only, cfg-excluding scan would have MISSED: a
+    // macro-generated producer, a `use … as` reexport, an out-of-module duplicate,
+    // and a cfg-gated production usurper. Each runs the SAME shared classifier
+    // (`positive_pin_sanctioned_helper` over the broadened, cfg-independent
+    // `collect_sanctioned_occurrences`), so a regression that re-narrows the scan
+    // reddens BOTH the live crate-wide guard and these proofs together. "A guard
+    // that cannot fail is a stub."
+
+    // Direct-occurrence helper: parse one synthetic source and return the recorded
+    // sanctioned-name occurrence kinds. Used below to prove a vector is now SEEN
+    // (visibility), distinct from proving the pin REJECTS it.
+    fn occurrence_kinds(src: &str, name: &str) -> Vec<SanctionedOccurrenceKind> {
+        let file = syn::parse_file(src).expect("occurrence-probe parse");
+        let mut out: Vec<SanctionedOccurrence> = Vec::new();
+        collect_sanctioned_occurrences(&file.items, name, "synthetic.rs", &mut out);
+        out.into_iter().map(|o| o.kind).collect()
+    }
+
+    // REJECT (F1, macro-generated producer) — a `macro_rules!` whose body emits
+    // `fn build_script_setup_seed_frames(...) -> HotTypeRef`. A `syn` scan cannot
+    // expand the macro, so a fn-definition-only walk sees NOTHING here (the real
+    // helper is invisible inside the macro body). The broadened scan records the
+    // macro invocation as a `MacroInvocation` occurrence because its token stream
+    // MENTIONS the sanctioned name → it is the SOLE occurrence and is NOT a free fn
+    // ⇒ #2 rejects it. FIRST prove it is SEEN as a macro occurrence (the F1 fix),
+    // then prove the pin rejects it.
+    let macro_gen_src = "macro_rules! gen_producer {\n    () => {\n        pub(crate) fn build_script_setup_seed_frames(seed: HotTypeRef) -> HotTypeRef { todo!() }\n    };\n}\n";
+    assert_eq!(
+        occurrence_kinds(macro_gen_src, real_name),
+        vec![SanctionedOccurrenceKind::MacroInvocation],
+        "F1 visibility: a `macro_rules!` whose body emits `fn {real_name}` MUST be recorded as a \
+         MacroInvocation occurrence — the broadened scan bans the sanctioned name appearing inside \
+         any macro token stream (a `syn` scan cannot expand the macro to see the generated fn)"
+    );
+    let macro_gen_sources = vec![(binder_rel.clone(), macro_gen_src.to_string())];
+    assert_rejected(
+        &macro_gen_sources,
+        real_name,
+        "positive-pin #2",
+        "F1 macro-generated producer (`macro_rules!` body emits `fn <name>`)",
+    );
+    // A function-like macro INVOCATION (not a definition) that merely mentions the
+    // name as an argument ident is ALSO a usurpation surface (it could expand to a
+    // producer) and is rejected.
+    let macro_call_sources = vec![(
+        binder_rel.clone(),
+        "define_seed_producer!(build_script_setup_seed_frames, HotTypeRef);\n".to_string(),
+    )];
+    assert_rejected(
+        &macro_call_sources,
+        real_name,
+        "positive-pin #2",
+        "F1 function-like macro invocation mentioning the sanctioned name",
+    );
+    // An `include!("<name>.rs")` whose PATH string-literal references the name is
+    // caught via the literal word-boundary match (the name lives in a string, not
+    // as a bare ident token).
+    let include_sources = vec![(
+        binder_rel.clone(),
+        "include!(\"build_script_setup_seed_frames.rs\");\n".to_string(),
+    )];
+    assert_rejected(
+        &include_sources,
+        real_name,
+        "positive-pin #2",
+        "F1 `include!(\"<name>.rs\")` referencing the sanctioned name in a path literal",
+    );
+
+    // REJECT (F2, reexport under the name) — `pub(crate) use crate::other::producer
+    // as build_script_setup_seed_frames;`. The pin checks fn DEFINITIONS, so a
+    // `use … as <name>` value-namespace binding (a callable entry under the
+    // sanctioned name) is invisible to a definition-only walk. The broadened scan
+    // records a `UseRename` occurrence → it is the SOLE occurrence and is NOT a
+    // free fn ⇒ #2 rejects it. Prove it is SEEN as a use-rename first.
+    let reexport_src = "pub(crate) use crate::other::producer as build_script_setup_seed_frames;\n";
+    assert_eq!(
+        occurrence_kinds(reexport_src, real_name),
+        vec![SanctionedOccurrenceKind::UseRename],
+        "F2 visibility: a `use … as {real_name}` reexport MUST be recorded as a UseRename \
+         occurrence — it mints a callable entry under the sanctioned name a fn-definition scan \
+         misses"
+    );
+    let reexport_sources = vec![(binder_rel.clone(), reexport_src.to_string())];
+    assert_rejected(
+        &reexport_sources,
+        real_name,
+        "positive-pin #2",
+        "F2 `use … as <name>` reexport binding under the sanctioned name",
+    );
+    // SOUNDNESS (F2): a PLAIN `use` of the genuine helper (no `as` rename) is NOT a
+    // usurpation — it re-exports under the ORIGINAL name, not a freshly minted
+    // binding. It must NOT be recorded, so it does not false-positive the crate-wide
+    // uniqueness scan (the genuine helper may be legitimately imported elsewhere).
+    assert!(
+        occurrence_kinds(
+            "use crate::macro_hot_mirror::script_setup_binder::build_script_setup_seed_frames;\n",
+            real_name,
+        )
+        .is_empty(),
+        "F2 soundness: a plain `use …::{real_name};` (no `as` rename) must NOT be recorded — it is \
+         not a fresh binding usurping the name, so importing the genuine helper stays legal"
+    );
+
+    // REJECT (F3, out-of-module duplicate) — a SECOND genuine-looking
+    // `build_script_setup_seed_frames` free fn in a DIFFERENT file OUTSIDE
+    // `macro_hot_mirror/`. The former mirror-directory-only scan never looked
+    // outside `macro_hot_mirror/**`, so a producer under the name in another
+    // module was invisible. The crate-wide scan aggregates BOTH files → two
+    // occurrences ⇒ #1 rejects it. Both fns are genuine-shaped, so ONLY the
+    // occurrence-count (crate-wide uniqueness) property catches this.
+    let out_of_module_rel = "crates/verter_session/src/host_resolve/seed_smuggler.rs".to_string();
+    let out_of_module_sources = vec![
+        synthetic_genuine.clone(),
+        (
+            out_of_module_rel.clone(),
+            "pub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> Vec<BinderScope> { Vec::new() }\n"
+                .to_string(),
+        ),
+    ];
+    assert_rejected(
+        &out_of_module_sources,
+        real_name,
+        "positive-pin #1",
+        "F3 out-of-module duplicate (second genuine fn in a non-mirror file)",
+    );
+    // The #1 message names the OUT-OF-MODULE offender by its non-mirror path,
+    // proving the crate-wide aggregate genuinely reaches outside `macro_hot_mirror/`.
+    let oom_msg = positive_pin_sanctioned_helper(&out_of_module_sources, real_name).unwrap_err();
+    assert!(
+        oom_msg.contains("host_resolve/seed_smuggler.rs"),
+        "F3: the out-of-module duplicate reject must name the non-mirror offender path \
+         `host_resolve/seed_smuggler.rs` (proving the crate-wide scan reaches outside \
+         `macro_hot_mirror/`) — got: {oom_msg}"
+    );
+
+    // REJECT (F4, cfg-gated production usurper) — `#[cfg(any(test,
+    // debug_assertions))] fn build_script_setup_seed_frames(...) -> HotTypeRef`.
+    // The former `attrs_test_gate` OVER-EXCLUDED this (it treated the `test` arm of
+    // `any(...)` as test-gating), so a debug-PRODUCTION usurper under that cfg was
+    // skipped entirely — even though `any(test, debug_assertions)` is satisfiable
+    // in a non-test debug build via `debug_assertions`. The occurrence scan is now
+    // cfg-INDEPENDENT (the genuine helper is cfg-free, so any cfg-gated same-name
+    // item is necessarily a second occurrence): the cfg-gated fn is COUNTED as a
+    // `Free` occurrence. FIRST prove it is now SEEN (the F4 fix — under the old
+    // gate this was EXCLUDED and the scan would have reported ZERO occurrences),
+    // then prove the pin rejects it (its `-> HotTypeRef` product return ⇒ #5).
+    let cfg_usurper_src = "#[cfg(any(test, debug_assertions))]\npub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> HotTypeRef { todo!() }\n";
+    assert_eq!(
+        occurrence_kinds(cfg_usurper_src, real_name),
+        vec![SanctionedOccurrenceKind::Free],
+        "F4 visibility: a `#[cfg(any(test, debug_assertions))]` fn under the sanctioned name MUST \
+         now be COUNTED (as a Free occurrence) — the occurrence scan is cfg-independent, so the \
+         debug-production usurper the old `attrs_test_gate` over-excluded is no longer invisible. \
+         If this reports ZERO, the cfg over-exclusion regressed and the F4 vector reopened"
+    );
+    let cfg_usurper_sources = vec![(binder_rel.clone(), cfg_usurper_src.to_string())];
+    assert_rejected(
+        &cfg_usurper_sources,
+        real_name,
+        "positive-pin #5",
+        "F4 cfg(any(test, debug_assertions)) production usurper with a product return",
+    );
+    // A cfg-gated usurper PLANTED ALONGSIDE the genuine cfg-free helper is a SECOND
+    // occurrence ⇒ #1 (crate-wide uniqueness) rejects it — the most direct proof
+    // that the cfg-gated item is counted, not silently dropped to leave the
+    // genuine fn passing alone.
+    let cfg_plus_genuine_sources = vec![
+        synthetic_genuine.clone(),
+        (mod_rel.clone(), cfg_usurper_src.to_string()),
+    ];
+    assert_rejected(
+        &cfg_plus_genuine_sources,
+        real_name,
+        "positive-pin #1",
+        "F4 cfg-gated usurper alongside the genuine helper (second occurrence, cfg-counted)",
     );
 }
