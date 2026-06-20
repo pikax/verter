@@ -389,6 +389,47 @@ function pidAlive(pid) {
   }
 }
 
+// Holder command for the HOLDER-SURVIVAL probe (scenario (i)): a long-lived leaf process whose argv (a)
+// is recognized as a build tool by the REAL `isBuildTool` predicate (argv[0] renamed to `cargo` via
+// `exec -a`) and (b) literally references the SHARED runner target dir — so it is EXACTLY the kind of
+// process `provenanceSweep(target)` TERM/KILLs. `exec -a` replaces the wrapping bash, so the only
+// surviving process is the renamed leaf. node holds the process open indefinitely; the trailing
+// `<target>` arg is an inert positional arg the eval script ignores. Pre-fix, a LOCK-REFUSED second gate
+// swept this leaf dead; post-fix (sweep gated on `acquired`) it must survive.
+function buildToolHolderCmd(sharedTarget) {
+  return `exec -a cargo "${process.execPath}" -e "setInterval(()=>{}, 1e9)" "${sharedTarget}"`;
+}
+
+// Count LIVE processes that the REAL provenance-sweep predicate would match for a given target dir:
+// `isBuildTool(cmd) && targetDirMatches(cmd, target)`. POSIX-only (uses `ps`); used by the holder-
+// survival probe to assert the holder's build-tool leaf was NOT swept by a non-acquiring gate.
+function countSweepMatchesForTarget(sharedTarget) {
+  let out = "";
+  try {
+    out = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch {
+    return 0;
+  }
+  let n = 0;
+  for (const line of out.split("\n")) {
+    const trimmed = line.replace(/^\s+/, "");
+    if (!trimmed) continue;
+    const sp = trimmed.indexOf(" ");
+    if (sp < 0) continue;
+    const pidTok = trimmed.slice(0, sp);
+    if (!/^\d+$/.test(pidTok)) continue;
+    const cmd = trimmed.slice(sp + 1);
+    if (!cmd) continue;
+    // The harness itself (and the `ps` we just spawned) must never count: key strictly on the leaf's
+    // build-tool-name + shared-target-dir signature, which only the crafted holder leaf carries.
+    if (isBuildTool(cmd) && targetDirMatches(cmd, sharedTarget, false)) n++;
+  }
+  return n;
+}
+
 // Build a gate command string that backgrounds two argv-tagged sleeps and waits (the orphan shape).
 function orphanCmd(dur) {
   return (
@@ -502,6 +543,83 @@ async function main() {
       pass("(v/i) TEARDOWN: lockdir released and 0 stray tagged sleeps after MUTEX test");
     } else {
       fail(`(v/i) TEARDOWN: lockdir-exists=${existsSync(lk)} stray_sleeps=${left}`);
+    }
+
+    // ----------------------------------------------------------------------------------------------
+    // (i-survival) HOLDER SURVIVES A REFUSED GATE — the safety property the LOCK-REFUSED path exists
+    // to uphold. Two gates sharing the DEFAULT runner target dir (the real-world case: both resolve to
+    // <repo>/target/gate-runner) must be isolated — a gate that REFUSES the lock must touch NO other
+    // process. The holder runs a build-tool-named leaf (argv[0]=`cargo`) referencing the SHARED target
+    // dir, i.e. EXACTLY what `provenanceSweep(target)` matches. We then launch a second gate sharing
+    // that target; it refuses (LOCK-REFUSED) and tears down. PRE-FIX teardown ran the sweep on the
+    // `!acquired` path and KILLED the holder's leaf (this assertion FAILS). POST-FIX the sweep is gated
+    // on `acquired`, so the non-acquiring gate leaves the holder's leaf ALIVE (this assertion PASSES).
+    // This is the discriminating RED-prove for F1; the existing separate-target scenario above never
+    // exercised it (the sweep on a different target dir could not match the holder's process).
+    survival_i: {
+      const lk2 = freshLock();
+      const sharedTgt = freshTmpDir("gatetest-shared-target-");
+      const holder2 = spawnContainedCmd(buildToolHolderCmd(sharedTgt), {
+        VERTER_GATE_LOCK: lk2,
+        VERTER_GATE_TARGET_DIR: sharedTgt,
+      });
+      const acq2 = await waitLockHeld(lk2);
+      if (!acq2) {
+        fail("(i-survival) holder never acquired the lock within 6s");
+        break survival_i;
+      }
+      // Wait (bounded) until the holder's build-tool leaf is visible to the sweep predicate — i.e. the
+      // `exec -a cargo node …` has replaced the wrapping bash and `ps` reports it. If it never appears
+      // the probe cannot discriminate, so fail rather than falsely pass.
+      let holderLeaves = 0;
+      for (let w = 0; w < 60; w++) {
+        holderLeaves = countSweepMatchesForTarget(sharedTgt);
+        if (holderLeaves >= 1) break;
+        await delay(100);
+      }
+      if (holderLeaves < 1) {
+        fail(
+          "(i-survival) holder's build-tool leaf never became sweep-visible — cannot discriminate",
+        );
+      } else {
+        note(`holder build-tool leaf is sweep-visible (matches=${holderLeaves})`);
+        // A SECOND gate sharing the SAME target dir. It must REFUSE the held lock and, on teardown,
+        // touch nothing — leaving the holder's leaf alive.
+        const refused = runContainedCmd(singleSleepCmd("survivor_second_i", 5), {
+          VERTER_GATE_LOCK: lk2,
+          VERTER_GATE_TARGET_DIR: sharedTgt,
+        });
+        // Give any (pre-fix) sweep its TERM→grace→KILL window to land before we sample survival.
+        await delay(2000);
+        const stillAlive = countSweepMatchesForTarget(sharedTgt);
+        if (refused.code !== EXIT_LOCK_REFUSED) {
+          fail(
+            `(i-survival) second gate returned ${refused.code}, expected LOCK-REFUSED (${EXIT_LOCK_REFUSED})`,
+          );
+        } else if (stillAlive >= 1) {
+          pass(
+            "(i-survival) HOLDER SURVIVAL: a LOCK-REFUSED gate left the holder's build-tool leaf ALIVE " +
+              `(matches=${stillAlive}) — a non-acquiring gate touched no other process`,
+          );
+        } else {
+          fail(
+            "(i-survival) HOLDER SURVIVAL: the LOCK-REFUSED gate KILLED the holder's build-tool leaf " +
+              "(0 sweep matches survive) — a non-acquiring gate must touch NO other process",
+          );
+        }
+      }
+      // Cleanup: kill the holder's group + the build-tool leaf, then release its lock dir if lingering.
+      try {
+        process.kill(-holder2.pid, "SIGKILL");
+      } catch {
+        try {
+          holder2.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+      }
+      spawnSync("pkill", ["-9", "-f", sharedTgt], { stdio: "ignore" });
+      await delay(300);
     }
   }
 

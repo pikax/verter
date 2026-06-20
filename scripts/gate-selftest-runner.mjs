@@ -126,6 +126,14 @@ async function main() {
     targetDir: runnerTarget,
   });
 
+  // Did THIS runner acquire the lock? Declared before teardown so the closure reads the live value —
+  // the sweep + reap are gated on it, identical to gate.mjs. A non-acquiring (LOCK-REFUSED) runner
+  // shares the SAME default runner target dir as the holder, so an unconditional sweep would TERM/KILL
+  // the holder's build-tool tree. ONLY an acquiring runner may reap/sweep its target; a non-acquiring
+  // one touches no other process. (This stand-in MUST mirror gate.mjs exactly, or the self-test stops
+  // characterizing the production teardown.)
+  let acquired = false;
+
   // The SAME teardown lifecycle gate.mjs uses: reap the active step's whole tree (verified) BEFORE
   // releasing the lock, then sweep, then release — memoized so the signal handler and the main `finally`
   // share one completion. This is what scenario (xvii) (SIGTERM to the gate pid only) exercises.
@@ -133,20 +141,24 @@ async function main() {
   const teardown = () => {
     if (teardownPromise) return teardownPromise;
     teardownPromise = (async () => {
-      try {
-        const reap = await reapActiveStep();
-        if (reap && reap.reaped && !reap.confirmedDead) {
-          warn(
-            "gate-selftest-runner: active step tree NOT confirmed dead within budget (released anyway)",
-          );
+      // Only an ACQUIRING runner owns this runner target; a non-acquiring runner skips reap+sweep so it
+      // can never touch the holder's (or any other) process tree.
+      if (acquired) {
+        try {
+          const reap = await reapActiveStep();
+          if (reap && reap.reaped && !reap.confirmedDead) {
+            warn(
+              "gate-selftest-runner: active step tree NOT confirmed dead within budget (released anyway)",
+            );
+          }
+        } catch {
+          /* best-effort */
         }
-      } catch {
-        /* best-effort */
-      }
-      try {
-        await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
-      } catch {
-        /* ignore */
+        try {
+          await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
+        } catch {
+          /* ignore */
+        }
       }
       mutex.release();
     })();
@@ -161,7 +173,6 @@ async function main() {
     process.exit(143);
   });
 
-  let acquired = false;
   try {
     acquired = await mutex.acquire();
   } catch (e) {

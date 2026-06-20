@@ -74,7 +74,7 @@ Top-level record (`crates/verter_audit/src/record.rs`):
 
 Lives in `verter_audit`, not `verter_protocol`: it is generic over `T`/`E` (protobuf cannot express) and embeds `RequestAuditRecord` — putting it in the protobuf-authoritative `verter_protocol` would invert the dependency or force a hand-written TS mirror. Rides the ts-rs path, exporting as `export type AuditedResult<T, E>` into `packages/types/audit.generated.ts`; `packages/typeinfo` imports the generated type. The typeinfo native session's `_with_audit` methods return `AuditedResult<Arc<...>, TypeInfoRequestError>`.
 
-Surface: `ok(value, audit)` / `err(error, audit)` constructors; `audit()`, `as_result()`, `into_parts()`, `into_result()`, `map()`, `map_err()`. Home + export rule pinned by `audited_result_lives_in_audit_and_exports_through_generated_ts` (`crates/verter_session/tests/typeinfo_audit_contract_guards.rs`).
+Surface: `ok(value, audit)` / `err(error, audit)` constructors; `audit()`, `as_result()`, `into_parts()`, `into_result()`, `map()`, `map_err()`. Home + export rule pinned by `audited_result_lives_in_audit_and_exports_through_generated_ts` (`crates/verter_session/tests/cases/g_block/typeinfo_audit_contract_guards.rs`).
 
 ## Producer Entry-Points
 
@@ -182,7 +182,7 @@ WASM targets gated off via `#[cfg(not(target_arch = "wasm32"))]` — no sampler 
 
 ## Architecture Guards
 
-All live in `crates/verter_session/tests/architecture_guards.rs` unless noted:
+All live in `crates/verter_session/tests/cases/architecture_guards.rs` unless noted:
 
 | Guard | Role |
 | --- | --- |
@@ -194,7 +194,7 @@ All live in `crates/verter_session/tests/architecture_guards.rs` unless noted:
 | `audit_counter_single_helper` | The two `record_inflight_aborted_retry` / `record_cold_abort_swept` increments live in helper bodies only — no inline `fetch_add` callers anywhere else |
 | `wave_3_entry_points_propagate_tls` | Each audited `*_with_audit` entry-point has at least one paired test that drives it AND calls `assert_observer_reaches(...)` so TLS propagation is mechanically verified |
 | `every_consumer_has_production_call_site` | Every `RequestKind` variant has at least one production producer under `crates/*/src/` that constructs the variant in expression context (not match-arm pattern). `Custom` and `BundlerBatch` are documented exemptions in `KIND_EXEMPTIONS` |
-| `audit_ts_bindings_are_in_sync` (in `tests/ts_bindings.rs`) | `packages/types/audit.generated.ts` matches what `ts-rs` would regenerate from current Rust DTOs |
+| `audit_ts_bindings_are_in_sync` (in `tests/cases/g_misc1/ts_bindings.rs`) | `packages/types/audit.generated.ts` matches what `ts-rs` would regenerate from current Rust DTOs |
 
 The general `no_phase_archaeology_in_production_code` and `external_corpus_paths_not_present_outside_gated_tests` guards apply across the workspace, including audit code.
 
@@ -204,12 +204,12 @@ The general `no_phase_archaeology_in_production_code` and `external_corpus_paths
 
 | Entry-point | Paired TLS driver |
 | --- | --- |
-| `resolve_type_with_audit` | `crates/verter_session/tests/type_resolution_audit_tls_propagation.rs` |
-| `compile_with_audit` | `crates/verter_session/tests/tls_harness_cross_crate.rs` |
-| `analyze_with_audit` | `crates/verter_session/tests/semantic_analysis_audit_tls_propagation.rs` |
-| `audit_op` (`WorkspaceAccess` trait method, driven via the host wrapper `audit_workspace_op`) | `crates/verter_session/tests/workspace_audit_tls_propagation.rs` |
-| `verter_lsp::audit_harness::run_with_audit` | `crates/verter_lsp/tests/lsp_audit_tls_propagation.rs` |
-| `audit_mcp_tool_call` | `crates/verter_session/tests/mcp_audit_tls_propagation.rs` |
+| `resolve_type_with_audit` | `crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs` |
+| `compile_with_audit` | `crates/verter_session/tests/cases/g_misc0/tls_harness_cross_crate.rs` |
+| `analyze_with_audit` | `crates/verter_session/tests/cases/g_misc0/semantic_analysis_audit_tls_propagation.rs` |
+| `audit_op` (`WorkspaceAccess` trait method, driven via the host wrapper `audit_workspace_op`) | `crates/verter_session/tests/cases/g_misc0/workspace_audit_tls_propagation.rs` |
+| `verter_lsp::audit_harness::run_with_audit` | `crates/verter_lsp/tests/cases/lsp_audit_tls_propagation.rs` |
+| `audit_mcp_tool_call` | `crates/verter_session/tests/cases/g_misc0/mcp_audit_tls_propagation.rs` |
 
 The guard's `MISSING_TLS_TEST` allow-list is empty: every Wave-3 entry-point is paired. Adding a new audited entry-point requires landing a paired TLS driver in the same change and pinning the pair into `WAVE_3_ENTRY_POINTS`; the stale-allow-list check rejects an unpaired entry that has a TLS driver already.
 
@@ -248,7 +248,7 @@ trait AuditRecordSource {
 
 Worker threads spawned bare via `std::thread::spawn` get a fresh TLS slot by construction. Closures needing observer propagation into a worker pool must either install the guard again on the worker or rely on a runtime that plumbs `RequestContextGuard` through to its workers (the production scheduler does this for its rayon pool).
 
-The `wave_3_entry_points_propagate_tls` guard pins the `(entry_point_symbol, paired_test_files)` invariant — every `*_with_audit` entry-point has at least one test that both invokes the symbol AND calls `assert_observer_reaches(...)`. Tests living in `crates/verter_session/tests/tls_harness_in_crate.rs`, `tls_harness_cross_crate.rs`, and `semantic_analysis_audit_tls_propagation.rs` exercise the harness across in-crate, cross-crate, and analysis-specific propagation.
+The `wave_3_entry_points_propagate_tls` guard pins the `(entry_point_symbol, paired_test_files)` invariant — every `*_with_audit` entry-point has at least one test that both invokes the symbol AND calls `assert_observer_reaches(...)`. Tests living in `crates/verter_session/tests/cases/g_misc0/tls_harness_in_crate.rs`, `tls_harness_cross_crate.rs`, and `semantic_analysis_audit_tls_propagation.rs` exercise the harness across in-crate, cross-crate, and analysis-specific propagation.
 
 ## Key Files
 

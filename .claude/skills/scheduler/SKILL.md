@@ -82,7 +82,7 @@ reverse. The skill never names a symbol living in a higher-level crate —
 any such reference is a cycle and a violation.
 
 Guard:
-`crates/verter_scheduler/tests/no_session_dep.rs::scheduler_does_not_depend_on_verter_session`
+`crates/verter_scheduler/tests/cases/no_session_dep.rs::scheduler_does_not_depend_on_verter_session`
 walks `crates/verter_scheduler/Cargo.toml`, every `.rs` file under
 `crates/verter_scheduler/src/**` (parsed with `syn::parse_file`), AND
 this skill markdown. Asserts NO mention of any higher-level crate appears
@@ -434,7 +434,7 @@ impl Scheduler {
 Substrate: `parking_lot::Mutex<usize>` (the free-permit count) +
 `parking_lot::Condvar` — the only synchronisation primitives
 `parking_lot 0.12` exports (`parking_lot::Semaphore` does NOT exist in
-that version; absence pinned by `tests/no_parking_lot_semaphore.rs`).
+that version; absence pinned by `tests/cases/no_parking_lot_semaphore.rs`).
 `new(capacity)` PANICS on `capacity == 0` (a release-active assert: a
 zero-permit semaphore would deadlock every `acquire`; the cap is
 configured once at construction so the check is off the hot path).
@@ -445,7 +445,7 @@ one held slot). `Drop` increments the count and `notify_one`s a single
 waiter, on BOTH the normal path AND stack-unwind on panic, so a panicking
 holder still frees its slot. The `Mutex<usize>` count is the single
 source of truth for available permits. Guards:
-`tests/cpu_concurrency_semaphore.rs` pins the capacity cap (deterministic
+`tests/cases/cpu_concurrency_semaphore.rs` pins the capacity cap (deterministic
 channel-handshake blocking proof), RAII normal-drop release, and
 panic-unwind release; the `cpu_concurrency` module is
 `#[cfg(not(target_arch = "wasm32"))]` (the limiter caps the native-only

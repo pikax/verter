@@ -369,6 +369,16 @@ async function main() {
   //   2. Provenance sweep (the backstop for any detached build-tool descendant).
   //   3. Release the mutex (token-checked) — only AFTER the tree is reaped, so a second gate can never
   //      start while the old test process still runs.
+  // Did THIS gate acquire the lock? Declared before teardown so the closure reads the live value. The
+  // sweep + reap below are gated on it: a gate that REFUSED the lock (another gate holds it) shares the
+  // SAME default runner target dir as the holder, so an UNCONDITIONAL provenanceSweep(runnerTarget) would
+  // TERM/KILL the HOLDER's cargo/nextest/rustc tree — a non-acquiring gate killing the very build it
+  // refused to contend with. ONLY a gate that acquired the lock (and thus ran cargo in its own runner
+  // target) may reap/sweep that target; a LOCK-REFUSED / errored-before-acquire gate must touch NO other
+  // process. (release() below is always safe: the mutex is token-checked and releases nothing it does not
+  // own, so a non-acquiring gate's release is a no-op on the holder's lock.)
+  let acquired = false;
+
   // Memoized so EVERY caller awaits the SAME completion. The signal handlers AND the main-flow `finally`
   // both invoke teardown; without memoization the second caller's short-circuit would let it race ahead to
   // `process.exit` while the FIRST caller's async reap/sweep/release was still in flight, cutting off the
@@ -378,22 +388,26 @@ async function main() {
   const teardown = () => {
     if (teardownPromise) return teardownPromise;
     teardownPromise = (async () => {
-      try {
-        const reap = await reapActiveStep();
-        if (reap && reap.reaped && !reap.confirmedDead) {
-          warn(
-            "teardown could not CONFIRM the active step's process tree was reaped within the kill " +
-              "budget — releasing the lock anyway to avoid a permanent hang, but the tree's death is " +
-              "UNVERIFIED (a descendant may still be live). This is recorded, not claimed clean.",
-          );
+      // Only an ACQUIRING gate owns this runner target; a non-acquiring gate skips reap+sweep so it can
+      // never touch the holder's (or any other) process tree.
+      if (acquired) {
+        try {
+          const reap = await reapActiveStep();
+          if (reap && reap.reaped && !reap.confirmedDead) {
+            warn(
+              "teardown could not CONFIRM the active step's process tree was reaped within the kill " +
+                "budget — releasing the lock anyway to avoid a permanent hang, but the tree's death is " +
+                "UNVERIFIED (a descendant may still be live). This is recorded, not claimed clean.",
+            );
+          }
+        } catch {
+          /* best-effort reap */
         }
-      } catch {
-        /* best-effort reap */
-      }
-      try {
-        await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
-      } catch {
-        /* ignore */
+        try {
+          await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
+        } catch {
+          /* ignore */
+        }
       }
       mutex.release();
     })();
@@ -411,8 +425,7 @@ async function main() {
   };
   installSignalTraps();
 
-  // Acquire the single-flight mutex FIRST.
-  let acquired = false;
+  // Acquire the single-flight mutex FIRST. (`acquired` is declared above so teardown's closure reads it.)
   try {
     acquired = await mutex.acquire();
   } catch (e) {

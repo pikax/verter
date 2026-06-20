@@ -175,4 +175,4 @@ external-corpus = []
 //! (`node scripts/gate.mjs`) stays hermetic.
 ```
 
-Guard `external_corpus_paths_not_present_outside_gated_tests` (in `crates/verter_session/tests/architecture_guards.rs`) rejects `include_str!` / `include!` / path-string references to `.integration-tests/repos/...` from any test file not gated behind such a feature.
+Guard `external_corpus_paths_not_present_outside_gated_tests` (in `crates/verter_session/tests/cases/architecture_guards.rs`) rejects `include_str!` / `include!` / path-string references to `.integration-tests/repos/...` from any test file not gated behind such a feature.

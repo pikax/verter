@@ -436,7 +436,7 @@ string literals (a `vue`/`Vue` word inside the `"vue"` npm specifier or a log
 message is not a routed identifier):
 
 - `carrier_lsp_routing_has_no_hardcoded_vue_gate`
-  (`crates/verter_lsp/tests/carrier_routing_no_vue_gate.rs`) — bans executable
+  (`crates/verter_lsp/tests/cases/carrier_routing_no_vue_gate.rs`) — bans executable
   `.vue` / `"vue"` GATES: `.is_vue(`, the `.vue`-suffix classifiers
   (`ends_with` / `strip_suffix` / `trim_end_matches` / `starts_with` /
   `contains` against `".vue"`), the `.vue` / `"vue"` equality + `matches!`
@@ -449,7 +449,7 @@ message is not a routed identifier):
   flags). Self-discriminating: its detector FLAGS the pre-change `.vue`-gated
   shapes and PASSES the carrier-generic post-change shapes.
 - `carrier_routing_has_no_vue_named_generic_primitive`
-  (`crates/verter_lsp/tests/carrier_routing_no_vue_named_primitive.rs`) — the
+  (`crates/verter_lsp/tests/cases/carrier_routing_no_vue_named_primitive.rs`) — the
   NAMING half that ends the whack-a-mole: bans ANY `vue`/`Vue`-substring
   identifier in the scanned production code outside the Vue-intrinsic allowlist
   (the attr mappers, hover label, runtime-API classification, `VUE_BUILTINS`,

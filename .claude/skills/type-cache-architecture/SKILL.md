@@ -238,7 +238,7 @@ validity models and distinct admission producers:
   in lockstep. Leaving the sidecar populated after either reset would extend a
   stale `content_generation` stamp into the next admission cycle.
 
-The integration guard at `crates/verter_session/tests/import_route_writer_guard.rs`
+The integration guard at `crates/verter_session/tests/cases/g_misc3/import_route_writer_guard.rs`
 enforces both halves statically: no direct `import_routes` mutation outside the
 three named writers, and no known-miss sidecar admission outside
 `set_import_dependencies`.
@@ -722,7 +722,7 @@ Hard rules:
   `ReadSetSignature::overflow()` is not.
 
 The new guards are registered in
-[`CRITICAL_RULE_GUARDS`](../../crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs)
+[`CRITICAL_RULE_GUARDS`](../../crates/verter_session/tests/cases/g_misc0/critical_rules_have_guards.rs)
 under the `Typed SignatureAdmission gate` entry.
 
 ## Error-Tolerance Non-Admission + §22 Absorption (CRITICAL)
@@ -954,7 +954,7 @@ owning module — there is no `for_tests` re-export and no parallel
 tests drive `from_request` through the bare-host
 `impl ResolverContext for VerterHost` rail directly.
 
-Architecture guard: `tests/world_snapshot_is_not_a_cache_key.rs` parses every
+Architecture guard: `tests/cases/g_misc3/world_snapshot_is_not_a_cache_key.rs` parses every
 production `.rs` file under `crates/verter_session/src/` with
 `syn::parse_file`, walks every `ItemStruct` whose name ends `Key` or `Identity`,
 and rejects any field whose `syn::Type` mentions `WorldSnapshot` at a
@@ -1105,7 +1105,7 @@ fact_dep_signature }`. The `fact_dep_signature` records the
 A typed `ModuleAugmentationStitched` audit event records each cold-path compute.
 Both audit-event variants live on `verter_audit::StructuredAuditEvent`; the
 `Custom` escape hatch is forbidden on the augmentation stitching surface (R23
-scope-fence guarded by `tests/audit_event_shape.rs`).
+scope-fence guarded by `tests/cases/g_audit/audit_event_shape.rs`).
 
 **Overlay-aware contract (R6 key split).** Augmentation stitching is
 OVERLAY-AWARE across two layers with deliberately DIFFERENT key discipline:
@@ -1142,14 +1142,14 @@ Both producers (the body stitch in `project_semantic_dispatch::build` and
 slot lookup both derive from
 `EffectiveExportSetScope::from_session(compat_token().session)`. Overlay
 augmenters NEVER poison the base index and NEVER cross sessions. The contract is
-locked by `tests/g_misc3/module_augmentation_stitching.rs` —
+locked by `tests/cases/g_misc3/module_augmentation_stitching.rs` —
 `session_overlay_augmenter_isolated_from_base_index`,
 `effective_export_set_warm_base_entry_does_not_satisfy_session_lookup`,
 `effective_export_set_warm_session_entry_does_not_satisfy_base_lookup`,
 `effective_export_set_same_session_overlay_content_edit_invalidates_via_facts`,
 `effective_export_set_content_free_key_warm_hits_across_unrelated_fingerprint_change` —
 plus the guard `no_effective_export_set_base_only_session_assert`
-(`tests/g_misc0/critical_rules_have_guards.rs`) which pins that NO base-only
+(`tests/cases/g_misc0/critical_rules_have_guards.rs`) which pins that NO base-only
 `compat_token().session.is_none()` assert is re-introduced on this surface.
 
 **R30 (No heuristic cache semantics).** Cache identity and cache admission must
@@ -1215,7 +1215,7 @@ composition table. Summary:
 
 The split `MaterializeMemoDb`/`MemberShapeCacheDb` shape stores are RETIRED in
 favour of `ShapeCacheDb`; the static guard
-`crates/verter_session/tests/block_6i_static_guards.rs::shape_cache_db_replaces_split_caches`
+`crates/verter_session/tests/cases/g_block/block_6i_static_guards.rs::shape_cache_db_replaces_split_caches`
 asserts neither may be re-introduced.
 
 ## Two-phase emission map (R28)
@@ -1344,12 +1344,12 @@ The discrimination matrix:
   (R21).
 - `crates/verter_session/src/file_artifact_store_tests.rs` — store unit tests
   (R5, R6, R28, R29).
-- `crates/verter_session/tests/env_hash_isolation.rs` — R21 scoping rule tests.
-- `crates/verter_session/tests/cache_key_invariants.rs` — R5 / R6 key-shape
+- `crates/verter_session/tests/cases/g_misc0/env_hash_isolation.rs` — R21 scoping rule tests.
+- `crates/verter_session/tests/cases/g_cache/cache_key_invariants.rs` — R5 / R6 key-shape
   tests.
-- `crates/verter_session/tests/parse_stable_hash_invariance.rs` —
+- `crates/verter_session/tests/cases/g_misc1/parse_stable_hash_invariance.rs` —
   cosmetic-invariant + decl-shape-discriminating tests.
-- `crates/verter_session/tests/file_artifact_store_smoke.rs` — consumer-side
+- `crates/verter_session/tests/cases/g_file/file_artifact_store_smoke.rs` — consumer-side
   smoke tests.
 - `crates/verter_semantic/src/facts/registry.rs` (`registry_tests` inline
   module) — `FactKey::domain()` routing per R12 / R26, `SymbolSpace` tag
@@ -1362,35 +1362,35 @@ The discrimination matrix:
 - `crates/verter_session/src/member_semantic_fact_store.rs` /
   `member_display_fact_store.rs` (inline `tests` modules) — store admission,
   parse_stable_hash vs content_hash keying contract (R13).
-- `crates/verter_session/tests/fact_fingerprint_stability.rs` —
+- `crates/verter_session/tests/cases/g_fact/fact_fingerprint_stability.rs` —
   R10/R11/R13/R16 binding (cosmetic-invariance, namespace coexistence,
   decl-reorder stability, syntactic export set).
-- `crates/verter_session/tests/fact_semantic_display_split.rs` — R13 binding
+- `crates/verter_session/tests/cases/g_fact/fact_semantic_display_split.rs` — R13 binding
   (semantic store survives cosmetic edit; display store re-keys).
-- `crates/verter_session/tests/parse_resolve_domain_separation.rs` — R12 binding
+- `crates/verter_session/tests/cases/g_misc1/parse_resolve_domain_separation.rs` — R12 binding
   (`ImportRef` invariant under resolution change).
-- `crates/verter_session/tests/member_presence_vs_member.rs` — R28 two-fact
+- `crates/verter_session/tests/cases/g_misc1/member_presence_vs_member.rs` — R28 two-fact
   model (`pick_literal_key.ts` invariant).
-- `crates/verter_session/tests/cycle_safety.rs` — R27 binding (stack-safe +
+- `crates/verter_session/tests/cases/g_misc0/cycle_safety.rs` — R27 binding (stack-safe +
   cycle-safe + canonical visit order).
-- `crates/verter_session/tests/shallow_walk_invariant.rs` — R28 arch-guard
+- `crates/verter_session/tests/cases/g_misc2/shallow_walk_invariant.rs` — R28 arch-guard
   (parse-time emitter does not call cross-decl AST traversal).
-- `crates/verter_session/tests/module_augmentation.rs` — R29 binding
+- `crates/verter_session/tests/cases/g_misc2/module_augmentation.rs` — R29 binding
   (per-archetype fact emission; `augmentation_index` stays empty at parse time).
-- `crates/verter_session/tests/declaration_merge_facts.rs` — R10 binding
+- `crates/verter_session/tests/cases/g_misc0/declaration_merge_facts.rs` — R10 binding
   (merged `interface Foo` parts emit one `Export`).
-- `crates/verter_session/tests/fact_lane_correctness.rs` — R13 lane binding
+- `crates/verter_session/tests/cases/g_fact/fact_lane_correctness.rs` — R13 lane binding
   (generic param rename invariant).
-- `crates/verter_session/tests/fact_emission_parse_time_budget.rs` — emitter
+- `crates/verter_session/tests/cases/g_fact/fact_emission_parse_time_budget.rs` — emitter
   scales linearly on 10k-decl input.
-- `crates/verter_session/tests/storeview_per_domain_dispatch.rs` — R26 binding
+- `crates/verter_session/tests/cases/g_misc3/storeview_per_domain_dispatch.rs` — R26 binding
   (dispatch table bounded by `FactDomain`, not `FactKey`).
 - `crates/verter_session/src/session_view_current_content_tests.rs` — R17
   binding (`SessionView::content_hash_for` is a view-authoritative
   current-content oracle: base + overlay fallthrough return the
   scheduler-authoritative hash, never a stale lingering artifact's; the overlay
   materialiser does not serve a stale `IndexedReady`).
-- `crates/verter_session/tests/architecture_guards.rs`
+- `crates/verter_session/tests/cases/architecture_guards.rs`
   (`content_pinned_artifact_read_guards` module) — the named-currency-oracle
   closure: `file_artifact_store_defines_no_unpinned_currency_oracle`
   (definition-shape guard) + `no_named_currency_oracle_calls_in_production`
@@ -1406,7 +1406,7 @@ project context into the durable code base.
 
 The guard is `architecture_guards::guard7_predicate_rejects_block_vocabulary`,
 which sits inside the broader `no_phase_archaeology_in_production_code` walker at
-`crates/verter_session/tests/architecture_guards.rs`. The walker scans every
+`crates/verter_session/tests/cases/architecture_guards.rs`. The walker scans every
 production `.rs` file under `crates/*/src/` (excluding `_tests.rs`, `tests.rs`,
 `tests/`, `benches/`, `examples/`, and `target/`).
 
@@ -1463,7 +1463,7 @@ is permitted.
   `every_semantic_query_key_maps_to_exactly_one_value_domain`,
   `module_resolution_keys_on_resolve_env_not_type_or_lib`, and
   `semantic_query_key_spec_table_equals_enum`
-  (`crates/verter_session/tests/g_block/`); the per-key `*_do_not_warm_hit` set
+  (`crates/verter_session/tests/cases/g_block/`); the per-key `*_do_not_warm_hit` set
   — including `instantiate_same_base_different_env_or_context_do_not_warm_hit`,
   `decl_self_type_or_lib_env_change_produces_distinct_instantiate_key`,
   `resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit`,
@@ -1471,7 +1471,7 @@ is permitted.
   `crates/verter_session/src/semantic_query_memo/tests.rs`. The design-gate
   guards `no_envless_semantic_query_env_key_envelope` and
   `u2_value_domain_design_doc_locks_invariants` live in
-  `crates/verter_session/tests/g_block/u2_value_domain_design_guards.rs`.
+  `crates/verter_session/tests/cases/g_block/u2_value_domain_design_guards.rs`.
 
 ## Carrier handle identity is never a cache key (PARSELOWER foundation)
 
