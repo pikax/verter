@@ -44,8 +44,9 @@ use super::{
 };
 use crate::request_context::RequestContext;
 use crate::semantic_query::{
-    BranchSelection, IndexKey, OriginEdgeKind as CoreOriginEdgeKind, OriginMeta, PathSegment,
-    SemanticNodeData, SemanticNodeId,
+    BranchSelection, DeclIdentity, IndexKey, IndexSignature, LiteralValue, NodeScopeId,
+    OriginEdgeKind as CoreOriginEdgeKind, OriginMeta, PathSegment, ScopeId, SemanticNodeData,
+    SemanticNodeId, SurfaceMember, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::types::Hash16;
@@ -562,125 +563,565 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
     }
 }
 
-/// Recursion ceiling for the carrier-arg structural walk. Carrier `type_args`
-/// children are themselves interned nodes that may in turn be carriers; a
-/// malformed or self-referential graph could otherwise recurse without bound.
-/// At the ceiling the walk stops recursing into a child's structure and folds
-/// only the child's node identity, so the fingerprint stays finite and
-/// deterministic.
-const CARRIER_HASH_MAX_DEPTH: u32 = 32;
+/// Depth backstop for the structural walk, secondary to the visited-set cycle
+/// guard. The visited set already terminates every cycle reachable through the
+/// interned DAG; this ceiling is a defensive bound against a pathologically deep
+/// (but acyclic) chain. At the ceiling the walk encodes a fixed
+/// [`TAG_DEPTH_CEILING`] sentinel — never an arena ordinal.
+const STRUCTURAL_HASH_MAX_DEPTH: u32 = 64;
 
-/// Variant-aware structural fingerprint of a semantic node.
+/// Content-only, recursive, variant-tagged structural fingerprint of a semantic
+/// node.
 ///
-/// The three structural carriers (`TypeOf` / `BareRef` / `ImportType`) carry
-/// their `type_args` on a PRIVATE payload field whose `Debug` shape is an
-/// internal representation detail. Hashing the carrier's `Debug` rendering would
-/// make the fingerprint representation-sensitive — it would change if the
-/// carrier's private layout changed, even though the type it denotes did not.
-/// So a carrier is fingerprinted from its public HEAD (the
-/// `typeof_head` / `bare_ref_head` / `import_type_head` views, which expose no
-/// args) PLUS the ORDERED structural fingerprints of its arg CHILD nodes,
-/// resolved through the sole descent accessor
-/// [`SemanticNodeData::carrier_type_args`] and recursed via `graph`. Distinct
-/// args therefore yield distinct fingerprints (`Foo<A>` ≠ `Foo<B>`); identical
-/// args yield identical fingerprints.
+/// The fingerprint is derived EXCLUSIVELY from semantic CONTENT — it never folds
+/// a raw [`SemanticNodeId`] arena ordinal. A `SemanticNodeId` is allocated
+/// sequentially on intern-miss and is only meaningful inside one store for one
+/// project generation (see the contract on [`SemanticNodeId`]); folding it would
+/// make two equivalent `Foo<String>` carriers hash differently whenever `String`
+/// received a different ordinal, breaking the file-level content-determinism
+/// contract. Instead, every child reference is replaced by the RECURSIVE
+/// structural fingerprint of the node it points at, resolved through
+/// `graph.node_data`.
 ///
-/// Non-carrier variants reference their children by [`SemanticNodeId`] (an
-/// arena-stable integer), never by an embedded carrier value, so their `Debug`
-/// rendering never transitively prints a carrier's private args; it is
-/// content-deterministic (same content prints the same bytes) and is retained as
-/// a stable structural signal. Every arm is prefixed with a variant discriminant
-/// so a carrier and a non-carrier — or two different non-carrier variants — can
-/// never collide on equal payload bytes.
+/// Encoding shape:
+///
+/// - Each variant emits a one-byte [`VariantTag`] discriminant, so two different
+///   variants can never collide on equal payload bytes.
+/// - Scalars are emitted by their little-endian bytes; `Arc<str>` and string
+///   collections are LENGTH-PREFIXED; child-reference fields are replaced by the
+///   recursive child fingerprint, also length/order-prefixed where a collection.
+/// - The three carriers (`TypeOf` / `BareRef` / `ImportType`) are fingerprinted
+///   from their public HEAD (which exposes no args) PLUS the ordered recursive
+///   fingerprints of their `type_args` children, reached through the sole
+///   descent accessor [`SemanticNodeData::carrier_type_args`]. Their private
+///   `type_args` layout is NEVER `Debug`-rendered.
+///
+/// Cycle safety: an in-progress visited set of `SemanticNodeId`s on the current
+/// descent path terminates any cycle in the interned graph by emitting a fixed
+/// [`TAG_CYCLE`] back-reference sentinel instead of recursing forever. A
+/// secondary depth ceiling ([`STRUCTURAL_HASH_MAX_DEPTH`]) backstops a
+/// pathologically deep acyclic chain with a fixed [`TAG_DEPTH_CEILING`]
+/// sentinel. A child id that does not resolve in `graph` emits a fixed
+/// [`TAG_UNRESOLVED_CHILD`] sentinel — never the ordinal value (two distinct but
+/// equally-unresolved children collapsing is acceptable; two equal-content
+/// children diverging by ordinal is not).
 fn structural_hash_of(graph: &SemanticGraphStore, data: &SemanticNodeData) -> Hash16 {
-    structural_hash_with_depth(graph, data, 0)
+    let mut enc = StructuralEncoder {
+        graph,
+        buf: Vec::with_capacity(128),
+        visited: Vec::new(),
+    };
+    enc.encode_node_data(data, 0);
+    xxh3_128(&enc.buf).to_le_bytes()
 }
 
-fn structural_hash_with_depth(
-    graph: &SemanticGraphStore,
-    data: &SemanticNodeData,
-    depth: u32,
-) -> Hash16 {
-    // Discriminant prefix: a one-byte family tag keeps carriers and
-    // non-carriers (and the three carriers from each other) in disjoint hash
-    // input spaces regardless of payload bytes.
-    let mut buf: Vec<u8> = Vec::with_capacity(64);
+/// Stateful structural encoder. Owns the growing byte `buf`, the in-progress
+/// `visited` path set (for cycle detection), and a borrow of the graph for child
+/// resolution.
+struct StructuralEncoder<'g> {
+    graph: &'g SemanticGraphStore,
+    buf: Vec<u8>,
+    /// `SemanticNodeId`s currently on the descent path. Used ONLY to detect a
+    /// back-edge — never folded into the hash bytes.
+    visited: Vec<SemanticNodeId>,
+}
 
-    match data {
-        // ── Carrier arms: HEAD (no args) + ordered recursive child hashes.
-        // NEVER `Debug`-render the carrier — its private `type_args` layout is
-        // a representation detail. ──
-        SemanticNodeData::TypeOf(_) => {
-            buf.push(CARRIER_TAG_TYPEOF);
-            let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
-            buf.extend_from_slice(format!("{value_root:?}|{path:?}").as_bytes());
-            push_carrier_arg_hashes(&mut buf, graph, data, depth);
-        }
-        SemanticNodeData::BareRef(_) => {
-            buf.push(CARRIER_TAG_BAREREF);
-            let (name, scope) = data.bare_ref_head().expect("BareRef carrier head");
-            buf.extend_from_slice(format!("{name:?}|{scope:?}").as_bytes());
-            push_carrier_arg_hashes(&mut buf, graph, data, depth);
-        }
-        SemanticNodeData::ImportType(_) => {
-            buf.push(CARRIER_TAG_IMPORTTYPE);
-            let (specifier, qualifier, typeof_query) =
-                data.import_type_head().expect("ImportType carrier head");
-            buf.extend_from_slice(
-                format!("{specifier:?}|{qualifier:?}|{typeof_query:?}").as_bytes(),
-            );
-            push_carrier_arg_hashes(&mut buf, graph, data, depth);
-        }
-        // ── Non-carrier arms: discriminant + content-deterministic Debug.
-        // These reference children by SemanticNodeId, never by an embedded
-        // carrier value, so the Debug never prints a carrier's private args. ──
-        _ => {
-            buf.push(NON_CARRIER_TAG);
-            buf.extend_from_slice(format!("{data:?}").as_bytes());
+/// One-byte variant discriminants for the structural encoding. Each
+/// `SemanticNodeData` variant — plus the descent sentinels — occupies a distinct
+/// tag so disjoint variants live in disjoint hash-input spaces. Values are fixed
+/// and independent of source declaration order; a new variant takes the next
+/// free tag.
+#[repr(u8)]
+enum VariantTag {
+    Alias = 1,
+    Object = 2,
+    Union = 3,
+    Intersection = 4,
+    Primitive = 5,
+    Literal = 6,
+    Opaque = 7,
+    Array = 8,
+    Tuple = 9,
+    TemplateLiteral = 10,
+    KeyOf = 11,
+    IndexedAccess = 12,
+    Mapped = 13,
+    TypeOf = 14,
+    TypeParam = 15,
+    Infer = 16,
+    Conditional = 17,
+    VueMacroElements = 18,
+    Function = 19,
+    DeclRef = 20,
+    InstantiationRef = 21,
+    MergedDecl = 22,
+    BareRef = 23,
+    ImportType = 24,
+    RawFallback = 25,
+    ConstructorType = 26,
+    SyntheticBinding = 27,
+}
+
+/// Descent sentinel: a child id currently on the descent path (a graph cycle).
+const TAG_CYCLE: u8 = 0xF0;
+/// Descent sentinel: a child id that did not resolve in `graph`.
+const TAG_UNRESOLVED_CHILD: u8 = 0xF1;
+/// Descent sentinel: the recursion depth backstop fired.
+const TAG_DEPTH_CEILING: u8 = 0xF2;
+
+impl StructuralEncoder<'_> {
+    /// Push a length-prefixed string.
+    fn push_str(&mut self, s: &str) {
+        self.buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        self.buf.extend_from_slice(s.as_bytes());
+    }
+
+    /// Push a length-prefixed list of strings (order-preserving).
+    fn push_str_slice(&mut self, items: &[Arc<str>]) {
+        self.buf
+            .extend_from_slice(&(items.len() as u64).to_le_bytes());
+        for item in items {
+            self.push_str(item);
         }
     }
 
-    xxh3_128(&buf).to_le_bytes()
-}
+    /// Push an `Option<scalar-tag>`: `0` for `None`, `1` for `Some`.
+    fn push_present(&mut self, present: bool) {
+        self.buf.push(u8::from(present));
+    }
 
-/// Fold the ordered structural fingerprints of a carrier's `type_args` child
-/// nodes into `buf` — descending each child through the sole accessor
-/// [`SemanticNodeData::carrier_type_args`] and recursing `structural_hash_with_depth`
-/// (so `Foo<A>` and `Foo<B>` differ on their child structure). The child's
-/// arena identity is also folded in, so even when the recursion ceiling is hit
-/// (or a child id is unresolved in `graph`) distinct args still produce distinct
-/// bytes. Argument ORDER is preserved (`Foo<A, B>` ≠ `Foo<B, A>`).
-fn push_carrier_arg_hashes(
-    buf: &mut Vec<u8>,
-    graph: &SemanticGraphStore,
-    data: &SemanticNodeData,
-    depth: u32,
-) {
-    let args = data.carrier_type_args();
-    buf.extend_from_slice(&(args.len() as u64).to_le_bytes());
-    for child in args {
-        // Fold the child's arena identity unconditionally — the
-        // structural-recursion is the strong signal, the identity is the
-        // floor that survives the depth ceiling and unresolved ids.
-        buf.extend_from_slice(&child.0.to_le_bytes());
-        if depth >= CARRIER_HASH_MAX_DEPTH {
-            continue;
+    /// Resolve `id` and fold its RECURSIVE structural fingerprint into `buf`.
+    /// Never folds the ordinal: a cycle, an unresolved id, or the depth backstop
+    /// each emit a FIXED sentinel byte instead.
+    fn encode_child(&mut self, id: SemanticNodeId, depth: u32) {
+        if self.visited.contains(&id) {
+            self.buf.push(TAG_CYCLE);
+            return;
         }
-        if let Some(child_data) = graph.node_data(*child) {
-            let child_hash = structural_hash_with_depth(graph, &child_data, depth + 1);
-            buf.extend_from_slice(&child_hash);
+        if depth >= STRUCTURAL_HASH_MAX_DEPTH {
+            self.buf.push(TAG_DEPTH_CEILING);
+            return;
+        }
+        match self.graph.node_data(id) {
+            Some(child) => {
+                self.visited.push(id);
+                self.encode_node_data(&child, depth + 1);
+                self.visited.pop();
+            }
+            None => self.buf.push(TAG_UNRESOLVED_CHILD),
+        }
+    }
+
+    /// Encode every child id of an ordered id slice, length/order-prefixed.
+    fn encode_child_slice(&mut self, ids: &[SemanticNodeId], depth: u32) {
+        self.buf
+            .extend_from_slice(&(ids.len() as u64).to_le_bytes());
+        for id in ids {
+            self.encode_child(*id, depth);
+        }
+    }
+
+    /// Encode an `Option<SemanticNodeId>`: a presence byte followed by the child
+    /// fingerprint when present.
+    fn encode_child_opt(&mut self, id: Option<SemanticNodeId>, depth: u32) {
+        match id {
+            Some(id) => {
+                self.push_present(true);
+                self.encode_child(id, depth);
+            }
+            None => self.push_present(false),
+        }
+    }
+
+    /// Encode an [`IndexKey`] structurally: a kind byte, then the key content
+    /// (string / canonical integer bytes / recursive child fingerprint).
+    fn encode_index_key(&mut self, index: &IndexKey, depth: u32) {
+        match index {
+            IndexKey::String(s) => {
+                self.buf.push(0);
+                self.push_str(s);
+            }
+            IndexKey::Number(n) => {
+                self.buf.push(1);
+                self.buf.extend_from_slice(&n.get().to_le_bytes());
+            }
+            IndexKey::TypeNode(id) => {
+                self.buf.push(2);
+                self.encode_child(*id, depth);
+            }
+        }
+    }
+
+    /// Encode a [`NodeScopeId`] by its SEMANTIC content (canonical id +
+    /// whole-hash + local scope), never an arena ordinal.
+    fn encode_node_scope(&mut self, scope: &NodeScopeId) {
+        match scope {
+            NodeScopeId::Global => self.buf.push(0),
+            NodeScopeId::File {
+                canonical_id,
+                whole_hash,
+                local_scope,
+            } => {
+                self.buf.push(1);
+                self.push_str(canonical_id);
+                self.buf.extend_from_slice(whole_hash);
+                match local_scope {
+                    Some(s) => {
+                        self.push_present(true);
+                        self.buf.extend_from_slice(&s.to_le_bytes());
+                    }
+                    None => self.push_present(false),
+                }
+            }
+        }
+    }
+
+    /// Encode a [`ScopeId`] by content (canonical id + optional local scope).
+    fn encode_scope_id(&mut self, scope: &ScopeId) {
+        self.push_str(&scope.canonical_id);
+        match scope.local_scope {
+            Some(s) => {
+                self.push_present(true);
+                self.buf.extend_from_slice(&s.to_le_bytes());
+            }
+            None => self.push_present(false),
+        }
+    }
+
+    /// Encode a [`ValueRootKey`] by content (scope + name).
+    fn encode_value_root(&mut self, root: &ValueRootKey) {
+        self.encode_scope_id(&root.scope);
+        self.push_str(&root.name);
+    }
+
+    /// Encode a [`DeclIdentity`] by content (canonical id + whole-hash + name).
+    fn encode_decl_identity(&mut self, identity: &DeclIdentity) {
+        self.push_str(&identity.canonical_id);
+        self.buf.extend_from_slice(&identity.whole_hash);
+        self.push_str(&identity.decl_name);
+    }
+
+    /// Encode one [`SurfaceMember`]: scalar/string fields by content, the value
+    /// type by recursive child fingerprint.
+    fn encode_surface_member(&mut self, m: &SurfaceMember, depth: u32) {
+        self.push_str(&m.name);
+        self.encode_child(m.value, depth);
+        self.buf.push(u8::from(m.optional));
+        self.buf.push(u8::from(m.readonly));
+        self.buf.push(u8::from(m.is_method));
+        // `visibility` / `merge_role` are id-free C-like enums; a Debug of them
+        // cannot transitively print a `SemanticNodeId`, so a stable string of
+        // their discriminant is content-deterministic.
+        self.push_str(&format!("{:?}", m.visibility));
+        self.push_str(&format!("{:?}", m.spans));
+        match &m.declaration_origin {
+            Some(o) => {
+                self.push_present(true);
+                self.push_str(o);
+            }
+            None => self.push_present(false),
+        }
+        self.buf.push(u8::from(m.declared_in_macro_type_arg));
+        self.push_str(&format!("{:?}", m.merge_role));
+    }
+
+    /// Encode one [`IndexSignature`]: key / value types by recursive child
+    /// fingerprint, the rest by content.
+    fn encode_index_signature(&mut self, sig: &IndexSignature, depth: u32) {
+        self.encode_child(sig.key_type, depth);
+        self.encode_child(sig.value_type, depth);
+        self.buf.push(u8::from(sig.readonly));
+        self.push_str(&format!("{:?}", sig.spans));
+        match &sig.declaration_origin {
+            Some(o) => {
+                self.push_present(true);
+                self.push_str(o);
+            }
+            None => self.push_present(false),
+        }
+    }
+
+    /// The structural encoder body. EXHAUSTIVE over every `SemanticNodeData`
+    /// variant — NO `_` wildcard, so a new variant fails to compile here and
+    /// must be classified (a content-bearing scalar, or a child-bearing variant
+    /// whose ids are descended). `depth` is the current descent depth.
+    fn encode_node_data(&mut self, data: &SemanticNodeData, depth: u32) {
+        match data {
+            // ── Single-child variants. ──
+            SemanticNodeData::Alias(child) => {
+                self.buf.push(VariantTag::Alias as u8);
+                self.encode_child(*child, depth);
+            }
+            SemanticNodeData::Array { element, readonly } => {
+                self.buf.push(VariantTag::Array as u8);
+                self.buf.push(u8::from(*readonly));
+                self.encode_child(*element, depth);
+            }
+            SemanticNodeData::KeyOf { base } => {
+                self.buf.push(VariantTag::KeyOf as u8);
+                self.encode_child(*base, depth);
+            }
+            SemanticNodeData::ConstructorType { signature } => {
+                self.buf.push(VariantTag::ConstructorType as u8);
+                self.encode_child(*signature, depth);
+            }
+
+            // ── Child-list variants. ──
+            SemanticNodeData::Union(arms) => {
+                self.buf.push(VariantTag::Union as u8);
+                self.encode_child_slice(arms, depth);
+            }
+            SemanticNodeData::Intersection(arms) => {
+                self.buf.push(VariantTag::Intersection as u8);
+                self.encode_child_slice(arms, depth);
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                self.buf.push(VariantTag::MergedDecl as u8);
+                self.encode_child_slice(contributors, depth);
+            }
+
+            // ── Compound-payload variants carrying child ids. ──
+            SemanticNodeData::Object(surface) => {
+                self.buf.push(VariantTag::Object as u8);
+                self.buf
+                    .extend_from_slice(&(surface.members.len() as u64).to_le_bytes());
+                for m in surface.members.iter() {
+                    self.encode_surface_member(m, depth);
+                }
+                self.encode_child_slice(&surface.call_signatures, depth);
+                self.encode_child_slice(&surface.construct_signatures, depth);
+                self.buf
+                    .extend_from_slice(&(surface.index_signatures.len() as u64).to_le_bytes());
+                for sig in surface.index_signatures.iter() {
+                    self.encode_index_signature(sig, depth);
+                }
+                self.encode_child_opt(surface.keyspace, depth);
+                self.buf.push(u8::from(surface.has_index_signature));
+            }
+            SemanticNodeData::Tuple { elements, readonly } => {
+                self.buf.push(VariantTag::Tuple as u8);
+                self.buf.push(u8::from(*readonly));
+                self.buf
+                    .extend_from_slice(&(elements.len() as u64).to_le_bytes());
+                for el in elements.iter() {
+                    match &el.label {
+                        Some(l) => {
+                            self.push_present(true);
+                            self.push_str(l);
+                        }
+                        None => self.push_present(false),
+                    }
+                    self.encode_child(el.value, depth);
+                    self.buf.push(u8::from(el.optional));
+                    self.buf.push(u8::from(el.rest));
+                }
+            }
+            SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            } => {
+                self.buf.push(VariantTag::TemplateLiteral as u8);
+                self.push_str_slice(quasis);
+                self.encode_child_slice(expressions, depth);
+            }
+            SemanticNodeData::IndexedAccess { object, index } => {
+                self.buf.push(VariantTag::IndexedAccess as u8);
+                self.encode_child(*object, depth);
+                self.encode_index_key(index, depth);
+            }
+            SemanticNodeData::Mapped { source, mapper } => {
+                self.buf.push(VariantTag::Mapped as u8);
+                self.encode_child(*source, depth);
+                self.encode_child(mapper.parameter_node, depth);
+                self.encode_child(mapper.key_space, depth);
+                self.encode_child(mapper.value_expr, depth);
+                self.push_str(&format!("{:?}", mapper.optionality));
+                self.push_str(&format!("{:?}", mapper.readonly));
+                self.encode_child_opt(mapper.name_remap, depth);
+                self.push_str(&format!("{:?}", mapper.kind));
+            }
+            SemanticNodeData::TypeParam {
+                decl,
+                param_index,
+                constraint,
+                default,
+                display_name,
+            } => {
+                self.buf.push(VariantTag::TypeParam as u8);
+                self.encode_decl_identity(decl);
+                self.buf.extend_from_slice(&param_index.to_le_bytes());
+                self.encode_child_opt(*constraint, depth);
+                self.encode_child_opt(*default, depth);
+                self.push_str(display_name);
+            }
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+            } => {
+                self.buf.push(VariantTag::Conditional as u8);
+                self.buf.push(u8::from(*distributive));
+                self.encode_child(*check, depth);
+                self.encode_child(*extends, depth);
+                self.encode_child(*true_branch_ref, depth);
+                self.encode_child(*false_branch_ref, depth);
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                type_parameters,
+                signature_span,
+                return_type_span,
+            } => {
+                self.buf.push(VariantTag::Function as u8);
+                self.buf
+                    .extend_from_slice(&(params.len() as u64).to_le_bytes());
+                for p in params.iter() {
+                    match &p.name {
+                        Some(n) => {
+                            self.push_present(true);
+                            self.push_str(n);
+                        }
+                        None => self.push_present(false),
+                    }
+                    self.encode_child(p.ty, depth);
+                    self.buf.push(u8::from(p.optional));
+                    self.buf.push(u8::from(p.rest));
+                    self.push_str(&format!("{:?}", p.span));
+                }
+                self.encode_child(*return_type, depth);
+                self.buf
+                    .extend_from_slice(&(type_parameters.len() as u64).to_le_bytes());
+                for tp in type_parameters.iter() {
+                    self.push_str(&tp.name);
+                    self.encode_child_opt(tp.constraint, depth);
+                    self.encode_child_opt(tp.default, depth);
+                }
+                self.push_str(&format!("{signature_span:?}"));
+                self.push_str(&format!("{return_type_span:?}"));
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                self.buf.push(VariantTag::InstantiationRef as u8);
+                self.encode_decl_identity(base);
+                self.encode_child_slice(args, depth);
+            }
+
+            // ── Carrier arms: HEAD (no args) + ordered recursive child hashes.
+            // NEVER `Debug`-render the carrier — its private `type_args` layout
+            // is a representation detail; descend through the sole accessor. ──
+            SemanticNodeData::TypeOf(_) => {
+                self.buf.push(VariantTag::TypeOf as u8);
+                let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+                self.encode_value_root(value_root);
+                self.push_str_slice(path);
+                let args = data.carrier_type_args().to_vec();
+                self.encode_child_slice(&args, depth);
+            }
+            SemanticNodeData::BareRef(_) => {
+                self.buf.push(VariantTag::BareRef as u8);
+                let (name, scope) = data.bare_ref_head().expect("BareRef carrier head");
+                self.push_str(name);
+                self.encode_node_scope(scope);
+                let args = data.carrier_type_args().to_vec();
+                self.encode_child_slice(&args, depth);
+            }
+            SemanticNodeData::ImportType(_) => {
+                self.buf.push(VariantTag::ImportType as u8);
+                let (specifier, qualifier, typeof_query) =
+                    data.import_type_head().expect("ImportType carrier head");
+                self.push_str(specifier);
+                self.push_str_slice(qualifier);
+                self.buf.push(u8::from(typeof_query));
+                let args = data.carrier_type_args().to_vec();
+                self.encode_child_slice(&args, depth);
+            }
+
+            // ── Pure-scalar / id-free variants. Encoded by content. None of
+            // these payloads can transitively hold a `SemanticNodeId`:
+            // `PrimitiveKind` / `LiteralValue` / `QueryError` / the `Infer`
+            // name / `RawFallback` raw text / `SyntheticBindingId` / the
+            // `DeclRef` identity are all scalar/string or live in a lower crate
+            // than `SemanticNodeId`, so a `Debug` of them is content-only. ──
+            SemanticNodeData::Primitive(p) => {
+                self.buf.push(VariantTag::Primitive as u8);
+                self.push_str(&format!("{p:?}"));
+            }
+            SemanticNodeData::Literal(lit) => {
+                self.buf.push(VariantTag::Literal as u8);
+                match lit {
+                    LiteralValue::String(s) => {
+                        self.buf.push(0);
+                        self.push_str(s);
+                    }
+                    LiteralValue::Number(n) => {
+                        self.buf.push(1);
+                        // f64 by bit pattern — NaN folds to one stable encoding.
+                        self.buf.extend_from_slice(&n.to_bits().to_le_bytes());
+                    }
+                    LiteralValue::Boolean(b) => {
+                        self.buf.push(2);
+                        self.buf.push(u8::from(*b));
+                    }
+                    LiteralValue::BigInt(s) => {
+                        self.buf.push(3);
+                        self.push_str(s);
+                    }
+                }
+            }
+            SemanticNodeData::Opaque(err) => {
+                self.buf.push(VariantTag::Opaque as u8);
+                // `QueryError` is an entirely scalar/string enum (no
+                // `SemanticNodeId` in any arm), so its `Debug` is content-only.
+                self.push_str(&format!("{err:?}"));
+            }
+            SemanticNodeData::Infer { name } => {
+                self.buf.push(VariantTag::Infer as u8);
+                self.push_str(name);
+            }
+            SemanticNodeData::RawFallback { raw } => {
+                self.buf.push(VariantTag::RawFallback as u8);
+                self.push_str(raw);
+            }
+            SemanticNodeData::DeclRef { identity } => {
+                self.buf.push(VariantTag::DeclRef as u8);
+                self.encode_decl_identity(identity);
+            }
+            SemanticNodeData::SyntheticBinding { id, value_node } => {
+                self.buf.push(VariantTag::SyntheticBinding as u8);
+                // `SyntheticBindingId` is content-free (canonical id + surface
+                // kind + slot/binding names); no `SemanticNodeId`.
+                self.push_str(&id.scope_canonical_id);
+                self.push_str(&format!("{:?}", id.surface_kind));
+                match &id.slot_name {
+                    Some(n) => {
+                        self.push_present(true);
+                        self.push_str(n);
+                    }
+                    None => self.push_present(false),
+                }
+                self.push_str(&id.binding_name);
+                // `value_node` is a value-side provenance ordinal carried on the
+                // payload (NOT part of the binding identity). It is folded as a
+                // content field of THIS node, not descended as a graph child —
+                // it never feeds a child fingerprint and never crosses the
+                // store/generation determinism boundary as a structural id.
+                self.buf.extend_from_slice(&value_node.to_le_bytes());
+            }
+            SemanticNodeData::VueMacroElements(elements) => {
+                self.buf.push(VariantTag::VueMacroElements as u8);
+                // `ResolvedElements` lives in `verter_parser` — a crate LOWER
+                // than the `verter_session` crate that owns `SemanticNodeId`, so
+                // it provably cannot embed a `SemanticNodeId` (crate-dependency
+                // direction). It exposes no stable structural-hash accessor, so
+                // a content hash of its `Debug` rendering is the stable identity
+                // available here; the Debug is content-only (no arena ordinal).
+                self.push_str(&format!("{elements:?}"));
+            }
         }
     }
 }
-
-/// Family discriminant tags. The three carrier tags keep `TypeOf` / `BareRef` /
-/// `ImportType` in disjoint hash spaces; [`NON_CARRIER_TAG`] separates every
-/// non-carrier variant (whose own `Debug` discriminator distinguishes them from
-/// each other) from the carriers.
-const CARRIER_TAG_TYPEOF: u8 = 1;
-const CARRIER_TAG_BAREREF: u8 = 2;
-const CARRIER_TAG_IMPORTTYPE: u8 = 3;
-const NON_CARRIER_TAG: u8 = 0;
 
 fn named_identity_of(data: &SemanticNodeData) -> Option<NamedIdentity> {
     match data {
@@ -989,361 +1430,5 @@ fn instantiate_args_fingerprint(edge: &DerivationEdgeRecord) -> Hash16 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::component_meta_audit::accumulator::{
-        DerivationEdgeRaw, RequestFootprintAccumulator,
-    };
-    use crate::semantic_query::OriginEdge;
-
-    fn make_ctx(id: u64) -> Arc<RequestContext> {
-        let acc = Arc::new(RequestFootprintAccumulator::new());
-        RequestContext::new(id, Arc::from("/x.vue"), true, Some(acc))
-    }
-
-    fn synth_edge(
-        result_raw: u64,
-        sources: &[u64],
-        kind: CoreOriginEdgeKind,
-        meta: OriginMeta,
-    ) -> DerivationEdgeRaw {
-        DerivationEdgeRaw {
-            result: SemanticNodeId(result_raw),
-            kind,
-            edge: OriginEdge {
-                sources: sources.iter().copied().map(SemanticNodeId).collect(),
-                meta,
-                edge_dep_signature: Arc::new(
-                    Arc::<[(Arc<str>, crate::semantic_query::DepVersion)]>::from(Vec::<(
-                        Arc<str>,
-                        crate::semantic_query::DepVersion,
-                    )>::new(
-                    )),
-                ),
-            },
-        }
-    }
-
-    fn empty_graph() -> SemanticGraphStore {
-        SemanticGraphStore::new()
-    }
-
-    #[test]
-    fn mine_footprint_empty_state_yields_empty_subgraph_and_zero_counters() {
-        let graph = empty_graph();
-        let ctx = make_ctx(1);
-        let state = AccumulatorState::default();
-        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
-        assert_eq!(fp.derivation_subgraph.nodes.len(), 0);
-        assert_eq!(fp.derivation_subgraph.edges.len(), 0);
-        assert_eq!(fp.cache_outcomes.cold_builds, 0);
-        assert!(!fp.graph_completeness.has_orphan_edges);
-    }
-
-    #[test]
-    fn mine_footprint_cache_outcomes_read_from_per_context_atomic_counters() {
-        let graph = empty_graph();
-        let ctx = make_ctx(2);
-        ctx.cold_builds.store(3, Ordering::Relaxed);
-        ctx.warm_hits.store(5, Ordering::Relaxed);
-        ctx.joined_waits.store(2, Ordering::Relaxed);
-        ctx.sentinels.store(1, Ordering::Relaxed);
-        ctx.inflight_aborted_retries.store(7, Ordering::Relaxed);
-        ctx.cold_aborts_swept.store(11, Ordering::Relaxed);
-        let fp = mine_footprint(
-            &graph,
-            AccumulatorState::default(),
-            &ctx,
-            10_000,
-            &AuditCaps::default(),
-        );
-        assert_eq!(fp.cache_outcomes.cold_builds, 3);
-        assert_eq!(fp.cache_outcomes.warm_hits, 5);
-        assert_eq!(fp.cache_outcomes.joined_waits, 2);
-        assert_eq!(fp.cache_outcomes.sentinels, 1);
-        assert_eq!(fp.cache_outcomes.inflight_aborted_retries, 7);
-        assert_eq!(fp.cache_outcomes.cold_aborts_swept, 11);
-    }
-
-    #[test]
-    fn mine_footprint_truncates_at_max_derivation_edges_sets_orphan_flag() {
-        let graph = empty_graph();
-        let ctx = make_ctx(3);
-        let mut state = AccumulatorState::default();
-        for i in 0..10u64 {
-            state.derivation_edges_raw.push(synth_edge(
-                i,
-                &[i + 100],
-                CoreOriginEdgeKind::AliasResolve,
-                OriginMeta::None,
-            ));
-        }
-        let fp = mine_footprint(&graph, state, &ctx, 5, &AuditCaps::default());
-        assert_eq!(fp.derivation_subgraph.edges.len(), 5);
-        assert!(fp.graph_completeness.has_orphan_edges);
-        assert_eq!(fp.graph_completeness.edges_truncated, 5);
-    }
-
-    #[test]
-    fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
-        let graph = empty_graph();
-        let ctx_a = make_ctx(1);
-        let ctx_b = make_ctx(1);
-        let mut state_a = AccumulatorState::default();
-        let mut state_b = AccumulatorState::default();
-        for i in 0..6u64 {
-            state_a.derivation_edges_raw.push(synth_edge(
-                i,
-                &[i + 100],
-                CoreOriginEdgeKind::ProjectMember,
-                OriginMeta::ProjectedMember {
-                    name: Arc::from(format!("m{i}")),
-                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                },
-            ));
-            state_b.derivation_edges_raw.push(synth_edge(
-                i,
-                &[i + 100],
-                CoreOriginEdgeKind::ProjectMember,
-                OriginMeta::ProjectedMember {
-                    name: Arc::from(format!("m{i}")),
-                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                },
-            ));
-        }
-        let fp_a = mine_footprint(&graph, state_a, &ctx_a, 10_000, &AuditCaps::default());
-        let fp_b = mine_footprint(&graph, state_b, &ctx_b, 10_000, &AuditCaps::default());
-        let bytes_a = serde_json::to_vec(&fp_a).expect("serialise a");
-        let bytes_b = serde_json::to_vec(&fp_b).expect("serialise b");
-        assert_eq!(
-            bytes_a, bytes_b,
-            "identical inputs must produce byte-identical mined footprints"
-        );
-    }
-
-    #[test]
-    fn mine_footprint_conditional_decisions_distinguish_true_false_deferred() {
-        let graph = empty_graph();
-        let ctx = make_ctx(4);
-        let mut state = AccumulatorState::default();
-        state.derivation_edges_raw.push(synth_edge(
-            1,
-            &[10],
-            CoreOriginEdgeKind::ConditionalSelect,
-            OriginMeta::Branch(BranchSelection::True),
-        ));
-        state.derivation_edges_raw.push(synth_edge(
-            2,
-            &[10],
-            CoreOriginEdgeKind::ConditionalSelect,
-            OriginMeta::Branch(BranchSelection::False),
-        ));
-        state.derivation_edges_raw.push(synth_edge(
-            3,
-            &[10],
-            CoreOriginEdgeKind::ConditionalSelect,
-            OriginMeta::None,
-        ));
-        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
-        let branches: Vec<ConditionalBranch> =
-            fp.conditional_decisions.iter().map(|c| c.branch).collect();
-        assert!(branches.contains(&ConditionalBranch::True));
-        assert!(branches.contains(&ConditionalBranch::False));
-        assert!(branches.contains(&ConditionalBranch::Deferred));
-    }
-
-    #[test]
-    fn mine_footprint_alias_resolve_emits_one_record_per_hop() {
-        let graph = empty_graph();
-        let ctx = make_ctx(5);
-        let mut state = AccumulatorState::default();
-        for hop in 0..3u64 {
-            state.derivation_edges_raw.push(synth_edge(
-                hop,
-                &[hop + 1],
-                CoreOriginEdgeKind::AliasResolve,
-                OriginMeta::AliasName(Arc::from(format!("alias_{hop}"))),
-            ));
-        }
-        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
-        assert_eq!(fp.alias_resolutions.len(), 3);
-        for rec in &fp.alias_resolutions {
-            assert!(rec.alias_name.starts_with("alias_"));
-        }
-    }
-
-    #[test]
-    fn mine_footprint_path_segments_preserve_member_index_distinction() {
-        let graph = empty_graph();
-        let ctx = make_ctx(6);
-        let mut state = AccumulatorState::default();
-        let path = [
-            PathSegment::Member(Arc::from("a")),
-            PathSegment::Index(IndexKey::String(Arc::from("b"))),
-            PathSegment::Index(IndexKey::Number(
-                crate::semantic_query::CanonicalIndexInt::from_canonical_i64(7).expect("canonical"),
-            )),
-        ];
-        state.derivation_edges_raw.push(synth_edge(
-            1,
-            &[10],
-            CoreOriginEdgeKind::ProjectPath,
-            OriginMeta::Path(Arc::from(path)),
-        ));
-        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
-        assert_eq!(fp.projections.len(), 1);
-        let segs = &fp.projections[0].path;
-        assert!(matches!(&segs[0], ProjectPathSegment::Member { name } if name.as_ref() == "a"));
-        assert!(matches!(&segs[1], ProjectPathSegment::Index { key } if key.as_ref() == "b"));
-        assert!(matches!(&segs[2], ProjectPathSegment::Index { key } if key.as_ref() == "7"));
-    }
-
-    #[test]
-    fn mine_footprint_indexed_ready_builds_extracted_from_structured_events() {
-        let graph = empty_graph();
-        let ctx = make_ctx(7);
-        let mut state = AccumulatorState::default();
-        state
-            .structured_events
-            .push(StructuredAuditEvent::IndexedReadyBuilt {
-                canonical_id: Arc::from("/a.ts"),
-                whole_hash: [9u8; 16],
-            });
-        state
-            .structured_events
-            .push(StructuredAuditEvent::IndexedReadyBuilt {
-                canonical_id: Arc::from("/b.ts"),
-                whole_hash: [10u8; 16],
-            });
-        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
-        assert_eq!(fp.indexed_ready_builds.len(), 2);
-        assert_eq!(fp.indexed_ready_builds[0].canonical_id.as_ref(), "/a.ts");
-        assert_eq!(fp.indexed_ready_builds[1].canonical_id.as_ref(), "/b.ts");
-    }
-
-    #[test]
-    fn mine_footprint_multiple_derivations_for_same_result_produce_multiple_edges() {
-        let graph = empty_graph();
-        let ctx = make_ctx(8);
-        let mut state = AccumulatorState::default();
-        // Two derivations of the same result via different alias hops.
-        state.derivation_edges_raw.push(synth_edge(
-            42,
-            &[10],
-            CoreOriginEdgeKind::AliasResolve,
-            OriginMeta::AliasName(Arc::from("path_a")),
-        ));
-        state.derivation_edges_raw.push(synth_edge(
-            42,
-            &[20],
-            CoreOriginEdgeKind::AliasResolve,
-            OriginMeta::AliasName(Arc::from("path_b")),
-        ));
-        let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
-        assert_eq!(fp.derivation_subgraph.edges.len(), 2);
-        assert_eq!(
-            fp.derivation_subgraph.edges[0].result, fp.derivation_subgraph.edges[1].result,
-            "both derivations of the same SemanticNodeId must produce the same NodeId result"
-        );
-    }
-
-    use crate::semantic_query::{NodeScopeId, PrimitiveKind};
-
-    /// Build a `Foo<arg_child>` bare-ref carrier node (head `Foo` in
-    /// `NodeScopeId::Global`, a single structural type argument). The carrier's
-    /// `type_args` are carried IN at construction through the sanctioned
-    /// `SemanticNodeData::new_bare_ref` constructor — never hand-bound — so this
-    /// is a REAL carrier node, not a faked `SemanticNodeData`.
-    fn bare_ref_with_arg(arg_child: SemanticNodeId) -> SemanticNodeData {
-        SemanticNodeData::new_bare_ref(
-            Arc::from("Foo"),
-            NodeScopeId::Global,
-            Arc::from(vec![arg_child].into_boxed_slice()),
-        )
-    }
-
-    /// `structural_hash_of` must DISCRIMINATE a carrier's type arguments: two
-    /// `Foo<…>` carriers that share a head but differ ONLY in their single type
-    /// argument child must produce DIFFERENT fingerprints. This is the contract
-    /// the old `format!("{data:?}")` fingerprint could not guarantee once the
-    /// carrier's private `type_args` layout changed; the variant-aware walk
-    /// hashes the head plus the ordered recursive child hashes, so distinct args
-    /// never collapse to one footprint.
-    #[test]
-    fn structural_hash_discriminates_carrier_type_args_foo_a_vs_foo_b() {
-        let graph = empty_graph();
-        // Two structurally-DISTINCT argument children (`A` = string, `B` =
-        // number), each a real interned node.
-        let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        let child_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-        assert_ne!(
-            child_a, child_b,
-            "the two argument children must be distinct interned nodes"
-        );
-
-        let foo_a = bare_ref_with_arg(child_a); // Foo<A>
-        let foo_b = bare_ref_with_arg(child_b); // Foo<B>
-
-        let hash_a = structural_hash_of(&graph, &foo_a);
-        let hash_b = structural_hash_of(&graph, &foo_b);
-        assert_ne!(
-            hash_a, hash_b,
-            "DISCRIMINATION: Foo<A> and Foo<B> (same head, different single type argument) must \
-             yield DIFFERENT structural fingerprints — the carrier walk must hash the arg child \
-             structure, not drop it. A fingerprint that ignored the args (or rendered them through \
-             a representation-sensitive Debug that collapsed distinct children) would make these \
-             equal and this assertion fail."
-        );
-    }
-
-    /// Inverse stability contract: two structurally-IDENTICAL `Foo<A>` carriers
-    /// (same head, same single argument child) must produce the SAME fingerprint.
-    /// Together with the discrimination test this pins "distinct args ⇒ distinct
-    /// footprint, identical args ⇒ identical footprint".
-    #[test]
-    fn structural_hash_is_stable_for_identical_carriers() {
-        let graph = empty_graph();
-        let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-
-        // Two independently-constructed but structurally-identical Foo<A>.
-        let foo_a1 = bare_ref_with_arg(child_a);
-        let foo_a2 = bare_ref_with_arg(child_a);
-
-        let hash_a1 = structural_hash_of(&graph, &foo_a1);
-        let hash_a2 = structural_hash_of(&graph, &foo_a2);
-        assert_eq!(
-            hash_a1, hash_a2,
-            "STABILITY: two structurally-identical Foo<A> carriers must yield the SAME structural \
-             fingerprint."
-        );
-    }
-
-    /// The discriminating signal must be the carrier ARGUMENT, not merely the
-    /// carrier HEAD. `Foo<A>` and `Foo<B>` share an identical head (`Foo` /
-    /// `Global`), so a head-only fingerprint would make them equal; this test
-    /// pins that the head is shared yet the fingerprints diverge — proving the
-    /// arg child is what discriminates.
-    #[test]
-    fn structural_hash_carrier_discrimination_comes_from_args_not_head() {
-        let graph = empty_graph();
-        let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        let child_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-
-        let foo_a = bare_ref_with_arg(child_a);
-        let foo_b = bare_ref_with_arg(child_b);
-
-        // Heads are identical (same name + scope, no args).
-        assert_eq!(
-            foo_a.bare_ref_head().map(|(n, s)| (n.clone(), s.clone())),
-            foo_b.bare_ref_head().map(|(n, s)| (n.clone(), s.clone())),
-            "Foo<A> and Foo<B> must share an identical head — the only difference is the arg child"
-        );
-        // …yet the fingerprints diverge, so the arg child is the discriminator.
-        assert_ne!(
-            structural_hash_of(&graph, &foo_a),
-            structural_hash_of(&graph, &foo_b),
-            "with identical heads, the differing fingerprints prove the carrier ARG child is what \
-             discriminates the fingerprint."
-        );
-    }
-}
+#[path = "footprint_miner_tests.rs"]
+mod footprint_miner_tests;
