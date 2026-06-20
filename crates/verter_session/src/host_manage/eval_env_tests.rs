@@ -1241,7 +1241,12 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
         host.resolve_value_export_root_with_facts_with_store_view(&view, "/src/barrel.ts", "V");
 
     // (1) Final defining value: the cross-file chain resolves to /src/a.ts and
-    // the terminal same-file `typeof` alias peels `V` -> `realImpl`.
+    // the terminal same-file `typeof` alias peels `V` -> `realImpl`. This is the
+    // resolver's own end-to-end behavior; at the production call site the
+    // cross-file hops are taken by the symbol-space-neutral TYPE rail and this
+    // resolver runs only for the same-file terminal peel, but the unit resolver
+    // walks the full chain identically (and is what the integration relies on if
+    // the ordering ever changes).
     let identity =
         identity.expect("the value export root must resolve through the multi-hop chain");
     assert_eq!(
@@ -1253,23 +1258,22 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
     );
 
     // (2) FULL participant chain facts: a `FileWholeHash` for EVERY file on the
-    // walk — barrel, mid, AND a. The pre-fix value rail recorded ONLY the
-    // immediate barrel; the inner `mid` (and the final `a`) being present is the
-    // discriminator that catches an inner-barrel retarget.
+    // walk — barrel, mid, AND a. The inner `mid` (and the final `a`) being
+    // present is the discriminator that catches an inner-barrel retarget; a rail
+    // that recorded only the immediate barrel could not.
     let participants = whole_hash_participants(&facts);
     for required in ["/src/barrel.ts", "/src/mid.ts", "/src/a.ts"] {
         assert!(
             participants.contains(required),
             "the value-export root resolver must record a FileWholeHash for EVERY participant on \
              the value re-export chain — missing `{required}` (recorded: {participants:?}). The \
-             inner participant facts are the SOLE catcher of an inner-barrel retarget; the pre-fix \
-             value rail recorded only the immediate barrel."
+             inner participant facts are the SOLE catcher of an inner-barrel retarget."
         );
     }
 
     // (3) BOUND: the resolver is graph-native — it does NOT materialise any
-    // participant's whole_env() (the correctness defect the fix removes: the
-    // OLD `resolve_value_export_target` routed through
+    // participant's whole_env() (the correctness defect the graph-native rail
+    // avoids: the legacy `resolve_value_export_target` routed through
     // `peel_value_decl_alias` -> `base_eval_env_arc` -> `whole_env()`).
     for participant in ["/src/barrel.ts", "/src/mid.ts", "/src/a.ts"] {
         assert!(
@@ -1279,4 +1283,56 @@ fn fix_a_value_export_root_resolver_returns_full_chain_facts_and_peels_terminal(
              the legacy `peel_value_decl_alias`/`base_eval_env_arc` oracle"
         );
     }
+}
+
+/// FIX A' (normalization parity): the value-export root resolver normalizes its
+/// FINAL canonical through `resolve_eval_dependency_canonical` — exactly as the
+/// TYPE rail normalizes its final `defining_canonical`
+/// (`imported_type_root.rs`). When a value re-export terminates at a `.js`
+/// defining file that has a `.d.ts` type companion, BOTH rails must report the
+/// `.d.ts` companion as the final canonical; without the normalization the value
+/// rail returned the raw `.js`, diverging from the type rail (the spurious
+/// cross-file divergence the parity fix removes). DISCRIMINATING: this test FAILS
+/// against the pre-fix resolver (which returned `/pkg/impl.js`) and PASSES against
+/// the normalized resolver (`/pkg/impl.d.ts`).
+#[test]
+fn fix_a_value_export_root_resolver_normalizes_final_canonical_like_type_rail() {
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    // Terminal defining file is a `.js` runtime file WITH a `.d.ts` type
+    // companion present — the `resolve_eval_dependency_canonical` collapse the
+    // type rail already applies (TS-first companion preference). The `.js` carries
+    // the runtime value; the `.d.ts` is its type companion.
+    upsert_ts(
+        &host,
+        "/pkg/impl.d.ts",
+        "export declare const W: { from: 'pkg' }\n",
+    );
+    upsert_ts(&host, "/pkg/impl.js", "export const W = { from: 'pkg' }\n");
+    upsert_ts(&host, "/pkg/barrel.ts", "export { W } from './impl.js'\n");
+
+    let view = host
+        .resolver_store_view_read()
+        .into_cold_seed_view()
+        .into_inner();
+    let (identity, _facts) =
+        host.resolve_value_export_root_with_facts_with_store_view(&view, "/pkg/barrel.ts", "W");
+    let identity = identity.expect("the value export root must resolve the `.js` terminal");
+
+    assert_eq!(
+        identity.canonical_id.as_str(),
+        "/pkg/impl.d.ts",
+        "the value-export root resolver must normalize its FINAL canonical through \
+         `resolve_eval_dependency_canonical` — the `.js` terminal `/pkg/impl.js` collapses onto its \
+         `.d.ts` type companion `/pkg/impl.d.ts`, matching the TYPE rail (parity). The pre-fix value \
+         rail returned the raw `/pkg/impl.js`, diverging from the type rail."
+    );
+    assert_ne!(
+        identity.canonical_id.as_str(),
+        "/pkg/impl.js",
+        "the value rail must NOT report the raw `.js` final when a `.d.ts` companion exists — that is \
+         the type-rail divergence the normalization-parity fix removes"
+    );
 }

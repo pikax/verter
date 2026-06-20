@@ -726,15 +726,19 @@ impl VerterHost {
                 continue;
             }
 
-            // VALUE rail (reached only when the type route resolved to the
-            // barrel itself — see the doc-comment: the symbol-space-neutral type
-            // rail above pre-empts every CROSS-FILE re-export hop, value-only
-            // included). Resolve the value through the VIEW-AWARE, FULL-CHAIN-fact
-            // resolver (symmetric with the type rail). It records EVERY
-            // participant it walks and peels the terminal SAME-FILE `typeof`
-            // value alias — its distinct work over the type rail. NEVER routes
-            // through `peel_value_decl_alias` / `base_eval_env_arc` /
-            // `whole_env()` (the legacy whole-env oracle path) during prep.
+            // VALUE rail. Reached ONLY when the type route above resolved to the
+            // barrel ITSELF (a same-file resolution): the symbol-space-neutral
+            // type rail follows every CROSS-FILE re-export hop (value-only
+            // included) and short-circuits the moment it lands cross-file, so the
+            // only remaining work here is the SAME-FILE terminal `typeof`
+            // value-alias peel (`export const V: typeof realImpl = realImpl` on
+            // the barrel → `realImpl`) — this rail's distinct live contribution.
+            // The cross-file fact completeness is delivered by the type rail's
+            // full-chain walk above, not here. Resolve through the VIEW-AWARE,
+            // FULL-CHAIN-fact resolver (symmetric with the type rail, same final
+            // normalization); NEVER routes through `peel_value_decl_alias` /
+            // `base_eval_env_arc` / `whole_env()` (the legacy whole-env oracle
+            // path) during prep.
             let (value_final, value_chain_facts) = self
                 .resolve_value_export_root_with_facts_with_store_view(
                     view,

@@ -22574,9 +22574,11 @@ const MIRROR_MACRO_ARG_PRODUCT_TYPE: &str = "HotTypeRef";
 const MIRROR_BINDER_SEED_RETURN_TYPE: &str = "Vec < BinderScope >";
 
 /// Find the FREE function (`ItemFn`) named `name` anywhere in `items`
-/// (descending inline `mod` blocks), returning its `syn::Signature`. The
-/// sanctioned non-producer helpers are module-level free fns, so this does not
-/// need to descend `impl` blocks.
+/// (descending inline `mod` blocks), returning its `syn::Signature`. Used by the
+/// guard only to LOCATE the production file that DEFINES a sanctioned helper as a
+/// free fn (anti-vacuity); the SIGNATURE anti-usurpation validation itself runs
+/// over [`find_all_crate_visible_fn_signatures`], which also covers associated
+/// `impl` fns and rejects a duplicate definition.
 fn find_free_fn_signature(items: &[syn::Item], name: &str) -> Option<syn::Signature> {
     for item in items {
         match item {
@@ -22594,32 +22596,123 @@ fn find_free_fn_signature(items: &[syn::Item], name: &str) -> Option<syn::Signat
     None
 }
 
-/// SIGNATURE/BODY anti-usurpation check for a sanctioned non-producer mirror
-/// entry (FIX C — ANTI-ROGUE). The name-only allowlist
-/// ([`MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES`]) is necessary but NOT
-/// sufficient: a function USURPING the sanctioned name with a real macro-arg
-/// producer body would pass a bare-name check. This verifies the entry is a
-/// GENUINE non-producer by its SIGNATURE:
+/// Collect the `syn::Signature` of EVERY CRATE-VISIBLE function named `name`
+/// across a source's items — module-level FREE fns (`ItemFn`), ASSOCIATED fns
+/// inside INHERENT `impl` blocks (`ImplItemFn`), and both forms nested in inline
+/// `mod` blocks. This is the exact surface
+/// [`collect_crate_visible_fns_in_items`] enumerates for the entry-NAME scan, so
+/// the SIGNATURE anti-usurpation validation covers the same surface the name scan
+/// does — closing the associated-fn hole where a producer-shaped
+/// `impl X { pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }`
+/// was name-allowlisted but never signature-checked (the old free-fn-only
+/// validator skipped `impl` blocks).
 ///
-/// 1. its return type is the binder-seed shape `Vec<BinderScope>` (NOT the
-///    producer's `Option<HotTypeRef>`), and
-/// 2. NEITHER the return type NOR any input type mentions the macro-arg product
-///    type `HotTypeRef` — so it cannot return or accept the producer surface.
+/// Visibility/test-gating filters mirror the name collector exactly: a TRAIT impl
+/// (`imp.trait_` set) is SKIPPED (its methods inherit the trait's visibility and
+/// can never be an independently crate-visible producer entry); a `#[cfg(test)]`
+/// (or `any(test, …)`) gated fn / impl / mod is excluded; only crate-visible
+/// (`pub` / `pub(crate)` / `pub(in crate)`) fns are collected.
+fn find_all_crate_visible_fn_signatures(items: &[syn::Item], name: &str) -> Vec<syn::Signature> {
+    let mut sigs = Vec::new();
+    collect_crate_visible_fn_signatures_named(items, name, &mut sigs);
+    sigs
+}
+
+/// Recursive worker for [`find_all_crate_visible_fn_signatures`].
+fn collect_crate_visible_fn_signatures_named(
+    items: &[syn::Item],
+    name: &str,
+    sigs: &mut Vec<syn::Signature>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Fn(f) => {
+                if attrs_test_gate(&f.attrs) {
+                    continue;
+                }
+                if f.sig.ident == name && visibility_is_crate_visible(&f.vis) {
+                    sigs.push(f.sig.clone());
+                }
+            }
+            syn::Item::Impl(imp) => {
+                // Trait-impl methods are not an independently crate-visible
+                // producer-entry vector — skip them, exactly as the name
+                // collector does. A test-gated impl is skipped wholesale.
+                if imp.trait_.is_some() || attrs_test_gate(&imp.attrs) {
+                    continue;
+                }
+                for impl_item in &imp.items {
+                    if let syn::ImplItem::Fn(m) = impl_item {
+                        if attrs_test_gate(&m.attrs) {
+                            continue;
+                        }
+                        if m.sig.ident == name && visibility_is_crate_visible(&m.vis) {
+                            sigs.push(m.sig.clone());
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if attrs_test_gate(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    collect_crate_visible_fn_signatures_named(inner, name, sigs);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Validate that the sanctioned non-producer name `fn_name` has EXACTLY ONE
+/// crate-visible definition in `src` AND that it is a genuine non-producer by
+/// signature. This is the FULL anti-usurpation gate, covering EVERY crate-visible
+/// occurrence — free fn, inherent-`impl` associated fn, and inline-mod nesting —
+/// not just the first free fn:
 ///
-/// The check is on the SIGNATURE only (return type + parameter types), never
-/// the body: the genuine helper legitimately calls `HotTypeRef::node(...)`
-/// internally to extract a binder's interned node, so a body-text scan for
-/// `HotTypeRef` would false-positive. A name-usurping producer-shaped fn
-/// (returns/accepts `HotTypeRef`) fails (1) and/or (2). Returns `Err(reason)`
-/// on a usurpation, `Ok(())` for a genuine non-producer.
-fn sanctioned_non_producer_signature_is_genuine(src: &str, fn_name: &str) -> Result<(), String> {
+/// - ZERO crate-visible definitions ⇒ `Err` (the sanctioned name vanished; the
+///   guard's anti-vacuity locator already panics earlier, but this keeps the
+///   validator self-consistent for the self-test).
+/// - MORE THAN ONE crate-visible definition ⇒ `Err`. A sanctioned name must have
+///   exactly one genuine non-producer definition; a SECOND definition under the
+///   same name (e.g. a real free helper PLUS an associated-fn usurper) is the
+///   usurpation vector — the producer-shaped second entry would otherwise hide
+///   behind the name allowlist.
+/// - Each definition's signature is checked by [`signature_is_non_producer`]
+///   (returns the binder-seed `Vec<BinderScope>`, neither returns nor accepts the
+///   macro-arg product `HotTypeRef`); ANY producer-shaped occurrence ⇒ `Err`.
+fn validate_sanctioned_entry_all_occurrences(src: &str, fn_name: &str) -> Result<(), String> {
     let file = syn::parse_file(src).map_err(|e| {
         format!("sanctioned-entry signature parse of source defining {fn_name}: {e}")
     })?;
-    let sig = find_free_fn_signature(&file.items, fn_name).ok_or_else(|| {
-        format!("sanctioned non-producer entry `{fn_name}` not found as a free fn in its source")
-    })?;
+    let sigs = find_all_crate_visible_fn_signatures(&file.items, fn_name);
+    if sigs.is_empty() {
+        return Err(format!(
+            "sanctioned non-producer entry `{fn_name}` has NO crate-visible definition in its \
+             source — it must be defined exactly once as a genuine non-producer"
+        ));
+    }
+    if sigs.len() > 1 {
+        return Err(format!(
+            "sanctioned non-producer entry `{fn_name}` is defined {} times across crate-visible \
+             surfaces (free fns + inherent-impl associated fns) — a sanctioned name must have \
+             EXACTLY ONE genuine non-producer definition; a second definition under the same name \
+             is the usurpation vector (e.g. a real free helper plus an associated-fn usurper)",
+            sigs.len()
+        ));
+    }
+    signature_is_non_producer(&sigs[0], fn_name)
+}
 
+/// Whether a single `syn::Signature` is a genuine non-producer per the
+/// anti-usurpation rule: (1) its return type is the binder-seed shape
+/// `Vec<BinderScope>` (NOT the producer's `Option<HotTypeRef>`), and (2) NEITHER
+/// the return type NOR any input type mentions the macro-arg product type
+/// `HotTypeRef`. Signature-only (never the body): the genuine helper legitimately
+/// calls `HotTypeRef::node(..)` internally. Returns `Err(reason)` on a
+/// usurpation, `Ok(())` for a genuine non-producer.
+fn signature_is_non_producer(sig: &syn::Signature, fn_name: &str) -> Result<(), String> {
     // (1) Return type must be the binder-seed shape.
     let return_rendered = match &sig.output {
         syn::ReturnType::Type(_, ty) => render_type(ty),
@@ -22655,6 +22748,28 @@ fn sanctioned_non_producer_signature_is_genuine(src: &str, fn_name: &str) -> Res
         }
     }
     Ok(())
+}
+
+/// SIGNATURE anti-usurpation check for a sanctioned non-producer mirror entry
+/// (FIX C — ANTI-ROGUE). The name-only allowlist
+/// ([`MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES`]) is necessary but NOT sufficient:
+/// a function USURPING the sanctioned name with a real macro-arg producer body
+/// would pass a bare-name check. Delegates to
+/// [`validate_sanctioned_entry_all_occurrences`], which covers EVERY
+/// crate-visible occurrence of the name — module-level FREE fns, ASSOCIATED fns
+/// inside INHERENT `impl` blocks, and inline-mod nesting — rejecting a DUPLICATE
+/// definition (a second crate-visible def under the same name is itself the
+/// usurpation vector) and requiring each occurrence to be a genuine non-producer
+/// by signature (returns the binder-seed `Vec<BinderScope>`, neither returns nor
+/// accepts the macro-arg product `HotTypeRef`).
+///
+/// The previous free-fn-only validator (`find_free_fn_signature`) skipped `impl`
+/// blocks, so a producer-shaped ASSOCIATED-fn usurper
+/// (`impl X { pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }`)
+/// was name-allowlisted but NEVER signature-checked → it PASSED. The
+/// all-occurrences validation closes that hole.
+fn sanctioned_non_producer_signature_is_genuine(src: &str, fn_name: &str) -> Result<(), String> {
+    validate_sanctioned_entry_all_occurrences(src, fn_name)
 }
 
 /// GOV finding (c) + round-4/5 extension: assert `macro_type_arg_hot_ref` is the
@@ -23062,5 +23177,83 @@ fn mirror_entry_surface_classifier_discriminates() {
         "a genuine non-producer SHAPE under the sanctioned name (binder-seed return, no \
          `HotTypeRef` in the signature) must pass — an internal `HotTypeRef::node(..)` body call \
          is not a producer-surface exposure"
+    );
+
+    // (e) ANTI-ROGUE RED-PROOF — THE HEART OF THIS FIX. The REAL free helper
+    // (genuine non-producer) PLUS a producer-shaped ASSOCIATED-fn usurper of the
+    // SAME sanctioned name inside an INHERENT `impl`. The old free-fn-only
+    // validator (`find_free_fn_signature`) located ONLY the genuine free fn and
+    // NEVER signature-checked the `impl` method, so this source PASSED before the
+    // fix. The strengthened all-occurrences validator FAILS it on TWO counts: a
+    // DUPLICATE crate-visible definition of the sanctioned name AND the
+    // associated-fn occurrence being producer-shaped (`-> Option<HotTypeRef>`).
+    let assoc_usurper = "pub(crate) fn build_script_setup_seed_frames(g: &G, s: &S) -> Vec<BinderScope> { Vec::new() }\n\
+                         impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n}\n";
+    let assoc_usurper_result = sanctioned_non_producer_signature_is_genuine(
+        assoc_usurper,
+        "build_script_setup_seed_frames",
+    );
+    assert!(
+        assoc_usurper_result.is_err(),
+        "a producer-shaped ASSOCIATED-fn usurper of the sanctioned name \
+         (`impl MacroHotMirror {{ pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }}`) \
+         MUST fail the strengthened sanction — it would have PASSED the old free-fn-only validator \
+         (which never descended `impl` blocks). The all-occurrences validation signature-checks \
+         the associated fn and rejects the duplicate sanctioned name (got {assoc_usurper_result:?})"
+    );
+
+    // (f) A SOLE associated-fn occurrence (no free def) that is producer-shaped
+    // also FAILS — proving the associated-fn surface is signature-checked in its
+    // OWN right, not merely caught as a duplicate. This is the exact gap the old
+    // validator left: an `impl`-only producer usurping the name with NO free fn
+    // would have produced `None` from `find_free_fn_signature` and (under the old
+    // guard's `.find` locator) never reached signature validation at all.
+    let assoc_only_usurper =
+        "impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n}\n";
+    let assoc_only_result = sanctioned_non_producer_signature_is_genuine(
+        assoc_only_usurper,
+        "build_script_setup_seed_frames",
+    );
+    assert!(
+        assoc_only_result.is_err(),
+        "a SOLE producer-shaped ASSOCIATED-fn occurrence of the sanctioned name (no free def) MUST \
+         fail the signature sanction — the associated-fn surface is validated in its own right \
+         (got {assoc_only_result:?})"
+    );
+
+    // (g) A DUPLICATE sanctioned name where BOTH occurrences are genuine
+    // non-producers (binder-seed return, no `HotTypeRef`) STILL FAILS: a
+    // sanctioned name must have EXACTLY ONE definition. A second crate-visible
+    // definition under the same name is the usurpation vector regardless of its
+    // shape — it ambiguates which definition the allowlist sanctions.
+    let duplicate_genuine = "pub(crate) fn build_script_setup_seed_frames(g: &G) -> Vec<BinderScope> { Vec::new() }\n\
+                             impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(g: &G) -> Vec<BinderScope> { Vec::new() }\n}\n";
+    let duplicate_result = sanctioned_non_producer_signature_is_genuine(
+        duplicate_genuine,
+        "build_script_setup_seed_frames",
+    );
+    assert!(
+        duplicate_result.is_err(),
+        "TWO crate-visible definitions of the sanctioned name (a free fn + an associated fn), even \
+         both genuine non-producers, MUST fail — a sanctioned name must have exactly one definition \
+         (got {duplicate_result:?})"
+    );
+
+    // (h) The genuine free helper as the SOLE crate-visible definition still
+    // passes (positive control for the all-occurrences path: exactly one
+    // occurrence, genuine signature). A module-private `impl` method of the same
+    // name is NOT crate-visible, so it does not count as a duplicate.
+    let sole_genuine_with_private_impl =
+        "pub(crate) fn build_script_setup_seed_frames(g: &G) -> Vec<BinderScope> { Vec::new() }\n\
+         impl MacroHotMirror {\n    fn build_script_setup_seed_frames(g: &G) -> Vec<BinderScope> { Vec::new() }\n}\n";
+    assert!(
+        sanctioned_non_producer_signature_is_genuine(
+            sole_genuine_with_private_impl,
+            "build_script_setup_seed_frames"
+        )
+        .is_ok(),
+        "the genuine free helper as the SOLE crate-visible definition must pass even with a \
+         module-private (inherited-visibility) `impl` method of the same name present — the private \
+         method is not crate-visible and is not a duplicate"
     );
 }

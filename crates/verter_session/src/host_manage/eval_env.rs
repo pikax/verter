@@ -385,13 +385,23 @@ impl VerterHost {
     ///
     /// Resolves a value re-export to its FINAL defining value AND returns the
     /// version facts of EVERY file on the re-export walk (each participant's
-    /// `FileWholeHash` + route surface). A consumer that records these facts
-    /// invalidates on a retarget ANYWHERE on the chain — including a MULTI-HOP
-    /// inner barrel (`owner → barrel → mid → final`, retargeting the inner
-    /// `mid`). The pre-fix value rail recorded ONLY the immediate barrel's
-    /// whole-hash, which does not move when an INNER barrel retargets, so it
-    /// stale-served the final root; this resolver's full chain closes that gap
-    /// (and never materialises a dependency's `whole_env()`).
+    /// `FileWholeHash` + route surface), then peels the terminal SAME-FILE
+    /// `typeof` value alias.
+    ///
+    /// Integration role at the sole production call site
+    /// (`build_prepared_import_canonicalization`): this rail is reached ONLY
+    /// after the symbol-space-NEUTRAL TYPE rail above it has already resolved
+    /// the name to the BARREL itself (a same-file resolution). The type rail's
+    /// participant-accumulating walk follows EVERY cross-file re-export hop —
+    /// value-only re-exports included, because module resolution is
+    /// symbol-space-neutral — and short-circuits the moment it lands cross-file;
+    /// so by the time this rail runs, the only remaining work is the SAME-FILE
+    /// terminal value-alias peel (`export const V: typeof realImpl = realImpl`
+    /// declared on the barrel itself → `realImpl`). That same-file `typeof` peel
+    /// is this rail's distinct live contribution; the cross-file fact
+    /// completeness is delivered by the type rail's full-chain walk, not here.
+    /// The rail is whole-env-free and SYMMETRIC with the type rail, so it stays
+    /// correct if the integration ordering ever changes.
     ///
     /// Two graph-native sub-walks, both whole-env-free; NEVER routes through
     /// `peel_value_decl_alias` / `base_eval_env_arc` / `whole_env()`:
@@ -404,7 +414,12 @@ impl VerterHost {
     ///    a type re-export). It returns the terminal defining `(canonical,
     ///    name)` plus the participant `FileWholeHash` + `Route` facts; a
     ///    fenced-serve walk returns EMPTY facts (the strict-admission
-    ///    negative-cache contract), so this resolver inherits it.
+    ///    negative-cache contract), so this resolver inherits it. The terminal
+    ///    canonical is normalized through
+    ///    [`Self::resolve_eval_dependency_canonical`] — the SAME normalization
+    ///    the type rail applies to its final `defining_canonical` — so a final
+    ///    that an eval-dependency alias collapses onto the barrel is reported
+    ///    identically by both rails (parity; no spurious cross-file divergence).
     /// 2. The terminal value `typeof`-alias is peeled graph-native via
     ///    [`Self::peel_value_decl_alias_graph_native`] (per-symbol value memo +
     ///    header PRESENCE). The peeled identity is the final defining value.
@@ -436,9 +451,17 @@ impl VerterHost {
             // export still invalidates a recorded miss; no value identity.
             return (None, chain_facts);
         };
+        // Normalize the terminal canonical exactly as the type rail normalizes
+        // its final `defining_canonical` (companion-declaration / bundle-entry
+        // collapse) so the two rails agree on the final identity — parity, no
+        // value-only divergence on an eval-dependency-aliased final.
+        let final_canonical = self
+            .resolve_eval_dependency_canonical(final_canonical)
+            .unwrap_or_else(|| final_canonical.to_string());
         // Peel the terminal value alias graph-native (no whole-env). A pure
         // `export const V` terminal peels to itself.
-        let identity = self.peel_value_decl_alias_graph_native(final_canonical, final_name);
+        let identity =
+            self.peel_value_decl_alias_graph_native(final_canonical.as_str(), final_name);
         (Some(identity), chain_facts)
     }
 
