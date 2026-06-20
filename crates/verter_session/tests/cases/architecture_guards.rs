@@ -22573,29 +22573,6 @@ const MIRROR_MACRO_ARG_PRODUCT_TYPE: &str = "HotTypeRef";
 /// helper produces — token-spaced exactly as `render_type` emits it.
 const MIRROR_BINDER_SEED_RETURN_TYPE: &str = "Vec < BinderScope >";
 
-/// Find the FREE function (`ItemFn`) named `name` anywhere in `items`
-/// (descending inline `mod` blocks), returning its `syn::Signature`. Used by the
-/// guard only to LOCATE the production file that DEFINES a sanctioned helper as a
-/// free fn (anti-vacuity); the SIGNATURE anti-usurpation validation itself runs
-/// over [`find_all_crate_visible_fn_signatures`], which also covers associated
-/// `impl` fns and rejects a duplicate definition.
-fn find_free_fn_signature(items: &[syn::Item], name: &str) -> Option<syn::Signature> {
-    for item in items {
-        match item {
-            syn::Item::Fn(f) if f.sig.ident == name => return Some(f.sig.clone()),
-            syn::Item::Mod(m) => {
-                if let Some((_, inner)) = &m.content {
-                    if let Some(sig) = find_free_fn_signature(inner, name) {
-                        return Some(sig);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 /// Collect the `syn::Signature` of EVERY CRATE-VISIBLE function named `name`
 /// across a source's items — module-level FREE fns (`ItemFn`), ASSOCIATED fns
 /// inside INHERENT `impl` blocks (`ImplItemFn`), and both forms nested in inline
@@ -22703,6 +22680,76 @@ fn validate_sanctioned_entry_all_occurrences(src: &str, fn_name: &str) -> Result
         ));
     }
     signature_is_non_producer(&sigs[0], fn_name)
+}
+
+/// MODULE-GLOBAL anti-usurpation gate for a sanctioned non-producer name: the
+/// AGGREGATE of EVERY crate-visible occurrence across ALL scanned
+/// `macro_hot_mirror/**` production sources — not a single file. `mirror_sources`
+/// is the per-file `(rel, src)` list the entry-surface guard already retains.
+///
+/// Why this exists beyond [`validate_sanctioned_entry_all_occurrences`]: that
+/// validator parses ONE `src` and so only covers occurrences WITHIN a single
+/// file. The genuine helper is a free fn in `script_setup_binder.rs`, so a
+/// file-located validator (locate the defining free-fn file, validate only that
+/// file's source) would NEVER see a producer-shaped associated-fn usurper of the
+/// sanctioned name placed in a DIFFERENT mirror file
+/// (`impl X { pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }`
+/// in `mod.rs`/`structural_lower.rs`) — it would be name-allowlisted but never
+/// signature-checked. The module-global aggregate closes that cross-file vector:
+///
+/// - Collect EVERY crate-visible occurrence (free fn + inherent-impl associated
+///   fn + inline-mod nesting — the surface [`collect_crate_visible_fn_signatures_named`]
+///   enumerates, matching the name scan) across ALL files, WITH file provenance
+///   `(rel, sig)` so a violation can name the offending file.
+/// - ZERO occurrences ⇒ `Err` (the sanctioned name vanished module-wide).
+/// - The AGGREGATE occurrence count must be EXACTLY ONE: a SECOND crate-visible
+///   definition under the sanctioned name ANYWHERE in the module — in ANY mirror
+///   file — is the usurpation vector and FAILS (the error names every file).
+/// - Each occurrence is signature-checked via [`signature_is_non_producer`]
+///   (returns the binder-seed `Vec<BinderScope>`, neither returns nor accepts the
+///   macro-arg product `HotTypeRef`); ANY producer-shaped occurrence in ANY file
+///   FAILS — not just the free-fn-defining file's occurrences.
+fn validate_sanctioned_entry_module_global(
+    mirror_sources: &[(String, String)],
+    fn_name: &str,
+) -> Result<(), String> {
+    // (rel, signature) for every crate-visible occurrence of the name, across
+    // ALL mirror files — the module-global aggregate.
+    let mut occurrences: Vec<(String, syn::Signature)> = Vec::new();
+    for (rel, src) in mirror_sources {
+        let file = syn::parse_file(src).map_err(|e| {
+            format!("sanctioned-entry module-global signature parse of `{rel}` for {fn_name}: {e}")
+        })?;
+        for sig in find_all_crate_visible_fn_signatures(&file.items, fn_name) {
+            occurrences.push((rel.clone(), sig));
+        }
+    }
+    if occurrences.is_empty() {
+        return Err(format!(
+            "sanctioned non-producer entry `{fn_name}` has NO crate-visible definition anywhere in \
+             `macro_hot_mirror/**` — it must be defined exactly once as a genuine non-producer"
+        ));
+    }
+    if occurrences.len() > 1 {
+        let files: Vec<&str> = occurrences.iter().map(|(rel, _)| rel.as_str()).collect();
+        return Err(format!(
+            "sanctioned non-producer entry `{fn_name}` is defined {} times across crate-visible \
+             surfaces (free fns + inherent-impl associated fns) MODULE-WIDE in `macro_hot_mirror/**` \
+             — a sanctioned name must have EXACTLY ONE genuine non-producer definition across the \
+             WHOLE module; a second crate-visible definition under the same name in ANY mirror file \
+             is the usurpation vector (e.g. the genuine free helper in one file plus an associated-fn \
+             usurper in another). Occurrences found in: {files:?}",
+            occurrences.len()
+        ));
+    }
+    // Exactly one occurrence module-wide — signature-check it (and, defensively,
+    // every occurrence if the count ever loosened: a producer-shaped occurrence
+    // in ANY file fails, naming the file).
+    for (rel, sig) in &occurrences {
+        signature_is_non_producer(sig, fn_name)
+            .map_err(|reason| format!("in `{rel}`: {reason}"))?;
+    }
+    Ok(())
 }
 
 /// Whether a single `syn::Signature` is a genuine non-producer per the
@@ -22844,28 +22891,26 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     // (returns the binder-seed `Vec<BinderScope>`, neither returns nor accepts
     // the macro-arg product `HotTypeRef`). A producer-shaped usurpation FAILS
     // here even though its name is on the allowlist.
+    //
+    // The validation is MODULE-GLOBAL: it aggregates EVERY crate-visible
+    // occurrence of the sanctioned name across ALL scanned `macro_hot_mirror/**`
+    // sources (free fns + inherent-impl associated fns + inline-mod nesting),
+    // requires the aggregate count to be EXACTLY ONE module-wide, and
+    // signature-checks every occurrence. A file-located validator (locate the
+    // free-fn-defining file, validate only that file) would never see a
+    // producer-shaped associated-fn usurper of the sanctioned name placed in a
+    // DIFFERENT mirror file — it would be name-allowlisted but never
+    // signature-checked. Aggregating across all files closes that cross-file
+    // vector: a second crate-visible occurrence ANYWHERE (or a producer-shaped
+    // occurrence in ANY file) reddens.
     for sanctioned in MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES {
-        // Locate the mirror file that DEFINES this sanctioned entry as a free
-        // fn and run the signature check against its real source.
-        let defining = mirror_sources.iter().find(|(_, src)| {
-            syn::parse_file(src)
-                .ok()
-                .and_then(|f| find_free_fn_signature(&f.items, sanctioned))
-                .is_some()
-        });
-        let (rel, src) = defining.unwrap_or_else(|| {
+        if let Err(reason) = validate_sanctioned_entry_module_global(&mirror_sources, sanctioned) {
             panic!(
-                "sanctioned non-producer entry `{sanctioned}` must be DEFINED as a free fn in a \
-                 `macro_hot_mirror/**` production file (anti-vacuity: a sanctioned entry that no \
-                 longer exists must be removed from MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES)"
-            )
-        });
-        if let Err(reason) = sanctioned_non_producer_signature_is_genuine(src, sanctioned) {
-            panic!(
-                "sanctioned non-producer SIGNATURE violation (FIX C) in `{rel}`: {reason}. The \
+                "sanctioned non-producer MODULE-GLOBAL SIGNATURE violation (FIX C): {reason}. The \
                  name-only allowlist is not enough — a sanctioned entry must be a genuine \
-                 non-producer (binder-seed `Vec<BinderScope>` return, no `HotTypeRef` in/out). \
-                 A producer-shaped fn USURPING the sanctioned name is forbidden."
+                 non-producer (binder-seed `Vec<BinderScope>` return, no `HotTypeRef` in/out) with \
+                 EXACTLY ONE crate-visible definition across the WHOLE module. A producer-shaped fn \
+                 USURPING the sanctioned name — in ANY mirror file — is forbidden."
             )
         }
     }
@@ -23179,14 +23224,17 @@ fn mirror_entry_surface_classifier_discriminates() {
          is not a producer-surface exposure"
     );
 
-    // (e) ANTI-ROGUE RED-PROOF — THE HEART OF THIS FIX. The REAL free helper
+    // (e) ANTI-ROGUE RED-PROOF (WITHIN one source). The REAL free helper
     // (genuine non-producer) PLUS a producer-shaped ASSOCIATED-fn usurper of the
-    // SAME sanctioned name inside an INHERENT `impl`. The old free-fn-only
-    // validator (`find_free_fn_signature`) located ONLY the genuine free fn and
-    // NEVER signature-checked the `impl` method, so this source PASSED before the
-    // fix. The strengthened all-occurrences validator FAILS it on TWO counts: a
-    // DUPLICATE crate-visible definition of the sanctioned name AND the
-    // associated-fn occurrence being producer-shaped (`-> Option<HotTypeRef>`).
+    // SAME sanctioned name inside an INHERENT `impl`, in ONE source. An earlier
+    // free-fn-only validator located ONLY the genuine free fn and NEVER
+    // signature-checked the `impl` method, so this source PASSED before the
+    // all-occurrences strengthening. The single-source all-occurrences validator
+    // FAILS it on TWO counts: a DUPLICATE crate-visible definition of the
+    // sanctioned name AND the associated-fn occurrence being producer-shaped
+    // (`-> Option<HotTypeRef>`). (Arm (i) below covers the CROSS-FILE variant —
+    // the usurper in a DIFFERENT source — which only the module-global validator
+    // catches.)
     let assoc_usurper = "pub(crate) fn build_script_setup_seed_frames(g: &G, s: &S) -> Vec<BinderScope> { Vec::new() }\n\
                          impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n}\n";
     let assoc_usurper_result = sanctioned_non_producer_signature_is_genuine(
@@ -23204,10 +23252,10 @@ fn mirror_entry_surface_classifier_discriminates() {
 
     // (f) A SOLE associated-fn occurrence (no free def) that is producer-shaped
     // also FAILS — proving the associated-fn surface is signature-checked in its
-    // OWN right, not merely caught as a duplicate. This is the exact gap the old
-    // validator left: an `impl`-only producer usurping the name with NO free fn
-    // would have produced `None` from `find_free_fn_signature` and (under the old
-    // guard's `.find` locator) never reached signature validation at all.
+    // OWN right, not merely caught as a duplicate. This is the exact gap an
+    // earlier free-fn-only validator left: an `impl`-only producer usurping the
+    // name with NO free fn would have yielded no free-fn match and (under that
+    // guard's free-fn `.find` locator) never reached signature validation at all.
     let assoc_only_usurper =
         "impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n}\n";
     let assoc_only_result = sanctioned_non_producer_signature_is_genuine(
@@ -23255,5 +23303,82 @@ fn mirror_entry_surface_classifier_discriminates() {
         "the genuine free helper as the SOLE crate-visible definition must pass even with a \
          module-private (inherited-visibility) `impl` method of the same name present — the private \
          method is not crate-visible and is not a duplicate"
+    );
+
+    // (i) ANTI-ROGUE RED-PROOF — THE HEART OF THIS FIX (CROSS-FILE). The genuine
+    // free helper lives in ONE mirror file; a producer-shaped ASSOCIATED-fn
+    // usurper of the SAME sanctioned name lives in a SEPARATE mirror file. This
+    // is the exact gap a file-located validator leaves: locate the file that
+    // declares the helper as a free fn, validate ONLY that file's source — the
+    // usurper in the OTHER file is name-allowlisted but NEVER signature-checked.
+    let genuine_src = (
+        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs".to_string(),
+        "pub(crate) fn build_script_setup_seed_frames(g: &G, s: &S) -> Vec<BinderScope> { Vec::new() }\n"
+            .to_string(),
+    );
+    let usurper_src = (
+        "crates/verter_session/src/macro_hot_mirror/mod.rs".to_string(),
+        "impl MacroHotMirror {\n    pub(crate) fn build_script_setup_seed_frames(ctx: &C) -> Option<HotTypeRef> { None }\n}\n"
+            .to_string(),
+    );
+    let cross_file_sources = vec![genuine_src.clone(), usurper_src];
+
+    // The MODULE-GLOBAL validator aggregates across BOTH files → it sees the
+    // duplicate sanctioned name AND the producer-shaped associated-fn occurrence
+    // in the other file → FAILS.
+    let module_global_result = validate_sanctioned_entry_module_global(
+        &cross_file_sources,
+        "build_script_setup_seed_frames",
+    );
+    assert!(
+        module_global_result.is_err(),
+        "a producer-shaped ASSOCIATED-fn usurper of the sanctioned name in a SEPARATE mirror file \
+         (the genuine free helper in `script_setup_binder.rs` PLUS \
+         `impl MacroHotMirror {{ pub(crate) fn build_script_setup_seed_frames(..) -> Option<HotTypeRef> }}` \
+         in `mod.rs`) MUST fail the MODULE-GLOBAL sanction — the aggregate across files sees TWO \
+         crate-visible occurrences AND a producer-shaped one. Got {module_global_result:?}"
+    );
+    // The failure names the offending OTHER file (provenance), proving the
+    // aggregate is genuinely cross-file and not single-file-scoped.
+    let module_global_msg = module_global_result.unwrap_err();
+    assert!(
+        module_global_msg.contains("mod.rs"),
+        "the MODULE-GLOBAL violation message must name the offending mirror file (`mod.rs`) via file \
+         provenance — got: {module_global_msg}"
+    );
+
+    // DEMONSTRATE the single-file-scoped form would have PASSED: a file-located
+    // validator picks the file that declares the helper as a free fn
+    // (`script_setup_binder.rs`) and validates ONLY that source — which is a lone,
+    // genuine, non-producer free fn → `Ok`. It NEVER sees the usurper in the other
+    // file. This is precisely the cross-file hole the module-global form closes.
+    let single_file_scoped_result = sanctioned_non_producer_signature_is_genuine(
+        &genuine_src.1,
+        "build_script_setup_seed_frames",
+    );
+    assert!(
+        single_file_scoped_result.is_ok(),
+        "the single-file-scoped validator, fed ONLY the genuine free-helper file (as a file-located \
+         validator would pick it), PASSES — it never sees the cross-file usurper. This is the hole \
+         the module-global form closes; got {single_file_scoped_result:?}"
+    );
+
+    // Positive control for the module-global path: the genuine helper as the SOLE
+    // occurrence across BOTH files (the other file has NO occurrence of the name)
+    // PASSES — the aggregate count is exactly one and its signature is genuine.
+    let other_file_no_occurrence = (
+        "crates/verter_session/src/macro_hot_mirror/structural_lower.rs".to_string(),
+        "pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(g: &G) -> R { todo!() }\n"
+            .to_string(),
+    );
+    let module_global_ok_sources = vec![genuine_src, other_file_no_occurrence];
+    assert!(
+        validate_sanctioned_entry_module_global(
+            &module_global_ok_sources,
+            "build_script_setup_seed_frames"
+        )
+        .is_ok(),
+        "the genuine free helper as the SOLE crate-visible occurrence across all mirror files \
+         (the other file declares only the restricted lowerer) must PASS the module-global sanction"
     );
 }

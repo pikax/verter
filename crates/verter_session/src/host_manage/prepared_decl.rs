@@ -726,13 +726,17 @@ impl VerterHost {
                 continue;
             }
 
-            // VALUE rail. Reached ONLY when the type route above resolved to the
-            // barrel ITSELF (a same-file resolution): the symbol-space-neutral
-            // type rail follows every CROSS-FILE re-export hop (value-only
-            // included) and short-circuits the moment it lands cross-file, so the
-            // only remaining work here is the SAME-FILE terminal `typeof`
-            // value-alias peel (`export const V: typeof realImpl = realImpl` on
-            // the barrel → `realImpl`) — this rail's distinct live contribution.
+            // VALUE rail. Reached ONLY when the type rail above did NOT produce a
+            // DIFFERENT final canonical — i.e. `type_final_canonical ==
+            // barrel_canonical`, which covers BOTH a same-file resolution (the
+            // barrel declares/re-aliases the name itself) AND a type-route
+            // miss/fallback (the resolver returns `(barrel, name)` when the route
+            // does not resolve). The symbol-space-neutral type rail follows every
+            // CROSS-FILE re-export hop (value-only included) and short-circuits
+            // the moment it lands cross-file, so in the reached case the only
+            // remaining work is the SAME-FILE terminal `typeof` value-alias peel
+            // (`export const V: typeof realImpl = realImpl` on the barrel →
+            // `realImpl`) — this rail's distinct live contribution.
             // The cross-file fact completeness is delivered by the type rail's
             // full-chain walk above, not here. Resolve through the VIEW-AWARE,
             // FULL-CHAIN-fact resolver (symmetric with the type rail, same final

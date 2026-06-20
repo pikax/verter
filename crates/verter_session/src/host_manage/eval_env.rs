@@ -390,8 +390,10 @@ impl VerterHost {
     ///
     /// Integration role at the sole production call site
     /// (`build_prepared_import_canonicalization`): this rail is reached ONLY
-    /// after the symbol-space-NEUTRAL TYPE rail above it has already resolved
-    /// the name to the BARREL itself (a same-file resolution). The type rail's
+    /// when the symbol-space-NEUTRAL TYPE rail above it did NOT produce a
+    /// DIFFERENT final canonical — i.e. it resolved the name to the BARREL
+    /// itself, covering BOTH a same-file resolution AND a type-route
+    /// miss/fallback (both return the barrel). The type rail's
     /// participant-accumulating walk follows EVERY cross-file re-export hop —
     /// value-only re-exports included, because module resolution is
     /// symbol-space-neutral — and short-circuits the moment it lands cross-file;

@@ -1321,13 +1321,19 @@ fn fix_a_value_export_root_resolver_normalizes_final_canonical_like_type_rail() 
         host.resolve_value_export_root_with_facts_with_store_view(&view, "/pkg/barrel.ts", "W");
     let identity = identity.expect("the value export root must resolve the `.js` terminal");
 
+    // FULL (canonical, symbol) identity: the normalization-parity fix pins the
+    // CANONICAL; this assertion ALSO pins the SYMBOL axis so a resolver that
+    // normalized the canonical but returned the WRONG symbol would still fail.
+    // The terminal is a plain `export declare const W` on the `.d.ts` (no
+    // `typeof` value-alias), so the resolved symbol is `W` on `/pkg/impl.d.ts`.
     assert_eq!(
-        identity.canonical_id.as_str(),
-        "/pkg/impl.d.ts",
+        (identity.canonical_id.as_str(), identity.name.as_str()),
+        ("/pkg/impl.d.ts", "W"),
         "the value-export root resolver must normalize its FINAL canonical through \
          `resolve_eval_dependency_canonical` — the `.js` terminal `/pkg/impl.js` collapses onto its \
-         `.d.ts` type companion `/pkg/impl.d.ts`, matching the TYPE rail (parity). The pre-fix value \
-         rail returned the raw `/pkg/impl.js`, diverging from the type rail."
+         `.d.ts` type companion `/pkg/impl.d.ts`, matching the TYPE rail (parity) — AND report the \
+         correct terminal symbol `W` (the symbol axis is pinned too). The pre-fix value rail returned \
+         the raw `/pkg/impl.js`, diverging from the type rail."
     );
     assert_ne!(
         identity.canonical_id.as_str(),
