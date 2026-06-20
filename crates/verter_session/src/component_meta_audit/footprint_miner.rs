@@ -606,6 +606,18 @@ const STRUCTURAL_HASH_MAX_DEPTH: u32 = 64;
 /// equally-unresolved children collapsing is acceptable; two equal-content
 /// children diverging by ordinal is not).
 fn structural_hash_of(graph: &SemanticGraphStore, data: &SemanticNodeData) -> Hash16 {
+    // TODO(follow-up): a per-mine `FxHashMap<SemanticNodeId, Hash16>` content-hash
+    // memo would let `encode_child` reuse a child's already-computed fingerprint
+    // instead of re-walking shared subtrees per reference. It is NOT a drop-in:
+    // the encoder emits a node's FULL recursive bytes inline (not its 16-byte
+    // hash), and the same node legitimately encodes as `TAG_CYCLE` vs full
+    // content depending on the descent path — a naive `SemanticNodeId → bytes`
+    // (or `→ Hash16`) memo is path-INSENSITIVE and would both change every
+    // fingerprint's bytes and mis-handle the cycle sentinel. The durable shape is
+    // an encode-once-then-splice cache that preserves byte-identity and respects
+    // the visited-path sentinels; deferred so this fix does not risk any
+    // fingerprint value. The depth-64 ceiling + visited set already bound the
+    // current re-walk, so it terminates.
     let mut enc = StructuralEncoder {
         graph,
         buf: Vec::with_capacity(128),
@@ -1041,9 +1053,11 @@ impl StructuralEncoder<'_> {
             // ── Pure-scalar / id-free variants. Encoded by content. None of
             // these payloads can transitively hold a `SemanticNodeId`:
             // `PrimitiveKind` / `LiteralValue` / `QueryError` / the `Infer`
-            // name / `RawFallback` raw text / `SyntheticBindingId` / the
-            // `DeclRef` identity are all scalar/string or live in a lower crate
-            // than `SemanticNodeId`, so a `Debug` of them is content-only. ──
+            // name / `RawFallback` raw text / the `DeclRef` identity are all
+            // scalar/string or live in a lower crate than `SemanticNodeId`, so a
+            // `Debug` of them is content-only. (`SyntheticBinding` is NOT in this
+            // group: its `id` is scalar, but its `value_node` is a child node id
+            // that is descended via `encode_child` — see that arm below.) ──
             SemanticNodeData::Primitive(p) => {
                 self.buf.push(VariantTag::Primitive as u8);
                 self.push_str(&format!("{p:?}"));
@@ -1102,21 +1116,38 @@ impl StructuralEncoder<'_> {
                     None => self.push_present(false),
                 }
                 self.push_str(&id.binding_name);
-                // `value_node` is a value-side provenance ordinal carried on the
-                // payload (NOT part of the binding identity). It is folded as a
-                // content field of THIS node, not descended as a graph child —
-                // it never feeds a child fingerprint and never crosses the
-                // store/generation determinism boundary as a structural id.
-                self.buf.extend_from_slice(&value_node.to_le_bytes());
+                // `value_node` is a [`SemanticNodeId`] arena ordinal stored as a
+                // raw `u64` on the payload — store/generation-relative, NOT
+                // content. It is NEVER folded as the ordinal: it is descended as
+                // a graph child via [`Self::encode_child`], so the fingerprint
+                // carries the RECURSIVE CONTENT of the node it points at (or a
+                // fixed cycle / unresolved / depth sentinel), exactly like every
+                // other child id. `value_node` participates in node interning
+                // Eq/Hash, so two bindings pointing at different value nodes stay
+                // structurally DISTINCT (descending by content preserves that),
+                // while two content-equivalent bindings whose target was interned
+                // at a different ordinal hash IDENTICALLY (the cross-run
+                // byte-identity contract this encoder establishes).
+                self.encode_child(SemanticNodeId(*value_node), depth);
             }
             SemanticNodeData::VueMacroElements(elements) => {
                 self.buf.push(VariantTag::VueMacroElements as u8);
-                // `ResolvedElements` lives in `verter_parser` — a crate LOWER
-                // than the `verter_session` crate that owns `SemanticNodeId`, so
-                // it provably cannot embed a `SemanticNodeId` (crate-dependency
-                // direction). It exposes no stable structural-hash accessor, so
-                // a content hash of its `Debug` rendering is the stable identity
-                // available here; the Debug is content-only (no arena ordinal).
+                // `ResolvedElements` (defined in `verter_parser`) holds only
+                // parser-domain resolved data — `props`, `call_signatures`,
+                // `has_call_signature`, `root_runtime_types` — and NO
+                // `SemanticNodeId` / `value_node` ordinal: no live producer
+                // inserts a session-origin handle into it. So for the CURRENT
+                // payload shape its `Debug` rendering is content-only (no arena
+                // ordinal), and a content hash of it is the stable identity
+                // available here (it exposes no structural-hash accessor).
+                //
+                // The "lower crate" relationship is NOT the guarantee — a lower
+                // crate can still carry a raw `u64` ordinal on a payload (as
+                // `SyntheticBinding.value_node` does). The guarantee is the live
+                // field shape above. If session-origin typed IR carrying a
+                // `SemanticNodeId` / ordinal could ever enter `ResolvedElements`,
+                // this arm MUST become an explicit child-descending encoder (like
+                // `SyntheticBinding`), not a `Debug` of the ordinal.
                 self.push_str(&format!("{elements:?}"));
             }
         }

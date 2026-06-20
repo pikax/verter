@@ -514,17 +514,35 @@ fn structural_hash_recursion_into_grandchildren_is_load_bearing() {
     );
 }
 
-/// MINED-FOOTPRINT BYTE-STABILITY OVER CARRIERS. Build two IDENTICAL graphs
-/// each containing an interned `Foo<String>` carrier referenced by the
-/// derivation edges, mine each, and assert the serialised footprints are
-/// byte-identical. This drives the structural encoder through the full
-/// `mine_footprint` pipeline (node-record construction + node sort by
-/// `structural_hash`) on CARRIER nodes — the determinism contract the file
-/// header pins, now exercised over the variant-tagged content-only encoder.
+/// MINED-FOOTPRINT BYTE-STABILITY OVER CARRIERS UNDER ORDINAL SKEW. Build two
+/// graphs each containing an equivalent `Foo<String>` carrier referenced by the
+/// derivation edges, but intern the carrier's `String` child at a DIFFERENT
+/// arena ordinal in graph B (graph B interns unrelated fillers FIRST), then mine
+/// each and assert the serialised footprints are byte-identical. This drives the
+/// structural encoder through the full `mine_footprint` pipeline (node-record
+/// construction + node sort by `structural_hash`) on CARRIER nodes — the
+/// determinism contract the file header pins.
+///
+/// The ordinal skew makes this a genuine cross-run byte-identity discriminator,
+/// not a same-order pipeline smoke test: it FAILS against the carrier-arg
+/// ordinal-folding tree (the old `push_carrier_arg_hashes` folded the child's
+/// raw `SemanticNodeId.0`, so the skewed `String` ordinals produced divergent
+/// carrier bytes and the two mined footprints differed). The content-only
+/// encoder descends to the `Primitive(String)` content in both graphs, so the
+/// ordinal skew is invisible.
 #[test]
 fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
-    fn build_graph_with_carrier() -> (SemanticGraphStore, SemanticNodeId, SemanticNodeId) {
+    /// `skew` controls the carrier child's arena ordinal: when set, unrelated
+    /// filler nodes are interned FIRST so the `String` child lands at a HIGHER
+    /// ordinal than in the un-skewed graph.
+    fn build_graph_with_carrier(
+        skew: bool,
+    ) -> (SemanticGraphStore, SemanticNodeId, SemanticNodeId) {
         let graph = empty_graph();
+        if skew {
+            let _f0 = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+            let _f1 = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
+        }
         let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let carrier_id = graph.intern_node(bare_ref_with_arg(string_id));
         (graph, carrier_id, string_id)
@@ -550,10 +568,18 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
         state
     }
 
-    let (graph_a, carrier_a, child_a) = build_graph_with_carrier();
-    let (graph_b, carrier_b, child_b) = build_graph_with_carrier();
+    let (graph_a, carrier_a, child_a) = build_graph_with_carrier(false);
+    let (graph_b, carrier_b, child_b) = build_graph_with_carrier(true);
     let ctx_a = make_ctx(1);
     let ctx_b = make_ctx(1);
+
+    // Precondition: graph B's `String` child genuinely occupies a DIFFERENT
+    // arena ordinal than graph A's — otherwise this would pass vacuously even
+    // against the carrier-arg ordinal-folding encoder.
+    assert_ne!(
+        child_a.0, child_b.0,
+        "test setup must give the carrier's `String` child different ordinals across the two graphs"
+    );
 
     let fp_a = mine_footprint(
         &graph_a,
@@ -584,7 +610,149 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
     let bytes_b = serde_json::to_vec(&fp_b).expect("serialise b");
     assert_eq!(
         bytes_a, bytes_b,
-        "CARRIER DETERMINISM: two identically-built graphs containing an interned `Foo<String>` \
-         carrier must mine to BYTE-IDENTICAL footprints across runs."
+        "CARRIER DETERMINISM UNDER ORDINAL SKEW: two graphs containing an equivalent `Foo<String>` \
+         carrier must mine to BYTE-IDENTICAL footprints even when the `String` child received a \
+         different arena ordinal in each graph. The carrier-arg ordinal-folding code folded the \
+         child's raw ordinal into the carrier bytes and FAILED this; the content-only encoder \
+         descends to the `Primitive(String)` content and passes."
+    );
+}
+
+use crate::semantic_query::SyntheticBindingId;
+use verter_type_expr::SyntheticCarrierSurfaceKind;
+
+/// Build a content-free [`SyntheticBindingId`] — the four scalar/string fields,
+/// NO `value_node`. Two ids built from the same `(slot, binding)` are `Eq`.
+fn synthetic_binding_id(slot: &str, binding: &str) -> SyntheticBindingId {
+    SyntheticBindingId {
+        scope_canonical_id: Arc::from("/Comp.vue"),
+        surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+        slot_name: Some(Arc::from(slot)),
+        binding_name: Arc::from(binding),
+    }
+}
+
+/// Intern a real `SyntheticBinding` node whose `value_node` points at the
+/// already-interned `target` node (re-attaching the target's raw ordinal exactly
+/// as the production lowering does at `structural_lower.rs`). The binding's
+/// `value_node` therefore RESOLVES in `graph`, so the encoder descends it.
+fn intern_synthetic_binding(
+    graph: &SemanticGraphStore,
+    id: SyntheticBindingId,
+    target: SemanticNodeId,
+) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::SyntheticBinding {
+        id,
+        value_node: target.0,
+    })
+}
+
+/// CROSS-GRAPH STABILITY OF EQUIVALENT SYNTHETIC BINDINGS UNDER ORDINAL SKEW.
+/// Two graphs each hold a `SyntheticBinding` with the SAME content-free
+/// [`SyntheticBindingId`] whose `value_node` points at a target of the SAME
+/// CONTENT (`Primitive(String)`), but graph B interns unrelated fillers FIRST so
+/// its target lands at a DIFFERENT arena ordinal. The two structural fingerprints
+/// must be EQUAL.
+///
+/// This is the discriminating regression for the `value_node` ordinal leak: it
+/// FAILS against the tree where the `SyntheticBinding` arm folded
+/// `value_node.to_le_bytes()` — the raw `SemanticNodeId` ordinal — straight into
+/// the content hash, so a target at ordinal 1 and the same-content target at
+/// ordinal 3 produced divergent bytes (a cross-run false-DISTINCTION). Descending
+/// `value_node` via `encode_child` hashes the pointed-at `Primitive(String)`
+/// content in both graphs, so the ordinal skew is invisible.
+#[test]
+fn synthetic_binding_is_cross_graph_stable_despite_different_value_node_ordinals() {
+    // Graph A: `String` target is the FIRST interned node → low ordinal.
+    let graph_a = empty_graph();
+    let target_a = graph_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let binding_a =
+        intern_synthetic_binding(&graph_a, synthetic_binding_id("default", "row"), target_a);
+
+    // Graph B: intern unrelated fillers FIRST, so the same-content `String`
+    // target lands at a HIGHER ordinal than in graph A.
+    let graph_b = empty_graph();
+    let _f0 = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let _f1 = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
+    let target_b = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let binding_b =
+        intern_synthetic_binding(&graph_b, synthetic_binding_id("default", "row"), target_b);
+
+    // Precondition: the two `value_node` targets genuinely occupy DIFFERENT
+    // arena ordinals — otherwise the test would pass vacuously even against the
+    // ordinal-folding `value_node.to_le_bytes()` code.
+    assert_ne!(
+        target_a.0, target_b.0,
+        "test setup must give the `value_node` target different ordinals across the two graphs"
+    );
+
+    let hash_a = structural_hash_of(
+        &graph_a,
+        &graph_a.node_data(binding_a).expect("binding_a interned"),
+    );
+    let hash_b = structural_hash_of(
+        &graph_b,
+        &graph_b.node_data(binding_b).expect("binding_b interned"),
+    );
+    assert_eq!(
+        hash_a, hash_b,
+        "SYNTHETIC-BINDING CROSS-GRAPH STABILITY: two `SyntheticBinding`s with the same \
+         content-free id and a `value_node` pointing at the same-content target must hash \
+         IDENTICALLY even when that target received a different arena ordinal in each graph. The \
+         ordinal-folding code folded the raw `value_node` ordinal and FAILED this; descending it \
+         via `encode_child` hashes the target's `Primitive(String)` content and passes."
+    );
+}
+
+/// DISTINCTION BY VALUE-NODE CONTENT UNDER COLLIDING ORDINALS. Two graphs each
+/// hold a `SyntheticBinding` with the SAME content-free [`SyntheticBindingId`],
+/// but their `value_node` targets COLLIDE on the arena ordinal while pointing at
+/// DIFFERENT content (`Primitive(String)` vs `Primitive(Number)`). The two
+/// structural fingerprints must DIFFER.
+///
+/// This proves the content distinction is preserved and guards against a naive
+/// "just drop `value_node`" fix: dropping it would leave only the identical
+/// content-free id, so the two semantically-DISTINCT bindings would COLLIDE on
+/// the footprint (a false-collision, strictly worse than the ordinal fold's
+/// false-distinction). It also defeats an ordinal-only shortcut: the ordinals
+/// collide, so only descending `value_node`'s content distinguishes them.
+#[test]
+fn synthetic_binding_distinguishes_value_node_content_under_colliding_ordinals() {
+    // Graph A: `String` target is the FIRST interned node → ordinal N.
+    let graph_a = empty_graph();
+    let target_a = graph_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let binding_a =
+        intern_synthetic_binding(&graph_a, synthetic_binding_id("default", "row"), target_a);
+
+    // Graph B: `Number` target is the FIRST interned node → the SAME ordinal N,
+    // but DIFFERENT content.
+    let graph_b = empty_graph();
+    let target_b = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let binding_b =
+        intern_synthetic_binding(&graph_b, synthetic_binding_id("default", "row"), target_b);
+
+    // Precondition: the two `value_node` targets COLLIDE on the ordinal — so a
+    // fingerprint that distinguished only by ordinal (or that dropped
+    // `value_node` entirely) could NOT tell these two bindings apart.
+    assert_eq!(
+        target_a.0, target_b.0,
+        "test setup must collide the `value_node` target ordinal across the two graphs"
+    );
+
+    let hash_a = structural_hash_of(
+        &graph_a,
+        &graph_a.node_data(binding_a).expect("binding_a interned"),
+    );
+    let hash_b = structural_hash_of(
+        &graph_b,
+        &graph_b.node_data(binding_b).expect("binding_b interned"),
+    );
+    assert_ne!(
+        hash_a, hash_b,
+        "SYNTHETIC-BINDING CONTENT DISTINCTION: two `SyntheticBinding`s with the same content-free \
+         id whose `value_node` points at DIFFERENT content (`String` vs `Number`) must hash \
+         DIFFERENTLY even though the target ordinals collide. Descending `value_node` via \
+         `encode_child` distinguishes the targets' content; dropping `value_node` would collide \
+         them, and an ordinal-only fold could not tell them apart under colliding ordinals."
     );
 }
