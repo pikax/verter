@@ -433,15 +433,21 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `pub(in crate::macro_hot_mirror)` ancestor-private, so its SOLE
             // production caller is the macro hot-mirror builder and a second
             // macro-arg graph producer is unrepresentable by construction. The
-            // PRIVACY-SHAPE guard pins that visibility; the ENTRY-SURFACE guard
-            // pins `macro_type_arg_hot_ref` as the SOLE crate-visible module-level
-            // producer entry of the module (no second outward producer fn beyond
-            // the cfg-gated test facade); the ORDERING TRIPWIRE bans a production
-            // macro-arg eager-lowering path outside the mirror (a FILE-SCOPE catch:
-            // whole-function co-presence PLUS the cross-function-same-file
-            // binding-flow helper split); the PURITY guard bans the full
-            // route/import/cross-file-symbol/carrier-head resolution surface
-            // (`prepared_decl_bundle`, `cached_import_route_resolution`,
+            // PRIVACY-SHAPE guards pin that visibility on BOTH producer-capable
+            // helpers — the lowerer AND the shared binder-seed helper
+            // `build_script_setup_seed_frames` (likewise `pub(in
+            // crate::macro_hot_mirror)`, so no foreign module can open a second
+            // binder-seed producer); those compiler-enforced privacies are the
+            // LOAD-BEARING confinement. The ENTRY-SURFACE guard is a BOUNDED
+            // defense-in-depth token tripwire (NOT exhaustive — documented residual
+            // tail) that pins `macro_type_arg_hot_ref` as the SOLE crate-visible
+            // module-level producer entry of the module (no second outward producer
+            // fn beyond the cfg-gated test facade); the ORDERING TRIPWIRE bans a
+            // production macro-arg eager-lowering path outside the mirror (a
+            // FILE-SCOPE catch: whole-function co-presence PLUS the
+            // cross-function-same-file binding-flow helper split); the PURITY guard
+            // bans the full route/import/cross-file-symbol/carrier-head resolution
+            // surface (`prepared_decl_bundle`, `cached_import_route_resolution`,
             // `resolve_route_type_edge`, `resolve_type_dependency_canonical`,
             // `resolve_owner_direct_import`, `routed_shallow_state`,
             // `resolve_*_head`, …) inside the mirror producer — resolution + dep
@@ -450,6 +456,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // from the owner's route-free `IndexedReady` (`raw_source` +
             // `framework_parse`).
             "structural_lowerer_production_entry_is_macro_hot_mirror_private",
+            "script_setup_binder_helper_is_module_private",
             "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
             "no_production_macro_arg_eager_lowering_outside_mirror",
             "macro_hot_mirror_producer_is_pure_no_route_resolution",

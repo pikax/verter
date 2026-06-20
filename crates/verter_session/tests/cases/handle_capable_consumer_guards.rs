@@ -835,12 +835,14 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 
 // ===========================================================================
 // Macro hot-mirror producer guard SET — the single-engine macro-arg producer
-// is defended by four guards: the module-visibility privacy-shape guard
-// (`structural_lowerer_production_entry_is_macro_hot_mirror_private`), the
+// is defended by five guards: the TWO module-visibility privacy-shape guards
+// (`structural_lowerer_production_entry_is_macro_hot_mirror_private` on the
+// lowerer + `script_setup_binder_helper_is_module_private` on the shared
+// binder-seed helper — the compiler-enforced LOAD-BEARING confinement), the
 // file-scope ordering tripwire
 // (`no_production_macro_arg_eager_lowering_outside_mirror`), the purity guard
-// (`macro_hot_mirror_producer_is_pure_no_route_resolution`), and the
-// entry-surface guard
+// (`macro_hot_mirror_producer_is_pure_no_route_resolution`), and the BOUNDED
+// entry-surface token tripwire
 // (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`). The witness
 // below pins that set into the registry; it does not re-define those guards.
 // ===========================================================================
@@ -863,6 +865,17 @@ fn macro_hot_mirror_producer_privacy_guard_remains_registered() {
     assert!(
         guards.contains("structural_lowerer_production_entry_is_macro_hot_mirror_private"),
         "the producer-privacy guard's assertion must remain in architecture_guards.rs"
+    );
+    assert!(
+        registry.contains("script_setup_binder_helper_is_module_private"),
+        "the binder-seed-helper module-privacy guard must remain registered — \
+         `build_script_setup_seed_frames` is `pub(in crate::macro_hot_mirror)` ancestor-private, the \
+         compiler-enforced load-bearing confinement against a second binder-seed producer"
+    );
+    assert!(
+        guards.contains("script_setup_binder_helper_is_module_private"),
+        "the binder-seed-helper module-privacy guard's assertion must remain in \
+         architecture_guards.rs"
     );
     assert!(
         guards.contains("no_production_macro_arg_eager_lowering_outside_mirror"),

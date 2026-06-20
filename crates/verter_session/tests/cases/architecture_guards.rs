@@ -21547,6 +21547,146 @@ fn structural_lowerer_privacy_classifier_discriminates() {
     );
 }
 
+/// The defining module of the shared binder-seed helper. It lives UNDER
+/// `crate::macro_hot_mirror` and is `pub(in crate::macro_hot_mirror)` —
+/// ancestor-private to the mirror, mirroring the structural lowerer's own
+/// confinement — so no FOREIGN production module can NAME it. That makes a
+/// second binder-seed producer reachable from outside the module UNREPRESENTABLE
+/// by construction (compiler-enforced — a foreign reference is a compile error,
+/// not a lint). This is the LOAD-BEARING anti-rogue guarantee for the helper;
+/// the bounded token tripwire
+/// (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`) is
+/// defense-in-depth on top of it.
+const SCRIPT_SETUP_BINDER_DEFINING_MODULE: &str = "macro_hot_mirror/script_setup_binder.rs";
+
+/// Classify the visibility shape of the `build_script_setup_seed_frames`
+/// DEFINITION in the given source body. Returns the offending reason when the
+/// entry is NOT the required `pub(in crate::macro_hot_mirror)` ancestor-private
+/// shape (the shape that makes a foreign-module binder-seed producer
+/// unrepresentable), or `None` when the shape is correct. Looks at the
+/// DEFINITION line only. ANY broader visibility — bare `pub`, `pub(crate)`,
+/// `pub(super)`, or even `pub(in crate)` (the crate root) — lets a foreign
+/// production module name the helper, re-opening the cross-module producer
+/// surface, and is rejected; only the EXACT `pub(in crate::macro_hot_mirror)`
+/// subtree path passes.
+fn script_setup_binder_privacy_violation(body: &str) -> Option<String> {
+    let needle = "fn build_script_setup_seed_frames(";
+    let def_line = body.lines().find(|l| l.contains(needle))?;
+    let trimmed = def_line.trim_start();
+    if trimmed.starts_with("pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(") {
+        return None;
+    }
+    // Any broader visibility (`pub`, `pub(crate)`, `pub(in crate)`,
+    // `pub(super)`, bare) lets a foreign production module name the helper — the
+    // forbidden cross-module-producer shape.
+    Some(format!(
+        "the shared binder-seed helper must be declared \
+         `pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(` (ancestor-private to \
+         the macro hot mirror, so no foreign production module can name it and open a second \
+         binder-seed producer); found: `{}`",
+        trimmed
+    ))
+}
+
+/// PRIMARY by-construction confinement guard for the shared binder-seed helper
+/// (make-unrepresentable): the production helper `build_script_setup_seed_frames`
+/// lives under `crate::macro_hot_mirror::script_setup_binder` and is
+/// `pub(in crate::macro_hot_mirror)`. Its only callers (the mirror's macro-arg
+/// builder and the in-module tests) are within the module subtree;
+/// ancestor-privacy makes a SECOND binder-seed producer reachable from a foreign
+/// module UNREPRESENTABLE (a foreign module cannot name the fn — a compile
+/// error, not a lint), so the no-second-producer rule needs no caller scanner
+/// here. This is the COMPILER-ENFORCED load-bearing layer; the bounded token
+/// tripwire `macro_hot_mirror_exposes_single_crate_visible_producer_entry` is
+/// defense-in-depth on top of it (it is NOT exhaustive — see its doc comment for
+/// the documented residual evasion tail). The TWO together mirror the structural
+/// lowerer's own two-layer confinement
+/// (`structural_lowerer_production_entry_is_macro_hot_mirror_private` + the same
+/// token tripwire).
+///
+/// GOVERNANCE: if the helper's visibility is ever WIDENED (e.g. to `pub(crate)`
+/// to let a relocated decl-body producer in another module call it), this guard
+/// REDs — the widening must be a DELIBERATE re-home to the new caller's shared
+/// ancestor-private boundary, reviewed against this guard, never a passive
+/// `pub(crate)` that silently re-opens the cross-module producer surface.
+#[test]
+fn script_setup_binder_helper_is_module_private() {
+    let rel = "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs";
+    let body = std::fs::read_to_string(workspace_path(rel))
+        .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
+    // Anti-vacuity: the defining module must exist at the expected path and carry
+    // the definition — its absence means the helper vanished or moved.
+    assert!(
+        body.contains("fn build_script_setup_seed_frames("),
+        "anti-vacuity: the shared binder-seed helper definition must live at `{rel}` \
+         (`{SCRIPT_SETUP_BINDER_DEFINING_MODULE}`) — its absence means the binder-seed producer \
+         regressed or relocated"
+    );
+    if let Some(reason) = script_setup_binder_privacy_violation(&body) {
+        panic!(
+            "binder-seed-helper confinement rule violated: {reason}. The helper must stay \
+             ancestor-private to `crate::macro_hot_mirror` so a second binder-seed producer \
+             reachable from a foreign module is unrepresentable by construction. A widening must be \
+             a deliberate re-home to the new caller's shared ancestor-private boundary, not a \
+             passive `pub(crate)`."
+        );
+    }
+}
+
+/// Self-test for [`script_setup_binder_privacy_violation`] (ANTI-ROGUE
+/// RED-PROOF): the genuine `pub(in crate::macro_hot_mirror)` shape is ACCEPTED;
+/// a `pub(crate)` / bare `pub` / `pub(in crate)` (crate-root) WIDENING is
+/// REJECTED. A privacy guard that cannot fail on a widening is a stub — these
+/// plants prove it catches the exact re-opening of the cross-module producer
+/// surface the load-bearing confinement forbids.
+#[test]
+fn script_setup_binder_privacy_classifier_discriminates() {
+    // ACCEPT — the genuine ancestor-private-to-the-mirror shape.
+    let ok = "    pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(\n";
+    assert!(
+        script_setup_binder_privacy_violation(ok).is_none(),
+        "the genuine `pub(in crate::macro_hot_mirror)` shape MUST pass — it is ancestor-private to \
+         the mirror, so no foreign module can name the helper"
+    );
+    // REJECT — `pub(crate)` (the exact passive widening the ruling forbids): any
+    // foreign production module can now name the helper.
+    let wrong_crate = "    pub(crate) fn build_script_setup_seed_frames(\n";
+    assert!(
+        script_setup_binder_privacy_violation(wrong_crate).is_some(),
+        "a `pub(crate)` widening MUST be reported — it re-opens the cross-module binder-seed \
+         producer surface the compiler-enforced confinement closes"
+    );
+    // REJECT — bare `pub` (wider still).
+    let wrong_pub = "pub fn build_script_setup_seed_frames(\n";
+    assert!(
+        script_setup_binder_privacy_violation(wrong_pub).is_some(),
+        "a bare `pub` widening MUST be reported as a confinement violation"
+    );
+    // REJECT — `pub(in crate)` (the crate ROOT): Rust treats `pub(in crate)` as
+    // identical crate-wide visibility to `pub(crate)`, so a foreign module can
+    // name the helper. Only the DEEPER `pub(in crate::macro_hot_mirror)` subtree
+    // path is module-private.
+    let wrong_pub_in_crate = "    pub(in crate) fn build_script_setup_seed_frames(\n";
+    assert!(
+        script_setup_binder_privacy_violation(wrong_pub_in_crate).is_some(),
+        "a `pub(in crate)` (crate-root) shape MUST be reported — it is crate-wide visibility \
+         (identical to `pub(crate)`), not the module-private `pub(in crate::macro_hot_mirror)` \
+         subtree path"
+    );
+    // The REAL helper source is the genuine shape (revert proof: the production
+    // tree is pristine — the helper is module-private to the mirror).
+    let real = std::fs::read_to_string(workspace_path(
+        "crates/verter_session/src/macro_hot_mirror/script_setup_binder.rs",
+    ))
+    .expect("the binder-seed helper's defining file must be readable");
+    assert!(
+        script_setup_binder_privacy_violation(&real).is_none(),
+        "the REAL `build_script_setup_seed_frames` in `script_setup_binder.rs` MUST be \
+         `pub(in crate::macro_hot_mirror)` (ancestor-private to the mirror) — if this reddens, the \
+         helper's visibility was widened, re-opening the cross-module producer surface"
+    );
+}
+
 /// SECONDARY ordering tripwire (codex-flagged distinct migration invariant):
 /// a NON-TEST `verter_session` production FILE that BOTH reads an
 /// `AnalyzedMacro.parsed_type_argument` AND lowers via
@@ -22316,20 +22456,29 @@ fn macro_hot_mirror_purity_scanner_discriminates() {
 /// mirror module.
 const MIRROR_SOLE_PRODUCER_ENTRY: &str = "macro_type_arg_hot_ref";
 
-/// Crate-visible mirror fns that are NOT macro-arg producer entries and are
-/// therefore sanctioned alongside [`MIRROR_SOLE_PRODUCER_ENTRY`]. Each is a
-/// shared STRUCTURAL helper a foreign module legitimately calls — it does NOT
-/// produce a macro-arg graph node (the single-engine producer concern), so it
-/// does not re-open a second outward macro-arg producer entry.
+/// Mirror fns that are NOT macro-arg producer entries and are therefore the
+/// SANCTIONED-NAME subjects of the bounded token tripwire alongside
+/// [`MIRROR_SOLE_PRODUCER_ENTRY`]. Each is a shared STRUCTURAL helper — it does
+/// NOT produce a macro-arg graph node (the single-engine producer concern), so
+/// it does not re-open a second outward macro-arg producer entry. The token
+/// tripwire enumerates the NAME (regardless of visibility) and pins it to one
+/// genuine free-fn occurrence; the LOAD-BEARING confinement for each is the
+/// COMPILER module-privacy on its own definition (pinned by a dedicated
+/// privacy-shape guard), not this name-tracking list.
 ///
 /// - `build_script_setup_seed_frames`: the shared `<script setup generic="…">`
 ///   binder-frame builder. It interns the owner's script-setup generics as
 ///   `TypeParam` binder nodes and returns a seed `BinderScope` stack; both the
 ///   mirror's macro-arg builder AND the ordinary decl-body structural producer
-///   build the SAME seed binder shape from it. It must be `pub(crate)` so the
-///   decl-body producer (a foreign module) can call it WITHOUT naming the
-///   ancestor-private structural lowerer — the single-engine boundary on the
-///   lowerer (`pub(in crate::macro_hot_mirror)`) stays intact.
+///   build the SAME seed binder shape from it. It is
+///   `pub(in crate::macro_hot_mirror)` — ancestor-private to the mirror — so NO
+///   foreign module can NAME it (a compile error, not a lint): the by-
+///   construction, compiler-enforced single-producer guarantee, pinned by
+///   [`script_setup_binder_helper_is_module_private`]. Both seed-shape callers
+///   reach it from WITHIN the module subtree today; a later move of the
+///   decl-body producer out of the subtree must DELIBERATELY re-home / re-scope
+///   the helper to the new caller's shared ancestor-private boundary, never
+///   passively widen it to `pub(crate)`.
 const MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES: &[&str] = &["build_script_setup_seed_frames"];
 
 /// The ONE production file the sanctioned non-producer helper
@@ -22642,47 +22791,65 @@ struct SanctionedOccurrence {
     sig: Option<syn::Signature>,
 }
 
-/// Collect EVERY occurrence of the sanctioned name `name` across a source's
-/// items — a module-level FREE `fn`, an associated `fn` inside ANY `impl`
-/// (inherent OR trait), a trait-item `fn` declaration, a MACRO INVOCATION at
-/// item / impl-item / trait-item position whose token stream mentions the name
-/// (including `include!` / `macro_rules!`, which parse as item-position macro
-/// invocations), a `use … as <name>` REEXPORT binding, and all of those nested
-/// in inline `mod` blocks. This is intentionally BROADER than a crate-visibility
-/// scan: the positive pin asserts the name has EXACTLY ONE occurrence and that it
-/// is the genuine free-fn shape, so ANY second occurrence (in any surface, at any
-/// visibility) is a usurpation — there is no visibility spelling a usurper can
-/// hide behind.
+/// Collect occurrences of the sanctioned name `name` across a source's items —
+/// a module-level FREE `fn`, an associated `fn` inside ANY `impl` (inherent OR
+/// trait), a trait-item `fn` declaration, a MACRO INVOCATION at item / impl-item
+/// / trait-item position whose token stream mentions the name (including
+/// `include!` / `macro_rules!`, which parse as item-position macro invocations),
+/// a `use … as <name>` REEXPORT binding, and all of those nested in inline `mod`
+/// blocks. This is intentionally BROADER than a crate-visibility scan: the
+/// positive pin asserts the name has EXACTLY ONE occurrence among the surfaces it
+/// CAN see and that it is the genuine free-fn shape, so any second occurrence in
+/// one of those surfaces (at any visibility) is a usurpation.
 ///
-/// CFG-INDEPENDENT BY DESIGN (closes the cfg over-exclusion vector): the genuine
-/// helper is UNCONDITIONAL — it carries no `#[cfg(...)]` at all. So the airtight
-/// invariant is that the sanctioned name appears EXACTLY ONCE in production
-/// source, full stop, regardless of cfg. This collector therefore does NOT apply
-/// `attrs_test_gate`: a same-name item under ANY cfg (`#[cfg(test)]`,
-/// `#[cfg(debug_assertions)]`, `#[cfg(any(test, debug_assertions))]`,
-/// `#[cfg(not(test))]`, `#[cfg(feature = "…")]`) is necessarily a SECOND
-/// occurrence (the genuine one is cfg-free), so it must be counted and rejected —
-/// not over-excluded as the `attrs_test_gate` `any(test, …)` arm would. The
-/// genuine fn (cfg-free) is counted unchanged; any cfg-gated same-name item is
-/// now visible and rejected by the occurrence-count / not-a-free-fn properties.
+/// SCOPE — BOUNDED, NOT EXHAUSTIVE. This is a `syn`-source collector. It sees the
+/// occurrence surfaces enumerated above; it CANNOT see macro-expanded output or
+/// any definition outside the walked production-`src` tree. The realistic-vector
+/// surfaces below are the high-value ones a routine refactor / copy-paste would
+/// hit, and closing them is worthwhile defense-in-depth — but the LOAD-BEARING
+/// no-second-producer guarantee for the helper is the COMPILER module-privacy of
+/// `build_script_setup_seed_frames` (`pub(in crate::macro_hot_mirror)`, pinned by
+/// `script_setup_binder_helper_is_module_private`), NOT this scanner. See the
+/// guard `macro_hot_mirror_exposes_single_crate_visible_producer_entry` for the
+/// documented residual evasion tail this scanner deliberately does NOT chase.
 ///
-/// MACRO TOKEN-STREAM DEFENSE (closes the macro-generated-producer vector): a
+/// CFG-INDEPENDENT BY DESIGN (narrows the cfg over-exclusion vector): the genuine
+/// helper is UNCONDITIONAL — it carries no `#[cfg(...)]` at all. So this collector
+/// pins that the sanctioned name appears EXACTLY ONCE (among the surfaces it can
+/// see) regardless of cfg. It therefore does NOT apply `attrs_test_gate`: a
+/// same-name item under ANY cfg (`#[cfg(test)]`, `#[cfg(debug_assertions)]`,
+/// `#[cfg(any(test, debug_assertions))]`, `#[cfg(not(test))]`,
+/// `#[cfg(feature = "…")]`) is necessarily a SECOND occurrence (the genuine one is
+/// cfg-free), so it is counted and rejected — not over-excluded as the
+/// `attrs_test_gate` `any(test, …)` arm would. The genuine fn (cfg-free) is
+/// counted unchanged; any cfg-gated same-name item is now visible and rejected by
+/// the occurrence-count / not-a-free-fn properties.
+///
+/// MACRO TOKEN-STREAM DEFENSE (narrows the macro-generated-producer vector): a
 /// `syn` scan cannot expand macros, so a macro emitting `fn <name>(...)` would be
 /// invisible to a fn-definition-only walk. The genuine helper uses NO macro and
-/// NO `include!`, so the defense is to ban the sanctioned NAME appearing inside
+/// NO `include!`, so the defense is to flag the sanctioned NAME appearing inside
 /// ANY item-position macro invocation token stream: any macro whose tokens
 /// mention the name is a usurpation surface (it could generate a producer under
 /// the name) → recorded as a `MacroInvocation` occurrence (which is not a free
 /// fn ⇒ rejected). A bare call EXPRESSION inside a fn body
 /// (`script_setup_binder::build_script_setup_seed_frames(…)`, the legitimate
 /// call site in `mod.rs`) is NOT an item-position macro and is NOT seen here, so
-/// it is not flagged.
+/// it is not flagged. NOTE the documented residual: a macro that SYNTHESISES the
+/// name from token FRAGMENTS (`paste!` / `concat_idents!` / a proc-macro joining
+/// `build_script_setup_` + `seed_frames`) never emits the whole name as one
+/// token, so this token-mention check cannot see it — that residual is accepted
+/// (see the guard doc).
 ///
-/// USE-REEXPORT DEFENSE (closes the reexport-under-the-name vector): a
+/// USE-REEXPORT DEFENSE (narrows the reexport-under-the-name vector): a
 /// `use some::producer as <name>` creates a callable entry under the sanctioned
 /// name that a fn-definition scan misses. The genuine helper needs NO reexport,
 /// so any `use … as <name>` rename binding is a usurpation → recorded as a
-/// `UseRename` occurrence (not a free fn ⇒ rejected).
+/// `UseRename` occurrence (not a free fn ⇒ rejected). NOTE the documented
+/// residual: a GLOB reexport (`use other::*`) that re-exports a foreign `<name>`,
+/// or a rename whose target DEFINITION lives outside the walked `src` tree, is
+/// not resolved by this source-only scan — accepted residual (the compiler
+/// privacy of the helper is the real guarantee).
 fn collect_sanctioned_occurrences(
     items: &[syn::Item],
     name: &str,
@@ -22910,13 +23077,19 @@ const MIRROR_SEED_FRAMES_PARAM_TYPES: &[&str] = &[
 /// a generic bound / `where` clause, a `type H = HotTypeRef` alias, a reexport
 /// (`use … as H`), or an associated-type projection — none of which RENDER the
 /// token `HotTypeRef`, so the negative scan passed them. A POSITIVE contract
-/// closes the whole evasion class AT ONCE: it asserts the sanctioned name IS
-/// EXACTLY the one genuine production shape, so ANYTHING that is not that shape —
-/// however it aliases the product — fails. The pin reasons over PARSED STRUCTURE
-/// (free-fn-ness, generics, receiver, the param/return shape), never over a
-/// rendered spelling or raw source bytes, so a legitimate signature change
-/// correctly turns it RED until the sanctioned surface is reviewed and re-pinned
-/// (that is the intended governance, not brittleness).
+/// closes the whole PARSED-FN-SURFACE alias class at once (within the surfaces a
+/// `syn` source scan CAN see): it asserts the sanctioned name IS EXACTLY the one
+/// genuine production shape, so anything VISIBLE-to-the-scanner that is not that
+/// shape — however it aliases the product — fails. This is a BOUNDED
+/// defense-in-depth tripwire, NOT exhaustive: a macro-expanded or out-of-tree
+/// producer is outside what a source scan can see (the documented residual tail
+/// on `macro_hot_mirror_exposes_single_crate_visible_producer_entry`); the
+/// load-bearing guarantee is the COMPILER module-privacy of the helper. The pin
+/// reasons over PARSED STRUCTURE (free-fn-ness, generics, receiver, the
+/// param/return shape), never over a rendered spelling or raw source bytes, so a
+/// legitimate signature change correctly turns it RED until the sanctioned
+/// surface is reviewed and re-pinned (that is the intended governance, not
+/// brittleness).
 ///
 /// The five structural assertions (each independently fatal):
 ///
@@ -23081,23 +23254,61 @@ fn positive_pin_sanctioned_helper(
     Ok(())
 }
 
-/// GOV finding (c) + round-4/5 extension: assert `macro_type_arg_hot_ref` is the
-/// SOLE crate-visible (`pub(crate)` / `pub(in crate)` / bare `pub`) PRODUCTION
-/// producer entry of the `macro_hot_mirror` module — covering BOTH module-level
-/// FREE functions AND ASSOCIATED functions inside INHERENT `impl` blocks
-/// (trait-impl methods inherit the trait's visibility and cannot be independently
-/// crate-visible, so they are not a producer-entry vector). No OTHER
-/// crate-visible fn (free or associated) in `macro_hot_mirror/**` may expose a
-/// second macro-arg producer entry. The `#[cfg(test)]` test facade
-/// (`for_tests::lower_type_expr_structural_for_tests`) and the `#[cfg(test)]`
-/// `MacroHotMirror::demanded_count` test accessor are excluded by attribute, and
-/// the raw structural lowerer is `pub(in crate::macro_hot_mirror)` (restricted
-/// visibility — NOT crate-visible), so none widens the crate-visible producer
-/// surface. This complements
-/// `structural_lowerer_production_entry_is_macro_hot_mirror_private` (which pins
-/// the lowerer ancestor-private — the PRIMARY by-construction guarantee); this
-/// one SECONDARILY pins the mirror's outward producer entry to exactly one
-/// crate-visible symbol, now including associated fns.
+/// BOUNDED defense-in-depth tripwire (NOT exhaustive): assert
+/// `macro_type_arg_hot_ref` is the SOLE crate-visible (`pub(crate)` /
+/// `pub(in crate)` / bare `pub`) PRODUCTION producer entry of the
+/// `macro_hot_mirror` module — covering BOTH module-level FREE functions AND
+/// ASSOCIATED functions inside INHERENT `impl` blocks (trait-impl methods inherit
+/// the trait's visibility and cannot be independently crate-visible, so they are
+/// not a producer-entry vector). No OTHER crate-visible fn (free or associated)
+/// in `macro_hot_mirror/**` may expose a second macro-arg producer entry. The
+/// `#[cfg(test)]` test facade (`for_tests::lower_type_expr_structural_for_tests`)
+/// and the `#[cfg(test)]` `MacroHotMirror::demanded_count` test accessor are
+/// excluded by attribute, and the raw structural lowerer is
+/// `pub(in crate::macro_hot_mirror)` (restricted visibility — NOT crate-visible),
+/// so none widens the crate-visible producer surface.
+///
+/// LAYER ORDER. This is the SECONDARY layer. The LOAD-BEARING confinement is the
+/// COMPILER module-privacy of the producer-capable helpers:
+/// - the structural lowerer is `pub(in crate::macro_hot_mirror)`, pinned by
+///   `structural_lowerer_production_entry_is_macro_hot_mirror_private`;
+/// - the shared binder-seed helper `build_script_setup_seed_frames` is likewise
+///   `pub(in crate::macro_hot_mirror)`, pinned by
+///   `script_setup_binder_helper_is_module_private`.
+///
+/// A foreign module cannot NAME either (a compile error, not a lint), so a second
+/// outward producer is UNREPRESENTABLE by construction — that is the airtight
+/// guarantee. This token-scanning guard is a `syn`-source tripwire layered on
+/// top: it catches the high-value, realistic refactor/copy-paste vectors a future
+/// edit would plausibly introduce, but it is BOUNDED, not exhaustive.
+///
+/// KNOWN RESIDUAL GAPS (deliberately NOT covered — ACCEPTED). A `syn` source scan
+/// fundamentally cannot see macro-expanded or out-of-tree producers, so the
+/// following exotic shapes can evade THIS guard while the compiler module-privacy
+/// of the helpers still forbids the actual rogue producer:
+/// - a `const` / `static` FN-POINTER binding (`const P: fn(&C) -> H = …;`) or an
+///   ASSOCIATED const holding a producer fn pointer under the sanctioned name —
+///   not a `fn`-item / `impl`-fn / trait-fn surface, so not enumerated;
+/// - a FOREIGN-FN shape (`extern "C" { fn <name>(...) -> …; }`) under the name;
+/// - SPLIT-TOKEN macro name synthesis: `paste!` / `concat_idents!` / a proc-macro
+///   that joins fragments (`build_script_setup_` + `seed_frames`) so the whole
+///   name is never one ident token — the token-mention check cannot see it;
+/// - a GLOB reexport (`use other::*`) pulling in a foreign `<name>`, or an
+///   EXTERNAL reexport whose target DEFINITION lives outside the walked
+///   production-`src` tree;
+/// - a production `#[path = "…"]` module rooted OUTSIDE
+///   `crates/verter_session/src/**` (not enumerated by `session_production_src_files()`);
+/// - an `include!(concat!(…))` whose composed path is not a literal the
+///   word-boundary scan can match.
+///
+/// These residuals are ACCEPTED because (i) the COMPILER module-privacy of the
+/// producer-capable helpers (the two PRIMARY guards above) is the airtight
+/// guarantee — a rogue producer reachable from a foreign module is a compile
+/// error regardless of how it is spelled; (ii) a `syn` scan cannot SOUNDLY close
+/// the macro-expansion / out-of-tree tail (chasing it adds occurrence kinds with
+/// no end and no soundness gain); (iii) no live violation exists. Per the
+/// architecture ruling, this guard is NOT extended to chase the const / static /
+/// split-token / glob / out-of-tree tail.
 #[test]
 fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     let mut crate_visible: Vec<(String, String)> = Vec::new();
@@ -23159,9 +23370,11 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     // one occurrence (any second definition in any item kind/visibility fails),
     // a module-level FREE fn (no associated/trait fn), no generics/`where`/
     // receiver, the genuine three typed params, and the binder-seed
-    // `Vec<BinderScope>` return. Anything that is not that exact shape — however
-    // it aliases the macro-arg product — fails, closing the whole evasion class
-    // at once. (See `positive_pin_sanctioned_helper`.)
+    // `Vec<BinderScope>` return. Anything VISIBLE-to-the-scanner that is not that
+    // exact shape — however it aliases the macro-arg product — fails, closing the
+    // whole PARSED-FN-SURFACE alias class at once (a BOUNDED tripwire, not
+    // exhaustive over macro-expanded / out-of-tree shapes — see the guard's
+    // documented residual list). (See `positive_pin_sanctioned_helper`.)
     for sanctioned in MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES {
         if let Err(reason) = positive_pin_sanctioned_helper(&mirror_sources, sanctioned) {
             panic!(
@@ -23175,22 +23388,27 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
         }
     }
 
-    // CRATE-WIDE SANCTIONED-NAME UNIQUENESS (AIRTIGHT POSITIVE PIN). The
+    // CRATE-WIDE SANCTIONED-NAME UNIQUENESS (BOUNDED POSITIVE TRIPWIRE). The
     // mirror-scoped pin above proves the sanctioned helper is the one genuine
-    // free fn WITHIN `macro_hot_mirror/**`. But the stated invariant is stronger:
-    // the sanctioned name `build_script_setup_seed_frames` must appear in ALL
-    // `verter_session` PRODUCTION source — not just the mirror directory — ONLY
-    // as that one genuine free fn in `script_setup_binder.rs`, and NOWHERE else
-    // (no fn in another module, no `#[path = "…"]` child outside the directory,
-    // no macro that could expand to a producer under the name, no `use … as`
-    // reexport, no cfg-gated variant). Scanning the WHOLE crate (not just
-    // `macro_hot_mirror/**`) closes the out-of-module producer vector (a usurper
-    // under the name in any OTHER production module is now visible); the
-    // surface-broadened, cfg-independent `collect_sanctioned_occurrences` (run by
-    // `positive_pin_sanctioned_helper`) closes the macro-generated, reexport, and
-    // cfg-gated vectors. A bare CALL EXPRESSION of the helper inside a fn body
-    // (the legitimate call site in `mod.rs`) is NOT an item-level occurrence and
-    // is correctly NOT counted — only DEFINITIONS / BINDINGS / macro-invocation
+    // free fn WITHIN `macro_hot_mirror/**`. This broadens that to the whole crate:
+    // the sanctioned name `build_script_setup_seed_frames` should appear in ALL
+    // WALKED `verter_session` production source — not just the mirror directory —
+    // ONLY as that one genuine free fn in `script_setup_binder.rs`, and nowhere
+    // else among the SURFACES THE SCANNER CAN SEE (no fn in another module, no
+    // `use … as` reexport binding, no cfg-gated variant, no item-position macro
+    // invocation token-mentioning the name). Scanning the WHOLE walked tree (not
+    // just `macro_hot_mirror/**`) narrows the out-of-module producer vector (a
+    // usurper under the name in any OTHER walked production module is now visible);
+    // the surface-broadened, cfg-independent `collect_sanctioned_occurrences` (run
+    // by `positive_pin_sanctioned_helper`) narrows the macro-generated, reexport,
+    // and cfg-gated vectors. This is BOUNDED, not exhaustive: a `#[path]` module
+    // rooted outside `crates/verter_session/src/**`, a split-token macro name
+    // synthesis, a glob/external reexport whose target is out of tree, or a
+    // const/static fn-pointer binding are the documented residuals this scanner
+    // does NOT cover (the helper's compiler module-privacy is the airtight
+    // guarantee). A bare CALL EXPRESSION of the helper inside a fn body (the
+    // legitimate call site in `mod.rs`) is NOT an item-level occurrence and is
+    // correctly NOT counted — only DEFINITIONS / BINDINGS / macro-invocation
     // surfaces are.
     let all_sources = session_production_src_files();
     let mut crate_wide_occurrences: Vec<(String, SanctionedOccurrenceKind)> = Vec::new();
@@ -23213,14 +23431,16 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     assert_eq!(
         crate_wide_occurrences.len(),
         1,
-        "crate-wide sanctioned-name uniqueness: `{}` must appear EXACTLY ONCE as a \
-         definition/binding across ALL `verter_session` production source — found {} occurrences \
-         {:#?}. A second occurrence under the sanctioned name in ANY production file (a fn in \
-         another module, a `#[path]` child outside `macro_hot_mirror/`, a macro invocation whose \
-         tokens mention the name, a `use … as` reexport, or a cfg-gated variant) is a usurpation: \
-         the airtight invariant is that the name is the ONE genuine free fn in \
-         `script_setup_binder.rs` and NOWHERE else. (A bare call expression of the helper is not \
-         an item-level occurrence and is not counted.)",
+        "crate-wide sanctioned-name uniqueness (BOUNDED tripwire): `{}` must appear EXACTLY ONCE as \
+         a definition/binding across all WALKED `verter_session` production source — found {} \
+         occurrences {:#?}. A second occurrence under the sanctioned name in any walked production \
+         file (a fn in another module, a `#[path]` child inside the walked tree, a macro invocation \
+         whose tokens mention the name, a `use … as` reexport, or a cfg-gated variant) is a \
+         usurpation: this tripwire pins the name to the ONE genuine free fn in \
+         `script_setup_binder.rs` among the surfaces it CAN see (it is bounded, not exhaustive — the \
+         airtight no-second-producer guarantee is the helper's compiler module-privacy, pinned by \
+         `script_setup_binder_helper_is_module_private`). (A bare call expression of the helper is \
+         not an item-level occurrence and is not counted.)",
         MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
         crate_wide_occurrences.len(),
         crate_wide_occurrences,
@@ -23701,17 +23921,24 @@ fn mirror_entry_surface_classifier_discriminates() {
         "vanished sanctioned name (no definition anywhere)",
     );
 
-    // ---- AIRTIGHT EXTENSION — RED-PROOFS FOR THE FOUR RESIDUAL VECTORS. ----
+    // ---- BOUNDED-TRIPWIRE COVERAGE — RED-PROOFS FOR THE FOUR REALISTIC VECTORS. ----
     //
     // The positive pin above closed the ORDINARY parsed-fn evasion class. These
-    // four plants RED-prove the surfaces that a fn-definition-only,
-    // mirror-directory-only, cfg-excluding scan would have MISSED: a
-    // macro-generated producer, a `use … as` reexport, an out-of-module duplicate,
-    // and a cfg-gated production usurper. Each runs the SAME shared classifier
-    // (`positive_pin_sanctioned_helper` over the broadened, cfg-independent
-    // `collect_sanctioned_occurrences`), so a regression that re-narrows the scan
-    // reddens BOTH the live crate-wide guard and these proofs together. "A guard
-    // that cannot fail is a stub."
+    // four plants RED-prove the additional realistic surfaces that a
+    // fn-definition-only, mirror-directory-only, cfg-excluding scan would have
+    // MISSED: a macro-generated producer (whole-name token), a `use … as`
+    // reexport, an out-of-module duplicate, and a cfg-gated production usurper.
+    // These are the high-value vectors a routine refactor / copy-paste would hit,
+    // and they remain part of this bounded tripwire's coverage. They are NOT the
+    // tripwire's documented RESIDUAL gaps — those (const/static fn-pointer,
+    // associated const, foreign-fn, SPLIT-TOKEN macro name synthesis, glob/external
+    // reexport, out-of-tree `#[path]`, `include!(concat!(…))`) are deliberately
+    // uncovered, per the guard's doc comment, because the helper's compiler
+    // module-privacy is the airtight guarantee. Each plant runs the SAME shared
+    // classifier (`positive_pin_sanctioned_helper` over the broadened,
+    // cfg-independent `collect_sanctioned_occurrences`), so a regression that
+    // re-narrows the scan reddens BOTH the live crate-wide guard and these proofs
+    // together. "A guard that cannot fail is a stub."
 
     // Direct-occurrence helper: parse one synthetic source and return the recorded
     // sanctioned-name occurrence kinds. Used below to prove a vector is now SEEN

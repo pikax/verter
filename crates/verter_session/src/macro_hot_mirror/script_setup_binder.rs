@@ -19,9 +19,18 @@
 //! [`structural_lower::lower_type_expr_structural`](super::structural_lower)
 //! entry to lower each binder's constraint / default expression — the
 //! documented INTERNAL binder-seed lowering, NOT a second macro-arg producer.
-//! It is exposed `pub(crate)` so the ordinary decl-body producer can call it
-//! without naming the lowerer itself (the single-engine producer boundary on
-//! the lowerer stays intact).
+//! It is `pub(in crate::macro_hot_mirror)` — ancestor-private to the mirror,
+//! mirroring the lowerer's own confinement — so NO foreign module can NAME it.
+//! That by-construction, compiler-enforced privacy (a foreign reference is a
+//! compile error, not a lint) is the load-bearing guarantee that no second
+//! binder-seed producer can be opened outside this module (the secondary
+//! token-tripwire guard is bounded defense-in-depth on top of it). Both callers
+//! that build the seed shape — the mirror's macro-arg builder and the ordinary
+//! decl-body structural producer — reach it from WITHIN this module subtree
+//! today. If the decl-body producer is later moved out of the subtree, the
+//! helper must be DELIBERATELY re-homed (or widened to the right ancestor-
+//! private boundary the new caller shares) — never passively widened to
+//! `pub(crate)`, which would re-open the cross-module producer surface.
 
 use std::sync::Arc;
 
@@ -48,7 +57,7 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// shape is identical. The helper does NOT read the prepared-decl bundle
 /// (whose cold path can route-resolve imports) — that would make the producer
 /// impure.
-pub(crate) fn build_script_setup_seed_frames(
+pub(in crate::macro_hot_mirror) fn build_script_setup_seed_frames(
     indexed: &crate::project_type_store::IndexedReady,
     graph: &SemanticGraphStore,
     scope: &NodeScopeId,
