@@ -870,12 +870,12 @@ fn structural_carrier_producer_guards_remain_registered() {
         ),
         (
             "structural_carrier_producer_module_is_narrow",
-            "the PARENT-SHAPE guard: the owner directory contains ONLY the raw lowerer, the two \
-             witness-gated producer surfaces, the binder helper, mod.rs, and test modules",
+            "the PARENT-SHAPE guard: the owner directory contains ONLY the raw lowerer, the \
+             witness-gated producer surface, the binder helper, mod.rs, and test modules",
         ),
         (
             "structural_carrier_producer_witnesses_are_unforgeable",
-            "the WITNESS-unforgeability guard: exactly two private-field producer witnesses, \
+            "the WITNESS-unforgeability guard: exactly one private-field producer witness, \
              neither forgeable nor returned crate-visibly outside its owning surface",
         ),
         (

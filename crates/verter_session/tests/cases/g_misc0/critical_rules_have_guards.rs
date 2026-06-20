@@ -430,23 +430,22 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // STRUCTURAL-CARRIER PRODUCER — single producer (make-unrepresentable):
             // the raw structural lowerer `lower_type_expr_structural` is owned by
             // `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
-            // visibility modifier), reachable ONLY through two WITNESS-GATED wrappers
-            // (`emit_macro_arg` / `emit_decl_body_arm`). Each wrapper requires an
-            // unforgeable capability witness (`MacroProducerWitness` /
-            // `DeclBodyProducerWitness`, private field + constructor confined to its
-            // owning surface), so a THIRD structural-carrier producer can neither name
-            // the lowerer nor forge a witness — unrepresentable by construction. The
-            // MODULE-PRIVATE lowerer guard, the PARENT-SHAPE narrowness guard (the
-            // owner directory holds ONLY the lowerer, the two producer surfaces, the
+            // visibility modifier), reachable ONLY through the WITNESS-GATED wrapper
+            // (`emit_macro_arg`). The wrapper requires an unforgeable capability
+            // witness (`MacroProducerWitness`, private field + constructor confined to
+            // its owning surface), so a SECOND structural-carrier producer can neither
+            // name the lowerer nor forge a witness — unrepresentable by construction.
+            // The MODULE-PRIVATE lowerer guard, the PARENT-SHAPE narrowness guard (the
+            // owner directory holds ONLY the lowerer, the macro producer surface, the
             // binder helper, mod.rs, and tests), and the WITNESS-unforgeability guard
             // together are the compiler-enforced LOAD-BEARING confinement; the
             // binder-seed helper `build_script_setup_seed_frames` is
             // `pub(in crate::structural_carrier_producer)` (confined to the owner
             // module), pinned by its own privacy guard. The ENTRY-SURFACE guard is a
             // BOUNDED defense-in-depth token tripwire (NOT exhaustive — documented
-            // residual tail) that pins the sanctioned witness-gated entries
-            // (`macro_type_arg_hot_ref`, `emit_decl_body_arm`) as the ONLY
-            // crate-visible producer fns of the owner module; the ORDERING TRIPWIRE
+            // residual tail) that pins the sanctioned witness-gated entry
+            // (`macro_type_arg_hot_ref`) as the ONLY crate-visible producer fn of the
+            // owner module; the ORDERING TRIPWIRE
             // bans a production macro-arg eager-lowering path outside the producer
             // module (a FILE-SCOPE catch: whole-function co-presence PLUS the
             // cross-function-same-file binding-flow helper split); the PURITY guard

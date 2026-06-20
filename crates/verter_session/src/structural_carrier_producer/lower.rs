@@ -32,12 +32,10 @@
 //! [`lower_type_expr_structural`] is PRIVATE to this module: it carries NO
 //! visibility modifier, so no other module — not even a sibling under
 //! [`crate::structural_carrier_producer`] — can NAME it. The only way to
-//! reach it is through the two WITNESS-GATED wrappers this module exposes,
-//! [`emit_macro_arg`] and [`emit_decl_body_arm`]. Each takes a capability
-//! witness defined in its owning surface
-//! ([`super::macro_surface::MacroProducerWitness`] /
-//! [`super::decl_body_surface::DeclBodyProducerWitness`]) with a private
-//! field and a constructor confined to that surface, so a THIRD production
+//! reach it is through the WITNESS-GATED wrapper this module exposes,
+//! [`emit_macro_arg`]. It takes a capability witness defined in its owning
+//! surface ([`super::macro_surface::MacroProducerWitness`]) with a private
+//! field and a constructor confined to that surface, so a SECOND production
 //! caller cannot forge a witness and therefore cannot lower structurally —
 //! the single structural-carrier producer rule is compiler-enforced, not
 //! source-scanned. The structural-lowerer unit tests live alongside this
@@ -58,7 +56,7 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
-use super::{decl_body_surface, macro_surface};
+use super::macro_surface;
 
 /// A lexical binder frame: the syntactic type-parameter / `infer` /
 /// mapped-type-parameter names in scope at one nesting level, each mapped
@@ -257,20 +255,6 @@ pub(in crate::structural_carrier_producer) fn emit_macro_arg(
     lower_type_expr_structural(graph, expr, scope, ctx)
 }
 
-/// Emit a declaration body's structural carrier graph: the WITNESS-GATED
-/// decl-body-surface entry to the private structural lowerer. Its production
-/// caller is the declaration-body producer, which holds the
-/// [`decl_body_surface::DeclBodyProducerWitness`] capability proof.
-pub(in crate::structural_carrier_producer) fn emit_decl_body_arm(
-    graph: &SemanticGraphStore,
-    expr: &TypeExpr,
-    scope: NodeScopeId,
-    ctx: &StructuralLowerContext<'_>,
-    _witness: &decl_body_surface::DeclBodyProducerWitness,
-) -> Result<HotTypeRef, StructuralLowerError> {
-    lower_type_expr_structural(graph, expr, scope, ctx)
-}
-
 /// Structurally lower an owned [`TypeExpr`] into the dormant semantic-graph
 /// carriers, rooted at the owner-supplied `scope`, performing no resolution.
 ///
@@ -278,9 +262,9 @@ pub(in crate::structural_carrier_producer) fn emit_decl_body_arm(
 /// [`StructuralLowerError`] for a shape with no unresolved representation.
 ///
 /// PRIVATE (no visibility modifier): reachable only from this module's
-/// witness-gated wrappers ([`emit_macro_arg`] / [`emit_decl_body_arm`]) and
-/// this module's in-module unit tests. No other module can name it, so a
-/// third structural-carrier producer is unrepresentable by construction.
+/// witness-gated wrapper ([`emit_macro_arg`]) and this module's in-module
+/// unit tests. No other module can name it, so a second structural-carrier
+/// producer is unrepresentable by construction.
 fn lower_type_expr_structural(
     graph: &SemanticGraphStore,
     expr: &TypeExpr,
