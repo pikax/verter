@@ -220,8 +220,11 @@ defineProps<MergedProps>()
 /// Shallow-By-Default contract: imported alias names are NOT eagerly inlined
 /// at the publication surface; the consumer re-resolves `Foo` through the
 /// registry on demand. The full surface is pinned: the exact member set,
-/// required-ness derived from optionality, the primitive `label` type, the
-/// `onSubmit` function-type shape, and the shallow imported-alias `item` Ref.
+/// required-ness derived from optionality, and all three imported-alias member
+/// types published as shallow `Ref`s — `label` as `Ref { name: "Label" }`
+/// (NOT the inlined `string` primitive), `onSubmit` as `Ref { name: "Submit" }`
+/// (NOT the inlined function body), and `item` as `Ref { name: "Foo" }` (NOT
+/// Foo's inlined `Object` body).
 ///
 /// The imported-alias member rides the publication boundary directly (the
 /// macro type arg is the inline object literal), where the shallow-by-default
@@ -229,15 +232,25 @@ defineProps<MergedProps>()
 /// `published_bare_alias_ref_stays_shallow` contract observed end-to-end
 /// through the equivalence net.
 ///
+/// Cross-file-resolution proof (the discriminator that the shallow `Ref`s
+/// alone do NOT provide): the published read-set's dep-signature MUST include
+/// the imported carriers `/foo.ts` and `/types.ts`. A bare `Ref { name: "Foo" }`
+/// is EXACTLY what `/component.vue` would publish in isolation if the import
+/// route to `/foo.ts` were broken (an unresolved import leaves the bare name),
+/// so the shallow-`Ref` asserts cannot tell a resolved import from a broken
+/// one. The dep-signature assert closes that gap — see the negative-control
+/// note on the assertion itself.
+///
 /// Discriminating: if the cross-file import resolution regressed, the surface
 /// would be empty / wrong (the imported members unresolved); the
-/// `["item", "label", "onSubmit"]` set + required asserts fail. If the
-/// producer flip EAGERLY inlined the imported alias `Foo` at the member
-/// surface, `item`'s `type_expr` would be `Foo`'s `Object` body (or its
-/// resolved alias) instead of the bare `Ref { name: "Foo" }` and the
-/// shallow-Ref assert (plus its explicit anti-`Object` arm) fails. The
-/// `onSubmit` `Function` match fails on a wrong lowering (an
-/// `Object`/`Unknown`/`Ref`).
+/// `["item", "label", "onSubmit"]` set + required asserts fail, and the
+/// imported carriers drop out of the dep-signature. If the producer flip
+/// EAGERLY inlined the imported alias `Foo` at the member surface, `item`'s
+/// `type_expr` would be `Foo`'s `Object` body (or its resolved alias) instead
+/// of the bare `Ref { name: "Foo" }` and the shallow-Ref assert (plus its
+/// explicit anti-`Object` arm) fails. `label` and `onSubmit` are pinned the
+/// same way: an eager inline to the `string` primitive or the function body
+/// fails their shallow-`Ref` arms.
 #[test]
 fn cross_file_imported_props_resolve_their_member_surface() {
     let project = make_project();
@@ -353,6 +366,43 @@ defineProps<{
     assert!(
         !matches!(&prop(&meta, "item").type_expr, TypeExpr::Object(_)),
         "the imported-alias member `item` must NOT expand `Foo` inline to an Object body"
+    );
+
+    // Cross-file-resolution PROOF (the discriminator the shallow `Ref`s above
+    // cannot provide on their own): the published read-set MUST root on the
+    // imported carriers. `Foo` is defined in `/foo.ts`; `Label`/`Submit` in
+    // `/types.ts`. Both must appear in the published component-meta entry's
+    // dep-signature because resolving the macro's member surface consulted
+    // those files cross-file.
+    //
+    // NEGATIVE CONTROL: a bare `Ref { name: "Foo" }` is EXACTLY what
+    // `/component.vue` publishes in ISOLATION when the import route to
+    // `/foo.ts` is broken — an unresolved import leaves the bare name as a
+    // `Ref`, so every shallow-`Ref` assertion above would STILL PASS against a
+    // regression that broke cross-file import resolution. These dep-signature
+    // asserts close that gap: if the import route to `/foo.ts` (or `/types.ts`)
+    // were removed/broken, the carrier would NOT be consulted, would NOT enter
+    // the read-set, and the corresponding `any(... == "/foo.ts")` assert FAILS.
+    // (Empirically the dep-signature for this fixture is
+    // `["/component.vue", "/foo.ts", "/types.ts"]`.)
+    let dep_canonicals =
+        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
+            project.host(),
+            "/component.vue",
+        );
+    assert!(
+        dep_canonicals.iter().any(|c| c.as_ref() == "/foo.ts"),
+        "cross-file resolution must consult the `Foo` carrier `/foo.ts`, recording it \
+         in the published read-set; a broken import route to `/foo.ts` would leave the \
+         same bare `Ref {{ name: \"Foo\" }}` yet drop `/foo.ts` from the dep-signature. \
+         observed {dep_canonicals:?}"
+    );
+    assert!(
+        dep_canonicals.iter().any(|c| c.as_ref() == "/types.ts"),
+        "cross-file resolution must consult the `Label`/`Submit` carrier `/types.ts`, \
+         recording it in the published read-set; a broken import route to `/types.ts` \
+         would leave the same bare `Label`/`Submit` refs yet drop `/types.ts` from the \
+         dep-signature. observed {dep_canonicals:?}"
     );
 }
 
