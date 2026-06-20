@@ -252,26 +252,45 @@ defineProps<MergedProps>()
 /// `cross_file_imported_type_resolves_through_path_projection` below.
 ///
 /// What the dep-signature DOES discriminate here: import-route / SPECIFIER
-/// resolution and carrier consultation. The published read-set's dep-signature
-/// MUST include the imported carriers `/foo.ts` and `/types.ts` — the
-/// specifiers were route-resolved and the carrier files shallow-consulted. A
-/// regression that broke the import ROUTE would drop the carrier from the
-/// read-set (the shallow `Ref` asserts alone could not tell a route-resolved
-/// import from a broken one — both leave the bare name). The dep-signature
-/// asserts close that ROUTE gap; they do NOT prove the member TYPE resolved
-/// (the `cross_file_imported_type_resolves_through_path_projection` sibling
-/// does).
+/// resolution recording the carrier in the published read-set. The published
+/// read-set's dep-signature MUST include the imported carriers `/foo.ts` and
+/// `/types.ts` — the import specifiers were route-resolved and each carrier
+/// canonical entered the published read-set. This proves only read-set
+/// membership; it does NOT prove the carrier files were semantically consulted
+/// (their symbols/bodies resolved) — an implementation that route-resolves the
+/// specifiers and records the canonical deps but never resolves the carrier
+/// symbols/bodies would still record the same dep-signature. A regression that
+/// broke the import ROUTE would drop the carrier from the read-set (the shallow
+/// `Ref` asserts alone could not tell a route-resolved import from a broken one
+/// — both leave the bare name). The dep-signature asserts close that ROUTE gap;
+/// they do NOT prove the member TYPE resolved (the
+/// `cross_file_imported_type_resolves_through_path_projection` sibling does).
 ///
-/// Discriminating: if the import-route resolution regressed, the imported
-/// members would be unresolved (surface empty / wrong); the
-/// `["item", "label", "onSubmit"]` set + required asserts fail, and the
-/// imported carriers drop out of the dep-signature. If the producer flip
-/// EAGERLY inlined the imported alias `Foo` at the member surface, `item`'s
-/// `type_expr` would be `Foo`'s `Object` body (or its resolved alias) instead
-/// of the bare `Ref { name: "Foo" }` and the shallow-Ref assert (plus its
-/// explicit anti-`Object` arm) fails. `label` and `onSubmit` are pinned the
-/// same way: an eager inline to the `string` primitive or the function body
-/// fails their shallow-`Ref` arms.
+/// Discriminating, on three SEPARATE axes:
+///
+/// (1) Local macro surface + Shallow-By-Default: the
+/// `["item", "label", "onSubmit"]` member set, the shallow-`Ref` arms, and the
+/// not-required asserts pin the LOCAL macro surface and the Shallow-By-Default
+/// publication. Every one of those facts — the three names and their
+/// optionality — is derivable ENTIRELY from `/component.vue`'s OWN inline
+/// `defineProps<{ ... }>` object literal. These asserts therefore do NOT
+/// discriminate a broken import route: a broken route would STILL publish those
+/// same three optional bare `Ref`s.
+///
+/// (2) Import-route discrimination: ONLY the DEP-SIGNATURE asserts catch a
+/// broken import route. A regression that broke the route drops `/foo.ts` /
+/// `/types.ts` from the published read-set, and the
+/// `any(... == "/foo.ts")` / `any(... == "/types.ts")` dep-signature asserts
+/// fail.
+///
+/// (3) Eager-inline regression: the anti-`Object` and shallow-`Ref` arms catch
+/// an EAGER-INLINE producer flip. If the producer flip EAGERLY inlined the
+/// imported alias `Foo` at the member surface, `item`'s `type_expr` would be
+/// `Foo`'s `Object` body (or its resolved alias) instead of the bare
+/// `Ref { name: "Foo" }` and the shallow-`Ref` assert (plus its explicit
+/// anti-`Object` arm) fails. `label` and `onSubmit` are pinned the same way: an
+/// eager inline to the `string` primitive or the function body fails their
+/// shallow-`Ref` arms.
 #[test]
 fn cross_file_imported_props_resolve_their_member_surface() {
     let project = make_project();
