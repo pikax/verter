@@ -84,8 +84,10 @@ fn extracted_builder_seeds_typeparam_binders_for_script_setup_generics() {
         local_scope: None,
     };
 
-    // Call the EXTRACTED helper directly — the shared entry the mirror and the
-    // ordinary decl-body producer both build from.
+    // Call the EXTRACTED helper directly — the shared
+    // `pub(in crate::macro_hot_mirror)` entry the mirror's macro-arg builder
+    // builds the seed binder shape from (a future decl-body structural producer
+    // would build the same shape but does NOT call it today).
     let frames = build_script_setup_seed_frames(&indexed, graph, &scope);
     assert_eq!(
         frames.len(),
