@@ -1238,27 +1238,24 @@ impl TsgoTypeProvider {
 
         // Send initialize request (use longer timeout for cold starts).
         //
-        // Advertise diagnostic `tagSupport` on BOTH the push (`publishDiagnostics`)
-        // and pull (`diagnostic`) channels. An LSP server only attaches
-        // `DiagnosticTag`s (1 = Unnecessary fade, 2 = Deprecated strikethrough) when
-        // the client declares it understands them; with empty capabilities TSGO
-        // silently drops the tags, so an unused `.vue` import would never gray out.
-        // The `valueSet` enumerates the tags we render.
+        // The client capabilities are built by `build_client_capabilities()` —
+        // an LSP server gates every optional feature on what the client
+        // advertises, so a capability the client never declares is silently
+        // dropped and TSGO never emits data this provider's handlers are ready
+        // to consume. The helper advertises EXACTLY the completion- and
+        // diagnostic-channel capabilities TSGO's handlers consume (diagnostic
+        // `tagSupport` on both channels; `completionItem.resolveSupport` for the
+        // `completionItem/resolve` round-trips; `contextSupport` + the
+        // `completionItemKind` valueSet). TSGO's base features (hover / definition /
+        // references / rename / signatureHelp / codeAction / semanticTokens /
+        // documentHighlight / inlayHint / pull-diagnostic) are left to TSGO's static
+        // server-side registration and are not advertised here.
         let init_result = transport
             .request_with_priority(
                 "initialize",
                 serde_json::json!({
                     "processId": std::process::id(),
-                    "capabilities": {
-                        "textDocument": {
-                            "publishDiagnostics": {
-                                "tagSupport": { "valueSet": [1, 2] }
-                            },
-                            "diagnostic": {
-                                "tagSupport": { "valueSet": [1, 2] }
-                            }
-                        }
-                    },
+                    "capabilities": build_client_capabilities(),
                     "rootUri": root_uri,
                     "workspaceFolders": [{
                         "uri": root_uri,
@@ -1458,6 +1455,126 @@ pub(crate) fn rewrite_vue_imports_for_tsgo(content: &str, _path: &str) -> String
             .replace(&format!(".{ext}\""), &format!(".{ext}.ts\""));
     }
     out
+}
+
+/// Build the LSP `ClientCapabilities` object sent in the tgo `initialize` request.
+///
+/// An LSP server gates every optional feature on what the client advertises: a
+/// capability the client never declares is silently dropped, so tgo would never
+/// emit data this provider's handlers are ready to consume. This helper owns the
+/// COMPLETION and DIAGNOSTIC channels, and advertises EXACTLY the completion- and
+/// diagnostic-channel capabilities tgo's handlers actually consume — no more (an
+/// over-claimed completion/diagnostic capability invites the server to compute
+/// work the client discards, or register a sub-feature this thin provider cannot
+/// service):
+///
+/// Scope note: this helper does NOT enumerate tgo's BASE features — hover,
+/// definition, typeDefinition, references, rename, signatureHelp, codeAction,
+/// semanticTokens, documentHighlight, inlayHint, and the pull `textDocument/diagnostic`
+/// request itself. The provider fully consumes those responses today; they work
+/// because tgo statically registers those providers server-side regardless of
+/// client capabilities, and no OPTIONAL gated sub-feature of them is consumed. They
+/// are intentionally left to tgo's static server-side registration and are not
+/// advertised here.
+///
+/// - `textDocument.publishDiagnostics.tagSupport` / `textDocument.diagnostic.tagSupport`
+///   (`valueSet [1, 2]`) — tgo attaches `DiagnosticTag`s (1 = Unnecessary fade,
+///   2 = Deprecated strikethrough) only when the client understands them; the
+///   `parse_lsp_diagnostic` tag mapping re-emits the fade / strikethrough on both
+///   the push and pull channels. The `valueSet` enumerates the tags we render.
+///   Spec note: the PUSH-channel `publishDiagnostics.tagSupport` is the
+///   spec-defined capability (`PublishDiagnosticsClientCapabilities.tagSupport`).
+///   The PULL-channel `textDocument.diagnostic.tagSupport` is NOT a field defined
+///   by LSP 3.17 (`DiagnosticClientCapabilities` has no `tagSupport` member) — it
+///   is a NON-SPEC field retained for compatibility (tgo may read it as a private
+///   extension to gate pull-diagnostic tags) and is intentionally kept as-is.
+/// - `textDocument.completion.completionItem.resolveSupport` (`documentation`,
+///   `detail`, `additionalTextEdits`) — tgo computes a `completionItem/resolve`
+///   property lazily only when the client lists it. This provider folds `detail` +
+///   `documentation` back in [`TsgoTypeProvider::get_completion_details`] and
+///   `additionalTextEdits` (the auto-import edits) in
+///   [`TsgoTypeProvider::resolve_completion`]; WITHOUT this, tgo silently drops
+///   `additionalTextEdits` and completion-driven auto-import never applies its
+///   import edit.
+/// - `textDocument.completion.contextSupport` (`true`) —
+///   [`TsgoTypeProvider::get_completions`] ALWAYS sends `CompletionParams.context`
+///   (the trigger kind/character). Per LSP 3.17 a server honours that field only
+///   when the client declares `contextSupport: true`; WITHOUT it tgo may ignore
+///   the trigger context entirely, so completions stop being trigger-aware.
+/// - `textDocument.completion.completionItemKind.valueSet` (`1..=25`) — the
+///   completion parser [`parse_completion_item`] maps the full standard
+///   `CompletionItemKind` range generically. The LSP DEFAULT value set when this
+///   field is omitted is `Text..Reference` (1..=18), so Class (7) — the kind
+///   component-tag completions depend on — is INSIDE the default range and is
+///   preserved regardless. The valueSet is advertised to stop tgo DOWNGRADING the
+///   UPPER standard kinds 19..=25 (Folder, EnumMember, Constant, Struct, Event,
+///   Operator, TypeParameter), which fall OUTSIDE the default range. The `valueSet`
+///   is EXACTLY the parser's range `1..=25` (no over-claim past it).
+///
+/// NOT advertised — `completionItem.dataSupport`: there is NO `dataSupport`
+/// capability in the LSP spec. `CompletionItem.data` is a transparent
+/// passthrough — the server stamps it on each item and the client MUST echo the
+/// same blob back on `completionItem/resolve` regardless of any advertised
+/// capability. Both resolve sites here ([`TsgoTypeProvider::get_completion_details`]
+/// and [`TsgoTypeProvider::resolve_completion`]) replay the item's opaque `data`
+/// verbatim, and tgo's resolve handler reads `params.Data` unconditionally (it
+/// embeds the file name there to re-locate the language service); tgo never reads
+/// a `dataSupport` flag, so advertising it would be a meaningless non-spec field.
+///
+/// Intentionally NOT advertised (no handler fulfills them — over-claim would be a
+/// silent no-op or worse): `documentSymbol`, `foldingRange`, `callHierarchy`,
+/// `typeHierarchy`, `selectionRange`, `linkedEditingRange`, and `workspace/symbol`
+/// (this provider issues none of those requests); completion `snippetSupport` /
+/// `insertReplaceSupport` / `labelDetailsSupport` (the completion parser maps a
+/// flat `insertText` / single `textEdit` and reads no snippet, insert-replace, or
+/// label-details shape); and `dataSupport` (not a real LSP capability — `data` is
+/// a spec-transparent passthrough, see above).
+fn build_client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "textDocument": {
+            // PUSH channel: `publishDiagnostics.tagSupport` IS the spec-defined
+            // diagnostic-tag capability (`PublishDiagnosticsClientCapabilities`).
+            "publishDiagnostics": {
+                "tagSupport": { "valueSet": [1, 2] }
+            },
+            // PULL channel: `diagnostic.tagSupport` is NOT defined by LSP 3.17
+            // (`DiagnosticClientCapabilities` has no `tagSupport`). It is a NON-SPEC
+            // field retained for compatibility — tgo may read it as a private
+            // extension to gate pull-diagnostic tags — and is intentionally kept.
+            "diagnostic": {
+                "tagSupport": { "valueSet": [1, 2] }
+            },
+            "completion": {
+                // `get_completions` ALWAYS sends `CompletionParams.context` (the
+                // trigger kind/character). Per LSP 3.17 a server only honours that
+                // field when the client advertises `contextSupport: true`; without
+                // it tgo may ignore the trigger context and stop being trigger-aware.
+                "contextSupport": true,
+                // The completion parser (`parse_completion_item`) maps the full
+                // standard `CompletionItemKind` range (1..=25) generically. The LSP
+                // default value set (when omitted) is `Text..Reference` (1..=18), so
+                // Class = 7 — on which component-tag completions depend — is INSIDE
+                // that default range and preserved regardless. The valueSet stops tgo
+                // DOWNGRADING the UPPER kinds 19..=25 (outside the default range) to
+                // `Text`. Advertise EXACTLY the parser's range 1..=25.
+                "completionItemKind": {
+                    "valueSet": [
+                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+                        19, 20, 21, 22, 23, 24, 25
+                    ]
+                },
+                "completionItem": {
+                    // Only these properties are folded back by this provider's
+                    // resolve handlers; listing any other invites discarded work.
+                    // (`data` rides every resolve round-trip transparently per the
+                    // LSP spec — there is no `dataSupport` capability to advertise.)
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail", "additionalTextEdits"]
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Build the `workspace/didChangeConfiguration` payload for TSGO path aliases.

@@ -157,3 +157,126 @@ export const out = obj.;
         );
     }
 );
+
+// ---------------------------------------------------------------------------
+// completionItem.resolveSupport[additionalTextEdits] — auto-import on resolve
+// ---------------------------------------------------------------------------
+
+// Auto-import edits ride `completionItem/resolve.additionalTextEdits`, which an
+// LSP server (tgo) computes lazily ONLY when the client advertises
+// `textDocument.completion.completionItem.resolveSupport.properties` containing
+// `additionalTextEdits`. Before that capability was advertised, tgo's near-empty
+// handshake made it silently drop the import edit, so accepting an auto-import
+// completion inserted the identifier WITHOUT its `import { … }` statement. (The
+// resolve `data` blob rides every round-trip transparently per the LSP spec — no
+// `dataSupport` capability exists or is needed.)
+//
+// This drives the REAL provider end to end: a workspace sibling exports a unique
+// symbol; a second file references it WITHOUT importing; the provider's
+// completion for that symbol must, on resolve, carry an `additionalTextEdits`
+// edit whose text is the missing import. The macro runs this for BOTH providers
+// (tsserver already advertised resolve via its native protocol; tgo needs the
+// new capability) and vacuously skips when the backend / node_modules is absent.
+//
+// Discriminating for tgo: reverting the `resolveSupport` capability makes tgo
+// return no `additionalTextEdits` on resolve, so the import-edit assertion fails
+// (under require-mode) instead of passing.
+real_provider_test!(
+    completion_resolve_carries_auto_import_edit,
+    fixture = "single-project",
+    async fn run(session) {
+        // A workspace sibling that exports a uniquely-named symbol. Auto-import
+        // must offer it (and, on resolve, supply the import statement) in a file
+        // that references the name without importing it.
+        let marker = "verterAutoImportMarker42";
+        let src = format!("export const {marker} = 123;\n");
+        let _src_path = session
+            .open_in_provider("src/__verter_autoimport_src.tsx", &src)
+            .await;
+
+        // The use site references the marker with no import — the completion list
+        // for the partial identifier should include the cross-file auto-import.
+        let use_src = format!("export const usage = {marker};\n");
+        let use_path = session
+            .open_in_provider("src/__verter_autoimport_use.tsx", &use_src)
+            .await;
+
+        // Cursor at the END of the typed identifier so the completion list is the
+        // identifier completion (the auto-import candidate carries the import edit).
+        let needle_pos = use_src.find(marker).expect("marker present in use source");
+        let offset = (needle_pos + marker.len()) as u32;
+
+        // Retry while the project indexes the sibling export (auto-import needs the
+        // workspace symbol table warm).
+        let mut import_edit_text: Option<String> = None;
+        'outer: for attempt in 0..10 {
+            let Ok(result) = session
+                .provider()
+                .get_completions(&use_path, offset, None)
+                .await
+            else {
+                if attempt < 9 {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                }
+                continue;
+            };
+
+            // Find the auto-import candidate for our marker that carries a resolve
+            // handle, then resolve it and inspect its additionalTextEdits.
+            for item in result.items.iter().filter(|i| i.label == marker) {
+                let Some(data) = item.data.clone() else {
+                    continue;
+                };
+                if let Ok(Some(resolved)) =
+                    session.provider().resolve_completion(&use_path, data).await
+                {
+                    // Capture only the edit that IS the import of our marker — both
+                    // `import` and the marker name. A looser `||` could latch onto a
+                    // sibling import edit (text with `import` but not the marker) and
+                    // break early, then fail the stricter `&&` assertion below.
+                    for edit in &resolved.additional_text_edits {
+                        if edit.new_text.contains("import") && edit.new_text.contains(marker) {
+                            import_edit_text = Some(edit.new_text.clone());
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if attempt < 9 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        }
+
+        match import_edit_text {
+            Some(text) => {
+                // The resolved edit must be the import STATEMENT for the sibling
+                // symbol — proving tgo computed `additionalTextEdits` because the
+                // client advertised the resolveSupport capability. Strengthen past
+                // the capture predicate (which only required `import` + the marker
+                // substrings): a real auto-import for a cross-file symbol is
+                // `import { <marker> } from "<module>"` (or `import <marker> from
+                // …`), so it MUST also carry the `from` module-specifier clause.
+                // A bare text that merely contains both substrings (e.g. a comment
+                // or a side-effect `import "<marker>";`) lacks `from` and fails —
+                // discrimination the capture condition does not already guarantee.
+                assert!(
+                    text.contains("from") && text.contains(marker),
+                    "auto-import resolve edit should be the import statement \
+                     `import {{ {marker} }} from \"…\"` (with a `from` module clause), \
+                     got: {text:?}"
+                );
+            }
+            None => {
+                // Fail-closed under require-mode (CI: `allow_empty_result_skip`
+                // panics), recorded-skip otherwise — an absent import edit for this
+                // controlled workspace symbol is a genuine resolveSupport regression
+                // when the backend is present.
+                let _skipped = session.allow_empty_result_skip(&format!(
+                    "no completionItem/resolve additionalTextEdits import edit surfaced for \
+                     workspace symbol {marker} (provider={}, auto-import indexing may be cold)",
+                    if session.is_tsgo() { "tsgo" } else { "tsserver" }
+                ));
+            }
+        }
+    }
+);

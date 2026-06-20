@@ -234,6 +234,236 @@ fn test_rewrite_vue_imports_no_false_positives() {
     );
 }
 
+/// The tgo `initialize` client capabilities must advertise the diagnostic
+/// `tagSupport` on BOTH the push (`publishDiagnostics`) and pull (`diagnostic`)
+/// channels with `valueSet [1, 2]`. An LSP server only attaches `DiagnosticTag`s
+/// (1 = Unnecessary fade, 2 = Deprecated strikethrough) when the client declares
+/// support; with empty capabilities tgo silently drops the tags.
+///
+/// Note: only the PUSH-channel `publishDiagnostics.tagSupport` is spec-defined; the
+/// PULL-channel `diagnostic.tagSupport` is a NON-SPEC field (LSP 3.17's
+/// `DiagnosticClientCapabilities` has no `tagSupport`) pinned to document/retain
+/// current behavior, not because the spec requires it.
+///
+/// Discriminating: a near-empty capabilities object (the pre-`tagSupport`-fix
+/// state) has neither channel and fails this.
+#[test]
+fn client_capabilities_advertise_diagnostic_tag_support() {
+    let caps = build_client_capabilities();
+    let td = &caps["textDocument"];
+
+    assert_eq!(
+        td["publishDiagnostics"]["tagSupport"]["valueSet"],
+        serde_json::json!([1, 2]),
+        "publishDiagnostics.tagSupport.valueSet must advertise [1, 2]"
+    );
+    assert_eq!(
+        td["diagnostic"]["tagSupport"]["valueSet"],
+        serde_json::json!([1, 2]),
+        "diagnostic.tagSupport.valueSet must advertise [1, 2]"
+    );
+}
+
+/// The tgo `initialize` client capabilities must advertise
+/// `textDocument.completion.completionItem.resolveSupport` listing EXACTLY the
+/// properties tgo's `completionItem/resolve` handlers fold back.
+///
+/// tgo consumes the resolve round-trip at two sites — `get_completion_details`
+/// folds back `detail` + `documentation`; `resolve_completion` folds back
+/// `additionalTextEdits` (the auto-import edits). Per the LSP spec, a server only
+/// computes a resolve property lazily when the client lists it in
+/// `resolveSupport.properties`; with empty capabilities tgo silently drops
+/// `additionalTextEdits`, so completion-driven auto-import never applies its
+/// import edit.
+///
+/// `completionItem.data` is NOT gated on any advertised capability — it is a
+/// spec-transparent passthrough the client echoes back verbatim, and there is no
+/// `dataSupport` capability in the LSP spec, so the handshake must NOT carry one.
+///
+/// Discriminating: the pre-fix near-empty capabilities (only the diagnostic
+/// `tagSupport` keys) have no `completion` object at all and fail this.
+#[test]
+fn client_capabilities_advertise_completion_item_resolve_support() {
+    let caps = build_client_capabilities();
+    let completion_item = &caps["textDocument"]["completion"]["completionItem"];
+
+    // `dataSupport` is NOT a real LSP capability — `data` rides the resolve
+    // round-trip transparently per spec, so the handshake must not advertise it.
+    assert!(
+        completion_item.get("dataSupport").is_none(),
+        "completionItem.dataSupport must be absent — it is not a real LSP capability \
+         (`data` is a spec-transparent resolve passthrough)"
+    );
+
+    let properties = completion_item["resolveSupport"]["properties"]
+        .as_array()
+        .expect("resolveSupport.properties must be an array");
+    let props: std::collections::BTreeSet<&str> =
+        properties.iter().filter_map(|p| p.as_str()).collect();
+
+    // EXACTLY the properties tgo's resolve handlers actually fold back — no more.
+    // `documentation` + `detail` from get_completion_details; `additionalTextEdits`
+    // from resolve_completion (auto-import). Advertising a property tgo does not
+    // consume would invite the server to compute work the client discards.
+    let expected: std::collections::BTreeSet<&str> =
+        ["documentation", "detail", "additionalTextEdits"]
+            .into_iter()
+            .collect();
+    assert_eq!(
+        props, expected,
+        "resolveSupport.properties must be EXACTLY the folded-back set {expected:?}, got {props:?}"
+    );
+
+    // Negative — do NOT over-claim properties tgo has no handler for. `command`
+    // is a common resolve property tgo never executes; it must be absent.
+    assert!(
+        !props.contains("command"),
+        "must NOT advertise `command` — tgo's resolve has no command handler"
+    );
+    assert!(
+        !props.contains("textEdit"),
+        "must NOT advertise `textEdit` resolve — tgo only folds additionalTextEdits"
+    );
+}
+
+/// The tgo `initialize` client capabilities must advertise
+/// `textDocument.completion.contextSupport: true`.
+///
+/// `get_completions` ALWAYS sends `CompletionParams.context` (the trigger
+/// kind/character — `triggerKind: 2 + triggerCharacter` on a trigger-character
+/// completion, `triggerKind: 1` on an invoked one). Per LSP 3.17 a server only
+/// honours `CompletionParams.context` when the client advertises
+/// `textDocument.completion.contextSupport: true`; without it tgo may ignore the
+/// trigger context entirely, so completions stop being trigger-aware.
+///
+/// Discriminating: the pre-fix capabilities (no `contextSupport` key under
+/// `completion`) fail this — `contextSupport` is `Null` there, not `true`.
+#[test]
+fn client_capabilities_advertise_completion_context_support() {
+    let caps = build_client_capabilities();
+    let completion = &caps["textDocument"]["completion"];
+
+    assert_eq!(
+        completion["contextSupport"],
+        serde_json::json!(true),
+        "completion.contextSupport must be `true` — get_completions always sends \
+         CompletionParams.context and LSP only honours it under this flag"
+    );
+}
+
+/// The tgo `initialize` client capabilities must advertise
+/// `textDocument.completion.completionItemKind.valueSet` covering EXACTLY the
+/// `CompletionItemKind` integers the tgo completion parser
+/// (`parse_completion_item`) can carry through.
+///
+/// Per LSP, omitting `completionItemKind.valueSet` means the client only supports
+/// the default range `Text..Reference` (1..=18), so a server may DOWNGRADE a kind
+/// OUTSIDE that range to `Text`. `parse_completion_item` reads the full standard
+/// `CompletionItemKind` range `1..=25` generically (every integer is mapped to a
+/// `CompletionKind`; unmapped integers fall back to `Text` but are still consumed),
+/// so the client advertises the full standard valueSet `1..=25` — no more (exact,
+/// no over-claim) and no less. Class = 7 (which Block A's component-tag completions
+/// rely on) is INSIDE the default `1..=18` range and is preserved even without the
+/// valueSet; the kinds the default range actually downgrades are the higher kinds
+/// 19..=25, which are the motivation for advertising the valueSet.
+///
+/// Discriminating: the pre-fix capabilities have no `completionItemKind` key, so
+/// `valueSet` is `Null` and fails this; a default-range-only advertisement would
+/// omit 19..=25 and fail the upper-bound coverage assertion.
+#[test]
+fn client_capabilities_advertise_completion_item_kind_value_set() {
+    let caps = build_client_capabilities();
+    let completion = &caps["textDocument"]["completion"];
+
+    let value_set = completion["completionItemKind"]["valueSet"]
+        .as_array()
+        .expect("completionItemKind.valueSet must be an array");
+    let kinds: std::collections::BTreeSet<u64> =
+        value_set.iter().filter_map(|k| k.as_u64()).collect();
+
+    // The parser maps the full standard CompletionItemKind range — advertise it
+    // exactly (1..=25), no more (no over-claim past the spec range) and no less.
+    let expected: std::collections::BTreeSet<u64> = (1..=25).collect();
+    assert_eq!(
+        kinds, expected,
+        "completionItemKind.valueSet must be EXACTLY the standard range 1..=25 the \
+         parser carries through, got {kinds:?}"
+    );
+
+    // Class (7) is the kind Block A's component-tag completions depend on; assert
+    // it is present so a future trim of the valueSet cannot silently drop it.
+    assert!(
+        kinds.contains(&7),
+        "completionItemKind.valueSet must include Class (7) — component-tag \
+         completions depend on the Class kind surviving"
+    );
+    // Upper-range kinds the default `Text..Reference` (1..=18) range would
+    // downgrade — guard the coverage that motivates advertising the valueSet.
+    for richer in [19u64, 20, 21, 22, 23, 24, 25] {
+        assert!(
+            kinds.contains(&richer),
+            "completionItemKind.valueSet must include {richer} — the default range \
+             1..=18 would downgrade it, but the parser maps it"
+        );
+    }
+}
+
+/// Negative over-claim guard for the whole capabilities surface: tgo issues no
+/// `documentSymbol`, `foldingRange`, `callHierarchy`, `typeHierarchy`,
+/// `selectionRange`, `linkedEditingRange`, or `workspace/symbol` request (see the
+/// request inventory in `ipc.rs`), so the client must NOT advertise those
+/// capabilities. Advertising a capability whose handler tgo cannot fulfill would
+/// let tgo register/return data the client silently ignores.
+///
+/// Also guards the `completionItem` shapes this provider's completion parser does
+/// NOT read — `snippetSupport`, `insertReplaceSupport`, `labelDetailsSupport`
+/// (the parser maps a flat `insertText` / single `textEdit` and reads no snippet,
+/// insert-replace, or label-details shape) — and `dataSupport` (not a real LSP
+/// capability; `data` is a spec-transparent resolve passthrough).
+#[test]
+fn client_capabilities_do_not_overclaim_unhandled_features() {
+    let caps = build_client_capabilities();
+    let td = &caps["textDocument"];
+
+    for unhandled in [
+        "documentSymbol",
+        "foldingRange",
+        "callHierarchy",
+        "typeHierarchy",
+        "selectionRange",
+        "linkedEditingRange",
+    ] {
+        assert!(
+            td.get(unhandled).is_none(),
+            "must NOT advertise textDocument.{unhandled} — tgo has no handler for it"
+        );
+    }
+    assert!(
+        caps.get("workspace")
+            .and_then(|w| w.get("symbol"))
+            .is_none(),
+        "must NOT advertise workspace.symbol — tgo issues no workspace/symbol request"
+    );
+
+    // Completion `completionItem` shapes the parser does not read must be absent —
+    // advertising one invites tgo to emit a shape this provider silently discards.
+    let completion_item = &td["completion"]["completionItem"];
+    for unread in [
+        "snippetSupport",
+        "insertReplaceSupport",
+        "labelDetailsSupport",
+        // `dataSupport` is not a real LSP capability (`data` is a spec-transparent
+        // resolve passthrough); it must never be advertised.
+        "dataSupport",
+    ] {
+        assert!(
+            completion_item.get(unread).is_none(),
+            "must NOT advertise completion.completionItem.{unread} — the completion \
+             parser reads no such shape"
+        );
+    }
+}
+
 #[test]
 fn test_build_paths_config_payload_includes_paths_only() {
     let payload = build_paths_config_payload(serde_json::json!({
