@@ -21,6 +21,7 @@ Append-only, newest at bottom, one terse factual line per event, no timestamps:
 - `DISPATCH <role> mechanism=agent|claude-p brief=<path> report=<path> input-id=<hash> model=<id> effort=<level>` — EVERY gate-bearing dispatch records these five regardless of mechanism (gate-bearing roles persist brief+report to files, never inline). Mechanism-specific evidence is EXTRA only and never substitutes for the input identity: `agent-id=<id>` on the Agent path; `terminal=<path> wrapper-pid=<n>` + jsonl on the opt-in `claude -p` path.
 - `CAPABILITY mechanism=agent isolation=<pass|fail> identity=<pass|fail> stopcontinue=<pass|fail> childspawn=<pass|fail> result=PASS|FAIL` — recorded once before the first Agent dispatch; absent or stale (inputs changed) ⇒ "unknown" ⇒ forces the `claude -p` fallback.
 - `VERDICT <reviewer> = LAND|CHANGES base..head=<sha..sha> file=<path>`
+- `CODEX <role> prompt=<path> output=<path> input-id=<hash> model=<id> effort=<level> framing=neutral-verified,best-not-lowest-effort-explicit` — every codex-architect consult/approval records this; the `framing=` field is the auditable marker that BOTH the neutral/unprimed check AND the best-not-lowest-effort-explicit check (PROTOCOL.md → Consult Framing Discipline) ran before send.
 - `DECISION <what> — <why/codex-ref>`
 - `CHECK <n> = PASS|FAIL inputs=<base..head|cmd|env> <evidence>`
 - `BLOCKED: <what>`

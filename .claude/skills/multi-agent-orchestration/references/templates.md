@@ -122,9 +122,18 @@ The external model usually cannot read the repo. Structure the prompt file:
 # Consult — <one-line question>
 
 You are reviewing an architectural question for <project>. Evaluate for
-PRODUCTION-READY quality: recommend the best long-term architecture. Breaking
-changes, broad refactors, and implementation cost are all acceptable — do not
-trade architectural correctness for a smaller fix.
+PRODUCTION-READY quality: recommend the best long-term architecture ON THE
+MERITS. Breaking changes and broad refactors are acceptable when they are best
+on the merits. Implementation effort as accounting — diff-size, migration
+effort/breadth, files-touched, "smaller change" — is NOT a selection criterion:
+effort is neutral, biasing toward NEITHER a minimal/local fix NOR a
+broad/refactor-heavy one. Choose the minimal option only when it is
+independently best; choose the broader option only when it is independently
+better; reject over-engineering, gold-plating, and unnecessary breadth.
+(Architecture-relevant migration RISK — dual paths, rollout/rollback safety,
+invariant exposure — stays a merit, but only when tied to a durable failure
+mode: raw edit volume / file count is effort, while concrete rollback / invariant
+risk may not be dismissed as mere effort.)
 
 ## Context
 <the plan; what landed; why this question arises>
