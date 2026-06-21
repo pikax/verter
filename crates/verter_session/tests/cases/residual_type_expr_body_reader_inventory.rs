@@ -1103,8 +1103,8 @@ fn inventory_for(files: &[(String, String)]) -> Vec<FnDef> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReaderClass {
     /// MIGRATED onto the shared `decl_body_hot_ref` hot accessor / a graph-native
-    /// arm — these anchors must NO LONGER read a declaration body as `TypeExpr`
-    /// for a semantic decision (enforced by
+    /// arm — these anchors must NOT read a declaration body as `TypeExpr` for a
+    /// semantic decision (enforced by
     /// [`graph_backed_migrated_anchors_perform_no_typeexpr_body_read`]).
     GraphBackedMigrated,
 
@@ -1114,14 +1114,16 @@ enum ReaderClass {
     /// closedness / key-domain over the authored `TypeExpr`). Stays `TypeExpr`.
     ///
     /// ```text
-    /// scanner_invariant: Only enumerated production anchors may read a
-    ///   declaration body as TypeExpr for authored-shape decisions. These reads
-    ///   may inspect preserved syntax but must not feed graph-backed semantic
-    ///   reduction.
+    /// scanner_invariant: reads of a declaration body as TypeExpr for authored-shape
+    ///   decisions are CONFINED BY POLICY to the enumerated production anchors in this
+    ///   class (the curated inventory row), NOT a structurally-enforced embargo. These
+    ///   reads may inspect preserved syntax but must not feed graph-backed semantic
+    ///   reduction. A new bare-field reader outside the enumeration is caught by the
+    ///   curated enumeration + the behavioural parity rail, not by this guard.
     /// scanner_justification: Whether a reader requires authored syntax is an
     ///   architectural judgment not expressible by Rust while raw TypeExpr bodies
     ///   remain available.
-    /// mechanism_ruling: curated inventory row, not a global confinement proof.
+    /// mechanism_ruling: curated inventory row, not a structural confinement proof.
     ///   The structural replacement is private body storage plus an AuthoredDeclBody
     ///   wrapper/tokened accessor.
     /// hardening_rounds: 0
@@ -1134,25 +1136,29 @@ enum ReaderClass {
     /// below-graph DTO depend on the session graph. Stays `TypeExpr`.
     ///
     /// ```text
-    /// scanner_invariant: Only enumerated below-graph DTO/frontier/eval-env paths
-    ///   may carry declaration bodies as TypeExpr, and they must not depend on
-    ///   HotTypeRef, SemanticGraphStore, or decl_body_hot_ref.
+    /// scanner_invariant: carriage of a declaration body as TypeExpr on a below-graph
+    ///   DTO/frontier/eval-env path is CONFINED BY POLICY to the enumerated paths in
+    ///   this class (the curated inventory row), NOT a structurally-enforced embargo;
+    ///   these paths must not depend on HotTypeRef, SemanticGraphStore, or
+    ///   decl_body_hot_ref. A new bare-field reader outside the enumeration is caught
+    ///   by the curated enumeration + the behavioural parity rail, not by this guard.
     /// scanner_justification: These paths intentionally live below the session
     ///   graph. Current layout may not encode every boundary as a crate
     ///   dependency.
-    /// mechanism_ruling: Prefer Cargo/module dependency enforcement. Scanner is
-    ///   only for same-crate residual reads.
+    /// mechanism_ruling: curated inventory row, not a structural confinement proof.
+    ///   Prefer Cargo/module dependency enforcement of the below-graph boundary; this
+    ///   inventory only records the same-crate residual reads.
     /// hardening_rounds: 0
     /// ```
     GraphFreeDto,
 
     /// Graph-backed-PENDING reader — a genuinely graph-backed reader that reads
-    /// the body as `TypeExpr` because no graph-native arm for its shape exists yet.
-    /// Each row stays `TypeExpr` because the structural arm that would let it route
-    /// through `decl_body_hot_ref` / graph-native dispatch is not present (the
-    /// imported-registry body carrier does not yet carry identity / `HotTypeRef`;
-    /// the member-surface-route key enumerator has no graph-native `SemanticNodeData`
-    /// key enumerator; the locator is a single `TypeExpr`-returning locator, not yet
+    /// the body as `TypeExpr` because its shape has no graph-native arm. Each row
+    /// stays `TypeExpr` because the structural arm that would let it route through
+    /// `decl_body_hot_ref` / graph-native dispatch is absent (the imported-registry
+    /// body carrier carries `TypeExpr` rather than identity / `HotTypeRef`; the
+    /// member-surface-route key enumerator has no graph-native `SemanticNodeData`
+    /// key enumerator; the locator is a single `TypeExpr`-returning locator, not
     /// split into identity/hot vs authored-body locators; the
     /// `PreparedValueDecl.type_annotation` value-decl handle has no `HotPreparedValueDecl`
     /// annotation handle). Unlike the `AuthoredShape` / `GraphFreeDto` /
@@ -1186,14 +1192,17 @@ enum ReaderClass {
     /// required bridge from authored IR into graph IR.
     ///
     /// ```text
-    /// scanner_invariant: Only enumerated producer anchors may read the authored
-    ///   body to lower it into the semantic graph and mint a
-    ///   HotTypeRef/SemanticNodeId. They must not return or cache TypeExpr as a
-    ///   hot carrier.
+    /// scanner_invariant: reads of the authored body to lower it into the semantic
+    ///   graph and mint a HotTypeRef/SemanticNodeId are CONFINED BY POLICY to the
+    ///   enumerated producer anchors in this class (the curated inventory row), NOT a
+    ///   structurally-enforced embargo; these anchors must not return or cache TypeExpr
+    ///   as a hot carrier. A new bare-field reader outside the enumeration is caught by
+    ///   the curated enumeration + the behavioural parity rail, not by this guard.
     /// scanner_justification: The producer is the required bridge from authored IR
     ///   into graph IR; purpose is not distinguishable while the field is publicly
     ///   readable.
-    /// mechanism_ruling: Replace with private prepared-body access scoped to
+    /// mechanism_ruling: curated inventory row, not a structural confinement proof.
+    ///   The structural replacement is private prepared-body access scoped to the
     ///   producer modules.
     /// hardening_rounds: 0
     /// ```
@@ -2080,8 +2089,8 @@ fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
 /// Every `GraphBackedMigrated` anchor's OWN fn body (a) performs NO forbidden
 /// `TypeExpr` declaration-body read — no `<expr>.body` / `<expr>.type_annotation`
 /// field access, no `prepared_type_decl(..)` / `named_decl_body(..)` call — AND
-/// (b) routes through the shared `decl_body_hot_ref` hot accessor (or the
-/// alternate graph-native `materialize_member_surface_node` arm). This is a `syn`
+/// (b) routes through the hot accessor(s) in its row's `required_hot_route` set
+/// (the per-row required route, not a flat global union). This is a `syn`
 /// AST audit ([`MigratedBodyAuditor`]) scoped to the EXACT `(file, impl_path, fn)`
 /// anchor — NOT a text/needle scan: it is alias/rename robust, sees neither
 /// comments nor string literals, and proves the precise anchor identity (the right
@@ -2147,8 +2156,9 @@ fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
         if !verdict.forbidden_reads.is_empty() {
             violations.push(format!(
                 "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` STILL performs \
-                 forbidden TypeExpr-body read(s) {:?} — a migrated reader must route through \
-                 decl_body_hot_ref / a graph-native arm, not read a declaration body as TypeExpr",
+                 forbidden TypeExpr-body read(s) {:?} — a migrated reader must route through the \
+                 hot accessor(s) in its row's `required_hot_route` set, not read a declaration \
+                 body as TypeExpr",
                 verdict.forbidden_reads
             ));
         }
@@ -2415,11 +2425,11 @@ fn audit_synthetic_migrated_body(body_src: &str, required_idents: &[&str]) -> Mi
 /// `materialize_member_surface_node` — so the ident stays a valid required route
 /// for a member-surface-route row; it just does not satisfy THIS anchor.
 ///
-/// This discriminates the per-row mechanism from the prior flat list: under the
-/// flat list `&["decl_body_hot_ref", "materialize_member_surface_node"]`, a
-/// `materialize_member_surface_node`-only body would have been judged ROUTED for
+/// This discriminates the per-row mechanism from a flat-union audit: under a flat
+/// union `&["decl_body_hot_ref", "materialize_member_surface_node"]`, a
+/// `materialize_member_surface_node`-only body would be judged ROUTED for
 /// `lower_decl_body_to_node` (a too-broad accept). With the per-row set this case
-/// is NOT-routed, so the first assertion below FAILS against a flat-list audit and
+/// is NOT-routed, so the first assertion below FAILS against a flat-union audit and
 /// PASSES against the per-row audit.
 #[test]
 fn migrated_route_requirement_is_per_row_not_a_flat_union() {
@@ -2442,10 +2452,10 @@ fn migrated_route_requirement_is_per_row_not_a_flat_union() {
         "the lower_decl_body_to_node row must require `decl_body_hot_ref` ONLY"
     );
 
-    // RED-on-flat-list / GREEN-on-per-row: judged against THIS row's required set,
+    // RED-on-flat-union / GREEN-on-per-row: judged against THIS row's required set,
     // a `materialize_member_surface_node`-only body does NOT satisfy the route. A
-    // flat-union audit (the pre-fix behaviour) would have marked it ROUTED and this
-    // assertion would FAIL — that is the discriminating property.
+    // flat-union audit would mark it ROUTED and this assertion would FAIL — that is
+    // the discriminating property.
     let surface_only = audit_synthetic_migrated_body(SURFACE_ONLY_BODY, lower_decl_route);
     assert!(
         !surface_only.routes_through_hot_accessor,
@@ -2575,10 +2585,10 @@ fn graph_backed_migrated_no_read_check_discriminates() {
         regressed_named.forbidden_reads
     );
 
-    // ALIASED LAUNDER — the read goes through a renamed local binding, so the OLD
-    // text needle `"prepared.body"` would NOT fire (the binding is named `p`). The
-    // AST audit catches the `p.body` field access structurally. THIS is the
-    // upgrade's load-bearing discrimination.
+    // ALIASED LAUNDER — the read goes through a renamed local binding, so the
+    // literal text needle `"prepared.body"` would NOT fire (the binding is named
+    // `p`). The AST audit catches the `p.body` field access structurally. THIS is
+    // the load-bearing discrimination of this AST audit over a literal-text scan.
     let aliased_launder = audit("let p = get_prepared(cid, name); let _ = p.body.clone(); None");
     assert!(
         aliased_launder
@@ -2586,17 +2596,17 @@ fn graph_backed_migrated_no_read_check_discriminates() {
             .iter()
             .any(|r| r.contains("body")),
         "self-test (ALIASED LAUNDER): the AST audit MUST catch `p.body` where `let p = \
-         get_prepared(..)` — the aliased body read the old text needle `prepared.body` missed. Got \
-         {:?}",
+         get_prepared(..)` — the aliased body read the literal text needle `prepared.body` cannot \
+         see. Got {:?}",
         aliased_launder.forbidden_reads
     );
-    // Sanity that this case really is a launder past the OLD needle: the literal
-    // text `prepared.body` is absent from the laundered body source, yet the AST
-    // audit still flags it.
+    // Sanity that this case really is a launder past the literal-text needle: the
+    // literal text `prepared.body` is absent from the laundered body source, yet the
+    // AST audit still flags it.
     assert!(
         !"let p = get_prepared(cid, name); let _ = p.body.clone(); None".contains("prepared.body"),
         "self-test (launder premise): the laundered source must NOT contain the literal \
-         `prepared.body` text — otherwise it is not a real launder past the old needle"
+         `prepared.body` text — otherwise it is not a real launder past the literal-text needle"
     );
 
     // ALIASED LAUNDER via `type_annotation` too (the value-decl body carrier).
@@ -2661,7 +2671,7 @@ fn graph_backed_migrated_no_read_check_discriminates() {
 /// The MANUALLY-CURATED enumeration — NOT any automatic structural scan — is the
 /// only rail for BARE-FIELD body readers (which the method-chain tripwire
 /// structurally cannot see, and which the GraphBackedMigrated AST no-read rail does
-/// not cover at a NEW anchor). This test PROVES the DISCLOSED INTERIM LIMITATION: a
+/// not cover at a NEW anchor). This test PROVES the DISCLOSED LIMIT: a
 /// synthetic bare `<recv>.body.clone()` reader at a NON-inventoried anchor produces
 /// ZERO method-chain hits, so a brand-new bare-field reader is NOT auto-caught — it
 /// is closed ONLY by the author keeping the enumeration complete + the behavioural

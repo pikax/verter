@@ -41,7 +41,7 @@ genuine structural close — private owner-layer body storage plus `HotPrepared*
 access and an explicit `AuthoredDeclBody` / authored-shape surface with no raw escape to graph-backed
 consumers — is a dedicated follow-up, recorded as part of this debt row's closure criterion below.
 
-## The two deferred reader classes
+## The three deferred reader classes
 
 ### 1. Authored-shape readers (decision is intrinsically about the AUTHORED syntactic form)
 
