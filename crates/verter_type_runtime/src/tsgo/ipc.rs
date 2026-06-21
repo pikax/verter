@@ -3955,10 +3955,33 @@ mod dto_path_canonicalization_tests {
         assert!(!edit.path.starts_with("file://"));
     }
 
+    /// A URI whose canonical path is guaranteed absent on disk: built under the OS temp dir with a
+    /// process- and time-unique segment, then removed so neither the file nor its parent exists.
+    /// Returned in the same `file://` form production resolves through.
+    fn absent_target_uri(tag: &str) -> String {
+        use super::{path_to_file_uri_string, uri_to_file_path};
+        let dir = std::env::temp_dir().join(format!(
+            "verter_tgo_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Ensure absence: remove the directory tree if a prior run left it behind.
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("gone.ts");
+        let canonical = uri_to_file_path(&format!(
+            "file:///{}",
+            file.to_string_lossy().replace('\\', "/")
+        ));
+        path_to_file_uri_string(&canonical)
+    }
+
     /// A code-action text edit whose target is absent from the cache AND unreadable on disk must be
-    /// DROPPED (returns `None`) — never pack a line-0 offset. Discriminating: the pre-fix path
-    /// wrapped `pack_position` in `Some`, so `?` did NOT drop it and the edit survived at a packed
-    /// offset that corrupts the WRONG file.
+    /// DROPPED (returns `None`). Fails if the converter emits a packed line:col offset on a cache +
+    /// disk miss — that offset would corrupt the WRONG file.
     #[test]
     fn parse_text_edit_to_code_edit_drops_when_content_unavailable() {
         let te = serde_json::json!({
@@ -3968,8 +3991,8 @@ mod dto_path_canonicalization_tests {
             },
             "newText": "x"
         });
-        // Cache miss for everything; the canonical path `d:/proj/gone.ts` does not exist on disk.
-        let edit = parse_text_edit_to_code_edit("file:///D:/proj/gone.ts", &te, &|_p| None);
+        let uri = absent_target_uri("code_edit_gone");
+        let edit = parse_text_edit_to_code_edit(&uri, &te, &|_p| None);
         assert!(
             edit.is_none(),
             "a code-action edit whose content is unavailable must be DROPPED (fail-closed), never \
@@ -3978,11 +4001,11 @@ mod dto_path_canonicalization_tests {
     }
 
     /// A rename edit whose target is absent from the cache AND unreadable on disk must be DROPPED —
-    /// a rename is a WRITE edit, so a packed line-0 offset corrupts the file. Same RED as the
-    /// code-edit twin.
+    /// a rename is a WRITE edit, so a packed line:col offset would corrupt the file.
     #[test]
     fn parse_rename_edit_drops_when_content_unavailable() {
-        let loc = parse_rename_edit("file:///D:/proj/gone.ts", &edit_json(), &|_p| None);
+        let uri = absent_target_uri("rename_gone");
+        let loc = parse_rename_edit(&uri, &edit_json(), &|_p| None);
         assert!(
             loc.is_none(),
             "a rename edit whose content is unavailable must be DROPPED (fail-closed), never \
