@@ -2438,11 +2438,13 @@ pub fn parse_tsserver_location(
 /// cache miss — the SAME content-resolution [`parse_tsserver_location`] gives references /
 /// definition, and the tsgo rename path gives via `parse_range_to_offsets_with_disk_fallback`.
 ///
-/// Without the disk fallback, a cross-file target absent from the cache packed a 0-based
-/// `(line << 16) | col` sentinel that the merge layer cannot map back to a real range — so the
-/// cross-file rename edit was silently DROPPED, leaving the rename incomplete (dangling
-/// references). The packed fallback survives only as the last resort when neither the cache nor
-/// disk has the content.
+/// The disk fallback recovers a cross-file target absent from the cache, so its rename edit lands
+/// at the real range instead of being dropped. FAIL CLOSED otherwise: when NEITHER cache nor disk
+/// has the content the span is DROPPED (returns `None`) — a rename location is a WRITE edit, so a
+/// packed `(line << 16) | col` sentinel applied at a bogus byte offset would CORRUPT the file. An
+/// out-of-range position (the shared codec would clamp it to EOF) and an inverted `start > end`
+/// span also drop. The caller collects via `filter_map`, so one dropped span never aborts the
+/// whole rename.
 pub fn parse_tsserver_rename_span(
     span: &serde_json::Value,
     file: &str,
@@ -2463,17 +2465,19 @@ pub fn parse_tsserver_rename_span(
         disk_content.as_deref()
     };
 
-    let (s, e) = if let Some(c) = content {
-        (
-            tsserver_pos_to_byte_offset(c, sl, so),
-            tsserver_pos_to_byte_offset(c, el, eo),
-        )
-    } else {
-        (
-            ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF),
-            ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF),
-        )
-    };
+    // FAIL CLOSED: a rename location is a WRITE edit — same corruption class as a code edit. When the
+    // target content is unavailable (cache miss AND disk read fails) DROP the span — never pack a
+    // `(line << 16) | col` sentinel the merge layer would apply at a bogus byte offset and corrupt
+    // the file. The checked converter additionally drops an out-of-range position (the shared codec
+    // would clamp it to a valid-looking EOF offset), and an inverted `start > end` span drops too.
+    // The caller collects via `filter_map`, so a dropped span skips that one location, not the
+    // whole rename.
+    let c = content?;
+    let s = tsserver_pos_to_byte_offset_checked(c, sl, so)?;
+    let e = tsserver_pos_to_byte_offset_checked(c, el, eo)?;
+    if s > e {
+        return None;
+    }
 
     Some(RenameLocation {
         path: file.to_string(),

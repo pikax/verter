@@ -513,6 +513,58 @@ fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
     let _ = std::fs::remove_dir_all(&temp_root);
 }
 
+/// A rename span whose GROUP file is absent from the cache AND unreadable on disk must be DROPPED
+/// (returns `None`) — a rename location is a WRITE edit, so a packed `(line << 16) | col` sentinel
+/// applied at a bogus byte offset would CORRUPT the file.
+///
+/// Discriminating regression: the pre-fix code packed the 0-based sentinel as a final `else` arm and
+/// returned `Some(RenameLocation { start: packed, .. })`. The fixed code returns `None`. The fixture
+/// path does not exist on disk and is not in the (empty) cache.
+#[test]
+fn parse_tsserver_rename_span_drops_span_when_content_unavailable() {
+    let missing = std::env::temp_dir()
+        .join(format!(
+            "verter-tsserver-rename-missing-{}-absent.ts",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .replace('\\', "/");
+    let _ = std::fs::remove_file(&missing);
+
+    let span = serde_json::json!({
+        "start": { "line": 3, "offset": 14 },
+        "end": { "line": 3, "offset": 21 },
+    });
+    let cache: HashMap<String, String> = HashMap::new();
+
+    let parsed = parse_tsserver_rename_span(&span, &missing, &cache);
+    assert!(
+        parsed.is_none(),
+        "a rename span whose content is unavailable must be DROPPED (fail-closed), never packed: \
+         {parsed:?}"
+    );
+}
+
+/// A rename span whose content IS available but whose position is OUT OF RANGE (past EOF) is
+/// DROPPED, not clamped — a clamped rename WRITE at EOF would corrupt the file.
+#[test]
+fn parse_tsserver_rename_span_drops_out_of_range_position() {
+    let content = "const x = 1;\nconst y = 2;\n";
+    let mut cache: HashMap<String, String> = HashMap::new();
+    cache.insert("d:/proj/r.ts".to_string(), content.to_string());
+
+    let span = serde_json::json!({
+        "start": { "line": 999, "offset": 1 },
+        "end": { "line": 999, "offset": 4 },
+    });
+
+    let parsed = parse_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
+    assert!(
+        parsed.is_none(),
+        "an out-of-range rename span must be DROPPED, never clamped to EOF: {parsed:?}"
+    );
+}
+
 #[test]
 fn test_parse_tsserver_location_non_ascii() {
     // tsserver uses UTF-16 code units for offset
