@@ -1000,19 +1000,21 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
             .map(String::from)
             .or_else(|| v.get("value").and_then(|v2| v2.as_str()).map(String::from))
     });
-    // The insert text the editor commits. Prefer an explicit `insertText`; else
-    // fall back to the `textEdit.newText` (the text the provider intended to
-    // write). When the replace-range is dropped fail-closed below, this carries
-    // the intended text so the item degrades to inserting that text — never the
-    // display `label`, which may differ (e.g. `"foo (auto-import)"` vs `"foo"`).
+    // The `textEdit.newText` — the text a SURVIVING replace-range commits (per
+    // LSP the editor applies it and ignores `insertText`), and the preferred
+    // plain-insert fallback when the range is dropped fail-closed below.
+    let text_edit_new_text = item
+        .get("textEdit")
+        .and_then(|te| te.get("newText"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    // The explicit `insertText` — the plain-insert text used only when there is
+    // no `textEdit`. Carried distinctly from `text_edit_new_text` so the consumer
+    // chooses the right text per LSP semantics (newText for an edit; insertText
+    // for a plain insert) and never falls back to the display `label`.
     let insert_text = item
         .get("insertText")
         .and_then(|v| v.as_str())
-        .or_else(|| {
-            item.get("textEdit")
-                .and_then(|te| te.get("newText"))
-                .and_then(|v| v.as_str())
-        })
         .map(String::from);
     let sort_text = item
         .get("sortText")
@@ -1062,6 +1064,7 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         documentation,
         edit_range_start,
         edit_range_end,
+        text_edit_new_text,
         insert_text,
         sort_text,
         data,
@@ -1111,6 +1114,7 @@ fn fold_lsp_resolve_detail_into_completion(
         documentation: documentation.or_else(|| item.documentation.clone()),
         edit_range_start: item.edit_range_start,
         edit_range_end: item.edit_range_end,
+        text_edit_new_text: item.text_edit_new_text.clone(),
         insert_text: item.insert_text.clone(),
         sort_text: item.sort_text.clone(),
         data: item.data.clone(),

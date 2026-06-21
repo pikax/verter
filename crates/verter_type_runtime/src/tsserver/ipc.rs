@@ -2282,6 +2282,9 @@ pub fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion>
         documentation: None,
         edit_range_start: None,
         edit_range_end: None,
+        // tsserver completion entries carry no `textEdit`; the surviving-edit
+        // payload is absent and the plain-insert text rides `insert_text`.
+        text_edit_new_text: None,
         insert_text,
         sort_text,
         data,
@@ -2371,6 +2374,7 @@ fn enrich_tsserver_completion(item: &Completion, detail: &serde_json::Value) -> 
         documentation: documentation.or_else(|| item.documentation.clone()),
         edit_range_start: item.edit_range_start,
         edit_range_end: item.edit_range_end,
+        text_edit_new_text: item.text_edit_new_text.clone(),
         insert_text: item.insert_text.clone(),
         sort_text: item.sort_text.clone(),
         data: item.data.clone(),

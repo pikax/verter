@@ -935,22 +935,25 @@ fn parse_completion_item_preserves_new_text_as_insert_when_range_dropped() {
         item.edit_range_start, None,
         "an unprovable replace-range must be dropped"
     );
+    // The intended edit text rides `text_edit_new_text`; on a dropped range the
+    // consumer falls back to it (over the absent explicit insertText), so the
+    // item inserts "foo" — never the decorated display label.
     assert_eq!(
-        item.insert_text.as_deref(),
+        item.text_edit_new_text.as_deref(),
         Some("foo"),
-        "the dropped-range item must insert the textEdit.newText, not the decorated label"
+        "the textEdit.newText is carried distinctly for the dropped-range fallback"
     );
-    assert_ne!(
-        item.insert_text.as_deref(),
-        Some("foo (auto-import)"),
-        "the inserted text must not fall back to the display label"
+    assert_eq!(
+        item.insert_text, None,
+        "no explicit insertText was supplied, so the explicit-insert field stays empty"
     );
 }
 
-// An explicit `insertText` takes priority over `textEdit.newText` for the
-// committed insert text.
+// The textEdit.newText and an explicit insertText are carried as DISTINCT fields:
+// newText is the surviving-edit payload, insertText is the plain-insert fallback.
+// The parser must not collapse them — a future consumer chooses which to use.
 #[test]
-fn parse_completion_item_prefers_explicit_insert_text_over_new_text() {
+fn parse_completion_item_carries_new_text_and_insert_text_separately() {
     let json = serde_json::json!({
         "label": "foo",
         "kind": 6,
@@ -965,9 +968,35 @@ fn parse_completion_item_prefers_explicit_insert_text_over_new_text() {
     });
     let item = parse_completion_item(&json, None).unwrap();
     assert_eq!(
+        item.text_edit_new_text.as_deref(),
+        Some("foo"),
+        "the textEdit.newText is captured as the edit payload"
+    );
+    assert_eq!(
         item.insert_text.as_deref(),
         Some("foo_snippet"),
-        "an explicit insertText takes priority over textEdit.newText"
+        "an explicit insertText is captured as the plain-insert fallback, not discarded"
+    );
+}
+
+// With NO textEdit and only an explicit insertText, the plain-insert fallback is
+// the insertText and no edit payload is carried.
+#[test]
+fn parse_completion_item_uses_insert_text_when_no_text_edit() {
+    let json = serde_json::json!({
+        "label": "foo",
+        "kind": 6,
+        "insertText": "foo()"
+    });
+    let item = parse_completion_item(&json, None).unwrap();
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("foo()"),
+        "with no textEdit the explicit insertText is the plain-insert text"
+    );
+    assert_eq!(
+        item.text_edit_new_text, None,
+        "no textEdit ⇒ no edit payload carried"
     );
 }
 
@@ -2749,6 +2778,7 @@ fn bare_completion(label: &str) -> Completion {
         documentation: None,
         edit_range_start: None,
         edit_range_end: None,
+        text_edit_new_text: None,
         insert_text: None,
         sort_text: None,
         data: None,

@@ -251,6 +251,7 @@ fn make_type_completion(label: &str) -> Completion {
         documentation: None,
         edit_range_start: None,
         edit_range_end: None,
+        text_edit_new_text: None,
         insert_text: None,
         sort_text: None,
         data: None,
@@ -601,6 +602,36 @@ fn provider_completion_to_lsp_item_carries_insert_text_when_range_dropped() {
     );
 }
 
+/// On a dropped range, the plain-insert fallback prefers the dropped edit's
+/// `textEdit.newText` over an explicit `insertText`, and never the label.
+///
+/// Discriminating: an item carrying `text_edit_new_text = "foo"` with a decorated
+/// label and a dropped range must insert `"foo"` (the newText the dropped edit
+/// would have applied), not the label.
+#[test]
+fn provider_completion_to_lsp_item_prefers_new_text_over_label_when_range_dropped() {
+    let mut entry = make_type_completion("foo (auto-import)");
+    entry.text_edit_new_text = Some("foo".to_string());
+    // Dropped range ⇒ no `text_edit`; the client commits the plain-insert text.
+    let item = provider_completion_to_lsp_item(
+        entry,
+        "foo (auto-import)".to_string(),
+        None,
+        "tsgo",
+        Some("/ws/App.vue.tsx"),
+    );
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("foo"),
+        "the dropped-range item commits the dropped edit's newText"
+    );
+    assert_ne!(
+        item.insert_text.as_deref(),
+        Some("foo (auto-import)"),
+        "the committed text must not fall back to the decorated display label"
+    );
+}
+
 /// @ai-generated — TypeProvider completions are added alongside verter completions
 #[test]
 fn merge_completions_combines_both() {
@@ -627,6 +658,55 @@ fn merge_completions_combines_both() {
     assert!(labels.contains(&"msg"));
     assert!(labels.contains(&"count"));
     assert!(labels.contains(&"name"));
+}
+
+/// A surviving completion replace-range commits the provider's `textEdit.newText`
+/// — NOT an explicit `insertText` — when the two differ. Per LSP, when a
+/// completion item carries a `textEdit`, the editor applies `textEdit.newText`
+/// and ignores `insertText`; so the surviving edit's text must be the newText.
+///
+/// Discriminating: the pre-fix surviving-edit branch built the edit's `new_text`
+/// from `insert_text`, so an item with `insert_text = "WRONG"` and
+/// `text_edit_new_text = "foo"` produced an edit that committed `"WRONG"`. This
+/// asserts the surviving edit commits `"foo"` (the newText).
+#[test]
+fn merge_completions_surviving_edit_commits_text_edit_new_text_not_insert_text() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let mut entry = make_type_completion("foo");
+    // A surviving TSX replace-range (line 0, cols 0..10 all map to the carrier).
+    entry.edit_range_start = Some(0);
+    entry.edit_range_end = Some(10);
+    // The two text fields DIFFER: the edit must use the newText, not insertText.
+    entry.text_edit_new_text = Some("foo".to_string());
+    entry.insert_text = Some("WRONG".to_string());
+    let type_result = CompletionResult {
+        items: vec![entry],
+        is_incomplete: false,
+    };
+
+    let (result, _) = merge_completions(
+        vec![],
+        type_result,
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        None,
+        "tsgo",
+        false,
+    );
+    let item = result.iter().find(|i| i.label == "foo").expect("foo item");
+    let new_text = match item.text_edit.as_ref().expect("a surviving text edit") {
+        CompletionTextEdit::Edit(edit) => edit.new_text.as_str(),
+        CompletionTextEdit::InsertAndReplace(edit) => edit.new_text.as_str(),
+    };
+    assert_eq!(
+        new_text, "foo",
+        "the surviving edit must commit the provider's textEdit.newText"
+    );
+    assert_ne!(
+        new_text, "WRONG",
+        "the surviving edit must NOT commit an explicit insertText when it differs from newText"
+    );
 }
 
 /// @ai-generated — Duplicate labels are deduplicated (verter wins)
@@ -4100,6 +4180,7 @@ fn test_merge_completions_transforms_jsx_events() {
                 insert_text: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 data: None,
             },
             Completion {
@@ -4111,6 +4192,7 @@ fn test_merge_completions_transforms_jsx_events() {
                 insert_text: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 data: None,
             },
         ],
@@ -4163,6 +4245,7 @@ fn merge_expression_context_does_not_transform_jsx() {
                 insert_text: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 data: None,
             },
             Completion {
@@ -4174,6 +4257,7 @@ fn merge_expression_context_does_not_transform_jsx() {
                 insert_text: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 data: None,
             },
             Completion {
@@ -4185,6 +4269,7 @@ fn merge_expression_context_does_not_transform_jsx() {
                 insert_text: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 data: None,
             },
         ],
@@ -4249,6 +4334,7 @@ fn merge_enriches_verter_kind_from_type_provider() {
             documentation: None,
             edit_range_start: None,
             edit_range_end: None,
+            text_edit_new_text: None,
             insert_text: None,
             sort_text: None,
             data: None,
@@ -4292,6 +4378,7 @@ fn merge_does_not_enrich_with_text_kind() {
             documentation: None,
             edit_range_start: None,
             edit_range_end: None,
+            text_edit_new_text: None,
             insert_text: None,
             sort_text: None,
             data: None,

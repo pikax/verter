@@ -165,11 +165,12 @@ pub(crate) fn provider_completion_to_lsp_item(
             })
         }),
         sort_text: item.sort_text,
-        // When `text_edit` is present the client applies it and ignores
-        // `insert_text`; when the replace-range was dropped fail-closed,
-        // `insert_text` carries the provider's intended text so the item still
-        // inserts that text rather than the (possibly decorated) display label.
-        insert_text: item.insert_text,
+        // When `text_edit` is present the client applies it and ignores this
+        // field. When the replace-range was dropped fail-closed (or there was no
+        // textEdit), the plain-insert text prefers the dropped edit's
+        // `textEdit.newText` over an explicit `insertText`, so the item inserts
+        // the intended text rather than the (possibly decorated) display label.
+        insert_text: item.text_edit_new_text.or(item.insert_text),
         text_edit,
         data,
         ..Default::default()
@@ -274,10 +275,19 @@ pub fn merge_completions(
                 None
             };
 
+        // A SURVIVING replace-range commits the provider's `textEdit.newText`,
+        // never an explicit `insertText` (per LSP the editor applies the edit's
+        // newText and ignores insertText when a textEdit is present). The range
+        // only survives when a textEdit existed, so `text_edit_new_text` is set;
+        // the `insert_text` / `label` chain is a defensive last resort.
         let text_edit = edit_range.map(|range| {
             CompletionTextEdit::Edit(TextEdit {
                 range,
-                new_text: item.insert_text.clone().unwrap_or(item.label.clone()),
+                new_text: item
+                    .text_edit_new_text
+                    .clone()
+                    .or_else(|| item.insert_text.clone())
+                    .unwrap_or(item.label.clone()),
             })
         });
 

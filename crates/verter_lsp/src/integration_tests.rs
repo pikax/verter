@@ -4645,6 +4645,7 @@ const msg = "hello"
             documentation: None,
             edit_range_start: None,
             edit_range_end: None,
+            text_edit_new_text: None,
             insert_text: None,
             sort_text: None,
             data: None,

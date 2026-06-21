@@ -50,6 +50,17 @@ pub struct Completion {
     pub edit_range_start: Option<u32>,
     /// Byte offset of the text edit range end in the generated file.
     pub edit_range_end: Option<u32>,
+    /// The provider's `textEdit.newText` — the text a SURVIVING replace-range
+    /// commits. Per LSP, when a completion item carries a `textEdit` the editor
+    /// applies this and IGNORES `insert_text`. It is also the preferred
+    /// plain-insert fallback when the range is dropped fail-closed (the text the
+    /// dropped edit would have applied). `None` when the item has no `textEdit`.
+    pub text_edit_new_text: Option<String>,
+    /// The provider's explicit `insertText` — the plain-insert text used only
+    /// when there is NO `textEdit` (or as the fallback after
+    /// [`Self::text_edit_new_text`] when a `textEdit`'s range was dropped). It is
+    /// NOT the surviving-edit payload. `None` when the item supplied no explicit
+    /// `insertText`.
     pub insert_text: Option<String>,
     pub sort_text: Option<String>,
     /// Typed, provider-owned resolve key preserved for `completionItem/resolve`.
