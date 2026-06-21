@@ -10,15 +10,22 @@
 //! `COMPAT_BODY_READERS`) — it is the authoritative frozen list of the body
 //! readers the storage flip migrates, and it covers BOTH bare-field reads
 //! (`<recv>.body` used as a value, e.g. `.body.clone()`) AND method-chain reads
-//! (`<recv>.body.<method>()`). The `<recv>.body.<method>` tripwire (invariant 3)
-//! is a BOUNDED SUPPLEMENT on top of the enumeration: it cheaply reddens a NEW
-//! or MOVED method-chain read that escaped the enumeration, but it is NOT the
-//! completeness rail and does NOT alone prove "no new reader can appear". A new
+//! (`<recv>.body.<method>()`). Critically, this enumeration is a MANUALLY-CURATED
+//! list: invariants 1-2 (presence + uniqueness) only verify that the rows ALREADY
+//! ON THE LIST are present in the tree and resolve uniquely — they do NOT, and
+//! cannot, auto-discover a NEW reader nobody added to the curated list. A new
 //! reader that reads `.body` as a bare field, or that launders a method-chain
-//! read through a local binding (`let b = &lowered.body; b.m()`), is covered by
-//! the ENUMERATION, not the tripwire. The migration additionally carries its own
-//! frozen-file gate and a behavioural parity rail (the retained oracle) on top
-//! of this guard.
+//! read through a local binding (`let b = &lowered.body; b.m()`), is therefore
+//! NOT auto-detected by this guard; closing the surface against such a reader is
+//! carried by (1) the author keeping the curated enumeration complete, (2) the
+//! mechanically-pinned count assertion reddening if the row count drifts, (3) the
+//! migration's own frozen-file gate, and (4) the behavioural parity rail (the
+//! retained oracle). The `<recv>.body.<method>` tripwire (invariant 3) is a
+//! BOUNDED SUPPLEMENT on top of the enumeration: it cheaply reddens a NEW or
+//! MOVED method-chain read that escaped the enumeration, but it is NOT the
+//! completeness rail, does NOT alone prove "no new reader can appear", and does
+//! NOT cover the bare-field or local-binding-laundered spelling (those are not
+//! auto-caught — by design, for this temporary guard).
 //!
 //! ## Why this guard exists (and that it is TEMPORARY)
 //!
@@ -44,7 +51,10 @@
 //!      also recognizes the UFCS call form (`TypeDeclBody::m(&x.body)`), so those
 //!      spellings are detected identically — but this is a BOUNDED SUPPLEMENT,
 //!      not the completeness rail: a bare-field read or a local-binding launder
-//!      is caught by the ENUMERATION (invariants 1-2), not here.
+//!      is NOT caught here, and is NOT auto-caught by invariants 1-2 either
+//!      (those only re-verify the already-curated rows); covering such a reader
+//!      relies on the curated enumeration being kept complete plus the count-pin,
+//!      frozen-file, and parity rails noted above.
 //!   4. COMPAT PURITY — the two body-fact / oracle CONSUMER files
 //!      (`fact_emission.rs`, the oracle `source_walk.rs`) contain NO direct
 //!      lowered-body method-chain read after the compat routing: their only
@@ -111,13 +121,13 @@
 //!   (`let b = &lowered.body; b.m()`) is NOT classified by the tripwire either:
 //!   the receiver is a path, not a `.body` field access. This is an IRREDUCIBLE
 //!   limit of a syntactic guard (resolving the binding would need type
-//!   resolution), DISCLOSED here and covered by the ENUMERATION + the
-//!   migration's frozen-file gate + the behavioural parity rail — it is NOT
-//!   chased with further detector cases (that would be an arms race; the real
-//!   closure of the laundered class is the enumeration and the eventual
-//!   single-typed-accessor funnel the storage flip introduces). The negative
-//!   self-test that codifies this non-detection is a DISCLOSED-limit fixture,
-//!   not a soundness claim.
+//!   resolution), DISCLOSED here and covered by the MANUALLY-CURATED ENUMERATION
+//!   (kept complete by the author — not auto-detected) + the migration's
+//!   frozen-file gate + the behavioural parity rail — it is NOT chased with
+//!   further detector cases (that would be an arms race; the real closure of the
+//!   laundered class is the enumeration and the eventual single-typed-accessor
+//!   funnel the storage flip introduces). The negative self-test that codifies
+//!   this non-detection is a DISCLOSED-limit fixture, not a soundness claim.
 //!
 //! The ENUMERATION (the SEMANTIC + COMPAT inventories below) is the completeness
 //! statement; the migration pass carries its own frozen-file gate and
@@ -1435,9 +1445,11 @@ fn unclassified_method_chain_reads(
 /// The tripwire SUPPLEMENT: every production `<recv>.body.<method>` lowered-body
 /// read (incl. paren/ref-unwrapped and UFCS spellings) sits at an anchor in
 /// EITHER inventory. A NEW or MOVED such read outside both reddens at once. This
-/// is a bounded supplement to the enumeration (invariants 1-2), NOT the
-/// completeness rail — bare-field and local-binding-laundered reads are caught
-/// by the enumeration, not here (see the module "Honest scope" note).
+/// is a bounded supplement to the curated enumeration, NOT the completeness rail
+/// — bare-field and local-binding-laundered reads are NOT caught here and are NOT
+/// auto-caught by invariants 1-2 (which only re-verify already-curated rows);
+/// closing the surface against them relies on the curated enumeration being kept
+/// complete plus the count-pin/frozen-file/parity rails (see the module header).
 #[test]
 fn no_method_chain_body_read_outside_the_inventory() {
     let files = production_src_files();
@@ -1519,8 +1531,9 @@ fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
 /// a `.body` field) is a DISCLOSED-LIMIT fixture: it documents that a
 /// method-chain read laundered through a local binding is OUT of the tripwire's
 /// sound syntactic reach (resolving the binding would need type resolution). It
-/// is covered by the ENUMERATION + the migration's frozen-file/parity gate, NOT
-/// by this tripwire — it is NOT a soundness claim and is deliberately NOT chased
+/// is covered by the MANUALLY-CURATED ENUMERATION (kept complete by the author —
+/// not auto-detected) + the migration's frozen-file/parity gate, NOT by this
+/// tripwire — it is NOT a soundness claim and is deliberately NOT chased
 /// with further detector cases (anti-arms-race; see the module "Honest scope").
 /// Paren/reference and UFCS spellings ARE detected — covered by
 /// [`body_read_shape_detector_handles_paren_ref_and_ufcs`].
@@ -2239,7 +2252,7 @@ fn real_tree_satisfies_all_four_invariants() {
 /// large fn inventory that records at least one cfg-test fn AND at least one real
 /// `<recv>.body.<method>` read; the method-chain allowlist is exactly the
 /// inventoried `method_chain` rows (2 COMPAT + 10 SEMANTIC = 12); and the TOTAL
-/// inventory sizes are pinned (37 SEMANTIC `ReaderRow` + 5 COMPAT `CompatRow`)
+/// inventory sizes are pinned (40 SEMANTIC `ReaderRow` + 5 COMPAT `CompatRow`)
 /// so the frozen-surface count cannot drift silently.
 #[test]
 fn real_tree_inventory_is_non_vacuous() {
