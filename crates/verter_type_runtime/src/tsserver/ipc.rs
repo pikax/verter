@@ -549,6 +549,40 @@ pub fn tsserver_pos_to_byte_offset(content: &str, line: u32, offset: u32) -> u32
     line_column_to_offset_utf16(content, line.saturating_sub(1), offset.saturating_sub(1))
 }
 
+/// Convert tsserver's 1-based (line, offset) to a byte offset, returning `None` when the position
+/// is OUT OF RANGE for `content` instead of clamping it to EOF.
+///
+/// The shared codec ([`line_column_to_offset_utf16`]) fails OPEN: a past-EOF line or a column past
+/// the line's end is silently clamped to a valid-looking offset (`content.len()` / the line end).
+/// That is acceptable for a navigation sentinel, but for an EDIT a clamped wrong offset corrupts
+/// the file — so the edit path validates the position is real and DROPS it otherwise. The check is
+/// EDIT-PATH-LOCAL: it does not change the shared codec.
+///
+/// Validates against the content's own UTF-16 [`LineIndex`]: the 1-based line must exist, and the
+/// 0-based UTF-16 column must not exceed that line's UTF-16 length (a column AT the line end is in
+/// range; past it is not).
+fn tsserver_pos_to_byte_offset_checked(content: &str, line: u32, offset: u32) -> Option<u32> {
+    let line0 = line.checked_sub(1)?; // 1-based → 0-based; line 0 is malformed
+    let col0 = offset.checked_sub(1)?; // 1-based → 0-based; offset 0 is malformed
+    let idx = crate::codec::LineIndex::new(content, crate::codec::PositionEncoding::Utf16);
+    if line0 as usize >= idx.line_count() {
+        return None; // past-EOF line
+    }
+    // The line's UTF-16 width: bytes from this line's start to the next line's start (or EOF),
+    // measured in the same UTF-16 space tsserver columns use. A column past it would clamp.
+    let line_start = idx.line_start(line0 as usize)?;
+    let line_end = idx.line_end(line0 as usize)?; // before the newline / EOF
+    let line_text = content.get(line_start as usize..line_end as usize)?;
+    let line_utf16_len: u32 = line_text.encode_utf16().count() as u32;
+    if col0 > line_utf16_len {
+        return None; // column past the line end
+    }
+    idx.position_to_offset(crate::codec::LineColumn {
+        line: line0,
+        character: col0,
+    })
+}
+
 /// A `TypeProvider` backed by a tsserver process (`node tsserver.js`).
 pub struct TsserverTypeProvider {
     transport: Arc<TsserverTransport>,
@@ -2513,8 +2547,18 @@ fn parse_tsserver_file_code_edits(
                 let Some(c) = content else {
                     continue;
                 };
-                let s = tsserver_pos_to_byte_offset(c, sl, so);
-                let e = tsserver_pos_to_byte_offset(c, el, eo);
+                // FAIL CLOSED on an OUT-OF-RANGE position: the shared codec clamps a past-EOF
+                // line/col to a valid-looking offset, which for an EDIT would corrupt the file. The
+                // checked converter drops it instead. A malformed `start > end` also drops.
+                let (Some(s), Some(e)) = (
+                    tsserver_pos_to_byte_offset_checked(c, sl, so),
+                    tsserver_pos_to_byte_offset_checked(c, el, eo),
+                ) else {
+                    continue;
+                };
+                if s > e {
+                    continue;
+                }
 
                 edits.push(TypeCodeEdit {
                     path: file.clone(),
@@ -2530,8 +2574,10 @@ fn parse_tsserver_file_code_edits(
 
 /// Parse a tsserver code action / code fix.
 ///
-/// When content is available in `contents_cache`, converts 1-based tsserver positions
-/// to byte offsets. Otherwise, falls back to packed 0-based format.
+/// Each edit's 1-based tsserver positions convert to byte offsets against the edit's own target
+/// content (cache → disk). FAIL CLOSED: an edit whose target content is unavailable, or whose
+/// position is out of range for that content, is DROPPED — the EDIT path emits NO packed line:col
+/// sentinel (a wrong-offset edit corrupts the file). An action whose edits all drop is dropped.
 pub fn parse_tsserver_code_action(
     action: &serde_json::Value,
     contents_cache: &HashMap<String, String>,

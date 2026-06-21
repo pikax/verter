@@ -1313,6 +1313,77 @@ fn parse_tsserver_file_code_edits_drops_edit_when_file_unavailable() {
     );
 }
 
+/// A code-edit whose target content IS available but whose tsserver position is OUT OF RANGE (a
+/// past-EOF line) must be DROPPED — never clamped to a content-length offset.
+///
+/// Discriminating regression: the shared codec (`line_column_to_offset_utf16` → `position_to_offset`)
+/// clamps a past-EOF line/col to `content.len()` and returns a valid-looking WRONG offset, so the
+/// pre-fix edit path emitted an edit at EOF that corrupts the file. The checked converter returns
+/// `None` for an out-of-range position and the edit is dropped. The fixture content is short (3
+/// lines), so line 999 is unmistakably past EOF.
+#[test]
+fn parse_tsserver_file_code_edits_drops_out_of_range_position_not_clamped() {
+    let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
+    let path = "d:/proj/oob.ts".to_string();
+    let mut cache: HashMap<String, String> = HashMap::new();
+    cache.insert(path.clone(), content.to_string());
+
+    // Line 999 is far past the file's 3 lines → the codec would clamp to EOF.
+    let changes = vec![serde_json::json!({
+        "fileName": path,
+        "textChanges": [
+            {
+                "start": { "line": 999, "offset": 1 },
+                "end": { "line": 999, "offset": 5 },
+                "newText": "boom"
+            }
+        ]
+    })];
+
+    let edits = parse_tsserver_file_code_edits(&changes, &cache)
+        .expect("a well-formed change array still returns Some(empty)");
+    assert!(
+        edits.is_empty(),
+        "an edit whose position is out of range must be DROPPED (fail-closed), never clamped to a \
+         content-length offset: {edits:?}"
+    );
+    // Discriminating negative: the clamp the pre-fix code produced was `content.len()`.
+    assert!(
+        !edits.iter().any(|e| e.start == content.len() as u32),
+        "no edit may carry the clamped content-length offset"
+    );
+}
+
+/// A code-edit whose endpoints invert after conversion (`start > end`) must be DROPPED — a
+/// malformed span would otherwise produce a reversed-range edit. Content is available so the drop
+/// is attributable to the inverted span, not a content miss.
+#[test]
+fn parse_tsserver_file_code_edits_drops_inverted_span() {
+    let content = "const alpha = 1;\nconst beta = 2;\n";
+    let path = "d:/proj/inv.ts".to_string();
+    let mut cache: HashMap<String, String> = HashMap::new();
+    cache.insert(path.clone(), content.to_string());
+
+    // start is on line 2 (later), end is on line 1 (earlier) → start byte > end byte.
+    let changes = vec![serde_json::json!({
+        "fileName": path,
+        "textChanges": [
+            {
+                "start": { "line": 2, "offset": 7 },
+                "end": { "line": 1, "offset": 7 },
+                "newText": "x"
+            }
+        ]
+    })];
+
+    let edits = parse_tsserver_file_code_edits(&changes, &cache)
+        .expect("a well-formed change array still returns Some(empty)");
+    assert!(
+        edits.is_empty(),
+        "an edit whose start > end after conversion must be DROPPED, never emitted reversed: {edits:?}"
+    );
+}
+
 /// A code-edit whose target file is absent from the contents cache but PRESENT on disk resolves its
 /// byte offsets against THAT file's own on-disk content (the per-target disk fallback), matching the
 /// rename/location paths' content resolution.
