@@ -68,6 +68,28 @@ pub fn tsserver_combined_code_fix_target_paths(body: &serde_json::Value) -> Hash
         .unwrap_or_default()
 }
 
+/// Canonical target paths referenced by a tsserver `completionEntryDetails`
+/// response (one entry's `detail`): every `codeActions[].changes[].fileName`,
+/// canonicalized exactly as `parse_tsserver_file_code_edits` (reached through
+/// `parse_tsserver_code_action`) keys its content lookup.
+///
+/// This is an EDIT-producing response — its auto-import `codeActions` parse into
+/// `additionalTextEdits` — so its target content must be snapshotted FRESH after
+/// the await rather than cloning the whole contents cache.
+pub fn tsserver_completion_entry_details_target_paths(
+    detail: &serde_json::Value,
+) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    if let Some(actions) = detail.get("codeActions").and_then(|v| v.as_array()) {
+        for action in actions {
+            if let Some(changes) = action.get("changes") {
+                paths.extend(tsserver_code_fix_change_target_paths(changes));
+            }
+        }
+    }
+    paths
+}
+
 /// Canonical target paths referenced by a tsserver `rename` response: each
 /// `locs[].file`, canonicalized exactly as the rename closure keys its content
 /// lookup.
@@ -206,6 +228,40 @@ mod tests {
         let mut want = HashSet::new();
         want.insert("d:/proj/a.ts".to_string());
         assert_eq!(paths, want);
+    }
+
+    #[test]
+    fn tsserver_completion_entry_details_scanner_extracts_code_action_change_files() {
+        // A completionEntryDetails entry carries auto-import codeActions; each
+        // action's changes[].fileName is an edit target. Drive letter upper-cased
+        // on input → canonicalized in the key.
+        let detail = serde_json::json!({
+            "name": "computed",
+            "displayParts": [],
+            "codeActions": [
+                {
+                    "description": "Add import from \"vue\"",
+                    "changes": [
+                        { "fileName": "D:/proj/App.vue.tsx", "textChanges": [] }
+                    ]
+                }
+            ]
+        });
+        let paths = tsserver_completion_entry_details_target_paths(&detail);
+        assert_eq!(paths.len(), 1, "exactly the one referenced change file");
+        assert!(paths.contains("d:/proj/App.vue.tsx"));
+        assert!(
+            !paths.contains("D:/proj/App.vue.tsx"),
+            "the scanned key is canonicalized, matching the parser's content-lookup key"
+        );
+    }
+
+    #[test]
+    fn tsserver_completion_entry_details_scanner_empty_without_code_actions() {
+        // A local-member entry (no codeActions) references no edit target, so the
+        // snapshot stays empty.
+        let detail = serde_json::json!({ "name": "x", "displayParts": [] });
+        assert!(tsserver_completion_entry_details_target_paths(&detail).is_empty());
     }
 
     #[test]

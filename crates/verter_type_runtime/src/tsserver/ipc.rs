@@ -1336,11 +1336,20 @@ impl TypeProvider for TsserverTypeProvider {
             let Some(detail) = result.as_array().and_then(|arr| arr.first()) else {
                 return Ok(None);
             };
-            let contents_cache = contents_cache.lock().await.clone();
+            // The entry's auto-import `codeActions` parse into `additionalTextEdits`,
+            // so this is an edit-producing response: snapshot ONLY the files those
+            // code actions target, taken FRESH after the await — never a whole-map
+            // clone of the contents cache.
+            let target_paths =
+                crate::contents_snapshot::tsserver_completion_entry_details_target_paths(detail);
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
+            };
             Ok(completion_entry_details_to_resolve_result(
                 detail,
                 &file,
-                &contents_cache,
+                &cache_snapshot,
             ))
         })
     }
