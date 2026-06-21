@@ -1183,9 +1183,11 @@ struct HotNotAsserted { a: u32 }
 
 /// The audited single exception to the hand-impl ban: the one
 /// `impl … NoTypeExprWitness … for HotTypeRef` in `semantic_query.rs`. The
-/// invariant allows EXACTLY this one self type — identified by an EXACT
-/// whole-ident match on the self-type's last path segment (never a substring,
-/// so `HotTypeRefAlias` / `HotTypeRefSneaky` are NOT exempted). Any OTHER
+/// invariant allows EXACTLY this one witness — identified by an EXACT whole-ident
+/// match on the self-type's last path segment (never a substring, so
+/// `HotTypeRefAlias` / `HotTypeRefSneaky` are NOT exempted) AND by the FILE it is
+/// found in (see [`is_audited_witness_file`], so a forged `HotTypeRef` /
+/// `other::HotTypeRef` in any other file is NOT exempted). Any OTHER
 /// hand-written `NoTypeExpr` / `NoTypeExprWitness` impl in
 /// `verter_session/src/**` is a violation.
 const AUDITED_HAND_WITNESS_SELF_TY: &str = "HotTypeRef";
@@ -1213,6 +1215,43 @@ fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
     }
 }
 
+/// Collects every hand-written `NoTypeExpr[Witness]` trait impl ANYWHERE in a
+/// parsed file — at file scope, inside an inline `mod m { … }`, inside a `fn`
+/// body, or nested inside another impl. Driven by `syn::visit::Visit` so the
+/// walk reaches every `syn::ItemImpl` regardless of its lexical nesting; a
+/// top-level-only `for item in &file.items` loop would miss any impl below the
+/// first level (e.g. inside an inline module), which a production file may
+/// carry.
+struct WitnessImplCollector {
+    hits: Vec<HandWrittenWitnessImpl>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for WitnessImplCollector {
+    fn visit_item_impl(&mut self, imp: &'ast syn::ItemImpl) {
+        if let Some((_, trait_path, _)) = &imp.trait_ {
+            if let Some(trait_ident) = trait_path.segments.last().map(|seg| seg.ident.to_string()) {
+                if trait_ident == "NoTypeExpr" || trait_ident == "NoTypeExprWitness" {
+                    let self_ty = type_path_last_ident(&imp.self_ty)
+                        .unwrap_or_else(|| "<non-path self type>".to_string());
+                    let trait_rendered = trait_path
+                        .segments
+                        .iter()
+                        .map(|seg| seg.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    self.hits.push(HandWrittenWitnessImpl {
+                        rendered: format!("impl {trait_rendered} for {self_ty} {{}}"),
+                        self_ty,
+                    });
+                }
+            }
+        }
+        // Default recursion: an impl nested inside this impl (or anything below
+        // it) is reached too — harmless completeness.
+        syn::visit::visit_item_impl(self, imp);
+    }
+}
+
 /// Hand-written `impl … NoTypeExpr[Witness] … for …` items in `src`. The blanket
 /// bridge makes the public `NoTypeExpr` non-hand-implementable (a manual impl is
 /// `E0119`), but the HIDDEN `NoTypeExprWitness` CAN be hand-written for a local
@@ -1221,45 +1260,36 @@ fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
 /// exception.
 ///
 /// Parses the file with `syn` (consistent with the sibling coverage guard
-/// `every_hot_carrier_opts_into_no_type_expr`) and walks `syn::Item::Impl`: a
-/// TRAIT impl whose trait path's LAST segment ident is `NoTypeExpr` or
-/// `NoTypeExprWitness` is a hand-written witness impl. Resolving the item (not
-/// the text) means a LINE-SPLIT or reformatted `impl …\n    for X {}` is caught
-/// identically to a single-line one — the previous per-line `starts_with("impl")
-/// && contains(...) && contains(" for ")` scan missed any impl split across
-/// lines. The derive emits its `impl` from a proc-macro token stream, never as a
-/// source `impl … for` item, so a `#[derive(NoTypeExpr)]` carrier is not flagged.
+/// `every_hot_carrier_opts_into_no_type_expr`) and RECURSIVELY visits every
+/// `syn::ItemImpl` via `syn::visit::Visit` — at file scope AND inside inline
+/// `mod` blocks / fn bodies. A TRAIT impl whose trait path's LAST segment ident
+/// is `NoTypeExpr` or `NoTypeExprWitness` is a hand-written witness impl.
+/// Resolving the item (not the text) means a LINE-SPLIT or reformatted
+/// `impl …\n    for X {}` is caught identically to a single-line one — the
+/// previous per-line `starts_with("impl") && contains(...) && contains(" for ")`
+/// scan missed any impl split across lines. Visiting recursively (not the prior
+/// top-level `for item in &file.items` loop) additionally catches an impl nested
+/// inside an inline module or fn body, which a top-level-only walk skipped. The
+/// derive emits its `impl` from a proc-macro token stream, never as a source
+/// `impl … for` item, so a `#[derive(NoTypeExpr)]` carrier is not flagged.
 fn hand_written_no_type_expr_impls(src: &str) -> Vec<HandWrittenWitnessImpl> {
     let file = syn::parse_file(src).expect("parse production source as a syn file");
-    let mut hits = Vec::new();
-    for item in &file.items {
-        let syn::Item::Impl(imp) = item else {
-            continue;
-        };
-        let Some((_, trait_path, _)) = &imp.trait_ else {
-            // An inherent impl (`impl X { … }`) is never a witness impl.
-            continue;
-        };
-        let Some(trait_ident) = trait_path.segments.last().map(|seg| seg.ident.to_string()) else {
-            continue;
-        };
-        if trait_ident != "NoTypeExpr" && trait_ident != "NoTypeExprWitness" {
-            continue;
-        }
-        let self_ty = type_path_last_ident(&imp.self_ty)
-            .unwrap_or_else(|| "<non-path self type>".to_string());
-        let trait_rendered = trait_path
-            .segments
-            .iter()
-            .map(|seg| seg.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        hits.push(HandWrittenWitnessImpl {
-            rendered: format!("impl {trait_rendered} for {self_ty} {{}}"),
-            self_ty,
-        });
-    }
-    hits
+    let mut collector = WitnessImplCollector { hits: Vec::new() };
+    syn::visit::Visit::visit_file(&mut collector, &file);
+    collector.hits
+}
+
+/// Whether the relative production-source path `rel` is the SINGLE audited
+/// witness file (`semantic_query.rs`). The audited-exception gate is FILE-PRECISE:
+/// only a `HotTypeRef` witness in THIS file is exempt. Tests the file-name
+/// portion portably by splitting on BOTH path separators (`/` and `\`) and
+/// taking the last component (NOT a hardcoded `/`), so a forward-slash
+/// `src/semantic_query.rs` (the form `production_src_files` yields) and a
+/// Windows-style `src\semantic_query.rs` are both matched on any host —
+/// `std::path::Path::file_name` alone would not split on `\` when running on a
+/// Unix host.
+fn is_audited_witness_file(rel: &str) -> bool {
+    rel.rsplit(['/', '\\']).next() == Some("semantic_query.rs")
 }
 
 #[test]
@@ -1269,23 +1299,35 @@ fn no_hand_written_no_type_expr_impls_except_audited_hot_type_ref() {
     // hand-written-witness escape hatch everywhere in production source except
     // the single audited `HotTypeRef` witness.
     //
+    // The `syn::visit` scan RECURSES into nested items (inline `mod` blocks, fn
+    // bodies), so a witness impl is caught regardless of lexical nesting, not
+    // only at file scope. The audited exception is FILE-PRECISE: the EXACT
+    // `HotTypeRef` self type is exempt ONLY when found in `semantic_query.rs`, so
+    // a forged `HotTypeRef` (or `other::HotTypeRef`, whose last segment is also
+    // `HotTypeRef`) witness in any OTHER file is a violation — it cannot
+    // masquerade as the one sanctioned witness.
+    //
     // Honest residual: a `use ...::NoTypeExprWitness as Alias; impl Alias for X`
-    // (an aliased TRAIT NAME) could evade this `syn` scan — the trait path's last
-    // segment would be `Alias`, not `NoTypeExprWitness`. That is acceptable —
-    // forging the witness is a deliberate hostile act, not drift, and even a
-    // forged witness on a DERIVED carrier cannot hide a `TypeExpr` (the
-    // field-recursion still fails the build). Resolving the IMPL ITEM (not the
-    // text) is what closes the prior line-split hole; the only residual is a
-    // deliberate trait-name alias. The scan defends the realistic accidental
-    // case any-formatting, any-line-split.
+    // (an aliased TRAIT NAME) could still evade this `syn` scan — the trait
+    // path's last segment would be `Alias`, not `NoTypeExprWitness`. That is
+    // acceptable — forging the witness through a trait-name alias is a deliberate
+    // hostile act, not drift, and even a forged witness on a DERIVED carrier
+    // cannot hide a `TypeExpr` (the field-recursion still fails the build). With
+    // the recursive walk and the file-precise exemption, the trait-name alias is
+    // the ONLY remaining residual; the scan otherwise defends the realistic
+    // accidental case under any formatting, any line-split, and any nesting.
     let mut violations = Vec::new();
     let mut audited_seen = false;
     for (rel, src) in production_src_files() {
+        let in_audited_file = is_audited_witness_file(&rel);
         for hit in hand_written_no_type_expr_impls(&src) {
-            // EXACT whole-ident match on the self type — `HotTypeRefAlias` /
-            // `HotTypeRefSneaky` are NOT the audited exception (a `contains`
-            // would have wrongly exempted them).
-            if hit.self_ty == AUDITED_HAND_WITNESS_SELF_TY {
+            // EXACT whole-ident match on the self type AND file-precision — the
+            // exemption applies ONLY to `HotTypeRef` in `semantic_query.rs`.
+            // `HotTypeRefAlias` / `HotTypeRefSneaky` (wrong ident) and a
+            // `HotTypeRef` in any other file (wrong file) are NOT exempted (a
+            // `contains` on the ident, or an ident-only match without the file
+            // gate, would have wrongly exempted them).
+            if hit.self_ty == AUDITED_HAND_WITNESS_SELF_TY && in_audited_file {
                 audited_seen = true;
                 continue;
             }
@@ -1440,6 +1482,138 @@ impl verter_no_typeexpr::__private::NoTypeExprWitness for HotTypeRefAlias {}
         violations.contains(&"HotTypeRefAlias".to_string()),
         "self-test: `HotTypeRefAlias` must be flagged as a violation, not exempted; violations = \
          {violations:?}"
+    );
+}
+
+#[test]
+fn hand_impl_scan_recurses_into_inline_module_a_top_level_walk_would_miss() {
+    // REGRESSION: a hand-witness impl nested INSIDE an inline `mod m { … }` —
+    //   mod evil_inner {
+    //       impl …NoTypeExprWitness for NestedForgery {}
+    //   }
+    // — is NOT a top-level item; a `for item in &file.items` walk visits only the
+    // `Item::Mod` and never descends, so it returned ZERO hits for the nested
+    // impl. The `syn::visit` rewrite reaches every `ItemImpl` regardless of
+    // nesting, so it flags `NestedForgery`.
+    let nested = "\
+mod evil_inner {
+    impl verter_no_typeexpr::__private::NoTypeExprWitness for NestedForgery {}
+}
+";
+    let hits = hand_written_no_type_expr_impls(nested);
+    assert!(
+        hits.iter().any(|h| h.self_ty == "NestedForgery"),
+        "self-test: the recursive scan MUST flag a hand-witness impl nested inside an inline \
+         module (`NestedForgery`) — a top-level-only walk missed it; got selves {:?}",
+        hits.iter().map(|h| &h.self_ty).collect::<Vec<_>>()
+    );
+
+    // Discriminating proof that the OLD top-level-only walk genuinely MISSED this
+    // exact shape: replicate the prior `for item in &file.items` loop here and
+    // assert it produces ZERO `NestedForgery` hits — so the recursion (not a
+    // formatting accident) is what closes the gap.
+    let top_level_only_misses = {
+        let file = syn::parse_file(nested).expect("parse nested-impl fixture");
+        let mut found = false;
+        for item in &file.items {
+            let syn::Item::Impl(imp) = item else {
+                continue;
+            };
+            let Some((_, trait_path, _)) = &imp.trait_ else {
+                continue;
+            };
+            let Some(trait_ident) = trait_path.segments.last().map(|seg| seg.ident.to_string())
+            else {
+                continue;
+            };
+            if trait_ident != "NoTypeExpr" && trait_ident != "NoTypeExprWitness" {
+                continue;
+            }
+            if type_path_last_ident(&imp.self_ty).as_deref() == Some("NestedForgery") {
+                found = true;
+            }
+        }
+        found
+    };
+    assert!(
+        !top_level_only_misses,
+        "self-test invariant: the legacy top-level-only walk must MISS this inline-module-nested \
+         impl (that is the coverage gap the recursive rewrite closes) — if a top-level walk now \
+         sees `NestedForgery`, this regression no longer discriminates the fix"
+    );
+}
+
+#[test]
+fn hand_impl_audited_exception_is_file_precise_not_ident_only() {
+    // REGRESSION: the audited exception is FILE-PRECISE. The single sanctioned
+    // witness is `impl …NoTypeExprWitness for HotTypeRef {}` in `semantic_query.rs`.
+    // A forged `HotTypeRef` (or `other::HotTypeRef`, whose last segment is also
+    // `HotTypeRef`) witness in any OTHER production file is a VIOLATION — an
+    // ident-only exemption (`hit.self_ty == AUDITED…` without the file gate) would
+    // have wrongly exempted it. Drive the production guard's file-gated
+    // classification directly via `is_audited_witness_file`.
+
+    // The file gate itself: only `semantic_query.rs` (under any directory, any
+    // separator) is the audited file.
+    assert!(
+        is_audited_witness_file("src/semantic_query.rs"),
+        "self-test: `src/semantic_query.rs` IS the audited witness file"
+    );
+    assert!(
+        is_audited_witness_file("src\\semantic_query.rs"),
+        "self-test: a Windows-style `src\\semantic_query.rs` IS the audited witness file (the gate \
+         is path-separator-portable)"
+    );
+    assert!(
+        !is_audited_witness_file("src/resolver_core/hot_prepared.rs"),
+        "self-test: a non-`semantic_query.rs` file is NOT the audited witness file"
+    );
+    assert!(
+        !is_audited_witness_file("src/other/semantic_query_helpers.rs"),
+        "self-test: a file whose name merely CONTAINS `semantic_query` (but is not exactly \
+         `semantic_query.rs`) is NOT the audited witness file"
+    );
+
+    // A `HotTypeRef` hit, classified through the SAME `self_ty == AUDITED && file`
+    // gate the production guard uses, in the audited file is EXEMPT and in any
+    // other file is a VIOLATION. Both forms (a plain `HotTypeRef` self type and a
+    // qualified `other::HotTypeRef`, last segment `HotTypeRef`) are exercised.
+    let forged_in_other_file = "\
+impl verter_no_typeexpr::__private::NoTypeExprWitness for HotTypeRef {}
+impl verter_no_typeexpr::__private::NoTypeExprWitness for other::HotTypeRef {}
+";
+    let hits = hand_written_no_type_expr_impls(forged_in_other_file);
+    assert_eq!(
+        hits.iter().filter(|h| h.self_ty == "HotTypeRef").count(),
+        2,
+        "self-test: both the plain and the `other::`-qualified `HotTypeRef` witnesses resolve to a \
+         last-segment self type of `HotTypeRef`; got selves {:?}",
+        hits.iter().map(|h| &h.self_ty).collect::<Vec<_>>()
+    );
+
+    // Classify under the audited file → both exempt, zero violations.
+    let classify = |rel: &str| -> Vec<String> {
+        let in_audited = is_audited_witness_file(rel);
+        hits.iter()
+            .filter(|h| !(h.self_ty == AUDITED_HAND_WITNESS_SELF_TY && in_audited))
+            .map(|h| h.self_ty.clone())
+            .collect()
+    };
+    assert!(
+        classify("src/semantic_query.rs").is_empty(),
+        "self-test: `HotTypeRef` witnesses in `semantic_query.rs` are exempt — zero violations there"
+    );
+
+    // Classify under ANY OTHER file → the file gate fails, so BOTH `HotTypeRef`
+    // hits become violations. An ident-only exemption would have (wrongly)
+    // exempted them.
+    let violations_elsewhere = classify("src/resolver_core/hot_prepared.rs");
+    assert_eq!(
+        violations_elsewhere,
+        vec!["HotTypeRef".to_string(), "HotTypeRef".to_string()],
+        "self-test: a forged `HotTypeRef` / `other::HotTypeRef` witness in a NON-`semantic_query.rs` \
+         file is a VIOLATION — the file gate is what stops it masquerading as the audited witness; \
+         got {violations_elsewhere:?}"
     );
 }
 
