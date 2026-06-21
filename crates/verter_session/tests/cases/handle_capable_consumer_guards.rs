@@ -835,13 +835,17 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 
 // ===========================================================================
 // Structural-carrier producer guard SET — the single structural-carrier producer
-// is defended by eight guards: the PRIMARY module-private lowerer guard
+// is defended by nine guards: the PRIMARY module-private lowerer guard
 // (`structural_carrier_producer_lowerer_is_module_private`), the IN-FILE
 // SINGLE-CALL pin (`structural_lowerer_called_only_through_the_witness_gated_wrapper`
 // — the raw lowerer is CALLED exactly once, inside the witness-gated
 // `emit_macro_arg` wrapper, closing the in-file case where a second un-gated
 // `pub(in …)` wrapper added inside `lower.rs` could name and call the lowerer),
-// the PARENT-SHAPE
+// the EXPANSION-SURFACE companion
+// (`structural_carrier_producer_lower_has_no_expansion_surface` — `lower.rs`
+// declares no production macro / include! / out-of-line-or-`#[path]` mod /
+// lowerer-`as` reexport, closing the macro-synthesis / include-splice /
+// child-mod class the occurrence rail cannot see), the PARENT-SHAPE
 // narrowness guard (`structural_carrier_producer_module_is_narrow`), the
 // WITNESS-unforgeability guard (`structural_carrier_producer_witnesses_are_unforgeable`)
 // — together the compiler-enforced make-unrepresentable layer — plus the
@@ -880,6 +884,15 @@ fn structural_carrier_producer_guards_remain_registered() {
              witness-gated `emit_macro_arg` wrapper, so a second un-gated `pub(in …)` wrapper added \
              inside `lower.rs` (which the compiler privacy cannot catch within the file) cannot \
              re-open the producer surface",
+        ),
+        (
+            "structural_carrier_producer_lower_has_no_expansion_surface",
+            "the EXPANSION-SURFACE companion: `lower.rs` declares NO production (non-`#[cfg(test)]`) \
+             item-position macro / `include!` / out-of-line-or-`#[path]` child mod / \
+             lowerer-`as` reexport, closing the macro-synthesis / include-splice / child-mod class \
+             that introduces same-module code reaching the private lowerer WITHOUT a third literal \
+             identifier token (which the occurrence-counting in-file pin cannot see); only the \
+             sanctioned `#[cfg(test)]`-gated `structural_lower_tests` test wiring is allowlisted",
         ),
         (
             "structural_carrier_producer_module_is_narrow",

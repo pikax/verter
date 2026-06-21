@@ -21873,14 +21873,11 @@ fn structural_lowerer_occurrence_is_definition(stripped: &str, abs: usize) -> bo
 
 /// The name of the nearest preceding `fn <name>(` definition before `offset`
 /// in `stripped`, or `None` when no `fn …(` precedes it (a free / top-level
-/// call). Used to assert the single structural-lowerer call sits inside
-/// `emit_macro_arg`'s body. BOUND: this is a NEAREST-PRECEDING-fn check, not a
-/// full brace-balanced containment scan — a call placed textually after
-/// `emit_macro_arg`'s opening `fn emit_macro_arg(` but before any later `fn`
-/// would still attribute to `emit_macro_arg`; combined with the EXACTLY-ONE
-/// call assertion (a second wrapper introduces a second call, which the count
-/// rejects regardless), this bound is sufficient to pin the single witnessed
-/// call.
+/// call). Used ONLY to NAME the enclosing fn in the violation message; the
+/// actual containment GATE is the brace-balanced
+/// [`offset_is_inside_emit_macro_arg_body`], so this heuristic's
+/// nearest-preceding bound no longer affects correctness — it only labels the
+/// offending encloser for the diagnostic.
 fn nearest_preceding_fn_name(stripped: &str, offset: usize) -> Option<String> {
     let needle = "fn ";
     let prefix = &stripped[..offset];
@@ -21911,6 +21908,79 @@ fn nearest_preceding_fn_name(stripped: &str, offset: usize) -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+/// Whether `offset` (a byte offset into the comment/string/char-stripped
+/// `stripped` source) sits INSIDE the BRACE-BALANCED `{ … }` body of the
+/// `emit_macro_arg` wrapper fn — a true containment scan, NOT the
+/// nearest-preceding-`fn` heuristic [`nearest_preceding_fn_name`] uses for its
+/// diagnostic name. Procedure: locate the word-bounded `fn emit_macro_arg`
+/// header, advance to the FIRST `{` after it (the body's opening brace), then
+/// brace-depth-track (`+1` on `{`, `-1` on `}`) to the matching close; the
+/// offset is contained iff `open < offset < close`. (The stripper already
+/// blanked comments / string contents / char literals to spaces, so no `{` /
+/// `}` inside a literal or comment can perturb the depth count.)
+///
+/// This makes the single-witnessed-call containment INDEPENDENTLY correct
+/// (defense-in-depth): a call placed textually AFTER `emit_macro_arg`'s closing
+/// brace but BEFORE any later `fn` — e.g. in a trailing free item or a
+/// closure-bearing `const` — is no longer mis-attributed to `emit_macro_arg`
+/// (the nearest-preceding-`fn` heuristic would still have named it
+/// `emit_macro_arg`). Returns `false` when no `fn emit_macro_arg` header exists
+/// or its body brace never balances (a truncated / malformed wrapper).
+fn offset_is_inside_emit_macro_arg_body(stripped: &str, offset: usize) -> bool {
+    let needle = "fn emit_macro_arg";
+    let bytes = stripped.as_bytes();
+    // Find the word-bounded `fn emit_macro_arg` header (leading boundary so
+    // `…rfn emit_macro_arg` cannot match). Use the LAST such header before
+    // `offset` if several exist, mirroring nearest-preceding semantics for the
+    // start of the containment scan.
+    let mut header_at: Option<usize> = None;
+    let mut search_from = 0usize;
+    while let Some(rel) = stripped[search_from..].find(needle) {
+        let abs = search_from + rel;
+        search_from = abs + needle.len();
+        let is_word_start =
+            abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+        // Trailing boundary so `fn emit_macro_arg_v2` does not match.
+        let end = abs + needle.len();
+        let is_word_end =
+            end >= bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+        if is_word_start && is_word_end {
+            header_at = Some(abs);
+        }
+    }
+    let header_at = match header_at {
+        Some(h) => h,
+        None => return false,
+    };
+    // Advance to the first `{` after the header — the body's opening brace.
+    let open_rel = match stripped[header_at..].find('{') {
+        Some(p) => p,
+        None => return false,
+    };
+    let open = header_at + open_rel;
+    // Brace-depth-track from the open brace to its matching close.
+    let mut depth = 0i32;
+    let mut close: Option<usize> = None;
+    for (i, b) in stripped.bytes().enumerate().skip(open) {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = match close {
+        Some(c) => c,
+        None => return false,
+    };
+    open < offset && offset < close
 }
 
 /// Classify whether `body` (RAW owner source — the classifier strips comments,
@@ -21997,16 +22067,23 @@ fn structural_lowerer_single_witnessed_call_violation(body: &str) -> Option<Stri
                 .to_string(),
         );
     }
-    // The single witnessed call must sit inside `emit_macro_arg`'s body.
-    let enclosing = nearest_preceding_fn_name(&stripped, reference);
-    match enclosing.as_deref() {
-        Some("emit_macro_arg") => None,
-        other => Some(format!(
+    // The single witnessed call must sit inside `emit_macro_arg`'s body, checked
+    // by a BRACE-BALANCED containment scan (NOT the nearest-preceding-`fn`
+    // heuristic): a call placed after `emit_macro_arg`'s closing brace but before
+    // the next `fn` is NOT inside the wrapper and must be rejected even though the
+    // nearest-preceding fn name would still read `emit_macro_arg`.
+    if offset_is_inside_emit_macro_arg_body(&stripped, reference) {
+        None
+    } else {
+        let enclosing = nearest_preceding_fn_name(&stripped, reference);
+        Some(format!(
             "the single `lower_type_expr_structural` call must sit inside the witness-gated \
-             `emit_macro_arg` wrapper, but its nearest enclosing fn is `{}` — a call from any other \
-             fn reaches the raw lowerer without presenting the `MacroProducerWitness`",
-            other.unwrap_or("<no enclosing fn>")
-        )),
+             `emit_macro_arg` wrapper's `{{ … }}` body (brace-balanced containment), but it does \
+             not — its nearest preceding fn header is `{}`. A call after `emit_macro_arg`'s closing \
+             brace (a trailing free item / closure-bearing const) or in any other fn reaches the \
+             raw lowerer without presenting the `MacroProducerWitness`",
+            enclosing.as_deref().unwrap_or("<no enclosing fn>")
+        ))
     }
 }
 
@@ -22203,6 +22280,47 @@ fn structural_lowerer_single_call_classifier_discriminates() {
         "a longer identifier sharing the prefix (`lower_type_expr_structural_v2`) must NOT be \
          counted as a reference to the lowerer — the trailing word boundary excludes it"
     );
+    // WRONG (BRACE-BALANCED CONTAINMENT — the FIX-2 vector): the SOLE call sits
+    // AFTER `emit_macro_arg`'s closing brace but BEFORE the next `fn`, inside a
+    // trailing free item (a closure-bearing const). The occurrence count is
+    // EXACTLY two (the definition + this one call), so the count gate PASSES and
+    // does NOT fire first — only the brace-balanced containment scan catches it,
+    // proving the containment is INDEPENDENTLY correct (the nearest-preceding-`fn`
+    // heuristic would still have named the encloser `emit_macro_arg` and wrongly
+    // passed). `emit_macro_arg`'s own body is empty here.
+    let after_close_brace = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                             pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                             }\n\
+                             const ROGUE: fn(&G) -> R = |g| lower_type_expr_structural(g);\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(after_close_brace).is_some(),
+        "a call placed AFTER `emit_macro_arg`'s closing brace but before the next `fn` (a trailing \
+         closure-bearing const) must be REPORTED by the BRACE-BALANCED containment — it is no \
+         longer inside the wrapper body even though the nearest-preceding-`fn` heuristic would \
+         still name the encloser `emit_macro_arg`. The occurrence count is exactly two here, so the \
+         count gate does not fire first: only the brace-balanced gate catches it"
+    );
+    // Direct positive/negative self-test of the brace-balanced containment helper:
+    // an offset INSIDE `emit_macro_arg`'s `{ … }` is contained; the same call moved
+    // after the close brace is NOT.
+    let inside_src = "fn emit_macro_arg() {\n    lower_type_expr_structural(g)\n}\n";
+    let inside_off = inside_src
+        .find("lower_type_expr_structural")
+        .expect("inside fixture must contain the call");
+    assert!(
+        offset_is_inside_emit_macro_arg_body(inside_src, inside_off),
+        "an offset inside `emit_macro_arg`'s `{{ … }}` body must be reported as CONTAINED"
+    );
+    let outside_src =
+        "fn emit_macro_arg() {\n}\nconst R: () = { lower_type_expr_structural(g); };\n";
+    let outside_off = outside_src
+        .find("lower_type_expr_structural")
+        .expect("outside fixture must contain the call");
+    assert!(
+        !offset_is_inside_emit_macro_arg_body(outside_src, outside_off),
+        "an offset AFTER `emit_macro_arg`'s closing brace must NOT be reported as contained — the \
+         brace-balanced scan stops at the matching close brace"
+    );
     // ANTI-VACUITY — a missing definition is reported.
     let no_def =
         "pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G) -> R { other(g) }\n";
@@ -22228,6 +22346,370 @@ fn structural_lowerer_single_call_classifier_discriminates() {
         "the REAL `lower.rs` MUST have exactly one `lower_type_expr_structural` call, inside \
          `emit_macro_arg` — if this reddens, a second in-file caller was added, re-opening the \
          single-producer surface"
+    );
+}
+
+/// The SINGLE sanctioned out-of-line child module of `lower.rs`: the
+/// `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod structural_lower_tests;`
+/// test wiring. This is the ONLY non-inline `mod` the expansion-surface guard
+/// allows, and ONLY when it is `#[cfg(test)]`-gated — a production (non-test)
+/// out-of-line `mod` of any name is rejected.
+const LOWER_RS_SANCTIONED_TEST_MOD: &str = "structural_lower_tests";
+
+/// Whether any of `attrs` is a `#[cfg(test)]` / `#[cfg(any(test, …))]` /
+/// `#[cfg(all(…, test, …))]` gate — any `cfg(...)` whose token stream contains
+/// the bare predicate `test` (mirrors the module-private `has_cfg_test` helper
+/// used by the recursion-visitor guard, re-expressed at file scope for the
+/// expansion-surface classifier).
+fn lower_rs_attrs_are_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        if !a.path().is_ident("cfg") {
+            return false;
+        }
+        let rendered = match &a.meta {
+            syn::Meta::List(list) => list.tokens.to_string(),
+            _ => return false,
+        };
+        rendered
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|token| token == "test")
+    })
+}
+
+/// Collect EXPANSION-SURFACE violations in `lower.rs` source `src` — production
+/// (non-`#[cfg(test)]`) constructs that could introduce compiled same-module
+/// code reaching the module-private `lower_type_expr_structural` WITHOUT adding
+/// a third literal identifier token (so the occurrence-counting
+/// `structural_lowerer_single_witnessed_call_violation` rail cannot see them).
+/// Parses `src` with `syn` and walks its items (recursing into inline `mod { … }`
+/// content blocks), recording:
+///
+/// - an **item-position macro invocation** (`syn::Item::Macro`) — covers
+///   `macro_rules!` definitions, `include!` / `include_str!`, AND function-like
+///   `some_macro! { … }` / `(…)` / `[…]` (`paste!`, `concat_idents!`, a
+///   proc-macro that synthesises a call). REJECTED UNCONDITIONALLY (not keyed on
+///   the token stream mentioning the lowerer name): a `paste!` joining
+///   `lower_type_expr_` + `structural` never emits the whole name as one token,
+///   so a name-mention check could not see it — the genuine `lower.rs` uses NO
+///   item-position macro at all, so the robust rule is to forbid the whole
+///   class.
+/// - an **out-of-line / `#[path]` / adorned child `mod`** (`syn::Item::Mod` with
+///   `content.is_none()`) — a `mod foo;` declaration (with or without
+///   `#[path = …]` / `#[cfg(…)]`) whose body lives in another file that could
+///   carry code reaching the private lowerer. REJECTED unless it is the
+///   sanctioned `#[cfg(test)]`-gated test wiring
+///   (`LOWER_RS_SANCTIONED_TEST_MOD`): a production out-of-line `mod` of any
+///   name, OR a non-test `#[path]` `mod`, is a usurpation surface.
+/// - a **`use … lower_type_expr_structural … as <Alias>;`** reexport
+///   (`syn::Item::Use` renaming TO `lower_type_expr_structural`, via the shared
+///   [`use_tree_renames_to`] classifier) — defense-in-depth alongside the
+///   occurrence guard's third-occurrence rail.
+///
+/// SCOPE — BOUNDED, NOT EXHAUSTIVE (see the guard doc's documented residual):
+/// this is a `syn`-source walk over ONE file. It CANNOT see macro-expanded
+/// output, a `#[path]` module rooted OUTSIDE the walked tree, an attribute /
+/// derive proc-macro that rewrites the file, or split-token name synthesis. The
+/// LOAD-BEARING guarantee is the COMPILER module-privacy of
+/// `lower_type_expr_structural` (a foreign module cannot NAME it — a compile
+/// error, not a lint); this classifier closes the realistic in-file
+/// expansion-surface vectors a routine refactor / copy-paste would introduce.
+fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(e) => {
+            violations.push(format!(
+                "expansion-surface scan could not parse `lower.rs` with `syn`: {e}"
+            ));
+            return violations;
+        }
+    };
+    lower_rs_collect_expansion_surface(&file.items, &mut violations);
+    violations
+}
+
+/// Recursive item walker for [`lower_rs_expansion_surface_violations`] —
+/// descends inline `mod { … }` content blocks so a violation nested in an inline
+/// module is still seen.
+fn lower_rs_collect_expansion_surface(items: &[syn::Item], violations: &mut Vec<String>) {
+    for item in items {
+        match item {
+            // An item-position macro invocation — `some_macro! { … }`,
+            // `macro_rules! m { … }`, `include!("…")`, `include_str!("…")` (all
+            // parse as `Item::Macro`). Forbidden UNCONDITIONALLY in production
+            // `lower.rs`.
+            syn::Item::Macro(item_mac) => {
+                let mac_name = item_mac
+                    .mac
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_else(|| "<macro>".to_string());
+                violations.push(format!(
+                    "an item-position macro invocation `{mac_name}!{{ … }}` (a `macro_rules!` \
+                     definition, an `include!` / `include_str!`, or a function-like / proc-macro \
+                     invocation) is forbidden in production `lower.rs` — it can synthesise \
+                     same-module code reaching the private `lower_type_expr_structural` without a \
+                     third literal identifier token"
+                ));
+            }
+            syn::Item::Mod(m) => {
+                match &m.content {
+                    // Inline `mod foo { … }` — its body items are walked by this
+                    // same scan (and any call inside is still subject to the
+                    // occurrence-counting rail), so it is allowed; recurse.
+                    Some((_, inner)) => lower_rs_collect_expansion_surface(inner, violations),
+                    // Out-of-line `mod foo;` — body lives in another file. Allowed
+                    // ONLY for the sanctioned `#[cfg(test)]`-gated test wiring.
+                    None => {
+                        let is_sanctioned_test_mod = m.ident == LOWER_RS_SANCTIONED_TEST_MOD
+                            && lower_rs_attrs_are_cfg_test(&m.attrs);
+                        if !is_sanctioned_test_mod {
+                            let has_path = m.attrs.iter().any(|a| a.path().is_ident("path"));
+                            violations.push(format!(
+                                "an out-of-line child module `mod {};`{} is forbidden in production \
+                                 `lower.rs` — only the sanctioned `#[cfg(test)] #[path = \
+                                 \"structural_lower_tests.rs\"] mod {}` test wiring may declare an \
+                                 out-of-line child; a production (or `#[path]`-adorned non-test) \
+                                 child module could carry code reaching the private lowerer",
+                                m.ident,
+                                if has_path { " (with `#[path]`)" } else { "" },
+                                LOWER_RS_SANCTIONED_TEST_MOD,
+                            ));
+                        }
+                    }
+                }
+            }
+            // A `use … as lower_type_expr_structural;` reexport binding minting a
+            // nameable alias of the private lowerer (defense-in-depth alongside
+            // the occurrence guard's third-occurrence rail).
+            syn::Item::Use(use_item) => {
+                if use_tree_renames_to(&use_item.tree, "lower_type_expr_structural") {
+                    violations.push(
+                        "a `use … as lower_type_expr_structural;` reexport binding mints a nameable \
+                         alias of the private structural lowerer in `lower.rs` — forbidden"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// COMPANION single-engine producer guard (close the EXPANSION-SURFACE class):
+/// the occurrence-counting in-file pin
+/// (`structural_lowerer_called_only_through_the_witness_gated_wrapper`) closes
+/// the direct / alias / whitespace / newline / char-literal vectors, but it
+/// cannot see a `macro_rules!` / `paste!` / proc-macro that SYNTHESISES a call,
+/// an `include!("external.inc")` that splices a generated body, or a `#[path]` /
+/// out-of-line child `mod` — each can introduce compiled same-module code
+/// reaching the module-private `lower_type_expr_structural` WITHOUT adding a
+/// third literal identifier token (Rust descendant / expanded code CAN reach a
+/// module-private item). This guard reads `lower.rs` and rejects every such
+/// production (non-`#[cfg(test)]`) expansion surface, mirroring the sibling
+/// guard that closes the same class for `build_script_setup_seed_frames`
+/// (`collect_sanctioned_occurrences` + `macro_hot_mirror_exposes_single_crate_visible_producer_entry`)
+/// and the `syn`-AST `carrier_module_has_no_public_type_args_surface`.
+///
+/// REJECTION SET (production, non-`#[cfg(test)]`): an item-position macro
+/// invocation (`macro_rules!` / `include!` / `include_str!` / function-like or
+/// proc-macro `some_macro!{…}`); an out-of-line / `#[path]` / adorned child
+/// `mod` (any `mod foo;` other than the sanctioned `#[cfg(test)]`-gated
+/// `structural_lower_tests` wiring); a `use … as lower_type_expr_structural;`
+/// reexport. The sanctioned `#[cfg(test)] #[path = "structural_lower_tests.rs"]
+/// mod structural_lower_tests;` test wiring is ALLOWLISTED (test-gated only).
+///
+/// DOCUMENTED IRREDUCIBLE RESIDUAL (ACCEPTED — matches
+/// `carrier_module_has_no_public_type_args_surface`'s doc and the sibling
+/// entry-surface guard's residual list). A `syn` source scan of one file
+/// fundamentally cannot model:
+/// - a `#[path = "…"]` module rooted OUTSIDE `crates/verter_session/src/**`
+///   (its body is a foreign file this scan never reads);
+/// - an ATTRIBUTE / DERIVE PROC-MACRO applied to the file or an item that
+///   rewrites the token stream after parsing (a `syn` parse sees the
+///   pre-expansion shape only);
+/// - SPLIT-TOKEN macro NAME SYNTHESIS (`paste!` / `concat_idents!` / a proc-macro
+///   joining `lower_type_expr_` + `structural`) so the whole identifier is never
+///   one token — here, the UNCONDITIONAL item-macro rejection already forbids the
+///   carrier (any item-position macro reds regardless of its tokens), so this
+///   residual is narrowed to a macro reaching the lowerer through a NON-item
+///   position the scan does not enumerate.
+///
+/// These residuals are ACCEPTED because the AIRTIGHT backstop is COMPILER
+/// module-privacy: `lower_type_expr_structural` carries NO visibility modifier,
+/// so a foreign module — however it is spelled, expanded, or `#[path]`-rooted —
+/// still cannot NAME it (a compile error, not a lint). This guard is the bounded
+/// in-file expansion-surface rejection layered on top of that guarantee, not a
+/// replacement for it.
+#[test]
+fn structural_carrier_producer_lower_has_no_expansion_surface() {
+    let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
+    let body = std::fs::read_to_string(workspace_path(rel))
+        .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
+    // Anti-vacuity: the owner module must exist and carry the lowerer definition —
+    // its absence means the owner re-home regressed and the scan would be vacuous.
+    assert!(
+        body.contains("fn lower_type_expr_structural("),
+        "anti-vacuity: the structural lowerer definition must live at `{rel}` — its absence means \
+         the structural-carrier-producer owner re-home regressed, making this expansion-surface \
+         scan vacuous"
+    );
+    let violations = lower_rs_expansion_surface_violations(&body);
+    assert!(
+        violations.is_empty(),
+        "single-engine producer EXPANSION-SURFACE violation in `{rel}`: production \
+         `lower.rs` introduced a macro / include! / out-of-line-or-`#[path]` mod / lowerer-`as` \
+         reexport that can reach the module-private `lower_type_expr_structural` without a third \
+         literal identifier token (the occurrence-counting in-file pin cannot see it). Only the \
+         sanctioned `#[cfg(test)]`-gated `structural_lower_tests` test wiring may declare an \
+         out-of-line child. Violations:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Self-test for the EXPANSION-SURFACE classifier
+/// [`lower_rs_expansion_surface_violations`]: the REAL `lower.rs` shape passes
+/// (its `#[cfg(test)] #[path] mod structural_lower_tests;` test wiring does NOT
+/// red); each planted production expansion surface reds — an
+/// `include!("generated_lowerer.inc")`, a `macro_rules!` whose body emits a
+/// lowerer call, an item-position `paste! { … }` invocation, an
+/// `include_str!`, a production `#[path = "…"] mod foo;`, a plain out-of-line
+/// `mod foo;`, and a `use … as lower_type_expr_structural;` reexport; an inline
+/// `mod { … }` block (subject to the occurrence rail) does NOT red.
+#[test]
+fn structural_lower_expansion_surface_classifier_discriminates() {
+    // The REAL minimal genuine shape: `use` imports, the bare module-private fn,
+    // and the sanctioned `#[cfg(test)] #[path] mod` test wiring. PASSES.
+    let genuine = "use std::sync::Arc;\n\
+                   fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                   pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                   lower_type_expr_structural(g)\n\
+                   }\n\
+                   #[cfg(test)]\n\
+                   #[path = \"structural_lower_tests.rs\"]\n\
+                   mod structural_lower_tests;\n";
+    assert!(
+        lower_rs_expansion_surface_violations(genuine).is_empty(),
+        "the genuine `lower.rs` shape (with the `#[cfg(test)] #[path] mod structural_lower_tests;` \
+         test wiring) must PASS the expansion-surface scan"
+    );
+
+    // REJECT — an `include!("generated_lowerer.inc")` item-position include that
+    // could splice a generated body reaching the private lowerer.
+    let include_planted = format!("{genuine}include!(\"generated_lowerer.inc\");\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&include_planted).is_empty(),
+        "a planted `include!(\"generated_lowerer.inc\")` must RED — it can splice a generated body \
+         reaching the private lowerer"
+    );
+
+    // REJECT — an `include_str!` item macro (also `Item::Macro`).
+    let include_str_planted =
+        format!("{genuine}const SRC: &str = include_str!(\"x.inc\");\ninclude!(\"x.inc\");\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&include_str_planted).is_empty(),
+        "a planted `include!`/`include_str!` item macro must RED"
+    );
+
+    // REJECT — a `macro_rules!` whose body emits a lowerer call. A `syn` scan
+    // cannot expand it, so the occurrence rail sees nothing; the UNCONDITIONAL
+    // item-macro rejection catches it.
+    let macro_rules_planted = format!(
+        "{genuine}macro_rules! gen_call {{\n    ($g:expr) => {{ lower_type_expr_structural($g) }};\n}}\n"
+    );
+    assert!(
+        !lower_rs_expansion_surface_violations(&macro_rules_planted).is_empty(),
+        "a planted `macro_rules!` whose body emits a lowerer call must RED — the occurrence rail \
+         cannot see inside the macro body, so the item-macro rejection is the catch"
+    );
+
+    // REJECT — an item-position `paste! { … }` invocation (the token-synthesis
+    // vector). Rejected by the UNCONDITIONAL item-macro rule regardless of its
+    // tokens (a `paste!` joining `lower_type_expr_` + `structural` never emits the
+    // whole name as one token, so a name-mention check could not see it).
+    let paste_planted = format!(
+        "{genuine}paste::paste! {{ fn [<lower_type_expr_ structural>](g: &G) -> R {{ todo!() }} }}\n"
+    );
+    assert!(
+        !lower_rs_expansion_surface_violations(&paste_planted).is_empty(),
+        "a planted item-position `paste! {{ … }}` invocation must RED — the UNCONDITIONAL \
+         item-macro rejection forbids the whole class, so split-token name synthesis cannot evade it"
+    );
+
+    // REJECT — a production `#[path = "external"] mod smuggler;` out-of-line child
+    // (NOT cfg(test)-gated): its body lives in a foreign file that could reach the
+    // private lowerer.
+    let path_mod_planted = format!("{genuine}#[path = \"external.rs\"]\nmod smuggler;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&path_mod_planted).is_empty(),
+        "a planted production `#[path = \"external.rs\"] mod smuggler;` must RED — its out-of-line \
+         body could carry code reaching the private lowerer"
+    );
+
+    // REJECT — a plain production out-of-line `mod smuggler;` (no `#[path]`, no
+    // cfg(test)).
+    let plain_mod_planted = format!("{genuine}mod smuggler;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&plain_mod_planted).is_empty(),
+        "a planted plain production out-of-line `mod smuggler;` must RED — only the sanctioned \
+         `#[cfg(test)]`-gated test wiring may declare an out-of-line child"
+    );
+
+    // REJECT — a `use … as lower_type_expr_structural;` reexport binding minting a
+    // nameable alias of the private lowerer.
+    let use_rename_planted =
+        format!("{genuine}use crate::other::raw as lower_type_expr_structural;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&use_rename_planted).is_empty(),
+        "a planted `use … as lower_type_expr_structural;` reexport must RED — it mints a nameable \
+         alias of the private lowerer"
+    );
+
+    // SOUNDNESS — a TEST-gated out-of-line `mod` of a DIFFERENT name must STILL
+    // red: the allowlist is the EXACT sanctioned `structural_lower_tests` name
+    // (a `#[cfg(test)]` gate alone does not license an arbitrary out-of-line mod).
+    let wrong_name_test_mod =
+        format!("{genuine}#[cfg(test)]\n#[path = \"other_tests.rs\"]\nmod other_tests;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&wrong_name_test_mod).is_empty(),
+        "a `#[cfg(test)]` out-of-line `mod other_tests;` of a NON-sanctioned name must RED — the \
+         allowlist pins the exact `structural_lower_tests` name, not any test-gated out-of-line mod"
+    );
+
+    // SOUNDNESS — an INLINE `mod helper { … }` block is allowed (its body is
+    // walked by this same scan, and any call inside is still subject to the
+    // occurrence-counting rail), so a benign inline mod does NOT red.
+    let inline_mod = format!("{genuine}mod helper {{\n    pub(super) const K: u8 = 1;\n}}\n");
+    assert!(
+        lower_rs_expansion_surface_violations(&inline_mod).is_empty(),
+        "an INLINE `mod helper {{ … }}` block (body walked in-place, subject to the occurrence \
+         rail) must NOT red"
+    );
+
+    // SOUNDNESS — an inline mod that ITSELF contains a forbidden item-position
+    // macro IS caught (recursion into inline mod bodies).
+    let inline_mod_with_macro =
+        format!("{genuine}mod helper {{\n    include!(\"nested.inc\");\n}}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&inline_mod_with_macro).is_empty(),
+        "an item-position macro NESTED in an inline `mod` body must RED — the scan recurses into \
+         inline mod content"
+    );
+
+    // The REAL owner source passes the expansion-surface scan (revert proof).
+    let real = std::fs::read_to_string(workspace_path(
+        "crates/verter_session/src/structural_carrier_producer/lower.rs",
+    ))
+    .expect("the structural lowerer's owner module must be readable");
+    let real_violations = lower_rs_expansion_surface_violations(&real);
+    assert!(
+        real_violations.is_empty(),
+        "the REAL `lower.rs` MUST pass the expansion-surface scan (its `#[cfg(test)] #[path] mod \
+         structural_lower_tests;` test wiring is allowlisted) — if this reddens, a production \
+         macro / include! / extra mod / lowerer-`as` reexport was added. Violations:\n  {}",
+        real_violations.join("\n  ")
     );
 }
 

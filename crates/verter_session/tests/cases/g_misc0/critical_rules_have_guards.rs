@@ -440,7 +440,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // lowerer is CALLED exactly once, inside the witness-gated `emit_macro_arg`
             // wrapper — closing the in-file case where a future edit adds a SECOND
             // un-gated `pub(in …)` wrapper that the compiler privacy cannot catch within
-            // `lower.rs`), the PARENT-SHAPE narrowness guard (the
+            // `lower.rs`), the EXPANSION-SURFACE companion (`lower.rs` declares NO
+            // production item-position macro / `include!` / out-of-line-or-`#[path]`
+            // child mod / lowerer-`as` reexport — closing the macro-synthesis /
+            // include-splice / child-mod class that reaches the private lowerer without
+            // a third literal identifier token, which the occurrence rail cannot see;
+            // only the `#[cfg(test)]`-gated `structural_lower_tests` test wiring is
+            // allowlisted), the PARENT-SHAPE narrowness guard (the
             // owner directory holds ONLY the lowerer, the macro producer surface, the
             // binder helper, mod.rs, and tests), and the WITNESS-unforgeability guard
             // together are the compiler-enforced LOAD-BEARING confinement; the
@@ -464,6 +470,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // owner's route-free `IndexedReady` (`raw_source` + `framework_parse`).
             "structural_carrier_producer_lowerer_is_module_private",
             "structural_lowerer_called_only_through_the_witness_gated_wrapper",
+            "structural_carrier_producer_lower_has_no_expansion_surface",
             "structural_carrier_producer_module_is_narrow",
             "structural_carrier_producer_witnesses_are_unforgeable",
             "script_setup_binder_helper_is_module_private",
