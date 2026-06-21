@@ -59,6 +59,18 @@ use crate::semantic_query::{HotTypeRef, LocalScopeId, MemberMergeRole, SurfacePr
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct PreparedStructuralBodySlotId(u32);
 
+#[cfg(test)]
+impl PreparedStructuralBodySlotId {
+    /// TEST-ONLY constructor for a raw slot index. The production surface mints
+    /// ids ONLY through [`StructuralBodyRegistry::register`] (no public
+    /// `from_raw`); this `#[cfg(test)]` helper exists solely so a test can build
+    /// a known OUT-OF-RANGE index to assert [`StructuralBodyRegistry::descriptor`]
+    /// returns `None` past the dense bound.
+    pub(super) fn from_raw_for_test(raw: u32) -> Self {
+        Self(raw)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The registry descriptor + the body-kind axis
 // ---------------------------------------------------------------------------
@@ -161,8 +173,12 @@ impl StructuralBodyRegistry {
         PreparedStructuralBodySlotId(raw)
     }
 
-    /// The descriptor registered under `id`, or `None` if `id` was never minted
-    /// by this registry (an out-of-range / foreign id).
+    /// The descriptor registered under `id`, or `None` if `id` is out of range
+    /// (never minted by this registry). Slot ids are bundle-local: a registry
+    /// only resolves the ids it minted, and an id is never legitimately used
+    /// against a different registry — a same-index id from another registry is a
+    /// non-scenario, not a detected-and-rejected case, so this checks only the
+    /// dense bound, not provenance.
     pub(crate) fn descriptor(
         &self,
         id: PreparedStructuralBodySlotId,

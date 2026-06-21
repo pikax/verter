@@ -142,13 +142,23 @@ fn context_key_distinguishes_exactly_where_a_neutral_key_collides() {
         );
     }
 
-    // -- Assertion 4 (LOAD-BEARING): a context-NEUTRAL key would be WRONG. ---
+    // -- Assertion 4 (ILLUSTRATIVE CONTRAST, not the discriminator): a -------
+    //    context-NEUTRAL key would be WRONG.
+    // NOTE ON DISCRIMINATION STRUCTURE: this block is TRUE BY CONSTRUCTION — it
+    // builds literal `(body_slot,)` tuples and a slot-only map, so it would pass
+    // regardless of the REAL key's behavior. It proves nothing ON ITS OWN; it is
+    // the pedagogical CONTRAST showing what a context-neutral key WOULD do. The
+    // LOAD-BEARING discrimination of the context axes lives in assertions 1 + 3:
+    // assertion 1 (`memo.len() == 3`) FAILS RED if either `merge_role` or
+    // `provenance` is dropped from the real key (two of the three inserts would
+    // collide), and assertion 3 asserts the three REAL keys are pairwise `!=`.
+    // Do NOT read this block as the discriminator.
+    //
     // Build a "neutral" tuple `(body_slot,)` for all three contexts (dropping
     // provenance + merge_role). They are ALL EQUAL — a neutral-keyed map would
     // collide all three onto ONE slot and serve the wrong cell. Contrast with
-    // the REAL keys, which are pairwise UNEQUAL (assertion 3). This is the
-    // discrimination: the real key MUST distinguish exactly where a neutral key
-    // MUST collide.
+    // the REAL keys, which are pairwise UNEQUAL (assertion 3): the real key MUST
+    // distinguish exactly where a neutral key MUST collide.
     let neutral: Vec<(PreparedStructuralBodySlotId,)> = CONTEXTS.iter().map(|_| (s,)).collect();
     for i in 0..neutral.len() {
         for j in (i + 1)..neutral.len() {
@@ -174,10 +184,10 @@ fn context_key_distinguishes_exactly_where_a_neutral_key_collides() {
          context key fixes; the real memo kept three (assertion 1)"
     );
 
-    // -- Assertion 5: registry round-trip. ----------------------------------
+    // -- Assertion 5: registry round-trip + out-of-range miss. --------------
     // `descriptor(s)` returns the registered descriptor; the second distinct
-    // `register` minted a DIFFERENT id (asserted above); `descriptor(unminted)`
-    // returns `None`.
+    // `register` minted a DIFFERENT id (asserted above); an OUT-OF-RANGE id has
+    // no descriptor.
     let desc = registry
         .descriptor(s)
         .expect("the registered slot must round-trip its descriptor");
@@ -196,19 +206,34 @@ fn context_key_distinguishes_exactly_where_a_neutral_key_collides() {
         "the descriptor must round-trip the registered body kind"
     );
     assert_eq!(registry.len(), 2, "exactly two bodies were registered");
-    // An id never minted by this registry has no descriptor.
-    let unminted = registry.register(type_semantic_descriptor("Sentinel"));
-    let beyond = registry.register(type_semantic_descriptor("Beyond"));
-    // Drop the registry's view of `beyond` by querying a clearly-out-of-range id
-    // through a fresh, empty registry: an id minted elsewhere is foreign here.
-    let foreign_registry = StructuralBodyRegistry::new();
+
+    // Out-of-range negative on the POPULATED registry: an index AT and PAST the
+    // dense bound (`registry.len()` and beyond) has no descriptor, because
+    // `descriptor` checks only the dense `Vec` bound. This DISCRIMINATES — it
+    // fails RED if `descriptor` ever over-returned for an out-of-range id (e.g.
+    // saturated to the last descriptor instead of bounds-checking). Slot ids are
+    // bundle-local (each `PreparedDeclBundle` owns exactly one registry and an id
+    // is consumed within the registry that minted it), so a cross-registry id is
+    // a non-scenario; the real, testable guarantee is this dense out-of-range
+    // bound, exercised via the `#[cfg(test)]` raw constructor (no public
+    // `from_raw` on the production surface).
+    let at_bound = PreparedStructuralBodySlotId::from_raw_for_test(registry.len() as u32);
+    let well_past = PreparedStructuralBodySlotId::from_raw_for_test(registry.len() as u32 + 100);
     assert!(
-        foreign_registry.descriptor(s).is_none(),
-        "an empty registry must not resolve a slot id minted by a different registry"
+        registry.descriptor(at_bound).is_none(),
+        "an id exactly AT the dense bound (len) is out of range — no descriptor"
     );
     assert!(
-        foreign_registry.descriptor(unminted).is_none()
-            && foreign_registry.descriptor(beyond).is_none(),
-        "an empty registry resolves no minted id — descriptors are bundle-local"
+        registry.descriptor(well_past).is_none(),
+        "an id well PAST the dense bound is out of range — no descriptor"
+    );
+    // Sanity floor: the last in-range id (len - 1) DOES resolve, so the
+    // out-of-range misses above are a real bound check, not a registry that
+    // resolves nothing.
+    let last_in_range = PreparedStructuralBodySlotId::from_raw_for_test(registry.len() as u32 - 1);
+    assert!(
+        registry.descriptor(last_in_range).is_some(),
+        "the last in-range id (len - 1) must resolve — proving the out-of-range misses are a \
+         genuine bound check, not a registry that resolves nothing"
     );
 }
