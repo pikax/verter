@@ -7,25 +7,24 @@
 //! ## scanner records (durable guard-local record — Structural-Confinement-First)
 //!
 //! ```text
-//! scanner_invariant: only enumerated production anchors may read a declaration
-//!   body as TypeExpr; GraphBackedMigrated anchors must NOT (they route through
-//!   the shared `decl_body_hot_ref` hot accessor / a graph-native arm);
-//!   AuthoredShape / GraphFreeDto / GraphBackedPending / ProducerLowering are the
-//!   justified stay-allowlist (each carries a non-empty reason naming why it
-//!   stays), and OutputCompat is the sanctioned output/fingerprint/oracle read
-//!   set routed through the named compat helpers.
-//! scanner_justification: whether a reader requires authored syntax / lives
-//!   below the session graph / is a deferred larger refactor is an architectural
-//!   judgement not expressible by Rust while raw TypeExpr bodies remain readable.
-//! mechanism_ruling: a temporary last-resort scanner — the partition is an
-//!   architecture-design ruling recorded in
-//!   docs/arch/authored-shape-graph-native-migration-deferral.md; the structural
-//!   replacement target is private body storage plus an AuthoredDeclBody
-//!   wrapper / a below-graph layering seam, at which point the AuthoredShape /
-//!   GraphFreeDto / GraphBackedPending classes empty and this inventory is
-//!   deleted.
+//! scanner_invariant: this guard is a scoped residual-reader inventory and ratchet.
+//!   It enforces presence/uniqueness of curated residual and compat rows, rejects
+//!   uninventoried `<recv>.body.<TypeDeclBody-method>` chains, audits each
+//!   GraphBackedMigrated row for zero raw TypeExpr-body acquisition and required
+//!   hot routing, enforces compat-consumer purity, and prevents GraphBackedPending
+//!   growth. It does not structurally discover new bare `<expr>.body` or
+//!   `<expr>.type_annotation` readers outside enumerated anchors.
+//! scanner_justification: Rust privacy cannot expose lower-crate Prepared* TypeExpr
+//!   fields only to selected downstream session owners, and untyped `syn` field
+//!   reads cannot distinguish declaration-body fields from unrelated same-named
+//!   fields.
+//! mechanism_ruling: curated inventory plus bounded structural tripwires, not a
+//!   global confinement proof. The structural replacement is private owner-layer
+//!   body storage plus HotPrepared*/HotTypeRef semantic access and an explicit
+//!   AuthoredDeclBody/authored-shape surface with no raw escape to graph-backed
+//!   consumers.
 //! hardening_rounds: 0
-//! hardening_history: none — first version of the partitioned guard.
+//! hardening_history: narrowed claim; no global field-name scanner round consumed.
 //! ```
 //!
 //! The three per-class scanner records (authored-shape / graph-free / producer)
@@ -33,39 +32,54 @@
 //!
 //! ## What rail closes the surface (read this before trusting the tripwire)
 //!
-//! The COMPLETENESS rail is the ENUMERATION (`RESIDUAL_BODY_READERS` +
-//! `COMPAT_BODY_READERS`) — it is the authoritative curated list of the
-//! `TypeExpr` body readers, partitioned by `ReaderClass`, and covers BOTH
-//! bare-field reads (`<recv>.body` used as a value, e.g. `.body.clone()`) AND
-//! method-chain reads (`<recv>.body.<method>()`). Critically, this enumeration is
-//! a MANUALLY-CURATED list: invariants 1-2 (presence + uniqueness) only verify
-//! that the rows ALREADY ON THE LIST are present in the tree and resolve
-//! uniquely — they do NOT, and cannot, auto-discover a NEW reader nobody added to
-//! the curated list. A new reader that reads `.body` as a bare field, or that
-//! launders a method-chain read through a local binding
-//! (`let b = &lowered.body; b.m()`), is therefore NOT auto-detected by this
-//! guard; closing the surface against such a reader is carried by (1) the author
-//! keeping the curated enumeration complete, (2) the mechanically-pinned per-class
-//! count assertions reddening if a class's row count drifts, and (3) the
-//! behavioural parity rail (the retained oracle). The `<recv>.body.<method>`
-//! tripwire (invariant 3) is a BOUNDED SUPPLEMENT on top of the enumeration: it
-//! cheaply reddens a NEW or MOVED method-chain read that escaped the enumeration,
-//! but it is NOT the completeness rail, does NOT alone prove "no new reader can
-//! appear", and does NOT cover the bare-field or local-binding-laundered spelling
-//! (those are not auto-caught — by design).
+//! The ENUMERATION (`RESIDUAL_BODY_READERS` + `COMPAT_BODY_READERS`) is the
+//! curated LEDGER of the `TypeExpr` body readers, partitioned by `ReaderClass`,
+//! covering BOTH bare-field reads (`<recv>.body` used as a value, e.g.
+//! `.body.clone()`) AND method-chain reads (`<recv>.body.<method>()`). It is NOT
+//! an automatic completeness proof: it is a MANUALLY-CURATED list. The AUTOMATIC
+//! rails are exactly these, and only these:
+//!   (1) PRESENCE + UNIQUENESS — every row ALREADY on the list resolves to exactly
+//!       one non-test definition at its anchor (a moved / duplicated / deleted
+//!       enumerated reader reddens); this does NOT auto-discover a reader nobody
+//!       added to the list.
+//!   (2) the `<recv>.body.<TypeDeclBody-method>` METHOD-CHAIN TRIPWIRE — a bounded
+//!       supplement that reddens a NEW or MOVED method-chain read whose anchor is
+//!       not enumerated.
+//!   (3) COMPAT PURITY — the two compat-consumer files perform no direct
+//!       method-chain body read after the compat routing.
+//!   (4) the GraphBackedMigrated MIGRATED-ANCHOR NO-READ AUDIT — each enumerated
+//!       migrated anchor acquires no raw `TypeExpr` body and routes through its
+//!       required hot accessor (scoped to the enumerated migrated anchors, NOT a
+//!       global field scan).
+//!   (5) the GraphBackedPending NON-GROWTH RATCHET — the pending count cannot
+//!       grow.
+//! A new reader that reads `.body` / `.type_annotation` as a BARE FIELD at a new
+//! anchor, or that launders a method-chain read through a local binding
+//! (`let b = &lowered.body; b.m()`), is NOT structurally caught by any of these
+//! rails. Closing the surface against such a reader is carried by the author
+//! keeping the curated enumeration complete and by the behavioural parity rail
+//! (the retained oracle) — NOT by an automatic structural scan. None of the five
+//! automatic rails, alone or together, proves "no new bare-field reader can
+//! appear".
 //!
-//! ## Why this guard exists (and that it is TEMPORARY)
+//! ## What this guard confines
 //!
-//! Type-declaration BODY storage is migrating from the lower-crate typed IR
-//! (`TypeExpr`) to a `verter_session` arena handle (`HotTypeRef`). The genuinely
+//! Type-declaration BODY storage spans two carriers: the lower-crate typed IR
+//! (`TypeExpr`) and a `verter_session` arena handle (`HotTypeRef`). The genuinely
 //! graph-backed semantic consumers route through the thin `decl_body_hot_ref` hot
 //! accessor (the `SemanticGraphStore` `Instantiate` memo) via graph-native
-//! predicates/materializers; a second class of readers stays on `TypeExpr`
-//! because their decision is intrinsically about the authored syntactic form,
-//! because they live below the session graph, because their migration is a larger
-//! refactor than the bounded accessor flip, because they are the producer mint
-//! itself, or because they are output/compat reads. This inventory enumerates and
-//! partitions exactly that residual set.
+//! predicates/materializers; a second class of readers reads `TypeExpr` because
+//! their decision is intrinsically about the authored syntactic form, because they
+//! live below the session graph, because their semantic body data has no
+//! graph-native arm for its shape, because they are the producer mint itself, or
+//! because they are output/compat reads. This inventory enumerates and partitions
+//! exactly that residual set. The classes shrink to empty when the structural arms
+//! that retire each one exist (private owner-layer body storage plus
+//! `HotPrepared*` / `HotTypeRef` semantic access, an explicit `AuthoredDeclBody` /
+//! authored-shape surface, a graph-native closedness/key-domain classifier, a
+//! below-graph layering seam, and the imported-registry-carrier / locator-split
+//! refactors); at that point the `AuthoredShape` / `GraphFreeDto` /
+//! `GraphBackedPending` classes are empty and this guard is deleted.
 //!
 //! This guard pins, structurally:
 //!   1. PRESENCE — every enumerated reader is defined at its `(file, impl/mod,
@@ -83,14 +97,14 @@
 //!      lowered-body method-chain read after the compat routing.
 //!   5. NO GraphBackedMigrated TypeExpr-body read — a `GraphBackedMigrated`
 //!      anchor must NOT read `prepared.body` / a lowered `.body.<method>` /
-//!      `named_decl_body` as a semantic input (it routes through
-//!      `decl_body_hot_ref` / a graph-native arm). If one does, the guard REDS.
+//!      `named_decl_body` as a semantic input (it routes through its own required
+//!      hot accessor — `decl_body_hot_ref` for the current row). If one does, the
+//!      guard REDS.
 //!
-//! When the future block lands the graph-native replacements (heritage-as-
-//! metadata + a graph-native closedness/key-domain classifier, the below-graph
-//! layering seam, and the C3-carrier / C7-split refactors), the AuthoredShape /
-//! GraphFreeDto / GraphBackedPending classes empty and this guard is deleted. It
-//! is intentionally TEMPORARY.
+//! These five rails do NOT structurally discover a new bare `<expr>.body` /
+//! `<expr>.type_annotation` reader at a new anchor (see "What rail closes the
+//! surface" above) — that surface is closed by the curated enumeration and the
+//! behavioural parity rail, not an automatic scan.
 //!
 //! ## Identity is structural (`syn`), not text
 //!
@@ -135,16 +149,18 @@
 //! body reader can appear, and NONE of its three structural rails alone closes
 //! that surface.
 //!
-//! Concretely, the DISCLOSED INTERIM LIMITATION: a NEW non-inventoried bare
-//! `<recv>.body` / `<recv>.type_annotation` FIELD read at a NEW anchor (used as a
-//! value, e.g. `.body.clone()`), and a method-chain read laundered through a local
-//! binding (`let b = &lowered.body; b.m()`), are OUT of the method-chain tripwire's
-//! sound syntactic reach — they are caught ONLY if the author keeps the
+//! Concretely, the DISCLOSED LIMIT: a NEW non-inventoried bare `<recv>.body` /
+//! `<recv>.type_annotation` FIELD read at a NEW anchor (used as a value, e.g.
+//! `.body.clone()`), and a method-chain read laundered through a local binding
+//! (`let b = &lowered.body; b.m()`), are OUT of the method-chain tripwire's sound
+//! syntactic reach — they are caught ONLY if the author keeps the
 //! MANUALLY-CURATED ENUMERATION complete (and by the behavioural parity rail), NOT
-//! by an automatic structural scan. This hole is INHERITED from the prior frozen
-//! guard and is correctly DEFERRED: closing it (a private-body refactor + an
-//! `AuthoredDeclBody` wrapper / a global direct-field scanner) is the later
-//! migration block's work, NOT this guard's. The
+//! by an automatic structural scan. Closing this hole structurally requires private
+//! owner-layer body storage plus a `HotPrepared*` / `HotTypeRef` semantic surface
+//! and an explicit `AuthoredDeclBody` accessor (a global direct-field scanner is
+//! rejected as a confinement proof — untyped `syn` field reads cannot attribute a
+//! `.body` read to the declaration-body type); that structural arm is a separate
+//! surface, not this guard. The
 //! `enumeration_is_the_completeness_rail_for_bare_field_readers` self-test PROVES
 //! this hole exists (a synthetic new bare-field reader passes the tripwire). The
 //! GraphBackedMigrated AST no-read rail does NOT close it either: that rail is
@@ -678,9 +694,8 @@ fn collect_body_reads(block: &syn::Block) -> HashSet<String> {
 
 // ════════════════════════════════════════════════════════════════════
 // GraphBackedMigrated no-read AUDIT — a `syn` AST visitor over ONE anchored
-// fn body (FIX-2). Replaces the old brace-balanced TEXT needle scan: this is
-// a structural visitor that cannot see comments/strings, is alias/rename
-// robust, and is scoped to the EXACT `(impl_path, fn)` anchor.
+// fn body. A structural visitor that cannot see comments/strings, is
+// alias/rename robust, and is scoped to the EXACT `(impl_path, fn)` anchor.
 // ════════════════════════════════════════════════════════════════════
 
 /// The forbidden CALL idents a `GraphBackedMigrated` anchor must NOT invoke in
@@ -699,33 +714,42 @@ const MIGRATED_FORBIDDEN_CALL_IDENTS: &[&str] = &["prepared_type_decl", "named_d
 /// the text needle `"prepared.body"` missed.
 const MIGRATED_FORBIDDEN_FIELD_MEMBERS: &[&str] = &["body", "type_annotation"];
 
-/// The REQUIRED hot-route call ident a `GraphBackedMigrated` anchor MUST invoke —
-/// the shared hot accessor. Matched as a method-call ident or a call-path final
-/// segment. (`materialize_member_surface_node` is the alternate graph-native arm
-/// for the member-surface route; either satisfies the requirement.)
-const MIGRATED_REQUIRED_HOT_ROUTE_IDENTS: &[&str] =
-    &["decl_body_hot_ref", "materialize_member_surface_node"];
+/// The known hot-route call idents a `GraphBackedMigrated` row MAY declare as its
+/// REQUIRED route — the shared hot accessor and the alternate graph-native
+/// member-surface arm. This is the UNIVERSE of valid options, NOT the per-row
+/// requirement: each row names the EXACT subset that satisfies it via
+/// [`ReaderRow::required_hot_route`] (e.g. `lower_decl_body_to_node` requires
+/// `decl_body_hot_ref` ONLY — `materialize_member_surface_node` does not satisfy
+/// it). `materialize_member_surface_node` stays a valid option for a member-surface-
+/// route row. The auditor consults the ROW's own set, never this universe.
+const KNOWN_HOT_ROUTE_IDENTS: &[&str] = &["decl_body_hot_ref", "materialize_member_surface_node"];
 
 /// A `syn::visit::Visit` AST auditor over ONE anchored fn's body: structurally
 /// collects (a) every forbidden `TypeExpr`-body read — a `<expr>.body` /
 /// `<expr>.type_annotation` field access OR a `prepared_type_decl` /
-/// `named_decl_body` call — and (b) whether the body invokes the required
-/// `decl_body_hot_ref` (or the alternate graph-native arm). Descends closures and
-/// nested expressions but NOT nested item-`fn`s (a nested fn is a separate anchor),
+/// `named_decl_body` call — and (b) whether the body invokes the EXACT hot-route
+/// ident(s) THIS row requires (`required_idents`, supplied per-row from
+/// [`ReaderRow::required_hot_route`]). A call to a graph-native arm NOT in the
+/// row's set does NOT mark the body routed. Descends closures and nested
+/// expressions but NOT nested item-`fn`s (a nested fn is a separate anchor),
 /// matching the per-anchor scope of [`BodyReadCollector`]. Tokens in comments /
 /// string literals are invisible to the AST and cannot satisfy or trip it.
-struct MigratedBodyAuditor {
+struct MigratedBodyAuditor<'a> {
+    /// The EXACT hot-route call ident(s) that satisfy THIS row's requirement —
+    /// the per-row [`ReaderRow::required_hot_route`] set, NOT a flat global list.
+    required_idents: &'a [&'a str],
     /// The forbidden read shapes found, each a human label
     /// (`<recv>.body field read` / `named_decl_body(..) call` / …) for the
     /// diagnostic.
     forbidden_reads: Vec<String>,
-    /// Whether the required hot-route call was found.
+    /// Whether one of THIS row's required hot-route calls was found.
     routes_through_hot_accessor: bool,
 }
 
-impl MigratedBodyAuditor {
-    fn new() -> Self {
+impl<'a> MigratedBodyAuditor<'a> {
+    fn new(required_idents: &'a [&'a str]) -> Self {
         Self {
+            required_idents,
             forbidden_reads: Vec::new(),
             routes_through_hot_accessor: false,
         }
@@ -741,7 +765,7 @@ fn call_path_final_ident(func: &syn::Expr) -> Option<String> {
     }
 }
 
-impl<'ast> Visit<'ast> for MigratedBodyAuditor {
+impl<'ast> Visit<'ast> for MigratedBodyAuditor<'_> {
     fn visit_expr_field(&mut self, f: &'ast syn::ExprField) {
         if let syn::Member::Named(name) = &f.member {
             let n = name.to_string();
@@ -758,7 +782,7 @@ impl<'ast> Visit<'ast> for MigratedBodyAuditor {
         if MIGRATED_FORBIDDEN_CALL_IDENTS.contains(&m.as_str()) {
             self.forbidden_reads.push(format!("`.{m}(..)` method call"));
         }
-        if MIGRATED_REQUIRED_HOT_ROUTE_IDENTS.contains(&m.as_str()) {
+        if self.required_idents.contains(&m.as_str()) {
             self.routes_through_hot_accessor = true;
         }
         syn::visit::visit_expr_method_call(self, c);
@@ -769,7 +793,7 @@ impl<'ast> Visit<'ast> for MigratedBodyAuditor {
             if MIGRATED_FORBIDDEN_CALL_IDENTS.contains(&ident.as_str()) {
                 self.forbidden_reads.push(format!("`{ident}(..)` call"));
             }
-            if MIGRATED_REQUIRED_HOT_ROUTE_IDENTS.contains(&ident.as_str()) {
+            if self.required_idents.contains(&ident.as_str()) {
                 self.routes_through_hot_accessor = true;
             }
         }
@@ -793,9 +817,13 @@ struct MigratedBodyVerdict {
     routes_through_hot_accessor: bool,
 }
 
-/// Run the [`MigratedBodyAuditor`] `syn` visitor over one fn `Block`.
-fn audit_migrated_anchor_block(block: &syn::Block) -> MigratedBodyVerdict {
-    let mut a = MigratedBodyAuditor::new();
+/// Run the [`MigratedBodyAuditor`] `syn` visitor over one fn `Block`, judging
+/// `routes_through_hot_accessor` against THIS row's `required_idents`.
+fn audit_migrated_anchor_block(
+    block: &syn::Block,
+    required_idents: &[&str],
+) -> MigratedBodyVerdict {
+    let mut a = MigratedBodyAuditor::new(required_idents);
     a.visit_block(block);
     MigratedBodyVerdict {
         forbidden_reads: a.forbidden_reads,
@@ -812,6 +840,9 @@ fn audit_migrated_anchor_block(block: &syn::Block) -> MigratedBodyVerdict {
 struct MigratedAnchorAuditScanner<'a> {
     target_impl_path: &'a str,
     target_fn: &'a str,
+    /// The EXACT hot-route ident(s) THIS target row requires (its
+    /// [`ReaderRow::required_hot_route`]), threaded into the per-block auditor.
+    required_idents: &'a [&'a str],
     path_stack: Vec<String>,
     cfg_test_depth: u32,
     /// Verdicts for every NON-test anchor matching `(target_impl_path,
@@ -820,10 +851,11 @@ struct MigratedAnchorAuditScanner<'a> {
 }
 
 impl<'a> MigratedAnchorAuditScanner<'a> {
-    fn new(target_impl_path: &'a str, target_fn: &'a str) -> Self {
+    fn new(target_impl_path: &'a str, target_fn: &'a str, required_idents: &'a [&'a str]) -> Self {
         Self {
             target_impl_path,
             target_fn,
+            required_idents,
             path_stack: Vec::new(),
             cfg_test_depth: 0,
             verdicts: Vec::new(),
@@ -841,7 +873,8 @@ impl<'a> MigratedAnchorAuditScanner<'a> {
             return;
         }
         if self.current_path() == self.target_impl_path && *fn_ident == self.target_fn {
-            self.verdicts.push(audit_migrated_anchor_block(block));
+            self.verdicts
+                .push(audit_migrated_anchor_block(block, self.required_idents));
         }
     }
 }
@@ -905,16 +938,18 @@ impl<'ast> Visit<'ast> for MigratedAnchorAuditScanner<'_> {
 }
 
 /// Parse `src` and audit the EXACT non-test `(impl_path, fn_name)` anchor's body
-/// with the `syn` [`MigratedBodyAuditor`]. Returns each matching anchor's verdict
-/// (normally exactly one — UNIQUENESS pins the count).
+/// with the `syn` [`MigratedBodyAuditor`], judging routing against `required_idents`
+/// — the per-row [`ReaderRow::required_hot_route`] of the audited anchor. Returns
+/// each matching anchor's verdict (normally exactly one — UNIQUENESS pins the count).
 fn audit_migrated_anchor(
     file: &str,
     src: &str,
     impl_path: &str,
     fn_name: &str,
+    required_idents: &[&str],
 ) -> Vec<MigratedBodyVerdict> {
     let parsed = syn::parse_file(src).unwrap_or_else(|e| panic!("parse {file}: {e}"));
-    let mut scanner = MigratedAnchorAuditScanner::new(impl_path, fn_name);
+    let mut scanner = MigratedAnchorAuditScanner::new(impl_path, fn_name, required_idents);
     syn_visit_file(&mut scanner, &parsed);
     scanner.verdicts
 }
@@ -1086,8 +1121,8 @@ enum ReaderClass {
     /// scanner_justification: Whether a reader requires authored syntax is an
     ///   architectural judgment not expressible by Rust while raw TypeExpr bodies
     ///   remain available.
-    /// mechanism_ruling: Temporary last-resort scanner. Target structural
-    ///   replacement is private body storage plus an AuthoredDeclBody
+    /// mechanism_ruling: curated inventory row, not a global confinement proof.
+    ///   The structural replacement is private body storage plus an AuthoredDeclBody
     ///   wrapper/tokened accessor.
     /// hardening_rounds: 0
     /// ```
@@ -1111,36 +1146,37 @@ enum ReaderClass {
     /// ```
     GraphFreeDto,
 
-    /// Graph-backed-PENDING reader — TRANSITIONAL MIGRATION DEBT, NOT a
-    /// final-state stay-class. Every row here is a genuinely graph-backed reader
-    /// that WILL migrate to `decl_body_hot_ref` / graph-native dispatch in a later
-    /// session; it stays on `TypeExpr` ONLY because its migration is a larger
-    /// refactor than the bounded accessor flip (the C3 imported-registry body
-    /// carrier needs to carry identity / `HotTypeRef`; the C4 member-surface-route
-    /// key enumerator needs a graph-native `SemanticNodeData` key enumerator that
-    /// does not yet exist; the C7 locator splits into identity/hot vs authored-body
-    /// locators; the `PreparedValueDecl.type_annotation` value-decl handle class
-    /// needs a `HotPreparedValueDecl` annotation handle). Unlike the
-    /// `AuthoredShape` / `GraphFreeDto` / `ProducerLowering` / `OutputCompat`
-    /// stay-classes (which record WHY a reader stays `TypeExpr` indefinitely), this
-    /// class is a NON-GROWTH RATCHET with a TARGET COUNT OF 0: it may only shrink
-    /// (a row leaves the moment its seam lands), never grow, and the cap guard
-    /// [`graph_backed_pending_is_capped_transitional_debt`] REDDENS on any growth.
-    /// Each row's `reason` names its FUTURE MIGRATION SEAM.
+    /// Graph-backed-PENDING reader — a genuinely graph-backed reader that reads
+    /// the body as `TypeExpr` because no graph-native arm for its shape exists yet.
+    /// Each row stays `TypeExpr` because the structural arm that would let it route
+    /// through `decl_body_hot_ref` / graph-native dispatch is not present (the
+    /// imported-registry body carrier does not yet carry identity / `HotTypeRef`;
+    /// the member-surface-route key enumerator has no graph-native `SemanticNodeData`
+    /// key enumerator; the locator is a single `TypeExpr`-returning locator, not yet
+    /// split into identity/hot vs authored-body locators; the
+    /// `PreparedValueDecl.type_annotation` value-decl handle has no `HotPreparedValueDecl`
+    /// annotation handle). Unlike the `AuthoredShape` / `GraphFreeDto` /
+    /// `ProducerLowering` / `OutputCompat` classes (which record WHY a reader reads
+    /// `TypeExpr` as a settled architectural fact), this class is a NON-GROWTH
+    /// BOUNDED SET: it is bounded at the readers structurally requiring such an arm,
+    /// may only shrink (a row leaves the moment its structural arm lands), never
+    /// grow, and the cap guard [`graph_backed_pending_is_a_non_growth_bounded_class`]
+    /// REDDENS on any growth. Each row's `reason` names the structural arm that
+    /// would retire it.
     ///
     /// ```text
-    /// scanner_invariant: transitional debt, target count 0 — every
-    ///   GraphBackedPending row is a graph-backed reader awaiting a named future
-    ///   migration seam; the class shrinks to empty, never grows, and is NOT a
-    ///   justified final reader class.
-    /// scanner_justification: which graph-backed reader needs a larger refactor
-    ///   (a carrier identity flip, a graph-native key enumerator, a locator split,
-    ///   a value-decl annotation handle) before it can route through
-    ///   decl_body_hot_ref is an architectural judgement; the named seam in each
-    ///   row records the future migration, not a permanent stay-reason.
-    /// mechanism_ruling: non-growth ratchet — the cap REDs on growth and is
-    ///   LOWERED when a seam lands; the class empties as the seams land and this
-    ///   inventory is deleted.
+    /// scanner_invariant: a non-growth bounded set — every GraphBackedPending row is
+    ///   a graph-backed reader whose shape has no graph-native arm; the set is
+    ///   bounded at the readers structurally requiring such an arm, shrinks to empty
+    ///   as those arms land, and never grows.
+    /// scanner_justification: which graph-backed reader needs a larger structural arm
+    ///   (a carrier identity flip, a graph-native key enumerator, a locator split, a
+    ///   value-decl annotation handle) before it can route through decl_body_hot_ref
+    ///   is an architectural judgement; the named arm in each row records the
+    ///   boundary, a present architectural fact.
+    /// mechanism_ruling: non-growth bounded set — the cap REDs on growth and is
+    ///   LOWERED as each structural arm lands; the set empties as the arms land and
+    ///   this inventory is deleted.
     /// hardening_rounds: 0
     /// ```
     GraphBackedPending,
@@ -1205,6 +1241,15 @@ struct ReaderRow {
     /// `type_annotation` / `merged_contributors`), which the tripwire does not
     /// classify (honest scope) but PRESENCE still anchors.
     method_chain: bool,
+    /// For a [`ReaderClass::GraphBackedMigrated`] row: the EXACT hot-route call
+    /// ident(s) that satisfy THIS anchor's required routing — the
+    /// [`graph_backed_migrated_anchors_perform_no_typeexpr_body_read`] audit
+    /// computes `routes_through_hot_accessor` against this per-row set, NOT a flat
+    /// global list, so a row that must route through `decl_body_hot_ref` is NOT
+    /// satisfied by an unrelated graph-native arm (`materialize_member_surface_node`).
+    /// Empty `&[]` for every non-migrated row (the audit only consults it for
+    /// `GraphBackedMigrated` anchors).
+    required_hot_route: &'static [&'static str],
     reason: &'static str,
 }
 
@@ -1223,9 +1268,14 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "lower_decl_body_to_node",
         class: ReaderClass::GraphBackedMigrated,
         method_chain: false,
-        reason: "MIGRATED — resolves the named declaration body to a graph node through the shared \
+        // This anchor routes through `decl_body_hot_ref` SPECIFICALLY — the
+        // unrelated `materialize_member_surface_node` graph-native arm does NOT
+        // satisfy it (the per-row requirement is exact, not the union of every
+        // graph-native arm).
+        required_hot_route: &["decl_body_hot_ref"],
+        reason: "resolves the named declaration body to a graph node through the shared \
                  decl_body_hot_ref hot accessor (the Instantiate memo, published Navigate) and \
-                 returns its node; no longer reads prepared.body, no reverse bridge",
+                 returns its node; reads no prepared.body, no reverse bridge",
     },
     // ── ProducerLowering — the mint + the eager clone path it backs ─────
     ReaderRow {
@@ -1234,6 +1284,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "lower_decl_body_with_provenance",
         class: ReaderClass::ProducerLowering,
         method_chain: false,
+        required_hot_route: &[],
         reason: "the body-lowering producer/mint — reads prepared.body + the merged_contributors \
                  gate to lower the authored body into the semantic graph; the required bridge from \
                  authored IR into graph IR (the hot accessor wraps THIS producer's Instantiate \
@@ -1245,6 +1296,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "prepare_type_decl_from_lowered",
         class: ReaderClass::ProducerLowering,
         method_chain: true,
+        required_hot_route: &[],
         reason: "the eager clone path the producer backs — reads lowered.body via lookup_object() / \
                  is_merged() / contributors() when building the PreparedTypeDecl; producer-mint \
                  class, preserved",
@@ -1255,6 +1307,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "prepare_local_value_decl",
         class: ReaderClass::ProducerLowering,
         method_chain: false,
+        required_hot_route: &[],
         reason: "the value eager clone path — reads lowered.type_annotation (LoweredValueDecl) when \
                  preparing a local value decl; producer-mint class, preserved",
     },
@@ -1265,6 +1318,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "class_heritage_bases",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body for the authored heritage extends/implements refs of a class \
                  declaration body — authored-syntax-intrinsic",
     },
@@ -1274,6 +1328,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "userland_instantiation_body_is_closed_object",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body to classify whether a userland instantiation body is a closed \
                  object — authored-shape closedness over the TypeExpr",
     },
@@ -1285,6 +1340,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "prepared_decl_body_is_closed_unguarded",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body to classify closedness of a prepared decl body — authored-shape \
                  closedness over the TypeExpr",
     },
@@ -1295,6 +1351,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "prepared_instantiation_key_domain_is_closed",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body to classify whether an instantiation's key domain is closed — \
                  authored-shape key-domain over the TypeExpr",
     },
@@ -1304,6 +1361,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "component_meta_registry_owner_local_component_config_alias_name",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body (and a one-hop alias next.body) to classify a ComponentConfig \
                  alias by authored shape",
     },
@@ -1313,6 +1371,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "collect_component_meta_registry_public_field_refs",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body across the registry public-field surface to collect authored \
                  field refs",
     },
@@ -1322,6 +1381,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "collect_component_meta_registry_public_indexed_access_roots",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body to collect authored indexed-access roots",
     },
     ReaderRow {
@@ -1330,6 +1390,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "should_preserve_transitive_ref",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body to decide transitive-ref preservation by authored shape",
     },
     ReaderRow {
@@ -1338,6 +1399,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "fast_symbolic_imported_generic_route",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body on the fast symbolic imported-generic route (authored ref \
                  shape)",
     },
@@ -1347,6 +1409,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "collapse_same_file_imported_alias_chain",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body when collapsing a same-file imported alias chain (authored \
                  alias shape)",
     },
@@ -1356,6 +1419,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "try_fast_expand_shallow_alias_body",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body on the fast shallow-alias expand path (authored alias shape)",
     },
     ReaderRow {
@@ -1364,6 +1428,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "rewrite_fast_shallow_alias_body",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body on the fast shallow-alias rewrite path (authored alias shape)",
     },
     ReaderRow {
@@ -1372,6 +1437,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "owner_collection_expr",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "reads prepared.body to return the RAW alias body the registry walker classifies by \
                  authored shape (Ref{type_arguments}); the value is keyed into the TypeExpr-keyed \
                  OwnerCollectionDb a handle-derived value must never populate — authored-shape, \
@@ -1383,6 +1449,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "named_decl_body",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "the named_decl_body DEFINITION — reads prepared.body and returns the cloned body \
                  TypeExpr the authored-shape classifiers (C5/C6) and the C7 locator consume",
     },
@@ -1392,6 +1459,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "nested_symbolic_member_route_should_stay_symbolic",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "calls named_decl_body and classifies the returned body by authored shape \
                  (Ref{type_arguments} non-empty, utility route, indexed-access route) — \
                  authored-syntax-intrinsic",
@@ -1402,6 +1470,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "type_expr_has_package_backed_object_like_root_with_fence",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "calls named_decl_body and extracts the authored root (literal Pick/Omit, \
                  IndexedAccess.object, Ref head) — authored-syntax-intrinsic",
     },
@@ -1411,6 +1480,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "owner_local_generic_alias_substituted_body_via_dispatch",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
+        required_hot_route: &[],
         reason: "the instantiation fast-lane gate reads prepared.body for the authored generic-alias \
                  substitution shape",
     },
@@ -1421,6 +1491,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "route_closure",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() on the route-closure path — below the session \
                  graph, cannot carry a HotTypeRef",
     },
@@ -1430,6 +1501,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "member_path_route_closure",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() on the member-path route closure — below the \
                  session graph",
     },
@@ -1439,6 +1511,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "member_route_closure",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() on the member route closure — below the session \
                  graph",
     },
@@ -1448,6 +1521,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "whole_route_closure",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() on the whole route closure — below the session \
                  graph",
     },
@@ -1457,6 +1531,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "follow_local_symbol_precise",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() when following a local symbol precisely — below \
                  the session graph",
     },
@@ -1466,6 +1541,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "follow_routed_expr",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() when following a routed expression — below the \
                  session graph",
     },
@@ -1475,6 +1551,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "extract_string_literal_keys_from_type_expr",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() to extract string-literal keys — below the \
                  session graph",
     },
@@ -1484,6 +1561,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "collect_member_path_seed_names",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() to collect member-path seed names (free fn) — \
                  below the session graph",
     },
@@ -1493,6 +1571,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "resolve_through_export",
         class: ReaderClass::GraphFreeDto,
         method_chain: true,
+        required_hot_route: &[],
         reason: "reads lowered.body.lookup_object() (two branches) when resolving through an export \
                  — the external-type frontier lives below the session graph",
     },
@@ -1502,6 +1581,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "resolve_one",
         class: ReaderClass::GraphFreeDto,
         method_chain: false,
+        required_hot_route: &[],
         reason: "re-clones a frontier-produced ResolvedSymbol.body (existing.body.clone(), populated \
                  FROM the lowered body) when rebuilding from an already-resolved chain entry — the \
                  frontier lives below the session graph. A BARE .body field read, anchored by the \
@@ -1513,6 +1593,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "peel_value_decl_alias_graph_native",
         class: ReaderClass::GraphFreeDto,
         method_chain: false,
+        required_hot_route: &[],
         reason: "the typeof peel reads lowered.type_annotation (LoweredValueDecl) — the eval-env \
                  value-decl peel lives below the session graph",
     },
@@ -1522,25 +1603,27 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "dependency_value_symbol_graph_native",
         class: ReaderClass::GraphFreeDto,
         method_chain: false,
+        required_hot_route: &[],
         reason: "the graph-native value-symbol reader reads lowered.type_annotation \
                  (effective_value_decl → LoweredValueDecl) — same below-graph carrier class as \
                  peel_value_decl_alias_graph_native. A BARE .type_annotation field read, anchored by \
                  the enumeration",
     },
-    // ── GraphBackedPending — graph-backed, deferred larger refactor ─────
+    // ── GraphBackedPending — graph-backed, no graph-native arm for its shape ──
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/route_keys.rs",
         impl_path: "impl ComponentMetaQueryEngine",
         fn_name: "enumerate_member_surface_keys_via_route",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "TRANSITIONAL DEBT (target 0) — reads prepared.body via \
-                 prepared_type_decl(..).map(|p| p.body.clone()) inside the try_body route-key \
-                 expansion closure (and the prepared-value .type_annotation route read). FUTURE \
-                 MIGRATION SEAM: a graph-native SemanticNodeData member-surface-ROUTE key enumerator \
-                 (an IndexedAccess/Conditional-distributing variant over union/intersection/ \
-                 conditional/object surfaces), which does not yet exist. BARE .body/.type_annotation \
-                 field reads, anchored by the enumeration",
+        required_hot_route: &[],
+        reason: "reads prepared.body via prepared_type_decl(..).map(|p| p.body.clone()) inside the \
+                 try_body route-key expansion closure (and the prepared-value .type_annotation route \
+                 read) because no graph-native member-surface-ROUTE key enumerator exists. The \
+                 structural arm that would retire this reader is a graph-native SemanticNodeData \
+                 member-surface-route key enumerator (an IndexedAccess/Conditional-distributing \
+                 variant over union/intersection/conditional/object surfaces). BARE \
+                 .body/.type_annotation field reads, anchored by the enumeration",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/helpers.rs",
@@ -1548,10 +1631,12 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "resolve_imported_registry_symbol_with_budget",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "TRANSITIONAL DEBT (target 0) — builds the ResolvedImportedRegistrySymbol.body \
-                 CARRIER from prepared.body (NOT the prepared_type_decl(..).is_some() existence \
-                 check, which stays a cheap shallow presence check). FUTURE MIGRATION SEAM: the C3 \
-                 imported-registry body carrier carries identity / HotTypeRef + graph-native \
+        required_hot_route: &[],
+        reason: "builds the ResolvedImportedRegistrySymbol.body CARRIER from prepared.body (NOT the \
+                 prepared_type_decl(..).is_some() existence check, which stays a cheap shallow \
+                 presence check) because the imported-registry body carrier holds a TypeExpr body, \
+                 not identity. The structural arm that would retire this reader is an \
+                 imported-registry body carrier that holds identity / HotTypeRef + graph-native \
                  materialization instead of a TypeExpr body",
     },
     ReaderRow {
@@ -1560,12 +1645,14 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "append_component_meta_registry_entries",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "TRANSITIONAL DEBT (target 0) — reads the imported-registry symbol body \
-                 (resolved.body, the ResolvedImportedRegistrySymbol.body carrier populated from \
-                 prepared.body.clone()) across registry-publication routing and calls named_decl_body \
-                 (×3). FUTURE MIGRATION SEAM: migrates WITH the C3 carrier — once the carrier holds \
-                 identity / HotTypeRef + graph-native materialization, this consumer routes through \
-                 it. All BARE .body field reads, anchored by the enumeration",
+        required_hot_route: &[],
+        reason: "reads the imported-registry symbol body (resolved.body, the \
+                 ResolvedImportedRegistrySymbol.body carrier populated from prepared.body.clone()) \
+                 across registry-publication routing and calls named_decl_body (×3) because that \
+                 carrier holds a TypeExpr body. The structural arm that would retire this reader is \
+                 the same imported-registry body carrier holding identity / HotTypeRef + \
+                 graph-native materialization, through which this consumer then routes. All BARE \
+                 .body field reads, anchored by the enumeration",
     },
     ReaderRow {
         file: "src/component_meta_resolution_policy/core.rs",
@@ -1573,11 +1660,12 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "locate_declaration",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "TRANSITIONAL DEBT (target 0) — calls named_decl_body and returns the located \
-                 declaration body TypeExpr; the TypeExpr-returning LOCATOR is too broad. FUTURE \
-                 MIGRATION SEAM: the C7 locator splits into an identity/hot-locator (for semantic \
-                 consumers) vs an authored-body-locator (for authored-shape policy code), by \
-                 downstream need",
+        required_hot_route: &[],
+        reason: "calls named_decl_body and returns the located declaration body TypeExpr because the \
+                 locator is a single TypeExpr-returning LOCATOR, too broad to hand back a handle. The \
+                 structural arm that would retire this reader splits the locator into an \
+                 identity/hot-locator (for semantic consumers) vs an authored-body-locator (for \
+                 authored-shape policy code), by downstream need",
     },
     ReaderRow {
         file: "src/project_semantic_dispatch/build.rs",
@@ -1585,11 +1673,13 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "build_typeof",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "TRANSITIONAL DEBT (target 0) — reads prepared.type_annotation (PreparedValueDecl, \
-                 from effective_prepared_value_decl) and feeds it to \
-                 shallow_lower_type_expr_with_context, a graph-feeding value-decl annotation reader. \
-                 FUTURE MIGRATION SEAM: the HotPreparedValueDecl annotation handle class. A BARE \
-                 .type_annotation field read, anchored by the enumeration",
+        required_hot_route: &[],
+        reason: "reads prepared.type_annotation (PreparedValueDecl, from \
+                 effective_prepared_value_decl) and feeds it to shallow_lower_type_expr_with_context, \
+                 a graph-feeding value-decl annotation reader, because the prepared value decl holds \
+                 a TypeExpr annotation. The structural arm that would retire this reader is a \
+                 HotPreparedValueDecl annotation handle. A BARE .type_annotation field read, anchored \
+                 by the enumeration",
     },
     ReaderRow {
         file: "src/resolver_core/runtime_values.rs",
@@ -1597,11 +1687,12 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "prepared_value_decl_to_value_decl_info",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "TRANSITIONAL DEBT (target 0) — reads prepared.type_annotation.clone() \
-                 (PreparedValueDecl) when building the ValueDeclInfo round-trip into the importing \
-                 env, the value-resolution surface. FUTURE MIGRATION SEAM: the HotPreparedValueDecl \
-                 annotation handle class. A BARE .type_annotation field read (free fn), anchored by \
-                 the enumeration",
+        required_hot_route: &[],
+        reason: "reads prepared.type_annotation.clone() (PreparedValueDecl) when building the \
+                 ValueDeclInfo round-trip into the importing env, the value-resolution surface, \
+                 because the prepared value decl holds a TypeExpr annotation. The structural arm that \
+                 would retire this reader is a HotPreparedValueDecl annotation handle. A BARE \
+                 .type_annotation field read (free fn), anchored by the enumeration",
     },
     ReaderRow {
         file: "src/host_manage/eval_env.rs",
@@ -1609,11 +1700,12 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "component_meta_binding_type_entries",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "TRANSITIONAL DEBT (target 0) — reads decl.type_annotation.clone() (decl = \
-                 prepared_value_decl(..), a PreparedValueDecl) to build the component-meta binding \
-                 type entries (publication). FUTURE MIGRATION SEAM: the HotPreparedValueDecl \
-                 annotation handle class. A BARE .type_annotation field read, anchored by the \
-                 enumeration",
+        required_hot_route: &[],
+        reason: "reads decl.type_annotation.clone() (decl = prepared_value_decl(..), a \
+                 PreparedValueDecl) to build the component-meta binding type entries (publication) \
+                 because the prepared value decl holds a TypeExpr annotation. The structural arm that \
+                 would retire this reader is a HotPreparedValueDecl annotation handle. A BARE \
+                 .type_annotation field read, anchored by the enumeration",
     },
 ];
 
@@ -1756,19 +1848,30 @@ fn all_inventory_anchors() -> Vec<(String, String, String)> {
     out
 }
 
-/// The `(file, impl_path, fn)` anchors of every [`ReaderClass::GraphBackedMigrated`]
-/// row — the migrated anchors that must NOT read a declaration body as a
-/// `TypeExpr` semantic input.
-fn graph_backed_migrated_anchors() -> Vec<(String, String, String)> {
+/// One [`ReaderClass::GraphBackedMigrated`] anchor: its `(file, impl_path, fn)`
+/// identity plus the EXACT hot-route ident(s) THIS anchor requires (its
+/// [`ReaderRow::required_hot_route`]). The audit judges routing against
+/// `required_hot_route`, NOT a flat global list — so an anchor that must route
+/// through `decl_body_hot_ref` is NOT satisfied by an unrelated graph-native arm.
+struct MigratedAnchor {
+    file: String,
+    impl_path: String,
+    fn_name: String,
+    required_hot_route: &'static [&'static str],
+}
+
+/// Every [`ReaderClass::GraphBackedMigrated`] row as a [`MigratedAnchor`] — the
+/// migrated anchors that must NOT read a declaration body as a `TypeExpr` semantic
+/// input, each carrying its own required hot-route set.
+fn graph_backed_migrated_anchors() -> Vec<MigratedAnchor> {
     RESIDUAL_BODY_READERS
         .iter()
         .filter(|r| r.class == ReaderClass::GraphBackedMigrated)
-        .map(|r| {
-            (
-                r.file.to_string(),
-                r.impl_path.to_string(),
-                r.fn_name.to_string(),
-            )
+        .map(|r| MigratedAnchor {
+            file: r.file.to_string(),
+            impl_path: r.impl_path.to_string(),
+            fn_name: r.fn_name.to_string(),
+            required_hot_route: r.required_hot_route,
         })
         .collect()
 }
@@ -2001,7 +2104,13 @@ fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
     );
 
     let mut violations = Vec::new();
-    for (file, impl_path, name) in &migrated {
+    for anchor in &migrated {
+        let MigratedAnchor {
+            file,
+            impl_path,
+            fn_name: name,
+            required_hot_route,
+        } = anchor;
         // The anchor must be present + unique (PRESENCE/UNIQUENESS cover this too,
         // but assert here so a missing migrated anchor reds THIS invariant).
         let defs = anchored_defs(&inv, file, impl_path, name);
@@ -2019,8 +2128,9 @@ fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
             ));
             continue;
         };
-        // The `syn` AST audit, scoped to the exact `(impl_path, fn)` anchor.
-        let verdicts = audit_migrated_anchor(file, src, impl_path, name);
+        // The `syn` AST audit, scoped to the exact `(impl_path, fn)` anchor, judging
+        // routing against THIS anchor's OWN required hot-route set.
+        let verdicts = audit_migrated_anchor(file, src, impl_path, name, required_hot_route);
         let verdict = match verdicts.as_slice() {
             [v] => v,
             other => {
@@ -2042,12 +2152,12 @@ fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
                 verdict.forbidden_reads
             ));
         }
-        // (b) Routes through the hot accessor / a graph-native arm.
+        // (b) Routes through THIS anchor's OWN required hot-route ident(s).
         if !verdict.routes_through_hot_accessor {
             violations.push(format!(
-                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` does NOT call the \
-                 shared hot accessor / a graph-native arm (expected one of \
-                 {MIGRATED_REQUIRED_HOT_ROUTE_IDENTS:?}) — the migration is not in place"
+                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` does NOT call its \
+                 required hot-route accessor (expected one of {required_hot_route:?}) — the \
+                 migration is not in place"
             ));
         }
     }
@@ -2273,26 +2383,145 @@ fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     );
 }
 
-/// The INVARIANT-5 GraphBackedMigrated-no-read AST audit discriminates (FIX-2):
-/// fed SYNTHETIC source through the `syn` parse + [`audit_migrated_anchor`], a
-/// clean migrated fn that routes through `decl_body_hot_ref` and reads no body
-/// passes; a regressed fn that reads `prepared.body`, that calls `named_decl_body`
-/// / `prepared_type_decl`, OR that LAUNDERS the body read through an aliased local
-/// binding (`let p = get_prepared(); p.body.clone()`) is caught. The aliased case
-/// is the launder the OLD text needle `"prepared.body"` MISSED — proving the AST
-/// upgrade is real. This exercises the AST visitor, NOT a text path.
+/// Audit a SYNTHETIC migrated anchor body: wrap `body_src` in a one-fn
+/// `impl Synthetic { fn migrated(&self) { … } }` shell, parse it with `syn`, and
+/// audit the `migrated` anchor through [`audit_migrated_anchor`] against
+/// `required_idents` — the per-row required hot-route set under test. Asserts the
+/// shell resolves to exactly one audited body and returns its verdict. Shared by
+/// the discrimination self-tests so each can feed a synthetic body and a chosen
+/// required-route set.
+fn audit_synthetic_migrated_body(body_src: &str, required_idents: &[&str]) -> MigratedBodyVerdict {
+    let src = format!("impl Synthetic {{\n    fn migrated(&self) {{ {body_src} }}\n}}\n");
+    let mut v = audit_migrated_anchor(
+        "src/synthetic.rs",
+        &src,
+        "impl Synthetic",
+        "migrated",
+        required_idents,
+    );
+    assert_eq!(
+        v.len(),
+        1,
+        "self-test: the synthetic anchor must resolve to exactly one audited body"
+    );
+    v.pop().unwrap()
+}
+
+/// The required hot-route is judged PER-ROW, not against a flat global union: a
+/// body that routes ONLY through the unrelated graph-native arm
+/// `materialize_member_surface_node` is judged NOT-routed for the
+/// `lower_decl_body_to_node` row, whose `required_hot_route` is `decl_body_hot_ref`
+/// ONLY. The SAME body IS judged routed for a row whose required set is
+/// `materialize_member_surface_node` — so the ident stays a valid required route
+/// for a member-surface-route row; it just does not satisfy THIS anchor.
+///
+/// This discriminates the per-row mechanism from the prior flat list: under the
+/// flat list `&["decl_body_hot_ref", "materialize_member_surface_node"]`, a
+/// `materialize_member_surface_node`-only body would have been judged ROUTED for
+/// `lower_decl_body_to_node` (a too-broad accept). With the per-row set this case
+/// is NOT-routed, so the first assertion below FAILS against a flat-list audit and
+/// PASSES against the per-row audit.
+#[test]
+fn migrated_route_requirement_is_per_row_not_a_flat_union() {
+    // The body routes ONLY through the unrelated graph-native arm — it does NOT
+    // call `decl_body_hot_ref`.
+    const SURFACE_ONLY_BODY: &str =
+        "let n = engine.materialize_member_surface_node(cid, key)?; n.node()";
+
+    // The `lower_decl_body_to_node` row requires `decl_body_hot_ref` ONLY.
+    let lower_decl_route = RESIDUAL_BODY_READERS
+        .iter()
+        .find(|r| {
+            r.class == ReaderClass::GraphBackedMigrated && r.fn_name == "lower_decl_body_to_node"
+        })
+        .expect("the lower_decl_body_to_node migrated row is present")
+        .required_hot_route;
+    assert_eq!(
+        lower_decl_route,
+        &["decl_body_hot_ref"],
+        "the lower_decl_body_to_node row must require `decl_body_hot_ref` ONLY"
+    );
+
+    // RED-on-flat-list / GREEN-on-per-row: judged against THIS row's required set,
+    // a `materialize_member_surface_node`-only body does NOT satisfy the route. A
+    // flat-union audit (the pre-fix behaviour) would have marked it ROUTED and this
+    // assertion would FAIL — that is the discriminating property.
+    let surface_only = audit_synthetic_migrated_body(SURFACE_ONLY_BODY, lower_decl_route);
+    assert!(
+        !surface_only.routes_through_hot_accessor,
+        "per-row discrimination: a body that routes ONLY through \
+         `materialize_member_surface_node` must NOT satisfy the `lower_decl_body_to_node` row \
+         (whose required route is `decl_body_hot_ref` only). A flat-union audit would have \
+         wrongly accepted it."
+    );
+
+    // Positive control: the SAME body IS judged routed for a row whose required
+    // set is `materialize_member_surface_node` — proving the ident is still a
+    // VALID required route, just not for this anchor.
+    let surface_route_row =
+        audit_synthetic_migrated_body(SURFACE_ONLY_BODY, &["materialize_member_surface_node"]);
+    assert!(
+        surface_route_row.routes_through_hot_accessor,
+        "the `materialize_member_surface_node` arm IS a valid required route for a \
+         member-surface-route row — the SAME body is judged routed when the row requires it"
+    );
+
+    // And the converse: a `decl_body_hot_ref`-only body satisfies the
+    // `lower_decl_body_to_node` requirement but NOT a member-surface-route row's.
+    const HOT_REF_ONLY_BODY: &str =
+        "let h = dispatch.decl_body_hot_ref(cid, name, args, prc)?; h.node()";
+    let hot_for_lower = audit_synthetic_migrated_body(HOT_REF_ONLY_BODY, lower_decl_route);
+    assert!(
+        hot_for_lower.routes_through_hot_accessor,
+        "a `decl_body_hot_ref`-only body satisfies the `lower_decl_body_to_node` required route"
+    );
+    let hot_for_surface =
+        audit_synthetic_migrated_body(HOT_REF_ONLY_BODY, &["materialize_member_surface_node"]);
+    assert!(
+        !hot_for_surface.routes_through_hot_accessor,
+        "a `decl_body_hot_ref`-only body does NOT satisfy a row whose required route is \
+         `materialize_member_surface_node` — the per-row set is exact, not a union"
+    );
+
+    // Structural sanity: every row's required route idents are drawn from the
+    // KNOWN universe (no row can require an unknown ident), and the
+    // `lower_decl_body_to_node` row deliberately requires a STRICT SUBSET of it
+    // (it omits `materialize_member_surface_node`).
+    for r in RESIDUAL_BODY_READERS {
+        for ident in r.required_hot_route {
+            assert!(
+                KNOWN_HOT_ROUTE_IDENTS.contains(ident),
+                "row `{} :: {}` requires unknown hot-route ident `{ident}` — every required \
+                 route must be a known graph-native arm",
+                r.file,
+                r.fn_name
+            );
+        }
+    }
+    assert!(
+        KNOWN_HOT_ROUTE_IDENTS.contains(&"materialize_member_surface_node")
+            && !lower_decl_route.contains(&"materialize_member_surface_node"),
+        "`materialize_member_surface_node` is a KNOWN route but is deliberately EXCLUDED from the \
+         `lower_decl_body_to_node` row's required set — the per-row requirement is narrower than \
+         the known universe"
+    );
+}
+
+/// The GraphBackedMigrated-no-read AST audit discriminates: fed SYNTHETIC source
+/// through the `syn` parse + [`audit_migrated_anchor`], a clean migrated fn that
+/// routes through `decl_body_hot_ref` and reads no body passes; a regressed fn
+/// that reads `prepared.body`, that calls `named_decl_body` / `prepared_type_decl`,
+/// OR that LAUNDERS the body read through an aliased local binding
+/// (`let p = get_prepared(); p.body.clone()`) is caught. The aliased case is the
+/// launder a text needle `"prepared.body"` cannot see — the AST field-access match
+/// catches it. This exercises the AST visitor, NOT a text path.
 #[test]
 fn graph_backed_migrated_no_read_check_discriminates() {
     // Synthetic anchors share one impl/fn anchor shape so the scanner finds them.
+    // The migrated anchor under test (`lower_decl_body_to_node`) requires
+    // `decl_body_hot_ref`, so the synthetic audits use that required-route set.
     let audit = |body_src: &str| -> MigratedBodyVerdict {
-        let src = format!("impl Synthetic {{\n    fn migrated(&self) {{ {body_src} }}\n}}\n");
-        let mut v = audit_migrated_anchor("src/synthetic.rs", &src, "impl Synthetic", "migrated");
-        assert_eq!(
-            v.len(),
-            1,
-            "self-test: the synthetic anchor must resolve to exactly one audited body"
-        );
-        v.pop().unwrap()
+        audit_synthetic_migrated_body(body_src, &["decl_body_hot_ref"])
     };
 
     // CLEAN — routes through the hot accessor, reads no body field, no locator call.
@@ -2392,11 +2621,17 @@ fn graph_backed_migrated_no_read_check_discriminates() {
         .map(|(r, s)| (r.as_str(), s.as_str()))
         .collect();
     let mut checked_any = false;
-    for (file, impl_path, name) in graph_backed_migrated_anchors() {
+    for anchor in graph_backed_migrated_anchors() {
+        let MigratedAnchor {
+            file,
+            impl_path,
+            fn_name: name,
+            required_hot_route,
+        } = anchor;
         let src = by_rel
             .get(file.as_str())
             .unwrap_or_else(|| panic!("migrated anchor file `{file}` present"));
-        let verdicts = audit_migrated_anchor(&file, src, &impl_path, &name);
+        let verdicts = audit_migrated_anchor(&file, src, &impl_path, &name, required_hot_route);
         assert_eq!(
             verdicts.len(),
             1,
@@ -2406,8 +2641,8 @@ fn graph_backed_migrated_no_read_check_discriminates() {
         let verdict = &verdicts[0];
         assert!(
             verdict.routes_through_hot_accessor,
-            "self-test (real tree): migrated anchor `{file} :: fn {name}` routes through the hot \
-             accessor / a graph-native arm"
+            "self-test (real tree): migrated anchor `{file} :: fn {name}` routes through its \
+             required hot-route accessor {required_hot_route:?}"
         );
         assert!(
             verdict.forbidden_reads.is_empty(),
@@ -2772,16 +3007,24 @@ fn real_tree_satisfies_all_invariants() {
     );
 
     // (5) GraphBackedMigrated-no-read — every migrated anchor reads no body
-    // TypeExpr and routes through the hot accessor (the `syn` AST audit).
+    // TypeExpr and routes through its OWN required hot-route accessor (the `syn`
+    // AST audit).
     let by_rel: std::collections::HashMap<&str, &str> = files
         .iter()
         .map(|(r, s)| (r.as_str(), s.as_str()))
         .collect();
-    for (file, impl_path, name) in graph_backed_migrated_anchors() {
+    for anchor in graph_backed_migrated_anchors() {
+        let MigratedAnchor {
+            file,
+            impl_path,
+            fn_name: name,
+            required_hot_route,
+        } = anchor;
         let src = by_rel
             .get(file.as_str())
             .expect("migrated anchor file present");
-        let verdicts = audit_migrated_anchor(file.as_str(), src, &impl_path, &name);
+        let verdicts =
+            audit_migrated_anchor(file.as_str(), src, &impl_path, &name, required_hot_route);
         assert_eq!(
             verdicts.len(),
             1,
@@ -2797,7 +3040,8 @@ fn real_tree_satisfies_all_invariants() {
         );
         assert!(
             verdict.routes_through_hot_accessor,
-            "control: migrated anchor `{file} :: fn {name}` routes through the hot accessor"
+            "control: migrated anchor `{file} :: fn {name}` routes through its required hot-route \
+             accessor {required_hot_route:?}"
         );
     }
 }
@@ -2819,10 +3063,9 @@ fn real_tree_inventory_is_non_vacuous() {
     );
 
     // Total residual + compat surface sizes — pinned so the curated surface
-    // cannot drift silently. The residual surface is the SAME 40 readers the
-    // frozen ledger enumerated, now partitioned by ReaderClass (no reader was
-    // dropped; the migrated anchor `lower_decl_body_to_node` stays enumerated as
-    // the GraphBackedMigrated row). The COMPAT surface is 5 rows.
+    // cannot drift silently. The residual surface is 40 readers, partitioned by
+    // ReaderClass; the migrated anchor `lower_decl_body_to_node` is the
+    // GraphBackedMigrated row. The COMPAT surface is 5 rows.
     assert_eq!(
         RESIDUAL_BODY_READERS.len(),
         40,
@@ -2867,10 +3110,11 @@ fn real_tree_inventory_is_non_vacuous() {
     assert_eq!(
         class_count(ReaderClass::GraphBackedPending),
         7,
-        "self-test (partition pin): exactly seven GraphBackedPending rows TODAY. \
-         GraphBackedPending is TRANSITIONAL MIGRATION DEBT (target 0), NOT a final stay-class — the \
-         non-growth ratchet is `graph_backed_pending_is_capped_transitional_debt`; this exact pin \
-         coexists with the cap and is LOWERED (toward 0) when a pending row's seam lands"
+        "self-test (partition pin): exactly seven GraphBackedPending rows. GraphBackedPending is a \
+         non-growth bounded set (bound 0 is the empty set once every structural arm lands), NOT a \
+         settled stay-class — the non-growth bound is \
+         `graph_backed_pending_is_a_non_growth_bounded_class`; this exact pin coexists with the cap \
+         and is LOWERED (toward 0) as each row's structural arm lands"
     );
     assert_eq!(
         class_count(ReaderClass::OutputCompat),
@@ -2927,72 +3171,71 @@ fn real_tree_inventory_is_non_vacuous() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// GraphBackedPending — NON-GROWTH RATCHET (transitional migration debt)
+// GraphBackedPending — NON-GROWTH BOUNDED CLASS
 // ════════════════════════════════════════════════════════════════════
 
-/// The non-growth CAP on the `GraphBackedPending` transitional-debt class — its
-/// CURRENT count. The class is a ratchet: it may only SHRINK as each pending
-/// row's named migration seam lands. The cap REDDENS on growth (a new pending
-/// row), and is LOWERED toward [`GRAPH_BACKED_PENDING_TARGET`] when a row
-/// migrates. It is NOT a justified final allowlist size.
+/// The non-growth CAP on the `GraphBackedPending` class — its CURRENT count. The
+/// class is a non-growth bounded set: it may only SHRINK as each row's named
+/// structural arm lands. The cap REDDENS on growth (a new pending row), and is
+/// LOWERED toward [`GRAPH_BACKED_PENDING_TARGET`] as a row leaves. It is NOT a
+/// settled final allowlist size.
 const GRAPH_BACKED_PENDING_CAP: usize = 7;
 
-/// The FINAL TARGET for the `GraphBackedPending` class: ZERO. Every row is
-/// transitional migration debt that leaves the class the moment its seam lands;
-/// when the count reaches 0 the class (and this guard) is deleted.
+/// The bound of the empty `GraphBackedPending` set: ZERO. Each row leaves the
+/// class the moment its structural arm lands; when the count reaches 0 the class
+/// (and this guard) is deleted.
 const GRAPH_BACKED_PENDING_TARGET: usize = 0;
 
 /// Count the [`ReaderClass::GraphBackedPending`] rows in an arbitrary row slice —
-/// the reusable cap predicate the production ratchet guard and its discriminating
-/// self-test both call (so the self-test can feed a synthetic over-cap slice and
-/// prove the cap REDDENS).
+/// the reusable cap predicate the production non-growth guard and its
+/// discriminating self-test both call (so the self-test can feed a synthetic
+/// over-cap slice and prove the cap REDDENS).
 fn count_pending_in(rows: &[ReaderRow]) -> usize {
     rows.iter()
         .filter(|r| r.class == ReaderClass::GraphBackedPending)
         .count()
 }
 
-/// NON-GROWTH RATCHET (FIX-1): the `GraphBackedPending` class is TRANSITIONAL
-/// MIGRATION DEBT, not a final reader class — it carries a FINAL TARGET of 0 and
-/// must never GROW past its current cap. A NEW pending row (a graph-backed reader
-/// deferred instead of migrated) pushes the count over
+/// NON-GROWTH BOUNDED CLASS: the `GraphBackedPending` class is a non-growth
+/// bounded set (its empty bound is 0), not a settled reader class — it must never
+/// GROW past its current cap. A NEW pending row (a graph-backed reader added
+/// instead of routed through a structural arm) pushes the count over
 /// [`GRAPH_BACKED_PENDING_CAP`] and REDDENS this guard; when a pending row's named
-/// seam lands and it leaves the class, the cap is LOWERED toward 0. This is the
-/// ratchet rail; the exact `== 7` pin in `real_tree_inventory_is_non_vacuous`
-/// coexists with it.
+/// structural arm lands and it leaves the class, the cap is LOWERED toward 0. This
+/// is the non-growth rail; the exact `== 7` pin in
+/// `real_tree_inventory_is_non_vacuous` coexists with it.
 #[test]
-fn graph_backed_pending_is_capped_transitional_debt() {
+fn graph_backed_pending_is_a_non_growth_bounded_class() {
     let pending = count_pending_in(RESIDUAL_BODY_READERS);
     assert!(
         pending <= GRAPH_BACKED_PENDING_CAP,
-        "GraphBackedPending is TRANSITIONAL MIGRATION DEBT with a FINAL TARGET of \
+        "GraphBackedPending is a non-growth bounded set with an empty bound of \
          {GRAPH_BACKED_PENDING_TARGET} — it must never GROW. The class has {pending} rows but the \
-         non-growth cap is {GRAPH_BACKED_PENDING_CAP}: a new graph-backed reader was DEFERRED \
-         (added to GraphBackedPending) instead of migrated to decl_body_hot_ref / graph-native \
-         dispatch. Migrate it through its named seam, or — if a deferral is genuinely unavoidable — \
-         a MANUAL cap raise is a recorded architecture decision, not a silent edit. The ratchet only \
-         shrinks toward {GRAPH_BACKED_PENDING_TARGET}; it does not grow."
+         non-growth cap is {GRAPH_BACKED_PENDING_CAP}: a new graph-backed reader was added (to \
+         GraphBackedPending) instead of routed through a structural arm to decl_body_hot_ref / \
+         graph-native dispatch. Route it through its named structural arm, or — if an addition is \
+         genuinely unavoidable — a MANUAL cap raise is a recorded architecture decision, not a \
+         silent edit. The set only shrinks toward {GRAPH_BACKED_PENDING_TARGET}; it does not grow."
     );
     // Belt-and-braces: the cap itself must not have been quietly raised above the
-    // landed count (the ratchet ceiling tracks today's exact count, lowered as
-    // rows migrate — never padded with headroom that would silently absorb a new
-    // pending row).
+    // landed count (the bound tracks the exact count, lowered as rows leave —
+    // never padded with headroom that would silently absorb a new pending row).
     assert_eq!(
         GRAPH_BACKED_PENDING_CAP, pending,
         "the GraphBackedPending non-growth cap ({GRAPH_BACKED_PENDING_CAP}) must equal the landed \
-         pending count ({pending}) — the ratchet ceiling carries NO growth headroom; lower it as \
-         rows migrate, never pad it"
+         pending count ({pending}) — the bound carries NO growth headroom; lower it as rows leave, \
+         never pad it"
     );
     assert_eq!(
         GRAPH_BACKED_PENDING_TARGET, 0,
-        "the GraphBackedPending FINAL TARGET is 0 (the class empties as every seam lands)"
+        "the GraphBackedPending empty bound is 0 (the class empties as every structural arm lands)"
     );
 }
 
 /// DISCRIMINATING self-test for the non-growth cap: the cap predicate REDDENS on a
 /// synthetic inventory carrying an 8th `GraphBackedPending` row (growth past the
-/// cap of 7) and is GREEN at exactly 7. Proves the ratchet fires on a NEW deferred
-/// reader rather than silently absorbing it.
+/// cap of 7) and is GREEN at exactly 7. Proves the non-growth bound fires on a NEW
+/// pending row rather than silently absorbing it.
 #[test]
 fn graph_backed_pending_cap_reddens_on_growth() {
     // A synthetic pending row template — `'static` literals so it fits `ReaderRow`.
@@ -3003,8 +3246,8 @@ fn graph_backed_pending_cap_reddens_on_growth() {
             fn_name,
             class: ReaderClass::GraphBackedPending,
             method_chain: false,
-            reason:
-                "synthetic transitional-debt row (target 0) — FUTURE MIGRATION SEAM: a synthetic \
+            required_hot_route: &[],
+            reason: "synthetic GraphBackedPending row — a graph-backed reader whose shape has no \
                      graph-native arm; exists ONLY to exercise the non-growth cap",
         }
     }
@@ -3030,7 +3273,7 @@ fn graph_backed_pending_cap_reddens_on_growth() {
          pending rows"
     );
 
-    // RED at cap + 1 (a synthetic 8th pending row — a NEW deferred reader).
+    // RED at cap + 1 (a synthetic 8th pending row — a NEW pending reader).
     let over_cap: [ReaderRow; 8] = [
         synthetic_pending("p0"),
         synthetic_pending("p1"),
@@ -3039,8 +3282,8 @@ fn graph_backed_pending_cap_reddens_on_growth() {
         synthetic_pending("p4"),
         synthetic_pending("p5"),
         synthetic_pending("p6"),
-        // The planted 8th row — growth the ratchet must reject.
-        synthetic_pending("p7_new_deferred_reader"),
+        // The planted 8th row — growth the non-growth bound must reject.
+        synthetic_pending("p7_new_pending_reader"),
     ];
     assert_eq!(
         count_pending_in(&over_cap),
@@ -3050,13 +3293,12 @@ fn graph_backed_pending_cap_reddens_on_growth() {
     assert!(
         count_pending_in(&over_cap) > GRAPH_BACKED_PENDING_CAP,
         "self-test (cap RED): the cap predicate FAILS the moment an 8th pending row is added — the \
-         non-growth ratchet reddens on a NEW deferred graph-backed reader rather than absorbing it. \
-         (Non-migrated rows of OTHER classes do NOT count: only GraphBackedPending growth trips the \
-         ratchet.)"
+         non-growth bound reddens on a NEW graph-backed pending reader rather than absorbing it. \
+         (Rows of OTHER classes do NOT count: only GraphBackedPending growth trips the bound.)"
     );
 
     // Discrimination: a synthetic row of a DIFFERENT class does NOT count toward
-    // the pending cap (the ratchet is scoped to GraphBackedPending only).
+    // the pending cap (the bound is scoped to GraphBackedPending only).
     let mixed: [ReaderRow; 8] = [
         synthetic_pending("p0"),
         synthetic_pending("p1"),
@@ -3071,6 +3313,7 @@ fn graph_backed_pending_cap_reddens_on_growth() {
             fn_name: "authored_shape_not_pending",
             class: ReaderClass::AuthoredShape,
             method_chain: false,
+            required_hot_route: &[],
             reason:
                 "synthetic AuthoredShape row — must NOT count toward the GraphBackedPending cap",
         },
@@ -3079,7 +3322,7 @@ fn graph_backed_pending_cap_reddens_on_growth() {
         count_pending_in(&mixed),
         GRAPH_BACKED_PENDING_CAP,
         "self-test (cap scope): an 8th row of a NON-pending class does NOT grow the pending count — \
-         the ratchet counts ONLY GraphBackedPending rows"
+         the bound counts ONLY GraphBackedPending rows"
     );
     assert!(
         count_pending_in(&mixed) <= GRAPH_BACKED_PENDING_CAP,
@@ -3088,7 +3331,7 @@ fn graph_backed_pending_cap_reddens_on_growth() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// impl-path renderer self-tests (the proven machinery, re-pinned here)
+// impl-path renderer self-tests (the shared `syn` anchor machinery)
 // ────────────────────────────────────────────────────────────────────
 
 /// The `impl`-path renderer keeps module quals + type generics, normalizes only

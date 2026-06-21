@@ -7,13 +7,39 @@ graph-native predicates/materializers. A second class of readers stays on the lo
 debt row** (per Rule-File Integrity) — it is cleared when that future block lands the graph-native
 replacements, not before.
 
-**Ruling source (codex-DEFER, binding)**: the two converged neutral codex architecture legs
-`/tmp/mom/STAGE6/SLICE4/session8/codex/fork2-legA-OUT.txt` (finding 6 + finding 7) +
-`fork2-legB-OUT.txt` (finding 6 + finding 7), both `__DONE__`, exit 0, framing dispatcher-verified, ratified
-by the CTO; plus the partition-design consult
-`/tmp/mom/STAGE6/SLICE4/session8/codex/gov-partition-consult-OUT.txt` (Q-DISPOSITION C5/C6/C7), which applied
-the ratified **no-`HotTypeRef`→`TypeExpr`→semantic-decision bridge** rule to determine which readers can and
-cannot migrate to the hot accessor without violating it.
+**Ruling source (codex-DEFER, binding)**: the round-3 body-reader confinement codex-DEFER ruling — a
+code-verifying neutral codex adjudication that supersedes the earlier two-converged-legs reference for the
+body-reader confinement question. It applied the ratified
+**no-`HotTypeRef`→`TypeExpr`→semantic-decision bridge** rule (Q-DISPOSITION C5/C6/C7) to determine which
+readers can and cannot migrate to the hot accessor without violating it, and additionally ruled on how the
+residual body-reader inventory guard must state its claim — see "Body-reader confinement narrowing" below.
+
+### Body-reader confinement narrowing (round-3 codex-DEFER, binding)
+
+The round-3 decider ruled, on VERIFIED evidence, that the residual `TypeExpr`-body-reader inventory guard
+(`crates/verter_session/tests/cases/residual_type_expr_body_reader_inventory.rs`) must NARROW its documented
+claim to exactly what it enforces (a curated residual-reader inventory + bounded structural tripwires) and
+must NOT advertise a global structural-confinement proof for bare `<expr>.body` / `<expr>.type_annotation`
+readers.
+
+The deferral of structural confinement is justified by **missing semantic ownership / type identity**, NOT by
+implementation effort:
+
+- An untyped `syn` field-read scanner CANNOT attribute a `.body` (or `.type_annotation`) read to the
+  declaration-body type: there are hundreds of `.body` / `.type_annotation` textual field reads across parser
+  / OXC AST bodies, module blocks, fn bodies, DTOs, `Prepared*` / `Lowered*` / registry / hot-carriers, and
+  `syn::ExprField { member: body }` cannot distinguish the four declaration-body fields from unrelated
+  same-named fields without type information. A field-name scanner would therefore be either an over-broad
+  embargo needing noisy exceptions OR a re-pin of the same curated enumeration (adding no real structural
+  confinement).
+- Rust privacy cannot expose the lower-crate `verter_semantic` `Prepared*` `TypeExpr` body fields to only the
+  selected downstream `verter_session` owners (no friend visibility), so private-field confinement is not
+  cleanly achievable at the current crate layout.
+
+**GLOBAL `.body` / `.type_annotation` field scanning is REJECTED as a confinement proof** for this reason. The
+genuine structural close — private owner-layer body storage plus `HotPrepared*` / `HotTypeRef` semantic
+access and an explicit `AuthoredDeclBody` / authored-shape surface with no raw escape to graph-backed
+consumers — is a dedicated follow-up, recorded as part of this debt row's closure criterion below.
 
 ## The two deferred reader classes
 
