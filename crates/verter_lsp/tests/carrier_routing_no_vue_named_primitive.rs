@@ -94,6 +94,11 @@ const VUE_INTRINSIC_ALLOWLIST: &[&str] = &[
     // check that lives in `verter_session`; referenced by name in carrier
     // docs/tests).
     "is_vue",
+    // The `CarrierKind::Vue` carrier-DISCRIMINANT variant (a per-framework enum
+    // value on the neutral `CarrierKind` type — names WHICH carrier a markup
+    // region belongs to, exactly as the `Svelte` sibling variant does; it is a
+    // discriminant value, not a carrier-generic routing primitive).
+    "Vue",
 ];
 
 fn crate_src() -> PathBuf {

@@ -84,6 +84,17 @@
         "label": "Verter Vue Analysis"
       }
     ],
+    "configurationDefaults": {
+      "emmet.includeLanguages": {
+        "vue": "html"
+      },
+      "[vue]": {
+        "editor.formatOnType": true
+      },
+      "[svelte]": {
+        "editor.formatOnType": true
+      }
+    },
     "configuration": {
       "type": "object",
       "title": "Verter",
@@ -680,11 +691,6 @@
   "icon": "logo.png",
   "engines": {
     "vscode": "^1.110.0"
-  },
-  "configurationDefaults": {
-    "emmet.includeLanguages": {
-      "vue": "html"
-    }
   },
   "vsce": {
     "dependencies": false,

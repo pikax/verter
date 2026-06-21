@@ -102,9 +102,12 @@ pub fn server_capabilities(
         }),
         color_provider: Some(ColorProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+        // Proactive tag auto-close fires on the `>` that closes an open tag.
+        // The handler (`auto_close_tag`) requires a `>` immediately before the
+        // cursor, so `>` is the only trigger it can act on — no `/` more-trigger.
         document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
             first_trigger_character: ">".to_string(),
-            more_trigger_character: Some(vec!["/".to_string()]),
+            more_trigger_character: None,
         }),
         call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),

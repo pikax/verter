@@ -339,13 +339,22 @@ pub fn scan_sfc_blocks(source: &str) -> Vec<SfcBlock> {
         if i == name_start {
             continue; // empty tag name
         }
-        let tag_name = &source[name_start..i];
+        let raw_tag_name = &source[name_start..i];
 
         // Only match known top-level SFC tags and custom blocks
         // Skip DOCTYPE, html, head, body, etc.
-        if !is_sfc_tag(tag_name) {
+        if !is_sfc_tag(raw_tag_name) {
             continue;
         }
+
+        // Normalize the built-in SFC tags (`script` / `template` / `style`) to
+        // their canonical lowercase form so a case-variant `<SCRIPT>` stores
+        // `tag_name == "script"` and downstream lowercase matches (the
+        // auto-close markup-region gate) recognize it. Custom blocks keep their
+        // authored spelling.
+        let tag_name: String = canonical_builtin_sfc_tag(raw_tag_name)
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| raw_tag_name.to_string());
 
         // Read attributes until '>' or '/>'
         let attrs_start = i;
@@ -380,24 +389,47 @@ pub fn scan_sfc_blocks(source: &str) -> Vec<SfcBlock> {
             continue; // self-closing blocks have no content
         }
 
-        // Find the matching closing tag
+        // Find the matching closing tag. The pattern carries the canonical
+        // lowercase tag name; [`find_close_tag`] matches case-insensitively, so
+        // a `</SCRIPT>` still resolves.
         let close_pattern = format!("</{tag_name}");
-        if let Some(close_start) = find_close_tag(source, i, &close_pattern) {
-            let close_end = match source[close_start..].find('>') {
-                Some(offset) => close_start + offset + 1,
-                None => continue,
-            };
+        match find_close_tag(source, i, &close_pattern) {
+            Some(close_start) => {
+                let close_end = match source[close_start..].find('>') {
+                    Some(offset) => close_start + offset + 1,
+                    None => continue,
+                };
 
-            blocks.push(SfcBlock {
-                tag_name: tag_name.to_string(),
-                open_tag_start: tag_start as u32,
-                open_tag_end,
-                close_tag_start: close_start as u32,
-                close_tag_end: close_end as u32,
-                attrs_raw,
-            });
+                blocks.push(SfcBlock {
+                    tag_name,
+                    open_tag_start: tag_start as u32,
+                    open_tag_end,
+                    close_tag_start: close_start as u32,
+                    close_tag_end: close_end as u32,
+                    attrs_raw,
+                });
 
-            i = close_end;
+                i = close_end;
+            }
+            None => {
+                // No closing tag yet (the user is mid-typing the block). The
+                // block must STILL establish a region from its open tag to EOF
+                // so its content classifies as inside-block (non-markup), not
+                // RootLevel — otherwise a generic `Box<Foo>` typed before the
+                // closing tag exists is misread as root markup. The close-tag
+                // positions collapse to the source end (an empty, open-ended
+                // close span). Everything after the open tag is inside this
+                // block, so scanning stops.
+                blocks.push(SfcBlock {
+                    tag_name,
+                    open_tag_start: tag_start as u32,
+                    open_tag_end,
+                    close_tag_start: len as u32,
+                    close_tag_end: len as u32,
+                    attrs_raw,
+                });
+                break;
+            }
         }
     }
 
@@ -405,8 +437,28 @@ pub fn scan_sfc_blocks(source: &str) -> Vec<SfcBlock> {
 }
 
 /// Check if a tag name is an SFC top-level block.
+///
+/// The built-in `script` / `template` / `style` tags are matched
+/// CASE-INSENSITIVELY (HTML tag names are case-insensitive, and
+/// [`find_close_tag`] already matches the closing tag with
+/// `eq_ignore_ascii_case`), so `<SCRIPT>` / `<Style>` classify as their
+/// canonical block, not as a custom block.
 fn is_sfc_tag(name: &str) -> bool {
-    matches!(name, "script" | "template" | "style") || is_custom_block_tag(name)
+    is_builtin_sfc_tag(name) || is_custom_block_tag(name)
+}
+
+/// Whether `name` is one of the built-in SFC block tags (`script` / `template`
+/// / `style`), case-insensitively. Returns the canonical lowercase form so the
+/// stored [`SfcBlock::tag_name`] is normalized and downstream lowercase matches
+/// (e.g. the auto-close markup-region gate) recognize a case-variant tag.
+fn canonical_builtin_sfc_tag(name: &str) -> Option<&'static str> {
+    ["script", "template", "style"]
+        .into_iter()
+        .find(|canonical| name.eq_ignore_ascii_case(canonical))
+}
+
+fn is_builtin_sfc_tag(name: &str) -> bool {
+    canonical_builtin_sfc_tag(name).is_some()
 }
 
 /// Check if a tag name could be a custom block.
@@ -421,7 +473,15 @@ fn is_custom_block_tag(name: &str) -> bool {
     !is_standard_html_tag(name)
 }
 
+/// Whether `name` is a standard HTML element, case-insensitively (HTML tag
+/// names are case-insensitive). The match table is lowercase, so the input is
+/// folded to lowercase first — `<DIV>` / `<Br>` are still standard elements and
+/// never misclassified as custom SFC blocks.
 fn is_standard_html_tag(name: &str) -> bool {
+    is_standard_html_tag_lower(&name.to_ascii_lowercase())
+}
+
+fn is_standard_html_tag_lower(name: &str) -> bool {
     matches!(
         name,
         "html"
@@ -990,5 +1050,118 @@ const x = 1;
         assert_eq!(ctx.attrs[0].value, Some("scss".to_string()));
         assert_eq!(ctx.attrs[1].name, "scoped");
         assert_eq!(ctx.attrs[1].value, None);
+    }
+
+    // ========================================================================
+    // Case-insensitive SFC tag classification (F4)
+    //
+    // HTML tag names are case-insensitive, so `<SCRIPT>` / `<Script>` /
+    // `<STYLE>` / `<Template>` are the SAME block tags as their lowercase
+    // forms. `find_close_tag` already matches the closing tag with
+    // `eq_ignore_ascii_case`, so the OPEN-tag classifier must agree, otherwise
+    // a case-variant `<SCRIPT>` produces no block and its content (e.g. a TS
+    // generic `Box<Foo>`) leaks into RootLevel markup classification.
+    // ========================================================================
+
+    #[test]
+    fn case_variant_script_tag_is_recognized_as_script_block() {
+        // `<SCRIPT>` (uppercase) must classify as a `script` block with a
+        // NORMALIZED lowercase `tag_name`, so downstream lowercase matches
+        // (the Svelte markup-region gate's `matches!(tag, "script" | "style")`)
+        // still recognize it. Pre-fix, a lowercase-only matcher mis-routes
+        // `<SCRIPT>` into a CUSTOM block whose `tag_name` stays `"SCRIPT"`.
+        let source = "<SCRIPT lang=\"ts\">\nconst x: Box<Foo> = mk();\n</SCRIPT>\n<div></div>";
+        let blocks = scan_sfc_blocks(source);
+        let script = blocks
+            .iter()
+            .find(|b| b.tag_name.eq_ignore_ascii_case("script"))
+            .expect("<SCRIPT> must be recognized as a script block");
+        assert_eq!(
+            script.tag_name, "script",
+            "a case-variant <SCRIPT> must normalize its tag_name to lowercase `script`, got `{}`",
+            script.tag_name
+        );
+        let (cs, ce) = script.content_range();
+        assert!(
+            (cs as usize..ce as usize).contains(&(source.find("Box<Foo>").unwrap())),
+            "the script block's content must enclose the `Box<Foo>` generic",
+        );
+    }
+
+    #[test]
+    fn case_variant_style_and_template_tags_are_recognized() {
+        let source = "<Template>\n<div></div>\n</Template>\n<STYLE>\n.a{}\n</STYLE>";
+        let blocks = scan_sfc_blocks(source);
+        let template = blocks
+            .iter()
+            .find(|b| b.tag_name.eq_ignore_ascii_case("template"))
+            .expect("<Template> must be recognized as a template block");
+        assert_eq!(
+            template.tag_name, "template",
+            "<Template> must normalize its tag_name to lowercase `template`"
+        );
+        let style = blocks
+            .iter()
+            .find(|b| b.tag_name.eq_ignore_ascii_case("style"))
+            .expect("<STYLE> must be recognized as a style block");
+        assert_eq!(
+            style.tag_name, "style",
+            "<STYLE> must normalize its tag_name to lowercase `style`"
+        );
+    }
+
+    // ========================================================================
+    // Unclosed SFC block establishes an open-ended non-markup region (F5)
+    //
+    // While the user is mid-typing a `<script>` / `<style>` block there is no
+    // closing tag yet. The block must STILL span from its open tag to EOF so
+    // its content classifies as inside-block (non-markup) content rather than
+    // RootLevel — otherwise a generic `Box<Foo>` typed before `</script>`
+    // exists is misread as root markup and auto-closed.
+    // ========================================================================
+
+    #[test]
+    fn unclosed_script_block_spans_to_eof() {
+        let source = "<script lang=\"ts\">\nconst x: Box<Foo> = mk();";
+        let blocks = scan_sfc_blocks(source);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "the unclosed <script> must still be a block"
+        );
+        let b = &blocks[0];
+        assert_eq!(b.tag_name, "script");
+        // The block spans to EOF: close tag positions sit at the source end.
+        assert_eq!(b.close_tag_start as usize, source.len());
+        assert_eq!(b.close_tag_end as usize, source.len());
+        // The generic is inside the block's content, so the cursor right after
+        // `Box<Foo` classifies as BlockContent, NOT RootLevel.
+        let off = source.find("Box<Foo").unwrap() as u32 + "Box<Foo".len() as u32;
+        assert_eq!(
+            classify_cursor(off, &blocks),
+            SfcCursorContext::BlockContent { block_index: 0 },
+            "an offset inside the unclosed script must classify as BlockContent"
+        );
+    }
+
+    #[test]
+    fn unclosed_style_block_spans_to_eof() {
+        let source = "<div></div>\n<style>\n.a > .b { color: red";
+        let blocks = scan_sfc_blocks(source);
+        let style = blocks
+            .iter()
+            .position(|b| b.tag_name == "style")
+            .expect("unclosed <style> must still be a block");
+        assert_eq!(
+            blocks[style].close_tag_end as usize,
+            source.len(),
+            "the unclosed style block must span to EOF"
+        );
+        let off = source.find(".a >").unwrap() as u32 + ".a >".len() as u32;
+        assert_eq!(
+            classify_cursor(off, &blocks),
+            SfcCursorContext::BlockContent { block_index: style },
+            "an offset inside the unclosed style must classify as BlockContent"
+        );
     }
 }

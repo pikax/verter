@@ -866,6 +866,45 @@ pub(super) async fn handle_formatting(
     Ok(edits)
 }
 
+/// Resolve the markup [`CarrierKind`](crate::features::auto_close_tag::CarrierKind)
+/// for an on-type-formatting document, or `None` when the document is NOT a Vue
+/// or Svelte carrier (a plain script, a virtual file, an unsupported carrier, …).
+///
+/// The editor `language_id` is authoritative for a framework carrier (an
+/// in-memory carrier document may not carry a `.vue` / `.svelte` path), so it is
+/// consulted first via the registry; any other document classifies by canonical
+/// path through the host's static classifier — the same resolution
+/// `DocumentRegistry::document_file_language` performs. Only the built-in Vue /
+/// Svelte CARRIER rows map to a `CarrierKind`; everything else returns `None` and
+/// the on-type handler emits no edit.
+fn carrier_kind_for_on_type(
+    language_id: &str,
+    canonical_id: &str,
+) -> Option<crate::features::auto_close_tag::CarrierKind> {
+    use crate::features::auto_close_tag::CarrierKind;
+    let language = verter_session::LanguageRegistry::global()
+        .carrier_for_editor_language_id(language_id)
+        .unwrap_or_else(|| {
+            verter_session::LanguageRegistry::global()
+                .classify_static(canonical_id)
+                .static_resolution()
+        });
+    // Carrier-generic routing (no Vue-only `.is_vue()` predicate — the carrier
+    // routing guard bans it). A non-carrier document (plain script / template
+    // row / unknown) has no markup region. Of the built-in CARRIERS, Svelte is
+    // resolved via the allowlisted carrier check; the only OTHER built-in markup
+    // carrier today is the Vue SFC, so a framework carrier that is not Svelte is
+    // the Vue carrier. A third markup carrier would need its own explicit arm
+    // here (and its own `CarrierKind`), not a silent fall-through.
+    if !language.is_framework_carrier() {
+        None
+    } else if language.is_svelte() {
+        Some(CarrierKind::Svelte)
+    } else {
+        Some(CarrierKind::Vue)
+    }
+}
+
 pub(super) async fn handle_on_type_formatting(
     server: &VerterLanguageServer,
     params: DocumentOnTypeFormattingParams,
@@ -876,8 +915,23 @@ pub(super) async fn handle_on_type_formatting(
 
     let edits = (|| {
         let doc = server.documents.get(uri)?;
+
+        // Proactive tag auto-close is a MARKUP feature. It must fire only for a
+        // framework CARRIER document (Vue / Svelte) and only inside that
+        // carrier's template/markup region — never in a plain `.ts` / `.js`
+        // document (where `formatOnType` may be globally enabled and a `>` is a
+        // TS-generic close, not a tag), and never inside the carrier's
+        // `<script>` / `<style>` blocks. The carrier kind is resolved from the
+        // document's authoritative editor `language_id`; the region gate lives
+        // in `auto_close_tag_in_carrier`.
+        let carrier = carrier_kind_for_on_type(&doc.language_id, &doc.canonical_id)?;
+
         let offset = doc.line_index.position_to_offset(position)? as usize;
-        let snippet = crate::features::auto_close_tag::auto_close_tag(&doc.source, offset)?;
+        let snippet = crate::features::auto_close_tag::auto_close_tag_in_carrier(
+            &doc.source,
+            offset,
+            carrier,
+        )?;
 
         // Insert the closing tag text right at the cursor position (after the `>`)
         // The `$0` cursor marker is for snippet-capable clients; for the TextEdit
@@ -976,5 +1030,72 @@ pub(super) async fn handle_outgoing_calls(
     match calls {
         Some(v) if !v.is_empty() => Ok(Some(v)),
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod on_type_gate_tests {
+    use super::carrier_kind_for_on_type;
+    use crate::features::auto_close_tag::CarrierKind;
+
+    /// BLOCKER 1: the on-type auto-close gate must resolve a carrier ONLY for a
+    /// framework carrier document. A plain `.ts` / `.js` / `.tsx` document (where
+    /// `editor.formatOnType` may be globally enabled) resolves to `None`, so the
+    /// handler emits no edit and a TS-generic `>` is never turned into `</...>`.
+    #[test]
+    fn non_carrier_languages_resolve_to_no_carrier() {
+        for (lang, path) in [
+            ("typescript", "file:///proj/src/util.ts"),
+            ("javascript", "file:///proj/src/util.js"),
+            ("typescriptreact", "file:///proj/src/App.tsx"),
+            ("javascriptreact", "file:///proj/src/App.jsx"),
+            ("plaintext", "file:///proj/notes.txt"),
+        ] {
+            assert_eq!(
+                carrier_kind_for_on_type(lang, path),
+                None,
+                "`{lang}` is not a markup carrier — auto-close must not engage",
+            );
+        }
+    }
+
+    /// The Vue carrier `language_id` resolves to `CarrierKind::Vue`, authoritative
+    /// even for an in-memory carrier whose canonical id is not a `.vue` path.
+    #[test]
+    fn vue_language_id_resolves_to_vue_carrier() {
+        assert_eq!(
+            carrier_kind_for_on_type("vue", "file:///proj/src/App.vue"),
+            Some(CarrierKind::Vue),
+        );
+        // language_id is authoritative even without a `.vue` extension.
+        assert_eq!(
+            carrier_kind_for_on_type("vue", "untitled:Untitled-1"),
+            Some(CarrierKind::Vue),
+        );
+    }
+
+    /// The Svelte carrier `language_id` resolves to `CarrierKind::Svelte`.
+    #[test]
+    fn svelte_language_id_resolves_to_svelte_carrier() {
+        assert_eq!(
+            carrier_kind_for_on_type("svelte", "file:///proj/src/App.svelte"),
+            Some(CarrierKind::Svelte),
+        );
+    }
+
+    /// A `.vue` / `.svelte` path still classifies as its carrier when the editor
+    /// `language_id` is unhelpful (the canonical-path fallback), so an upgrade
+    /// path that loses the carrier `language_id` does not silently disable the
+    /// markup gate.
+    #[test]
+    fn carrier_path_fallback_classifies_when_language_id_is_generic() {
+        assert_eq!(
+            carrier_kind_for_on_type("plaintext", "file:///proj/src/App.vue"),
+            Some(CarrierKind::Vue),
+        );
+        assert_eq!(
+            carrier_kind_for_on_type("plaintext", "file:///proj/src/App.svelte"),
+            Some(CarrierKind::Svelte),
+        );
     }
 }

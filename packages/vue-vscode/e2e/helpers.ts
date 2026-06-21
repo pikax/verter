@@ -245,6 +245,78 @@ export async function waitForFileReady(
 }
 
 /**
+ * Run the on-type formatter as if the user typed the `>` immediately AFTER
+ * `marker` in `doc`, returning the concatenated inserted text (empty when the
+ * provider returns no edit).
+ *
+ * `marker` must end with the `>` whose typing triggers the formatter; the
+ * cursor is placed at the position right after it, and `>` is passed as the
+ * trigger character — exactly what VS Code dispatches when `editor.formatOnType`
+ * fires on a `>` keystroke.
+ */
+export async function runFormatOnTypeAfter(
+  doc: vscode.TextDocument,
+  marker: string,
+): Promise<string> {
+  const idx = doc.getText().indexOf(marker);
+  if (idx < 0) {
+    throw new Error(`runFormatOnTypeAfter: marker "${marker}" not found in document`);
+  }
+  const position = doc.positionAt(idx + marker.length);
+  const edits =
+    (await vscode.commands.executeCommand<vscode.TextEdit[]>(
+      "vscode.executeFormatOnTypeProvider",
+      doc.uri,
+      position,
+      ">",
+      { tabSize: 2, insertSpaces: true },
+    )) || [];
+  return edits.map((e) => e.newText).join("");
+}
+
+/**
+ * Deterministically wait until the on-type auto-close provider is live for
+ * `doc` by repeatedly driving it against a KNOWN-positive control tag until it
+ * inserts that tag's closing tag.
+ *
+ * This is the readiness probe the auto-close suite needs: the auto-close
+ * scratch carriers carry no `{{ }}` interpolation and no `defineProps` macro, so
+ * `waitForFileReady` returns immediately WITHOUT proving the document reached
+ * the LSP. A positive on-type round-trip proves BOTH that the provider is wired
+ * AND that the LSP has processed this document — so a subsequent assertion that
+ * a void / generic / script `>` yields NO edit distinguishes "ready + correctly
+ * no edit" from "provider not ready yet".
+ *
+ * `controlMarker` must be a markup open tag (ending in `>`) that the server
+ * MUST close (e.g. `<section>` in the template region) and whose
+ * `expectedClose` (e.g. `</section>`) is not already present after it. Returns
+ * when the round-trip succeeds; throws on timeout so the suite fails loudly
+ * rather than silently testing an un-ready provider.
+ */
+export async function waitForOnTypeReady(
+  doc: vscode.TextDocument,
+  controlMarker: string,
+  expectedClose: string,
+  options: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const { timeoutMs = 20_000, intervalMs = 150 } = options;
+  const start = Date.now();
+  let last = "";
+  while (Date.now() - start < timeoutMs) {
+    last = await runFormatOnTypeAfter(doc, controlMarker);
+    if (last === expectedClose) {
+      return;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(
+    `waitForOnTypeReady: on-type auto-close did not produce "${expectedClose}" for ` +
+      `control "${controlMarker}" within ${timeoutMs}ms (last="${last}") — the LSP/provider ` +
+      `never became ready, so negative auto-close assertions cannot be trusted`,
+  );
+}
+
+/**
  * Resolve the main App.vue path for the current fixture.
  * Different fixtures place App.vue in different locations.
  */
