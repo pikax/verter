@@ -2444,12 +2444,17 @@ impl TypeProvider for TsgoTypeProvider {
 
             // Cross-file rename: convert each edit's range against ITS OWN target file's content
             // (disk fallback inside the parser), never the queried file's single snapshot — a
-            // line-0 edit in the wrong file CORRUPTS it.
-            let cache = contents_cache.lock().await;
+            // line-0 edit in the wrong file CORRUPTS it. Snapshot the cache and RELEASE the async
+            // mutex before parsing, so the per-target blocking disk fallback never runs under the
+            // lock (a multi-file rename would otherwise stall the provider).
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                guard.clone()
+            };
             let mut locations = Vec::new();
             parse_workspace_edit_locations(
                 &result,
-                &|target_path| cache.get(target_path).map(|text| text.as_str()),
+                &|target_path| cache_snapshot.get(target_path).map(|text| text.as_str()),
                 &mut locations,
             );
             Ok(locations)
@@ -2568,12 +2573,17 @@ impl TypeProvider for TsgoTypeProvider {
             let items = result.as_array().cloned().unwrap_or_default();
             // Cross-file code-action edits: resolve each edit's range against ITS OWN target file's
             // content (disk fallback inside the parser), never the queried file's single snapshot.
-            let cache = contents_cache.lock().await;
+            // Snapshot the cache and RELEASE the async mutex before parsing, so the per-target
+            // blocking disk fallback never runs under the lock (a fix-all could stall the provider).
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                guard.clone()
+            };
             Ok(items
                 .iter()
                 .filter_map(|item| {
                     parse_code_action(item, &|target_path| {
-                        cache.get(target_path).map(|text| text.as_str())
+                        cache_snapshot.get(target_path).map(|text| text.as_str())
                     })
                 })
                 .collect())

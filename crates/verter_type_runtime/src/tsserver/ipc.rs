@@ -1555,11 +1555,17 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            let locs = {
+            // Snapshot the contents cache, then RELEASE the async mutex BEFORE parsing: the
+            // per-target parse runs a blocking `std::fs::read_to_string` disk fallback, and a
+            // multi-file rename could stall the provider if that disk I/O ran under the lock.
+            let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                // Bind a `Copy` `&HashMap` so each per-target closure can capture the cache by
-                // shared reference (the `MutexGuard` itself is not `Copy`).
-                let cache: &HashMap<String, String> = &guard;
+                guard.clone()
+            };
+            let locs = {
+                // Bind a `Copy` `&HashMap` for the per-target closures; the lock is already dropped,
+                // so the disk fallback inside the parser runs unlocked.
+                let cache: &HashMap<String, String> = &cache_snapshot;
                 result
                     .get("locs")
                     .and_then(|v| v.as_array())
@@ -1761,15 +1767,20 @@ impl TypeProvider for TsserverTypeProvider {
                 Err(_) => return Ok(vec![]),
             };
 
+            // Snapshot the contents cache, then RELEASE the async mutex BEFORE parsing: each edit's
+            // parse runs a blocking `std::fs::read_to_string` disk fallback, and a fix-all touching
+            // many files could stall the provider if that disk I/O ran under the lock.
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                guard.clone()
+            };
+
             // Single-fix actions first, then their combined "fix all" companions —
             // a stable order independent of provider response ordering.
-            let mut actions: Vec<TypeCodeAction> = {
-                let cache = contents_cache.lock().await;
-                raw_fixes
-                    .iter()
-                    .filter_map(|a| parse_tsserver_code_action(a, &cache))
-                    .collect()
-            };
+            let mut actions: Vec<TypeCodeAction> = raw_fixes
+                .iter()
+                .filter_map(|a| parse_tsserver_code_action(a, &cache_snapshot))
+                .collect();
 
             // Any fix carrying a `fixId` is combinable: tsserver exposes a
             // `getCombinedCodeFix` companion that applies the fix across the whole
@@ -1794,7 +1805,12 @@ impl TypeProvider for TsserverTypeProvider {
                     .request("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
                     .await;
                 if let Ok(body) = combined_result {
-                    let cache = contents_cache.lock().await;
+                    // Re-snapshot fresh (the request may have synced new files) and RELEASE the lock
+                    // before parsing — the parse runs a blocking disk fallback per edit.
+                    let cache = {
+                        let guard = contents_cache.lock().await;
+                        guard.clone()
+                    };
                     if let Some(action) =
                         parse_tsserver_combined_code_fix(&body, fix_all_title.as_deref(), &cache)
                     {
