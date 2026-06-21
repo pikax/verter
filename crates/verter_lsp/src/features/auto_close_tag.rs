@@ -569,12 +569,21 @@ fn auto_close_tag_carrier(
     // byte slice (safe across char boundaries; `tag_name` may carry a non-ASCII component char).
     let remaining = source[offset..].trim_start();
     let expected_close = format!("</{tag_name}");
-    if remaining
-        .as_bytes()
+    let remaining_bytes = remaining.as_bytes();
+    if remaining_bytes
         .get(..expected_close.len())
         .is_some_and(|p| p.eq_ignore_ascii_case(expected_close.as_bytes()))
     {
-        return None;
+        // The `</tag` prefix matches; require the NEXT byte to terminate the tag name — `>`, `/`,
+        // ASCII whitespace, or end of input. An identifier byte means a DIFFERENT, longer tag
+        // (`</diverse>` is not a close for `<div>`), which does NOT already-close this element.
+        let terminated = match remaining_bytes.get(expected_close.len()) {
+            None => true,
+            Some(&b) => b == b'>' || b == b'/' || b.is_ascii_whitespace(),
+        };
+        if terminated {
+            return None;
+        }
     }
 
     Some(format!("$0</{tag_name}>"))
@@ -729,12 +738,21 @@ pub fn auto_close_tag(source: &str, offset: usize) -> Option<String> {
     // byte slice (safe across char boundaries; `tag_name` may carry a non-ASCII component char).
     let remaining = source[offset..].trim_start();
     let expected_close = format!("</{tag_name}");
-    if remaining
-        .as_bytes()
+    let remaining_bytes = remaining.as_bytes();
+    if remaining_bytes
         .get(..expected_close.len())
         .is_some_and(|p| p.eq_ignore_ascii_case(expected_close.as_bytes()))
     {
-        return None;
+        // The `</tag` prefix matches; require the NEXT byte to terminate the tag name — `>`, `/`,
+        // ASCII whitespace, or end of input. An identifier byte means a DIFFERENT, longer tag
+        // (`</diverse>` is not a close for `<div>`), which does NOT already-close this element.
+        let terminated = match remaining_bytes.get(expected_close.len()) {
+            None => true,
+            Some(&b) => b == b'>' || b == b'/' || b.is_ascii_whitespace(),
+        };
+        if terminated {
+            return None;
+        }
     }
 
     Some(format!("$0</{}>", tag_name))
@@ -764,8 +782,8 @@ mod tests {
     }
 
     /// HTML tag names are case-insensitive: an opening `<DIV>` already followed by a
-    /// differently-cased `</div>` is CLOSED, so the raw helper must NOT insert a second close. The
-    /// pre-fix case-sensitive `starts_with("</DIV")` missed the lowercase `</div>` and double-closed.
+    /// differently-cased `</div>` is CLOSED, so the raw helper must NOT insert a second close. Fails
+    /// if the already-closed guard compares the `</tag` prefix case-sensitively.
     #[test]
     fn auto_close_raw_uppercase_open_already_closed_lowercase_is_none() {
         // `<DIV>` ends at offset 5; `</div>` follows immediately (different case).
@@ -774,6 +792,20 @@ mod tests {
         assert!(
             result.is_none(),
             "an already-closed (case-insensitively) tag must NOT be re-closed, got {result:?}"
+        );
+    }
+
+    /// A following `</diverse>` shares the `</div` prefix but is a DIFFERENT, longer tag — it does
+    /// NOT already-close `<div>`, so the raw helper must still emit the close. Fails if the
+    /// already-closed guard treats `</div` as a prefix without requiring a tag-name terminator.
+    #[test]
+    fn auto_close_raw_longer_tag_sharing_prefix_still_closes() {
+        let source = "<div></diverse>";
+        let off = after(source, "<div>");
+        assert_eq!(
+            auto_close_tag(source, off),
+            Some("$0</div>".to_string()),
+            "`</diverse>` does not close `<div>`; the close must still be emitted",
         );
     }
 
@@ -895,9 +927,8 @@ mod tests {
     }
 
     /// HTML tag names are case-insensitive, so a `<DIV>` already followed by `</div>` (different
-    /// case) is ALREADY CLOSED — auto-close must not insert a duplicate `</DIV>`. The pre-fix
-    /// already-closed guard compared case-sensitively, so `</div>` did not match the expected
-    /// `</DIV` and a duplicate close was emitted.
+    /// case) is ALREADY CLOSED — auto-close must not insert a duplicate `</DIV>`. Fails if the
+    /// already-closed guard compares the `</tag` prefix case-sensitively.
     #[test]
     fn already_closed_check_is_case_insensitive() {
         let source = "<template><DIV></div></template>";
@@ -916,6 +947,20 @@ mod tests {
             auto_close_tag_in_carrier(open_only, off, CarrierKind::Vue),
             Some("$0</DIV>".to_string()),
             "an unclosed `<DIV>` must still auto-close, preserving the original case",
+        );
+    }
+
+    /// A following `</diverse>` shares the `</div` prefix but is a DIFFERENT, longer tag — it does
+    /// NOT already-close `<div>`, so the carrier helper must still emit the close. Fails if the
+    /// already-closed guard treats `</div` as a prefix without requiring a tag-name terminator.
+    #[test]
+    fn already_closed_check_requires_tag_name_boundary() {
+        let source = "<template><div></diverse></template>";
+        let off = after(source, "<div>");
+        assert_eq!(
+            auto_close_tag_in_carrier(source, off, CarrierKind::Vue),
+            Some("$0</div>".to_string()),
+            "`</diverse>` does not close `<div>`; the close must still be emitted",
         );
     }
 
