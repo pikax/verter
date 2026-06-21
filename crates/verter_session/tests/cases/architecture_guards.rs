@@ -22669,8 +22669,9 @@ fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
 ///   occurrence guard's third-occurrence rail.
 ///
 /// CFG-TEST EXEMPTION: a `#[cfg(test)]`-gated subtree is test-only code (it is
-/// dead in any normal build) and is EXEMPT from the macro ban — the visitor
-/// tracks a `cfg_test_depth` and `visit_macro` rejects only when the depth is 0
+/// dead in any normal build) and is EXEMPT from the macro ban, the production-
+/// attribute allowlist, and the derive-shadow-import rejection — the visitor
+/// tracks a `cfg_test_depth` and those checks fire only when the depth is 0
 /// (production). The sanctioned out-of-line `#[cfg(test)] #[path] mod
 /// structural_lower_tests;` is never descended (its body lives in the SIBLING
 /// `structural_lower_tests.rs`, which `syn::parse_file` over `lower.rs` does not
@@ -22678,15 +22679,36 @@ fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
 /// for STRUCTURAL violations while its macros stay exempt — exactly the previous
 /// walker's cfg-test policy.
 ///
-/// SCOPE — the IN-FILE macro / mod / alias AND attribute surface is now CLOSED,
-/// not residual (see the guard doc). The macro ban closes every IN-FILE macro
-/// position; the [`check_production_attr`] allowlist (driven by the
-/// `visit_attribute` override) closes the attribute / derive PROC-MACRO vector
-/// (`#[some_attr]`, `#[derive(Evil)]` — a `syn::Attribute`, not a `syn::Macro`).
-/// The ONLY out-of-model case a `syn`-source walk over ONE file cannot see is a
-/// module rooted in a DIFFERENT/UNRELATED file the guard never reads — and there
-/// COMPILER module-privacy blocks that foreign body from naming the bare-private
-/// lowerer (a compile error, the airtight backstop).
+/// EXEMPTION BOUND (CONSERVATIVE, not an escape hatch): `cfg_test_depth` is
+/// incremented ONLY by the `within(attrs, …)` wrappers installed on the
+/// attribute-bearing ITEM CONTAINERS a test gate can sit on — `mod` / `fn` /
+/// `impl`(-method) / `trait`(-method) / `const` / `static` / `struct` / `enum` /
+/// `union` / `type` / `foreign-fn` / `use`. A `#[cfg(test)]` on a BARE STATEMENT
+/// or EXPRESSION (a `#[cfg(test)] let x = …;`, a `#[cfg(test)]`-attributed
+/// sub-expression) does NOT increment the depth — so a macro / attribute in that
+/// position would RED even though it is test-only. This is CONSERVATIVE (it reds
+/// test-only code; it NEVER admits production code), i.e. SOUND but stricter than
+/// test code might want — NOT a production hole, and deliberately NOT widened
+/// (widening the exemption to bare stmts/exprs would risk a production hole). The
+/// exemption is therefore the sanctioned cfg(test) MODULE / ITEM-CONTAINER
+/// subtree, never a cfg(test) bare statement/expression.
+///
+/// SCOPE — the IN-FILE macro / mod / alias / ATTRIBUTE AND DERIVE-NAME-SHADOW
+/// IMPORT surface is now CLOSED, not residual (see the guard doc). The macro ban
+/// closes every IN-FILE macro position; the [`check_production_attr`] allowlist
+/// (driven by the `visit_attribute` override) closes the attribute / derive
+/// PROC-MACRO vector (`#[some_attr]`, `#[derive(Evil)]` — a `syn::Attribute`, not
+/// a `syn::Macro`); and `visit_item_use`'s
+/// [`use_tree_binds_builtin_derive_name`] + [`use_tree_has_production_glob`]
+/// rejections close the DERIVE-NAME-SHADOW IMPORT vector (a `use serde_derive::
+/// Serialize as Clone;` re-binds `Clone` to a proc-macro derive the spelling-only
+/// `check_derive_contents_builtin` would wave through, and a production glob could
+/// carry the same shadow invisibly). The ONLY out-of-model case a `syn`-source
+/// walk over ONE file cannot see is a module rooted in a DIFFERENT/UNRELATED file
+/// the guard never reads (or an external re-export / glob whose TARGET DEFINITION
+/// lives OUTSIDE the walked production-src tree) — and there COMPILER
+/// module-privacy blocks that foreign body from naming the bare-private lowerer
+/// (a compile error, the airtight backstop).
 fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
     let mut violations = Vec::new();
     let file = match syn::parse_file(src) {
@@ -23031,8 +23053,16 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 
     /// A `use … as lower_type_expr_structural;` reexport binding mints a nameable
     /// alias of the private lowerer — defense-in-depth alongside the occurrence
-    /// guard's third-occurrence rail. The `within` wrapper keeps a `#[cfg(test)]`-
-    /// gated `use`'s attrs exempt from the production-attribute check.
+    /// guard's third-occurrence rail. PLUS the derive-NAME-SHADOW close: a
+    /// PRODUCTION (non-`#[cfg(test)]`) `use` that binds a built-in-derive name
+    /// into scope (`use serde_derive::Serialize as Clone;`, `use evil::Clone;`,
+    /// grouped `use evil::{Foo, Clone};`) re-binds that name to a proc-macro
+    /// derive `check_derive_contents_builtin`'s spelling-only scan would then
+    /// wave through — REJECTED. A production GLOB (`use evil::*;`) could carry the
+    /// same shadow invisibly — REJECTED (mirroring the sibling carrier guard's
+    /// EXACT-import requirement). The `within` wrapper keeps a `#[cfg(test)]`-
+    /// gated `use`'s attrs exempt from the production-attribute check and gates
+    /// these shadow rejections to production (`cfg_test_depth == 0`).
     fn visit_item_use(&mut self, use_item: &'ast syn::ItemUse) {
         if use_tree_renames_to(&use_item.tree, "lower_type_expr_structural") {
             self.violations.push(
@@ -23040,6 +23070,36 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
                  of the private structural lowerer in `lower.rs` — forbidden"
                     .to_string(),
             );
+        }
+        // Derive-NAME-SHADOW vector: gated to production code (a `#[cfg(test)]`-
+        // gated `use` is dead-in-production test wiring and is exempt, mirroring
+        // the macro / attribute bans). A `#[cfg(test)]` directly on THIS `use`
+        // item exempts it via `within`'s depth bump below; a `use` nested inside
+        // an already-cfg-test subtree is exempt via the inherited depth.
+        let cfg_test_here = use_item.attrs.iter().any(attr_is_exactly_cfg_test);
+        if self.cfg_test_depth == 0 && !cfg_test_here {
+            if use_tree_binds_builtin_derive_name(&use_item.tree) {
+                self.violations.push(format!(
+                    "a production `use` import in `lower.rs` binds a built-in-derive name \
+                     {LOWER_RS_BUILTIN_DERIVES:?} into scope (a `use … as Clone;` rename target or a \
+                     `use …::Clone;` / grouped `{{…, Clone}}` leaf) — forbidden. The std prelude \
+                     already provides every built-in derive, so an explicit `use` of one can ONLY \
+                     be a SHADOW: it re-binds the name to a proc-macro derive that \
+                     `#[derive(Clone)]`'s spelling-only check would wave through, letting the \
+                     proc-macro synthesise same-module code reaching the module-private \
+                     `lower_type_expr_structural`"
+                ));
+            }
+            if use_tree_has_production_glob(&use_item.tree) {
+                self.violations.push(
+                    "a production GLOB `use …::*;` import in `lower.rs` is forbidden — a glob can \
+                     bring a built-in-derive-name shadow (or any other binding) into scope WITHOUT \
+                     a visible leaf ident the `syn` scan can inspect; only EXACT named imports are \
+                     permitted (mirroring the sibling carrier guard's exact-import requirement). \
+                     The real `lower.rs` declares no glob import"
+                        .to_string(),
+                );
+            }
         }
         self.within(&use_item.attrs, |s| syn::visit::visit_item_use(s, use_item));
     }
@@ -23163,30 +23223,65 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 /// non-built-in-or-qualified-`derive` attribute REDS (the sibling carrier guard's
 /// `check_attrs` + `check_derive_exact` machinery, mirrored). The cfg-test
 /// exemption suspends the attribute check inside a `#[cfg(test)]`-gated subtree.
+/// The guard FINALLY rejects every PRODUCTION `use` that binds a BUILT-IN-DERIVE
+/// NAME (`{Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord}`)
+/// into scope — a `use serde_derive::Serialize as Clone;` rename target, a plain
+/// `use evil::Clone;` / grouped `use evil::{…, Clone};` leaf, OR a production
+/// glob `use evil::*;` ([`use_tree_binds_builtin_derive_name`] +
+/// [`use_tree_has_production_glob`] on `visit_item_use`). This closes the
+/// DERIVE-NAME-SHADOW vector the SPELLING-ONLY `check_derive_contents_builtin`
+/// cannot: `#[derive(Clone)]` is accepted if the ident reads `Clone`, but a
+/// `use serde_derive::Serialize as Clone;` re-binds the name to a PROC-MACRO
+/// derive (rustc resolves the derive to the imported macro, NOT the prelude
+/// built-in — RUSTC-CONFIRMED) that synthesises same-module code reaching the
+/// private lowerer; the scan cannot RESOLVE the derive, so it rejects the
+/// source-visible shadowing `use` IMPORT instead (the std prelude already
+/// provides every built-in derive, so an explicit `use` of one can ONLY be a
+/// shadow), mirroring the sibling carrier guard's `check_use` / `use_tree_has_
+/// rename` exact-import requirement (`carrier_encapsulation_guards.rs`). The
+/// cfg-test exemption suspends these `use` rejections inside a `#[cfg(test)]`-
+/// gated subtree too.
 ///
-/// IN-FILE EXPR / STMT / ITEM MACRO **AND ATTRIBUTE-MACRO** CLASSES ARE CLOSED
-/// (not residual). After this fix, EVERY same-module IN-FILE vector is CLOSED —
-/// every macro position (item, Expr, stmt, impl/trait/extern item, method body,
-/// assoc-const init), the inline mod, the out-of-line mod, the `as`-alias, the
-/// `let`-binding, the whitespace/newline-split call, the char-literal masking,
-/// AND every attribute / derive PROC-MACRO position. An attribute proc-macro
-/// (`#[some_attr] fn f() {}`) and a derive proc-macro (`#[derive(Evil)] struct
-/// S;`) are a `syn::Attribute`, NOT a `syn::Macro`, so the macro ban (`visit_
-/// macro`) never fires on them — the [`check_production_attr`] allowlist (driven
-/// by the `visit_attribute` override) closes that vector by permitting ONLY
-/// `derive(<std built-ins>)`, EXACTLY `cfg(test)`, inert `allow` / `expect`
-/// lints, the sanctioned `path`, and `doc`, rejecting every foreign / qualified /
-/// `cfg_attr` / non-built-in-derive attribute (the sibling carrier guard's
-/// `check_attrs` + `check_derive_exact` machinery, mirrored). A `#[path = "…"]`
-/// module declared as a CHILD of `lower.rs` is a DESCENDANT: it CAN name the
-/// private fn via `super::lower_type_expr_structural`, so compiler privacy does
-/// NOT backstop a child `#[path]` mod — that case is CLOSED by this guard's
-/// rejection of every non-sanctioned out-of-line / `#[path]` child `mod`, NOT by
-/// privacy.
+/// IN-FILE EXPR / STMT / ITEM MACRO, ATTRIBUTE-MACRO, **AND DERIVE-NAME-SHADOW
+/// IMPORT** CLASSES ARE CLOSED (not residual). After this fix, EVERY same-module
+/// IN-FILE vector is CLOSED — every macro position (item, Expr, stmt,
+/// impl/trait/extern item, method body, assoc-const init), the inline mod, the
+/// out-of-line mod, the `as`-alias, the `let`-binding, the
+/// whitespace/newline-split call, the char-literal masking, every attribute /
+/// derive PROC-MACRO position, AND every derive-NAME-SHADOW `use` import. An
+/// attribute proc-macro (`#[some_attr] fn f() {}`) and a derive proc-macro
+/// (`#[derive(Evil)] struct S;`) are a `syn::Attribute`, NOT a `syn::Macro`, so
+/// the macro ban (`visit_macro`) never fires on them — the
+/// [`check_production_attr`] allowlist (driven by the `visit_attribute` override)
+/// closes that vector by permitting ONLY `derive(<std built-ins>)`, EXACTLY
+/// `cfg(test)`, inert `allow` / `expect` lints, the sanctioned `path`, and `doc`,
+/// rejecting every foreign / qualified / `cfg_attr` / non-built-in-derive
+/// attribute (the sibling carrier guard's `check_attrs` + `check_derive_exact`
+/// machinery, mirrored). The DERIVE-NAME-SHADOW vector — a `use serde_derive::
+/// Serialize as Clone;` (or `use evil::Clone;`, or a production glob) that
+/// re-binds a built-in-derive name to a PROC-MACRO derive the spelling-only
+/// `check_derive_contents_builtin` would then wave through (rustc resolves the
+/// derive to the imported macro, NOT the prelude built-in — RUSTC-CONFIRMED) — is
+/// CLOSED by `visit_item_use`'s [`use_tree_binds_builtin_derive_name`] +
+/// [`use_tree_has_production_glob`] rejection of the source-visible shadowing
+/// `use` IMPORT (the scan cannot RESOLVE a derive, so it rejects the import; the
+/// std prelude already provides every built-in derive, so an explicit `use` of
+/// one can ONLY be a shadow), mirroring the sibling carrier guard's `check_use` /
+/// `use_tree_has_rename` exact-import requirement. A `#[path = "…"]` module
+/// declared as a CHILD of `lower.rs` is a DESCENDANT: it CAN name the private fn
+/// via `super::lower_type_expr_structural`, so compiler privacy does NOT backstop
+/// a child `#[path]` mod — that case is CLOSED by this guard's rejection of every
+/// non-sanctioned out-of-line / `#[path]` child `mod`, NOT by privacy.
 ///
-/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED) — exactly ONE out-of-model case a
-/// `syn` source scan of ONE file structurally cannot reach, and it is NOT an
-/// in-file vector:
+/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED) — the out-of-model cases a `syn` source
+/// scan of ONE file structurally cannot reach, NONE of which is an in-file
+/// vector. After the derive-shadow-import close, the derive-shadow vector is no
+/// longer residual (the shadowing `use` is rejected); the only residual is the
+/// OUT-OF-TREE / FOREIGN-NAME class:
+/// - a **GLOB or EXTERNAL re-export whose TARGET DEFINITION lives OUTSIDE the
+///   walked production-`src` tree** — this guard reads only `lower.rs` and rejects
+///   a production glob IN `lower.rs`, but it cannot see what an out-of-tree module
+///   a re-export points to actually contains; AND
 /// - a **module rooted in a DIFFERENT / UNRELATED file** the guard never reads
 ///   (NOT a child / descendant of `lower.rs` — e.g. an unrelated module elsewhere
 ///   in the crate; a `#[path]` CHILD of `lower.rs` is a descendant and is CLOSED
@@ -23194,21 +23289,27 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 ///   that foreign body; but because that body is in ANOTHER module, COMPILER
 ///   module-privacy DOES block it from naming the bare-private
 ///   `lower_type_expr_structural` HOWEVER it is spelled (a compile error, not a
-///   lint — the airtight backstop for the FOREIGN case, by construction). The
-///   codebase accepts this identical privacy-backstopped foreign-module residual
-///   for its sibling producer-confinement guards
-///   (`carrier_module_has_no_public_type_args_surface` and
-///   `macro_hot_mirror_exposes_single_crate_visible_producer_entry`).
+///   lint — the airtight backstop for the FOREIGN case, by construction).
+///
+/// Both are compiler-privacy-backstopped or unmodelable by a single-file source
+/// scan, and the codebase's sibling producer-confinement guards accept the
+/// IDENTICAL residual — see `macro_hot_mirror_exposes_single_crate_visible_
+/// producer_entry`'s KNOWN RESIDUAL GAPS (the glob / external-reexport-outside-
+/// `src` / out-of-tree-`#[path]` tail it deliberately does NOT chase) and
+/// `carrier_module_has_no_public_type_args_surface`.
 ///
 /// NOT residual (do NOT claim privacy backstops these — they are CLOSED here):
 /// the IN-FILE any-position macro / inline-mod / out-of-line-or-`#[path]`-child-
 /// mod / alias / binding vectors (rejected by this guard's `syn` walk and the
-/// occurrence rail) AND every attribute / derive PROC-MACRO on a `lower.rs` item
-/// (rejected by the production-attribute allowlist). Compiler module-privacy is
-/// the backstop ONLY for a body in a DIFFERENT/UNRELATED foreign module, NOT for
-/// same-module in-file code, NOT for a `#[path]` CHILD of `lower.rs` (a
-/// descendant), and NOT for an attribute proc-macro on a `lower.rs` item (closed
-/// by the allowlist).
+/// occurrence rail), every attribute / derive PROC-MACRO on a `lower.rs` item
+/// (rejected by the production-attribute allowlist), AND every derive-NAME-SHADOW
+/// `use` import — a `use … as Clone;` rename, a `use …::Clone;` / grouped leaf,
+/// or a production glob in `lower.rs` (rejected by `visit_item_use`). Compiler
+/// module-privacy is the backstop ONLY for a body in a DIFFERENT/UNRELATED
+/// foreign module (or an out-of-tree re-export target), NOT for same-module
+/// in-file code, NOT for a `#[path]` CHILD of `lower.rs` (a descendant), NOT for
+/// an attribute proc-macro on a `lower.rs` item, and NOT for a derive-shadow
+/// `use` import in `lower.rs` (all closed in-file here).
 #[test]
 fn structural_carrier_producer_lower_has_no_expansion_surface() {
     let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
@@ -23267,7 +23368,13 @@ fn structural_carrier_producer_lower_has_no_expansion_surface() {
 ///   Serialize)]` (non-built-in / qualified) derive, a `#[cfg(any(test, …))]`
 ///   non-exact cfg, a `#[cfg_attr(feature = "x", derive(Clone))]`, and a
 ///   `#[tokio::main]` multi-segment attribute each RED; a `#[cfg(test)]`-gated
-///   subtree may use any attribute (exempt).
+///   subtree may use any attribute (exempt);
+/// - DERIVE-NAME-SHADOW IMPORT (close the import vector that defeats the
+///   SPELLING-ONLY derive-contents check): a `use serde_derive::Serialize as
+///   Clone;` rename (the rustc-confirmed vector), a plain `use evil::Clone;`, a
+///   grouped `use evil::{Foo, Clone};`, and a production glob `use evil::*;` each
+///   RED; a legitimate `use std::cell::Cell;` and a `#[cfg(test)]`-gated
+///   shadowing `use` do NOT red.
 #[test]
 fn structural_lower_expansion_surface_classifier_discriminates() {
     // The REAL minimal genuine shape: `use` imports, the bare module-private fn,
@@ -23720,6 +23827,78 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
         "a `#[cfg(test)]`-gated subtree containing a `#[some_attr] fn` (test-only code) must NOT red \
          — the production-attribute allowlist is suspended inside a cfg-test subtree (reusing \
          `cfg_test_depth`), exactly as the macro ban is"
+    );
+
+    // ── DERIVE-NAME-SHADOW IMPORT (close the import vector that defeats the
+    //    SPELLING-ONLY `check_derive_contents_builtin`) ─────────────────────────
+    // The derive-CONTENTS check is spelling-only: `#[derive(Clone)]` is accepted
+    // if the ident reads `Clone`. But a `use serde_derive::Serialize as Clone;`
+    // re-binds `Clone` to a PROC-MACRO derive (rustc resolves the derive to the
+    // imported macro, NOT the prelude built-in — RUSTC-CONFIRMED), so the proc
+    // macro runs and can synthesise a body reaching the private lowerer. The scan
+    // cannot RESOLVE the derive, so it rejects the shadowing `use` IMPORT instead
+    // (a source-visible line), mirroring the sibling carrier guard's `check_use`
+    // / `use_tree_has_rename` (`carrier_encapsulation_guards.rs`).
+    //
+    // REJECT — a `use … as Clone;` rename re-binding a built-in-derive name to an
+    // imported proc-macro derive (THE rustc-confirmed vector).
+    let derive_rename_shadow = format!("{genuine}use serde_derive::Serialize as Clone;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&derive_rename_shadow).is_empty(),
+        "a production `use serde_derive::Serialize as Clone;` must RED — the `as Clone` rename \
+         re-binds the built-in-derive name `Clone` to an imported proc-macro derive that \
+         `#[derive(Clone)]`'s spelling-only check would then wave through (the rustc-confirmed \
+         derive-name-shadow vector)"
+    );
+    // REJECT — a PLAIN `use evil::Clone;` (no rename): the LEAF ident binds the
+    // name. The prelude already provides `Clone`, so an explicit `use …::Clone;`
+    // can ONLY be a shadow (rejected by the carrier guard's EXACT-import rule too).
+    let derive_plain_shadow = format!("{genuine}use evil::Clone;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&derive_plain_shadow).is_empty(),
+        "a production `use evil::Clone;` plain import must RED — its leaf ident binds the \
+         built-in-derive name `Clone` to a foreign item, shadowing the prelude built-in (which \
+         needs no `use`); an explicit `use` of a built-in-derive name can only be a shadow"
+    );
+    // REJECT — a GROUPED `use evil::{Foo, Clone};`: the `Clone` leaf inside the
+    // group binds the name (recursion through `UseTree::Group`).
+    let derive_grouped_shadow = format!("{genuine}use evil::{{Foo, Clone}};\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&derive_grouped_shadow).is_empty(),
+        "a production grouped `use evil::{{Foo, Clone}};` must RED — the `Clone` leaf in the group \
+         binds the built-in-derive name (the bound-name extractor recurses grouped trees, mirroring \
+         `use_tree_has_rename`)"
+    );
+    // REJECT — a production GLOB `use evil::*;`: the scan cannot see WHICH names a
+    // glob brings in, so it could carry a built-in-derive-name shadow invisibly.
+    // A production glob is the bounded close (mirroring the carrier guard's
+    // exact-import requirement; the real `lower.rs` has none).
+    let derive_glob_shadow = format!("{genuine}use evil::*;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&derive_glob_shadow).is_empty(),
+        "a production GLOB `use evil::*;` must RED — a glob can bring a built-in-derive-name shadow \
+         into scope without a visible leaf ident the `syn` scan can inspect; only EXACT named \
+         imports are permitted (the bounded close mirroring the carrier guard's exact-import rule)"
+    );
+    // SOUNDNESS — a LEGITIMATE non-shadowing import (`use std::cell::Cell;`, the
+    // real `lower.rs` carries exactly this at :45) must NOT red: its leaf `Cell`
+    // is not a built-in-derive name, so the shadow rule does not fire.
+    let legit_use = format!("{genuine}use std::cell::Cell;\n");
+    assert!(
+        lower_rs_expansion_surface_violations(&legit_use).is_empty(),
+        "a legitimate non-shadowing `use std::cell::Cell;` (a real `lower.rs` import) must NOT red \
+         — `Cell` is not a built-in-derive name, so the derive-shadow rule does not fire"
+    );
+    // SOUNDNESS — a `#[cfg(test)]`-gated shadowing `use` is dead-in-production
+    // test wiring and is EXEMPT (gated on `cfg_test_depth` / the on-item exact
+    // cfg-test, exactly as the macro and attribute bans are). It does NOT red.
+    let cfg_test_shadow_use =
+        format!("{genuine}#[cfg(test)]\nuse serde_derive::Serialize as Clone;\n");
+    assert!(
+        lower_rs_expansion_surface_violations(&cfg_test_shadow_use).is_empty(),
+        "a `#[cfg(test)]`-gated `use … as Clone;` (test-only code, dead in a production build) must \
+         NOT red — the derive-shadow rejection is suspended inside a cfg-test subtree, exactly as \
+         the macro / attribute bans are"
     );
 
     // The REAL owner source passes the expansion-surface scan (revert proof).
@@ -25787,6 +25966,62 @@ fn use_tree_renames_to(tree: &syn::UseTree, name: &str) -> bool {
         // `use a::b;` (plain) and `use a::*;` (glob) do not mint a fresh binding
         // under a renamed-to name.
         syn::UseTree::Name(_) | syn::UseTree::Glob(_) => false,
+    }
+}
+
+/// Whether a `use` tree binds ANY of [`LOWER_RS_BUILTIN_DERIVES`] (the std
+/// built-in derive names — `Debug` / `Default` / `Clone` / `Copy` / `PartialEq` /
+/// `Eq` / `Hash` / `PartialOrd` / `Ord`) INTO SCOPE — either as a `use … as <D>;`
+/// rename TARGET (`use serde_derive::Serialize as Clone;`) or as the bound leaf
+/// of a plain / grouped path (`use evil::Clone;`, `use evil::{Foo, Clone};`).
+///
+/// This closes the derive-NAME-SHADOW vector that `check_derive_contents_builtin`
+/// (a SPELLING-ONLY scan) cannot: `#[derive(Clone)]` is accepted by the spelling
+/// scan if the ident reads `Clone`, but a `use serde_derive::Serialize as Clone;`
+/// import re-binds the name `Clone` to a PROC-MACRO derive (rustc resolves the
+/// derive to the imported macro, NOT the prelude built-in — RUSTC-CONFIRMED),
+/// which can synthesise same-module code reaching the module-private
+/// `lower_type_expr_structural`. A scanner cannot RESOLVE the derive, so it
+/// rejects the shadowing `use` IMPORT instead (a source-visible line in
+/// `lower.rs`). The std prelude ALREADY provides every built-in derive name, so
+/// an EXPLICIT `use …::Clone;` (renamed or not, from any path) can ONLY be a
+/// shadow — never legitimate. Recurses grouped / pathed trees exactly as
+/// [`use_tree_renames_to`] does (mirroring the sibling carrier guard's
+/// `use_tree_has_rename`, `carrier_encapsulation_guards.rs`), but extracts the
+/// BOUND NAME (rename target or leaf ident) rather than only detecting a rename.
+fn use_tree_binds_builtin_derive_name(tree: &syn::UseTree) -> bool {
+    match tree {
+        // `use … as <D>;` — the RENAME TARGET binds the name.
+        syn::UseTree::Rename(rename) => {
+            LOWER_RS_BUILTIN_DERIVES.contains(&rename.rename.to_string().as_str())
+        }
+        // `use a::b;` (no rename) — the LEAF ident binds the name. An explicit
+        // `use …::Clone;` shadows the prelude built-in (which needs no `use`).
+        syn::UseTree::Name(name) => {
+            LOWER_RS_BUILTIN_DERIVES.contains(&name.ident.to_string().as_str())
+        }
+        syn::UseTree::Path(path) => use_tree_binds_builtin_derive_name(&path.tree),
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_binds_builtin_derive_name),
+        // A glob (`use evil::*;`) is handled separately by
+        // [`use_tree_has_production_glob`] — the scan cannot see WHICH names a
+        // glob brings in, so a production glob is rejected outright.
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+/// Whether a `use` tree contains a GLOB (`use evil::*;`, `use evil::{Foo, *};`) —
+/// recursing grouped / pathed trees. A glob could bring a built-in-derive-name
+/// shadow (or any other shadow) into scope WITHOUT a visible leaf ident the
+/// `syn` scan can inspect, so a PRODUCTION glob in `lower.rs` is the bounded
+/// close: reject it, mirroring the sibling carrier guard's EXACT-import
+/// requirement (`check_use` / `EXPECTED_USES`, which permits no glob). The real
+/// `lower.rs` has no glob import.
+fn use_tree_has_production_glob(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Glob(_) => true,
+        syn::UseTree::Path(path) => use_tree_has_production_glob(&path.tree),
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_has_production_glob),
+        syn::UseTree::Name(_) | syn::UseTree::Rename(_) => false,
     }
 }
 
