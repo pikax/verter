@@ -21,6 +21,7 @@ mod fact_matrix;
 mod family_warm_read_releases_mutex_before_validate;
 mod framework_corpus_svelte;
 mod framework_known_bug_manifest;
+mod frozen_body_reader_inventory;
 mod g_audit;
 mod g_block;
 mod g_cache;
