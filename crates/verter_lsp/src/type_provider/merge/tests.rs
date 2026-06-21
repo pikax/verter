@@ -570,6 +570,37 @@ fn provider_completion_to_lsp_item_preserves_actionable_handle() {
     );
 }
 
+/// When a provider completion's replace-range was dropped fail-closed (so
+/// `text_edit` is `None`), the shared mapper carries the provider's intended
+/// insert text onto the LSP item. Accepting the item then inserts that text, not
+/// the display `label` (which can differ — e.g. a decorated auto-import label).
+///
+/// Discriminating: a mapper that left `insert_text` unset would make the client
+/// fall back to the `label`, inserting `"foo (auto-import)"` instead of `"foo"`.
+#[test]
+fn provider_completion_to_lsp_item_carries_insert_text_when_range_dropped() {
+    let mut entry = make_type_completion("foo (auto-import)");
+    entry.insert_text = Some("foo".to_string());
+    // Dropped range ⇒ no `text_edit`; the client commits `insert_text`.
+    let item = provider_completion_to_lsp_item(
+        entry,
+        "foo (auto-import)".to_string(),
+        None,
+        "tsgo",
+        Some("/ws/App.vue.tsx"),
+    );
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("foo"),
+        "the dropped-range item must commit the provider's intended insert text"
+    );
+    assert_ne!(
+        item.insert_text.as_deref(),
+        Some("foo (auto-import)"),
+        "the committed text must not fall back to the decorated display label"
+    );
+}
+
 /// @ai-generated — TypeProvider completions are added alongside verter completions
 #[test]
 fn merge_completions_combines_both() {

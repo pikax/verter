@@ -165,6 +165,11 @@ pub(crate) fn provider_completion_to_lsp_item(
             })
         }),
         sort_text: item.sort_text,
+        // When `text_edit` is present the client applies it and ignores
+        // `insert_text`; when the replace-range was dropped fail-closed,
+        // `insert_text` carries the provider's intended text so the item still
+        // inserts that text rather than the (possibly decorated) display label.
+        insert_text: item.insert_text,
         text_edit,
         data,
         ..Default::default()

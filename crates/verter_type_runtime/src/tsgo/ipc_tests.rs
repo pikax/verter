@@ -912,6 +912,65 @@ fn parse_completion_item_drops_text_edit_range_when_content_unavailable() {
     assert_eq!(item.edit_range_end, None);
 }
 
+// When the replace-range is dropped fail-closed (content unavailable), the
+// completion must still carry the provider's intended insert text so accepting
+// it inserts that text — not the display `label`, which can differ from the
+// `textEdit.newText` (e.g. a decorated auto-import label).
+#[test]
+fn parse_completion_item_preserves_new_text_as_insert_when_range_dropped() {
+    let json = serde_json::json!({
+        "label": "foo (auto-import)",
+        "kind": 6,
+        "textEdit": {
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 3 }
+            },
+            "newText": "foo"
+        }
+    });
+    // No content ⇒ the replace-range is unprovable and dropped.
+    let item = parse_completion_item(&json, None).unwrap();
+    assert_eq!(
+        item.edit_range_start, None,
+        "an unprovable replace-range must be dropped"
+    );
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("foo"),
+        "the dropped-range item must insert the textEdit.newText, not the decorated label"
+    );
+    assert_ne!(
+        item.insert_text.as_deref(),
+        Some("foo (auto-import)"),
+        "the inserted text must not fall back to the display label"
+    );
+}
+
+// An explicit `insertText` takes priority over `textEdit.newText` for the
+// committed insert text.
+#[test]
+fn parse_completion_item_prefers_explicit_insert_text_over_new_text() {
+    let json = serde_json::json!({
+        "label": "foo",
+        "kind": 6,
+        "insertText": "foo_snippet",
+        "textEdit": {
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 3 }
+            },
+            "newText": "foo"
+        }
+    });
+    let item = parse_completion_item(&json, None).unwrap();
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("foo_snippet"),
+        "an explicit insertText takes priority over textEdit.newText"
+    );
+}
+
 // With content present but a range past EOF, the replace-range is unprovable and must be DROPPED,
 // not clamped to a content-length offset.
 #[test]
