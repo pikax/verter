@@ -17,20 +17,19 @@
 //! scanner_justification: whether a reader requires authored syntax / lives
 //!   below the session graph / is a deferred larger refactor is an architectural
 //!   judgement not expressible by Rust while raw TypeExpr bodies remain readable.
-//! mechanism_ruling: codex partition-design consult
-//!   gov-partition-consult-OUT.txt (Q-PARTITION) + CTO ratification; temporary
-//!   last-resort scanner; the structural replacement target is private body
-//!   storage plus an AuthoredDeclBody wrapper / a below-graph layering seam, at
-//!   which point the AuthoredShape / GraphFreeDto / GraphBackedPending classes
-//!   empty and this inventory is deleted (see
-//!   docs/arch/authored-shape-graph-native-migration-deferral.md).
+//! mechanism_ruling: a temporary last-resort scanner — the partition is an
+//!   architecture-design ruling recorded in
+//!   docs/arch/authored-shape-graph-native-migration-deferral.md; the structural
+//!   replacement target is private body storage plus an AuthoredDeclBody
+//!   wrapper / a below-graph layering seam, at which point the AuthoredShape /
+//!   GraphFreeDto / GraphBackedPending classes empty and this inventory is
+//!   deleted.
 //! hardening_rounds: 0
 //! hardening_history: none — first version of the partitioned guard.
 //! ```
 //!
-//! The three per-class scanner records the codex consult supplies (authored-shape
-//! / graph-free / producer) are reproduced verbatim on each class in
-//! [`ReaderClass`] below.
+//! The three per-class scanner records (authored-shape / graph-free / producer)
+//! are reproduced on each class in [`ReaderClass`] below.
 //!
 //! ## What rail closes the surface (read this before trusting the tripwire)
 //!
@@ -802,8 +801,9 @@ fn inventory_for(files: &[(String, String)]) -> Vec<FnDef> {
 
 /// The class a residual `TypeExpr` declaration-body reader belongs to. The
 /// partition is the architectural JUDGEMENT (no compiler fact expresses it while
-/// raw `TypeExpr` bodies stay readable) the curated allowlist records, per the
-/// codex partition-design consult (Q-PARTITION) + CTO ratification.
+/// raw `TypeExpr` bodies stay readable) the curated allowlist records — the
+/// design ruling lives in
+/// docs/arch/authored-shape-graph-native-migration-deferral.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReaderClass {
     /// MIGRATED onto the shared `decl_body_hot_ref` hot accessor / a graph-native
@@ -1107,7 +1107,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         method_chain: false,
         reason: "calls named_decl_body and classifies the returned body by authored shape \
                  (Ref{type_arguments} non-empty, utility route, indexed-access route) — \
-                 authored-syntax-intrinsic (codex Q-DISPOSITION C5)",
+                 authored-syntax-intrinsic",
     },
     ReaderRow {
         file: "src/meta_resolve/materialize/field_types.rs",
@@ -1116,8 +1116,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::AuthoredShape,
         method_chain: false,
         reason: "calls named_decl_body and extracts the authored root (literal Pick/Omit, \
-                 IndexedAccess.object, Ref head) — authored-syntax-intrinsic (codex Q-DISPOSITION \
-                 C6)",
+                 IndexedAccess.object, Ref head) — authored-syntax-intrinsic",
     },
     ReaderRow {
         file: "src/host_manage/component_meta_methods.rs",
@@ -1252,8 +1251,8 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
                  try_body route-key expansion closure (and the prepared-value .type_annotation route \
                  read) — genuinely graph-backed but a graph-native SemanticNodeData member-surface \
                  KEY enumerator over union/intersection/conditional/object surfaces does not yet \
-                 exist; deferred (codex Q-DISPOSITION C4). BARE .body/.type_annotation field reads, \
-                 anchored by the enumeration",
+                 exist; deferred. BARE .body/.type_annotation field reads, anchored by the \
+                 enumeration",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/helpers.rs",
@@ -1264,7 +1263,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         reason: "builds the ResolvedImportedRegistrySymbol.body CARRIER from prepared.body (NOT the \
                  prepared_type_decl(..).is_some() existence check, which stays a cheap shallow \
                  presence check) — the carrier migrates to identity/HotTypeRef in a larger refactor; \
-                 deferred (codex Q-DISPOSITION C3)",
+                 deferred",
     },
     ReaderRow {
         file: "src/host_manage/component_meta_methods.rs",
@@ -1286,8 +1285,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         method_chain: false,
         reason: "calls named_decl_body and returns the located declaration body TypeExpr — the \
                  TypeExpr-returning LOCATOR is too broad; it splits into an identity/hot locator and \
-                 an authored-body locator by downstream need in a larger refactor; deferred (codex \
-                 Q-DISPOSITION C7)",
+                 an authored-body locator by downstream need in a larger refactor; deferred",
     },
     ReaderRow {
         file: "src/project_semantic_dispatch/build.rs",
