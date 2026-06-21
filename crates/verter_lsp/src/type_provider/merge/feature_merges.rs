@@ -14,7 +14,7 @@ use crate::type_provider::protocol::{
 
 use super::definition::{
     is_carrier_api_path, is_carrier_ide_path, normalize_carrier_path, path_to_uri,
-    resolve_carrier_ide_range_strict, resolve_carrier_tsx_range, resolve_external_target_range,
+    resolve_carrier_ide_range_strict, resolve_external_target_range,
 };
 use super::position::{
     api_surface_range_to_carrier_range, tsx_range_to_carrier_range, ApiSurfaceResolution,
@@ -28,8 +28,11 @@ use super::position::{
 /// Strategy:
 /// - Combine verter in-file refs with TypeProvider cross-file refs.
 /// - A carrier IDE target (`{carrier}.tsx`/`.jsx`) maps its byte offsets back to the carrier
-///   source through that file's CodeTransform sourcemap (the in-context mapper for the queried
-///   file, the external resolver for a foreign component).
+///   source through the single shared strict mapper ([`resolve_carrier_ide_range_strict`]): the
+///   in-context mapper for the queried file (same canonical path as `current_tsx_path`), the
+///   external resolver for a foreign component. A FOREIGN carrier `.tsx` is DROPPED on a resolver
+///   miss — never mapped through the current request's sourcemap (its offsets index a different
+///   file, so the current map would point at an unrelated location).
 /// - Every other target's `start`/`end` are REAL byte offsets into that file: read the target's
 ///   own source through the host VFS (`source_reader`) and convert the offsets to a line:col
 ///   `Range` in the client-negotiated `encoding`, exactly as the definition merge does.
@@ -40,11 +43,12 @@ use super::position::{
 /// - Deduplicate by (uri, range.start).
 #[expect(
     clippy::too_many_arguments,
-    reason = "references merging needs the mapper, indexes, resolver, encoding, and VFS reader"
+    reason = "references merging needs the current TSX path, mapper, indexes, resolver, encoding, and VFS reader"
 )]
 pub fn merge_references(
     verter_refs: Option<Vec<Location>>,
     type_refs: Vec<TypeLocation>,
+    current_tsx_path: &str,
     tsx_line_index: &LineIndex,
     mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
@@ -56,14 +60,17 @@ pub fn merge_references(
     let mut result = verter_refs.unwrap_or_default();
 
     for loc in &type_refs {
-        // For carrier IDE targets, map back to carrier-source positions through the sourcemap.
-        // FAIL CLOSED: a carrier-IDE mapping failure DROPS the reference — never fabricate a
-        // `Range::default()` (line 0), exactly as the external-target branch below fails closed.
+        // For carrier IDE targets, map back to carrier-source positions through the single shared
+        // strict mapper, split by canonical identity: the CURRENT request's TSX uses the in-context
+        // mapper; a FOREIGN carrier `.tsx` requires its own context via the external resolver and is
+        // DROPPED on a miss/failure. FAIL CLOSED — never fabricate a `Range::default()` (line 0),
+        // and never map a foreign file's offsets through the current request's sourcemap.
         if is_carrier_ide_path(&loc.path) {
-            let Some(range) = resolve_carrier_tsx_range(
+            let Some(range) = resolve_carrier_ide_range_strict(
                 &loc.path,
                 loc.start,
                 loc.end,
+                current_tsx_path,
                 tsx_line_index,
                 mapper,
                 carrier_line_index,
@@ -127,7 +134,9 @@ pub fn merge_references(
 /// - Start with verter's same-file WorkspaceEdit.
 /// - Add TypeProvider's cross-file rename locations as additional TextEdits.
 /// - A carrier IDE target (`{carrier}.tsx`/`.jsx`) maps its TSX byte offsets back to the carrier
-///   source through that file's CodeTransform sourcemap (in-context mapper / external resolver).
+///   source through the single shared strict mapper ([`resolve_carrier_ide_range_strict`]): the
+///   in-context mapper for the queried file, the external resolver for a foreign component (a
+///   foreign target is DROPPED on a resolver miss, never line-0'd through the current sourcemap).
 /// - A carrier PUBLIC-API target (`{carrier}.ts`) — the surface where an imported component's
 ///   `defineProps<{ … }>` props are lifted into the `$props` / `new(props?)` declaration — maps its
 ///   API-surface byte offsets back to the carrier source through that surface's own CodeTransform
@@ -144,12 +153,13 @@ pub fn merge_references(
 #[allow(clippy::mutable_key_type)]
 #[expect(
     clippy::too_many_arguments,
-    reason = "rename merging needs the mapper, indexes, IDE+API resolvers, encoding, and VFS reader"
+    reason = "rename merging needs the current TSX path, mapper, indexes, IDE+API resolvers, encoding, and VFS reader"
 )]
 pub fn merge_rename_locations(
     verter_edit: Option<WorkspaceEdit>,
     type_locations: Vec<RenameLocation>,
     new_name: &str,
+    current_tsx_path: &str,
     tsx_line_index: &LineIndex,
     mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
@@ -170,13 +180,16 @@ pub fn merge_rename_locations(
 
     for loc in &type_locations {
         // FAIL CLOSED: a carrier-IDE mapping failure DROPS the rename edit — a `Range::default()`
-        // rename edit would write the new name at line 0 of the wrong file and CORRUPT it. Mirrors
-        // the external-target branch's fail-closed handling.
+        // rename edit would write the new name at line 0 of the wrong file and CORRUPT it. Routes
+        // through the single shared strict mapper, split by canonical identity: the CURRENT request's
+        // TSX uses the in-context mapper; a FOREIGN carrier `.tsx` requires its own context via the
+        // external resolver and is DROPPED on a miss — never mapped through the current sourcemap.
         if is_carrier_ide_path(&loc.path) {
-            let Some(range) = resolve_carrier_tsx_range(
+            let Some(range) = resolve_carrier_ide_range_strict(
                 &loc.path,
                 loc.start,
                 loc.end,
+                current_tsx_path,
                 tsx_line_index,
                 mapper,
                 carrier_line_index,

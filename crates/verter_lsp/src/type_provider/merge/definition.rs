@@ -18,58 +18,6 @@ use super::position::{
     tsx_range_to_carrier_range, BarrelResolver, ExternalIdeResolver, ExternalSourceReader,
 };
 
-/// Resolve a carrier IDE (`{carrier}.tsx`/`.jsx`) target's byte offsets to a carrier-source
-/// [`Range`], FAIL-CLOSED.
-///
-/// Prioritizes the external resolver (which looks up the target file's actual IDE context)
-/// over the current file's mapper. Only falls back to the current file's context if
-/// no external resolver is provided or the resolver doesn't know about the target.
-///
-/// Returns `None` whenever no in-context sourcemap bridges the offsets (no/unknown external
-/// resolver AND the current-file mapper does not map them, or any synthetic/unmapped region).
-/// The caller MUST then DROP the reference / rename edit — never substitute `Range::default()`,
-/// which silently sends "Find All References" to line 0 of the wrong file, or worse, writes a
-/// rename's new name at line 0 and CORRUPTS the target. This mirrors the definition path's
-/// [`resolve_carrier_ide_range_strict`] fail-closed contract.
-pub(crate) fn resolve_carrier_tsx_range(
-    path: &str,
-    start: u32,
-    end: u32,
-    current_tsx_line_index: &LineIndex,
-    current_mapper: &ProviderPositionMapper,
-    current_carrier_line_index: &LineIndex,
-    external_resolver: Option<ExternalIdeResolver<'_>>,
-) -> Option<Range> {
-    // Try external resolver first — it provides the correct mapper for the target file.
-    // Without this, cross-file navigation uses the *current* file's mapper, producing
-    // wrong positions (e.g., (0,0) or positions from the wrong file).
-    if let Some(resolver) = external_resolver {
-        if let Some(ctx) = resolver(path) {
-            if let Some(range) = tsx_range_to_carrier_range(
-                start,
-                end,
-                &ctx.tsx_line_index,
-                &ctx.mapper,
-                &ctx.carrier_line_index,
-            ) {
-                return Some(range);
-            }
-        }
-    }
-
-    // Fallback: use current file context (works when target is same file being queried).
-    // Fail closed (None) when even the current mapper cannot bridge the offsets — the old
-    // `.unwrap_or_default()` collapsed a failed map into a line-0 range pointing at the wrong
-    // place.
-    tsx_range_to_carrier_range(
-        start,
-        end,
-        current_tsx_line_index,
-        current_mapper,
-        current_carrier_line_index,
-    )
-}
-
 /// Resolve a definition/type-definition target's byte-offset range to an LSP `Range` by
 /// reading the target's own source through the host workspace (VFS) and converting through
 /// [`LineIndex`].

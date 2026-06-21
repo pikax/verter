@@ -1113,6 +1113,7 @@ fn merge_references_both_present() {
     let result = merge_references(
         verter,
         type_refs,
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -1132,6 +1133,7 @@ fn merge_references_neither() {
     let result = merge_references(
         None,
         vec![],
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -1155,6 +1157,7 @@ fn merge_references_verter_only() {
     let result = merge_references(
         verter,
         vec![],
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -1165,6 +1168,71 @@ fn merge_references_verter_only() {
     );
     assert!(result.is_some());
     assert_eq!(result.unwrap().len(), 1);
+}
+
+/// A reference at a FOREIGN carrier IDE `.tsx` (a different component than the one being queried)
+/// whose offsets HAPPEN to map in the CURRENT request's mapper must FAIL CLOSED with no external
+/// resolver — the offsets index the foreign file's TSX, so the current sourcemap would land on an
+/// unrelated location. The pre-fix lenient resolver fell back to the current mapper for ANY path,
+/// so offsets 6..9 (which map to the current `.vue` `const msg`) produced a bogus foreign reference;
+/// the strict resolver drops it.
+#[test]
+fn merge_references_foreign_carrier_fails_closed_without_resolver() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let foreign = vec![TypeLocation {
+        path: "/other.vue.tsx".to_string(),
+        start: 6,
+        end: 9,
+    }];
+    let no_external: Option<ExternalIdeResolver> = None;
+    let dropped = merge_references(
+        None,
+        foreign,
+        // current request is /test.vue.tsx; the ref targets a DIFFERENT carrier file.
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    assert!(
+        dropped.is_none(),
+        "a FOREIGN carrier reference with no resolver must be DROPPED, never mapped through the \
+         current request's sourcemap: {dropped:?}"
+    );
+
+    // Positive control: the SAME offsets at the SAME (current) carrier file still map.
+    let same_file = vec![TypeLocation {
+        path: "/test.vue.tsx".to_string(),
+        start: 6,
+        end: 9,
+    }];
+    let kept = merge_references(
+        None,
+        same_file,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None::<ExternalIdeResolver>,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    let locs = kept.expect("the same-file carrier reference must survive");
+    assert_eq!(locs.len(), 1, "the same-file carrier reference survives");
+    assert_eq!(
+        locs[0].range.start,
+        Position {
+            line: 5,
+            character: 6,
+        },
+        "the same-file reference maps to the carrier `const msg`, got {:?}",
+        locs[0].range.start
+    );
 }
 
 // ── Document highlights merge tests ───────────────────────────────
@@ -1836,6 +1904,7 @@ fn merge_rename_verter_only() {
         verter,
         vec![],
         "newName",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -1856,6 +1925,7 @@ fn merge_rename_neither() {
         None,
         vec![],
         "newName",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -1866,6 +1936,82 @@ fn merge_rename_neither() {
         &no_source,
     );
     assert!(result.is_none());
+}
+
+/// A rename location at a FOREIGN carrier IDE `.tsx` whose offsets HAPPEN to map in the CURRENT
+/// request's mapper must FAIL CLOSED with no external resolver — the offsets index the foreign
+/// file's TSX, so the current sourcemap would write the new name at an unrelated location and
+/// CORRUPT it. The pre-fix lenient resolver fell back to the current mapper for ANY path; the
+/// strict resolver drops it. This is the rename twin of the code-action/references foreign drop —
+/// the corruption stakes are highest here because rename produces WRITE edits.
+#[test]
+fn merge_rename_foreign_carrier_fails_closed_without_resolver() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let foreign = vec![RenameLocation {
+        path: "/other.vue.tsx".to_string(),
+        start: 6,
+        end: 9,
+    }];
+    let no_external: Option<ExternalIdeResolver> = None;
+    let dropped = merge_rename_locations(
+        None,
+        foreign,
+        "renamed",
+        // current request is /test.vue.tsx; the rename targets a DIFFERENT carrier file.
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        None::<ExternalApiResolver>,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    assert!(
+        dropped.is_none(),
+        "a FOREIGN carrier rename edit with no resolver must be DROPPED — a line-0/wrong-file \
+         rename WRITE would corrupt an unrelated file: {dropped:?}"
+    );
+
+    // Positive control: the SAME offsets at the SAME (current) carrier file still produce the
+    // mapped rename edit, proving the strict change did not over-drop the same-file path.
+    let same_file = vec![RenameLocation {
+        path: "/test.vue.tsx".to_string(),
+        start: 6,
+        end: 9,
+    }];
+    let kept = merge_rename_locations(
+        None,
+        same_file,
+        "renamed",
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None::<ExternalIdeResolver>,
+        None::<ExternalApiResolver>,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    let edit = kept.expect("the same-file carrier rename must survive");
+    let changes = edit.changes.expect("rename produces changes");
+    let (uri, edits) = changes.iter().next().expect("one change set");
+    assert_eq!(
+        uri.as_str(),
+        "file:///test.vue",
+        "the same-file rename must key the .vue source URI, got {uri:?}"
+    );
+    assert_eq!(
+        edits[0].range.start,
+        Position {
+            line: 5,
+            character: 6,
+        },
+        "the same-file rename maps to the carrier `const msg`, got {:?}",
+        edits[0].range.start
+    );
 }
 
 // ── Definition merge tests (Bug 2) ───────────────────────────────
@@ -2427,6 +2573,7 @@ fn merge_references_vue_dts_is_dropped_not_zeroed() {
     let result = merge_references(
         None,
         type_refs,
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -2476,6 +2623,7 @@ fn merge_rename_real_on_disk_carrier_ts_edits_in_place_never_maps_into_vue() {
         None,
         type_locations,
         "childHelperRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -2600,6 +2748,7 @@ fn merge_rename_carrier_api_target_maps_via_api_sourcemap_and_is_included() {
         None,
         type_locations.clone(),
         "fooRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -2619,6 +2768,7 @@ fn merge_rename_carrier_api_target_maps_via_api_sourcemap_and_is_included() {
         None,
         type_locations,
         "fooRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -2745,6 +2895,7 @@ fn merge_rename_carrier_api_target_utf8_session_nonascii_prefix_maps_correct_ran
         None,
         type_locations,
         "fooRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -2796,6 +2947,7 @@ fn merge_rename_vue_dts_is_dropped_not_zeroed() {
         None,
         type_locations,
         "NewName",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -2839,6 +2991,7 @@ fn merge_rename_carrier_api_unsynced_surface_no_backing_file_is_dropped() {
         None,
         type_locations,
         "fooRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -2901,6 +3054,7 @@ fn merge_rename_superseded_virtual_surface_with_real_backing_file_fails_closed()
         None,
         type_locations,
         "fooRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -2955,6 +3109,7 @@ fn merge_rename_not_virtual_path_with_real_backing_file_edits_in_place() {
         None,
         type_locations,
         "childHelperRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -3056,6 +3211,7 @@ fn merge_rename_store_known_virtual_absent_from_capture_routes_virtual_drop_end_
         None,
         type_locations,
         "fooRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -3110,6 +3266,7 @@ fn merge_rename_store_unknown_path_with_real_backing_edits_in_place_end_to_end()
         None,
         type_locations,
         "fooRenamed",
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,

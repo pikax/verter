@@ -538,6 +538,7 @@ pub(super) async fn handle_references(
                         return Ok(merge::merge_references(
                             verter_result,
                             type_refs,
+                            &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
@@ -714,6 +715,7 @@ pub(super) async fn handle_rename(
                             verter_result,
                             type_locs,
                             new_name,
+                            &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,

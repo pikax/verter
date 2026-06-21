@@ -110,6 +110,7 @@ fn external_ts_reference_keeps_the_real_line_not_zero() {
     let result = merge_references(
         None,
         type_refs,
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -168,6 +169,7 @@ fn external_reference_with_unresolvable_source_is_dropped_not_zeroed() {
     let result = merge_references(
         None,
         type_refs,
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -214,6 +216,7 @@ fn external_svelte_child_reference_keeps_the_real_line_not_zero() {
     let result = merge_references(
         None,
         type_refs,
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -261,6 +264,7 @@ fn external_ts_rename_keeps_the_real_line_not_zero() {
         None,
         type_locations,
         "newFormatCount",
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -318,6 +322,7 @@ fn external_rename_with_unresolvable_source_is_dropped_not_zeroed() {
         None,
         type_locations,
         "whatever",
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -382,6 +387,7 @@ fn external_reference_multibyte_column_correct_under_utf16_and_utf8() {
         let result = merge_references(
             None,
             type_refs,
+            "/proj/Caller.vue.tsx",
             &tsx_li,
             &mapper,
             &carrier_li,
@@ -444,6 +450,7 @@ fn external_reference_multibyte_columns_differ_between_encodings() {
         let result = merge_references(
             None,
             type_refs,
+            "/proj/Caller.vue.tsx",
             &tsx_li,
             &mapper,
             &carrier_li,
@@ -466,8 +473,8 @@ fn external_reference_multibyte_columns_differ_between_encodings() {
 
 /// A carrier IDE virtual file (`{carrier}.vue.tsx`) target whose byte offsets DO NOT map through
 /// any in-context sourcemap (no external resolver, and the current-file mapper can't bridge the
-/// offsets) must be DROPPED — never collapsed to `Range::default()` (line 0). This is the gap
-/// `resolve_carrier_tsx_range`'s old `.unwrap_or_default()` left open for references / rename.
+/// offsets) must be DROPPED — never collapsed to `Range::default()` (line 0). The shared strict
+/// carrier-IDE resolver fails closed here; the old lenient `.unwrap_or_default()` line-0'd it.
 fn unmappable_carrier_ide_path() -> String {
     // `path_is_carrier` of `…/Foo.vue` is true → `…/Foo.vue.tsx` is a carrier IDE path.
     "/proj/Foo.vue.tsx".to_string()
@@ -497,6 +504,9 @@ fn carrier_ide_reference_mapping_failure_is_dropped_not_zeroed() {
     let result = merge_references(
         None,
         type_refs,
+        // current request is a DIFFERENT carrier file → the foreign-carrier path with no resolver
+        // fails closed (its offsets 9000.. do not map anywhere regardless).
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -532,6 +542,7 @@ fn carrier_ide_rename_mapping_failure_is_dropped_not_zeroed() {
         None,
         type_locations,
         "newName",
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -601,6 +612,9 @@ fn carrier_ide_reference_with_valid_external_mapper_survives() {
     let result = merge_references(
         None,
         type_refs,
+        // current request is a DIFFERENT carrier file → the FOREIGN carrier target routes through
+        // its own context via `ext` (the resolver), proving the resolver bridges it.
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -660,6 +674,7 @@ fn barrel_reexport_reference_keeps_real_line() {
     let result = merge_references(
         None,
         type_refs,
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
@@ -697,6 +712,7 @@ fn barrel_reexport_rename_keeps_real_line() {
         None,
         type_locations,
         "WidgetRenamed",
+        "/proj/Caller.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
