@@ -1204,9 +1204,9 @@ fn merge_references_verter_only() {
 /// A reference at a FOREIGN carrier IDE `.tsx` (a different component than the one being queried)
 /// whose offsets HAPPEN to map in the CURRENT request's mapper must FAIL CLOSED with no external
 /// resolver — the offsets index the foreign file's TSX, so the current sourcemap would land on an
-/// unrelated location. The pre-fix lenient resolver fell back to the current mapper for ANY path,
-/// so offsets 6..9 (which map to the current `.vue` `const msg`) produced a bogus foreign reference;
-/// the strict resolver drops it.
+/// unrelated location. Discriminating: a lenient resolver that fell back to the current mapper for
+/// ANY path would let offsets 6..9 (which map to the current `.vue` `const msg`) produce a bogus
+/// foreign reference; the strict resolver drops it.
 #[test]
 fn merge_references_foreign_carrier_fails_closed_without_resolver() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
@@ -1567,10 +1567,10 @@ fn merge_code_actions_external_edit_keeps_real_range_or_fails_closed() {
 /// A code-action edit targeting a FOREIGN carrier IDE `.tsx` (a different component than the one
 /// being queried) must FAIL CLOSED when no external resolver can supply that file's own sourcemap:
 /// the edit's offsets index the foreign file's TSX, so mapping them through the CURRENT request's
-/// mapper would corrupt an unrelated location. The pre-fix code mapped every `is_carrier_ide_path`
-/// edit through the current mapper unconditionally, so a foreign edit with offsets that happen to be
-/// mappable in the current sourcemap (6..9 → the current `.vue` `const msg`) produced a bogus carrier
-/// edit; the fix drops it.
+/// mapper would corrupt an unrelated location. Discriminating: mapping every `is_carrier_ide_path`
+/// edit through the current mapper unconditionally would let a foreign edit with offsets that happen
+/// to be mappable in the current sourcemap (6..9 → the current `.vue` `const msg`) produce a bogus
+/// carrier edit; the strict resolver drops it.
 #[test]
 fn merge_code_actions_foreign_carrier_edit_fails_closed_without_resolver() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
@@ -1977,9 +1977,10 @@ fn merge_rename_neither() {
 /// A rename location at a FOREIGN carrier IDE `.tsx` whose offsets HAPPEN to map in the CURRENT
 /// request's mapper must FAIL CLOSED with no external resolver — the offsets index the foreign
 /// file's TSX, so the current sourcemap would write the new name at an unrelated location and
-/// CORRUPT it. The pre-fix lenient resolver fell back to the current mapper for ANY path; the
-/// strict resolver drops it. This is the rename twin of the code-action/references foreign drop —
-/// the corruption stakes are highest here because rename produces WRITE edits.
+/// CORRUPT it. Discriminating: a lenient resolver that fell back to the current mapper for ANY path
+/// would write at the bogus location; the strict resolver drops it. This is the rename twin of the
+/// code-action/references foreign drop — the corruption stakes are highest here because rename
+/// produces WRITE edits.
 #[test]
 fn merge_rename_foreign_carrier_fails_closed_without_resolver() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();

@@ -923,10 +923,9 @@ async fn test_get_semantic_tokens_cache_miss_returns_empty() {
         cache.get("/project/src/Missing.vue.tsx").cloned()
     };
 
-    // A cache miss yields None → the resolver early-returns.
+    // A cache miss yields None → the resolver early-returns with an empty
+    // result and sends no transport request. This asserts that None path exists.
     assert!(content.is_none(), "cache miss should yield None");
-    // The actual fix changes the code to `return Ok(vec![])` here,
-    // so no transport request is sent. We verify the None path exists.
 }
 
 // ── env denylist test ──────────────────────────────────────────

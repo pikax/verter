@@ -1339,7 +1339,7 @@ fn test_parse_code_action() {
             }
         }
     });
-    // Seed resolvable content for the edit's target so the (now fail-closed) edit survives; the
+    // Seed resolvable content for the edit's target so the fail-closed edit survives; the
     // assertion under test is the parsed action structure, not packed-offset survival. The (0,0)
     // range resolves against any content.
     let content_for = |p: &str| -> Option<&str> { (p == "/test.ts").then_some("") };

@@ -3826,7 +3826,7 @@ mod dto_path_canonicalization_tests {
     fn parse_rename_edit_stores_canonical_path_not_raw_uri() {
         // The DTO path must be the canonical filesystem ID, NEVER the raw URI.
         // Reverting `parse_rename_edit` to `path: uri.to_string()` fails this.
-        // Seed resolvable content keyed by the CANONICAL path so the (now fail-closed) rename
+        // Seed resolvable content keyed by the CANONICAL path so the fail-closed rename
         // location survives; the assertion under test is the canonical path, not the raw URI.
         let content = "ab";
         let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
@@ -3968,7 +3968,7 @@ mod dto_path_canonicalization_tests {
             },
             "newText": "x"
         });
-        // Seed resolvable content keyed by the CANONICAL path so the (now fail-closed) edit survives;
+        // Seed resolvable content keyed by the CANONICAL path so the fail-closed edit survives;
         // the assertion under test is that the stored path is canonical, not the raw `file://` URI.
         let content = "ab";
         let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
