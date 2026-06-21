@@ -1,0 +1,40 @@
+{
+  "slug": "matrix/derived_expr.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "derived_expr",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "derived",
+    "escape"
+  ],
+  "helperSet": [
+    "derived",
+    "escape"
+  ],
+  "helperCounts": {
+    "derived": 1,
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

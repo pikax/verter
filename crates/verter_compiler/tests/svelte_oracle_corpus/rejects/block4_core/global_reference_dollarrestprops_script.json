@@ -1,0 +1,4 @@
+{
+  "rule": "GlobalReferenceInvalid",
+  "official_code": "legacy_rest_props_invalid"
+}

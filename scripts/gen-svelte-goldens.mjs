@@ -115,6 +115,7 @@ import {
   helperSequenceOf,
   loadPinnedCompiler as loadPinnedCompilerFrom,
   maskScopeHash,
+  normalizeModuleForComparison,
 } from "./svelte-golden-lib.mjs";
 
 // ---------------------------------------------------------------------------
@@ -370,7 +371,6 @@ function componentNameFor(slug) {
 // extractDelegatedEvents) live in ./svelte-golden-lib.mjs (imported above) — the
 // single source of truth shared with scripts/gen-svelte-diff-corpus.mjs.
 
-
 /** Normalize one compiled fixture to its topology golden object. */
 function normalize(slug, backend, compiled) {
   const code = compiled.js.code;
@@ -398,6 +398,12 @@ function normalize(slug, backend, compiled) {
     // declaration) — client backend only (the server does no event delegation).
     delegatedEvents: backend === "client" ? extractDelegatedEvents(code) : [],
     templates: backend === "client" ? extractTemplates(code) : [],
+    // The FULL normalized official module (client backend only) — the
+    // argument/offset/identifier-precise oracle the emitted-JS topology gate
+    // compares Verter's normalized output against (cosmetic whitespace collapsed
+    // OUTSIDE literals; literal/template TEXT preserved byte-exact). The server
+    // backend omits it (the client gate is the only consumer today).
+    clientModule: backend === "client" ? normalizeModuleForComparison(code) : null,
     css,
   };
 }

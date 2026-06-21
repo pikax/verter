@@ -152,6 +152,12 @@ struct CommittedGolden {
     #[serde(rename = "delegatedEvents")]
     delegated_events: Vec<String>,
     templates: Vec<TemplateSkeleton>,
+    /// The FULL normalized official module (the emitted-JS equivalence oracle) —
+    /// present on the CLIENT backend, `null` on the server. Optional so the
+    /// `deny_unknown_fields` server golden (which carries `clientModule: null`)
+    /// still deserializes.
+    #[serde(rename = "clientModule")]
+    client_module: Option<String>,
     css: CssTopology,
 }
 
@@ -242,6 +248,32 @@ fn validate_committed_golden(path: &Path, raw: &str) -> Result<(), String> {
             golden.helper_counts,
             derived_counts
         ));
+    }
+
+    // The full-module equivalence oracle (`clientModule`) is CLIENT-only: present
+    // and non-empty on a client golden, `null` on a server golden. (The client gate
+    // compares Verter's normalized output against it; the server backend has no
+    // client-module consumer.)
+    match (golden.backend.as_str(), &golden.client_module) {
+        ("client", None) => {
+            return Err(format!(
+                "{}: a client golden must carry a `clientModule` (the full-module oracle)",
+                path.display()
+            ));
+        }
+        ("client", Some(m)) if m.is_empty() => {
+            return Err(format!(
+                "{}: a client golden's `clientModule` must be non-empty",
+                path.display()
+            ));
+        }
+        ("server", Some(_)) => {
+            return Err(format!(
+                "{}: a server golden must carry `clientModule: null`",
+                path.display()
+            ));
+        }
+        _ => {}
     }
 
     // The server backend never emits client DOM template skeletons.

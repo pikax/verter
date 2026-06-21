@@ -46,6 +46,7 @@ fn value(semantic_hash: Hash16) -> CompileOutputValue {
         None,
         None,
         None,
+        false,
     )
 }
 
@@ -378,6 +379,7 @@ fn session_peek_output_returns_per_kind_pair() {
         None,
         None,
         None,
+        false,
     );
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     node.publish(&mut state, 42, admission, value, 0);

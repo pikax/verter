@@ -1,0 +1,4 @@
+{
+  "rule": "DollarPrefixInvalid",
+  "official_code": "dollar_prefix_invalid"
+}

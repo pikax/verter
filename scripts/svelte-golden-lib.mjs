@@ -368,6 +368,132 @@ export function extractDelegatedEvents(code) {
   return out;
 }
 
+/**
+ * Normalize a FULL JS module for the emitted-JS equivalence comparison: collapse
+ * cosmetic whitespace OUTSIDE string/template/HTML literals (so a tabs-vs-spaces /
+ * line-wrap / blank-line reflow does not false-fail), while preserving whitespace
+ * INSIDE string / template-literal / regex literals BYTE-EXACT (so an `$$props.bar`
+ * vs `.foo`, a raw `count` vs `$.get(count)`, a dropped `$.child(_, true)` arg, a
+ * sibling-offset drift, or meaningful TEXT whitespace inside a template literal
+ * still fails). This is the FIDELITY the topology gate needs that the helper-name
+ * sequence misses.
+ *
+ * The algorithm walks the module with the SAME literal-aware scanner as
+ * `maskNonCodeRegions`, but instead of blanking literal contents it COPIES them
+ * verbatim; outside literals, it collapses every run of whitespace to a single
+ * space and trims spaces adjacent to a newline, dropping blank lines. The scope
+ * hash inside template literals is masked first (build-noise), matching the
+ * template-skeleton normalization.
+ */
+export function normalizeModuleForComparison(code) {
+  const masked = maskScopeHash(code);
+  const n = masked.length;
+  const tmplStack = [];
+  let out = "";
+  let i = 0;
+
+  const inTemplateText = () =>
+    tmplStack.length > 0 && tmplStack[tmplStack.length - 1].interpDepth === 0;
+
+  while (i < n) {
+    if (inTemplateText()) {
+      const ch = masked[i];
+      if (ch === "\\") {
+        out += masked.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (ch === "`") {
+        tmplStack.pop();
+        out += "`";
+        i += 1;
+        continue;
+      }
+      if (ch === "$" && i + 1 < n && masked[i + 1] === "{") {
+        tmplStack[tmplStack.length - 1].interpDepth = 1;
+        out += "${";
+        i += 2;
+        continue;
+      }
+      // Template TEXT — copied verbatim (whitespace is significant DOM text).
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    const ch = masked[i];
+    const next = i + 1 < n ? masked[i + 1] : "";
+
+    // Line / block comments are dropped entirely (cosmetic).
+    if (ch === "/" && next === "/") {
+      while (i < n && masked[i] !== "\n") i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i += 2;
+      while (i < n && !(masked[i] === "*" && i + 1 < n && masked[i + 1] === "/")) i += 1;
+      i += 2;
+      continue;
+    }
+    // String literals — copied verbatim.
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      out += ch;
+      i += 1;
+      while (i < n && masked[i] !== quote) {
+        if (masked[i] === "\\") {
+          out += masked.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
+        out += masked[i];
+        i += 1;
+      }
+      if (i < n) {
+        out += masked[i];
+        i += 1;
+      }
+      continue;
+    }
+    // Template-literal open — copied verbatim, contents handled by the text loop.
+    if (ch === "`") {
+      tmplStack.push({ interpDepth: 0 });
+      out += "`";
+      i += 1;
+      continue;
+    }
+    // Track `${…}` interpolation depth (so a `}` returns to template text).
+    if (tmplStack.length > 0 && tmplStack[tmplStack.length - 1].interpDepth > 0) {
+      const frame = tmplStack[tmplStack.length - 1];
+      if (ch === "{") {
+        frame.interpDepth += 1;
+        out += "{";
+        i += 1;
+        continue;
+      }
+      if (ch === "}") {
+        frame.interpDepth -= 1;
+        out += "}";
+        i += 1;
+        continue;
+      }
+    }
+    // Whitespace OUTSIDE a literal — collapse a run to a single space.
+    if (/\s/.test(ch)) {
+      while (i < n && /\s/.test(masked[i])) i += 1;
+      out += " ";
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+
+  // Trim the leading/trailing space the outside-literal collapse may have left.
+  // A `replace(/\s+/g, " ")` here would DESTROY the whitespace inside string /
+  // template literals this scanner deliberately preserved, so only trim.
+  return out.trim();
+}
+
 /** Normalize the compiled CSS to `{present, hash, code}` (scope hash masked). */
 export function normalizeCss(compiled) {
   const cssCode = compiled.css && compiled.css.code ? compiled.css.code : null;
@@ -449,9 +575,7 @@ export function extractClientEvents(code) {
 
   rows.sort(
     (a, b) =>
-      cmpStr(a.type, b.type) ||
-      cmpStr(a.target, b.target) ||
-      cmpStr(a.delegation, b.delegation),
+      cmpStr(a.type, b.type) || cmpStr(a.target, b.target) || cmpStr(a.delegation, b.delegation),
   );
   return rows;
 }
@@ -1005,15 +1129,11 @@ export function extractClientNodePaths(code) {
   for (const regionBody of splitRegions(code)) {
     const paths = nodePathsInRegion(regionBody);
     if (paths.length === 0) continue;
-    paths.sort(
-      (a, b) => cmpStr(a.base, b.base) || cmpStr(a.steps.join(">"), b.steps.join(">")),
-    );
+    paths.sort((a, b) => cmpStr(a.base, b.base) || cmpStr(a.steps.join(">"), b.steps.join(">")));
     regions.push({ paths });
   }
   // Stable region order: sort by serialized path-set.
-  regions.sort((a, b) =>
-    cmpStr(JSON.stringify(a.paths), JSON.stringify(b.paths)),
-  );
+  regions.sort((a, b) => cmpStr(JSON.stringify(a.paths), JSON.stringify(b.paths)));
   return { regions };
 }
 
@@ -1037,8 +1157,7 @@ function splitRegions(code) {
       // Look back for `)` or `=>` (a function/arrow body) skipping whitespace.
       let j = i - 1;
       while (j >= 0 && /\s/.test(code[j])) j -= 1;
-      const isBody =
-        code[j] === ")" || (code[j] === ">" && code[j - 1] === "=");
+      const isBody = code[j] === ")" || (code[j] === ">" && code[j - 1] === "=");
       if (isBody) {
         const body = readBalanced(code, i, "{", "}");
         if (body !== null) {
@@ -1156,9 +1275,7 @@ export function extractDynamicSlotCounts(code) {
 
   bump(
     "text",
-    countOf(/\$\.set_text\(/g) +
-      countOf(/\.textContent\s*=/g) +
-      countOf(/\.nodeValue\s*=/g),
+    countOf(/\$\.set_text\(/g) + countOf(/\.textContent\s*=/g) + countOf(/\.nodeValue\s*=/g),
   );
   bump("attribute", countOf(/\$\.set_attribute\(/g));
   bump("class", countOf(/\$\.set_class\(/g));
@@ -1169,10 +1286,7 @@ export function extractDynamicSlotCounts(code) {
   bump("html", countOf(/\$\.html\(/g));
   bump(
     "block",
-    countOf(/\$\.if\(/g) +
-      countOf(/\$\.each\(/g) +
-      countOf(/\$\.await\(/g) +
-      countOf(/\$\.key\(/g),
+    countOf(/\$\.if\(/g) + countOf(/\$\.each\(/g) + countOf(/\$\.await\(/g) + countOf(/\$\.key\(/g),
   );
 
   return counts;

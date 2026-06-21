@@ -130,11 +130,19 @@ pub(crate) struct CompileOutputValue {
     pub tsx: Option<CachedTsx>,
     /// Optional template-analysis snapshot extracted during compile.
     pub template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    /// Whether the carrier FAIL-CLOSED on an unsupported runtime surface (no
+    /// `Main` produced). The TYPED runtime-refusal signal the carrier sets on its
+    /// [`RuntimeCompileOutput`](verter_compiler::framework_common::RuntimeCompileOutput);
+    /// threaded onto the cached value so a runtime-requesting consumer reads the
+    /// refusal from this flag, NOT by sniffing the diagnostic-code prefix
+    /// (framework-neutral — the host never parses a framework-specific code).
+    pub runtime_surface_refused: bool,
 }
 
 impl CompileOutputValue {
     /// Build a value from a compile-tier publish record. Threads the
     /// override + semantic hashes and the per-kind outputs unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_compile_record(
         semantic_hash: Hash16,
         style_override_hash: u64,
@@ -144,6 +152,7 @@ impl CompileOutputValue {
         last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
         tsx: Option<CachedTsx>,
         template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        runtime_surface_refused: bool,
     ) -> Self {
         Self {
             semantic_hash,
@@ -154,6 +163,7 @@ impl CompileOutputValue {
             last_good_outputs,
             tsx,
             template_analysis,
+            runtime_surface_refused,
         }
     }
 }
@@ -533,6 +543,7 @@ impl CompileOutputNodeFactValidatedSession {
             outputs: slot.outputs.clone(),
             diagnostics: slot.diagnostics.clone(),
             tsx: slot.tsx.clone(),
+            runtime_surface_refused: slot.runtime_surface_refused,
         })
     }
 
@@ -569,6 +580,7 @@ impl CompileOutputNodeFactValidatedSession {
                     tsx: value.tsx,
                     template_analysis: value.template_analysis,
                     fact_dep_signature: signature,
+                    runtime_surface_refused: value.runtime_surface_refused,
                 };
                 profile_state.compile_slot_insert_for_node(profile_hash, slot);
                 SessionPublishOutcome::Admitted
@@ -707,6 +719,9 @@ pub(crate) struct SessionLookupHit {
     pub diagnostics: DiagnosticsSnapshot,
     /// Optional combined TSX output (IDE / LSP).
     pub tsx: Option<CachedTsx>,
+    /// Whether the carrier fail-closed on an unsupported runtime surface (the typed
+    /// runtime-refusal signal carried on the cached value).
+    pub runtime_surface_refused: bool,
 }
 
 /// Result of [`CompileOutputNodeFactValidatedSession::publish`].

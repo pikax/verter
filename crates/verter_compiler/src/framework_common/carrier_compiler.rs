@@ -312,6 +312,17 @@ pub struct RuntimeCompileOutput {
     /// Diagnostics emitted during the runtime compile. The host lifts these
     /// into its `DiagnosticsSnapshot`; an error here fails the compile.
     pub diagnostics: Vec<RuntimeDiagnostic>,
+    /// Whether the carrier REFUSED to produce a runtime surface for an
+    /// unsupported construct (a fail-closed runtime outcome), DISTINCT from
+    /// "no runtime surface was requested / this carrier is IDE-only". A
+    /// consumer REQUESTING the runtime artifact reads this to distinguish a
+    /// genuine unsupported-runtime refusal (no `Main`, the precise reason in
+    /// `diagnostics`) from a clean compile — so it cannot mistake an absent
+    /// `Main` for a successful runtime compile. The matching IDE artifact is
+    /// still produced (type-checking survives); the refusal diagnostics stay
+    /// NON-FATAL (`has_errors()` is false) so the IDE compile is not killed.
+    /// A carrier that emits a runtime surface (Vue) leaves this `false`.
+    pub runtime_surface_refused: bool,
 }
 
 impl RuntimeCompileOutput {
@@ -334,6 +345,17 @@ impl RuntimeCompileOutput {
         self.diagnostics
             .iter()
             .any(|d| d.severity == RuntimeDiagnosticSeverity::Error)
+    }
+
+    /// Whether the carrier REFUSED a runtime surface for an unsupported
+    /// construct (a fail-closed runtime outcome). A runtime-requesting consumer
+    /// uses this — together with `has_runtime_surface() == false` — to treat the
+    /// outcome as a runtime refusal rather than a successful compile, while the
+    /// IDE artifact (`tsx`) and the non-fatal diagnostics keep type-checking
+    /// alive. NEVER true on a clean compile (a refusal sets it AND omits `Main`).
+    #[must_use]
+    pub fn runtime_surface_refused(&self) -> bool {
+        self.runtime_surface_refused
     }
 }
 

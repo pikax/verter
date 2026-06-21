@@ -1,6 +1,11 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // NOTE: the `browser` export condition (needed so `svelte` resolves its CLIENT
+  // build — `mount`/`flushSync` — under the DOM test environment) is scoped to
+  // `packages/core/vitest.config.ts`, where the Svelte client smoke runs, NOT the
+  // repo root: a root-level condition changes dependency resolution for every
+  // package's tests (blast radius). Keep DOM-resolution conditions per-package.
   test: {
     globals: true,
     exclude: [

@@ -82,6 +82,7 @@
       "flag": "1"
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/> <div> </div>`, 1); export default function bind_value_and_this($$anchor) { let text = $.state(''); let el = $.state(void 0); var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var div = $.sibling(input, 2); var text_1 = $.child(div, true); $.reset(div); $.bind_this(div, ($$value) => $.set(el, $$value), () => $.get(el)); $.template_effect(() => $.set_text(text_1, $.get(text))); $.bind_value(input, () => $.get(text), ($$value) => $.set(text, $$value)); $.append($$anchor, fragment); }",
   "css": {
     "present": false,
     "hash": null,

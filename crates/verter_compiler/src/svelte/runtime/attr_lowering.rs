@@ -19,7 +19,7 @@ use super::events::{can_delegate_event, normalize_event_name};
 use super::expr::ScopeId;
 use super::ir::{AttrIr, MixedAttrPart, StaticAttrValue, TransitionKind};
 use super::{local_name_span, span_text, spread_expr_span, LoweringCtx};
-use crate::svelte::parser::tokenizer::find_matching_brace_in;
+use crate::svelte::parser::tokenizer_scan::find_matching_brace_in;
 use crate::svelte::parser::{
     SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteDirective,
     SvelteDirectiveKind,

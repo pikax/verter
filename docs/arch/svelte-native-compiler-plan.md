@@ -140,13 +140,15 @@ executed against the pinned runtime. Verified by the jsdom behavioral harness (�
   `var root = $.from_html(...)`, a single `export default function App($$anchor){...}`, module-scope
   `$.delegate([...])`) — so Svelte assembly is NOT this `_sfc_main` shape.
 - **CarrierCompiler seam** (`crates/verter_compiler/src/framework_common/carrier_compiler.rs`): the
-  trait owns `parse` / `eval_source` / `compile_ide` / `template_data` ONLY — NO runtime-codegen op.
-  Vue impl `vue_bridge::VueCarrierCompiler`; Svelte impl `svelte/carrier.rs::SvelteCarrierCompiler`
-  (parse/eval/IDE-TSX/template_data only). Registry `framework_common/registry.rs::
-  CarrierCompilerRegistry::built_in()`. **The host RUNTIME path is NOT routed through the carrier
-  today**: `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs::compile_entry()` calls
-  `compile_from_parsed` / `compile_sfc` directly (a hardcoded Vue call, ≈ lines 2030-2032), then
-  `assemble_main_module` (≈ line 2068).
+  trait owns `parse` / `eval_source` / `compile_ide` / `template_data` AND `compile_bundle` (the
+  framework-neutral runtime op — there is NO separate `compile_runtime` method). Vue impl
+  `vue_bridge::VueCarrierCompiler`; Svelte impl `svelte/carrier.rs::SvelteCarrierCompiler`. Registry
+  `framework_common/registry.rs::CarrierCompilerRegistry::built_in()`. The host RUNTIME path IS
+  routed through the carrier: `virtual_file_pipeline.rs` calls `compile_bundle` and emits the `Main`
+  virtual node from `RuntimeCompileOutput.main.body_code` when `has_runtime_surface()` is true.
+  Svelte's `compile_bundle` emits the native `svelte/internal/client` module for the supported runes
+  subset (the `svelte/runtime/client.rs` backend) and FAILS CLOSED with a typed
+  `UnsupportedSvelteRuntimeSurface` (a precise non-fatal diagnostic) for every unsupported surface.
 - **Shared Svelte parser** (`crates/verter_compiler/src/svelte/parser/`, ~2045 lines core):
   `parse_svelte(source) -> ParsedSvelte` (lossless, span-based, infallible). AST (`template_ast.rs`):
   `SvelteNode {Text, Comment, Interpolation, Element, Block, Tag}`; `SvelteElement {name, kind, attributes, children, open_span, close_span}`; `SvelteSpecialKind`; `SvelteAttribute {Plain, Spread, Directive(SvelteDirectiveKind)}`; `SvelteBlock {If, Each, Await, Key, Snippet}`; `SvelteTag {Render, Html, Const, …}`. Expression interiors are SPANS; runes are expression content recognized at the IDE layer via `is_rune()` (`ide/store_scan.rs`).
@@ -670,6 +672,65 @@ the `css` mode (external-vs-injected) toggle, the injected path (`$.append_style
 `$$renderer.global.css.add` on server), and surfacing the external CSS artifact on `RuntimeCompileOutput`. It mirrors how Vue's style flow reaches the bundler/unplugin (the
 Vue `query.type === "style"` virtual-file sub-request path — §10.1): the Svelte CSS artifact flows to the
 bundler/unplugin as a style virtual file analogously.
+
+**DEBT LEDGER — deferred CSS ANALYSIS-PHASE diagnostics ONLY (owner: CSS-scoping block 5l; upstream
+`phases/2-analyze/css`).** The Block-4 official-reject gate parses a `<style>` CSS body via a validation-only
+port of upstream's `read/style.js` PARSE-ENTRY control flow (`svelte/runtime/css_reject.rs`, reserved by the
+parser's `StyleBodyProbe` at the `read_style` position, BEFORE `style_duplicate`), so a malformed CSS body's
+exact PARSE-ENTRY code wins the first-error race over `style_duplicate` (the parity-bar requirement for a
+reachable 2nd-`<style>`-body official reject). The PARSE-ENTRY codes this port reproduces —
+`css_expected_identifier` / `css_empty_declaration` / `css_selector_invalid` / `expected_token` (required
+comment-close + brace tokens) / `unexpected_eof` — are NOT deferred: any `read/style.js` parse-entry code is
+a MUST-FIX (a missed/wrong one is a BUG, never ledgerable).
+
+This deferral covers EXACTLY the upstream POST-PARSE CSS ANALYSIS family, which is raised ONLY in
+`phases/2-analyze/css/css-analyze.js` (verified — these codes never originate in `read/style.js`):
+`css_global_*` (global-block placement / combinator / declaration / modifier rules),
+`css_nesting_selector_invalid_placement`, and `css_type_selector_invalid_placement`. Each of these forms
+PARSES clean (`parse()` accepts; a clean-CSS 2nd style still reports `style_duplicate`) and is rejected only
+later by `compile()`'s analysis phase. They are NOT reachable as a wrong-code parity miss in the §1.2-core
+surface today (any top-level `<style>` already fails closed as an unsupported FEATURE, and the parse-entry
+codes are the only ones a 2nd-style body race surfaces). They land with the 5l CSS-analysis port. Owner
+block: 5l (CSS-scoping). Upstream phase: `phases/2-analyze/css` (analysis), NOT `phases/1-parse/read/style.js`
+(parse).
+
+**DEBT LEDGER — exotic raw-block / `lang=` scan corners OUTSIDE the finite lower-case raw-block contract
+(owner: `svelte-native-parser-parity`; phase: post-Block-4 parser parity expansion).** The Block-4 finite
+contract covers lower-case `<script>` / `<style>` raw blocks and the deterministic `lang=` selection forms
+(quoted / unquoted / empty / `ts` / `tsx` / `typescript` / `TS` / no-lang / unrelated-quoted-substring /
+rightmost-overriding — the `script_lang` parse-parity axis + the `lang_scan_*` unit tests). Two exotic
+corners sit OUTSIDE that finite set, and BOTH FAIL CLOSED (behavioral parity is met; only an exotic exact
+code or an UNOBSERVABLE internal grammar choice differs):
+
+- **Quoted-`>` between two `lang=` attributes** (`<script lang=js data-x=">" lang="ts">`). The official
+  constructor regex's `[^>]*` prefix cannot cross the quoted `>`, so the OFFICIAL grammar scan selects the
+  EARLIER `lang=js`; Verter's attribute-aware byte scan skips the quoted value and selects the later
+  `lang="ts"`. This grammar-scan divergence is UNOBSERVABLE end-to-end: the source carries TWO `lang=`
+  attributes, so the official compiler AND Verter both reject it with `attribute_duplicate` (oracle-pinned;
+  locked by `quoted_gt_between_two_langs_rejects_with_attribute_duplicate_both_directions` at the gate level
+  and characterized at the scan level by `lang_scan_quoted_gt_between_two_langs_is_an_out_of_finite_scope_grammar_divergence`).
+  The divergent grammar choice never reaches a body parse. Oracle fixtures: both directions reject
+  `attribute_duplicate` (a both-reject SAME-code case — strictly stronger than the both-reject-different-code
+  bar).
+- **Uppercase `<SCRIPT>` / `<STYLE>` raw tags.** The official raw-block recognizer is case-sensitive on the
+  lowercase tag name; an uppercase `<SCRIPT>` / `<STYLE>` is NOT a raw block and parses as an ordinary
+  element. Verter's §1.2-core raw-block surface is the lower-case form only; an uppercase raw tag is outside
+  the finite contract. Both the official compiler and Verter treat it as a non-raw element (fail closed: it
+  is not a §1.2-core supported surface), so behavioral parity holds. Oracle fixtures land with this owner.
+- **`customElement={EXPR}` with an UNTERMINATED block comment swallowing the close brace**
+  (`<svelte:options customElement={1 /* unterminated} />`). Verter's `customElement={…}` inner span is
+  delimited by the COMMENT-AWARE brace matcher (`find_matching_brace_in`), whose `/*`-to-EOF skip consumes
+  the `}` into the comment, so no closing `}` is found, the span runs to true EOF, and the missing required
+  `}` (`eat('}', true)`) yields `expected_token`. The official compiler reaches a `js_parse_error` along its
+  acorn `read_expression` path on the same source. BOTH REJECT (no `Main` leak); only the exact code differs,
+  and the construct sits OUTSIDE the recognized `customElement` value axes (a value carrying an unterminated
+  comment is not one of the enumerated string / object / null / number / identifier / expression forms). An
+  exotic, out-of-finite-scope corner: behavioral parity (reject ⇔ reject) holds.
+
+When this block lands, each corner gets an oracle-pinned fixture (official-accept → an unsupported row if
+Verter does not compile it; both-reject → the recorded exact code, noting any divergence). Owner:
+`svelte-native-parser-parity`. Upstream phase: `phases/1-parse` (the constructor `lang=` regex +
+`read/script.js` / `read/style.js` raw-block recognition).
 
 ### 3.8 `<svelte:options>` + compile-option axis (first-class, empirically derived from `svelte@5.56.3`)
 

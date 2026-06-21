@@ -59,6 +59,7 @@
       "flag": "1"
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>capitalized</button> <button>trailing digit</button> <button>hyphen name</button>`, 1); export default function mixed_case_and_special_names($$anchor) { let h = () => {}; var fragment = root(); var button = $.first_child(fragment); var button_1 = $.sibling(button, 2); var button_2 = $.sibling(button_1, 2); $.event('Click', button, h); $.event('foo1', button_1, h); $.event('foo-bar', button_2, h); $.append($$anchor, fragment); }",
   "css": {
     "present": false,
     "hash": null,

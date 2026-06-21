@@ -28,6 +28,7 @@
   },
   "delegatedEvents": [],
   "templates": [],
+  "clientModule": null,
   "css": {
     "present": true,
     "hash": "svelte-c4vjvh",

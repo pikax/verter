@@ -16,10 +16,18 @@
 use verter_span::Span;
 
 use super::template_ast::{
-    ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock,
-    SvelteBlockClause, SvelteBlockKind, SvelteClauseKind, SvelteDirective, SvelteDirectiveKind,
-    SvelteElement, SvelteElementKind, SvelteNode, SvelteParseDiagnostic, SvelteScript,
-    SvelteSpecialKind, SvelteStyle, SvelteTag, SvelteTagKind,
+    script_body_grammar_for_source, CloseTagViolation, CloseTagViolationKind,
+    OptionsCustomElementProbe, ParsedSvelte, ScriptBodyGrammar, ScriptBodyProbe, StyleBodyProbe,
+    SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock, SvelteBlockClause,
+    SvelteBlockKind, SvelteClauseKind, SvelteDirective, SvelteDirectiveKind, SvelteElement,
+    SvelteElementKind, SvelteNode, SvelteParseDiagnostic, SvelteParseRejectFact,
+    SvelteParseRejectKind, SvelteScript, SvelteSpecialKind, SvelteStrictParseError,
+    SvelteStrictParseErrorKind, SvelteStyle, SvelteTag, SvelteTagKind,
+};
+use super::tokenizer_scan::{
+    classify_element, declaration_tag_kind, duplicate_attribute_key, find_matching_brace_in,
+    is_tag_name_byte, is_void_element, nonempty_span, paragraph_autocloses_on_block_child,
+    root_only_meta_tag_name, DuplicateKeyClass,
 };
 
 /// Parse Svelte component `source` into a [`ParsedSvelte`].
@@ -30,8 +38,36 @@ pub fn parse_svelte(source: &str) -> ParsedSvelte {
     parser.finish()
 }
 
+/// The well-formedness classification of a close tag's boundary (the bytes after `</`),
+/// produced by [`SvelteParser::classify_close_boundary`]. The malformed variants each map
+/// to a distinct official parse-phase code so every close-tag boundary fails closed with
+/// the exact code the pinned `svelte@5.56.3` compiler emits.
+enum CloseBoundary {
+    /// A well-formed close: a name followed by optional whitespace then `>`. The caller
+    /// reads the name separately (via `close_tag_name_bytes`) and applies match / ancestor
+    /// / stray / void rules.
+    Clean,
+    /// `</>` — a genuine nameless close (official `element_invalid_closing_tag`).
+    Nameless,
+    /// `</ name>` (whitespace before the name) OR a name with a trailing token
+    /// (`</div x>`, `</div/>`) OR EOF before `>` (`</div`) — official `expected_token`.
+    ExpectedToken,
+    /// `</` at EOF — official `unexpected_eof`.
+    UnexpectedEof,
+}
+
+/// A consumed close tag (the result of [`SvelteParser::consume_and_classify_close`]): the
+/// close span, the close NAME (independent of boundary well-formedness), and whether the
+/// boundary was WELL-FORMED (a clean close), so the caller can recognise a matching close
+/// even when its boundary is malformed.
+struct ConsumedClose {
+    span: Span,
+    name: Option<String>,
+    clean: bool,
+}
+
 /// The forward byte parser state.
-struct SvelteParser<'a> {
+pub(super) struct SvelteParser<'a> {
     src: &'a [u8],
     text: &'a str,
     pos: usize,
@@ -40,6 +76,66 @@ struct SvelteParser<'a> {
     styles: Vec<SvelteStyle>,
     template: Vec<SvelteNode>,
     diagnostics: Vec<SvelteParseDiagnostic>,
+    /// The CLOSE-TAG well-formedness violations observed during the walk (an element
+    /// open at EOF, a stray / mismatched close, or a void element with content / an
+    /// explicit close). Recorded faithfully at the recovery points so the
+    /// official-reject gate can fail closed.
+    close_tag_violations: Vec<CloseTagViolation>,
+    /// The STRICT-PARSE errors observed during the walk — markup Verter's forgiving
+    /// parser recovers from but the official STRICT parser rejects. Recorded faithfully
+    /// at each recovery point through `record_strict_parse_error` so the official-reject
+    /// gate can fail closed (no `Main`) instead of accepting a divergent module.
+    pub(super) strict_parse_errors: Vec<SvelteStrictParseError>,
+    /// The PARSE-DOMAIN official-reject facts observed during the walk — the `<script>`
+    /// attribute / duplicate-script rejects, the template duplicate attribute /
+    /// duplicate-`<svelte:options>`, and the explicit-`</p>` autoclose. Recorded at the
+    /// discovery point through `record_parse_reject` so the official-reject gate arbitrates
+    /// them by `encounter_order` against the close-tag and strict-parse rails.
+    parse_reject_facts: Vec<SvelteParseRejectFact>,
+    /// The RESERVED script-body-parse slots — one per `<script>` block with a body, each
+    /// carrying an `encounter_order` minted at the upstream-faithful body-parse position
+    /// (after the open-tag attribute-duplicate, before the source-order semantic-attr
+    /// validation). The parser reserves the slot; the official-reject gate fills it.
+    script_body_probes: Vec<ScriptBodyProbe>,
+    /// The RESERVED style-body-parse slots — one per top-level `<style>` block, each carrying
+    /// an `encounter_order` minted at the upstream `read_style` body-parse position (BEFORE the
+    /// `style_duplicate` check) + the CSS body content-start. The parser reserves the slot; the
+    /// official-reject gate fills it by running a faithful CSS-body reader.
+    style_body_probes: Vec<StyleBodyProbe>,
+    /// The RESERVED `<svelte:options customElement={EXPR}>` validation slots — reserved by the
+    /// `read_options` finalization at the options-attribute source-order position. The parser
+    /// reserves the slot; the official-reject gate fills it with OXC.
+    options_custom_element_probes: Vec<OptionsCustomElementProbe>,
+    /// The walk-time encounter order for the FIRST root `<svelte:options customElement={EXPR}>`
+    /// element's attribute-expression PARSE — drawn during the forward pass at the
+    /// `<svelte:options>` element's source position (where upstream's `read_expression` parses the
+    /// `customElement` value). `read_options_finalize` reads it when reserving the probe so a
+    /// malformed-expression `js_parse_error` rides the element's source position (beating a later
+    /// template defect), distinct from the finalization position the VALIDATION fault rides.
+    first_options_customelement_parse_order: Option<u32>,
+    /// The root-only `<svelte:*>` meta tag names already encountered at the component root
+    /// (`svelte:options` / `svelte:head` / `svelte:window` / `svelte:document` /
+    /// `svelte:body`). A SECOND occurrence of the same name mints `svelte_meta_duplicate`,
+    /// mirroring upstream's `parser.meta_tags` set in `element.js`.
+    root_meta_tags_seen: Vec<&'static str>,
+    /// The names of the elements whose children are CURRENTLY being scanned (the open
+    /// ancestor stack, innermost last). A foreign close tag that matches a name in
+    /// this stack closes an ANCESTOR (an implicitly-closed intervening element, which
+    /// official accepts); a close matching nothing here is a stray / mismatched close.
+    open_stack: Vec<String>,
+    /// The monotonic discovery counter shared by BOTH parse-defect rails (close-tag
+    /// violations and strict-parse errors). Each defect draws the NEXT value when it is
+    /// PROVEN/recorded during the single forward pass, so the two rails share one global
+    /// discovery order — the official-reject gate arbitrates competing defects by minimum
+    /// `encounter_order`, matching official (which stops at the first parse error).
+    next_defect_seq: u32,
+    /// The SINGLE parser-wide script-body grammar, computed ONCE from the whole source at
+    /// construction (the first lowercase `<script … lang="ts">` with an exact `ts` value) —
+    /// mirroring upstream's one `parser.ts` flag set in the `Parser` constructor. EVERY
+    /// `<script>` body probe uses this grammar, so a plain script + a later `lang="ts"` script
+    /// parses the whole component as TS, and `lang="TS"` / `lang="tsx"` / `lang="typescript"`
+    /// (not the exact `ts` value) stays JS. NOT a per-script `script.lang` choice.
+    script_body_grammar: ScriptBodyGrammar,
 }
 
 impl<'a> SvelteParser<'a> {
@@ -53,17 +149,447 @@ impl<'a> SvelteParser<'a> {
             styles: Vec::new(),
             template: Vec::new(),
             diagnostics: Vec::new(),
+            close_tag_violations: Vec::new(),
+            strict_parse_errors: Vec::new(),
+            parse_reject_facts: Vec::new(),
+            script_body_probes: Vec::new(),
+            style_body_probes: Vec::new(),
+            options_custom_element_probes: Vec::new(),
+            first_options_customelement_parse_order: None,
+            root_meta_tags_seen: Vec::new(),
+            open_stack: Vec::new(),
+            next_defect_seq: 0,
+            // Compute the parser-wide TS flag ONCE over the whole source, exactly as upstream's
+            // `Parser` constructor does (the first lowercase `<script … lang="ts">` scan).
+            script_body_grammar: script_body_grammar_for_source(source),
         }
     }
 
-    fn finish(self) -> ParsedSvelte {
+    /// Draw the NEXT monotonic discovery sequence for a parse defect (a close-tag
+    /// violation or a strict-parse error). `pub(super)` so the sibling `strict_facts`
+    /// module's `impl SvelteParser` can draw from the SAME counter — the two rails share
+    /// one global discovery order so the official-reject gate's minimum-`encounter_order`
+    /// arbitration sees a single forward-pass sequence across both streams.
+    pub(super) fn next_defect_seq(&mut self) -> u32 {
+        let seq = self.next_defect_seq;
+        self.next_defect_seq += 1;
+        seq
+    }
+
+    fn finish(mut self) -> ParsedSvelte {
+        // Order BOTH parse-defect rails by their monotonic `encounter_order` (the single
+        // forward-pass DISCOVERY order — NOT source position, since an `Unclosed` is
+        // proven at EOF yet anchors at its earlier open tag). The values are pushed in
+        // discovery order already, so these sorts are stable identities; they are kept
+        // explicit so the gate's `.first()`-is-earliest-discovered invariant is visible.
+        self.close_tag_violations.sort_by_key(|v| v.encounter_order);
+        self.strict_parse_errors.sort_by_key(|e| e.encounter_order);
+        self.parse_reject_facts.sort_by_key(|f| f.encounter_order);
+        self.script_body_probes.sort_by_key(|p| p.encounter_order);
+        self.style_body_probes.sort_by_key(|p| p.encounter_order);
+        self.options_custom_element_probes
+            .sort_by_key(|p| p.encounter_order);
         ParsedSvelte {
             instance_script: self.instance_script,
             module_script: self.module_script,
             styles: self.styles,
             template: self.template,
             diagnostics: self.diagnostics,
+            close_tag_violations: self.close_tag_violations,
+            strict_parse_errors: self.strict_parse_errors,
+            parse_reject_facts: self.parse_reject_facts,
+            script_body_probes: self.script_body_probes,
+            style_body_probes: self.style_body_probes,
+            options_custom_element_probes: self.options_custom_element_probes,
         }
+    }
+
+    /// Record a close-tag well-formedness violation. The `encounter_order` is drawn from
+    /// the shared monotonic defect counter at the moment the violation is PROVEN (for an
+    /// `Unclosed`, the EOF/unwind point), so it shares one discovery order with the
+    /// strict-parse-error rail.
+    fn record_close_violation(&mut self, kind: CloseTagViolationKind, tag: &str, span: Span) {
+        let encounter_order = self.next_defect_seq();
+        self.close_tag_violations.push(CloseTagViolation {
+            kind,
+            tag: tag.to_ascii_lowercase(),
+            span,
+            encounter_order,
+        });
+    }
+
+    /// Record a PARSE-DOMAIN official-reject fact (a `<script>` attribute / duplicate-script
+    /// reject, or an explicit-`</p>` autoclose) — the SINGLE sink the script-domain and
+    /// autoclose mint sites route through. The `encounter_order` is drawn from the SAME
+    /// shared defect counter as the close-tag and strict-parse rails at the moment the
+    /// defect is discovered, so all three rails share one global forward-pass discovery
+    /// order the official-reject gate arbitrates by minimum `encounter_order`.
+    fn record_parse_reject(
+        &mut self,
+        kind: SvelteParseRejectKind,
+        official_code: &'static str,
+        span: Span,
+    ) {
+        let encounter_order = self.next_defect_seq();
+        self.parse_reject_facts.push(SvelteParseRejectFact {
+            kind,
+            official_code,
+            span,
+            encounter_order,
+        });
+    }
+
+    /// Mint the PARSE-DOMAIN script-parse facts for one `<script>` open tag the instant it is
+    /// parsed, in the UPSTREAM encounter order (`element.js` + `read_script`):
+    ///
+    /// 1. the script-BODY parse slot — `read_script` runs Acorn on the body BEFORE validating
+    ///    the reserved/context/module attributes, so a RESERVED encounter slot is allocated
+    ///    here (the gate fills it: a body parse failure becomes `js_parse_error` at this
+    ///    reserved order, strictly AFTER the open-tag attribute-duplicate and BEFORE the
+    ///    source-order semantic-attribute faults);
+    /// 2. the FIRST source-order reserved/context/module semantic-attribute fault — official
+    ///    validates the attributes in source order AFTER the body parse.
+    ///
+    /// The open-tag `attribute_duplicate` is minted EARLIER, during `parse_open_tag_attributes`
+    /// (the SINGLE open-tag attribute loop shared by every tag, including `<script>`), so it
+    /// already precedes this script's body-probe in encounter order — matching official, which
+    /// throws `attribute_duplicate` in the open-tag loop before `read_script`. The
+    /// `script_duplicate` fact (a second instance / module script) is minted by the CALLER
+    /// AFTER this method returns, so it lands LAST in this script's encounter order — matching
+    /// official, which throws `script_duplicate` only after `read_script` returns a clean body
+    /// and clean attributes. Each step draws the next monotonic `encounter_order`, so the
+    /// per-script order is strictly increasing.
+    fn record_script_parse_facts(&mut self, script: &SvelteScript) {
+        // (1) reserve the body-parse slot at the upstream body-parse position. The grammar is
+        // the SINGLE parser-wide flag (`self.script_body_grammar`), computed once at construction
+        // from the first lowercase `<script … lang="ts">`, NOT this script's own `lang` — exactly
+        // as upstream parses EVERY `<script>` body with the one `parser.ts` flag. So a plain
+        // script using TS-only syntax is `js_parse_error` UNLESS some `<script lang="ts">` flipped
+        // the whole parse to TS; an uppercase / `tsx` / `typescript` `lang` (not the exact `ts`
+        // value) leaves the grammar JS. Only a script with an actual body span gets a probe.
+        if let Some(body_span) = script.content {
+            self.record_body_probe(body_span, self.script_body_grammar);
+        }
+        // (2) the FIRST source-order reserved/context/module semantic-attribute fault, with
+        // its exact official code (the `ScriptInvalidContext` kind carries the exact code:
+        // `script_invalid_context` for context, `script_invalid_attribute_value` for a valued
+        // module, `script_reserved_attribute` for a reserved name).
+        if let Some((official_code, span)) = script.first_semantic_attribute_fault(self.text) {
+            let kind = match official_code {
+                "script_reserved_attribute" => SvelteParseRejectKind::ScriptReservedAttribute,
+                _ => SvelteParseRejectKind::ScriptInvalidContext,
+            };
+            self.record_parse_reject(kind, official_code, span);
+        }
+    }
+
+    /// Reserve a script-body-parse slot at the current discovery point: draw the next
+    /// monotonic `encounter_order` and record a [`ScriptBodyProbe`] carrying it, the body
+    /// `Span`, and the grammar. The parser does NOT parse the body — the official-reject gate
+    /// fills the slot (a body parse failure → `js_parse_error` at the reserved order).
+    fn record_body_probe(&mut self, body_span: Span, grammar: ScriptBodyGrammar) {
+        let encounter_order = self.next_defect_seq();
+        self.script_body_probes.push(ScriptBodyProbe {
+            encounter_order,
+            body_span,
+            grammar,
+        });
+    }
+
+    /// Reserve a CSS style-body-parse slot at the current discovery point (the upstream
+    /// `read_style` position, before the duplicate-style check): draw the next monotonic
+    /// `encounter_order` and record a [`StyleBodyProbe`] carrying it and the CSS body's
+    /// content-start offset. The parser does NOT parse the CSS — the official-reject gate fills
+    /// the slot with a faithful `read/style.js` body reader (a CSS body parse failure → the
+    /// exact CSS parse code at the reserved order).
+    fn record_style_body_probe(&mut self, content_start: u32) {
+        let encounter_order = self.next_defect_seq();
+        self.style_body_probes.push(StyleBodyProbe {
+            encounter_order,
+            content_start,
+        });
+    }
+
+    /// Record one element's tag name into the root-only `<svelte:*>` meta-tag tracker, minting
+    /// the official parse errors for a root-only meta tag (`svelte:options` / `svelte:head` /
+    /// `svelte:window` / `svelte:document` / `svelte:body`), mirroring upstream's `element.js`
+    /// order EXACTLY:
+    ///
+    /// 1. a SECOND occurrence of the same root-only meta name → `svelte_meta_duplicate`
+    ///    (checked first, so it wins over a placement defect on the same tag);
+    /// 2. else a NON-root (`at_root == false`) occurrence → `svelte_meta_invalid_placement`.
+    ///
+    /// The name is recorded into the seen-set UNCONDITIONALLY (upstream sets
+    /// `parser.meta_tags[name] = true` regardless), so a later occurrence still duplicates. A
+    /// non-meta / non-root-only tag is ignored. `open_span` anchors the reject at the open tag.
+    fn note_root_meta_tag(&mut self, name: &str, at_root: bool, open_span: Span) {
+        let Some(meta) = root_only_meta_tag_name(name) else {
+            return;
+        };
+        if self.root_meta_tags_seen.contains(&meta) {
+            self.record_parse_reject(
+                SvelteParseRejectKind::SvelteMetaDuplicate,
+                "svelte_meta_duplicate",
+                open_span,
+            );
+        } else if !at_root {
+            self.record_parse_reject(
+                SvelteParseRejectKind::SvelteMetaInvalidPlacement,
+                "svelte_meta_invalid_placement",
+                open_span,
+            );
+        }
+        self.root_meta_tags_seen.push(meta);
+    }
+
+    /// The parser-FINALIZATION `read_options` + `disallow_children` equivalent: mirror upstream's
+    /// `Parser` constructor, which (after the root walk) finds the FIRST root `<svelte:options>`,
+    /// validates its attributes in SOURCE ORDER, then disallows its children.
+    ///
+    /// Mints exact-code `OptionsInvalid` parse facts for the official `read_options` /
+    /// `disallow_children` rejects:
+    /// - a spread / directive (a non-`Attribute`) → `svelte_options_invalid_attribute`;
+    /// - a boolean axis (`runes` / `immutable` / `preserveWhitespace` / `accessors`) with a
+    ///   non-boolean value → `svelte_options_invalid_attribute_value`;
+    /// - `tag` → `svelte_options_deprecated_tag` (always);
+    /// - `customElement` boolean-shorthand → `svelte_options_invalid_customelement`; a Text value
+    ///   → `validate_custom_element_tag` (`svelte_options_invalid_tagname` /
+    ///   `svelte_options_reserved_tagname`); an EXPRESSION value → a RESERVED
+    ///   [`OptionsCustomElementProbe`] the gate fills with OXC (the expression's AST decides);
+    /// - `namespace` not in {`html`, `svg`, `mathml`} → `svelte_options_invalid_attribute_value`;
+    /// - `css` not `injected` → `svelte_options_invalid_attribute_value`;
+    /// - any OTHER name → `svelte_options_unknown_attribute`;
+    /// - and, when NO attribute faults, child content → `svelte_meta_invalid_content`.
+    ///
+    /// Each fault / probe draws the next monotonic `encounter_order` in attribute SOURCE ORDER
+    /// (all > every root-walk fact, since this runs after the walk), so the minimum-order fault
+    /// wins — faithful to upstream throwing on the FIRST faulting attribute, then
+    /// `disallow_children`. A DIRECTLY-classifiable fault STOPS the scan (upstream's throw); an
+    /// EXPRESSION-valued `customElement` reserves a probe and CONTINUES (its disposition is only
+    /// known after the gate parses it). An ACCEPTED axis (a valid `namespace="svg"`, a boolean
+    /// `runes={true}`, a valid `customElement="my-el"`, …) mints NOTHING — it is refused later as
+    /// an unsupported FEATURE, not an official reject.
+    fn read_options_finalize(&mut self) {
+        // Upstream `findIndex` over the ROOT fragment nodes for the first `SvelteOptions`. Only a
+        // ROOT-level options participates (a nested one is `svelte_meta_invalid_placement`, minted
+        // during the walk). Extract the attributes + child-presence so the immutable borrow of
+        // `self.template` ends before minting facts.
+        let Some((attributes, has_children)) = self.first_root_options_element() else {
+            return;
+        };
+
+        // Walk the attributes in SOURCE ORDER, mirroring upstream's `for (const attribute …)`.
+        for attr in &attributes {
+            match &attr.kind {
+                // A spread / directive is not an `Attribute` → `svelte_options_invalid_attribute`.
+                SvelteAttributeKind::Spread(_) | SvelteAttributeKind::Directive(_) => {
+                    self.record_options_invalid("svelte_options_invalid_attribute", attr.span);
+                    return;
+                }
+                SvelteAttributeKind::Plain { name, value, .. } => {
+                    match name.as_str() {
+                        "runes" | "immutable" | "preserveWhitespace" | "accessors" => {
+                            if !options_value_is_boolean(self.text, value) {
+                                self.record_options_invalid(
+                                    "svelte_options_invalid_attribute_value",
+                                    attr.span,
+                                );
+                                return;
+                            }
+                            // a valid boolean axis — accepted (refused later as a feature).
+                        }
+                        "tag" => {
+                            // `tag` is ALWAYS the deprecated-tag hard error.
+                            self.record_options_invalid("svelte_options_deprecated_tag", attr.span);
+                            return;
+                        }
+                        "customElement" => {
+                            match value {
+                                // Boolean shorthand (`value === true`) → invalid customElement.
+                                None => {
+                                    self.record_options_invalid(
+                                        "svelte_options_invalid_customelement",
+                                        attr.span,
+                                    );
+                                    return;
+                                }
+                                // A Text value → `validate_tag` on the literal string.
+                                Some(SvelteAttributeValue::Text(span)) => {
+                                    let tag = &self.text[span.start as usize..span.end as usize];
+                                    if let Some(code) =
+                                        super::template_ast::validate_custom_element_tag(Some(tag))
+                                    {
+                                        self.record_options_invalid(code, attr.span);
+                                        return;
+                                    }
+                                    // a valid Text custom-element tag — accepted (5h feature).
+                                }
+                                // An EXPRESSION value → reserve a probe the gate fills with OXC.
+                                Some(SvelteAttributeValue::Expression(span)) => {
+                                    self.record_options_custom_element_probe(*span);
+                                    // CONTINUE: the expression's disposition is only known after
+                                    // the gate parses it, so a later attribute may still fault.
+                                }
+                                // A MIXED value (text + interpolation runs) is a multi-chunk
+                                // value, so `get_static_value` is `null`. Upstream branches on
+                                // `value[0].type === 'Text'`: a Mixed value whose FIRST chunk is
+                                // TEXT takes the Text path → `validate_tag(null)` →
+                                // `svelte_options_invalid_tagname`; one whose first chunk is an
+                                // EXPRESSION (`customElement="{x}…"`) takes the expression path →
+                                // `svelte_options_invalid_customelement`. The first chunk is Text
+                                // iff the value span does not START with `{` (the Mixed span
+                                // excludes the quotes).
+                                Some(SvelteAttributeValue::Mixed(span)) => {
+                                    let first_is_text = self
+                                        .src
+                                        .get(span.start as usize)
+                                        .is_some_and(|&b| b != b'{');
+                                    let code = if first_is_text {
+                                        "svelte_options_invalid_tagname"
+                                    } else {
+                                        "svelte_options_invalid_customelement"
+                                    };
+                                    self.record_options_invalid(code, attr.span);
+                                    return;
+                                }
+                            }
+                        }
+                        "namespace" => {
+                            if !options_namespace_is_valid(self.text, value) {
+                                self.record_options_invalid(
+                                    "svelte_options_invalid_attribute_value",
+                                    attr.span,
+                                );
+                                return;
+                            }
+                        }
+                        "css" => {
+                            if !options_css_is_injected(self.text, value) {
+                                self.record_options_invalid(
+                                    "svelte_options_invalid_attribute_value",
+                                    attr.span,
+                                );
+                                return;
+                            }
+                        }
+                        _ => {
+                            self.record_options_invalid(
+                                "svelte_options_unknown_attribute",
+                                attr.span,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // No directly-classifiable attribute fault — `disallow_children` runs LAST (a higher
+        // encounter order than any reserved `customElement` probe, so a `customElement` fault
+        // still wins). Child content on the options element is `svelte_meta_invalid_content`.
+        if has_children {
+            if let Some(span) = self.first_root_options_open_span() {
+                self.record_options_invalid("svelte_meta_invalid_content", span);
+            }
+        }
+    }
+
+    /// The FIRST ROOT-level `<svelte:options>` element's attributes (cloned) + whether it has
+    /// child content, or `None` when there is no root options element. (Upstream's `findIndex`
+    /// over the root fragment — root-level only.)
+    fn first_root_options_element(&self) -> Option<(Vec<SvelteAttribute>, bool)> {
+        self.template.iter().find_map(|node| match node {
+            SvelteNode::Element(el)
+                if matches!(
+                    el.kind,
+                    SvelteElementKind::Special(SvelteSpecialKind::Options)
+                ) =>
+            {
+                Some((el.attributes.clone(), !el.children.is_empty()))
+            }
+            _ => None,
+        })
+    }
+
+    /// The FIRST ROOT-level `<svelte:options>` element's open-tag span (the report anchor for the
+    /// child-content fact).
+    fn first_root_options_open_span(&self) -> Option<Span> {
+        self.template.iter().find_map(|node| match node {
+            SvelteNode::Element(el)
+                if matches!(
+                    el.kind,
+                    SvelteElementKind::Special(SvelteSpecialKind::Options)
+                ) =>
+            {
+                Some(el.open_span)
+            }
+            _ => None,
+        })
+    }
+
+    /// Record an `OptionsInvalid` parse fact carrying its exact site code, drawing the next
+    /// monotonic `encounter_order` (the options-finalization position, after every walk fact).
+    fn record_options_invalid(&mut self, official_code: &'static str, span: Span) {
+        self.record_parse_reject(SvelteParseRejectKind::OptionsInvalid, official_code, span);
+    }
+
+    /// Reserve an `<svelte:options customElement={EXPR}>` validation slot at the options-
+    /// finalization discovery point: draw the next monotonic `encounter_order` (for the VALIDATION
+    /// fault) and pair it with the walk-time `parse_encounter_order` stashed when the element was
+    /// parsed (for the attribute-expression `js_parse_error`). The gate fills the slot via OXC and
+    /// uses the parse-order for a `js_parse_error`, the finalization order for a `svelte_options_*`
+    /// validation fault. A missing stash (no walk-time order was drawn) falls back to the
+    /// finalization order — the conservative same-position default.
+    fn record_options_custom_element_probe(&mut self, expr_span: Span) {
+        let encounter_order = self.next_defect_seq();
+        let parse_encounter_order = self
+            .first_options_customelement_parse_order
+            .unwrap_or(encounter_order);
+        self.options_custom_element_probes
+            .push(OptionsCustomElementProbe {
+                encounter_order,
+                parse_encounter_order,
+                expr_span,
+            });
+    }
+
+    /// Reserve the attribute-expression PARSE encounter order for a `customElement={EXPR}` attribute
+    /// AT its discovery point in the open-tag attribute loop — drawn ONLY when the caller has
+    /// determined this open tag is the FIRST root `<svelte:options>` (the `draw_…` gate) AND the
+    /// attribute is `customElement` with an EXPRESSION value. The order is drawn HERE (interleaved
+    /// with the per-attribute duplicate tracker) so the customElement parse fault competes with
+    /// later same-tag attribute defects by source position — beating a LATER duplicate `foo foo`
+    /// and losing to an EARLIER one — exactly as upstream's during-loop `read_expression` does. Only
+    /// the FIRST occurrence participates (`first_options_customelement_parse_order` latches), so a
+    /// second `customElement` attribute does not overwrite it.
+    fn note_options_ce_attr_parse_order(&mut self, attr: &SvelteAttribute) {
+        if self.first_options_customelement_parse_order.is_some() {
+            return;
+        }
+        let is_custom_element_expr = matches!(
+            &attr.kind,
+            SvelteAttributeKind::Plain { name, value: Some(SvelteAttributeValue::Expression(_)), .. }
+                if name == "customElement"
+        );
+        if is_custom_element_expr {
+            self.first_options_customelement_parse_order = Some(self.next_defect_seq());
+        }
+    }
+
+    /// Whether the just-parsed `children` of a `<p>` contain a DIRECT disallowed block
+    /// child that auto-closes the `<p>` (the official `<p>` autoclosing-children set,
+    /// restricted to real intrinsic HTML elements — a component / `<svelte:*>` / custom
+    /// element never auto-closes a `<p>`). Drives the explicit-`</p>` autoclose reject mint.
+    fn paragraph_has_direct_autoclose_child(children: &[SvelteNode]) -> bool {
+        children.iter().any(|child| {
+            if let SvelteNode::Element(c) = child {
+                matches!(c.kind, SvelteElementKind::Intrinsic)
+                    && !c.name.contains('-')
+                    && paragraph_autocloses_on_block_child(&c.name.to_ascii_lowercase())
+            } else {
+                false
+            }
+        })
     }
 
     fn len(&self) -> usize {
@@ -116,6 +642,7 @@ impl<'a> SvelteParser<'a> {
     fn parse_root(&mut self) {
         let mut text_start = self.pos;
         while !self.eof() {
+            let iter_start = self.pos;
             let b = self.cur();
             if b == b'<' {
                 // A comment, a script/style block, or an element.
@@ -126,7 +653,9 @@ impl<'a> SvelteParser<'a> {
                 } else if self.try_parse_special_block_root() {
                     // consumed a <script>/<style> block at root scope
                 } else {
-                    let node = self.parse_element_or_recover();
+                    // ROOT-scope element scan: a root-only `<svelte:*>` meta tag here is at the
+                    // component root (placement-valid).
+                    let node = self.parse_element_or_recover(true);
                     self.template.extend(node);
                 }
                 text_start = self.pos;
@@ -138,6 +667,17 @@ impl<'a> SvelteParser<'a> {
             } else {
                 self.pos += 1;
             }
+            // FORWARD-PROGRESS INVARIANT: every iteration over a `<` / `{` construct
+            // MUST advance `pos` (a sub-parser consumes its bytes or records a strict
+            // fact + advances to EOF). An iteration that left `pos` unmoved while not at
+            // EOF is a no-forward-progress bug — it would re-enter the same byte forever
+            // (an unbounded re-parse, each pass pushing a strict fact, exhausting memory).
+            // Make the class STRUCTURALLY impossible: assert in debug, and in release
+            // record one fail-closed strict fact + advance one byte so the scan can never
+            // spin. `parse_element_or_recover` (and the comment / special-block readers)
+            // already guarantee progress; this is the backstop that turns any future
+            // no-advance recovery into a single fact + a step instead of a hang.
+            self.ensure_root_progress(iter_start);
         }
         // trailing text
         if text_start < self.pos {
@@ -145,6 +685,28 @@ impl<'a> SvelteParser<'a> {
                 text_start as u32,
                 self.pos as u32,
             )));
+        }
+        // PARSE FINALIZATION — upstream's `read_options` + `disallow_children` run in the
+        // `Parser` constructor AFTER the full root walk, so the options facts arbitrate at an
+        // encounter order LATER than every template/script/style defect (an earlier parse defect
+        // legitimately wins). Mints the first faulting options attribute's exact code, then the
+        // child-content defect — exactly the upstream order.
+        self.read_options_finalize();
+    }
+
+    /// Enforce the root-scan forward-progress invariant: if the iteration that began at
+    /// `iter_start` left `pos` unmoved while not at EOF, record one `expected_token`
+    /// strict fact (so the input fails closed) and advance a single byte so the scan
+    /// cannot spin. A no-op on the normal advancing path.
+    fn ensure_root_progress(&mut self, iter_start: usize) {
+        if self.pos == iter_start && !self.eof() {
+            debug_assert!(
+                false,
+                "svelte root scan made no forward progress at byte {iter_start} (a recovery \
+                 point consumed no input) — this is a no-forward-progress bug"
+            );
+            self.record_expected_token(Span::new(iter_start as u32, (iter_start + 1) as u32));
+            self.pos += 1;
         }
     }
 
@@ -163,18 +725,61 @@ impl<'a> SvelteParser<'a> {
     fn try_parse_special_block_root(&mut self) -> bool {
         if self.starts_with_ci_at(self.pos, b"<script") && self.is_tag_boundary(self.pos + 7) {
             if let Some(script) = self.parse_script_block() {
+                // Mint the per-script parse facts in upstream encounter order (attribute
+                // duplicate → reserved body-parse slot → source-order reserved/context/module
+                // fault) the instant the open tag is parsed — for EVERY script, duplicate or
+                // not. Official reads + parses + validates a `<script>` BEFORE throwing the
+                // duplicate-script error, so a duplicate script's body / attribute defect is
+                // discovered (and wins) ahead of the duplicate fact recorded below.
+                self.record_script_parse_facts(&script);
                 if script.is_module {
                     if self.module_script.is_none() {
                         self.module_script = Some(script);
+                    } else {
+                        // A SECOND module script — official `script_duplicate`, discovered
+                        // AFTER this script's own attribute rejects. The parser still
+                        // retains only the first.
+                        self.record_parse_reject(
+                            SvelteParseRejectKind::ScriptDuplicate,
+                            "script_duplicate",
+                            script.tag_open,
+                        );
                     }
                 } else if self.instance_script.is_none() {
                     self.instance_script = Some(script);
+                } else {
+                    // A SECOND instance script — official `script_duplicate`.
+                    self.record_parse_reject(
+                        SvelteParseRejectKind::ScriptDuplicate,
+                        "script_duplicate",
+                        script.tag_open,
+                    );
                 }
             }
             return true;
         }
         if self.starts_with_ci_at(self.pos, b"<style") && self.is_tag_boundary(self.pos + 6) {
             if let Some(style) = self.parse_style_block() {
+                // Reserve the CSS body-parse slot at the upstream `read_style` position — BEFORE
+                // the duplicate-style check, for EVERY top-level `<style>` (duplicate or not).
+                // Upstream's `element.js` calls `read_style` (which PARSES the CSS body and can
+                // throw) BEFORE `if (current.css) e.style_duplicate(start)`, so a malformed body
+                // (this style's OR an earlier one's) is discovered ahead of the duplicate fact
+                // minted below — exactly mirrored by drawing the probe's `encounter_order` here.
+                // Only a style with an actual body span gets a probe.
+                if let Some(content) = style.content {
+                    self.record_style_body_probe(content.start);
+                }
+                // A SECOND top-level `<style>` — official `style_duplicate` (`element.js`:
+                // `if (current.css) e.style_duplicate(start)`), minted AFTER `read_style`,
+                // parallel to `script_duplicate`. The parser still retains only the first.
+                if !self.styles.is_empty() {
+                    self.record_parse_reject(
+                        SvelteParseRejectKind::StyleDuplicate,
+                        "style_duplicate",
+                        style.tag_open,
+                    );
+                }
                 self.styles.push(style);
             }
             return true;
@@ -195,12 +800,31 @@ impl<'a> SvelteParser<'a> {
 
     fn parse_script_block(&mut self) -> Option<SvelteScript> {
         let open_start = self.pos;
-        let (attributes, open_end, self_closing) = self.parse_open_tag_attributes(self.pos + 1)?;
+        // Attributes begin AFTER the `<script` tag name (not at `self.pos + 1`, which
+        // would scan `script` itself as a phantom attribute). A `None` return means the
+        // open tag never reached `>` before EOF (an unterminated open tag): make forward
+        // progress to EOF and record the strict fact so the root loop terminates and the
+        // input fails closed — see `parse_open_tag_attributes_or_recover`.
+        let (attributes, open_end, self_closing) =
+            self.parse_open_tag_attributes_or_recover(open_start, self.pos + 7)?;
         let tag_open = Span::new(open_start as u32, open_end as u32);
         let lang = attr_text_value(&attributes, self, "lang");
-        let is_module = attribute_present(&attributes, self, "module")
-            || attr_text_value(&attributes, self, "context").as_deref() == Some("module");
+        // The `module` / `context` attribute NAME is matched CASE-SENSITIVELY, mirroring
+        // official's `attribute.name === 'module'` / `=== 'context'` checks: a capitalized
+        // `Module` / `Context` is an UNKNOWN attribute (so the script stays an INSTANCE
+        // script and a second instance script is a `script_duplicate`), never the module
+        // script.
+        let is_module = script_attr_marks_module(&attributes, self);
         if self_closing {
+            // A SELF-CLOSING `<script />` is not a valid raw-text element — official
+            // expects a `>` (then the raw body), so a bare `/>` is `expected_token`. Record
+            // the strict fact so the input fails closed (no `Main`) instead of being treated
+            // as a content-less script block. Advance past the consumed `/>` (the open tag's
+            // bytes were consumed up to `open_end`) so the root loop makes forward progress
+            // and cannot re-enter the same `<script` — a no-advance return here is an
+            // unbounded re-parse loop.
+            self.pos = open_end;
+            self.record_expected_token(tag_open);
             return Some(SvelteScript {
                 is_module,
                 tag_open,
@@ -211,7 +835,9 @@ impl<'a> SvelteParser<'a> {
         }
         self.pos = open_end;
         let content_start = self.pos;
-        let close = self.find_close_tag(b"script");
+        // The `<script>` close is STRICT (a trailing token leaves the block unclosed —
+        // official `element_unclosed`).
+        let close = self.find_close_tag(b"script", true);
         match close {
             Some((content_end, after)) => {
                 self.pos = after;
@@ -229,6 +855,10 @@ impl<'a> SvelteParser<'a> {
                     "unterminated <script> block",
                     tag_open,
                 );
+                // No recognised `</script>` close before EOF (an unterminated block, or a
+                // `</script x>` close official does not recognise) — official
+                // `element_unclosed`.
+                self.record_element_unclosed(tag_open);
                 self.pos = self.len();
                 Some(SvelteScript {
                     is_module,
@@ -243,9 +873,22 @@ impl<'a> SvelteParser<'a> {
 
     fn parse_style_block(&mut self) -> Option<SvelteStyle> {
         let open_start = self.pos;
-        let (attributes, open_end, self_closing) = self.parse_open_tag_attributes(self.pos + 1)?;
+        // Attributes begin AFTER the `<style` tag name (not at `self.pos + 1`). A `None`
+        // return is an unterminated open tag: advance to EOF + record the fact (forward
+        // progress) so the root loop terminates and the input fails closed.
+        let (attributes, open_end, self_closing) =
+            self.parse_open_tag_attributes_or_recover(open_start, self.pos + 6)?;
         let tag_open = Span::new(open_start as u32, open_end as u32);
         if self_closing {
+            // A SELF-CLOSING `<style />` is not a valid raw-text element — official expects
+            // a `>` (then the raw CSS body), so a bare `/>` is `expected_token`. Record the
+            // strict fact so the input fails closed (no `Main`) instead of being treated as
+            // a content-less style block. Advance past the consumed `/>` (the open tag's
+            // bytes were consumed up to `open_end`) so the root loop makes forward progress
+            // and cannot re-enter the same `<style` — a no-advance return here is an
+            // unbounded re-parse loop.
+            self.pos = open_end;
+            self.record_expected_token(tag_open);
             return Some(SvelteStyle {
                 tag_open,
                 content: None,
@@ -254,7 +897,9 @@ impl<'a> SvelteParser<'a> {
         }
         self.pos = open_end;
         let content_start = self.pos;
-        match self.find_close_tag(b"style") {
+        // The `<style>` close is LENIENT (official's CSS reader tolerates a trailing
+        // token: `</style x>` compiles).
+        match self.find_close_tag(b"style", false) {
             Some((content_end, after)) => {
                 self.pos = after;
                 Some(SvelteStyle {
@@ -265,6 +910,11 @@ impl<'a> SvelteParser<'a> {
             }
             None => {
                 self.diag("unterminated-style", "unterminated <style> block", tag_open);
+                // No recognised `</style>` close before EOF. Unlike `<script>` (whose
+                // raw-block close-recognition failure is `element_unclosed`), official's
+                // CSS reader reaches EOF inside the unterminated rule and errors
+                // `css_expected_identifier`.
+                self.record_css_expected_identifier(tag_open);
                 self.pos = self.len();
                 Some(SvelteStyle {
                     tag_open,
@@ -275,26 +925,92 @@ impl<'a> SvelteParser<'a> {
         }
     }
 
-    /// Find the matching `</tag>` close from `self.pos`. Returns
-    /// `(content_end, after_close)`. Scans raw (script/style contents are
-    /// opaque) — it does not descend into nested markup.
-    fn find_close_tag(&self, tag: &[u8]) -> Option<(usize, usize)> {
+    /// Find the matching close for a TOP-LEVEL raw-content block (`<script>` / `<style>`)
+    /// from `self.pos`. Returns `(content_end, after_close)`. Scans raw (script/style
+    /// contents are opaque) — it does not descend into nested markup. The tag name is
+    /// matched CASE-SENSITIVELY, mirroring official (a `</Style>` / `</Script>` does NOT
+    /// close the block).
+    ///
+    /// `strict_close` mirrors official's DIVERGENT raw-text-element close handling:
+    /// - STRICT (`<script>`): the close is ONLY `</script` + optional whitespace + `>`. A
+    ///   trailing token (`</script x>`), a slash (`</script/>`), or a LONGER-name
+    ///   continuation (`</scriptfoo>`) is NOT the close — the scan continues (the block is
+    ///   left open at EOF ⇒ the caller records `element_unclosed`).
+    /// - LENIENT (`<style>`): official's CSS reader matches the `</style` NAME PREFIX and
+    ///   then reads to `>` / EOF, so a LONGER-name continuation (`</stylefoo>`,
+    ///   `</style-x>`), a trailing token (`</style x>`), whitespace (`</style >`), or even
+    ///   EOF before `>` (`</style`) all CLOSE the style block. A SHORTER prefix (`</styl`)
+    ///   does NOT match (the block stays open at EOF ⇒ the caller records
+    ///   `css_expected_identifier`).
+    fn find_close_tag(&self, tag: &[u8], strict_close: bool) -> Option<(usize, usize)> {
         let mut p = self.pos;
         while p < self.len() {
-            if self.at(p) == b'<' && self.at(p + 1) == b'/' && self.starts_with_ci_at(p + 2, tag) {
+            if self.at(p) == b'<' && self.at(p + 1) == b'/' && self.starts_with_at(p + 2, tag) {
                 let after_name = p + 2 + tag.len();
-                if self.is_tag_boundary(after_name) || self.at(after_name) == b'>' {
-                    // advance to the closing '>'
+                if strict_close {
+                    // STRICT (`<script>`): accept ONLY `</tag>` + optional whitespace +
+                    // `>`. A trailing token / longer-name continuation means this is NOT the
+                    // close — keep scanning (the block is left open ⇒ `element_unclosed`).
+                    if self.at(after_name) == b'>' {
+                        return Some((p, (after_name + 1).min(self.len())));
+                    }
+                    if self.at(after_name).is_ascii_whitespace() {
+                        let mut q = after_name;
+                        while q < self.len() && self.at(q).is_ascii_whitespace() {
+                            q += 1;
+                        }
+                        if self.at(q) == b'>' {
+                            return Some((p, (q + 1).min(self.len())));
+                        }
+                    }
+                } else {
+                    // LENIENT (`<style>`): the `</style` NAME PREFIX is the close — read to
+                    // `>` / EOF regardless of any name continuation / trailing token
+                    // (official's CSS reader tolerates them).
                     let mut q = after_name;
                     while q < self.len() && self.at(q) != b'>' {
                         q += 1;
                     }
-                    let after = (q + 1).min(self.len());
+                    return Some((p, (q + 1).min(self.len())));
+                }
+            }
+            p += 1;
+        }
+        None
+    }
+
+    /// Find the matching close for a NESTED raw-content element (a nested `<style>`) from
+    /// `self.pos`, mirroring official's raw-text-element reader: the close is the LITERAL
+    /// `</tag>` string — a CASE-SENSITIVE `</tag` immediately followed by `>`. ANY other
+    /// `</tag…` occurrence (a trailing token `</style x>`, a slash `</style/>`, whitespace
+    /// `</style >`, a longer name `</stylefoo>`, a different case `</Style>`) is NOT the
+    /// close — it is opaque body text and the scan continues. Returns
+    /// `(content_end, after_close)` on the clean `</tag>`. When EOF is reached with no clean
+    /// close, the raw-text reader hit end of input expecting the close `>` — official
+    /// `expected_token` — so it records that strict fact (on EVERY EOF path, so the fact
+    /// DOMINATES the recovery return) and returns `None`. The caller does NOT record a fact
+    /// for the no-close case (this helper owns it). Scans raw (the content is opaque CSS).
+    fn find_nested_raw_close(&mut self, tag: &[u8]) -> Option<(usize, usize)> {
+        let content_start = self.pos;
+        let mut p = self.pos;
+        while p < self.len() {
+            // The close is the LITERAL `</tag>` (case-sensitive name + immediate `>`); any
+            // deviation is body text, not the close.
+            if self.at(p) == b'<' && self.at(p + 1) == b'/' && self.starts_with_at(p + 2, tag) {
+                let after_name = p + 2 + tag.len();
+                if self.at(after_name) == b'>' {
+                    let after = (after_name + 1).min(self.len());
                     return Some((p, after));
                 }
             }
             p += 1;
         }
+        // EOF with no clean `</tag>` close — the raw-text reader reached end of input
+        // expecting the close `>` (official `expected_token`). Record the strict fact AND
+        // advance to EOF in this same block (the fact DOMINATES the recovery exit), then
+        // report no-close to the caller.
+        self.record_expected_token(Span::new(content_start as u32, self.len() as u32));
+        self.pos = self.len();
         None
     }
 
@@ -304,6 +1020,10 @@ impl<'a> SvelteParser<'a> {
         let start = self.pos;
         // skip "<!--"
         self.pos += 4;
+        // An EMPTY comment lead (`<!--` with NOTHING after it) is cut off immediately —
+        // official `unexpected_eof`. A STARTED-but-unterminated comment (`<!-- oops` with
+        // content but no `-->`) is official `expected_token`. Captured before the scan.
+        let empty_at_eof = self.pos >= self.len();
         while self.pos < self.len() {
             if self.starts_with_at(self.pos, b"-->") {
                 self.pos += 3;
@@ -316,6 +1036,15 @@ impl<'a> SvelteParser<'a> {
             "unterminated comment",
             Span::new(start as u32, self.len() as u32),
         );
+        // Reached EOF without the closing `-->`: an EMPTY `<!--` is `unexpected_eof`; a
+        // started-but-unterminated comment is `expected_token`. Recorded UNCONDITIONALLY
+        // (the kind is selected first), so the strict fact DOMINATES the EOF recovery exit.
+        let kind = if empty_at_eof {
+            SvelteStrictParseErrorKind::UnexpectedEof
+        } else {
+            SvelteStrictParseErrorKind::ExpectedToken
+        };
+        self.record_strict_parse_error(kind, Span::new(start as u32, self.len() as u32));
         self.pos = self.len();
         SvelteNode::Comment(Span::new(start as u32, self.len() as u32))
     }
@@ -324,26 +1053,55 @@ impl<'a> SvelteParser<'a> {
 
     /// Parse an element at `<`, recovering by emitting the `<` as text on a
     /// malformed tag.
-    fn parse_element_or_recover(&mut self) -> Vec<SvelteNode> {
+    fn parse_element_or_recover(&mut self, at_root: bool) -> Vec<SvelteNode> {
         let start = self.pos;
         if self.at(self.pos + 1) == b'/' {
-            // A stray close tag at this scope — skip it (handled by the caller
-            // recursion when nested). Emit nothing; consume to '>'.
-            let mut p = self.pos + 2;
-            while p < self.len() && self.at(p) != b'>' {
-                p += 1;
+            // A close tag reached at this scope. The element-child scan
+            // (`parse_children_until_close`) handles a matching / ancestor close
+            // inline; this path is only reached for a close at the ROOT or a block
+            // scope. The SINGLE close-boundary classifier records the malformed-boundary
+            // strict fact (nameless `</>` / trailing token / `</` at EOF). A WELL-FORMED
+            // close matching NOTHING open is a stray / mismatched close —
+            // `element_invalid_closing_tag` (or `void_element_invalid_content` for a void
+            // name); a malformed-boundary close already recorded its strict fact.
+            let close = self.consume_and_classify_close();
+            if close.clean {
+                if let Some(close_name) = close.name {
+                    if !self.open_stack.iter().any(|a| a == &close_name) {
+                        self.record_stray_or_void_close(&close_name, close.span);
+                    }
+                }
             }
-            self.pos = (p + 1).min(self.len());
             return Vec::new();
         }
-        // Parse the tag name.
+        // Parse the tag name. A valid element tag name STARTS with an ASCII letter
+        // (`[a-zA-Z]`); a `<` followed by a digit / punctuation name byte (`<1`, `<.`)
+        // does NOT begin a valid tag even though that byte can appear LATER in a name —
+        // official rejects it (`tag_invalid_name`), so it must take the recovery path
+        // (not be mis-parsed as an element whose name starts with a digit).
         let name_start = self.pos + 1;
         let mut p = name_start;
         while p < self.len() && is_tag_name_byte(self.at(p)) {
             p += 1;
         }
-        if p == name_start {
-            // Not a real tag (`<` followed by non-name) — emit `<` as text.
+        let valid_name_start = p > name_start && self.at(name_start).is_ascii_alphabetic();
+        if !valid_name_start {
+            // Not a real tag (`<` followed by a byte that cannot BEGIN a tag name) —
+            // recover by emitting `<` as literal text. Official STRICT-parses this as a
+            // tag start and REJECTS it, with a code that DEPENDS on the following byte:
+            //   - `<` at EOF                       → `unexpected_eof`
+            //   - `<!…` (a markup-declaration lead, e.g. `<!x`, distinct from the `<!--`
+            //     comment handled earlier) → `expected_token` (a recognised declaration /
+            //     comment token is expected after `<!`)
+            //   - any other malformed name start (`<.`, `<}`, `<1`, `< `) → `tag_invalid_name`
+            let lt_span = Span::new(start as u32, (start + 1) as u32);
+            if start + 1 >= self.len() {
+                self.record_unexpected_eof(lt_span);
+            } else if self.at(name_start) == b'!' {
+                self.record_expected_token(lt_span);
+            } else {
+                self.record_tag_invalid_name(lt_span);
+            }
             self.pos += 1;
             return vec![SvelteNode::Text(Span::new(start as u32, self.pos as u32))];
         }
@@ -351,13 +1109,42 @@ impl<'a> SvelteParser<'a> {
         let name = self.slice(name_span).to_string();
         let kind = classify_element(&name);
 
-        let Some((attributes, open_end, self_closing)) = self.parse_open_tag_attributes(p) else {
-            // Unterminated open tag — emit text and bail.
+        // A DUPLICATE root-only `<svelte:*>` meta element (a second `<svelte:options>` /
+        // `<svelte:head>` / …) — official `svelte_meta_duplicate`, minted right after the tag
+        // name is read (BEFORE the open-tag attribute loop), so it precedes this element's own
+        // `attribute_duplicate` in encounter order (matching upstream `element.js`). The check
+        // is on the second occurrence of the same name ANYWHERE (root or nested), mirroring
+        // upstream's `parser.meta_tags` set.
+        let element_open_span_start = Span::new(start as u32, (start + 1 + name.len()) as u32);
+        self.note_root_meta_tag(&name, at_root, element_open_span_start);
+
+        // The customElement attribute-expression PARSE encounter order rides the position upstream's
+        // `read_expression` reaches DURING the attribute loop, so it must be drawn at the
+        // `customElement` attribute's discovery point (interleaved with the open tag's duplicate
+        // tracker), NOT after the whole open tag. The gate to draw it is "the FIRST root
+        // `<svelte:options>`": this open tag is at the root, classifies as the options special
+        // element, and no earlier options-customElement parse order has been latched yet. (Upstream's
+        // `findIndex` over the root fragment picks the FIRST `<svelte:options>`.)
+        let draw_options_ce_parse_order = at_root
+            && matches!(kind, SvelteElementKind::Special(SvelteSpecialKind::Options))
+            && self.first_options_customelement_parse_order.is_none();
+        let facts_before_open = self.strict_parse_errors.len();
+        let Some((attributes, open_end, self_closing)) =
+            self.parse_open_tag_attributes_inner(p, false, draw_options_ce_parse_order)
+        else {
+            // Unterminated open tag — emit text and bail. A truncated intrinsic open tag
+            // reaches end of input mid-construct (`<div`, `<div id`) ⇒ official
+            // `unexpected_eof` — UNLESS the attribute parse already recorded an earlier,
+            // equally-specific EOF fact (an `id=` value at EOF, an unterminated quoted
+            // value), which is the authoritative first-in-document-order one.
             self.diag(
                 "unterminated-tag",
                 "unterminated element open tag",
                 Span::new(start as u32, self.len() as u32),
             );
+            if self.strict_parse_errors.len() == facts_before_open {
+                self.record_unexpected_eof(Span::new(start as u32, self.len() as u32));
+            }
             self.pos = self.len();
             return Vec::new();
         };
@@ -369,9 +1156,16 @@ impl<'a> SvelteParser<'a> {
         let mut close_span = None;
         if !void {
             if matches!(kind, SvelteElementKind::NestedStyle) {
-                // Nested <style> inside template markup — opaque content.
+                // Nested <style> inside template markup — opaque content closed by the
+                // LITERAL `</style>` only. Unlike the TOP-LEVEL `<style>` (whose CSS-aware
+                // reader matches the close by a lenient name prefix and consumes to `>`), a
+                // NESTED `<style>` close is the exact `</style>` raw-text-element close: any
+                // deviation (a trailing token, whitespace before `>`, a longer name, a
+                // different case) is body text, and reaching EOF with no clean close is
+                // official `expected_token` (recorded inside `find_nested_raw_close` on
+                // every no-close path).
                 let content_start = self.pos;
-                if let Some((content_end, after)) = self.find_close_tag(b"style") {
+                if let Some((content_end, after)) = self.find_nested_raw_close(b"style") {
                     self.pos = after;
                     // The NestedStyle text child spans content + close tag (the
                     // projector strips it whole); the close span is recorded for
@@ -381,11 +1175,12 @@ impl<'a> SvelteParser<'a> {
                         self.pos as u32,
                     )));
                     close_span = Some(Span::new(content_end as u32, after as u32));
-                } else {
-                    self.pos = self.len();
                 }
+                // No clean `</style>` close before EOF — `find_nested_raw_close` already
+                // recorded the `expected_token` strict fact AND advanced `self.pos` to EOF,
+                // so there is nothing more to do on the no-close path.
             } else {
-                let (kids, close) = self.parse_children_until_close(&name);
+                let (kids, close) = self.parse_children_until_close(&name, open_span);
                 children = kids;
                 close_span = close;
             }
@@ -405,38 +1200,106 @@ impl<'a> SvelteParser<'a> {
 
     /// Parse child nodes until the matching `</name>` close (or EOF). Returns the
     /// children plus the consumed `</name>` close-tag span (`None` if the element
-    /// is unterminated / closed implicitly by a foreign close).
-    fn parse_children_until_close(&mut self, name: &str) -> (Vec<SvelteNode>, Option<Span>) {
+    /// is unterminated / closed implicitly by an ancestor close).
+    ///
+    /// The element is pushed onto the OPEN-STACK for the duration so a deeper foreign
+    /// close can recognise it as an ancestor. Close-tag well-formedness is recorded
+    /// faithfully: a foreign close that matches an OPEN ANCESTOR unwinds (the
+    /// intervening element is implicitly closed — official accepts it); a foreign
+    /// close that matches NOTHING open is a stray / mismatched close (recorded, then
+    /// skipped so this element keeps scanning for its real close); reaching EOF with
+    /// no close leaves an intrinsic element UNCLOSED (recorded — official
+    /// `element_unclosed`).
+    fn parse_children_until_close(
+        &mut self,
+        name: &str,
+        open_span: Span,
+    ) -> (Vec<SvelteNode>, Option<Span>) {
+        self.open_stack.push(name.to_string());
         let mut children = Vec::new();
         let mut text_start = self.pos;
         while !self.eof() {
             let b = self.cur();
             if b == b'<' {
-                // Is this the matching close tag?
+                // A close tag at this scope? Recognise the close by NAME (independent of
+                // boundary well-formedness) so a MALFORMED-boundary close of THIS element
+                // (`</div/>` while parsing `<div>`) is still recognised as this element's
+                // close — recorded `expected_token` AND the element closed (never left
+                // open as a spurious `element_unclosed`).
                 if self.at(self.pos + 1) == b'/' {
-                    if self.matches_close_name(self.pos + 2, name) {
-                        // flush text and consume the close tag, recording its span
-                        if text_start < self.pos {
-                            children.push(SvelteNode::Text(Span::new(
-                                text_start as u32,
-                                self.pos as u32,
-                            )));
-                        }
-                        let close_start = self.pos as u32;
-                        self.consume_close_tag();
-                        let close_span = Span::new(close_start, self.pos as u32);
-                        return (children, Some(close_span));
-                    }
-                    // A different close tag — recovery: flush and consume it,
-                    // treating the current element as implicitly closed.
+                    // `close_tag_name_bytes` lowercases; match the (also-lowercased) element
+                    // / ancestor names case-insensitively (HTML close-tag matching). The
+                    // BOUNDARY is classified non-consuming so an ANCESTOR unwind (which must
+                    // NOT consume the close — the ancestor frame consumes it) happens ONLY
+                    // for a well-formed boundary.
+                    let close_name = self.close_tag_name_bytes(self.pos + 2);
+                    let matches_self =
+                        close_name.as_deref() == Some(name.to_ascii_lowercase().as_str());
+                    let matches_ancestor = close_name.as_deref().is_some_and(|cn| {
+                        self.open_stack.iter().any(|a| a.eq_ignore_ascii_case(cn))
+                    });
+                    let boundary_clean = matches!(
+                        self.classify_close_boundary(self.pos + 2),
+                        CloseBoundary::Clean
+                    );
+                    // Flush pending text before consuming the close.
                     if text_start < self.pos {
                         children.push(SvelteNode::Text(Span::new(
                             text_start as u32,
                             self.pos as u32,
                         )));
                     }
-                    // Leave the foreign close for the parent to handle: stop.
-                    return (children, None);
+                    // A WELL-FORMED close of an OPEN ANCESTOR (NOT this element) — this
+                    // element is implicitly closed (official pops intervening elements);
+                    // unwind WITHOUT consuming so the ancestor frame consumes the close.
+                    if boundary_clean && matches_ancestor && !matches_self {
+                        self.open_stack.pop();
+                        return (children, None);
+                    }
+                    if matches_self {
+                        // THE close of this element (possibly with a malformed boundary —
+                        // `consume_and_classify_close` records the strict fact). Close it.
+                        let close = self.consume_and_classify_close();
+                        // An explicit `</p>` SURVIVING for a `<p>` that the browser already
+                        // auto-closed (a direct disallowed block child) is official
+                        // `element_invalid_closing_tag_autoclosed`, ANCHORED at this `</p>`
+                        // close (NOT the `<p>` open). Mint it here — the close-handling
+                        // authority — so its `encounter_order` is the moment the surviving
+                        // `</p>` is consumed (an earlier inner parse defect beats it; a later
+                        // stray loses to it). A WELL-FORMED `</p>` boundary only (a
+                        // malformed-boundary close already recorded its own strict fact, which
+                        // is the earlier/authoritative defect). The IMPLICIT case (no explicit
+                        // `</p>`) is official-ACCEPTED via autoclose — minted NOTHING.
+                        if close.clean
+                            && name.eq_ignore_ascii_case("p")
+                            && matches!(classify_element(name), SvelteElementKind::Intrinsic)
+                            && Self::paragraph_has_direct_autoclose_child(&children)
+                        {
+                            self.record_parse_reject(
+                                SvelteParseRejectKind::ParagraphAutoclose,
+                                "element_invalid_closing_tag_autoclosed",
+                                close.span,
+                            );
+                        }
+                        self.open_stack.pop();
+                        return (children, Some(close.span));
+                    }
+                    // A FOREIGN close that is NOT a clean ancestor. Consume + classify the
+                    // boundary (a malformed boundary records its strict fact here, AHEAD of
+                    // any ancestor absorption — so a malformed-boundary close, e.g. a
+                    // trailing slash/token, cannot be silently absorbed as an ancestor close
+                    // without recording its strict fact).
+                    let close = self.consume_and_classify_close();
+                    if close.clean {
+                        if let Some(close_name) = close.name {
+                            // A STRAY / mismatched well-formed close (matches nothing open)
+                            // — record the violation and KEEP scanning for this element's
+                            // real close (so a `<div>…</span>…</div>` still closes `<div>`).
+                            self.record_stray_or_void_close(&close_name, close.span);
+                        }
+                    }
+                    text_start = self.pos;
+                    continue;
                 }
                 if text_start < self.pos {
                     children.push(SvelteNode::Text(Span::new(
@@ -448,7 +1311,9 @@ impl<'a> SvelteParser<'a> {
                     let c = self.parse_comment();
                     children.push(c);
                 } else {
-                    let nodes = self.parse_element_or_recover();
+                    // NESTED child scan (inside an element or a block clause): a root-only
+                    // `<svelte:*>` meta tag here is NOT at the component root.
+                    let nodes = self.parse_element_or_recover(false);
                     children.extend(nodes);
                 }
                 text_start = self.pos;
@@ -462,6 +1327,7 @@ impl<'a> SvelteParser<'a> {
                 // A block-closing/clause token belongs to an enclosing block —
                 // stop child scan so the block parser sees it.
                 if self.is_block_close_or_clause() {
+                    self.open_stack.pop();
                     return (children, None);
                 }
                 let nodes = self.parse_brace_construct();
@@ -477,15 +1343,130 @@ impl<'a> SvelteParser<'a> {
                 self.pos as u32,
             )));
         }
+        // Reached EOF with no matching close: an intrinsic HTML element is UNCLOSED
+        // (official `element_unclosed`). A component / `<svelte:*>` element is NOT in
+        // the close-tag universe (it fails closed as an unsupported feature regardless).
+        if matches!(classify_element(name), SvelteElementKind::Intrinsic) {
+            self.record_close_violation(CloseTagViolationKind::Unclosed, name, open_span);
+        }
+        self.open_stack.pop();
         (children, None)
     }
 
-    fn matches_close_name(&self, pos: usize, name: &str) -> bool {
-        let nb = name.as_bytes();
-        self.src.get(pos..pos + nb.len()).is_some_and(|s| s == nb) && {
-            let after = pos + nb.len();
-            self.at(after) == b'>' || self.at(after).is_ascii_whitespace()
+    /// Classify the WELL-FORMEDNESS of a close tag whose `</` precedes `pos` (i.e. `pos`
+    /// is the first byte after `</`), driven from the parser's own bytes (no source
+    /// product-path scanning). Non-consuming. This is the SINGLE close-tag boundary
+    /// classifier every close site routes through so the recorded official code matches
+    /// the pinned compiler at EVERY boundary form:
+    ///
+    /// - `</` at EOF (no further bytes) → [`CloseBoundary::UnexpectedEof`]
+    ///   (`unexpected_eof`).
+    /// - `</>` (immediately `>`, no name) → [`CloseBoundary::Nameless`]
+    ///   (`element_invalid_closing_tag`).
+    /// - `</ name>` / `</ >` (WHITESPACE before any name) → [`CloseBoundary::ExpectedToken`]
+    ///   (`expected_token`): the parser expects the name immediately after `</`.
+    /// - a name followed by anything but optional-whitespace-then-`>` — a trailing token
+    ///   (`</div x>`, `</div/>`) or EOF before `>` (`</div`) → [`CloseBoundary::ExpectedToken`]
+    ///   (`expected_token`).
+    /// - a name followed by optional whitespace then `>` → [`CloseBoundary::Clean`] with
+    ///   the lowercased name (the caller then applies match / ancestor / stray / void
+    ///   classification).
+    fn classify_close_boundary(&self, pos: usize) -> CloseBoundary {
+        if pos >= self.len() {
+            // `</` at EOF.
+            return CloseBoundary::UnexpectedEof;
         }
+        // Read the tag-name bytes.
+        let mut pn = pos;
+        while pn < self.len() && is_tag_name_byte(self.at(pn)) {
+            pn += 1;
+        }
+        if pn == pos {
+            // No name byte at `pos`.
+            if self.at(pos) == b'>' {
+                // `</>` — a genuine nameless close.
+                return CloseBoundary::Nameless;
+            }
+            // `</ …>` (whitespace, or any non-name non-`>` byte) — the name is expected
+            // immediately after `</`.
+            return CloseBoundary::ExpectedToken;
+        }
+        // Skip whitespace after the name.
+        let mut pw = pn;
+        while pw < self.len() && self.at(pw).is_ascii_whitespace() {
+            pw += 1;
+        }
+        if pw < self.len() && self.at(pw) == b'>' {
+            CloseBoundary::Clean
+        } else {
+            // A trailing token after the name, or EOF before `>`.
+            CloseBoundary::ExpectedToken
+        }
+    }
+
+    /// Consume a close tag (at `</`), record the strict fact for a malformed BOUNDARY (a
+    /// nameless `</>`, a `</ name>` / trailing-token, or a `</` at EOF), and return a
+    /// [`ConsumedClose`]: the close span, the close NAME (the tag-name bytes after `</`,
+    /// independent of boundary well-formedness — `None` only for a nameless `</>` or `</`
+    /// at EOF), and whether the boundary was WELL-FORMED. Advances `self.pos` past the
+    /// close.
+    ///
+    /// The name is reported even for a MALFORMED boundary (`</div/>` yields `Some("div")`)
+    /// so the caller can still recognise it as the (malformed) close of the matching
+    /// element — and close the element — instead of leaving it open. The strict fact for
+    /// the malformed boundary is recorded HERE regardless.
+    fn consume_and_classify_close(&mut self) -> ConsumedClose {
+        let close_start = self.pos as u32;
+        let name = self.close_tag_name_bytes(self.pos + 2);
+        let boundary = self.classify_close_boundary(self.pos + 2);
+        self.consume_close_tag();
+        let span = Span::new(close_start, self.pos as u32);
+        let clean = match boundary {
+            CloseBoundary::Clean => true,
+            CloseBoundary::Nameless => {
+                self.record_nameless_close(span);
+                false
+            }
+            CloseBoundary::ExpectedToken => {
+                self.record_expected_token(span);
+                false
+            }
+            CloseBoundary::UnexpectedEof => {
+                self.record_unexpected_eof(span);
+                false
+            }
+        };
+        ConsumedClose { span, name, clean }
+    }
+
+    /// The lowercased tag-name bytes of a close tag at `pos` (just after `</`), or `None`
+    /// when no name byte is present (`</>`, `</ …>`, `</` at EOF). Non-consuming. Used to
+    /// recognise the close NAME independent of the boundary well-formedness.
+    fn close_tag_name_bytes(&self, pos: usize) -> Option<String> {
+        let mut p = pos;
+        while p < self.len() && is_tag_name_byte(self.at(p)) {
+            p += 1;
+        }
+        if p == pos {
+            return None;
+        }
+        self.text.get(pos..p).map(|s| s.to_ascii_lowercase())
+    }
+
+    /// Record a STRAY close tag as the right violation class: a close of a VOID
+    /// element (`</input>`) is `void_element_invalid_content` (a void element cannot
+    /// have a closing tag); any other unmatched close is `element_invalid_closing_tag`.
+    /// A component / `<svelte:*>` close name is NOT in the close-tag universe.
+    fn record_stray_or_void_close(&mut self, close_name: &str, span: Span) {
+        if !matches!(classify_element(close_name), SvelteElementKind::Intrinsic) {
+            return;
+        }
+        let kind = if is_void_element(close_name) {
+            CloseTagViolationKind::VoidElementInvalidContent
+        } else {
+            CloseTagViolationKind::InvalidClosingTag
+        };
+        self.record_close_violation(kind, close_name, span);
     }
 
     fn consume_close_tag(&mut self) {
@@ -497,15 +1478,77 @@ impl<'a> SvelteParser<'a> {
         self.pos = (p + 1).min(self.len());
     }
 
-    /// Parse an open tag's attributes starting at `from` (just after the tag
-    /// name). Returns `(attributes, position_after_'>', self_closing)`, or
-    /// `None` if the tag is unterminated.
+    /// Parse a SPECIAL-block (`<script>` / `<style>`) open tag's attributes starting at
+    /// `from` (just after the tag name), GUARANTEEING forward progress on an unterminated
+    /// tag. On a `None` (the tag never reached `>` before EOF) this records the strict
+    /// fact and advances `self.pos` to EOF — so the caller's `?` still bails, but the root
+    /// loop can never re-enter the same `<` (the no-forward-progress hang). `open_start`
+    /// is the `<` position (the open-tag span start).
+    ///
+    /// The strict fact: a special open tag truncated at EOF (it never reaches its `>`)
+    /// reaches end of input mid-construct — official `unexpected_eof`. If the attribute
+    /// parse ALREADY recorded a more specific fact (an empty `lang=` value at EOF →
+    /// `expected_attribute_value`), that earlier fact is left as the authoritative
+    /// first-in-document-order one.
+    fn parse_open_tag_attributes_or_recover(
+        &mut self,
+        open_start: usize,
+        from: usize,
+    ) -> Option<(Vec<SvelteAttribute>, usize, bool)> {
+        let facts_before = self.strict_parse_errors.len();
+        match self.parse_open_tag_attributes(from, true) {
+            Some(result) => Some(result),
+            None => {
+                self.diag(
+                    "unterminated-tag",
+                    "unterminated special-block open tag",
+                    Span::new(open_start as u32, self.len() as u32),
+                );
+                // Only mint the truncated-open-tag `unexpected_eof` when the attribute parse
+                // did not already record an earlier, more specific fact.
+                if self.strict_parse_errors.len() == facts_before {
+                    self.record_unexpected_eof(Span::new(open_start as u32, self.len() as u32));
+                }
+                self.pos = self.len();
+                None
+            }
+        }
+    }
+
+    /// Parse an open tag's attributes starting at `from` (just after the tag name). Returns
+    /// `(attributes, position_after_'>', self_closing)`, or `None` if the tag is
+    /// unterminated. `special_block` selects the `=`-at-EOF code: a SPECIAL-block
+    /// (`<script>` / `<style>`) `attr=` truncated at EOF is official `expected_attribute_value`,
+    /// while an INTRINSIC-element `attr=` at EOF reaches end of input ⇒ `unexpected_eof`.
     fn parse_open_tag_attributes(
         &mut self,
         from: usize,
+        special_block: bool,
+    ) -> Option<(Vec<SvelteAttribute>, usize, bool)> {
+        self.parse_open_tag_attributes_inner(from, special_block, false)
+    }
+
+    /// The shared open-tag attribute loop, with `draw_options_ce_parse_order` selecting whether to
+    /// draw the FIRST root `<svelte:options customElement={EXPR}>`'s attribute-expression PARSE
+    /// encounter order AT the `customElement` attribute's discovery point in the loop. Drawing it
+    /// here (rather than after the whole open tag) interleaves the parse fault correctly with the
+    /// `attribute_duplicate` minted by `note_attribute_for_duplicate` for later attributes — so a
+    /// `customElement={}` / `customElement={1 2}` parse fault beats a LATER duplicate `foo foo` and
+    /// loses to an EARLIER one, exactly as upstream's during-loop `read_expression` does.
+    fn parse_open_tag_attributes_inner(
+        &mut self,
+        from: usize,
+        special_block: bool,
+        draw_options_ce_parse_order: bool,
     ) -> Option<(Vec<SvelteAttribute>, usize, bool)> {
         let mut p = from;
         let mut attributes = Vec::new();
+        // The duplicate-attribute tracker for THIS open tag, mirroring upstream's per-element
+        // `unique_names` set (`element.js`): the FIRST collision mints `attribute_duplicate`
+        // at the colliding attribute's discovery point (so its `encounter_order` interleaves
+        // correctly with the open tag's attribute strict facts), and only once per tag.
+        let mut seen_attr_keys: Vec<(DuplicateKeyClass, String)> = Vec::new();
+        let mut dup_minted = false;
         loop {
             // skip whitespace
             while p < self.len() && self.at(p).is_ascii_whitespace() {
@@ -536,14 +1579,58 @@ impl<'a> SvelteParser<'a> {
                 // A spread `{...x}`, shorthand `{value}`, or an inline tag
                 // (`{@attach}`/comment) used as an attribute.
                 let (attr, next) = self.parse_brace_attribute(p);
+                self.note_attribute_for_duplicate(&attr, &mut seen_attr_keys, &mut dup_minted);
                 attributes.push(attr);
                 p = next;
                 continue;
             }
             // A named attribute or directive.
-            let (attr, next) = self.parse_named_attribute(p);
+            let (attr, next) = self.parse_named_attribute(p, special_block);
+            // Draw the customElement parse order BEFORE the duplicate-tracker for THIS attribute, so
+            // the parse fault rides the position upstream's `read_expression` reaches first (the
+            // value is read during the attribute parse). The order between this and the duplicate
+            // mint for a SAME-named collision is moot — `customElement` is a single key, never a
+            // duplicate of itself.
+            if draw_options_ce_parse_order {
+                self.note_options_ce_attr_parse_order(&attr);
+            }
+            self.note_attribute_for_duplicate(&attr, &mut seen_attr_keys, &mut dup_minted);
             attributes.push(attr);
             p = next;
+        }
+    }
+
+    /// Record one open-tag attribute into the per-tag duplicate tracker, minting
+    /// `attribute_duplicate` at the FIRST collision (the official `element.js` rule: the
+    /// `type + name` key is case-sensitive; a `this` attribute is exempt — never recorded,
+    /// never a collision). Mints at most once per tag (`dup_minted` latches). The shared
+    /// [`duplicate_attribute_key`] normalization is the SINGLE copy of the bind→Attribute /
+    /// class/style-namespace / non-checkable-form rules.
+    fn note_attribute_for_duplicate(
+        &mut self,
+        attr: &SvelteAttribute,
+        seen: &mut Vec<(DuplicateKeyClass, String)>,
+        dup_minted: &mut bool,
+    ) {
+        let Some((class, name)) = duplicate_attribute_key(attr) else {
+            return;
+        };
+        if *dup_minted {
+            return;
+        }
+        if seen.iter().any(|(c, n)| *c == class && n == name) {
+            self.record_parse_reject(
+                SvelteParseRejectKind::AttributeDuplicate,
+                "attribute_duplicate",
+                attr.span,
+            );
+            *dup_minted = true;
+            return;
+        }
+        // `this` is exempt (`<svelte:element bind:this this=..>` is allowed): never recorded,
+        // so it neither triggers nor causes a collision.
+        if name != "this" {
+            seen.push((class, name.to_string()));
         }
     }
 
@@ -552,6 +1639,13 @@ impl<'a> SvelteParser<'a> {
     fn parse_brace_attribute(&mut self, from: usize) -> (SvelteAttribute, usize) {
         let inner_start = from + 1;
         let end = self.find_matching_brace(inner_start);
+        // An UNCLOSED `{` attribute expression at EOF (`<button {x` / `<button onclick={…`
+        // with no matching `}`) is official `expected_token` (the brace expected its close),
+        // NOT the bare truncated-tag `unexpected_eof`. Record the strict fact here so the
+        // open-tag fallback's fact-count guard leaves it as the authoritative code.
+        if end >= self.len() {
+            self.record_expected_token(Span::new(from as u32, self.len() as u32));
+        }
         let inner = Span::new(inner_start as u32, end as u32);
         let span = Span::new(from as u32, (end + 1).min(self.len()) as u32);
         let body = self.slice(inner).trim_start();
@@ -591,9 +1685,15 @@ impl<'a> SvelteParser<'a> {
         (attr, (end + 1).min(self.len()))
     }
 
-    /// Parse a named attribute or directive at `from`. Returns the attribute
-    /// and the position after it.
-    fn parse_named_attribute(&mut self, from: usize) -> (SvelteAttribute, usize) {
+    /// Parse a named attribute or directive at `from`. Returns the attribute and the
+    /// position after it. `special_block` selects the `=`-at-EOF code (a SPECIAL-block
+    /// `attr=` truncated at EOF is `expected_attribute_value`; an INTRINSIC-element `attr=`
+    /// at EOF is `unexpected_eof`).
+    fn parse_named_attribute(
+        &mut self,
+        from: usize,
+        special_block: bool,
+    ) -> (SvelteAttribute, usize) {
         let mut p = from;
         // The attribute name runs until whitespace, `=`, `/`, `>`, or EOF.
         while p < self.len() {
@@ -619,9 +1719,27 @@ impl<'a> SvelteParser<'a> {
             q += 1;
         }
         if self.at(q) == b'=' {
+            let eq_pos = q;
             q += 1;
             while q < self.len() && self.at(q).is_ascii_whitespace() {
                 q += 1;
+            }
+            // An `=` followed immediately by the tag-closing `>` is an EMPTY attribute
+            // value (`id=>`, `lang=>`) — official `expected_attribute_value`. An `=` at EOF
+            // (`<div id=` with no `>`) is CONSTRUCT-dependent: an INTRINSIC-element attribute
+            // reaches end of input ⇒ `unexpected_eof`, while a SPECIAL-block (`<script>` /
+            // `<style>`) attribute reader specifically expected the value ⇒
+            // `expected_attribute_value`. (An unquoted value `id=x`, a quoted `id="x"`, or a
+            // `/>` self-close are NOT empty: each begins a real value / a distinct close,
+            // classified elsewhere.)
+            if q >= self.len() {
+                if special_block {
+                    self.record_empty_attribute_value(Span::new(from as u32, self.len() as u32));
+                } else {
+                    self.record_unexpected_eof(Span::new(from as u32, self.len() as u32));
+                }
+            } else if self.at(q) == b'>' {
+                self.record_empty_attribute_value(Span::new(from as u32, (eq_pos + 1) as u32));
             }
             let (val, next) = self.parse_attribute_value(q);
             value = val;
@@ -677,6 +1795,11 @@ impl<'a> SvelteParser<'a> {
                 }
                 p += 1;
             }
+            if p >= self.len() {
+                // Reached EOF without the closing quote (`id="oops`) — official
+                // `unexpected_eof`.
+                self.record_unexpected_eof(Span::new(from as u32, self.len() as u32));
+            }
             let body = Span::new(body_start as u32, p as u32);
             let after = (p + 1).min(self.len());
             let value = if saw_brace {
@@ -688,17 +1811,34 @@ impl<'a> SvelteParser<'a> {
         } else if b == b'{' {
             let inner_start = from + 1;
             let end = self.find_matching_brace(inner_start);
+            // An UNCLOSED `{` expression value at EOF (`<button onclick={…` with no matching
+            // `}`) is official `expected_token` (the brace expected its close), NOT the bare
+            // truncated-tag `unexpected_eof`. Record the strict fact so the open-tag
+            // fallback's fact-count guard leaves it as the authoritative code.
+            if end >= self.len() {
+                self.record_expected_token(Span::new(from as u32, self.len() as u32));
+            }
             let inner = Span::new(inner_start as u32, end as u32);
             (
                 Some(SvelteAttributeValue::Expression(inner)),
                 (end + 1).min(self.len()),
             )
         } else {
-            // Unquoted value: runs until whitespace / `>` / `/`.
+            // Unquoted value: every byte that is not whitespace / `>` / quote belongs to
+            // the value, mirroring official's unquoted-value reader. A `/` is an ORDINARY
+            // value byte — the `/>` self-close marker only terminates the value once at
+            // least one value byte has been read (`p > from`). A LEADING `/` (an `=`
+            // immediately followed by `/`) is therefore consumed AS the value, so `id=/>`
+            // parses as `id="/"` + a NORMAL `>` close (the element stays open ⇒
+            // `element_unclosed`), NOT a self-close — whereas `id=x/>` reads value `x` then
+            // self-closes at `/>`, exactly as the pinned `svelte@5.56.3` parser does.
             let mut p = from;
             while p < self.len() {
                 let c = self.at(p);
-                if c.is_ascii_whitespace() || c == b'>' || (c == b'/' && self.at(p + 1) == b'>') {
+                if c.is_ascii_whitespace()
+                    || c == b'>'
+                    || (c == b'/' && p > from && self.at(p + 1) == b'>')
+                {
                     break;
                 }
                 p += 1;
@@ -1015,7 +2155,9 @@ impl<'a> SvelteParser<'a> {
                     let c = self.parse_comment();
                     children.push(c);
                 } else {
-                    let nodes = self.parse_element_or_recover();
+                    // NESTED child scan (inside an element or a block clause): a root-only
+                    // `<svelte:*>` meta tag here is NOT at the component root.
+                    let nodes = self.parse_element_or_recover(false);
                     children.extend(nodes);
                 }
                 text_start = self.pos;
@@ -1184,206 +2326,6 @@ impl<'a> SvelteParser<'a> {
 
 // ── Free helpers ───────────────────────────────────────────────────────
 
-fn is_tag_name_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b':' || b == b'.'
-}
-
-/// Find the matching closing `}` for a brace opened just before `inner_start`
-/// (i.e. `inner_start` is the first inner byte) within `src`. Returns the index of
-/// the closing `}`, or `src.len()` at EOF.
-///
-/// STRING-, COMMENT-, and REGEX-AWARE: a `}` inside a single/double/backtick
-/// string, a `//` line comment, a `/* */` block comment, or a `/regex/` literal
-/// does NOT close the brace early. This is the SINGLE JS-aware brace scan shared by
-/// the parser's interpolation tokenizer and the runtime mixed-attribute lowering —
-/// the runtime never re-implements a byte-level `{`/`}` counter (which closes at a
-/// `}` inside a string, e.g. `class="x {format('}')} y"`).
-pub(crate) fn find_matching_brace_in(src: &[u8], inner_start: usize) -> usize {
-    let len = src.len();
-    let at = |p: usize| src.get(p).copied().unwrap_or(0);
-    let starts_with_at = |p: usize, needle: &[u8]| src.get(p..p + needle.len()) == Some(needle);
-    let mut depth = 1usize;
-    let mut p = inner_start;
-    let mut quote: Option<u8> = None;
-    // The last significant byte, used to decide whether a `/` opens a regex
-    // (after an operator / `(` / `,` / `=` / …) vs a division (after a value).
-    let mut prev_significant: u8 = b'{';
-    while p < len {
-        let b = at(p);
-        if let Some(q) = quote {
-            if b == b'\\' {
-                p += 2;
-                continue;
-            }
-            if b == q {
-                quote = None;
-            }
-            p += 1;
-            continue;
-        }
-        // Comments.
-        if b == b'/' && at(p + 1) == b'/' {
-            p += 2;
-            while p < len && at(p) != b'\n' {
-                p += 1;
-            }
-            continue;
-        }
-        if b == b'/' && at(p + 1) == b'*' {
-            p += 2;
-            while p < len && !starts_with_at(p, b"*/") {
-                p += 1;
-            }
-            p = (p + 2).min(len);
-            continue;
-        }
-        // A regex literal opens only in expression position (after an
-        // operator/opener, never after a value/identifier/`)`). Skip its body
-        // (char-class- and escape-aware) so a `}` inside `/[}]/` does not close
-        // early.
-        if b == b'/' && regex_allowed_after(prev_significant) {
-            let mut q = p + 1;
-            let mut in_class = false;
-            while q < len {
-                let rb = at(q);
-                if rb == b'\\' {
-                    q += 2;
-                    continue;
-                }
-                match rb {
-                    b'[' => in_class = true,
-                    b']' => in_class = false,
-                    b'/' if !in_class => {
-                        q += 1;
-                        break;
-                    }
-                    b'\n' => break,
-                    _ => {}
-                }
-                q += 1;
-            }
-            p = q;
-            prev_significant = b'/';
-            continue;
-        }
-        match b {
-            b'"' | b'\'' | b'`' => quote = Some(b),
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return p;
-                }
-            }
-            _ => {}
-        }
-        if !b.is_ascii_whitespace() {
-            prev_significant = b;
-        }
-        p += 1;
-    }
-    len
-}
-
-/// Whether a `/` in expression text opens a REGEX literal (vs a division).
-///
-/// CONSERVATIVE WHITELIST: a `/` is treated as a regex ONLY after a byte that
-/// UNAMBIGUOUSLY precedes an expression (an opener / separator / binary
-/// operator / assignment). Every other context — a value-ending byte (an
-/// identifier char, `)`, `]`, `}`, a digit, `$`, `_`), AND the AMBIGUOUS postfix
-/// bytes (`+`/`-` which may be `++`/`--`, `!` which may be a TS non-null
-/// assertion) — is DIVISION, so the regex body is NOT skipped. A missed
-/// regex-skip only matters when a `}` sits inside a regex (rare); a FALSE
-/// regex-skip would swallow real expression bytes, so the whitelist fails toward
-/// division. The brace scanner is correct either way for the common case; this
-/// only guards the `}`-inside-regex corner.
-fn regex_allowed_after(prev: u8) -> bool {
-    matches!(
-        prev,
-        b'(' | b'['
-            | b'{'
-            | b','
-            | b';'
-            | b':'
-            | b'='
-            | b'<'
-            | b'>'
-            | b'&'
-            | b'|'
-            | b'?'
-            | b'*'
-            | b'%'
-            | b'^'
-            | b'~'
-            | b'\n'
-    )
-}
-
-fn classify_element(name: &str) -> SvelteElementKind {
-    if let Some(local) = name.strip_prefix("svelte:") {
-        return SvelteElementKind::Special(SvelteSpecialKind::from_local(local));
-    }
-    if name.eq_ignore_ascii_case("style") {
-        return SvelteElementKind::NestedStyle;
-    }
-    // Component: starts uppercase or is dotted (member access).
-    let first = name.chars().next().unwrap_or('a');
-    if first.is_ascii_uppercase() || name.contains('.') {
-        SvelteElementKind::Component
-    } else {
-        SvelteElementKind::Intrinsic
-    }
-}
-
-fn is_void_element(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "area"
-            | "base"
-            | "br"
-            | "col"
-            | "embed"
-            | "hr"
-            | "img"
-            | "input"
-            | "link"
-            | "meta"
-            | "param"
-            | "source"
-            | "track"
-            | "wbr"
-    )
-}
-
-/// Classify a brace body as a declaration tag (`const`/`let`) — the 5.56
-/// declaration-tag forms (NOT the `{@const}` legacy form, which the `@` path
-/// handles).
-fn declaration_tag_kind(trimmed: &str) -> Option<SvelteTagKind> {
-    if let Some(rest) = trimmed.strip_prefix("const") {
-        if rest.starts_with(|c: char| c.is_whitespace()) {
-            return Some(SvelteTagKind::Const);
-        }
-    }
-    if let Some(rest) = trimmed.strip_prefix("let") {
-        if rest.starts_with(|c: char| c.is_whitespace()) {
-            return Some(SvelteTagKind::Let);
-        }
-    }
-    None
-}
-
-/// A non-empty trimmed span anchored at `offset` for `text` (the raw run after
-/// a keyword). Returns `None` for an all-whitespace run.
-pub(super) fn nonempty_span(offset: usize, text: &str) -> Option<Span> {
-    let lead = text.len() - text.trim_start().len();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let start = offset + lead;
-    Some(Span::new(start as u32, (start + trimmed.len()) as u32))
-}
-
 /// Read a quoted/text attribute value by name (case-insensitive) from a parsed
 /// attribute list, returning the value text.
 fn attr_text_value(attrs: &[SvelteAttribute], parser: &SvelteParser, name: &str) -> Option<String> {
@@ -1402,13 +2344,118 @@ fn attr_text_value(attrs: &[SvelteAttribute], parser: &SvelteParser, name: &str)
     })
 }
 
-/// Whether a bare (valueless) attribute of `name` is present.
-fn attribute_present(attrs: &[SvelteAttribute], parser: &SvelteParser, name: &str) -> bool {
+/// Whether a `<script>`'s attributes mark it as the MODULE script — a valueless
+/// `module` flag OR a `context="module"` text attribute. The attribute NAME is matched
+/// CASE-SENSITIVELY (official's `attribute.name === 'module'` / `=== 'context'`), so a
+/// capitalized `Module` / `Context` does NOT mark a module script (it is an unknown
+/// attribute, leaving the script as an instance script).
+fn script_attr_marks_module(attrs: &[SvelteAttribute], parser: &SvelteParser) -> bool {
     attrs.iter().any(|a| match &a.kind {
-        SvelteAttributeKind::Plain { name: n, value, .. } => {
-            let _ = parser;
-            n.eq_ignore_ascii_case(name) && value.is_none()
+        SvelteAttributeKind::Plain { name, value, .. } if name == "module" => value.is_none(),
+        SvelteAttributeKind::Plain { name, value, .. } if name == "context" => {
+            matches!(value, Some(SvelteAttributeValue::Text(span)) if parser.slice(*span) == "module")
         }
         _ => false,
     })
+}
+
+/// The STATIC value of a `<svelte:options>` attribute, mirroring upstream's `get_static_value`
+/// (`read/options.js`) restricted to what the parse domain can statically determine. A shorthand
+/// (no value) is `True`; a Text value is its string `Str`; an EXPRESSION value carries a bare
+/// boolean / string literal as `Bool` / `Str`, and any non-literal (an identifier, a number, an
+/// operation, a mixed value) is `Dynamic` (upstream's `chunk.expression.type !== 'Literal'` →
+/// `null`).
+enum OptionsStaticValue {
+    /// A boolean-shorthand attribute (no value) — upstream's `value === true`.
+    True,
+    /// A boolean literal `{true}` / `{false}` (the value itself is consumed elsewhere; here only
+    /// its boolean-ness matters for `get_boolean_value` validity).
+    Bool,
+    /// A static string — a Text value, or a single-string-literal expression.
+    Str(String),
+    /// A non-statically-resolvable value (an identifier, number, operation, or mixed value) —
+    /// upstream's `null` static value.
+    Dynamic,
+}
+
+/// Classify a `<svelte:options>` attribute value into its [`OptionsStaticValue`], faithful to
+/// upstream `get_static_value`. The expression inner text is recognised ONLY as a single complete
+/// boolean / string literal (the whole trimmed inner is exactly `true` / `false` / `'…'` / `"…"`);
+/// anything else (an identifier, a number, an operation, a mixed value) is `Dynamic`.
+fn options_static_value(text: &str, value: &Option<SvelteAttributeValue>) -> OptionsStaticValue {
+    match value {
+        None => OptionsStaticValue::True,
+        Some(SvelteAttributeValue::Text(span)) => {
+            OptionsStaticValue::Str(text[span.start as usize..span.end as usize].to_string())
+        }
+        Some(SvelteAttributeValue::Mixed(_)) => OptionsStaticValue::Dynamic,
+        Some(SvelteAttributeValue::Expression(span)) => {
+            let inner = text[span.start as usize..span.end as usize].trim();
+            match inner {
+                "true" | "false" => OptionsStaticValue::Bool,
+                _ => match parse_single_string_literal(inner) {
+                    Some(s) => OptionsStaticValue::Str(s),
+                    None => OptionsStaticValue::Dynamic,
+                },
+            }
+        }
+    }
+}
+
+/// If `inner` is EXACTLY a single quoted string literal (`'…'` or `"…"` with the matching close
+/// quote at the very end and no escapes / trailing tokens), return its string contents; otherwise
+/// `None` (a non-literal expression, faithful to upstream treating only a bare `Literal` as a
+/// static value). Escapes are not modelled — an option string value (a namespace / css / tag) is
+/// a plain identifier-like token in practice; an escaped form falls through to `Dynamic`, which is
+/// a SAFE direction (it can only DROP an accept into an unsupported-feature refusal, never mint a
+/// wrong reject code for an officially-accepted input — the only such strings are `svg` / `mathml`
+/// / `html` / `injected`, none of which need escapes).
+fn parse_single_string_literal(inner: &str) -> Option<String> {
+    let bytes = inner.as_bytes();
+    let &first = bytes.first()?;
+    if first != b'\'' && first != b'"' {
+        return None;
+    }
+    if bytes.len() < 2 || *bytes.last()? != first {
+        return None;
+    }
+    let body = &inner[1..inner.len() - 1];
+    // No inner unescaped matching quote (which would mean it is not a single literal).
+    if body.as_bytes().contains(&first) {
+        return None;
+    }
+    Some(body.to_string())
+}
+
+/// Whether a `<svelte:options>` boolean axis (`runes` / `immutable` / `preserveWhitespace` /
+/// `accessors`) value is a BOOLEAN, mirroring upstream's `get_boolean_value` (a non-boolean
+/// `get_static_value` is `svelte_options_invalid_attribute_value`). The shorthand `value === true`
+/// counts as boolean.
+fn options_value_is_boolean(text: &str, value: &Option<SvelteAttributeValue>) -> bool {
+    matches!(
+        options_static_value(text, value),
+        OptionsStaticValue::True | OptionsStaticValue::Bool
+    )
+}
+
+/// Whether a `<svelte:options namespace>` value is a VALID namespace, mirroring upstream
+/// (`get_static_value` in {`html`, `svg`, `mathml`} OR the SVG / MathML namespace URLs). A
+/// shorthand / boolean / dynamic value is invalid (the static value is not one of the strings).
+fn options_namespace_is_valid(text: &str, value: &Option<SvelteAttributeValue>) -> bool {
+    const NAMESPACE_SVG: &str = "http://www.w3.org/2000/svg";
+    const NAMESPACE_MATHML: &str = "http://www.w3.org/1998/Math/MathML";
+    match options_static_value(text, value) {
+        OptionsStaticValue::Str(s) => {
+            matches!(s.as_str(), "html" | "svg" | "mathml")
+                || s == NAMESPACE_SVG
+                || s == NAMESPACE_MATHML
+        }
+        _ => false,
+    }
+}
+
+/// Whether a `<svelte:options css>` value is the VALID `injected` (the only accepted value
+/// upstream). A shorthand / boolean / dynamic / other-string value is invalid.
+fn options_css_is_injected(text: &str, value: &Option<SvelteAttributeValue>) -> bool {
+    matches!(options_static_value(text, value), OptionsStaticValue::Str(s) if s == "injected")
 }

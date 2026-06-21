@@ -1,0 +1,85 @@
+{
+  "slug": "matrix/bind_value_signal_ident.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_value_signal_ident",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "bind_value",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_value",
+    "child",
+    "first_child",
+    "from_html",
+    "get",
+    "remove_input_defaults",
+    "reset",
+    "set",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "first_child": 1,
+    "remove_input_defaults": 1,
+    "sibling": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 2,
+    "bind_value": 1,
+    "set": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/> <p> </p>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/> <p> </p>`, 1); export default function bind_value_signal_ident($$anchor) { let name = $.state(\"\"); var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var p = $.sibling(input, 2); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(name))); $.bind_value(input, () => $.get(name), ($$value) => $.set(name, $$value)); $.append($$anchor, fragment); }",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

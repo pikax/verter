@@ -57,7 +57,11 @@ fn main_code(host: &VerterHost, canonical: &str, profile: &CompileProfile) -> Op
         compile_profile: profile.clone(),
     }) {
         Ok(resp) => Some(resp.code.to_string()),
-        Err(HostError::MissingVirtualNode { .. }) => None,
+        // BOTH "no node at all" and "the runtime surface was explicitly refused"
+        // mean "no Main module produced" for this helper's callers; the dedicated R6
+        // test distinguishes the explicit refusal via `get_virtual_file` directly.
+        Err(HostError::MissingVirtualNode { .. })
+        | Err(HostError::RuntimeSurfaceRefused { .. }) => None,
         Err(e) => panic!("get_virtual_file(Main) for {canonical}: {e:?}"),
     }
 }
@@ -216,7 +220,12 @@ fn ensure_ide_compiled_normalizes_a_bundler_profile_to_the_ide_surface() {
     );
 }
 
-// ── Svelte: Main-less IDE projection ────────────────────────────────────────
+// ── Svelte: an UNSUPPORTED-runtime component is IDE-only (Main-less) ─────────
+//
+// A legacy (non-runes) Svelte component is an unsupported runtime surface: the
+// carrier FAILS CLOSED on the runtime body (a precise non-fatal diagnostic) and
+// produces NO `Main` node, while the IDE projection still type-checks. A SUPPORTED
+// runes component DOES emit a `Main` (see `svelte_runes_component_emits_a_runtime_main`).
 
 const SVELTE_SRC: &str = "<script lang=\"ts\">let count = 0;</script>\n<button onclick={() => count++}>{count}</button>\n";
 
@@ -268,11 +277,48 @@ fn svelte_ensure_ide_compiled_succeeds_with_no_main_node() {
         "Svelte IDE output must NOT carry the Vue jsxImportSource, got:\n{code}"
     );
 
-    // … and there is NO runtime `Main` virtual node (Svelte runtime generation
-    // is a later block).
+    // … and there is NO runtime `Main` virtual node: a legacy (non-runes)
+    // component is an unsupported runtime surface, so the carrier fails closed on
+    // the runtime body and emits no `Main` (the IDE projection above still
+    // type-checks).
     assert!(
         main_code(&host, "/src/Counter.svelte", &profile).is_none(),
-        "a Main-less Svelte carrier must NOT produce a runtime Main virtual node yet"
+        "a legacy (non-runes) Svelte component must NOT produce a runtime Main node"
+    );
+}
+
+/// A SUPPORTED runes Svelte component emits a runtime `Main` virtual node through
+/// registry routing — the §1.2 client surface reaches `get_virtual_file(Main)`.
+#[test]
+fn svelte_runes_component_emits_a_runtime_main() {
+    let host = host();
+    // The §1.2 conformance fixture: `$state` + bind + a delegated event.
+    let src = "<script>\n\tlet name = $state('world');\n\tlet count = $state(0);\n</script>\n\n<h1>Hello {name}!</h1>\n<input bind:value={name} />\n<button onclick={() => count += 1}>clicks: {count}</button>\n";
+    upsert(&host, "/src/App.svelte", src, FileLanguage::svelte());
+    let profile = ide_profile();
+
+    let main = main_code(&host, "/src/App.svelte", &profile)
+        .expect("a runes Svelte component must produce a runtime Main node");
+
+    // The Main is the Svelte client module (imports the client runtime, exports the
+    // component fn, declares the delegated set). Strictly discriminating — this is
+    // Svelte client output, not Vue `_sfc_main`.
+    assert!(
+        main.contains("import * as $ from 'svelte/internal/client';"),
+        "the Main must be the Svelte client module:\n{main}"
+    );
+    assert!(
+        main.contains("export default function App($$anchor)"),
+        "the Main must export the component fn:\n{main}"
+    );
+    assert!(
+        main.contains("$.delegate(['click']);"),
+        "the Main must declare the delegated event set:\n{main}"
+    );
+    // NEGATIVE: no Vue residue.
+    assert!(
+        !main.contains("_sfc_main"),
+        "the Svelte Main must not be Vue-shaped:\n{main}"
     );
 }
 
@@ -496,5 +542,137 @@ fn svelte_projector_diagnostic_reaches_diagnostics_snapshot() {
             .iter()
             .map(|d| &d.code)
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn runtime_main_request_on_a_refused_svelte_component_is_an_explicit_refusal_yet_ide_resolves() {
+    // R6: requesting the runtime `Main` of a Svelte component whose runtime surface
+    // is REFUSED (here an `{#if}` block — a 5e unsupported construct) yields the
+    // EXPLICIT `HostError::RuntimeSurfaceRefused` (carrying the precise
+    // `svelte-runtime-unsupported-*` reason) — NOT a silent `MissingVirtualNode`,
+    // and NOT a successful compile. YET the IDE projection (`get_ide`) still
+    // resolves (type-checking survives). RED against the prior host path (which
+    // ignored `runtime_surface_refused` and collapsed the request to a generic
+    // missing node, indistinguishable from a clean IDE-only carrier).
+    let host = host();
+    let source = "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n";
+    upsert(&host, "/src/Refused.svelte", source, FileLanguage::svelte());
+    let profile = ide_profile();
+
+    // The runtime `Main` request is an EXPLICIT refusal carrying the precise reason.
+    match host.get_virtual_file(VirtualQuery {
+        raw_id: None,
+        canonical_id: Some("/src/Refused.svelte".to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile.clone(),
+    }) {
+        Err(HostError::RuntimeSurfaceRefused {
+            diagnostic_code, ..
+        }) => {
+            assert!(
+                diagnostic_code.starts_with("svelte-runtime-unsupported-"),
+                "the refusal must carry the precise reason, got: {diagnostic_code}"
+            );
+        }
+        Err(HostError::MissingVirtualNode { .. }) => panic!(
+            "a REQUESTED-but-refused runtime Main must be an EXPLICIT RuntimeSurfaceRefused, \
+             not a silent MissingVirtualNode"
+        ),
+        Ok(_) => panic!("a refused runtime surface must NOT produce a Main module"),
+        Err(e) => panic!("unexpected error for the refused runtime request: {e:?}"),
+    }
+
+    // The IDE projection STILL resolves (type-checking survives the runtime refusal).
+    assert!(
+        host.ensure_ide_compiled("/src/Refused.svelte", &profile)
+            .unwrap(),
+        "the IDE projection must still compile for a runtime-refused component"
+    );
+    assert!(
+        host.get_ide("/src/Refused.svelte", &profile).is_some(),
+        "the IDE `tsx` must resolve even though the runtime surface was refused"
+    );
+}
+
+#[test]
+fn runtime_main_request_on_a_supported_svelte_component_returns_the_main_module() {
+    // R6 NEGATIVE: a SUPPORTED runes component's runtime `Main` request returns the
+    // client module (NOT a refusal) — the refusal path is gated on a real refusal,
+    // never a clean compile. (the Svelte client emitter emits `Main` for supported runes components.)
+    let host = host();
+    let source = "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
+    upsert(&host, "/src/Ok.svelte", source, FileLanguage::svelte());
+    let profile = ide_profile();
+    let code = main_code(&host, "/src/Ok.svelte", &profile)
+        .expect("a supported runes component returns a Main module");
+    assert!(
+        code.contains("import * as $ from 'svelte/internal/client';"),
+        "the Main module is the Svelte client module:\n{code}"
+    );
+}
+
+#[test]
+fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
+    // A WARM cached runtime refusal (`runtime_surface_refused = true`, no `Main`
+    // output) must SATISFY a `get_virtual_file(Main)` demand from the cache — the
+    // serve gate (`compile_serve_satisfies_demand`) treats a `Main` demand as
+    // satisfied when the served result is a runtime refusal, so the second request
+    // is served from the warm slot (it still yields the typed `RuntimeSurfaceRefused`)
+    // rather than falling through to a COLD recompile.
+    //
+    // DISCRIMINATING via the feature-independent `compile_cold_runs` provenance rail
+    // (bumped once per cold run past the warm-hit consult): RED against the pre-fix
+    // gate (which required `outputs.contains_key(Main)` and so recompiled the refusal
+    // on every request — the second request's cold-run count would INCREASE).
+    let host = host();
+    let source = "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n";
+    upsert(
+        &host,
+        "/src/RefusedCached.svelte",
+        source,
+        FileLanguage::svelte(),
+    );
+    let profile = ide_profile();
+
+    let request = || {
+        host.get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/RefusedCached.svelte".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile.clone(),
+        })
+    };
+
+    // First request: the cold compile runs, fails closed, and the refusal is cached.
+    assert!(
+        matches!(request(), Err(HostError::RuntimeSurfaceRefused { .. })),
+        "the first runtime Main request on a refused component is a typed refusal"
+    );
+    let cold_after_first = host.provenance_snapshot().compile_cold_runs;
+
+    // Second request: served from the WARM cached refusal — still the typed refusal,
+    // and NO new cold run (the cold-run count is unchanged).
+    assert!(
+        matches!(request(), Err(HostError::RuntimeSurfaceRefused { .. })),
+        "the second runtime Main request on a refused component is STILL a typed refusal"
+    );
+    let cold_after_second = host.provenance_snapshot().compile_cold_runs;
+    assert_eq!(
+        cold_after_first, cold_after_second,
+        "the cached runtime refusal must satisfy the Main demand WITHOUT a cold \
+         recompile (cold runs: {cold_after_first} -> {cold_after_second})"
+    );
+
+    // The IDE projection still resolves (type-checking survives the runtime refusal).
+    assert!(
+        host.ensure_ide_compiled("/src/RefusedCached.svelte", &profile)
+            .unwrap(),
+        "the IDE projection must still compile for a runtime-refused component"
+    );
+    assert!(
+        host.get_ide("/src/RefusedCached.svelte", &profile)
+            .is_some(),
+        "the IDE `tsx` must resolve even though the runtime surface was refused"
     );
 }

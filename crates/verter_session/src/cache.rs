@@ -274,6 +274,7 @@ mod tests {
                 tsx: None,
                 template_analysis: None,
                 fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                runtime_surface_refused: false,
             },
         );
 

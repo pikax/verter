@@ -91,6 +91,18 @@ pub enum SvelteHelper {
     Derived,
     /// `$.head` — a `<svelte:head>` region.
     Head,
+    /// `$.remove_input_defaults` — strip an `<input>`'s static value/checked
+    /// defaults when a `bind:value` / `bind:group` / `bind:checked` is present.
+    RemoveInputDefaults,
+    /// `$.user_effect` — a `$effect(fn)` user effect.
+    UserEffect,
+    /// `$.prop` — a `$props()` destructured prop accessor.
+    Prop,
+    /// `$.push` — open the component instance context (a component using
+    /// `$effect` / lifecycle).
+    Push,
+    /// `$.pop` — close the component instance context.
+    Pop,
 }
 
 impl SvelteHelper {
@@ -138,6 +150,11 @@ impl SvelteHelper {
             Self::Snippet => "snippet",
             Self::Derived => "derived",
             Self::Head => "head",
+            Self::RemoveInputDefaults => "remove_input_defaults",
+            Self::UserEffect => "user_effect",
+            Self::Prop => "prop",
+            Self::Push => "push",
+            Self::Pop => "pop",
         }
     }
 }

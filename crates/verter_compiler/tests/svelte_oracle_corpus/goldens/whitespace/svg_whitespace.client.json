@@ -47,6 +47,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_svg(`<svg><rect></rect><circle></circle><text>label</text></svg>`); export default function svg_whitespace($$anchor) { var svg = root(); $.append($$anchor, svg); }",
   "css": {
     "present": false,
     "hash": null,

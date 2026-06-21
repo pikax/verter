@@ -1603,6 +1603,23 @@ pub enum HostError {
     /// The requested virtual node does not exist for this file.
     #[error("missing virtual node for id '{canonical_id}'")]
     MissingVirtualNode { canonical_id: String },
+    /// The carrier REFUSED to produce the requested RUNTIME surface for an
+    /// unsupported construct (a fail-closed runtime outcome). DISTINCT from a
+    /// generic missing node: the runtime artifact was REQUESTED and explicitly
+    /// refused, with the precise reason in `diagnostic_code` / `message`. The IDE
+    /// projection is still produced (type-checking survives); a runtime-requesting
+    /// consumer reads this rather than mistaking the absent node for an IDE-only
+    /// carrier.
+    #[error("runtime surface refused for '{canonical_id}': {diagnostic_code}: {message}")]
+    RuntimeSurfaceRefused {
+        /// The canonical id of the refused file.
+        canonical_id: String,
+        /// The machine-stable refusal diagnostic code (e.g.
+        /// `svelte-runtime-unsupported-block`).
+        diagnostic_code: String,
+        /// The human-readable refusal reason.
+        message: String,
+    },
     /// Compilation failed. Carries the error diagnostics plus the mode
     /// metadata decided at classification time.
     #[error("compile error")]
@@ -1877,6 +1894,10 @@ pub(crate) struct CompileSlot {
     /// falls back to the existing `semantic_hash`/override-hash
     /// pre-filter.
     pub(crate) fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature,
+    /// Whether the carrier fail-closed on an unsupported runtime surface (the typed
+    /// runtime-refusal signal). Survives a warm hit so a runtime-requesting consumer
+    /// reads the refusal from this flag, not a diagnostic-code prefix.
+    pub(crate) runtime_surface_refused: bool,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,

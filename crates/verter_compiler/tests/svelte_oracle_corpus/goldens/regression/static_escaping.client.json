@@ -42,6 +42,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div title=\"say &quot;hi&quot; Tom &amp; Jerry &amp; co\" data-x=\"1 &lt; 2 &amp; 3\">Tom &amp; Jerry &lt; co &nbsp; raw &amp;amp; text</div>`); export default function static_escaping($$anchor) { let label = 'x'; var div = root(); $.append($$anchor, div); }",
   "css": {
     "present": false,
     "hash": null,

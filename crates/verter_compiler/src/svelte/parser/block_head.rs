@@ -8,7 +8,7 @@
 
 use verter_span::Span;
 
-use super::tokenizer::nonempty_span;
+use super::tokenizer_scan::nonempty_span;
 
 /// Split an `{#each ...}` head into `(list_expr, item, index, key)`. The
 /// `as`/item is optional (the `{#each {length:n}}` no-item form).

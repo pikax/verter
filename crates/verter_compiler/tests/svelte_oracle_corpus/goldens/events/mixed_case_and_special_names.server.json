@@ -22,6 +22,7 @@
   "helperCounts": {},
   "delegatedEvents": [],
   "templates": [],
+  "clientModule": null,
   "css": {
     "present": false,
     "hash": null,

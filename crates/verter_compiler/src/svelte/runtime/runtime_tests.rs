@@ -7021,4 +7021,46 @@ mod official_controlled_child_and_attr_skeleton {
             "an empty-string non-class attribute is kept"
         );
     }
+
+    #[test]
+    fn every_state_binding_carries_a_classification() {
+        // F8 invariant: `prepare_state_bindings` classifies EVERY top-level `$state`
+        // binding, so the `$state` emitter's missing-classification arm is provably
+        // dead for well-formed input (no silent `$.state(...)` default fallback).
+        // Discriminating: a `$state` binding with `state: None` would surface here.
+        let alloc = Allocator::default();
+        let ir = lower(
+            "<script>\n\
+                let a = $state(0);\n\
+                let b = $state({ x: 1 });\n\
+                let c = $state('s');\n\
+            </script>\n<button onclick={() => { a++; b.x++; }}>{a} {b.x} {c}</button>\n",
+            &alloc,
+        );
+        let state_bindings: Vec<_> = ir
+            .analysis
+            .bindings
+            .all()
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.kind,
+                    BindingRuntimeKind::StateSignal { .. }
+                        | BindingRuntimeKind::StateProxy
+                        | BindingRuntimeKind::BareProxy
+                )
+            })
+            .collect();
+        assert!(
+            !state_bindings.is_empty(),
+            "the fixture declares $state bindings"
+        );
+        for b in state_bindings {
+            assert!(
+                b.state.is_some(),
+                "every $state binding must carry a classification (no silent \
+                 missing-classification fallback): {b:?}"
+            );
+        }
+    }
 }

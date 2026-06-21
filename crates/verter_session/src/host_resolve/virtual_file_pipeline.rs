@@ -152,6 +152,12 @@ pub(crate) struct CompileServe {
     pub(crate) actual_mode: CompileCacheMode,
     /// The first downgrade reason, when one fired.
     pub(crate) downgrade_reason: Option<DowngradeReason>,
+    /// Whether the carrier FAIL-CLOSED on an unsupported runtime surface (no `Main`
+    /// produced) — the TYPED runtime-refusal signal sourced from the carrier
+    /// bundle's `runtime_surface_refused`. A runtime-requesting consumer reads THIS
+    /// flag (never the diagnostic-code prefix) to turn a requested-but-absent `Main`
+    /// into an explicit `RuntimeSurfaceRefused`.
+    pub(crate) runtime_surface_refused: bool,
 }
 
 impl VerterHost {
@@ -861,13 +867,49 @@ impl VerterHost {
             CompileDemand::VirtualNode(node_kind.clone()),
         )?;
 
-        let found =
-            served
-                .outputs
-                .get(&node_kind)
-                .ok_or_else(|| HostError::MissingVirtualNode {
+        let found = match served.outputs.get(&node_kind) {
+            Some(found) => found,
+            None => {
+                // A REQUESTED `Main` runtime node that is absent is examined for a
+                // RUNTIME REFUSAL via the TYPED `runtime_surface_refused` flag the
+                // carrier set on its bundle (threaded onto `CompileServe`): a carrier
+                // that fail-closed on an unsupported runtime construct emits no
+                // `Main` and sets the flag. Such a request is an EXPLICIT refusal —
+                // distinct from a generic missing node and from an IDE-only carrier —
+                // so a runtime-requesting consumer reads `RuntimeSurfaceRefused` and
+                // cannot mistake the absent node for a clean compile. The host reads
+                // the FRAMEWORK-NEUTRAL typed flag, never a framework-specific
+                // diagnostic-code prefix; the precise per-surface code/message is
+                // recovered from the refusal diagnostic for the error payload. The
+                // IDE `tsx` is still produced (the `Ide` demand resolves it). Every
+                // OTHER missing node stays the generic `MissingVirtualNode`.
+                if node_kind == VirtualNodeKind::Main && served.runtime_surface_refused {
+                    // Recover the precise per-surface code + message from the
+                    // refusal diagnostic the carrier lifted (a non-fatal Warning).
+                    let (diagnostic_code, message) = served
+                        .diagnostics
+                        .diagnostics
+                        .iter()
+                        .find(|d| d.code.starts_with("svelte-runtime-unsupported-"))
+                        .map(|d| (d.code.clone(), d.message.clone()))
+                        .unwrap_or_else(|| {
+                            (
+                                "runtime-surface-refused".to_string(),
+                                "the carrier fail-closed on an unsupported runtime surface"
+                                    .to_string(),
+                            )
+                        });
+                    return Err(HostError::RuntimeSurfaceRefused {
+                        canonical_id: canonical_id.clone(),
+                        diagnostic_code,
+                        message,
+                    });
+                }
+                return Err(HostError::MissingVirtualNode {
                     canonical_id: canonical_id.clone(),
-                })?;
+                });
+            }
+        };
 
         Ok(VirtualFileResponse {
             id: render_single_id(&canonical_id, &node_kind, &served.meta, raw_was_lsp),
@@ -1155,6 +1197,7 @@ impl VerterHost {
                     outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
                     diagnostics: DiagnosticsSnapshot,
                     tsx: Option<CachedTsx>,
+                    runtime_surface_refused: bool,
                 }
                 let warm_hit: Option<WarmHit> = match actual_mode {
                     CompileCacheMode::Stateless => None,
@@ -1200,6 +1243,7 @@ impl VerterHost {
                                 outputs: hit.outputs,
                                 diagnostics: hit.diagnostics,
                                 tsx: hit.tsx,
+                                runtime_surface_refused: hit.runtime_surface_refused,
                             })
                     }),
                     CompileCacheMode::Content => {
@@ -1212,6 +1256,7 @@ impl VerterHost {
                                 outputs: value.outputs.clone(),
                                 diagnostics: value.diagnostics.clone(),
                                 tsx: value.tsx.clone(),
+                                runtime_surface_refused: value.runtime_surface_refused,
                             })
                     }
                 };
@@ -1263,6 +1308,7 @@ impl VerterHost {
                         requested_mode,
                         actual_mode,
                         downgrade_reason: classification.first_downgrade_reason(),
+                        runtime_surface_refused: hit.runtime_surface_refused,
                     };
                     if Self::compile_serve_satisfies_demand(&serve, &demand) {
                         return Ok(serve);
@@ -1439,33 +1485,34 @@ impl VerterHost {
             let result = self.compile_entry(&compile_input, profile);
             (result, None)
         };
-        let (compiled_outputs, diagnostics, stale, compiled_tsx, compiled_template_analysis) =
-            match compile_result {
-                Ok((outputs, diagnostics, tsx, tpl)) => (outputs, diagnostics, false, tsx, tpl),
-                Err(diagnostics) => {
-                    self.store_latest_diagnostics(&canonical_id, profile_hash, diagnostics.clone());
-                    let policy = self.config.compile_error_policy;
-                    // `fallback_last_good` is session-published output. A
-                    // `Stateless` compile bypasses ALL host cache reads —
-                    // including this dev-serve-last-good read-back — so it
-                    // never serves the session last-good even on error.
-                    // (`actual_mode == Stateless` is reached either by an
-                    // explicit `Stateless` request or by a downgraded
-                    // `Content` request.)
-                    let serve_last_good = actual_mode != CompileCacheMode::Stateless
-                        && self.config.dev_mode
-                        && policy == CompileErrorPolicy::DevServeLastKnownGood;
-                    if serve_last_good {
-                        if let Some(last_good) = fallback_last_good.clone() {
-                            (last_good, diagnostics, true, None, None)
-                        } else {
-                            return Err(HostError::CompileError(CompileFailure {
-                                diagnostics,
-                                requested_mode: classification.requested_mode,
-                                actual_mode,
-                                downgrade_reason,
-                            }));
-                        }
+        let (
+            compiled_outputs,
+            diagnostics,
+            stale,
+            compiled_tsx,
+            compiled_template_analysis,
+            runtime_surface_refused,
+        ) = match compile_result {
+            Ok((outputs, diagnostics, tsx, tpl, refused)) => {
+                (outputs, diagnostics, false, tsx, tpl, refused)
+            }
+            Err(diagnostics) => {
+                self.store_latest_diagnostics(&canonical_id, profile_hash, diagnostics.clone());
+                let policy = self.config.compile_error_policy;
+                // `fallback_last_good` is session-published output. A
+                // `Stateless` compile bypasses ALL host cache reads —
+                // including this dev-serve-last-good read-back — so it
+                // never serves the session last-good even on error.
+                // (`actual_mode == Stateless` is reached either by an
+                // explicit `Stateless` request or by a downgraded
+                // `Content` request.)
+                let serve_last_good = actual_mode != CompileCacheMode::Stateless
+                    && self.config.dev_mode
+                    && policy == CompileErrorPolicy::DevServeLastKnownGood;
+                if serve_last_good {
+                    if let Some(last_good) = fallback_last_good.clone() {
+                        // A last-good serve is not a fresh runtime refusal.
+                        (last_good, diagnostics, true, None, None, false)
                     } else {
                         return Err(HostError::CompileError(CompileFailure {
                             diagnostics,
@@ -1474,8 +1521,16 @@ impl VerterHost {
                             downgrade_reason,
                         }));
                     }
+                } else {
+                    return Err(HostError::CompileError(CompileFailure {
+                        diagnostics,
+                        requested_mode: classification.requested_mode,
+                        actual_mode,
+                        downgrade_reason,
+                    }));
                 }
-            };
+            }
+        };
 
         #[cfg(feature = "session_metrics")]
         {
@@ -1510,6 +1565,7 @@ impl VerterHost {
             },
             compiled_tsx.clone(),
             compiled_template_analysis.clone(),
+            runtime_surface_refused,
         );
 
         // The `latest_diagnostics` + generation bump runs for EVERY mode
@@ -1700,15 +1756,27 @@ impl VerterHost {
             requested_mode: classification.requested_mode,
             actual_mode,
             downgrade_reason,
+            runtime_surface_refused,
         })
     }
 
     /// Whether a served compile result satisfies the demand. The shared
     /// authority for the WARM-hit serve gate: a `VirtualNode` demand needs the
     /// node present; an `Ide` demand needs a `tsx`.
+    ///
+    /// A `Main` demand is ALSO satisfied by a RUNTIME REFUSAL: a carrier that
+    /// fail-closed on an unsupported runtime surface produces no `Main` output but
+    /// sets `runtime_surface_refused`. That refusal is the FINAL, cacheable answer to
+    /// a `Main` request (`get_virtual_file` turns the absent-`Main`-but-refused serve
+    /// into a typed `RuntimeSurfaceRefused`), so a warm cached refusal must SATISFY
+    /// the demand and be reused — never fall through to a cold recompile that would
+    /// re-derive the same refusal on every request.
     fn compile_serve_satisfies_demand(serve: &CompileServe, demand: &CompileDemand) -> bool {
         match demand {
-            CompileDemand::VirtualNode(kind) => serve.outputs.contains_key(kind),
+            CompileDemand::VirtualNode(kind) => {
+                serve.outputs.contains_key(kind)
+                    || (*kind == VirtualNodeKind::Main && serve.runtime_surface_refused)
+            }
             CompileDemand::Ide => serve.tsx.is_some(),
         }
     }
@@ -2072,6 +2140,9 @@ impl VerterHost {
             DiagnosticsSnapshot,
             Option<CachedTsx>,
             Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+            // Whether the carrier fail-closed on an unsupported runtime surface (the
+            // TYPED runtime-refusal signal, sourced from the bundle).
+            bool,
         ),
         DiagnosticsSnapshot,
     > {
@@ -2307,6 +2378,11 @@ impl VerterHost {
             }
         };
 
+        // Capture the TYPED runtime-refusal signal BEFORE the bundle's fields are
+        // moved out below (the `Main` body / blocks are consumed when assembling the
+        // outputs), so the final `CompileServe`/cache record can carry it.
+        let runtime_surface_refused = compiled.runtime_surface_refused();
+
         // Lift the bundle's framework-neutral diagnostics into the host
         // `DiagnosticsSnapshot` (a Svelte projector diagnostic reaches the
         // snapshot through THIS path).
@@ -2501,6 +2577,15 @@ impl VerterHost {
             )
         });
 
-        Ok((outputs, compile_diags, cached_tsx, template_analysis))
+        Ok((
+            outputs,
+            compile_diags,
+            cached_tsx,
+            template_analysis,
+            // The TYPED runtime-refusal signal the carrier set on the bundle (no
+            // `Main` was produced for an unsupported runtime surface), captured
+            // before the bundle's fields were moved out.
+            runtime_surface_refused,
+        ))
     }
 }

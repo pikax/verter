@@ -61,6 +61,7 @@
       "flag": "1"
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<i>x</i>`); var root_1 = $.from_html(` <!>`, 1); export default function nbsp_then_block($$anchor) { let show = true; $.next(); var fragment = root_1(); var node = $.sibling($.first_child(fragment)); { var consequent = ($$anchor) => { var i = root(); $.append($$anchor, i); }; $.if(node, ($$render) => { if (show) $$render(consequent); }); } $.append($$anchor, fragment); }",
   "css": {
     "present": false,
     "hash": null,

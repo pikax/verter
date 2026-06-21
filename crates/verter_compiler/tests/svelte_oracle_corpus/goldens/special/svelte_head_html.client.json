@@ -57,6 +57,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function svelte_head_html($$anchor) { let title = 'page'; let markup = '<b>bold</b>'; var div = root(); $.head('1tufvvq', ($$anchor) => { $.effect(() => { $.document.title = 'page'; }); }); $.html(div, () => markup, true); $.reset(div); $.append($$anchor, div); }",
   "css": {
     "present": false,
     "hash": null,

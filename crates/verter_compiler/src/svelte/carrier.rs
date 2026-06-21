@@ -352,7 +352,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         source: &str,
         artifact: &FrameworkParseArtifact,
         opts: &RuntimeCompileOptions,
-        _alloc: &oxc_allocator::Allocator,
+        alloc: &oxc_allocator::Allocator,
     ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
         // A foreign artifact (not a Svelte carrier) declines with the typed
         // answer — never a silent empty bundle.
@@ -362,26 +362,101 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             });
         };
 
-        // Svelte's native RUNTIME compiler (source `.svelte` → JS importing
-        // `svelte/internal/client`) is not produced through this carrier yet.
-        // The carrier projects ONLY the IDE surface: it yields the IDE `tsx`
-        // (when the host requests it) and NO runtime `main` / block side-files.
-        // The host
-        // detects the absent runtime surface (`has_runtime_surface() == false`)
-        // and populates only its `CachedTsx` slot — it emits no `Main` virtual
-        // node. The projection's typed-unsupported diagnostics are LIFTED into
-        // the bundle so they reach the host `DiagnosticsSnapshot`.
         let mut bundle = RuntimeCompileOutput::default();
 
+        // The Svelte native RUNTIME compiler (source `.svelte` → JS importing
+        // `svelte/internal/client`). A SUPPORTED component populates
+        // `main.body_code` (the host emits the `Main` virtual node from it,
+        // `has_runtime_surface()` becoming true through registry routing); an
+        // UNSUPPORTED runtime surface FAILS CLOSED with a precise non-fatal
+        // diagnostic (carrying the surface + owning vertical) and produces NO
+        // runtime body — the IDE artifact is still produced so type-checking
+        // survives. SSR (`opts.ssr`) fails closed until the server backend lands.
+        let runtime_opts = super::runtime::SvelteRuntimeOptions {
+            filename: opts.filename.clone(),
+            name: None,
+            runes: None,
+            is_production: opts.is_production,
+            // The neutral `RuntimeCompileOptions` carries no dev-codegen request
+            // distinct from the §1.2 default (`is_production == false` is the
+            // canonical request shape, NOT a dev-codegen request), so the Svelte
+            // client backend always emits PRODUCTION output here. The dev-mode
+            // output axis (5k) is requested through a dedicated signal that lands
+            // with that block; until then `dev_codegen` stays false.
+            dev_codegen: false,
+        };
+        match super::runtime::compile_client(source, parsed, &runtime_opts, alloc, opts.ssr) {
+            Ok(module) => {
+                bundle.main.body_code = Some(module.code);
+                bundle.main.lang = Some("js".to_string());
+            }
+            Err(super::runtime::ClientCompileError::Unsupported(surface)) => {
+                // Fail closed: NO `Main` runtime node is produced, the bundle is
+                // marked `runtime_surface_refused` (the distinct typed signal a
+                // runtime-requesting consumer reads so it cannot mistake the absent
+                // `Main` for a successful runtime compile), and the precise
+                // `svelte-runtime-unsupported-<surface>` reason reaches the host
+                // `DiagnosticsSnapshot`. The diagnostic stays NON-FATAL (Warning) so
+                // the IDE projection below still compiles and type-checking survives.
+                bundle.runtime_surface_refused = true;
+                bundle.diagnostics.push(RuntimeDiagnostic {
+                    severity: RuntimeDiagnosticSeverity::Warning,
+                    code: surface.diagnostic_code().to_string(),
+                    message: surface.message(),
+                    span: Some(surface.span()),
+                });
+            }
+            Err(super::runtime::ClientCompileError::Lowering(errors)) => {
+                // A genuine lowering failure (a malformed construct) ALSO produces no
+                // `Main` — so it is a runtime refusal too: set `runtime_surface_refused`
+                // (the distinct typed signal) so a runtime-requesting consumer reads the
+                // failure EXPLICITLY rather than mistaking the absent `Main` for a clean
+                // IDE-only carrier. Each recorded problem is surfaced as a non-fatal
+                // diagnostic — the IDE projection still runs (it has its own error
+                // recovery).
+                bundle.runtime_surface_refused = true;
+                for diag in &errors.diagnostics {
+                    bundle.diagnostics.push(RuntimeDiagnostic {
+                        severity: RuntimeDiagnosticSeverity::Warning,
+                        code: diag.code.to_string(),
+                        message: diag.message.clone(),
+                        span: Some(diag.span),
+                    });
+                }
+            }
+            Err(super::runtime::ClientCompileError::OfficialReject(rejection)) => {
+                // The component is MALFORMED Svelte official ALSO compile-errors — fail
+                // closed (NO `Main`), mark `runtime_surface_refused`, and surface the
+                // typed official-reject diagnostic (the rule's stable code + a message
+                // naming the EXACT official code the rejection mirrors). The IDE
+                // projection below still runs (it owns its own error recovery), so a
+                // malformed component still type-checks while producing no runtime module.
+                bundle.runtime_surface_refused = true;
+                bundle.diagnostics.push(RuntimeDiagnostic {
+                    severity: RuntimeDiagnosticSeverity::Warning,
+                    code: rejection.rule.diagnostic_code().to_string(),
+                    message: format!(
+                        "{} (official `{}`)",
+                        rejection.rule.message(),
+                        rejection.official_code
+                    ),
+                    span: None,
+                });
+            }
+        }
+
+        // The IDE projection is ALWAYS available (independent of the runtime
+        // surface) so an unsupported-runtime component still type-checks. Its
+        // typed-unsupported diagnostics are lifted alongside the runtime ones.
         if opts.want_ide {
             let ide_opts = IdeCompileOptions {
                 filename: opts.filename.clone(),
                 skip_source_map: !opts.source_map,
                 embed_ambient_types: opts.embed_ambient_types,
             };
-            let (ide, diagnostics) = Self::project_ide(parsed, source, &ide_opts);
+            let (ide, mut diagnostics) = Self::project_ide(parsed, source, &ide_opts);
             bundle.tsx = Some(ide);
-            bundle.diagnostics = diagnostics;
+            bundle.diagnostics.append(&mut diagnostics);
         }
 
         if opts.want_template_data {
@@ -405,6 +480,149 @@ mod tests {
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
         let parsed = Arc::new(parse_svelte(source));
         build_svelte_parse_artifact(source, parsed, SVELTE_CARRIER_PARSER_VERSION)
+    }
+
+    #[test]
+    fn compile_bundle_emits_a_runtime_main_body_for_a_runes_component() {
+        // A SUPPORTED runes component populates `main.body_code` (Svelte client JS)
+        // so `has_runtime_surface()` becomes true. DISCRIMINATING: the body is the
+        // client module, not empty.
+        let compiler = SvelteCarrierCompiler::default();
+        let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let alloc = oxc_allocator::Allocator::default();
+        let bundle = compiler
+            .compile_bundle(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
+            .expect("svelte runtime bundle");
+        assert!(
+            bundle.has_runtime_surface(),
+            "a runes component must carry a runtime surface"
+        );
+        let body = bundle
+            .main
+            .body_code
+            .expect("a runes component emits a Main body");
+        assert!(
+            body.contains("import * as $ from 'svelte/internal/client';"),
+            "body:\n{body}"
+        );
+        assert!(body.contains("$.state(0)"), "body:\n{body}");
+        assert_eq!(bundle.main.lang.as_deref(), Some("js"));
+        // No fail-closed diagnostic for a supported component.
+        assert!(
+            bundle.diagnostics.is_empty(),
+            "a supported component emits no diagnostics, got: {:?}",
+            bundle.diagnostics
+        );
+    }
+
+    #[test]
+    fn compile_bundle_fails_closed_for_a_legacy_component_with_no_main() {
+        // A legacy (non-runes) component is an unsupported runtime surface: NO Main
+        // body, and a precise non-fatal diagnostic (so the IDE surface survives).
+        let compiler = SvelteCarrierCompiler::default();
+        let source = "<script>export let label;</script>\n<p>{label}</p>\n";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let alloc = oxc_allocator::Allocator::default();
+        let bundle = compiler
+            .compile_bundle(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
+            .expect("the bundle is produced (fail-closed, not an Err)");
+        assert!(
+            !bundle.has_runtime_surface(),
+            "a legacy component must NOT carry a runtime surface"
+        );
+        assert!(
+            bundle.main.body_code.is_none(),
+            "no Main body for a legacy component"
+        );
+        // The fail-closed diagnostic is precise + NON-FATAL (so the IDE survives).
+        assert!(
+            bundle
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "svelte-runtime-unsupported-legacy-mode"),
+            "the legacy-mode fail-closed diagnostic must be present, got: {:?}",
+            bundle
+                .diagnostics
+                .iter()
+                .map(|d| &d.code)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !bundle.has_errors(),
+            "the fail-closed diagnostic is non-fatal so the IDE compile survives"
+        );
+    }
+
+    #[test]
+    fn runtime_refusal_is_unmissable_to_a_runtime_consumer_yet_ide_survives() {
+        // F5: a RUNTIME request on an unsupported component must surface the refusal
+        // UNAMBIGUOUSLY — `runtime_surface_refused()` is the distinct typed signal
+        // (set ONLY on a fail-closed runtime outcome), `has_runtime_surface()` is
+        // false (no `Main`), and the precise diagnostic carries the reason — so a
+        // consumer cannot mistake the absent `Main` for a successful runtime
+        // compile. YET the IDE projection (`tsx`) is still produced and the
+        // diagnostics stay NON-FATAL, so type-checking survives.
+        let compiler = SvelteCarrierCompiler::default();
+        // An `{#if}` block is an unsupported runtime surface (5e).
+        let source = "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let alloc = oxc_allocator::Allocator::default();
+        let opts = RuntimeCompileOptions {
+            want_ide: true,
+            ..Default::default()
+        };
+        let bundle = compiler
+            .compile_bundle(source, &artifact, &opts, &alloc)
+            .expect("the bundle is produced (fail-closed, not an Err)");
+
+        // The distinct typed runtime-refusal signal.
+        assert!(
+            bundle.runtime_surface_refused(),
+            "an unsupported runtime surface must set the runtime-refusal signal"
+        );
+        // No `Main` runtime surface.
+        assert!(
+            !bundle.has_runtime_surface(),
+            "a refused runtime surface produces NO Main"
+        );
+        // The precise reason reaches the consumer.
+        assert!(
+            bundle
+                .diagnostics
+                .iter()
+                .any(|d| d.code.starts_with("svelte-runtime-unsupported-")),
+            "the precise unsupported-surface diagnostic is present"
+        );
+        // The IDE survives: the `tsx` artifact is present and the refusal is
+        // non-fatal (does not kill the IDE compile).
+        assert!(bundle.tsx.is_some(), "the IDE projection still compiles");
+        assert!(
+            !bundle.has_errors(),
+            "the runtime refusal is non-fatal so the IDE survives"
+        );
+    }
+
+    #[test]
+    fn a_supported_component_never_sets_the_runtime_refusal_signal() {
+        // F5 NEGATIVE: a SUPPORTED runes component emits a Main and NEVER sets the
+        // runtime-refusal signal (the signal discriminates refusal from success).
+        let compiler = SvelteCarrierCompiler::default();
+        let source =
+            "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let alloc = oxc_allocator::Allocator::default();
+        let bundle = compiler
+            .compile_bundle(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
+            .expect("svelte runtime bundle");
+        assert!(
+            bundle.has_runtime_surface(),
+            "a supported component carries a Main"
+        );
+        assert!(
+            !bundle.runtime_surface_refused(),
+            "a supported component must NOT set the runtime-refusal signal"
+        );
     }
 
     #[test]

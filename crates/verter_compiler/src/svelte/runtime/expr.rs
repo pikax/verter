@@ -480,6 +480,10 @@ pub fn reparse_module<'a>(alloc: &'a Allocator, text: &str) -> Option<Program<'a
     Some(parsed.program)
 }
 
+pub use super::bind_target::{
+    bind_target_is_ts_wrapped, bind_target_root_ident, classify_bind_target, BindTargetKind,
+};
+
 /// Whether a callee expression is the `$state(…)` rune (vs `$state.raw` / a
 /// shadowing local). Returns the declared flavour when it is a `$state` family
 /// call.
@@ -499,6 +503,49 @@ pub fn state_rune_call(call: &CallExpression<'_>) -> Option<StateRuneKind> {
         }
         _ => None,
     }
+}
+
+/// Whether a CALLEE expression is the bare `$props` rune (`$props()` — NOT a
+/// `$props.id` member access, NOT a shadowing local). The SINGLE shared
+/// `$props`-callee predicate every syntax-side pass consults (the rune scan, the
+/// binding classifier, the declaration lowering) — there is no per-module fork.
+#[must_use]
+pub(super) fn is_props_callee(callee: &Expression<'_>) -> bool {
+    matches!(callee, Expression::Identifier(id) if id.name.as_str() == "$props")
+}
+
+/// Whether a CALLEE expression is the bare `$effect` rune (`$effect(...)` — NOT
+/// `$effect.pre` / `$effect.root` / `$effect.tracking`, NOT a shadowing local). The
+/// SINGLE shared `$effect`-callee predicate.
+#[must_use]
+pub(super) fn is_effect_callee(callee: &Expression<'_>) -> bool {
+    matches!(callee, Expression::Identifier(id) if id.name.as_str() == "$effect")
+}
+
+/// Whether a CALLEE expression is a `$derived(...)` or `$derived.by(...)` rune — the
+/// two callee forms that introduce a `Derived` memo binding (NOT a shadowing local).
+/// The SINGLE shared `$derived`-callee predicate.
+#[must_use]
+pub(super) fn is_derived_callee(callee: &Expression<'_>) -> bool {
+    match callee {
+        // `$derived(...)`.
+        Expression::Identifier(id) => id.name.as_str() == "$derived",
+        // `$derived.by(...)`.
+        Expression::StaticMemberExpression(m) => {
+            matches!(&m.object, Expression::Identifier(obj)
+                if obj.name.as_str() == "$derived" && m.property.name.as_str() == "by")
+        }
+        _ => false,
+    }
+}
+
+/// Whether an EXPRESSION is a `$bindable(...)` rune call — the default-value form
+/// that marks a destructured `$props()` member as a BINDABLE prop. The SINGLE shared
+/// `$bindable`-expression predicate.
+#[must_use]
+pub(super) fn is_bindable_call(expr: &Expression<'_>) -> bool {
+    matches!(expr, Expression::CallExpression(call)
+        if matches!(&call.callee, Expression::Identifier(id) if id.name.as_str() == "$bindable"))
 }
 
 /// Whether a `$state(…)` initializer's first argument is PROXIABLE — the
@@ -1129,9 +1176,6 @@ impl<'a> Visit<'a> for ScriptUseCollector {
 
     fn visit_update_expression(&mut self, it: &UpdateExpression<'a>) {
         match &it.argument {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                self.mark_reassigned(id.name.as_str());
-            }
             SimpleAssignmentTarget::StaticMemberExpression(m) => {
                 if let Expression::Identifier(obj) = &m.object {
                     self.mark_deep_mutated(obj.name.as_str());
@@ -1142,7 +1186,14 @@ impl<'a> Visit<'a> for ScriptUseCollector {
                     self.mark_deep_mutated(obj.name.as_str());
                 }
             }
-            _ => {}
+            // A bare-identifier OR a TS-WRAPPED identifier (`count!++` /
+            // `(count as T)++`) update reassigns the inner identifier (the wrapper
+            // is type-only and strips away).
+            other => {
+                if let Some(name) = simple_target_wrapped_ident(other) {
+                    self.mark_reassigned(name);
+                }
+            }
         }
         walk::walk_update_expression(self, it);
     }
@@ -1162,6 +1213,37 @@ impl<'a> Visit<'a> for ScriptUseCollector {
             }
         }
         walk::walk_call_expression(self, it);
+    }
+}
+
+/// Peel TS-WRAPPER layers (`x!`, `x as T`, `x satisfies T`, `<T>x`) off a SIMPLE
+/// assignment target and return the inner bare-identifier name, if it reduces to
+/// one. A TS-wrapped update/assignment of an identifier (`count!++`) is still a
+/// reassignment of that identifier (the type wrapper strips away), so the write
+/// attribution must see through it — otherwise a `$state` written ONLY through a
+/// wrapper is misclassified as never-reassigned. A member target reduces to `None`.
+fn simple_target_wrapped_ident<'a>(target: &'a SimpleAssignmentTarget<'a>) -> Option<&'a str> {
+    match target {
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.as_str()),
+        SimpleAssignmentTarget::TSAsExpression(e) => expr_wrapped_ident(&e.expression),
+        SimpleAssignmentTarget::TSSatisfiesExpression(e) => expr_wrapped_ident(&e.expression),
+        SimpleAssignmentTarget::TSNonNullExpression(e) => expr_wrapped_ident(&e.expression),
+        SimpleAssignmentTarget::TSTypeAssertion(e) => expr_wrapped_ident(&e.expression),
+        _ => None,
+    }
+}
+
+/// Peel TS-wrapper / parenthesis layers off an EXPRESSION and return the inner
+/// bare-identifier name, if it reduces to one.
+fn expr_wrapped_ident<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.as_str()),
+        Expression::ParenthesizedExpression(p) => expr_wrapped_ident(&p.expression),
+        Expression::TSAsExpression(e) => expr_wrapped_ident(&e.expression),
+        Expression::TSSatisfiesExpression(e) => expr_wrapped_ident(&e.expression),
+        Expression::TSNonNullExpression(e) => expr_wrapped_ident(&e.expression),
+        Expression::TSTypeAssertion(e) => expr_wrapped_ident(&e.expression),
+        _ => None,
     }
 }
 
@@ -1436,15 +1518,6 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
 
     fn visit_update_expression(&mut self, it: &UpdateExpression<'a>) {
         match &it.argument {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                let name = id.name.as_str();
-                if !self.is_local(name) {
-                    self.refs.push(ExprReference {
-                        name: name.to_string(),
-                        kind: ExprRefKind::Reassign,
-                    });
-                }
-            }
             SimpleAssignmentTarget::StaticMemberExpression(m) => {
                 if let Expression::Identifier(obj) = &m.object {
                     let name = obj.name.as_str();
@@ -1469,7 +1542,19 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
                 }
                 walk::walk_update_expression(self, it);
             }
-            _ => walk::walk_update_expression(self, it),
+            // A bare-identifier OR a TS-WRAPPED identifier (`count!++`) update is a
+            // REASSIGN of the inner identifier (the type wrapper strips away).
+            other => {
+                if let Some(name) = simple_target_wrapped_ident(other) {
+                    if !self.is_local(name) {
+                        self.refs.push(ExprReference {
+                            name: name.to_string(),
+                            kind: ExprRefKind::Reassign,
+                        });
+                    }
+                }
+                walk::walk_update_expression(self, it);
+            }
         }
     }
 

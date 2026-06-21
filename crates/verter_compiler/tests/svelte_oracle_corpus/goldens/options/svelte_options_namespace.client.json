@@ -45,6 +45,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_svg(`<circle cx=\"50\" cy=\"50\"></circle>`); export default function svelte_options_namespace($$anchor) { let r = 10; var circle = root(); $.set_attribute(circle, 'r', r); $.append($$anchor, circle); }",
   "css": {
     "present": false,
     "hash": null,

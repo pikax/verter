@@ -83,6 +83,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); var root_1 = $.from_html(`<p>loading…</p>`); export default function await_block($$anchor) { let promise = $.proxy(Promise.resolve(42)); var fragment = $.comment(); var node = $.first_child(fragment); $.await( node, () => promise, ($$anchor) => { var p_2 = root_1(); $.append($$anchor, p_2); }, ($$anchor, value) => { var p = root(); var text = $.child(p); $.reset(p); $.template_effect(() => $.set_text(text, `got ${$.get(value) ?? ''}`)); $.append($$anchor, p); }, ($$anchor, error) => { var p_1 = root(); var text_1 = $.child(p_1); $.reset(p_1); $.template_effect(() => $.set_text(text_1, `error ${$.get(error).message ?? ''}`)); $.append($$anchor, p_1); } ); $.append($$anchor, fragment); }",
   "css": {
     "present": false,
     "hash": null,

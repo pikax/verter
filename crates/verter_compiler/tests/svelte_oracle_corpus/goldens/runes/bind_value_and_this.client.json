@@ -1,0 +1,83 @@
+{
+  "slug": "runes/bind_value_and_this.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_value_and_this",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "bind_this",
+    "sibling",
+    "template_effect",
+    "set_text",
+    "get",
+    "bind_value",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_this",
+    "bind_value",
+    "first_child",
+    "from_html",
+    "get",
+    "remove_input_defaults",
+    "set",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "first_child": 1,
+    "remove_input_defaults": 1,
+    "sibling": 2,
+    "bind_this": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 2,
+    "bind_value": 1,
+    "set": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/><div></div> ",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/><div></div> `, 1); export default function bind_value_and_this($$anchor) { let v = $.state(''); let el; var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var div = $.sibling(input); $.bind_this(div, ($$value) => el = $$value, () => el); var text = $.sibling(div, 1, true); $.template_effect(() => $.set_text(text, $.get(v))); $.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value)); $.append($$anchor, fragment); }",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

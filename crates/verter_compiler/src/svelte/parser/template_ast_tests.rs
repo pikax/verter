@@ -847,3 +847,400 @@ fn close_span_ignores_a_close_tag_inside_a_descendant_string_literal() {
     assert_eq!(span.start, src.rfind("</div>").unwrap() as u32);
     assert_eq!(&src[span.start as usize..span.end as usize], "</div>");
 }
+
+// ── Close-tag well-formedness violations (the parser is the close-tag authority) ──
+
+#[test]
+fn unclosed_intrinsic_element_at_eof_records_unclosed() {
+    // `<button>x` open at EOF — official `element_unclosed`. The parser records an
+    // `Unclosed` violation naming the open element.
+    let p = parse_svelte("<button>x");
+    assert_eq!(p.close_tag_violations.len(), 1);
+    let v = &p.close_tag_violations[0];
+    assert_eq!(v.kind, CloseTagViolationKind::Unclosed);
+    assert_eq!(v.tag, "button");
+}
+
+#[test]
+fn nested_unclosed_inner_element_records_unclosed() {
+    // `<div><button>x</div>` — the `<button>` is implicitly closed by the ancestor
+    // `</div>` (official accepts that as an implicit close); but here there is NO
+    // `</div>`-matching ancestor for `<button>`, so `<button>` (and `<div>`) reach
+    // EOF unclosed. `<div><button>x` ⇒ both unclosed.
+    let p = parse_svelte("<div><button>x");
+    let kinds: Vec<_> = p
+        .close_tag_violations
+        .iter()
+        .map(|v| (v.kind, v.tag.clone()))
+        .collect();
+    assert!(
+        kinds.contains(&(CloseTagViolationKind::Unclosed, "button".to_string())),
+        "expected the inner <button> unclosed: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&(CloseTagViolationKind::Unclosed, "div".to_string())),
+        "expected the outer <div> unclosed: {kinds:?}"
+    );
+}
+
+#[test]
+fn well_formed_nested_elements_record_no_close_violation() {
+    // NEGATIVE: a fully-closed nested tree records ZERO violations (the §1.2-class
+    // well-formed shape must not be flagged).
+    let p = parse_svelte("<div><button>x</button></div>");
+    assert!(
+        p.close_tag_violations.is_empty(),
+        "well-formed tree must record no close violations: {:?}",
+        p.close_tag_violations
+    );
+}
+
+#[test]
+fn stray_top_level_close_records_invalid_closing_tag() {
+    // `</div>` with nothing open — official `element_invalid_closing_tag`.
+    let p = parse_svelte("</div><button>x</button>");
+    let v = p
+        .close_tag_violations
+        .iter()
+        .find(|v| v.tag == "div")
+        .expect("a div close violation");
+    assert_eq!(v.kind, CloseTagViolationKind::InvalidClosingTag);
+}
+
+#[test]
+fn mismatched_close_inside_element_records_invalid_closing_tag_and_still_closes_parent() {
+    // `<div>x</span></div>` — the `</span>` matches nothing open (a mismatched close);
+    // official `element_invalid_closing_tag`. The `<div>` still closes on its real
+    // `</div>` (the stray close is skipped, not promoted to an implicit close).
+    let src = "<div>x</span></div>";
+    let p = parse_svelte(src);
+    let v = p
+        .close_tag_violations
+        .iter()
+        .find(|v| v.tag == "span")
+        .expect("a span close violation");
+    assert_eq!(v.kind, CloseTagViolationKind::InvalidClosingTag);
+    let div = match &p.template[0] {
+        SvelteNode::Element(el) => el,
+        other => panic!("expected an element, got {other:?}"),
+    };
+    let close = div
+        .close_span
+        .expect("the <div> still closes on its real </div>");
+    assert_eq!(&src[close.start as usize..close.end as usize], "</div>");
+}
+
+#[test]
+fn explicit_close_of_a_void_element_records_void_invalid_content() {
+    // `<input></input>` — a void element cannot have a closing tag; official
+    // `void_element_invalid_content`.
+    let p = parse_svelte("<input></input>");
+    let v = p
+        .close_tag_violations
+        .iter()
+        .find(|v| v.tag == "input")
+        .expect("an input close violation");
+    assert_eq!(v.kind, CloseTagViolationKind::VoidElementInvalidContent);
+}
+
+#[test]
+fn void_element_with_content_then_close_records_void_invalid_content() {
+    // `<input>x</input>` — same class (a void element with content + close).
+    let p = parse_svelte("<input>x</input>");
+    let v = p
+        .close_tag_violations
+        .iter()
+        .find(|v| v.tag == "input")
+        .expect("an input close violation");
+    assert_eq!(v.kind, CloseTagViolationKind::VoidElementInvalidContent);
+}
+
+#[test]
+fn ancestor_close_implicitly_closing_intervening_element_is_not_a_violation() {
+    // NEGATIVE: `<div><span></div>` — the `</div>` closes the ancestor `<div>`,
+    // implicitly closing the intervening `<span>` (official accepts this with a
+    // warning). It is NOT a stray close, so NO `InvalidClosingTag` is recorded; and
+    // because the `</div>` was reached, neither element is left unclosed.
+    let p = parse_svelte("<div><span></div>");
+    assert!(
+        p.close_tag_violations.is_empty(),
+        "an ancestor implicit-close must record no violation: {:?}",
+        p.close_tag_violations
+    );
+}
+
+#[test]
+fn unclosed_component_is_not_a_close_tag_violation() {
+    // NEGATIVE: a `<Foo>` left open is NOT in the HTML close-tag universe (components
+    // fail closed as an unsupported feature elsewhere) — the parser records no
+    // close-tag violation for it.
+    let p = parse_svelte("<Foo>x");
+    assert!(
+        p.close_tag_violations.is_empty(),
+        "a component must not record a close-tag violation: {:?}",
+        p.close_tag_violations
+    );
+}
+
+#[test]
+fn self_closing_and_proper_void_elements_record_no_close_violation() {
+    // NEGATIVE: `<input>` (no close) and `<br />` self-closing are well-formed void
+    // usage — no violation.
+    let p = parse_svelte("<input><br /><img src=\"a.png\">");
+    assert!(
+        p.close_tag_violations.is_empty(),
+        "well-formed void usage must record no violation: {:?}",
+        p.close_tag_violations
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The SINGLE parser-wide script-body grammar scan (`script_body_grammar_for_source`)
+// mirrors upstream svelte@5.56.3's `Parser` constructor `regex_lang_attribute` scan +
+// exact `=== 'ts'` compare. Each expectation below was grounded against the pinned
+// compiler (an `ACCEPT` there ⇔ TS grammar / a `js_parse_error` there ⇔ JS grammar for a
+// TS-only body).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Assert the computed parser-wide grammar for `source`.
+fn assert_grammar(source: &str, expected: ScriptBodyGrammar, why: &str) {
+    assert_eq!(
+        script_body_grammar_for_source(source),
+        expected,
+        "{why} — source:\n{source}"
+    );
+}
+
+#[test]
+fn lang_scan_exact_lowercase_ts_is_ts() {
+    assert_grammar(
+        "<script lang=\"ts\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "exact lowercase lang=\"ts\" sets the parser-wide TS flag",
+    );
+}
+
+#[test]
+fn lang_scan_unquoted_ts_is_ts() {
+    assert_grammar(
+        "<script lang=ts>let a: number = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "an UNQUOTED lang=ts value sets TS (the regex value capture allows no quote)",
+    );
+}
+
+#[test]
+fn lang_scan_uppercase_ts_is_js() {
+    assert_grammar(
+        "<script lang=\"TS\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "uppercase lang=\"TS\" is NOT the exact `ts` value — JS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_tsx_and_typescript_are_js() {
+    assert_grammar(
+        "<script lang=\"tsx\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "lang=\"tsx\" is NOT the exact `ts` value — JS grammar",
+    );
+    assert_grammar(
+        "<script lang=\"typescript\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "lang=\"typescript\" is NOT the exact `ts` value — JS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_trailing_space_inside_quotes_is_js() {
+    // `lang="ts "` — the trailing space sits between the value run and the closing quote, so
+    // the regex's `\1` backreference fails and the lang attribute does NOT match → JS.
+    assert_grammar(
+        "<script lang=\"ts \">let a: number = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "lang=\"ts \" (trailing space) fails the closing-quote backreference — JS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_skips_first_script_without_lang() {
+    // The first script has NO lang (the regex requires `lang=`), so the scan continues to the
+    // SECOND script's lang="ts" → the whole parse is TS.
+    assert_grammar(
+        "<script>let a = 1;</script>\n<script module lang=\"ts\">const b = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "a first script with no lang is skipped; a later lang=\"ts\" decides — TS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_ignores_lang_inside_a_comment() {
+    // A `<script lang="ts">` INSIDE an HTML comment must NOT count — the comment is consumed
+    // whole, so the later PLAIN script keeps the parse in JS.
+    assert_grammar(
+        "<!-- <script lang=\"ts\"> --><script>let a = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "a lang=\"ts\" inside a <!-- --> comment is invisible — JS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_ignores_lang_on_a_non_script_element() {
+    // `<div lang="ts">` is not a `<script>` — the regex only matches `<script\s+`, so the
+    // div's lang must NOT set TS; the later plain script stays JS.
+    assert_grammar(
+        "<div lang=\"ts\"></div>\n<script>let a = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "lang on a non-<script> element does not set TS — JS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_allows_attributes_before_lang() {
+    assert_grammar(
+        "<script generics=\"T\" lang=\"ts\">let a: T = x;</script>",
+        ScriptBodyGrammar::Ts,
+        "attributes before lang are skipped; lang=\"ts\" still sets TS",
+    );
+}
+
+#[test]
+fn lang_scan_no_script_is_js() {
+    assert_grammar(
+        "<button onclick={() => c++}>{c}</button>",
+        ScriptBodyGrammar::Js,
+        "no <script> at all — JS grammar (the parser-wide flag stays off)",
+    );
+}
+
+// ── RAW-SUBSTRING / RIGHTMOST `lang=` selection ──
+// The regex matches `lang=` as a RAW SUBSTRING anywhere in the open tag — including inside
+// another attribute's quoted value — and the greedy prefix selects the RIGHTMOST viable match.
+// It is NOT an attribute-name-boundary / first-occurrence scan. Each row is grounded against the
+// pinned svelte@5.56.3 compiler.
+
+#[test]
+fn lang_scan_data_lang_quoted_value_is_ts() {
+    // `data-lang="ts"` — the `lang=` substring inside the `data-lang` value is matched (the only
+    // `lang=` in the tag) → TS. A boundary scan would miss it (it is preceded by `-`, not ws).
+    assert_grammar(
+        "<script data-lang=\"ts\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "data-lang=\"ts\" carries a raw lang= substring — TS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_quoted_value_containing_lang_eq_ts_is_ts() {
+    // `foo="lang=ts"` — the `lang=ts` substring sits inside the `foo` value; the regex matches it
+    // → TS.
+    assert_grammar(
+        "<script foo=\"lang=ts\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "foo=\"lang=ts\" carries a raw lang=ts substring — TS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_rightmost_lang_wins_ts() {
+    // `lang="js" data-lang="ts"` — the RIGHTMOST viable `lang=` (the one inside `data-lang="ts"`)
+    // wins over the earlier `lang="js"` → TS. A first-occurrence scan would wrongly pick `js`.
+    assert_grammar(
+        "<script lang=\"js\" data-lang=\"ts\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "the rightmost lang= (data-lang=\"ts\") wins over an earlier lang=\"js\" — TS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_rightmost_lang_wins_js() {
+    // `lang="ts" data-lang="js"` — the rightmost `lang=` resolves to `js`, so the WHOLE parse is
+    // JS even though an earlier `lang="ts"` is present.
+    assert_grammar(
+        "<script lang=\"ts\" data-lang=\"js\">let a = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "the rightmost lang= (data-lang=\"js\") wins over an earlier lang=\"ts\" — JS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_empty_quoted_lang_is_js() {
+    // `lang=""` — the value capture `[^"' >]+` requires ≥1 byte, so an empty quoted value does
+    // NOT match; the lang attribute is treated as absent → JS. Paired with the controls below so
+    // this discriminates the ≥1-byte value-capture + immediate-`\1`-close requirements (a
+    // loose-close-tolerant scan would WRONGLY select TS for `lang="ts "`).
+    assert_grammar(
+        "<script lang=\"\">let a = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "an empty lang=\"\" does not match the ≥1-char value capture — JS grammar",
+    );
+    // Discriminating control: a trailing space inside the quotes (`lang="ts "`) fails the regex's
+    // `\1` immediate-close, so it does NOT match `ts` → JS. The minimal-pair difference from the
+    // accepted `lang="ts"` (next assertion) is exactly the trailing space.
+    assert_grammar(
+        "<script lang=\"ts \">let a = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "a trailing space inside the quotes fails the immediate \\1 close — JS grammar",
+    );
+    assert_grammar(
+        "<script lang=\"ts\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "a clean lang=\"ts\" with an immediate close matches — TS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_quoted_gt_between_two_langs_is_an_out_of_finite_scope_grammar_divergence() {
+    // The EXOTIC quoted-`>` corner the doc scopes OUT (ledgered, owner `svelte-native-parser-parity`):
+    // `<script lang=js data-x=">" lang="ts">`. The regex's `[^>]*` prefix cannot cross the quoted
+    // `>`, so the OFFICIAL grammar scan selects the EARLIER `lang=js`; this attribute-aware byte
+    // scan skips the quoted value and selects the later `lang="ts"` (→ TS). This characterizes that
+    // KNOWN internal divergence so a change to the scan is caught. It is UNOBSERVABLE end-to-end —
+    // the source carries TWO `lang=` attributes, so both Verter and pinned svelte@5.56.3 reject it
+    // with `attribute_duplicate` (asserted at the gate level in `svelte_parse_defect_exact_codes`),
+    // regardless of which grammar the scan would pick. Behavioral parity is met; only the
+    // unreachable internal grammar choice differs.
+    assert_grammar(
+        "<script lang=js data-x=\">\" lang=\"ts\">let a = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "the attribute-aware byte scan crosses the quoted > (out-of-finite-scope; the official \
+         regex would select the earlier lang=js, but end-to-end both reject attribute_duplicate)",
+    );
+}
+
+#[test]
+fn lang_scan_gt_inside_earlier_quoted_value_then_lang_ts_is_ts() {
+    // `data-x="1>2" lang="ts"` — the `>` inside the earlier quoted value does NOT close the tag
+    // (the regex's attribute-aware prefix branch skips quoted values), so the later `lang="ts"`
+    // is reached → TS.
+    assert_grammar(
+        "<script data-x=\"1>2\" lang=\"ts\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "a > inside an earlier quoted value does not close the tag — TS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_first_script_with_lang_decides_even_if_js() {
+    // `<script lang="js">` followed by `<script lang="ts">` — the FIRST script that carries a
+    // `lang=` decides (the regex stops at the first matching `<script …>`), so the parse is JS
+    // even though a later script says `lang="ts"`.
+    assert_grammar(
+        "<script lang=\"js\">let a = 1;</script>\n<script module lang=\"ts\">const b = 1;</script>",
+        ScriptBodyGrammar::Js,
+        "the first script carrying a lang= decides (lang=\"js\") — JS grammar",
+    );
+}
+
+#[test]
+fn lang_scan_unterminated_comment_does_not_swallow_later_script_lang() {
+    // An UNTERMINATED `<!--` (no `-->`) is NOT a comment match — the regex advances past it, so a
+    // later `<script lang="ts">` is still reachable → TS. (A first-occurrence comment skip-to-EOF
+    // would wrongly miss the script.)
+    assert_grammar(
+        "<!-- oops <script lang=\"ts\">let a: number = 1;</script>",
+        ScriptBodyGrammar::Ts,
+        "an unterminated <!-- does not swallow a later <script lang=ts> — TS grammar",
+    );
+}

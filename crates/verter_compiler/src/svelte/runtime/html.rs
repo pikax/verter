@@ -495,7 +495,15 @@ fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) 
                 continue;
             }
             html.push(' ');
-            html.push_str(name);
+            // The official client template serializer lowercases a static attribute
+            // NAME on an HTML element (`template.js`: `is_html ? key.toLowerCase() :
+            // key`). Every element the supported client surface serializes is HTML
+            // (an SVG / MathML element fails closed at the element allowlist gate), so
+            // the name is unconditionally ASCII-lowercased — `data-FooBar` →
+            // `data-foobar`, `aria-LabelledBy` → `aria-labelledby`. The allowlisted
+            // names (`id` / `class` / `href` / `type` / …) are already lowercase, so
+            // only the case-preserving `data-*` / `aria-*` families observe a change.
+            html.push_str(&name.to_ascii_lowercase());
             // The official skeleton emits an EMPTY double-quoted value for a
             // valueless boolean attribute (`<input disabled>` → `disabled=""`) — the
             // attribute is present in the cloned HTML as `name=""`, NOT bare `name`.
@@ -603,7 +611,7 @@ fn is_whitespace_text(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
 /// `clean_nodes` at every level). There is NO inter-root separator: the cleaned
 /// sequence's `TextRun`s are the ONLY source of inter-node whitespace (adjacent
 /// element roots concatenate directly, matching `svelte@5.56.3`).
-fn synthesize_region(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> TemplateFactory {
+pub(super) fn synthesize_region(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> TemplateFactory {
     // A region's roots are at the fragment level (HTML namespace, no parent
     // element, never inside a `<pre>`), so cleaning starts from the region-root
     // context.
@@ -712,7 +720,7 @@ fn is_import_node_element(el: &crate::svelte::runtime::ir::ElementIr) -> bool {
 /// a tag whose name contains `-`, or one bearing an `is="…"` attribute (a
 /// customized built-in). A custom element sets its attributes via properties (so
 /// they are dropped from the static skeleton, except `is`).
-fn is_custom_element(el: &crate::svelte::runtime::ir::ElementIr) -> bool {
+pub(super) fn is_custom_element(el: &crate::svelte::runtime::ir::ElementIr) -> bool {
     el.tag.contains('-')
         || el.attrs.iter().any(|a| {
             matches!(a, AttrIr::Static { name, .. } if name == "is")

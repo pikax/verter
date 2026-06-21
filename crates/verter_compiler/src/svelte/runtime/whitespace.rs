@@ -119,7 +119,7 @@ impl<'a> CleanContext<'a> {
 /// `determine_namespace_for_children` returns HTML for a non-SVG-named element, and
 /// the whitespace rule keys on the namespace of the SIBLING sequence, which is the
 /// parent's namespace, not the child's).
-fn determine_namespace_for_children(current: Namespace, tag: &str) -> Namespace {
+pub(super) fn determine_namespace_for_children(current: Namespace, tag: &str) -> Namespace {
     if tag == "foreignObject" {
         return Namespace::Html;
     }
@@ -206,24 +206,34 @@ pub(super) enum CleanItem {
 /// all descendants), the whitespace-cleaning step (2) is SKIPPED: text is kept
 /// verbatim and only the run partition applies. (The `<pre>` first-newline discard
 /// is a SEPARATE rule that still applies — see step 3.)
+/// Whether a node is DROPPED from a cleaned sibling sequence (it never occupies a
+/// DOM position): a COMMENT (the default `preserve_comments = false`), a hoisted
+/// non-rendering construct (`{@const}` / `{#snippet}` declaration / `{@debug}` /
+/// `{@attach}`), or a non-body special (`<svelte:head>` / `<svelte:options>` /
+/// window / document / body — they render in their own region).
+///
+/// This is the SINGLE drop-set authority both [`clean_nodes`] (the skeleton + DOM
+/// walk) and the reactive-text run reconstruction key on, so a comment cannot
+/// break a text run in one path while being dropped in the other. Mirrors the
+/// `svelte@5.56.3` `clean_nodes` step-1 filter.
+pub(super) fn is_dropped_from_clean_sequence(node: &IrNode) -> bool {
+    matches!(node, IrNode::Comment { .. })
+        || super::html::is_non_body_special(node)
+        || super::html::is_non_rendering_node(node)
+}
+
 pub(super) fn clean_nodes(
     ir: &SvelteRuntimeIr,
     children: &[NodeId],
     ctx: CleanContext,
 ) -> Vec<CleanItem> {
-    // (1) The "regular" sequence: rendered nodes only. Dropped (mirroring official
-    // `clean_nodes`): COMMENTS (the default `preserve_comments = false`); hoisted
-    // non-rendering constructs (`{@const}` / `{#snippet}` decl / `{@debug}` / …);
-    // and non-body specials (which render in their own region).
+    // (1) The "regular" sequence: rendered nodes only. The dropped set (comments,
+    // hoisted non-rendering constructs, non-body specials) is the shared
+    // [`is_dropped_from_clean_sequence`] authority — mirroring official `clean_nodes`.
     let regular: Vec<NodeId> = children
         .iter()
         .copied()
-        .filter(|&id| {
-            let node = ir.node(id);
-            !matches!(node, IrNode::Comment { .. })
-                && !super::html::is_non_body_special(node)
-                && !super::html::is_non_rendering_node(node)
-        })
+        .filter(|&id| !is_dropped_from_clean_sequence(ir.node(id)))
         .collect();
 
     // (2) The whitespace-cleaned text for each regular node, aligned to `regular`
@@ -320,6 +330,103 @@ pub(super) fn clean_nodes(
     }
     flush(&mut items, &mut run_text, &mut run_interps, &mut run_active);
     items
+}
+
+/// One ordered part of a reactive text RUN: ONE text node's cleaned literal text,
+/// or an interpolation node. The literal text is whitespace-cleaned (the SAME
+/// neighbor-aware `clean_regular_texts` the skeleton uses, so a dropped comment's
+/// adjacent texts have their boundary whitespace collapsed) but NOT entity-decoded.
+/// Entity decoding is the reactive-text caller's concern (`set_text` writes
+/// `textContent`), and is applied PER text node BEFORE the parts are concatenated —
+/// a `&amp` reference split across a dropped comment (`&amp<!--x-->;`) therefore
+/// decodes the two text nodes independently (`&` + `; …`), never merging into one
+/// `&amp;` reference, matching the official per-text-node decode.
+#[derive(Debug, Clone)]
+pub(super) enum RunTextPart {
+    /// One text node's cleaned literal text (collapsed + boundary-aware; not decoded).
+    Literal(String),
+    /// An interpolation node id in the run.
+    Interp(NodeId),
+}
+
+/// Reconstruct the ordered cleaned text-run parts (one literal per text node +
+/// interp nodes) for the maximal `(Text | Interpolation)` run that CONTAINS `target`
+/// among `children`, driving from the SAME drop-set + `clean_regular_texts`
+/// whitespace authority [`clean_nodes`] uses. A dropped node (comment / non-rendering
+/// / non-body special) never breaks the run (it is filtered out before the
+/// partition), so a comment between an interpolation and trailing static text keeps
+/// them in one run — matching the skeleton, which drops the same node. A REAL
+/// rendered node (element / component / block / renderable tag) still breaks the run.
+/// Boundary whitespace BETWEEN two texts made adjacent by a dropped comment is
+/// collapsed by `clean_regular_texts`'s neighbor-aware rule (the previous text ending
+/// in whitespace replaces the next text's leading whitespace with `""`).
+///
+/// Returns `None` if `target` is not an interpolation inside any run of `children`
+/// (the caller falls back to the lone-interpolation form).
+pub(super) fn cleaned_text_run_parts(
+    ir: &SvelteRuntimeIr,
+    children: &[NodeId],
+    ctx: CleanContext,
+    target: NodeId,
+) -> Option<Vec<RunTextPart>> {
+    // (1) The shared drop-set filter — comments / non-rendering / non-body specials
+    // never occupy a DOM position, so they never break a run.
+    let regular: Vec<NodeId> = children
+        .iter()
+        .copied()
+        .filter(|&id| !is_dropped_from_clean_sequence(ir.node(id)))
+        .collect();
+
+    // (2) The same whitespace-cleaned per-node text the skeleton uses (`None` for a
+    // non-text node OR a fully-dropped whitespace-only text).
+    let cleaned_text: Vec<Option<String>> = if ctx.preserve_ws {
+        regular
+            .iter()
+            .map(|&id| match ir.node(id) {
+                IrNode::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    } else {
+        clean_regular_texts(ir, &regular, ctx)
+    };
+
+    // (3) Partition into runs (mirroring `clean_nodes` step 4), accumulating ordered
+    // parts (one literal PER text node so the caller decodes each independently)
+    // instead of collapsing the run to a ` ` placeholder.
+    let mut parts: Vec<RunTextPart> = Vec::new();
+    let mut contains_target = false;
+
+    for (idx, &id) in regular.iter().enumerate() {
+        match ir.node(id) {
+            IrNode::Text { .. } => {
+                if let Some(t) = &cleaned_text[idx] {
+                    parts.push(RunTextPart::Literal(t.clone()));
+                }
+                // A text that cleaned to nothing contributes no bytes but does NOT
+                // break the run (it never existed as a DOM node).
+            }
+            IrNode::Interpolation { .. } => {
+                parts.push(RunTextPart::Interp(id));
+                if id == target {
+                    contains_target = true;
+                }
+            }
+            // A REAL rendered node breaks the current run. If the target was in THIS
+            // run, return it now; otherwise reset and keep scanning.
+            _ => {
+                if contains_target {
+                    return Some(std::mem::take(&mut parts));
+                }
+                parts.clear();
+            }
+        }
+    }
+    if contains_target {
+        Some(parts)
+    } else {
+        None
+    }
 }
 
 /// The whitespace-cleaned text for each node in a REGULAR (already hoisted-filtered)

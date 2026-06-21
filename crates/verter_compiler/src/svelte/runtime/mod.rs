@@ -10,30 +10,50 @@
 //!
 //! ```text
 //! ParsedSvelte
-//!   → expr.rs  RuntimeAnalysis  (OXC reparse + binding/scope classification)
-//!   → ir.rs    SvelteRuntimeIr  (the semantic template IR + reactive ops)
-//!   → html.rs  StaticTemplatePlan  (static-HTML skeleton + DOM-path plan)
-//!   → the client / server backend  (the emitting backends)
+//!   → expr.rs    RuntimeAnalysis     (OXC reparse + binding/scope classification)
+//!   → ir.rs      SvelteRuntimeIr     (the semantic template IR + reactive ops)
+//!   → html.rs    StaticTemplatePlan  (static-HTML skeleton + DOM-path plan)
+//!   → topology.rs ClientTopologyPlan (the structural helper/import/delegate summary)
+//!   → client.rs  ClientModule        (the emitted `svelte/internal/client` JS)
 //! ```
 //!
-//! This substrate stops at the [`StaticTemplatePlan`] + the
-//! [`ClientTopologyPlan`] topology SUMMARY. It emits NO `svelte/internal/*` JS
-//! string, populates NO runtime body, and is NOT wired into the carrier's
-//! `compile_bundle` — the emitting backends consume this IR and own their own
-//! `CodeTransform` output.
+//! [`compile_client`] drives this end-to-end and is wired into the Svelte carrier's
+//! `compile_bundle` (`crate::svelte::carrier`): a supported runes component
+//! populates `bundle.main.body_code` (so `has_runtime_surface()` becomes true and
+//! the host emits the `Main` virtual node), and every unsupported surface FAILS
+//! CLOSED with a typed [`client::UnsupportedSvelteRuntimeSurface`] carrying its
+//! owning vertical. The expression / script emission routes its source-derived
+//! rewrites through [`CodeTransform`](crate::code_transform::CodeTransform); the
+//! synthesized helper scaffolding is unmapped.
 
 mod attr_lowering;
+mod bind_target;
+pub mod client;
+mod client_allowlist;
+mod client_plan;
+mod client_shapes;
+mod client_surface;
+mod css_reject;
 mod entity_decode;
 mod entity_table;
 mod events;
 pub mod expr;
+pub mod expr_emit;
+pub mod expr_rewrite;
 pub mod helpers;
 pub mod html;
 pub mod ir;
+mod naming;
+mod official_reject;
+mod official_rule;
 mod ops;
+mod options_reject;
+mod parse_refusal;
+mod reactive_analysis;
 mod rune_scan;
 mod state_scan;
 pub mod topology;
+mod unsupported;
 mod whitespace;
 
 #[cfg(test)]
@@ -69,11 +89,16 @@ use ir::{
 use state_scan::{collect_state_declarations, script_uses_runes};
 
 /// Re-export the public IR + analysis + planning surface so consumers reach it
-/// through one module path.
+/// through one module path. (`emit_client_module` is module-private — the client
+/// emission entry consumers use is [`compile_client`], which builds the narrow
+/// plan; the emitter never accepts the broad IR.)
+pub use client::{ClientModule, UnsupportedSvelteRuntimeSurface};
 pub use expr::StateLowering;
 pub use helpers::SvelteHelperMask;
 pub use html::{DynamicSlot, NodePathPlan, PathBase};
 pub use ir::BindingId;
+pub use official_reject::official_reject_gate;
+pub use official_rule::{CoreOfficialValidationRule, OfficialRejection};
 pub use topology::{plan_client_topology, ClientTopologyPlan};
 
 /// The options the runtime lowering reads.
@@ -97,6 +122,13 @@ pub struct SvelteRuntimeOptions {
     pub runes: Option<bool>,
     /// Production mode (strips dev-only instrumentation downstream).
     pub is_production: bool,
+    /// A DEV-MODE codegen request (the `dev: true` axis — validation wrappers,
+    /// `$.add_locations`, dev `$inspect` / `$.trace`). The client backend emits ONLY
+    /// the PRODUCTION runes output; a dev-codegen request FAILS CLOSED (5k) rather
+    /// than silently emitting production output. This is a SEPARATE signal from
+    /// `is_production` (which gates downstream stripping, not the dev-codegen axis):
+    /// the dev-mode output shape is a distinct compiler mode the host opts into.
+    pub dev_codegen: bool,
 }
 
 /// A runtime-lowering diagnostic.
@@ -139,45 +171,8 @@ impl RuntimeLoweringErrors {
     }
 }
 
-/// Derive the component-function name from the options: an explicit `name`
-/// override wins; otherwise the filename stem is sanitized to a JS identifier;
-/// otherwise `_unknown_`.
-fn derive_component_name(opts: &SvelteRuntimeOptions) -> String {
-    if let Some(name) = &opts.name {
-        return name.clone();
-    }
-    let Some(filename) = &opts.filename else {
-        return "_unknown_".to_string();
-    };
-    // The stem: the final path component with its (single) extension dropped —
-    // extension-agnostic via `Path::file_stem`, so no carrier extension literal is
-    // hand-matched and the path split is platform-correct (`/` and `\`).
-    let path = std::path::Path::new(filename);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .or_else(|| path.file_name().and_then(|s| s.to_str()))
-        .unwrap_or(filename);
-    let sanitized: String = stem
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        return "_unknown_".to_string();
-    }
-    // A leading digit is invalid for a JS identifier — prefix `_`.
-    if sanitized.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        format!("_{sanitized}")
-    } else {
-        sanitized
-    }
-}
+use naming::derive_component_name;
+use parse_refusal::parse_domain_gate;
 
 /// The lowering context: the source, the arenas being built, and the analysis
 /// state.
@@ -664,6 +659,15 @@ fn finalize_state_classifications(ctx: &mut LoweringCtx, tracked: &[TrackedState
         }
     }
 
+    // A TWO-WAY `bind:` writes back to its bound target, so the bound `$state` is
+    // observed as WRITTEN even though its expression is a syntactic READ — a
+    // `bind:value={name}` makes `name` a reassigned signal (a bare-identifier
+    // target is a reassignment; a member target `bind:value={o.x}` is a deep
+    // mutation). This mirrors the official compiler treating a bind target as
+    // mutated. The write attribution is scope-resolved, so a shadowing local is
+    // never mis-attributed.
+    attribute_bind_target_writes(ctx, &tracked_ids, &mut combined);
+
     for (t, uses) in tracked.iter().zip(combined) {
         let lowering = classify_state_lowering(t.declared, t.proxiable, uses);
         let info = ctx.bindings.get_mut(t.binding);
@@ -674,6 +678,63 @@ fn finalize_state_classifications(ctx: &mut LoweringCtx, tracked: &[TrackedState
             uses,
             lowering,
         });
+    }
+}
+
+/// Attribute the WRITE-BACK of every two-way `bind:` directive to its bound
+/// `$state` binding. Walks the IR nodes for an `AttrIr::Bind { target, expr }`
+/// whose target is a two-way writable bind (anything except `this`, which is a
+/// one-way element-ref write of the binding, also a reassignment), resolves the
+/// bind expression's referenced binding scope-awarely, and marks it reassigned (a
+/// bare-identifier target) or deep-mutated (a member target).
+fn attribute_bind_target_writes(
+    ctx: &LoweringCtx,
+    tracked_ids: &rustc_hash::FxHashMap<BindingId, usize>,
+    combined: &mut [BindingUseSet],
+) {
+    for node in &ctx.nodes {
+        let attrs = match node {
+            IrNode::Element(el) => &el.attrs,
+            IrNode::Component(c) => &c.attrs,
+            IrNode::Special(s) => &s.attrs,
+            _ => continue,
+        };
+        for attr in attrs {
+            let AttrIr::Bind {
+                expr: Some(expr_id),
+                ..
+            } = attr
+            else {
+                continue;
+            };
+            let analyzed = ctx.expressions.get(*expr_id);
+            // The bind expression's STRUCTURAL lvalue shape decides the write: a
+            // bare-identifier target is a reassignment; a member target is a deep
+            // mutation. Classify it from the parsed OXC node (NOT a `source` text
+            // scan), so a member access that is not the target root cannot
+            // mis-classify. A non-lvalue target (a literal / call) carries no
+            // attributable write.
+            let target_alloc = Allocator::default();
+            let is_member = match expr::classify_bind_target(&target_alloc, analyzed.source) {
+                Some(expr::BindTargetKind::Member) => true,
+                Some(expr::BindTargetKind::Identifier) => false,
+                // A non-lvalue bind target attributes no write.
+                None => continue,
+            };
+            for r in &analyzed.references {
+                let Some(resolved) = ctx.scopes.resolve(&ctx.bindings, analyzed.scope, &r.name)
+                else {
+                    continue;
+                };
+                if let Some(&idx) = tracked_ids.get(&resolved) {
+                    if is_member {
+                        combined[idx].deep_mutated = true;
+                    } else {
+                        combined[idx].reassigned = true;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1326,4 +1387,88 @@ fn resolve_render_callees(ctx: &mut LoweringCtx) {
 #[must_use]
 pub fn plan_static_templates(ir: &SvelteRuntimeIr) -> StaticTemplatePlan {
     html::plan_static_templates(ir)
+}
+
+/// The outcome of [`compile_client`] when the client module cannot be emitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientCompileError {
+    /// The runtime lowering itself failed (a malformed construct) — carries the
+    /// collected lowering diagnostics.
+    Lowering(RuntimeLoweringErrors),
+    /// The component uses a runtime surface this backend does not yet emit — fails
+    /// closed with the typed reason (never a silent empty module).
+    Unsupported(UnsupportedSvelteRuntimeSurface),
+    /// The component is MALFORMED Svelte the official `svelte@5.56.3` compiler also
+    /// COMPILE-ERRORS (a duplicate declaration, a `$`-prefixed binding, a duplicate /
+    /// mis-`context`-ed `<script>`, an invalid HTML placement, a global `$foo`
+    /// reference). Accepting it would change the observable contract from "compile
+    /// error, no module" to "module exists", so it fails closed with the typed
+    /// official-reject rejection (the rule class + its exact official code) — never a
+    /// `Main`. The official-reject parity quadrant.
+    OfficialReject(OfficialRejection),
+}
+
+/// Compile a parsed Svelte component into the `svelte/internal/client` JS module
+/// (the carrier-facing entry).
+///
+/// Runs the full pipeline — runtime lowering → static-template planning →
+/// client-topology planning → [`emit_client_module`] — and returns the emitted
+/// module, or a typed [`ClientCompileError`] (a lowering failure, or an
+/// unsupported surface that fails closed). `ssr` requests the server backend
+/// (fails closed until the server backend lands).
+pub fn compile_client<'a>(
+    source: &'a str,
+    parsed: &ParsedSvelte,
+    opts: &SvelteRuntimeOptions,
+    alloc: &'a Allocator,
+    ssr: bool,
+) -> Result<client::ClientModule, ClientCompileError> {
+    // The REFUSE-BY-DEFAULT pipeline. Each stage is a choke point: an unsupported
+    // surface fails closed BEFORE the next stage, so the narrow plan the emitter
+    // consumes can ONLY describe a fully-supported component — emit-by-default is
+    // structurally impossible.
+    //
+    // (0) SSR requests the server backend (fails closed until it lands).
+    if ssr {
+        return Err(ClientCompileError::Unsupported(
+            UnsupportedSvelteRuntimeSurface::ServerGenerate {
+                span: Span::new(0, 0),
+            },
+        ));
+    }
+    // (1) `official_reject_gate` — the OFFICIAL-REJECT parity gate. Refuse the
+    // MALFORMED-input classes official ALSO compile-errors (a duplicate / mis-context
+    // `<script>`, a `$`-prefixed binding, a duplicate accepted declaration, a global
+    // `$foo` / `$$foo` reference, an invalid HTML placement) FIRST, so a genuinely
+    // malformed component is rejected for being malformed — not later mis-attributed
+    // to an unsupported feature, and never accepted as a divergent `Main`.
+    if let Some(rejection) = official_reject::official_reject_gate(source, parsed) {
+        return Err(ClientCompileError::OfficialReject(rejection));
+    }
+    // (2) `parse_domain_gate` — refuse the PARSE-DOMAIN surfaces the runtime IR
+    // does not carry (a top-level `<style>` (5l), a `<svelte:options>` axis beyond
+    // runes (5m / 5h customElement), a dev-mode codegen request (5k)) BEFORE
+    // lowering, so a lossy lowering cannot hide them.
+    if let Some(surface) = parse_domain_gate(source, parsed, opts) {
+        return Err(ClientCompileError::Unsupported(surface));
+    }
+    // (2) Lower to the BROAD runtime IR (the shared substrate). The broad IR may
+    // exist; it just never reaches emission.
+    let ir = lower_parsed_svelte_to_ir(source, parsed, opts, alloc)
+        .map_err(ClientCompileError::Lowering)?;
+    // (3) `ClientSyntaxSurface::classify` — the DEFAULT-DENY classifier. It accepts
+    // ONLY when every node / attr / script-item is in the supported allowlist; the
+    // first unsupported surface fails closed (no wildcard accept arm).
+    let classified = client_surface::ClientSyntaxSurface::classify(&ir)
+        .map_err(ClientCompileError::Unsupported)?;
+    // (4) `SupportedClientIr::build` — the semantic projection. It decides which
+    // interpolations are ACTUALLY reactive (a non-reactive one fails closed),
+    // validates lvalues, and rewrites every script item + op through the FALLIBLE
+    // rewriter into the NARROW `ClientModulePlan`.
+    let plan = client_plan::SupportedClientIr::build(&classified, &ir)
+        .map_err(ClientCompileError::Unsupported)?;
+    // (5) Plan the static templates + topology, then emit from the NARROW plan only.
+    let html_plan = plan_static_templates(&ir);
+    let topology = plan_client_topology(&ir, &html_plan);
+    Ok(client::emit_client_module(&plan, &html_plan, &topology))
 }

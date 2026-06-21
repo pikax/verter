@@ -48,6 +48,7 @@
       "flag": "1"
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p></p> <pre>$.from_html($.template_effect($.derived))</pre>`, 1); export default function markup_dollar_member_text($$anchor) { let count = 0; var fragment = root(); var p = $.first_child(fragment); p.textContent = 'Use $.effect and $.state in your code, count is 0.'; $.next(2); $.append($$anchor, fragment); }",
   "css": {
     "present": false,
     "hash": null,

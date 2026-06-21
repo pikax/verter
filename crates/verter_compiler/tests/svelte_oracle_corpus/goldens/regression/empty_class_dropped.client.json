@@ -50,6 +50,7 @@
       "flag": "1"
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div> <div class=\" \"></div> <div id=\"\"></div>`, 1); export default function empty_class_dropped($$anchor) { var fragment = root(); $.next(4); $.append($$anchor, fragment); }",
   "css": {
     "present": false,
     "hash": null,

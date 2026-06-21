@@ -47,6 +47,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<a title=\"&amp;copy_x and © ok\">link</a>`); export default function legacy_entity_boundary($$anchor) { var a = root(); $.append($$anchor, a); }",
   "css": {
     "present": false,
     "hash": null,

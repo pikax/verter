@@ -50,6 +50,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>x</button>`); export default function legacy_on_capture($$anchor) { let h = () => {}; var button = root(); $.event('click', button, h, true); $.append($$anchor, button); }",
   "css": {
     "present": false,
     "hash": null,

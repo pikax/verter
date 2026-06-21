@@ -79,6 +79,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<li> </li>`); var root_1 = $.from_html(`<ul></ul>`); export default function const_tag($$anchor) { let items = $.proxy([{ qty: 2, price: 3 }, { qty: 1, price: 5 }]); var ul = root_1(); $.each(ul, 21, () => items, $.index, ($$anchor, item) => { const total = $.derived(() => $.get(item).qty * $.get(item).price); var li = root(); var text = $.child(li, true); $.reset(li); $.template_effect(() => $.set_text(text, $.get(total))); $.append($$anchor, li); }); $.reset(ul); $.append($$anchor, ul); }",
   "css": {
     "present": false,
     "hash": null,

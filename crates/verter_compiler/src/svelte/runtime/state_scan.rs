@@ -11,14 +11,15 @@
 //! [`super::expr::classify_state_lowering`].
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BindingPattern, CallExpression, Expression, Program, Statement};
+use oxc_ast::ast::{BindingPattern, Expression, Program, Statement};
 use oxc_ast_visit::Visit;
 use rustc_hash::FxHashMap;
 
 use super::expr::{
-    collect_pattern_names, expr_is_proxiable, init_is_proxiable, reparse_module, state_rune_call,
-    BindingInfo, BindingRuntimeKind, BindingTable, ProxyInit, ScopeGraph, ScopeId,
-    ScriptUseCollector, StateRuneKind,
+    collect_pattern_names, expr_is_proxiable, init_is_proxiable, is_bindable_call,
+    is_derived_callee, is_props_callee, reparse_module, state_rune_call, BindingInfo,
+    BindingRuntimeKind, BindingTable, ProxyInit, ScopeGraph, ScopeId, ScriptUseCollector,
+    StateRuneKind,
 };
 use super::rune_scan::ScopeAwareRuneDetector;
 
@@ -89,12 +90,12 @@ pub fn collect_rune_bindings<'a>(program: &Program<'a>) -> Vec<(String, BindingR
             let Expression::CallExpression(call) = init else {
                 continue;
             };
-            if is_derived_rune_call(call) {
+            if is_derived_callee(&call.callee) {
                 // A `$derived` binding is a plain-identifier declarator.
                 if let BindingPattern::BindingIdentifier(id) = &d.id {
                     out.push((id.name.to_string(), BindingRuntimeKind::Derived));
                 }
-            } else if is_props_rune_call(call) {
+            } else if is_props_callee(&call.callee) {
                 // A `$props()` declarator: classify each declared name (Prop, or
                 // BindableProp for a `$bindable(…)` default).
                 for (name, is_bindable) in props_pattern_binding_kinds(&d.id) {
@@ -156,7 +157,7 @@ pub fn prepare_rune_bindings(
 /// one-hop proxy follow for `let x=$state(base)`. (A reassignment of the top-level
 /// binding itself DOES block the follow, matching `should_proxy`'s
 /// `!binding.reassigned` guard.)
-fn collect_proxy_inits(program: &Program<'_>) -> FxHashMap<String, ProxyInit> {
+pub(super) fn collect_proxy_inits(program: &Program<'_>) -> FxHashMap<String, ProxyInit> {
     // The top-level declarator names whose reassignment we must resolve
     // scope-awarely (the candidate follow targets).
     let mut top_level_names = Vec::new();
@@ -231,36 +232,6 @@ pub fn script_uses_runes(alloc: &Allocator, text: &str) -> bool {
     detector.used()
 }
 
-/// Whether a call expression is the `$derived(…)` rune OR the `$derived.by(fn)`
-/// member form — the two forms that introduce a `Derived` memo binding. A
-/// shadowing local named `$derived` is excluded by the structural callee match.
-fn is_derived_rune_call(call: &CallExpression<'_>) -> bool {
-    match &call.callee {
-        // `$derived(...)`.
-        Expression::Identifier(id) => id.name.as_str() == "$derived",
-        // `$derived.by(...)`.
-        Expression::StaticMemberExpression(m) => {
-            matches!(&m.object, Expression::Identifier(obj)
-                if obj.name.as_str() == "$derived" && m.property.name.as_str() == "by")
-        }
-        _ => false,
-    }
-}
-
-/// Whether a call expression is the `$props()` rune (the bare identifier callee,
-/// NOT a `$props.id()` member access or a shadowing local). The declared bindings
-/// are the destructured prop names (or the whole props object).
-fn is_props_rune_call(call: &CallExpression<'_>) -> bool {
-    matches!(&call.callee, Expression::Identifier(id) if id.name.as_str() == "$props")
-}
-
-/// Whether an expression is a `$bindable(…)` rune call — the default-value form
-/// that marks a destructured `$props()` member as a BINDABLE prop.
-fn is_bindable_rune_expr(expr: &Expression<'_>) -> bool {
-    matches!(expr, Expression::CallExpression(call)
-        if matches!(&call.callee, Expression::Identifier(id) if id.name.as_str() == "$bindable"))
-}
-
 /// The runtime kind of each binding a `$props()` declarator pattern introduces, as
 /// `(name, is_bindable)` rows in source order. `is_bindable` is `true` only for a
 /// destructured member whose default initializer is a `$bindable(…)` call.
@@ -287,7 +258,7 @@ fn collect_props_binding_kinds(pattern: &BindingPattern<'_>, out: &mut Vec<(Stri
                 // A member with a `$bindable(…)` default is a BindableProp; the
                 // member name is the LEFT of the assignment pattern.
                 if let BindingPattern::AssignmentPattern(assign) = &prop.value {
-                    if is_bindable_rune_expr(&assign.right) {
+                    if is_bindable_call(&assign.right) {
                         // The bindable name(s) — typically a single identifier.
                         let mut names = Vec::new();
                         collect_pattern_names(&assign.left, &mut names);

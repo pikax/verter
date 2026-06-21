@@ -90,6 +90,7 @@
       "flag": "1"
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; const row = ($$anchor, n = $.noop) => { var li = root(); var text = $.child(li); $.reset(li); $.template_effect(() => $.set_text(text, `row ${n() ?? ''}`)); $.append($$anchor, li); }; var root = $.from_html(`<li> </li>`); var root_1 = $.from_html(`<!> <ul></ul>`, 1); export default function child_and_snippet($$anchor) { let rows = $.proxy([1, 2, 3]); var fragment = root_1(); var node = $.first_child(fragment); Child(node, { label: 'hi' }); var ul = $.sibling(node, 2); $.each(ul, 21, () => rows, $.index, ($$anchor, n) => { row($$anchor, () => $.get(n)); }); $.reset(ul); $.append($$anchor, fragment); }",
   "css": {
     "present": false,
     "hash": null,

@@ -4925,6 +4925,29 @@ mod foundations_guards {
             // so it is not reachable as a runtime production module (same generated-
             // data precedent as `entity_table.rs`); it cannot be meaningfully split.
             "crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs",
+            // The Svelte reactive/lexical analysis core — the script-use scan (the
+            // `ShadowStack` + scope-frame collectors), the `BindingTable` /
+            // `ScopeGraph`, the per-expression reference collector, and the
+            // `should_proxy` / assignment-target analysis the rune classification
+            // depends on. The two collectors (`ScriptUseCollector`,
+            // `ExprReferenceCollector`) and the scope-frame helpers are mutually
+            // dependent and read by every syntax-side scanner; splitting the lexical
+            // model out would create a circular import (the scanners and the model
+            // co-define the shadow semantics). The size is intentional cohesion.
+            "crates/verter_compiler/src/svelte/runtime/expr.rs",
+            // The Svelte byte tokenizer + recursive-descent template parser — one
+            // cohesive forward byte scan. The close-tag well-formedness classifier
+            // (`classify_close_boundary` / `consume_and_classify_close`) and the
+            // strict-parse recovery points are mutually dependent with the scan and share
+            // the PRIVATE byte-cursor primitives (`at` / `len` / `slice` /
+            // `starts_with_ci_at` / the `pos` cursor + the `src` / `text` backings).
+            // Splitting the close-tag logic into a sibling `impl` block would force
+            // widening that byte-cursor surface to `pub(super)` (harming the parser's
+            // encapsulation) for no real cohesion gain — the strict-fact helpers already
+            // live in the sibling `strict_facts.rs` precisely because they are the only
+            // self-contained slice (they touch ONLY `strict_parse_errors`). The size is
+            // intentional cohesion (same precedent as `expr.rs`).
+            "crates/verter_compiler/src/svelte/parser/tokenizer.rs",
             "crates/verter_compiler/src/ide/template/mod.rs",
             "crates/verter_compiler/src/template/code_gen/ssr/mod.rs",
             "crates/verter_compiler/src/template/code_gen/vapor/mod.rs",

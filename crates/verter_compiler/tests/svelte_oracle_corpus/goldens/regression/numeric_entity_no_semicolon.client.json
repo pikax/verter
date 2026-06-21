@@ -47,6 +47,7 @@
       "flag": null
     }
   ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<a title=\"page A B end\">link</a>`); export default function numeric_entity_no_semicolon($$anchor) { var a = root(); $.append($$anchor, a); }",
   "css": {
     "present": false,
     "hash": null,
