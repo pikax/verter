@@ -1280,16 +1280,16 @@ fn hand_written_no_type_expr_impls(src: &str) -> Vec<HandWrittenWitnessImpl> {
 }
 
 /// Whether the relative production-source path `rel` is the SINGLE audited
-/// witness file (`semantic_query.rs`). The audited-exception gate is FILE-PRECISE:
-/// only a `HotTypeRef` witness in THIS file is exempt. Tests the file-name
-/// portion portably by splitting on BOTH path separators (`/` and `\`) and
-/// taking the last component (NOT a hardcoded `/`), so a forward-slash
-/// `src/semantic_query.rs` (the form `production_src_files` yields) and a
-/// Windows-style `src\semantic_query.rs` are both matched on any host —
-/// `std::path::Path::file_name` alone would not split on `\` when running on a
-/// Unix host.
+/// witness file. The audited-exception gate is FILE-PRECISE on the FULL relative
+/// path (NOT the basename): the one sanctioned witness is THE
+/// `impl …NoTypeExprWitness for HotTypeRef {}` in `src/semantic_query.rs`, so a
+/// same-named file in ANY subdirectory (`src/foo/semantic_query.rs`) is NOT
+/// audited — a basename-only match would have wrongly exempted such an impostor.
+/// `production_src_files` already yields the `/`-normalized `src/...` form;
+/// normalize `\` → `/` here belt-and-suspenders so a Windows-style
+/// `src\semantic_query.rs` `rel` also matches on any host.
 fn is_audited_witness_file(rel: &str) -> bool {
-    rel.rsplit(['/', '\\']).next() == Some("semantic_query.rs")
+    rel.replace('\\', "/") == "src/semantic_query.rs"
 }
 
 #[test]
@@ -1307,15 +1307,21 @@ fn no_hand_written_no_type_expr_impls_except_audited_hot_type_ref() {
     // `HotTypeRef`) witness in any OTHER file is a violation — it cannot
     // masquerade as the one sanctioned witness.
     //
-    // Honest residual: a `use ...::NoTypeExprWitness as Alias; impl Alias for X`
-    // (an aliased TRAIT NAME) could still evade this `syn` scan — the trait
-    // path's last segment would be `Alias`, not `NoTypeExprWitness`. That is
-    // acceptable — forging the witness through a trait-name alias is a deliberate
-    // hostile act, not drift, and even a forged witness on a DERIVED carrier
-    // cannot hide a `TypeExpr` (the field-recursion still fails the build). With
-    // the recursive walk and the file-precise exemption, the trait-name alias is
-    // the ONLY remaining residual; the scan otherwise defends the realistic
-    // accidental case under any formatting, any line-split, and any nesting.
+    // Two residuals remain, both DELIBERATE-hostile (not accidental drift):
+    //   (1) a `use ...::NoTypeExprWitness as Alias; impl Alias for X` trait-name
+    //       alias — the trait path's last segment would be `Alias`, not
+    //       `NoTypeExprWitness`, so this `syn` scan does not flag it; and
+    //   (2) a witness impl emitted from a MACRO token stream — `syn::visit` does
+    //       NOT descend into macro token bodies (a documented syn limitation;
+    //       see `crates/verter_session/Cargo.toml`), so an `impl` generated
+    //       inside a macro invocation is invisible to this walk.
+    // Both are backstopped by the field-recursive `#[derive(NoTypeExpr)]` +
+    // `assert_impl_all!` on every carrier — a forged witness cannot hide a
+    // `TypeExpr` in a derived carrier's field (the field-recursion still fails
+    // the build), which is the real semantic proof. With the recursive walk and
+    // the full-path-precise exemption, this scan stays DEFENSE-IN-DEPTH for the
+    // realistic accidental case — any formatting, any line-split, any nesting —
+    // not the semantic proof.
     let mut violations = Vec::new();
     let mut audited_seen = false;
     for (rel, src) in production_src_files() {
@@ -1553,8 +1559,8 @@ fn hand_impl_audited_exception_is_file_precise_not_ident_only() {
     // have wrongly exempted it. Drive the production guard's file-gated
     // classification directly via `is_audited_witness_file`.
 
-    // The file gate itself: only `semantic_query.rs` (under any directory, any
-    // separator) is the audited file.
+    // The file gate itself is FULL-PATH-exact: only the EXACT relative path
+    // `src/semantic_query.rs` (under any separator) is the audited file.
     assert!(
         is_audited_witness_file("src/semantic_query.rs"),
         "self-test: `src/semantic_query.rs` IS the audited witness file"
@@ -1563,6 +1569,17 @@ fn hand_impl_audited_exception_is_file_precise_not_ident_only() {
         is_audited_witness_file("src\\semantic_query.rs"),
         "self-test: a Windows-style `src\\semantic_query.rs` IS the audited witness file (the gate \
          is path-separator-portable)"
+    );
+    // DISCRIMINATING: a same-named file in a SUBDIRECTORY (`src/foo/semantic_query.rs`)
+    // is NOT the audited file — full-path-exact rejects it, whereas a basename-only
+    // gate (`rsplit(['/','\\']).next() == Some("semantic_query.rs")`) would have
+    // WRONGLY exempted it. This sub-assertion FAILS against the basename gate and
+    // PASSES against the full-path gate.
+    assert!(
+        !is_audited_witness_file("src/foo/semantic_query.rs"),
+        "self-test: a same-named file in a SUBDIRECTORY (`src/foo/semantic_query.rs`) is NOT the \
+         audited witness file — the gate is full-path-exact, not basename-only; a basename-only \
+         match would have wrongly exempted this impostor"
     );
     assert!(
         !is_audited_witness_file("src/resolver_core/hot_prepared.rs"),
@@ -1614,6 +1631,22 @@ impl verter_no_typeexpr::__private::NoTypeExprWitness for other::HotTypeRef {}
         "self-test: a forged `HotTypeRef` / `other::HotTypeRef` witness in a NON-`semantic_query.rs` \
          file is a VIOLATION — the file gate is what stops it masquerading as the audited witness; \
          got {violations_elsewhere:?}"
+    );
+
+    // DISCRIMINATING (full-path-exact, not basename): classify under a SUBDIRECTORY
+    // same-named file `src/foo/semantic_query.rs` → the file gate fails (the audited
+    // path is the EXACT `src/semantic_query.rs`), so BOTH forged `HotTypeRef`
+    // witnesses are VIOLATIONS there. A basename-only gate would have exempted them
+    // (and produced zero violations), so this assertion FAILS against the basename
+    // form and PASSES against the full-path form.
+    let violations_in_subdir_same_name = classify("src/foo/semantic_query.rs");
+    assert_eq!(
+        violations_in_subdir_same_name,
+        vec!["HotTypeRef".to_string(), "HotTypeRef".to_string()],
+        "self-test: a forged `HotTypeRef` witness in a SUBDIRECTORY same-named file \
+         `src/foo/semantic_query.rs` is a VIOLATION — only the EXACT `src/semantic_query.rs` path \
+         is audited; a basename-only gate would have wrongly exempted it; got \
+         {violations_in_subdir_same_name:?}"
     );
 }
 
