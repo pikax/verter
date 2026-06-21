@@ -20,6 +20,7 @@ use crate::features::references::references_at_position;
 use crate::features::rename::{prepare_rename, rename_at_position};
 use crate::type_provider::merge;
 
+use super::component_resolve::ChildPropRenameClass;
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::VerterLanguageServer;
 
@@ -696,27 +697,38 @@ pub(super) async fn handle_rename(
                         // the pinned snapshot's source map — giving the child edit a
                         // single deterministic Verter-owned origin for BOTH providers.
                         //
-                        // FAIL CLOSED: every hop (resolve the child prop target,
-                        // find its captured API snapshot, locate the prop's byte
-                        // range in that snapshot) returns `None` on any uncertainty,
-                        // so a non-resolvable child synthesizes nothing — never a
-                        // usage-only partial. The merge already drops an unmappable
-                        // carrier location, so the worst case is no-worse-than-status-quo.
-                        if let Some(target) = server.resolve_child_prop_rename_target(uri, position)
+                        // 3-STATE classification (NOT a lossy `Option`): a confirmed
+                        // child-prop rename whose synthesis leg cannot be produced is
+                        // distinct from "not a child prop at all". Only a `Renameable`
+                        // class attempts synthesis; the resulting `WorkspaceEdit` is
+                        // then run through the post-merge COMPLETENESS GATE below.
+                        let rename_class = server.classify_child_prop_rename(uri, position);
+                        if let ChildPropRenameClass::ChildPropButNoSafeDeclaration { reason } =
+                            &rename_class
                         {
+                            // A confirmed child-prop rename with no synthesizable
+                            // declaration leg: we do NOT synthesize and do NOT gate the
+                            // provider's own result. Surface WHY (the reason) for
+                            // diagnostics.
+                            tracing::debug!(
+                                "rename: child prop has no safe synthesizable declaration ({reason:?}); \
+                                 deferring to provider result without synthesis"
+                            );
+                        }
+                        if let ChildPropRenameClass::Renameable(target) = &rename_class {
                             if let Some(snapshot) =
-                                query_snapshot.snapshot_for(&target.child_carrier_api_path)
+                                query_snapshot.snapshot_for(&target.usage.child_carrier_api_path)
                             {
                                 if let Some((start, end)) =
                                     crate::provider_surface_store::locate_prop_decl_range_in_carrier_api(
                                         snapshot,
-                                        target.prop_decl_span,
-                                        &target.prop_name,
+                                        target.child_prop_decl_span,
+                                        &target.usage.parent_prop_name,
                                     )
                                 {
                                     inject_synthesized_carrier_rename_location(
                                         &mut type_locs,
-                                        &target.child_carrier_api_path,
+                                        &target.usage.child_carrier_api_path,
                                         start,
                                         end,
                                     );
@@ -750,7 +762,7 @@ pub(super) async fn handle_rename(
                                 negotiated_encoding.clone(),
                             )
                         };
-                        return Ok(merge::merge_rename_locations(
+                        let merged = merge::merge_rename_locations(
                             verter_result,
                             type_locs,
                             new_name,
@@ -767,6 +779,18 @@ pub(super) async fn handle_rename(
                                     server.documents.host().workspace_read().read_file(p)
                                 })
                             },
+                        );
+
+                        // POST-MERGE COMPLETENESS GATE (fail-closed): for a CONFIRMED
+                        // (`Renameable`) cross-file child-prop rename, the EMITTED
+                        // `WorkspaceEdit` must edit BOTH the child `.vue` prop
+                        // declaration AND the parent `.vue` usage, or the whole rename
+                        // fails closed (returns no edit) — never a usage-only /
+                        // decl-only partial. See `gate_cross_file_child_prop_rename`.
+                        return Ok(gate_cross_file_child_prop_rename(
+                            merged,
+                            &rename_class,
+                            new_name,
                         ));
                     }
                 }
@@ -779,28 +803,143 @@ pub(super) async fn handle_rename(
 
 /// Inject Verter's SYNTHESIZED child-declaration carrier rename location into the
 /// provider's rename-location set, deduplicating against the provider's OWN
-/// carrier location for the SAME prop declaration.
+/// carrier location(s) for the SAME prop declaration.
 ///
 /// The synthesized location and a provider's real carrier location (tsserver
 /// returns one; tgo does not) target the SAME `{carrier}.ts` byte range for the
-/// same prop, so the synthesized leg must be the SINGLE deterministic origin:
-/// drop ONLY a provider location with the EXACT same `(path, start, end)` (the
-/// final merge would also dedup by the mapped `.vue` range, but pruning the exact
-/// duplicate here keeps one deterministic origin regardless of merge order).
-/// Every OTHER provider location — additional valid TS references the Vue-prop
-/// synthesis does not model — is PRESERVED.
+/// same prop, so the synthesized leg must be the SINGLE deterministic origin.
+///
+/// DEDUP BY OVERLAP, not just exact equality: drop EVERY provider location on the
+/// SAME carrier path whose byte range `[start, end)` OVERLAPS the synthesized
+/// `[start, end)`, in favor of the synthesized one. An exact-only dedup leaves a
+/// provider location that shares the synthesized START but has a DIFFERENT END
+/// (e.g. the provider ranged the whole `name: type` member, or only the bare
+/// name) in the set; the downstream merge dedups carrier edits by mapped-`.vue`
+/// `range.start`, so that same-start-different-end provider location would SUPPRESS
+/// the synthesized edit (whichever lands first wins the start slot) and the child
+/// decl could map to a wrong/under-covering range. Pruning by overlap here keeps
+/// the synthesized leg the authoritative origin for that declaration.
+///
+/// NARROW: only same-path, range-OVERLAPPING provider locations are pruned. Every
+/// OTHER provider location — a different-range carrier ref the Vue-prop synthesis
+/// does not model, or any location on a different path (the parent usage) — is
+/// PRESERVED. This narrowing is RENAME-SYNTHESIS-LOCAL; it does not touch the
+/// shared `merge_rename_locations` `range.start` dedup (which other features rely
+/// on).
 fn inject_synthesized_carrier_rename_location(
     type_locs: &mut Vec<crate::type_provider::protocol::RenameLocation>,
     carrier_api_path: &str,
     start: u32,
     end: u32,
 ) {
-    type_locs.retain(|loc| !(loc.path == carrier_api_path && loc.start == start && loc.end == end));
+    type_locs.retain(|loc| {
+        // Keep unless it is on the SAME carrier path AND its range overlaps the
+        // synthesized one. Half-open overlap: `a.start < b.end && b.start < a.end`.
+        !(loc.path == carrier_api_path && loc.start < end && start < loc.end)
+    });
     type_locs.push(crate::type_provider::protocol::RenameLocation {
         path: carrier_api_path.to_string(),
         start,
         end,
     });
+}
+
+/// Whether the merged cross-file rename `WorkspaceEdit` actually contains the
+/// SOURCE edits a confirmed `<Child prop=…>` rename MUST produce — the
+/// post-merge COMPLETENESS GATE.
+///
+/// A confirmed (Renameable) child-prop rename is incomplete unless the EMITTED
+/// `WorkspaceEdit` edits BOTH:
+///   1. the child component's `.vue` prop DECLARATION at `expected_child_range`
+///      with `new_text == new_name`, AND
+///   2. the parent's `.vue` prop USAGE at `expected_parent_range` with
+///      `new_text == new_name`.
+///
+/// PROVIDER-AGNOSTIC by construction: it inspects only the merged, mapped source
+/// `WorkspaceEdit` (`changes: HashMap<Uri, Vec<TextEdit>>`) — it does NOT care
+/// whether the child edit came from Verter's synthesis or from the provider's own
+/// native leg (tsserver enumerates it; tgo does not). So a tsserver rename whose
+/// native child leg is present passes even when Verter's own synthesis could not
+/// locate the leg — no `is_tsgo`/`is_tsserver` branch, no regression.
+///
+/// Each `expected_*` range is `None` when the originating span did not resolve to
+/// a `.vue` position; the gate then cannot prove that leg precisely and FAILS
+/// CLOSED (returns `false`) — the fail-closed boundary for an unmappable edit.
+///
+/// Range match is EXACT on `range.start` (the edit anchor), tolerant on `end`: an
+/// edit at the right start position with the right new text is the declaration /
+/// usage edit. A `new_text` mismatch (a stray edit at the same anchor with
+/// different text) does NOT satisfy the leg.
+fn workspace_edit_satisfies_child_prop_rename(
+    merged: &WorkspaceEdit,
+    expected_child_uri: &Uri,
+    expected_child_range: Option<Range>,
+    expected_parent_uri: &Uri,
+    expected_parent_range: Option<Range>,
+    new_name: &str,
+) -> bool {
+    let has_edit_at = |uri: &Uri, expected: Option<Range>| -> bool {
+        let Some(expected) = expected else {
+            // No precise range to assert → cannot prove this leg → fail closed.
+            return false;
+        };
+        let Some(changes) = merged.changes.as_ref() else {
+            return false;
+        };
+        let Some(edits) = changes.get(uri) else {
+            return false;
+        };
+        edits
+            .iter()
+            .any(|e| e.range.start == expected.start && e.new_text == new_name)
+    };
+
+    has_edit_at(expected_child_uri, expected_child_range)
+        && has_edit_at(expected_parent_uri, expected_parent_range)
+}
+
+/// Apply the post-merge COMPLETENESS GATE to a cross-file rename result.
+///
+/// - [`ChildPropRenameClass::Renameable`]: the merged `WorkspaceEdit` MUST satisfy
+///   [`workspace_edit_satisfies_child_prop_rename`] (edits BOTH the child `.vue`
+///   declaration AND the parent `.vue` usage). If it does not, the whole rename
+///   fails closed → `None`. This is the fix for the usage-only-partial gap: a
+///   confirmed child-prop rename whose merged edit lacks the child declaration
+///   (e.g. tgo, synthesis leg could not be produced) returns NO edit rather than a
+///   usage-only partial. Provider-AGNOSTIC: a tsserver result whose NATIVE child
+///   leg already lands the declaration edit passes the gate even when Verter's own
+///   synthesis could not locate the leg (no `is_tsgo`/`is_tsserver` branch).
+/// - [`ChildPropRenameClass::ChildPropButNoSafeDeclaration`] and
+///   [`ChildPropRenameClass::NotChildProp`]: do NOT gate. The provider's own
+///   merged result is returned untouched — these are not a confirmed
+///   synthesizable-declaration rename Verter promises both legs for, so Verter must
+///   not suppress an otherwise-valid provider result.
+///
+/// Inspects ONLY the merged source `WorkspaceEdit`, so it is a pure function of
+/// `(merged, class, new_name)` — unit-testable without a live provider.
+fn gate_cross_file_child_prop_rename(
+    merged: Option<WorkspaceEdit>,
+    rename_class: &ChildPropRenameClass,
+    new_name: &str,
+) -> Option<WorkspaceEdit> {
+    let ChildPropRenameClass::Renameable(target) = rename_class else {
+        return merged;
+    };
+    let satisfied = merged.as_ref().is_some_and(|edit| {
+        workspace_edit_satisfies_child_prop_rename(
+            edit,
+            &target.usage.child_uri,
+            target.expected_child_decl_range,
+            &target.usage.parent_uri,
+            target.expected_parent_usage_range,
+            new_name,
+        )
+    });
+    if satisfied {
+        merged
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -880,5 +1019,356 @@ mod synthesized_rename_injection_tests {
             1,
             "the synthesized child-declaration leg must be injected when the provider omits it"
         );
+    }
+
+    #[test]
+    fn prunes_same_start_different_end_provider_location_by_overlap() {
+        // The provider returned a carrier location for the SAME prop declaration but
+        // with a DIFFERENT end (it ranged `foo: string`, bytes 40..51, where the
+        // synthesis ranges only the name `foo`, 40..43). The downstream merge dedups
+        // carrier edits by mapped-`.vue` `range.start`; a same-start provider edit
+        // left in the set would SUPPRESS the synthesized one (whichever lands first
+        // wins the start slot) → the child decl could map to a wrong/over-covering
+        // range. The overlap-prune must drop the provider's overlapping location.
+        let mut locs = vec![loc(API, 40, 51)];
+        inject_synthesized_carrier_rename_location(&mut locs, API, 40, 43);
+        // DISCRIMINATING: with the OLD exact-only `retain` this is 2 (the provider's
+        // 40..51 survives alongside the synthesized 40..43); with overlap-prune it is 1.
+        assert_eq!(
+            locs.len(),
+            1,
+            "a same-start-different-end provider carrier location must be pruned by overlap"
+        );
+        assert_eq!(
+            count_matching(&locs, API, 40, 43),
+            1,
+            "only the synthesized exact-name range survives"
+        );
+        assert_eq!(
+            count_matching(&locs, API, 40, 51),
+            0,
+            "the provider's overlapping (wider) range must be dropped, not kept"
+        );
+    }
+
+    #[test]
+    fn prunes_partial_overlap_provider_location() {
+        // A provider location that PARTIALLY overlaps the synthesized range (44..47
+        // vs synthesized 40..46 — provider start inside the synthesized range) must
+        // also be pruned: it would map into the same declaration region.
+        let mut locs = vec![loc(API, 44, 47)];
+        inject_synthesized_carrier_rename_location(&mut locs, API, 40, 46);
+        assert_eq!(
+            locs.len(),
+            1,
+            "a partially-overlapping provider carrier location must be pruned"
+        );
+        assert_eq!(count_matching(&locs, API, 40, 46), 1);
+    }
+
+    #[test]
+    fn keeps_adjacent_non_overlapping_provider_location() {
+        // A provider carrier location that is ADJACENT but does NOT overlap (43..46,
+        // touching the synthesized 40..43 at the half-open boundary) is a DIFFERENT
+        // reference the synthesis does not model — it must be PRESERVED (the narrowing
+        // is overlap-only, never broader).
+        let mut locs = vec![loc(API, 43, 46)];
+        inject_synthesized_carrier_rename_location(&mut locs, API, 40, 43);
+        assert_eq!(
+            locs.len(),
+            2,
+            "an adjacent, non-overlapping provider carrier location must be preserved"
+        );
+        assert_eq!(count_matching(&locs, API, 40, 43), 1);
+        assert_eq!(count_matching(&locs, API, 43, 46), 1);
+    }
+}
+
+#[cfg(test)]
+mod cross_file_rename_gate_tests {
+    use super::{gate_cross_file_child_prop_rename, workspace_edit_satisfies_child_prop_rename};
+    use crate::server::component_resolve::{
+        ChildPropMissReason, ChildPropRenameClass, ChildPropRenameTarget, ChildPropUsage,
+    };
+    use std::collections::HashMap;
+    use tower_lsp_server::ls_types::{Position, Range, TextEdit, Uri, WorkspaceEdit};
+
+    fn uri(s: &str) -> Uri {
+        s.parse().unwrap()
+    }
+
+    fn child_uri() -> Uri {
+        uri("file:///src/MyComp.vue")
+    }
+
+    fn parent_uri() -> Uri {
+        uri("file:///src/App.vue")
+    }
+
+    fn rng(line: u32, start_ch: u32, end_ch: u32) -> Range {
+        Range {
+            start: Position {
+                line,
+                character: start_ch,
+            },
+            end: Position {
+                line,
+                character: end_ch,
+            },
+        }
+    }
+
+    /// The child decl is at MyComp.vue 5:11..5:14, the parent usage at App.vue 3:9..3:12.
+    fn child_decl_range() -> Range {
+        rng(5, 11, 14)
+    }
+    fn parent_usage_range() -> Range {
+        rng(3, 9, 12)
+    }
+
+    /// A `Renameable` class targeting the ranges above. Both expected ranges present.
+    fn renameable_target() -> ChildPropRenameClass {
+        ChildPropRenameClass::Renameable(Box::new(ChildPropRenameTarget {
+            usage: ChildPropUsage {
+                parent_uri: parent_uri(),
+                parent_prop_name: "foo".to_string(),
+                parent_prop_name_span: verter_span::Span { start: 0, end: 3 },
+                parent_is_shorthand: false,
+                child_uri: child_uri(),
+                child_carrier_api_path: "/src/MyComp.vue.ts".to_string(),
+            },
+            child_prop_decl_span: verter_span::Span {
+                start: 100,
+                end: 103,
+            },
+            expected_child_decl_range: Some(child_decl_range()),
+            expected_parent_usage_range: Some(parent_usage_range()),
+        }))
+    }
+
+    fn edit_with(entries: Vec<(Uri, Vec<TextEdit>)>) -> WorkspaceEdit {
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        for (u, edits) in entries {
+            changes.insert(u, edits);
+        }
+        WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }
+    }
+
+    fn te(range: Range, new_text: &str) -> TextEdit {
+        TextEdit {
+            range,
+            new_text: new_text.to_string(),
+        }
+    }
+
+    // ── The load-bearing fail-closed discriminator (RED-proof target) ──────────
+
+    #[test]
+    fn renameable_usage_only_merge_fails_closed_to_none() {
+        // A CONFIRMED child-prop rename whose merged edit contains ONLY the parent
+        // usage leg (the tgo synthesis-failure shape: child leg dropped, provider
+        // did not enumerate it). The gate MUST fail closed → None, never the
+        // usage-only partial.
+        //
+        // DISCRIMINATING / RED-PROOF: revert the gate (make
+        // `gate_cross_file_child_prop_rename` always return `merged`) and this goes
+        // RED — it would return the usage-only edit instead of None.
+        let merged = edit_with(vec![(
+            parent_uri(),
+            vec![te(parent_usage_range(), "fooRenamed")],
+        )]);
+        let result =
+            gate_cross_file_child_prop_rename(Some(merged), &renameable_target(), "fooRenamed");
+        assert!(
+            result.is_none(),
+            "a Renameable rename with a usage-ONLY merged edit must fail closed (None), \
+             not ship a usage-only partial"
+        );
+    }
+
+    #[test]
+    fn renameable_decl_only_merge_fails_closed_to_none() {
+        // A declaration-ONLY merged edit (parent usage leg missing) is ALSO
+        // incomplete → fail closed. Guards the optional-but-adopted parent-usage
+        // assertion.
+        let merged = edit_with(vec![(
+            child_uri(),
+            vec![te(child_decl_range(), "fooRenamed")],
+        )]);
+        let result =
+            gate_cross_file_child_prop_rename(Some(merged), &renameable_target(), "fooRenamed");
+        assert!(
+            result.is_none(),
+            "a Renameable rename with a declaration-ONLY merged edit must fail closed (None)"
+        );
+    }
+
+    #[test]
+    fn renameable_both_legs_present_is_returned() {
+        // BOTH legs present at the expected ranges with the right new text → the gate
+        // passes and returns the merged edit unchanged.
+        let merged = edit_with(vec![
+            (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
+            (child_uri(), vec![te(child_decl_range(), "fooRenamed")]),
+        ]);
+        let result = gate_cross_file_child_prop_rename(
+            Some(merged.clone()),
+            &renameable_target(),
+            "fooRenamed",
+        );
+        let returned = result.expect("a complete Renameable rename (both legs) must be returned");
+        let changes = returned.changes.expect("changes present");
+        assert!(
+            changes.contains_key(&parent_uri()) && changes.contains_key(&child_uri()),
+            "the returned edit must keep both the parent usage and child declaration legs"
+        );
+    }
+
+    #[test]
+    fn renameable_child_leg_from_provider_passes_without_synthesis() {
+        // tsserver case (c): Verter's own synthesis could not run, but the MERGED
+        // edit ALREADY contains the child declaration leg (the provider's native
+        // leg). The gate is provider-AGNOSTIC — it inspects the merged result, not
+        // whether synthesis ran — so it PASSES. This proves the gate does NOT
+        // regress tsserver when synthesis is absent.
+        //
+        // (Identical merged shape to `renameable_both_legs_present_is_returned`; the
+        // DISTINCTION this test characterizes is intent: the child leg's ORIGIN is
+        // irrelevant to the gate. Asserted via the same both-legs-present input.)
+        let merged = edit_with(vec![
+            (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
+            (child_uri(), vec![te(child_decl_range(), "fooRenamed")]),
+        ]);
+        let result =
+            gate_cross_file_child_prop_rename(Some(merged), &renameable_target(), "fooRenamed");
+        assert!(
+            result.is_some(),
+            "a Renameable rename whose child leg is present (from the provider) must pass the gate \
+             even without Verter synthesis (no provider regression)"
+        );
+    }
+
+    #[test]
+    fn renameable_wrong_new_text_at_child_range_fails_closed() {
+        // An edit at the right child START but with the WRONG new text does NOT
+        // satisfy the child leg → fail closed. Guards against a stray same-anchor edit
+        // masquerading as the declaration edit.
+        let merged = edit_with(vec![
+            (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
+            (child_uri(), vec![te(child_decl_range(), "WRONG")]),
+        ]);
+        let result =
+            gate_cross_file_child_prop_rename(Some(merged), &renameable_target(), "fooRenamed");
+        assert!(
+            result.is_none(),
+            "an edit at the child decl anchor with the wrong new_text must NOT satisfy the gate"
+        );
+    }
+
+    #[test]
+    fn not_child_prop_does_not_gate_usage_only_result() {
+        // A NotChildProp rename (e.g. a local binding) is NOT a confirmed
+        // synthesizable-declaration rename: the gate must NOT touch the provider's own
+        // merged result, even a single-file one. DISCRIMINATING against an
+        // over-broad gate that would suppress valid non-child renames.
+        let merged = edit_with(vec![(
+            parent_uri(),
+            vec![te(parent_usage_range(), "renamed")],
+        )]);
+        let result = gate_cross_file_child_prop_rename(
+            Some(merged),
+            &ChildPropRenameClass::NotChildProp,
+            "renamed",
+        );
+        assert!(
+            result.is_some(),
+            "a NotChildProp rename's merged result must be returned untouched (no over-gating)"
+        );
+    }
+
+    #[test]
+    fn child_prop_but_no_safe_declaration_does_not_gate() {
+        // A confirmed child prop with NO synthesizable declaration leg
+        // (`ChildPropButNoSafeDeclaration`) does NOT gate: Verter did not promise a
+        // synthesized declaration for it, so it must not suppress the provider's own
+        // (possibly complete) result. Reads `reason` to characterize the variant.
+        let class = ChildPropRenameClass::ChildPropButNoSafeDeclaration {
+            reason: ChildPropMissReason::NoMacroDeclaration,
+        };
+        if let ChildPropRenameClass::ChildPropButNoSafeDeclaration { reason } = &class {
+            assert_eq!(*reason, ChildPropMissReason::NoMacroDeclaration);
+        } else {
+            panic!("expected ChildPropButNoSafeDeclaration");
+        }
+        let merged = edit_with(vec![(
+            parent_uri(),
+            vec![te(parent_usage_range(), "renamed")],
+        )]);
+        let result = gate_cross_file_child_prop_rename(Some(merged), &class, "renamed");
+        assert!(
+            result.is_some(),
+            "ChildPropButNoSafeDeclaration must not gate the provider's own result"
+        );
+    }
+
+    #[test]
+    fn renameable_unmappable_expected_range_fails_closed() {
+        // If the child decl's `.vue` range could not be computed
+        // (`expected_child_decl_range == None`), the gate cannot prove the leg
+        // precisely and FAILS CLOSED — the fail-closed boundary for an unmappable
+        // edit. Even a both-files-touched merged edit does not satisfy it.
+        let mut class = renameable_target();
+        if let ChildPropRenameClass::Renameable(target) = &mut class {
+            target.expected_child_decl_range = None;
+        }
+        let merged = edit_with(vec![
+            (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
+            (child_uri(), vec![te(child_decl_range(), "fooRenamed")]),
+        ]);
+        let result = gate_cross_file_child_prop_rename(Some(merged), &class, "fooRenamed");
+        assert!(
+            result.is_none(),
+            "a Renameable rename with no precise child range must fail closed (None)"
+        );
+    }
+
+    #[test]
+    fn satisfies_helper_requires_both_legs() {
+        // Direct unit of the satisfaction predicate: both legs → true; missing
+        // either → false; None range → false.
+        let both = edit_with(vec![
+            (parent_uri(), vec![te(parent_usage_range(), "x")]),
+            (child_uri(), vec![te(child_decl_range(), "x")]),
+        ]);
+        assert!(workspace_edit_satisfies_child_prop_rename(
+            &both,
+            &child_uri(),
+            Some(child_decl_range()),
+            &parent_uri(),
+            Some(parent_usage_range()),
+            "x"
+        ));
+        // Missing child leg → false.
+        let usage_only = edit_with(vec![(parent_uri(), vec![te(parent_usage_range(), "x")])]);
+        assert!(!workspace_edit_satisfies_child_prop_rename(
+            &usage_only,
+            &child_uri(),
+            Some(child_decl_range()),
+            &parent_uri(),
+            Some(parent_usage_range()),
+            "x"
+        ));
+        // None expected child range → false (fail closed).
+        assert!(!workspace_edit_satisfies_child_prop_rename(
+            &both,
+            &child_uri(),
+            None,
+            &parent_uri(),
+            Some(parent_usage_range()),
+            "x"
+        ));
     }
 }

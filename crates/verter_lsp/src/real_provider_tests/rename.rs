@@ -204,9 +204,10 @@ real_provider_test!(
 // DISCRIMINATES: a synthesis that fired on a non-prop position (e.g. mis-resolved
 // the cursor to a child component, or located a bogus carrier range) would inject a
 // spurious `MyComp.vue.ts` rename location → the merge would land a wrong edit in
-// MyComp.vue. The `resolve_child_prop_rename_target` resolution returns `None` for a
-// non-prop cursor (no usage-only / cross-file partial), so MyComp.vue stays
-// untouched. Both providers run the SAME synthesis, so this guards both.
+// MyComp.vue. The `classify_child_prop_rename` classification returns `NotChildProp`
+// for a non-prop cursor (so nothing is synthesized AND the completeness gate does not
+// fire), so MyComp.vue stays untouched. Both providers run the SAME classification +
+// synthesis, so this guards both.
 real_provider_test!(
     rename_local_binding_does_not_synthesize_cross_file_child_edit,
     fixture = "single-project",
