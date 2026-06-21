@@ -2,21 +2,32 @@
 //! producer-capable: the query-free structural lowerer, the macro hot
 //! mirror, and the `<script setup generic="…">` binder-seed builder.
 //!
-//! ## Single-producer boundary (compiler-enforced by construction)
+//! ## Single-producer boundary (two confinement regimes)
 //!
-//! Verter has exactly ONE structural-carrier producer. The raw lowerer
-//! [`lower_type_expr_structural`] and its scope builder
-//! [`build_script_setup_seed_frames`] are PRIVATE to THIS module (no
-//! visibility modifier), so no other file — not even a sibling under
-//! [`crate::structural_carrier_producer`] — can NAME or CALL them. The ONLY
-//! crate-visible items this module exposes are [`macro_type_arg_hot_ref`]
-//! (the sole production entry that lowers a macro `parsed_type_argument`) and
-//! the [`MacroHotMirror`] artifact child it populates. A SECOND structural-
-//! carrier producer is therefore UNREPRESENTABLE BY CONSTRUCTION: a foreign
-//! caller cannot name the private lowerer, and a THIRD same-owner caller is a
-//! compile error (there is no other file in the owner module that could name
-//! it). The single-engine producer rule is enforced by the type system and
-//! module privacy, not a source scanner.
+//! Verter has exactly ONE structural-carrier producer. The producer-capable
+//! builders — the raw lowerer [`lower_type_expr_structural`], the macro
+//! hot-mirror builder [`build_macro_hot_ref`], and the scope builder
+//! [`build_script_setup_seed_frames`] — are PRIVATE to THIS module (no
+//! visibility modifier). The ONLY crate-visible items this module exposes are
+//! [`macro_type_arg_hot_ref`] (the sole production entry that lowers a macro
+//! `parsed_type_argument`) and the [`MacroHotMirror`] artifact child it
+//! populates.
+//!
+//! The single-producer guarantee has TWO regimes, NOT one. (1) The FOREIGN
+//! case is COMPILER-CONFINED: a module OUTSIDE this one cannot NAME the
+//! private builders — a foreign reference is a compile error (E0603 / E0433),
+//! not a lint, so a second producer in a foreign module is unrepresentable by
+//! construction. (2) The SAME-MODULE case is NOT compiler-confined: Rust
+//! privacy is module-scoped, so a SECOND producer written INSIDE this file CAN
+//! name the module-private builders, and the owner module's collapse to one
+//! file does not make that a compile error. That same-module residual is
+//! POLICED by the strengthened single-producer architecture guards
+//! (cfg-satisfiability classification + crate-visible producer-exposure
+//! collector covering fn / value / trait entries + the no-codegen-surface
+//! scan + the no-query/dispatch purity scan + the scoped derive-shadow
+//! import check). The IRREDUCIBLE residual is trust in this one sanctioned
+//! producer implementation plus compiler bugs / build-time substitution /
+//! out-of-tree proc-macros — NOT covered by either regime, by design.
 //!
 //! ## The query-free structural lowering
 //!
@@ -1204,7 +1215,12 @@ fn build_script_setup_seed_frames(
         frame.bind(display_name, node);
     }
 
-    vec![frame]
+    // De-sugared `vec![frame]`: this producer module forbids ALL production bang
+    // macro invocations (so the no-codegen-surface guard bans the whole class
+    // rather than allowlisting std macros), so the single-element vector is built
+    // via `Vec::from`. Behavior-identical to `vec![frame]` (one owned move into a
+    // fresh `Vec`).
+    Vec::from([frame])
 }
 
 // =============================================================================
@@ -1344,10 +1360,18 @@ fn build_macro_hot_ref(
     // PROVENANCE is a structural-lowering property of the macro's own body,
     // not a demand/mode property, so it belongs on the mode-neutral mirror.
     use verter_semantic::analysis::AnalyzedMacroKind;
-    let macro_own_body = matches!(
-        mac.kind,
-        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
-    );
+    // De-sugared `matches!`: this producer module forbids ALL production bang
+    // macro invocations (so the no-codegen-surface guard can ban the whole
+    // class instead of allowlisting individual std macros), so the macro-own-
+    // body classification stays an explicit `match`. Behavior-identical to
+    // `matches!(mac.kind, DefineProps | WithDefaults)`. Clippy's
+    // `match_like_matches_macro` suggestion to collapse this back to `matches!`
+    // MUST NOT be applied here.
+    #[allow(clippy::match_like_matches_macro)]
+    let macro_own_body = match mac.kind {
+        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => true,
+        _ => false,
+    };
 
     // Seed the script-setup generic binders so `defineProps<T>()`'s `T` in a
     // `<script setup generic="T">` SFC lowers to its `TypeParam` binder, not

@@ -12,13 +12,19 @@
 //! [`macro_type_arg_hot_ref`] (the sole production entry that lowers a macro
 //! type-argument) and the [`MacroHotMirror`] artifact child it populates.
 //!
-//! A SECOND structural-carrier producer is therefore UNREPRESENTABLE BY
-//! CONSTRUCTION: no foreign module — and no sibling under this owner module —
-//! can NAME the private lowerer, the private binder-seed builder, or the
-//! private mirror builder, so it cannot lower structurally. A THIRD same-owner
-//! caller is a compile error (there is no other file in the owner module that
-//! could name those private fns). The single-engine producer rule is enforced
-//! by the type system and module privacy, not a source scanner.
+//! The single-producer guarantee has TWO regimes. The FOREIGN case is
+//! COMPILER-CONFINED: no foreign module can NAME the private lowerer, the
+//! private binder-seed builder, or the private mirror builder (an E0603 /
+//! E0433 compile error), so a second producer in a foreign module is
+//! unrepresentable by construction. The SAME-MODULE case is NOT
+//! compiler-confined — Rust privacy is module-scoped, so a SECOND producer
+//! written INSIDE [`macro_arg_producer`] CAN name the module-private builders;
+//! that residual is POLICED by the strengthened single-producer architecture
+//! guards (cfg-satisfiability + producer-exposure over fn/value/trait entries +
+//! no-codegen-surface + no-query/dispatch + scoped derive-shadow), NOT by
+//! construction. The irreducible residual is trust in the one sanctioned
+//! producer implementation plus compiler bugs / build substitution /
+//! out-of-tree proc-macros.
 //!
 //! The owner module's boundary stays NARROW: it contains only
 //! [`macro_arg_producer`], this `mod.rs`, and the producer's test modules — no

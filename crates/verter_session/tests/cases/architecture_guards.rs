@@ -21230,9 +21230,25 @@ fn session_graph_lowerer_makes_no_query() {
         ".execute(",
         "execute_read",
         "execute_type_node",
+        // [P0] the dispatch/query route — the "SECOND QUERY-TIME RESOLUTION
+        // ENGINE" the single-engine rule forbids. A producer that reaches
+        // `ctx.dispatch().lower_type_expr_in_scope_with_context(...)` route-
+        // resolves imports (via `prepared_decl_bundle`) — a second resolver.
+        ".dispatch(",
+        "lower_type_expr_in_scope_with_",
+        // The route-resolving `ensure_indexed_ready(` (open-paren form) — DISTINCT
+        // from the allowed route-free `ensure_indexed_ready_serve` (which the
+        // mirror accessor legitimately calls). The open-paren in the needle means
+        // `ensure_indexed_ready_serve(` (whose next char after the prefix is `_`,
+        // not `(`) never matches.
+        "ensure_indexed_ready(",
         "resolve_bare_name_in_scope",
         "resolve_type_dependency_canonical",
         "prepared_decl_bundle",
+        "prepared_type_decl",
+        "prepared_value_decl",
+        "materialize_type_expr",
+        "raise_node_to_type_expr",
         "type_provider",
         "tsserver",
         // Assembled at compile time so this needle list does not itself carry
@@ -21269,6 +21285,44 @@ fn session_graph_lowerer_makes_no_query() {
     assert!(
         !carrier_production_code(test_only).contains("execute_read"),
         "scanner self-test (negative, cfg-test): a query token after `#[cfg(test)]` must be excluded"
+    );
+    //   POSITIVE ([P0]) — the dispatch/eager-lowering route IS detected. A
+    //   `ctx.dispatch().lower_type_expr_in_scope_with_context(...)` is the second
+    //   resolution engine the single-engine rule forbids; both needles fire.
+    let dispatch_route =
+        "fn rogue() { let _ = ctx.dispatch().lower_type_expr_in_scope_with_context(s, e, c); }";
+    assert!(
+        carrier_production_code(dispatch_route).contains(".dispatch("),
+        "scanner self-test (positive): a `.dispatch(` route call must be detected"
+    );
+    assert!(
+        carrier_production_code(dispatch_route).contains("lower_type_expr_in_scope_with_"),
+        "scanner self-test (positive): an eager `lower_type_expr_in_scope_with_*` call must be \
+         detected"
+    );
+    //   POSITIVE — a static `ProjectSemanticDispatch::lower_type_expr_in_scope_with_context`
+    //   call is detected.
+    let static_dispatch =
+        "fn rogue() { ProjectSemanticDispatch::lower_type_expr_in_scope_with_context(s, e, c); }";
+    assert!(
+        carrier_production_code(static_dispatch).contains("ProjectSemanticDispatch"),
+        "scanner self-test (positive): a `ProjectSemanticDispatch::…` call must be detected"
+    );
+    //   DISTINCTION — the route-resolving `ensure_indexed_ready(` IS detected, but
+    //   the allowed route-free `ensure_indexed_ready_serve(` is NOT (the needle's
+    //   trailing `(` never matches the `_serve` suffix). This is the load-bearing
+    //   distinction the brief flagged.
+    let route_resolving = "fn rogue() { ctx.ensure_indexed_ready(owner); }";
+    assert!(
+        carrier_production_code(route_resolving).contains("ensure_indexed_ready("),
+        "scanner self-test (positive): the route-resolving `ensure_indexed_ready(` must be detected"
+    );
+    let route_free = "fn ok() { let serve = ctx.ensure_indexed_ready_serve(owner); }";
+    assert!(
+        !carrier_production_code(route_free).contains("ensure_indexed_ready("),
+        "scanner self-test (DISTINCTION): the route-free `ensure_indexed_ready_serve(` must NOT \
+         match the `ensure_indexed_ready(` needle — the open-paren form distinguishes the route \
+         from the `_serve` suffix (the real producer uses `_serve`)"
     );
 }
 
@@ -21476,57 +21530,77 @@ fn carrier_production_code_scans_post_cfg_test_and_strips_block_comments() {
 }
 
 /// The structural lowerer's defining module: the raw entry
-/// `lower_type_expr_structural` lives under
-/// `crate::structural_carrier_producer::macro_arg_producer` and is
-/// MODULE-PRIVATE (no visibility modifier). The module itself is a PRIVATE
-/// `mod macro_arg_producer;` (only `macro_type_arg_hot_ref` + `MacroHotMirror`
-/// are re-exported), so no FOREIGN module — and no sibling under the owner
-/// module — can NAME the lowerer. A second production structural-carrier
-/// producer in ANY other file is therefore UNREPRESENTABLE by construction
-/// (compiler-enforced single-engine producer rule), which is why this guard is
-/// a PRIVACY-SHAPE assertion on the owner file, not a foreign caller scanner.
-/// The same-owner case is moot too: there is no other file in the owner module
-/// that could name the private lowerer (the producer is collapsed into this one
-/// module), so a third caller is a compile error.
+/// the THREE producer-capable builders (`lower_type_expr_structural`,
+/// `build_macro_hot_ref`, `build_script_setup_seed_frames`) each live under
+/// `crate::structural_carrier_producer::macro_arg_producer` and are EACH
+/// single-defined + MODULE-PRIVATE (no visibility modifier). The module itself
+/// is a PRIVATE `mod macro_arg_producer;` (only `macro_type_arg_hot_ref` +
+/// `MacroHotMirror` are re-exported), so no FOREIGN module can NAME any builder
+/// — a second producer in a foreign file is a compile error (E0603 / E0433),
+/// UNREPRESENTABLE by construction. The SAME-MODULE case is different: Rust
+/// privacy is module-scoped, so a SECOND producer written INSIDE this file CAN
+/// name the module-private builders; the owner's collapse to one file does NOT
+/// make that a compile error. This privacy-shape assertion is therefore one
+/// of the BOUNDED single-producer guards that POLICE that same-module residual
+/// (alongside the producer-exposure / no-codegen-surface / no-query /
+/// derive-shadow guards) — it pins each builder bare-private + single-defined +
+/// not re-exported, so a widened or duplicated builder reddens.
 const STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE: &str =
     "structural_carrier_producer/macro_arg_producer.rs";
 
-/// Classify the visibility shape of the `lower_type_expr_structural` definition
-/// in the given source body. Returns the offending reason when the entry
-/// carries ANY visibility modifier (the required shape is a bare module-private
-/// `fn lower_type_expr_structural(` — no `pub`, no `pub(crate)`, no `pub(in
-/// …)`), or `None` when the shape is correct. Looks at the DEFINITION line
-/// only.
-fn structural_carrier_producer_lowerer_privacy_violation(body: &str) -> Option<String> {
-    let needle = "fn lower_type_expr_structural(";
-    let def_line = body.lines().find(|l| l.contains(needle))?;
+/// The THREE producer-capable builders that MUST each be a single-defined, bare
+/// module-private `fn` (no visibility modifier) inside `macro_arg_producer.rs`
+/// and re-exported NOWHERE: the raw query-free structural lowerer, the macro
+/// hot-mirror builder, and the `<script setup generic="…">` binder-seed builder.
+/// The ONLY crate-visible producer entry is `macro_type_arg_hot_ref` (asserted by
+/// the entry-surface guard, NOT this one). A `pub` / `pub(crate)` / `pub(in …)` on
+/// ANY of these three, or a second definition, or a `pub use` re-export of any of
+/// them, re-opens a second/third structural-carrier producer surface.
+const STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS: &[&str] = &[
+    "lower_type_expr_structural",
+    "build_macro_hot_ref",
+    "build_script_setup_seed_frames",
+];
+
+/// Classify the visibility shape of the named producer builder's definition in
+/// the given source body. Returns the offending reason when the entry carries
+/// ANY visibility modifier (the required shape is a bare module-private
+/// `fn <builder>(` — no `pub`, no `pub(crate)`, no `pub(in …)`), or `None` when
+/// the shape is correct OR the builder is absent from `body` (absence is handled
+/// by the caller's anti-vacuity + single-definition assertions, NOT here). Looks
+/// at the DEFINITION line only.
+fn structural_carrier_producer_builder_privacy_violation(
+    body: &str,
+    builder: &str,
+) -> Option<String> {
+    let needle = format!("fn {builder}(");
+    let def_line = body.lines().find(|l| l.contains(&needle))?;
     let trimmed = def_line.trim_start();
     // The ONLY accepted shape is the bare module-private `fn` — the definition
-    // line starts directly with `fn lower_type_expr_structural(`. ANY visibility
-    // modifier (`pub`, `pub(crate)`, `pub(super)`, `pub(in …)`) lets some other
-    // module name the entry and is the forbidden second/third-producer shape.
-    if trimmed.starts_with("fn lower_type_expr_structural(") {
+    // line starts directly with `fn <builder>(`. ANY visibility modifier (`pub`,
+    // `pub(crate)`, `pub(super)`, `pub(in …)`) lets some other module name the
+    // entry and is the forbidden second/third-producer shape.
+    if trimmed.starts_with(&needle) {
         return None;
     }
     Some(format!(
-        "the structural lowerer's entry must be a bare module-private \
-         `fn lower_type_expr_structural(` (NO visibility modifier at all — not `pub`, \
-         `pub(crate)`, or `pub(in …)`), so no other module can name it and only the witness-gated \
-         wrappers can reach it; found: `{}`",
-        trimmed
+        "the producer builder `{builder}`'s entry must be a bare module-private \
+         `fn {builder}(` (NO visibility modifier at all — not `pub`, `pub(crate)`, or \
+         `pub(in …)`), so no other module can name it and only the single sanctioned producer \
+         entry can reach it; found: `{trimmed}`"
     ))
 }
 
-/// Whether `body` re-exports the structural lowerer with a `pub use … as` /
-/// `pub use …::lower_type_expr_structural` binding — a re-export would mint a
-/// NAMEABLE alias of the otherwise-private lowerer, re-opening the producer
-/// surface. The accepted module-private fn cannot be `pub use`-re-exported at
-/// all (that is itself a compile error), so this scan finds nothing on the
-/// genuine tree; it RED-proves a re-export evasion.
-fn structural_lowerer_reexport_violation(body: &str) -> bool {
+/// Whether `body` re-exports the named producer builder with a
+/// `pub use … <builder>` / `pub use … as <builder>` binding — a re-export would
+/// mint a NAMEABLE alias of the otherwise-private builder, re-opening the producer
+/// surface. The accepted module-private fn cannot be `pub use`-re-exported at all
+/// (that is itself a compile error), so this scan finds nothing on the genuine
+/// tree; it RED-proves a re-export evasion.
+fn structural_builder_reexport_violation(body: &str, builder: &str) -> bool {
     body.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("pub use ") && trimmed.contains("lower_type_expr_structural")
+        trimmed.starts_with("pub use ") && trimmed.contains(builder)
     })
 }
 
@@ -21545,117 +21619,135 @@ fn structural_carrier_producer_lowerer_is_module_private() {
     let rel = "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs";
     let body = std::fs::read_to_string(workspace_path(rel))
         .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
-    // (a) Anti-vacuity: the owner module must exist at this path and carry the
-    // definition — its absence means the owner re-home regressed.
-    assert!(
-        body.contains("fn lower_type_expr_structural("),
-        "anti-vacuity: the structural lowerer definition must live at `{rel}` \
-         (`{STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE}`) — its absence means the \
-         structural-carrier-producer owner re-home regressed"
-    );
-    // (a) The raw lowerer is defined NOWHERE ELSE in the crate — exactly one
-    // definition, in `macro_arg_producer.rs`.
-    let definitions: Vec<String> = session_production_src_files()
-        .into_iter()
-        .filter(|(_, src)| src.contains("fn lower_type_expr_structural("))
-        .map(|(rel, _)| rel)
-        .collect();
-    assert_eq!(
-        definitions,
-        vec![
-            "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs"
-                .to_string()
-        ],
-        "the raw `fn lower_type_expr_structural(` must be defined ONLY in \
-         `structural_carrier_producer/macro_arg_producer.rs`; found in {definitions:#?}"
-    );
-    // (b) The definition line carries NO visibility modifier.
-    if let Some(reason) = structural_carrier_producer_lowerer_privacy_violation(&body) {
-        panic!(
-            "single-engine producer rule violated: {reason}. The entry must stay module-private to \
-             `crate::structural_carrier_producer::macro_arg_producer` so a second structural-carrier \
-             producer is unrepresentable by construction."
-        );
-    }
-    // (c) The lowerer is NOT re-exported anywhere in the crate — a `pub use`
-    // re-export would mint a nameable alias and re-open the producer surface.
-    for (file_rel, src) in session_production_src_files() {
+    let production_files = session_production_src_files();
+    // The guard pins ALL THREE producer-capable builders (the raw structural
+    // lowerer, the macro hot-mirror builder, and the binder-seed builder) — each
+    // single-defined, bare module-private, and re-exported nowhere. Rust privacy
+    // is MODULE-scoped (a same-module second producer that NAMES these builders is
+    // representable), so widening ANY of the three re-opens a producer surface.
+    for builder in STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS {
+        let needle = format!("fn {builder}(");
+        // (a) Anti-vacuity: the owner module must exist at this path and carry the
+        // builder's definition — its absence means the owner re-home regressed.
         assert!(
-            !structural_lowerer_reexport_violation(&src),
-            "the raw structural lowerer must NOT be re-exported (found a `pub use … \
-             lower_type_expr_structural` in `{file_rel}`) — a re-export mints a nameable alias of \
-             the otherwise-private lowerer, re-opening the single-engine producer surface"
+            body.contains(&needle),
+            "anti-vacuity: the producer builder `{builder}` (`fn {builder}(`) must live at \
+             `{rel}` (`{STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE}`) — its absence means the \
+             structural-carrier-producer owner re-home regressed"
         );
+        // (a) The builder is defined NOWHERE ELSE in the crate — exactly one
+        // definition, in `macro_arg_producer.rs`.
+        let definitions: Vec<String> = production_files
+            .iter()
+            .filter(|(_, src)| src.contains(&needle))
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        assert_eq!(
+            definitions,
+            vec![
+                "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs"
+                    .to_string()
+            ],
+            "the raw `fn {builder}(` must be defined ONLY in \
+             `structural_carrier_producer/macro_arg_producer.rs`; found in {definitions:#?}"
+        );
+        // (b) The definition line carries NO visibility modifier.
+        if let Some(reason) = structural_carrier_producer_builder_privacy_violation(&body, builder)
+        {
+            panic!(
+                "single-engine producer rule violated: {reason}. The builder must stay \
+                 module-private to `crate::structural_carrier_producer::macro_arg_producer` so a \
+                 second structural-carrier producer that NAMES it (same-module privacy permits one) \
+                 is policed."
+            );
+        }
+        // (c) The builder is NOT re-exported anywhere in the crate — a `pub use`
+        // re-export would mint a nameable alias and re-open the producer surface.
+        for (file_rel, src) in &production_files {
+            assert!(
+                !structural_builder_reexport_violation(src, builder),
+                "the producer builder `{builder}` must NOT be re-exported (found a `pub use … \
+                 {builder}` in `{file_rel}`) — a re-export mints a nameable alias of the \
+                 otherwise-private builder, re-opening the single-engine producer surface"
+            );
+        }
     }
 }
 
-/// Self-test for the structural-carrier-producer lowerer privacy classifiers:
-/// the bare module-private `fn lower_type_expr_structural(` shape passes; ANY
-/// visibility modifier (`pub` / `pub(crate)` / `pub(in …)`) reddens; a `pub use`
-/// re-export of the lowerer is reported.
+/// Self-test for the structural-carrier-producer builder privacy classifiers:
+/// the bare module-private `fn <builder>(` shape passes for EACH of the three
+/// builders; ANY visibility modifier (`pub` / `pub(crate)` / `pub(in …)`)
+/// reddens; a `pub use` re-export of any builder is reported.
 #[test]
 fn structural_carrier_producer_lowerer_privacy_classifier_discriminates() {
-    // CORRECT — bare module-private fn (no visibility modifier).
-    let ok = "fn lower_type_expr_structural(\n";
-    assert!(
-        structural_carrier_producer_lowerer_privacy_violation(ok).is_none(),
-        "the bare module-private `fn lower_type_expr_structural(` shape must PASS"
-    );
-    // CORRECT — indented bare module-private fn (the real shape inside `lower.rs`).
-    let ok_indented = "    fn lower_type_expr_structural(\n";
-    assert!(
-        structural_carrier_producer_lowerer_privacy_violation(ok_indented).is_none(),
-        "an indented bare module-private fn must PASS (the def line is trimmed first)"
-    );
-    // WRONG — bare `pub` lets any module name the entry.
-    let wrong_pub = "pub fn lower_type_expr_structural(\n";
-    assert!(
-        structural_carrier_producer_lowerer_privacy_violation(wrong_pub).is_some(),
-        "a bare `pub` entry shape must be reported as a single-engine violation"
-    );
-    // WRONG — `pub(crate)` is crate-wide visibility.
-    let wrong_crate = "    pub(crate) fn lower_type_expr_structural(\n";
-    assert!(
-        structural_carrier_producer_lowerer_privacy_violation(wrong_crate).is_some(),
-        "a `pub(crate)` entry shape must be reported as a single-engine violation"
-    );
-    // WRONG — a `pub(in …)` owner-subtree path lets a sibling under the owner
-    // module name the entry, which would defeat the witness gate.
-    let wrong_in =
-        "    pub(in crate::structural_carrier_producer) fn lower_type_expr_structural(\n";
-    assert!(
-        structural_carrier_producer_lowerer_privacy_violation(wrong_in).is_some(),
-        "even a `pub(in crate::structural_carrier_producer)` shape must be reported — a sibling \
-         surface could then name the raw lowerer and bypass the witness gate"
-    );
-    // The re-export classifier: a `pub use … lower_type_expr_structural` is a
-    // violation; the bare def line is not.
-    assert!(
-        structural_lowerer_reexport_violation(
-            "pub use crate::structural_carrier_producer::lower::lower_type_expr_structural;\n"
-        ),
-        "a `pub use … lower_type_expr_structural` re-export must be reported"
-    );
-    assert!(
-        !structural_lowerer_reexport_violation("fn lower_type_expr_structural() {}\n"),
-        "a bare definition (not a `pub use`) must NOT be flagged as a re-export"
-    );
-    // The REAL owner source is the genuine module-private shape and is not
-    // re-exported (revert proof: the production tree is pristine).
+    // Exercise the classifier for EVERY pinned builder — same-module privacy
+    // permits a second producer that names ANY of the three, so each must be
+    // bare-private.
+    for builder in STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS {
+        // CORRECT — bare module-private fn (no visibility modifier).
+        let ok = format!("fn {builder}(\n");
+        assert!(
+            structural_carrier_producer_builder_privacy_violation(&ok, builder).is_none(),
+            "the bare module-private `fn {builder}(` shape must PASS"
+        );
+        // CORRECT — indented bare module-private fn (the real in-module shape).
+        let ok_indented = format!("    fn {builder}(\n");
+        assert!(
+            structural_carrier_producer_builder_privacy_violation(&ok_indented, builder).is_none(),
+            "an indented bare module-private `fn {builder}(` must PASS (the def line is trimmed \
+             first)"
+        );
+        // WRONG — bare `pub` lets any module name the entry.
+        let wrong_pub = format!("pub fn {builder}(\n");
+        assert!(
+            structural_carrier_producer_builder_privacy_violation(&wrong_pub, builder).is_some(),
+            "a bare `pub fn {builder}(` shape must be reported as a single-engine violation"
+        );
+        // WRONG — `pub(crate)` is crate-wide visibility.
+        let wrong_crate = format!("    pub(crate) fn {builder}(\n");
+        assert!(
+            structural_carrier_producer_builder_privacy_violation(&wrong_crate, builder).is_some(),
+            "a `pub(crate) fn {builder}(` shape must be reported as a single-engine violation"
+        );
+        // WRONG — a `pub(in …)` owner-subtree path lets a sibling under the owner
+        // module name the entry.
+        let wrong_in = format!("    pub(in crate::structural_carrier_producer) fn {builder}(\n");
+        assert!(
+            structural_carrier_producer_builder_privacy_violation(&wrong_in, builder).is_some(),
+            "even a `pub(in crate::structural_carrier_producer) fn {builder}(` shape must be \
+             reported — a sibling surface could then name the builder"
+        );
+        // The re-export classifier: a `pub use … <builder>` is a violation; the
+        // bare def line is not.
+        let reexport =
+            format!("pub use crate::structural_carrier_producer::macro_arg_producer::{builder};\n");
+        assert!(
+            structural_builder_reexport_violation(&reexport, builder),
+            "a `pub use … {builder}` re-export must be reported"
+        );
+        assert!(
+            !structural_builder_reexport_violation(&format!("fn {builder}() {{}}\n"), builder),
+            "a bare definition (not a `pub use`) must NOT be flagged as a re-export"
+        );
+    }
+    // The REAL owner source is the genuine module-private shape for all three
+    // builders and re-exports none of them (revert proof: the production tree is
+    // pristine).
     let real = std::fs::read_to_string(workspace_path(
         "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
-    .expect("the structural lowerer's owner module must be readable");
-    assert!(
-        structural_carrier_producer_lowerer_privacy_violation(&real).is_none(),
-        "the REAL `lower_type_expr_structural` in `macro_arg_producer.rs` MUST be a bare \
-         module-private fn — if this reddens, the lowerer's visibility was widened, re-opening the \
-         producer surface"
-    );
-    assert!(
-        !structural_lowerer_reexport_violation(&real),
-        "the REAL `macro_arg_producer.rs` must NOT re-export the lowerer"
-    );
+    .expect("the producer's owner module must be readable");
+    for builder in STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS {
+        assert!(
+            structural_carrier_producer_builder_privacy_violation(&real, builder).is_none(),
+            "the REAL `{builder}` in `macro_arg_producer.rs` MUST be a bare module-private fn — if \
+             this reddens, the builder's visibility was widened, re-opening the producer surface"
+        );
+        assert!(
+            !structural_builder_reexport_violation(&real, builder),
+            "the REAL `macro_arg_producer.rs` must NOT re-export `{builder}`"
+        );
+    }
 }
 
 /// Whether `attr` is EXACTLY `#[cfg(test)]` — the meta is a single-token `cfg`
@@ -21748,12 +21840,16 @@ fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
     saw_cfg_test && saw_exact_path
 }
 
-/// The std/compiler-builtin DERIVES the producer module's data types legitimately
-/// carry (`#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]` on `BinderScope`
-/// / `StructuralLowerContext` / `StructuralLowerError` / `MacroHotMirror`). A
-/// built-in derive is a compiler-known, fully-determined expansion — it cannot
-/// synthesise a call to the module-private builders from elsewhere. A CUSTOM
-/// (proc-macro) derive CAN, so any derive name not in this allowlist is rejected.
+/// The SINGLE-SEGMENT, compiler-built-in DERIVE names the producer module's data
+/// types legitimately carry (`#[derive(Debug, Default, Clone, Copy, PartialEq,
+/// Eq)]` on `BinderScope` / `StructuralLowerContext` / `StructuralLowerError` /
+/// `MacroHotMirror`). A built-in derive is a compiler-known, fully-determined
+/// expansion — it cannot synthesise a call to the module-private builders from
+/// elsewhere. A derive whose path is NOT a single segment (`evil::Debug`) or
+/// whose name is not one of these built-ins is rejected (FIX E — derives are 6a
+/// SCOPED, not banned). The derive-SHADOW vector — an import that brings one of
+/// THESE built-in names into scope under a foreign definition — is rejected
+/// separately (see [`macro_arg_producer_derive_shadow_import_violations`]).
 const MACRO_ARG_PRODUCER_BUILTIN_DERIVES: &[&str] = &[
     "Debug",
     "Default",
@@ -21764,23 +21860,6 @@ const MACRO_ARG_PRODUCER_BUILTIN_DERIVES: &[&str] = &[
     "Hash",
     "PartialOrd",
     "Ord",
-];
-
-/// The macro names that are genuine CODE-GENERATION surfaces — a `macro_rules!`
-/// definition, a file splice (`include!` / `include_str!` / `include_bytes!`), or
-/// a token-synthesising proc-macro bang (`concat_idents!` / `paste!`). These can
-/// introduce same-module code reaching the module-private builders WITHOUT a
-/// literal call, so they are rejected. An ordinary std declarative macro
-/// (`matches!` / `vec!` / `format!` / `write!` / `assert!` / …) is NOT a
-/// producer-surface vector — it is compiler-builtin / std, fully hygienic, and
-/// cannot manufacture a private-builder reference — so it is allowed (the genuine
-/// `build_macro_hot_ref` uses `matches!` on `AnalyzedMacroKind`).
-const MACRO_ARG_PRODUCER_FORBIDDEN_MACROS: &[&str] = &[
-    "include",
-    "include_str",
-    "include_bytes",
-    "concat_idents",
-    "paste",
 ];
 
 /// Collect PRODUCTION expansion-surface violations in `macro_arg_producer.rs`
@@ -21852,16 +21931,33 @@ impl ExpansionSurfaceVisitor {
                 continue;
             }
             if single && last == "derive" {
-                // Admit the derive, then validate every listed derive name is a
-                // compiler built-in — a custom proc-macro derive is rejected.
+                // FIX E (derives = 6a SCOPED): each listed derive path must be a
+                // SINGLE-SEGMENT, compiler-built-in name. A QUALIFIED path
+                // (`evil::Debug`) is rejected even though its final segment is a
+                // built-in name — a qualified derive resolves to a FOREIGN macro,
+                // not the compiler built-in. A non-built-in single-segment name is
+                // a custom proc-macro derive and is rejected.
                 let _ = attr.parse_nested_meta(|meta| {
-                    let name = meta
-                        .path
+                    let derive_path = &meta.path;
+                    let segs = derive_path.segments.len();
+                    let name = derive_path
                         .segments
                         .last()
                         .map(|s| s.ident.to_string())
                         .unwrap_or_default();
-                    if !MACRO_ARG_PRODUCER_BUILTIN_DERIVES.contains(&name.as_str()) {
+                    if segs != 1 {
+                        self.violations.push(format!(
+                            "a production QUALIFIED `#[derive({})]` is forbidden — a derive path \
+                             must be a SINGLE-SEGMENT compiler built-in; a qualified path resolves \
+                             to a foreign derive macro that can synthesise same-module code",
+                            derive_path
+                                .segments
+                                .iter()
+                                .map(|s| s.ident.to_string())
+                                .collect::<Vec<_>>()
+                                .join("::")
+                        ));
+                    } else if !MACRO_ARG_PRODUCER_BUILTIN_DERIVES.contains(&name.as_str()) {
                         self.violations.push(format!(
                             "a production custom `#[derive({name})]` (a derive proc-macro) is \
                              forbidden — only std built-in derives are allowed"
@@ -21946,25 +22042,163 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        // Classify the macro: a file splice / token-synthesising proc-macro bang
-        // is a code-generation surface; an ordinary std declarative macro
-        // (`matches!` / `vec!` / `format!` / …) is NOT (it cannot reach a private
-        // builder from elsewhere) and is allowed. `macro_rules!` definitions are
-        // handled at item position in `visit_item`.
+        // FIX C — ban ALL production bang-macro INVOCATIONS (item / expr / stmt
+        // position). A function-like macro DEFINED ANYWHERE (mod.rs / a foreign
+        // crate / a proc-macro crate) and INVOKED here is invisible to `syn` (it
+        // never expands it), so the generated producer is unseen — a denylist of
+        // specific macro names is inherently incomplete. The `matches!`→`match`
+        // de-sugar in production leaves the real file bang-macro-free, so the
+        // ban-all rule passes on the genuine tree. `macro_rules!` DEFINITIONS are
+        // handled at item position in `visit_item` (skipped here to avoid a
+        // double report).
         let name = mac
             .path
             .segments
             .last()
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
-        if MACRO_ARG_PRODUCER_FORBIDDEN_MACROS.contains(&name.as_str()) {
+        if name != "macro_rules" {
             self.violations.push(format!(
-                "a production code-generation macro `{name}!` (a file splice / token-synthesising \
-                 proc-macro) is forbidden"
+                "a production bang-macro invocation `{name}!(…)` is forbidden in the producer \
+                 module — a macro can expand into code reaching the module-private lowering \
+                 builders without naming them; the producer module is kept bang-macro-free (the \
+                 one `matches!` is de-sugared to a `match`)"
             ));
         }
         syn::visit::visit_macro(self, mac);
     }
+}
+
+/// Unraw an identifier string: `r#Clone` → `Clone`. A raw-ident import
+/// (`use evil::r#Clone;`) brings the SAME name `Clone` into scope as a plain
+/// `use evil::Clone;`, so the derive-shadow check must compare against the unraw
+/// form.
+fn unraw_ident(s: &str) -> &str {
+    s.strip_prefix("r#").unwrap_or(s)
+}
+
+/// The NAME a `use`-tree LEAF binds into the local namespace — the alias for a
+/// `Rename` (`X as Clone` binds `Clone`), the leaf ident for a `Name`, unrawed.
+/// `None` for a glob (handled separately) or a non-leaf.
+fn use_leaf_bound_name(tree: &syn::UseTree) -> Option<String> {
+    match tree {
+        syn::UseTree::Name(n) => Some(unraw_ident(&n.ident.to_string()).to_string()),
+        syn::UseTree::Rename(r) => Some(unraw_ident(&r.rename.to_string()).to_string()),
+        _ => None,
+    }
+}
+
+/// FIX E (derive-SHADOW import rejection, scoped to `macro_arg_producer.rs`):
+/// collect production `use` / `pub use` imports (and `#[macro_use]` attributes)
+/// that could bring one of the built-in-derive names
+/// ([`MACRO_ARG_PRODUCER_BUILTIN_DERIVES`]) into scope under a FOREIGN definition,
+/// shadowing the compiler built-in so a `#[derive(Clone)]` resolves to the
+/// foreign macro. Rejected:
+/// - a `use …::Clone;` / `use …::r#Clone;` whose bound name is a built-in-derive
+///   name;
+/// - a `use …::Foo as Clone;` alias whose ALIAS is a built-in-derive name;
+/// - a GLOB `use foo::*;` (it could bring ANY of the built-in names into scope —
+///   undecidable from the `use` alone, so conservatively rejected);
+/// - a `#[macro_use]` attribute (prelude injection of derive macros).
+///
+/// The genuine `macro_arg_producer.rs` imports (`std::cell::Cell`,
+/// `std::sync::{Arc, OnceLock}`, `rustc_hash::FxHashMap`, `verter_type_expr::{…}`,
+/// `crate::…`, and the fn-local `verter_semantic::analysis::AnalyzedMacroKind`)
+/// bind NONE of the built-in-derive names and use no glob, so they pass. Skips
+/// `#[cfg(test)]`-gated items; recurses into non-test inline modules and fn-body
+/// `use` statements.
+fn macro_arg_producer_derive_shadow_import_violations(src: &str) -> Vec<String> {
+    use syn::visit::Visit;
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(e) => return vec![format!("parse error: {e}")],
+    };
+    struct DeriveShadowVisitor {
+        violations: Vec<String>,
+    }
+    impl DeriveShadowVisitor {
+        /// Walk a `use`-tree, collecting every leaf-bound name and flagging a
+        /// glob. `prefix` accumulates the path for diagnostics.
+        fn walk_use_tree(&mut self, tree: &syn::UseTree, prefix: &str) {
+            match tree {
+                syn::UseTree::Path(p) => {
+                    let next = if prefix.is_empty() {
+                        p.ident.to_string()
+                    } else {
+                        format!("{prefix}::{}", p.ident)
+                    };
+                    self.walk_use_tree(&p.tree, &next);
+                }
+                syn::UseTree::Group(g) => {
+                    for item in &g.items {
+                        self.walk_use_tree(item, prefix);
+                    }
+                }
+                syn::UseTree::Glob(_) => {
+                    self.violations.push(format!(
+                        "a production glob import `use {prefix}::*;` is forbidden in the producer \
+                         module — it could bring a built-in-derive name into scope under a foreign \
+                         definition (derive-shadow)"
+                    ));
+                }
+                leaf @ (syn::UseTree::Name(_) | syn::UseTree::Rename(_)) => {
+                    if let Some(bound) = use_leaf_bound_name(leaf) {
+                        if MACRO_ARG_PRODUCER_BUILTIN_DERIVES.contains(&bound.as_str()) {
+                            self.violations.push(format!(
+                                "a production import binding `{bound}` (under `{prefix}`) is \
+                                 forbidden in the producer module — it shadows the compiler \
+                                 built-in derive `{bound}` so a `#[derive({bound})]` could resolve \
+                                 to a foreign macro (derive-shadow)"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for DeriveShadowVisitor {
+        fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
+            if attrs_test_gate(&u.attrs) {
+                return;
+            }
+            self.walk_use_tree(&u.tree, "");
+            syn::visit::visit_item_use(self, u);
+        }
+        // A fn-local `use` is a `syn::Stmt::Item(Item::Use(_))` — `visit_item_use`
+        // fires for it via the default item walk, so no extra override is needed.
+        fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+            if attr.path().is_ident("macro_use") {
+                self.violations.push(
+                    "a production `#[macro_use]` attribute is forbidden in the producer module — \
+                     it can inject foreign derive macros that shadow the built-ins (derive-shadow)"
+                        .to_string(),
+                );
+            }
+            syn::visit::visit_attribute(self, attr);
+        }
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            // Skip a `#[cfg(test)]`-gated item wholesale (its imports are
+            // test-only).
+            let attrs: &[syn::Attribute] = match item {
+                syn::Item::Use(u) => &u.attrs,
+                syn::Item::Mod(m) => &m.attrs,
+                syn::Item::Fn(f) => &f.attrs,
+                syn::Item::Impl(i) => &i.attrs,
+                syn::Item::Struct(s) => &s.attrs,
+                syn::Item::Enum(e) => &e.attrs,
+                _ => &[],
+            };
+            if attrs.iter().any(attr_is_exactly_cfg_test) {
+                return;
+            }
+            syn::visit::visit_item(self, item);
+        }
+    }
+    let mut v = DeriveShadowVisitor {
+        violations: Vec::new(),
+    };
+    v.visit_file(&file);
+    v.violations
 }
 
 /// SMALL no-reintroduce-a-surface backstop (the structural design's named
@@ -21998,25 +22232,40 @@ fn macro_arg_producer_has_no_production_expansion_surface() {
     assert!(
         violations.is_empty(),
         "expansion-surface violation: `macro_arg_producer.rs` must declare NO production \
-         (non-`#[cfg(test)]`) macro invocation / `macro_rules!` / `include!` / proc-macro attribute \
-         / `#[derive(…)]` on a producer-capable item / out-of-line-or-`#[path]` child mod / \
-         `#[macro_use]` — a same-module code-generation surface could emit code reaching the \
-         module-private lowering builders without naming them. Only the sanctioned \
+         (non-`#[cfg(test)]`) bang-macro invocation / `macro_rules!` / proc-macro attribute / \
+         qualified-or-custom `#[derive(…)]` on a producer-capable item / out-of-line-or-`#[path]` \
+         child mod / `#[macro_use]` — a same-module code-generation surface could emit code \
+         reaching the module-private lowering builders without naming them. Only the sanctioned \
          `#[cfg(test)] #[path] mod *_tests;` test wiring is allowed. Violations:\n  {}",
         violations.join("\n  ")
     );
+    // FIX E (derive-shadow, scoped to this module): NO production import may bring
+    // a built-in-derive name into scope under a foreign definition, and NO glob /
+    // `#[macro_use]` may do so undecidably.
+    let shadow = macro_arg_producer_derive_shadow_import_violations(&src);
+    assert!(
+        shadow.is_empty(),
+        "derive-shadow violation: `macro_arg_producer.rs` must declare NO production import that \
+         shadows a built-in-derive name ({MACRO_ARG_PRODUCER_BUILTIN_DERIVES:?}) — the module keeps \
+         its `#[derive(Debug, Clone, …)]`, so an import binding one of those names (or a glob / \
+         `#[macro_use]`) could redirect a derive to a foreign macro. Violations:\n  {}",
+        shadow.join("\n  ")
+    );
 }
 
-/// Self-test for [`macro_arg_producer_expansion_surface_violations`]: the genuine
-/// producer source passes; a planted production macro / `macro_rules!` /
-/// `include!` / `#[derive]` / `#[macro_use]` / out-of-line `#[path]` mod reddens;
-/// the sanctioned `#[cfg(test)] #[path] mod *_tests;` wiring and a `#[cfg(test)]`-
-/// gated macro do NOT.
+/// Self-test for [`macro_arg_producer_expansion_surface_violations`] +
+/// [`macro_arg_producer_derive_shadow_import_violations`]: the genuine producer
+/// source passes; a planted production bang-macro (ANY, incl. `matches!` /
+/// `format!`) / `macro_rules!` / `include!` / qualified-or-custom `#[derive]` /
+/// `#[macro_use]` / out-of-line `#[path]` mod reddens; a built-in single-segment
+/// `#[derive]` is allowed; a derive-shadow import / glob reddens; the sanctioned
+/// `#[cfg(test)] #[path] mod *_tests;` wiring and a `#[cfg(test)]`-gated macro do
+/// NOT.
 #[test]
 fn macro_arg_producer_expansion_surface_classifier_discriminates() {
     // ACCEPT — the genuine producer source: explicit `match` (no `matches!`), the
     // three sanctioned `#[cfg(test)] #[path] mod *_tests;` test children, no
-    // derive / macro_use / out-of-line production mod.
+    // derive / macro_use / out-of-line production mod / bang macro.
     let real = std::fs::read_to_string(workspace_path(
         "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
@@ -22024,7 +22273,11 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
     assert!(
         macro_arg_producer_expansion_surface_violations(&real).is_empty(),
         "ACCEPT: the REAL `macro_arg_producer.rs` must have NO production expansion surface — if \
-         this reddens, a production macro / derive / macro_use / out-of-line mod was added"
+         this reddens, a production bang macro / derive / macro_use / out-of-line mod was added"
+    );
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(&real).is_empty(),
+        "ACCEPT: the REAL `macro_arg_producer.rs` must have NO derive-shadow import"
     );
     // The sanctioned `#[cfg(test)] #[path] mod *_tests;` wiring alone is allowed.
     let sanctioned =
@@ -22041,23 +22294,38 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
         "a `#[cfg(test)]`-gated code-gen macro must NOT be a production violation (the cfg-test \
          item is skipped, not descended)"
     );
-    // ACCEPT — an ordinary std declarative body macro (`matches!` / `format!`) is
-    // NOT a code-gen surface (it cannot reach a private builder from elsewhere);
-    // the genuine `build_macro_hot_ref` uses `matches!`.
-    let std_macro = "fn build() { let _ = matches!(x, A | B); let _ = format!(\"{}\", y); }\n";
+    // REJECT (FIX C ban-all) — ANY production bang macro now reddens, including an
+    // ordinary std declarative macro (`matches!` / `format!`). A function-like
+    // macro defined elsewhere and invoked here is invisible to `syn`, so a
+    // denylist is incomplete; the `matches!`→`match` de-sugar keeps the real file
+    // bang-macro-free.
+    let std_macro = "fn build() { let _ = matches!(x, A | B); }\n";
     assert!(
-        macro_arg_producer_expansion_surface_violations(std_macro).is_empty(),
-        "an ordinary std declarative macro (`matches!` / `format!`) must NOT redden — it is not a \
-         code-generation surface reaching the private builders"
+        !macro_arg_producer_expansion_surface_violations(std_macro).is_empty(),
+        "a production `matches!` bang macro must NOW redden (FIX C bans ALL bang macros; the real \
+         file's `matches!` is de-sugared)"
     );
-    // ACCEPT — a built-in `#[derive(…)]` on the producer's data types (the genuine
-    // file carries `#[derive(Debug, Default, Clone, Copy, …)]`).
+    let format_macro = "fn build() { let _ = format!(\"{}\", y); }\n";
+    assert!(
+        !macro_arg_producer_expansion_surface_violations(format_macro).is_empty(),
+        "a production `format!` bang macro must redden (ban-all)"
+    );
+    // ACCEPT — a built-in SINGLE-SEGMENT `#[derive(…)]` on the producer's data
+    // types (the genuine file carries `#[derive(Debug, Default, Clone, Copy, …)]`).
     let builtin_derive =
         "#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]\nstruct Ctx { _x: () }\n";
     assert!(
         macro_arg_producer_expansion_surface_violations(builtin_derive).is_empty(),
-        "a built-in `#[derive(…)]` on a producer data type must NOT redden (only a custom proc-macro \
-         derive is a code-gen surface)"
+        "a built-in single-segment `#[derive(…)]` on a producer data type must NOT redden (only a \
+         custom / qualified derive is a code-gen surface)"
+    );
+    // REJECT (FIX E) — a QUALIFIED `#[derive(evil::Debug)]` whose final segment is
+    // a built-in NAME but resolves to a FOREIGN macro.
+    let qualified_derive = "#[derive(evil::Debug)]\nstruct Producer { _x: () }\n";
+    assert!(
+        !macro_arg_producer_expansion_surface_violations(qualified_derive).is_empty(),
+        "a QUALIFIED `#[derive(evil::Debug)]` must redden — a derive path must be a single-segment \
+         compiler built-in (FIX E)"
     );
     // REJECT — a production `macro_rules!` item (defines a new macro here).
     let macro_rules = "macro_rules! synth { () => {}; }\n";
@@ -22065,7 +22333,8 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
         !macro_arg_producer_expansion_surface_violations(macro_rules).is_empty(),
         "a production `macro_rules!` item must redden"
     );
-    // REJECT — a production `include!` file splice.
+    // REJECT — a production `include!` file splice (now caught by the ban-all bang
+    // rule).
     let include = "include!(\"generated.rs\");\n";
     assert!(
         !macro_arg_producer_expansion_surface_violations(include).is_empty(),
@@ -22096,6 +22365,52 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
     assert!(
         !macro_arg_producer_expansion_surface_violations(ungated_tests).is_empty(),
         "an out-of-line `mod *_tests;` WITHOUT `#[cfg(test)]` is a production splice and must redden"
+    );
+
+    // ── FIX E — derive-shadow import rejection ─────────────────────────────
+    // REJECT — `use evil::Clone;` shadows the built-in derive `Clone`.
+    let shadow_plain = "use evil::Clone;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(shadow_plain).is_empty(),
+        "a `use evil::Clone;` import shadowing the built-in `Clone` derive must redden"
+    );
+    // REJECT — a raw-ident `use evil::r#Clone;` binds the SAME name `Clone`.
+    let shadow_raw = "use evil::r#Clone;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(shadow_raw).is_empty(),
+        "a raw-ident `use evil::r#Clone;` import must redden (it binds `Clone`, unrawed)"
+    );
+    // REJECT — an alias `use evil::Serialize as Clone;` binds `Clone`.
+    let shadow_alias = "use evil::Serialize as Clone;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(shadow_alias).is_empty(),
+        "a `use evil::Serialize as Clone;` alias binding `Clone` must redden"
+    );
+    // REJECT — a glob `use evil::*;` could bring any built-in-derive name in.
+    let shadow_glob = "use evil::*;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(shadow_glob).is_empty(),
+        "a glob `use evil::*;` import must redden (it could shadow a built-in derive)"
+    );
+    // REJECT — a `#[macro_use]` attribute (foreign derive-macro prelude injection).
+    let shadow_macro_use = "#[macro_use]\nextern crate evil;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(shadow_macro_use).is_empty(),
+        "a `#[macro_use] extern crate evil;` must redden (derive-shadow via prelude injection)"
+    );
+    // ACCEPT — the genuine producer imports bind NO built-in-derive name and use no
+    // glob.
+    let real_imports = "use std::cell::Cell;\nuse std::sync::{Arc, OnceLock};\nuse rustc_hash::FxHashMap;\nuse crate::resolver_core::ResolverContext;\n";
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(real_imports).is_empty(),
+        "the genuine producer imports (no built-in-derive name, no glob) must NOT redden"
+    );
+    // A `#[cfg(test)]`-gated shadow import is test-only → not a production
+    // derive-shadow.
+    let test_shadow = "#[cfg(test)]\nuse evil::Clone;\n";
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(test_shadow).is_empty(),
+        "a `#[cfg(test)]`-gated shadow import must NOT redden (test-only)"
     );
 }
 
@@ -22866,6 +23181,21 @@ fn macro_hot_mirror_impurity_hits(body: &str) -> Vec<String> {
         "prepared_value_decl",
         "cached_import_route_resolution",
         "resolve_route_type_edge",
+        // [P0] the eager dispatch/query route — the second resolution engine the
+        // single-engine rule forbids. A producer reaching
+        // `ctx.dispatch().lower_type_expr_in_scope_with_context(...)` route-
+        // resolves imports through the prepared-decl path; both the `.dispatch(`
+        // method call and the eager-lowering entry are banned. The `.dispatch(`
+        // open-paren form does NOT match the allowed route-free arena read
+        // `dispatch_node_data(` (whose chars after `dispatch` are `_node_data(`,
+        // not `(`).
+        ".dispatch(",
+        "lower_type_expr_in_scope_with_",
+        // The route-resolving `ensure_indexed_ready(` (open-paren) — DISTINCT from
+        // the allowed route-free `ensure_indexed_ready_serve(` the mirror accessor
+        // calls (its char after the prefix is `_`, never `(`, so the needle never
+        // matches it).
+        "ensure_indexed_ready(",
         // ResolverContext "Symbol / route resolution" surface
         "resolve_imported_type_root",
         "resolve_named_type_export_target",
@@ -22982,6 +23312,43 @@ fn macro_hot_mirror_purity_scanner_discriminates() {
         vec!["resolve_named_type_export_target".to_string()],
         "the `_shallow` sibling is caught by the banned prefix `resolve_named_type_export_target`"
     );
+    // [P0] FIX D — the eager dispatch/query route inside the producer is flagged by
+    // BOTH the `.dispatch(` and `lower_type_expr_in_scope_with_` needles. This is
+    // the second-resolution-engine class the single-engine rule forbids; the
+    // adversarial-claude PROOF was a `pub(crate) fn` calling exactly this.
+    let dispatch_hits = macro_hot_mirror_impurity_hits(
+        "fn rogue() { let _ = ctx.dispatch().lower_type_expr_in_scope_with_context(s, e, c); }\n",
+    );
+    assert!(
+        dispatch_hits.contains(&".dispatch(".to_string())
+            && dispatch_hits.contains(&"lower_type_expr_in_scope_with_".to_string()),
+        "an eager `ctx.dispatch().lower_type_expr_in_scope_with_context(...)` route inside the \
+         producer MUST be flagged by both the `.dispatch(` and `lower_type_expr_in_scope_with_` \
+         needles (the [P0] second-resolution-engine closure); got {dispatch_hits:?}"
+    );
+    // The allowed route-free arena read `dispatch_node_data(` is NOT flagged by
+    // the `.dispatch(` needle (its chars after `dispatch` are `_node_data(`).
+    assert!(
+        macro_hot_mirror_impurity_hits("fn ok() { let _ = ctx.dispatch_node_data(node); }\n")
+            .is_empty(),
+        "the route-free arena read `dispatch_node_data(` must NOT be flagged — the `.dispatch(` \
+         needle's open-paren distinguishes it"
+    );
+    // The route-resolving `ensure_indexed_ready(` IS flagged; the route-free
+    // `ensure_indexed_ready_serve(` is NOT (the distinction the brief flagged).
+    assert_eq!(
+        macro_hot_mirror_impurity_hits("fn rogue() { ctx.ensure_indexed_ready(owner); }\n"),
+        vec!["ensure_indexed_ready(".to_string()],
+        "the route-resolving `ensure_indexed_ready(` must be flagged"
+    );
+    assert!(
+        macro_hot_mirror_impurity_hits(
+            "fn ok() { let serve = ctx.ensure_indexed_ready_serve(owner); }\n"
+        )
+        .is_empty(),
+        "the route-free `ensure_indexed_ready_serve(` must NOT be flagged (the `_serve` suffix \
+         distinguishes it from the `ensure_indexed_ready(` needle)"
+    );
     // ROUTE-FREE reads the mirror legitimately uses must NOT be flagged.
     assert!(
         macro_hot_mirror_impurity_hits(
@@ -23038,115 +23405,121 @@ fn mirror_entry_is_sanctioned(name: &str) -> bool {
     MIRROR_SANCTIONED_PRODUCER_ENTRIES.contains(&name)
 }
 
-/// Whether an attribute list test-gates an item — `#[cfg(test)]`,
-/// `#[cfg(any(test, …))]`, or `#[cfg(any(…, test))]`. The mirror's `for_tests`
-/// facade is `#[cfg(test)]`. ONLY a positive (un-negated) `test` predicate is a
-/// test gate; `debug_assertions` is a PRODUCTION predicate (compiled in debug
-/// production builds), so a bare `#[cfg(debug_assertions)]` item is COUNTED,
-/// never excluded. Such a test-gated item is compiled only under test builds,
-/// so it never widens the crate-visible PRODUCTION producer surface and is
-/// excluded from the scan.
+/// Whether an attribute list test-gates an item — i.e. its `#[cfg]` predicate
+/// ENTAILS `test` (every configuration that satisfies the predicate has
+/// `test = true`), so the item is compiled ONLY under a test build and never
+/// widens the crate-visible PRODUCTION producer surface.
 ///
-/// KNOWN CONSERVATIVE BLIND SPOT (recorded P1 debt — see the design's Stage 5A
-/// secondary-tripwire exotic-shape residual): a positive `test` ARM inside an
-/// `any(...)` is treated as test-gating even though `#[cfg(any(test, X))]`
-/// (e.g. `X = debug_assertions` or `feature = "…"`) is PRODUCTION-satisfiable
-/// in a non-test build that satisfies `X`. This classifier deliberately
-/// over-excludes that exotic shape; it is NOT relied on as the load-bearing
-/// single-entry guarantee (the by-construction `pub(in crate::structural_carrier_producer)`
-/// visibility is). The narrowing of this `any`-arm exclusion is tracked debt,
-/// out of scope for the producer-entry surface guard's current contract.
+/// SATISFIABILITY/ENTAILMENT classification (the [P0] root closure). The prior
+/// classifier treated `test` appearing in ANY `any(...)` arm as test-gating, so
+/// `#[cfg(any(test, debug_assertions))]` was over-EXCLUDED even though it is
+/// PRODUCTION-SATISFIABLE (a debug non-test build satisfies it via
+/// `debug_assertions`) — a rogue `#[cfg(any(test, debug_assertions))] pub(crate)
+/// fn` would compile into the always-on debug production lib and evade the
+/// single-entry guard. The corrected rule ([`predicate_entails_test`]):
+/// - a bare `test` atom ENTAILS test; any other atom (`debug_assertions`,
+///   `unix`, …) and a `feature = "…"` name-value do NOT;
+/// - `all(P1..Pn)` entails test iff ANY operand entails test (one required
+///   operand forcing test forces the whole conjunction);
+/// - `any(P1..Pn)` entails test iff ALL operands entail test (otherwise some
+///   satisfying configuration omits test);
+/// - `not(P)` entails test iff `P` is UNSATISFIABLE-without-test would mean the
+///   negation forces test — but in the cfg fragment we model, `not(test)` is
+///   satisfied by every non-test config, and `not(X)` for a non-test atom never
+///   forces test, so `not(...)` NEVER entails test under this conservative
+///   classifier (a `not(test)` item is PRODUCTION and is COUNTED).
 ///
-/// GOV (round 5): the gate must match ONLY genuine test-gating. A naive
-/// `rendered.contains("test")` over the whole attribute FALSELY excluded
-/// `#[cfg(not(test))]` — a PRODUCTION-only item that MUST be COUNTED. The gate
-/// now walks the cfg predicate tokens structurally and treats a bare `test`
-/// ident as test-gating ONLY when it is not the operand of a `not(...)`
-/// predicate, so `cfg(not(test))` stays a production item.
+/// So `#[cfg(test)]` and `#[cfg(all(test, unix))]` are test-only;
+/// `#[cfg(any(test, debug_assertions))]`, `#[cfg(any(test, feature = "x"))]`,
+/// `#[cfg(not(test))]`, and a bare `#[cfg(debug_assertions)]` are PRODUCTION and
+/// are COUNTED.
 fn attrs_test_gate(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         let path = attr.path();
         if !(path.is_ident("cfg") || path.is_ident("cfg_attr")) {
             return false;
         }
-        // Parse the cfg-predicate token stream (the `(...)` inside the
-        // attribute) and walk it for a positive `test` predicate, descending
-        // into `any(...)`/`all(...)` but treating any `not(...)` operand as a
-        // NEGATION boundary that flips test-gating off — a `not(test)` operand
-        // is a production gate, never a test gate. `debug_assertions` is NOT a
-        // test gate: it is a PRODUCTION predicate (compiled in debug production
-        // builds), so a `debug_assertions`-gated producer entry is COUNTED.
         let tokens = match &attr.meta {
             syn::Meta::List(list) => list.tokens.clone(),
             // `#[cfg]` / `#[cfg = …]` with no predicate list: never test-gating.
             _ => return false,
         };
-        cfg_tokens_test_gate(tokens, false)
+        // The `#[cfg(...)]` body is a SINGLE predicate (one operand); a
+        // `#[cfg_attr(cond, …)]` body's FIRST top-level operand is the
+        // condition. Classify that leading predicate.
+        match cfg_split_top_level_operands(tokens).into_iter().next() {
+            Some(pred) => predicate_entails_test(pred),
+            None => false,
+        }
     })
 }
 
-/// Walk a cfg-predicate token stream for a positive `test` predicate.
-/// `negated` is `true` when the stream is the operand of a `not(...)`. Only a
-/// bare, positive (un-negated) `test` ident counts as test-gating;
-/// `debug_assertions` is a PRODUCTION predicate (compiled in debug production
-/// builds) and is NOT a test gate. `any(...)` / `all(...)` recurse with the
-/// SAME polarity; `not(...)` recurses with FLIPPED polarity (so `not(test)`
-/// does not test-gate, while `not(not(test))` does).
-fn cfg_tokens_test_gate(tokens: proc_macro2::TokenStream, negated: bool) -> bool {
-    use proc_macro2::TokenTree;
-    let mut iter = tokens.into_iter().peekable();
-    while let Some(tt) = iter.next() {
-        match tt {
-            TokenTree::Ident(ident) => {
-                let name = ident.to_string();
-                // Look ahead: is this ident followed by a parenthesised group
-                // (i.e. it is `not(...)` / `any(...)` / `all(...)`)?
-                if let Some(TokenTree::Group(group)) = iter.peek() {
-                    let inner = group.stream();
-                    match name.as_str() {
-                        "not" => {
-                            if cfg_tokens_test_gate(inner, !negated) {
-                                return true;
-                            }
-                        }
-                        "any" | "all" => {
-                            if cfg_tokens_test_gate(inner, negated) {
-                                return true;
-                            }
-                        }
-                        // A function-call-shaped predicate we do not model
-                        // (e.g. `feature = "…"` would not reach here as an
-                        // ident+group): walk its inner with the same polarity
-                        // defensively.
-                        _ => {
-                            if cfg_tokens_test_gate(inner, negated) {
-                                return true;
-                            }
-                        }
-                    }
-                    // Consume the peeked group.
-                    iter.next();
-                } else if !negated && name == "test" {
-                    // Bare positive `test` predicate. `debug_assertions` is NOT
-                    // a test gate: it is a PRODUCTION predicate (compiled in
-                    // debug production builds), so a bare `#[cfg(debug_assertions)]`
-                    // item MUST be counted as a crate-visible production producer
-                    // (single-entry must hold in debug builds too).
-                    return true;
+/// Split a cfg token stream into its TOP-LEVEL comma-separated operands. The
+/// operands of `all(...)` / `any(...)` are separated by top-level commas; a
+/// comma INSIDE a nested group (e.g. inside `not(any(a, b))`) belongs to that
+/// nested predicate and is NOT a split point (it lives inside a `Group`'s own
+/// stream, so the flat top-level walk never sees it). A trailing comma yields no
+/// empty operand.
+fn cfg_split_top_level_operands(tokens: proc_macro2::TokenStream) -> Vec<proc_macro2::TokenStream> {
+    use proc_macro2::{TokenStream, TokenTree};
+    let mut operands: Vec<TokenStream> = Vec::new();
+    let mut current: Vec<TokenTree> = Vec::new();
+    for tt in tokens {
+        match &tt {
+            TokenTree::Punct(p) if p.as_char() == ',' => {
+                if !current.is_empty() {
+                    operands.push(current.drain(..).collect());
                 }
             }
-            TokenTree::Group(group) => {
-                // A bare parenthesised group (e.g. the outer wrapper) — recurse
-                // with the same polarity.
-                if cfg_tokens_test_gate(group.stream(), negated) {
-                    return true;
-                }
-            }
-            // Punctuation (commas, `=`) and literals carry no predicate name.
-            _ => {}
+            _ => current.push(tt),
         }
     }
-    false
+    if !current.is_empty() {
+        operands.push(current.into_iter().collect());
+    }
+    operands
+}
+
+/// Whether a SINGLE cfg predicate (one top-level operand) ENTAILS `test` — every
+/// configuration satisfying it has `test = true`. See [`attrs_test_gate`] for the
+/// full entailment rule set. The predicate is one of: a bare atom (`test` /
+/// `debug_assertions` / `unix` / …), a name-value (`feature = "x"`), or a
+/// combinator `all(...)` / `any(...)` / `not(...)`.
+fn predicate_entails_test(pred: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    let trees: Vec<TokenTree> = pred.into_iter().collect();
+    // A combinator predicate is `Ident(all|any|not) Group[...]`.
+    if let (Some(TokenTree::Ident(head)), Some(TokenTree::Group(group))) =
+        (trees.first(), trees.get(1))
+    {
+        let inner_operands = cfg_split_top_level_operands(group.stream());
+        return match head.to_string().as_str() {
+            // `all(...)` entails test iff ANY operand entails test.
+            "all" => inner_operands.into_iter().any(predicate_entails_test),
+            // `any(...)` entails test iff ALL operands entail test. An EMPTY
+            // `any()` is unsatisfiable (entails everything vacuously) — but it is
+            // not a real shape; `all(true)` over the empty set is `true`, so an
+            // empty `any()` returning `true` here is conservatively test-only,
+            // never widening the production surface incorrectly (there is no such
+            // item). We treat empty as NOT test-gating to avoid spurious
+            // exclusion of a degenerate shape.
+            "any" => {
+                !inner_operands.is_empty() && inner_operands.into_iter().all(predicate_entails_test)
+            }
+            // `not(P)`: in the cfg fragment we model, a negation never FORCES
+            // test — `not(test)` is satisfied by every non-test config (so it is
+            // production), and `not(non-test)` never forces test either. So
+            // `not(...)` does not entail test (the item is COUNTED).
+            "not" => false,
+            // Any other call-shaped predicate we do not model is treated
+            // conservatively as NOT entailing test (so the item is COUNTED — a
+            // production producer is never silently excluded).
+            _ => false,
+        };
+    }
+    // A bare atom: only the single ident `test` entails test. `debug_assertions`,
+    // `unix`, and a `feature = "…"` name-value do NOT.
+    matches!(trees.as_slice(), [TokenTree::Ident(id)] if *id == "test")
 }
 
 /// Whether a [`syn::Visibility`] is crate-visible OUTWARD — reachable by a
@@ -23263,6 +23636,420 @@ fn collect_crate_visible_fns_in_items(items: &[syn::Item], names: &mut Vec<Strin
     }
 }
 
+/// Whether a `syn::Expr` (or any sub-expression) NAMES one of the producer
+/// builders [`STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS`] — used to reject a
+/// `const` / `static` / associated-const that binds a producer builder as an
+/// fn-pointer value (the VALUE-exposure vector: `pub(crate) const F: fn(..) -> _
+/// = lower_type_expr_structural;`). A `syn::visit` over path segments catches the
+/// builder name wherever it appears in the initialiser expression.
+fn expr_references_producer_builder(expr: &syn::Expr) -> bool {
+    use syn::visit::Visit;
+    struct BuilderRefVisitor {
+        found: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for BuilderRefVisitor {
+        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+            let name = seg.ident.to_string();
+            if STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS.contains(&name.as_str()) {
+                self.found = true;
+            }
+            syn::visit::visit_path_segment(self, seg);
+        }
+    }
+    let mut v = BuilderRefVisitor { found: false };
+    v.visit_expr(expr);
+    v.found
+}
+
+/// Collect VALUE-exposure violations in `macro_arg_producer.rs`: a crate-visible
+/// (`pub` / `pub(crate)` / `pub(in crate)`) `const` / `static` item — or a
+/// crate-visible associated `const` inside an INHERENT `impl` — whose initialiser
+/// NAMES a producer builder (an fn-pointer / closure value that re-exports the
+/// builder through a value binding). Such a binding lets an arbitrary other module
+/// reach the builder through the const/static, re-opening the producer surface
+/// WITHOUT a `fn`-item. Skips `#[cfg(test)]`-gated items (entailment-classified
+/// via [`attrs_test_gate`]). Recurses into non-test inline modules.
+fn macro_arg_producer_value_exposure_violations(src: &str) -> Vec<String> {
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(e) => return vec![format!("parse error: {e}")],
+    };
+    let mut out: Vec<String> = Vec::new();
+    collect_value_exposure_in_items(&file.items, &mut out);
+    out
+}
+
+fn collect_value_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
+    for item in items {
+        match item {
+            syn::Item::Const(c) => {
+                if attrs_test_gate(&c.attrs) {
+                    continue;
+                }
+                if visibility_is_crate_visible(&c.vis) && expr_references_producer_builder(&c.expr)
+                {
+                    out.push(format!(
+                        "a crate-visible `const {}` binds a producer builder as a value — a \
+                         value-exposure re-export of the module-private builder",
+                        c.ident
+                    ));
+                }
+            }
+            syn::Item::Static(s) => {
+                if attrs_test_gate(&s.attrs) {
+                    continue;
+                }
+                if visibility_is_crate_visible(&s.vis) && expr_references_producer_builder(&s.expr)
+                {
+                    out.push(format!(
+                        "a crate-visible `static {}` binds a producer builder as a value — a \
+                         value-exposure re-export of the module-private builder",
+                        s.ident
+                    ));
+                }
+            }
+            // Inherent-impl associated consts: a crate-visible associated const
+            // holding a producer fn-pointer is equally a value-exposure vector.
+            syn::Item::Impl(imp) => {
+                if imp.trait_.is_some() || attrs_test_gate(&imp.attrs) {
+                    continue;
+                }
+                for impl_item in &imp.items {
+                    if let syn::ImplItem::Const(c) = impl_item {
+                        if attrs_test_gate(&c.attrs) {
+                            continue;
+                        }
+                        if visibility_is_crate_visible(&c.vis)
+                            && expr_references_producer_builder(&c.expr)
+                        {
+                            out.push(format!(
+                                "a crate-visible associated `const {}` binds a producer builder as \
+                                 a value — a value-exposure re-export of the module-private builder",
+                                c.ident
+                            ));
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if attrs_test_gate(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    collect_value_exposure_in_items(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The hand-written trait impls `macro_arg_producer.rs` legitimately carries —
+/// EXACTLY `Debug` and `Clone` for `MacroHotMirror` (the struct also
+/// `#[derive(Default)]`s, which is an ATTRIBUTE handled by the expansion-surface
+/// derive check, not a trait-impl item). Any OTHER trait impl in the producer
+/// module is a TRAIT-EXPOSURE vector (a trait-dispatch surface that could reach a
+/// producer-capable method) and is rejected. The trait path's FINAL segment is
+/// matched (so `std::fmt::Debug` and `Debug` both qualify) and the self type must
+/// be `MacroHotMirror`.
+const MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPLS: &[(&str, &str)] =
+    &[("Debug", "MacroHotMirror"), ("Clone", "MacroHotMirror")];
+
+/// Collect TRAIT-exposure violations in `macro_arg_producer.rs`:
+/// - any NON-allowlisted trait impl (the allowlist is the hand-written
+///   `Debug` / `Clone` for `MacroHotMirror`);
+/// - an allowlisted trait impl whose body NAMES a producer builder (a
+///   trait-dispatch path reaching a builder);
+/// - any crate-visible (or any) trait DEFINITION or trait ALIAS in the module
+///   (a crate-visible trait could expose a producer-capable default method).
+///
+/// Skips `#[cfg(test)]`-gated items. Recurses into non-test inline modules.
+fn macro_arg_producer_trait_exposure_violations(src: &str) -> Vec<String> {
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(e) => return vec![format!("parse error: {e}")],
+    };
+    let mut out: Vec<String> = Vec::new();
+    collect_trait_exposure_in_items(&file.items, &mut out);
+    out
+}
+
+fn collect_trait_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
+    for item in items {
+        match item {
+            // A trait IMPL — `impl Trait for Type`.
+            syn::Item::Impl(imp) => {
+                if attrs_test_gate(&imp.attrs) {
+                    continue;
+                }
+                if let Some((_, trait_path, _)) = &imp.trait_ {
+                    let trait_name = trait_path
+                        .segments
+                        .last()
+                        .map(|s| s.ident.to_string())
+                        .unwrap_or_default();
+                    let self_name = type_path_last_segment(&imp.self_ty);
+                    let allowed = MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPLS
+                        .iter()
+                        .any(|(t, s)| *t == trait_name && Some(*s) == self_name.as_deref());
+                    if !allowed {
+                        out.push(format!(
+                            "a non-allowlisted production trait impl `impl {trait_name} for {}` is \
+                             forbidden — only the hand-written `Debug` / `Clone` for \
+                             `MacroHotMirror` are allowed; a trait impl is a dispatch surface that \
+                             could expose a producer-capable method",
+                            self_name.as_deref().unwrap_or("<?>")
+                        ));
+                        continue;
+                    }
+                    // Allowlisted impl: its body must NOT name a producer builder.
+                    for impl_item in &imp.items {
+                        if let syn::ImplItem::Fn(m) = impl_item {
+                            let block_expr = syn::Expr::Block(syn::ExprBlock {
+                                attrs: Vec::new(),
+                                label: None,
+                                block: m.block.clone(),
+                            });
+                            if expr_references_producer_builder(&block_expr) {
+                                out.push(format!(
+                                    "the allowlisted trait impl `impl {trait_name} for \
+                                     MacroHotMirror`'s method `{}` NAMES a producer builder — a \
+                                     trait method must never reach a lowering builder",
+                                    m.sig.ident
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // A trait DEFINITION or trait ALIAS — a crate-visible trait could
+            // expose a producer-capable default method through dispatch; even a
+            // module-private trait is an unexpected surface here, so ANY trait
+            // def/alias in the producer module is rejected.
+            syn::Item::Trait(t) => {
+                if attrs_test_gate(&t.attrs) {
+                    continue;
+                }
+                out.push(format!(
+                    "a production trait DEFINITION `trait {}` is forbidden in the producer module \
+                     — a trait is a dispatch surface that could expose a producer-capable method",
+                    t.ident
+                ));
+            }
+            syn::Item::TraitAlias(t) => {
+                if attrs_test_gate(&t.attrs) {
+                    continue;
+                }
+                out.push(format!(
+                    "a production trait ALIAS `trait {} = …` is forbidden in the producer module",
+                    t.ident
+                ));
+            }
+            syn::Item::Mod(m) => {
+                if attrs_test_gate(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    collect_trait_exposure_in_items(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The FINAL path segment of a `syn::Type` if it is a plain type path
+/// (`MacroHotMirror`, `crate::…::MacroHotMirror`) — `None` for a non-path type.
+fn type_path_last_segment(ty: &syn::Type) -> Option<String> {
+    if let syn::Type::Path(tp) = ty {
+        return tp.path.segments.last().map(|s| s.ident.to_string());
+    }
+    None
+}
+
+/// The EXACT sanctioned shape of `structural_carrier_producer/mod.rs`: it must
+/// declare the producer module as a PRIVATE `mod macro_arg_producer;` (no
+/// visibility) and re-export EXACTLY
+/// `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`
+/// — no aliases, no globs, no extra leaves, no re-exported restricted
+/// helpers/traits/consts, no `pub`-widened module decl. Returns the list of
+/// violations (empty on the genuine `mod.rs`). A `syn` walk over the file's items
+/// enforces the shape structurally (not a substring scan).
+fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(e) => return vec![format!("parse error: {e}")],
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut saw_mod_decl = false;
+    let mut saw_sanctioned_reexport = false;
+    for item in &file.items {
+        match item {
+            // The `mod macro_arg_producer;` declaration must be PRIVATE and
+            // body-less (out-of-line into the sibling file).
+            syn::Item::Mod(m) if m.ident == "macro_arg_producer" => {
+                saw_mod_decl = true;
+                if !matches!(m.vis, syn::Visibility::Inherited) {
+                    out.push(
+                        "`mod macro_arg_producer;` must be PRIVATE (no `pub`/`pub(crate)`) — a \
+                         `pub`/`pub(crate)` module decl would let a foreign module name the \
+                         producer's private builders"
+                            .to_string(),
+                    );
+                }
+                if m.content.is_some() {
+                    out.push(
+                        "`mod macro_arg_producer` must be an out-of-line declaration (`mod \
+                         macro_arg_producer;`), not an inline `mod macro_arg_producer { … }`"
+                            .to_string(),
+                    );
+                }
+            }
+            // Any OTHER module declaration in mod.rs is an unexpected producer
+            // surface.
+            syn::Item::Mod(m) => {
+                out.push(format!(
+                    "mod.rs declares an unexpected module `mod {}` — the owner root must declare \
+                     ONLY the private `mod macro_arg_producer;`",
+                    m.ident
+                ));
+            }
+            // A `use` item: the ONLY sanctioned one is
+            // `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`.
+            syn::Item::Use(u) => {
+                if let Some(reason) = mod_rs_use_violation(u) {
+                    out.push(reason);
+                } else {
+                    saw_sanctioned_reexport = true;
+                }
+            }
+            // Any other item in mod.rs (a fn, const, trait, struct, impl, …) is an
+            // unexpected surface in the owner root.
+            other => {
+                out.push(format!(
+                    "mod.rs contains an unexpected item ({}) — the owner root must hold ONLY the \
+                     private `mod macro_arg_producer;` declaration and the one sanctioned \
+                     `pub(crate) use macro_arg_producer::{{macro_type_arg_hot_ref, MacroHotMirror}};`",
+                    describe_item_kind(other)
+                ));
+            }
+        }
+    }
+    if !saw_mod_decl {
+        out.push("mod.rs must declare `mod macro_arg_producer;`".to_string());
+    }
+    if !saw_sanctioned_reexport {
+        out.push(
+            "mod.rs must contain EXACTLY `pub(crate) use \
+             macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`"
+                .to_string(),
+        );
+    }
+    out
+}
+
+/// Whether a `use` item in mod.rs deviates from the EXACT sanctioned re-export
+/// `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`.
+/// Returns `Some(reason)` on any deviation (wrong visibility, wrong root, an
+/// alias, a glob, an extra/missing leaf, a re-exported restricted helper), `None`
+/// when it is exactly the sanctioned re-export.
+fn mod_rs_use_violation(u: &syn::ItemUse) -> Option<String> {
+    // Visibility must be EXACTLY `pub(crate)` (the crate-root restricted path).
+    let vis_ok = match &u.vis {
+        syn::Visibility::Restricted(r) => r.path.is_ident("crate") && r.in_token.is_none(),
+        _ => false,
+    };
+    if !vis_ok {
+        return Some(format!(
+            "the mod.rs re-export must be `pub(crate) use …` exactly; found a different visibility \
+             on `use {}`",
+            quote_use_tree(&u.tree)
+        ));
+    }
+    // The tree must be `macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror}`.
+    let syn::UseTree::Path(path) = &u.tree else {
+        return Some("the mod.rs re-export root must be `macro_arg_producer::{…}`".to_string());
+    };
+    if path.ident != "macro_arg_producer" {
+        return Some(format!(
+            "the mod.rs re-export root must be `macro_arg_producer`, found `{}`",
+            path.ident
+        ));
+    }
+    let syn::UseTree::Group(group) = &*path.tree else {
+        return Some(
+            "the mod.rs re-export must be a group `macro_arg_producer::{macro_type_arg_hot_ref, \
+             MacroHotMirror}` — not a single leaf, glob, or aliased import"
+                .to_string(),
+        );
+    };
+    // Collect the group's leaves; each MUST be a bare name (no alias, no glob, no
+    // nested path).
+    let mut leaves: Vec<String> = Vec::new();
+    for leaf in &group.items {
+        match leaf {
+            syn::UseTree::Name(n) => leaves.push(n.ident.to_string()),
+            syn::UseTree::Rename(r) => {
+                return Some(format!(
+                    "the mod.rs re-export must not alias — found `{} as {}`",
+                    r.ident, r.rename
+                ));
+            }
+            syn::UseTree::Glob(_) => {
+                return Some("the mod.rs re-export must not use a glob `*`".to_string());
+            }
+            syn::UseTree::Path(p) => {
+                return Some(format!(
+                    "the mod.rs re-export must not nest a path — found `{}::…`",
+                    p.ident
+                ));
+            }
+            syn::UseTree::Group(_) => {
+                return Some("the mod.rs re-export must not nest a group".to_string());
+            }
+        }
+    }
+    leaves.sort();
+    let expected = [
+        "MacroHotMirror".to_string(),
+        "macro_type_arg_hot_ref".to_string(),
+    ];
+    if leaves != expected {
+        return Some(format!(
+            "the mod.rs re-export leaves must be EXACTLY `{{macro_type_arg_hot_ref, \
+             MacroHotMirror}}`, found {leaves:?}"
+        ));
+    }
+    None
+}
+
+/// Render a `syn::UseTree` to a compact string for diagnostics.
+fn quote_use_tree(tree: &syn::UseTree) -> String {
+    use quote::ToTokens;
+    tree.to_token_stream().to_string()
+}
+
+/// A short human label for a `syn::Item` kind, for the mod.rs unexpected-item
+/// diagnostic.
+fn describe_item_kind(item: &syn::Item) -> &'static str {
+    match item {
+        syn::Item::Fn(_) => "a fn",
+        syn::Item::Const(_) => "a const",
+        syn::Item::Static(_) => "a static",
+        syn::Item::Trait(_) => "a trait",
+        syn::Item::TraitAlias(_) => "a trait alias",
+        syn::Item::Struct(_) => "a struct",
+        syn::Item::Enum(_) => "an enum",
+        syn::Item::Impl(_) => "an impl",
+        syn::Item::Type(_) => "a type alias",
+        syn::Item::Macro(_) => "a macro",
+        syn::Item::ExternCrate(_) => "an extern crate",
+        syn::Item::ForeignMod(_) => "a foreign mod",
+        syn::Item::Union(_) => "a union",
+        _ => "an item",
+    }
+}
+
 /// BOUNDED defense-in-depth tripwire (NOT exhaustive): assert the SANCTIONED
 /// producer entry (`macro_type_arg_hot_ref`) is the ONLY crate-visible
 /// (`pub(crate)` / `pub(in crate)` / bare `pub`) PRODUCTION producer entry of
@@ -23277,25 +24064,29 @@ fn collect_crate_visible_fns_in_items(items: &[syn::Item], names: &mut Vec<Strin
 /// builder are ALL MODULE-PRIVATE (no visibility modifier) inside
 /// `macro_arg_producer.rs`, so none widens the crate-visible producer surface.
 ///
-/// LAYER ORDER. This is the SECONDARY layer. The LOAD-BEARING confinement is the
-/// COMPILER privacy of the producer-capable code: the structural lowerer, the
-/// macro hot-mirror builder, and the binder-seed builder are all MODULE-PRIVATE
-/// inside the single producer module `macro_arg_producer.rs` (the owner declares
-/// it as a PRIVATE `mod macro_arg_producer;` re-exporting only
-/// `macro_type_arg_hot_ref` + `MacroHotMirror`), pinned by
+/// TWO CONFINEMENT REGIMES. The FOREIGN case is COMPILER-CONFINED: the three
+/// producer-capable builders are MODULE-PRIVATE inside the single producer
+/// module `macro_arg_producer.rs` (the owner declares it as a PRIVATE
+/// `mod macro_arg_producer;` re-exporting only `macro_type_arg_hot_ref` +
+/// `MacroHotMirror`), so a foreign module cannot NAME any of them (a compile
+/// error, E0603 / E0433) — a second producer in a foreign file is
+/// unrepresentable by construction (pinned by
 /// `structural_carrier_producer_lowerer_is_module_private` +
-/// `structural_carrier_producer_module_is_narrow`. A foreign module cannot NAME
-/// any of them (a compile error, not a lint), and there is no OTHER file in the
-/// owner module that could name them either, so a second outward producer is
-/// UNREPRESENTABLE by construction — that is the airtight guarantee. This
-/// token-scanning guard is a `syn`-source tripwire layered on top: it catches the
-/// high-value, realistic refactor/copy-paste vector (a new crate-visible producer
-/// fn added to the module), but it is BOUNDED, not exhaustive.
+/// `structural_carrier_producer_module_is_narrow`). The SAME-MODULE case is NOT
+/// compiler-confined: Rust privacy is module-scoped, so a SECOND producer
+/// written INSIDE `macro_arg_producer.rs` CAN name the builders, and the owner's
+/// collapse to one file does not make that a compile error. THIS guard is one of
+/// the BOUNDED scanners that POLICE that same-module residual: it covers the
+/// crate-visible producer-entry surface (free + inherent-associated fns, plus —
+/// after the strengthening below — value `const`/`static`, trait impls/defs, and
+/// the exact `mod.rs` re-export shape) under a cfg-SATISFIABILITY test-gate
+/// classifier. It is BOUNDED, not exhaustive.
 ///
 /// KNOWN RESIDUAL GAPS (deliberately NOT covered — ACCEPTED). A `syn` source scan
 /// fundamentally cannot see macro-expanded or out-of-tree producers, so the
-/// following exotic shapes can evade THIS guard while the compiler module-privacy
-/// of the producer-capable code still forbids the actual rogue producer:
+/// following exotic shapes can evade THIS guard; the IRREDUCIBLE residual is
+/// trust in the one sanctioned producer implementation plus compiler bugs /
+/// build substitution / out-of-tree proc-macros:
 /// - a `const` / `static` FN-POINTER binding (`const P: fn(&C) -> H = …;`) or an
 ///   ASSOCIATED const holding a producer fn pointer — not a `fn`-item / `impl`-fn
 ///   surface, so not enumerated;
@@ -23354,6 +24145,56 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
          single-producer module. Found extra entries: {extra:#?}. If the module legitimately needs \
          another crate-visible fn for a NON-producer reason, add it to the sanctioned set with \
          justification."
+    );
+
+    // VALUE EXPOSURE — a crate-visible `const`/`static`/associated-const binding a
+    // producer builder as an fn-pointer value re-opens the builder WITHOUT a `fn`
+    // item. Scan `macro_arg_producer.rs`.
+    let producer_rel =
+        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs";
+    let producer_src = std::fs::read_to_string(workspace_path(producer_rel))
+        .unwrap_or_else(|e| panic!("guard could not read {producer_rel}: {e}"));
+    let value_violations = macro_arg_producer_value_exposure_violations(&producer_src);
+    assert!(
+        value_violations.is_empty(),
+        "value-exposure violation: `macro_arg_producer.rs` must declare NO crate-visible \
+         `const`/`static`/associated-const that binds a producer builder \
+         ({STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS:?}) as a value — such a binding re-exports \
+         the module-private builder through a value, re-opening the producer surface. \
+         Violations:\n  {}",
+        value_violations.join("\n  ")
+    );
+
+    // TRAIT EXPOSURE — only the hand-written `Debug`/`Clone` impls for
+    // `MacroHotMirror` are allowed; any other trait impl, or a trait def/alias, is
+    // a dispatch surface that could expose a producer-capable method. The
+    // allowlisted impls' bodies must not name a builder.
+    let trait_violations = macro_arg_producer_trait_exposure_violations(&producer_src);
+    assert!(
+        trait_violations.is_empty(),
+        "trait-exposure violation: `macro_arg_producer.rs` must declare ONLY the hand-written \
+         `Debug`/`Clone` trait impls for `MacroHotMirror` (whose bodies name no builder) and NO \
+         crate-visible trait definition/alias — a trait is a dispatch surface that could expose a \
+         producer-capable method. Violations:\n  {}",
+        trait_violations.join("\n  ")
+    );
+
+    // PIN mod.rs EXACTLY — a PRIVATE `mod macro_arg_producer;` plus EXACTLY
+    // `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`
+    // (no aliases, globs, extra leaves, re-exported restricted helpers, or a
+    // `pub`-widened module decl).
+    let mod_rel = "crates/verter_session/src/structural_carrier_producer/mod.rs";
+    let mod_src = std::fs::read_to_string(workspace_path(mod_rel))
+        .unwrap_or_else(|e| panic!("guard could not read {mod_rel}: {e}"));
+    let mod_violations = mod_rs_reexport_shape_violations(&mod_src);
+    assert!(
+        mod_violations.is_empty(),
+        "mod.rs shape violation: `structural_carrier_producer/mod.rs` must declare a PRIVATE \
+         `mod macro_arg_producer;` and re-export EXACTLY `pub(crate) use \
+         macro_arg_producer::{{macro_type_arg_hot_ref, MacroHotMirror}};` — no aliases, globs, \
+         extra leaves, re-exported restricted helpers, or a `pub`-widened module decl. \
+         Violations:\n  {}",
+        mod_violations.join("\n  ")
     );
 }
 
@@ -23531,21 +24372,22 @@ fn mirror_entry_surface_classifier_discriminates() {
         "a `#[cfg(debug_assertions)] pub(crate) fn` is COMPILED in debug production builds and MUST \
          be counted — `debug_assertions` is NOT a test gate (single-entry must hold in debug too)"
     );
-    // A `#[cfg(any(test, debug_assertions))] pub(crate) fn` is STILL excluded:
-    // CONSERVATIVE OVER-EXCLUSION (recorded P1 debt): a positive `test` ARM
-    // inside `any(...)` is treated as test-gating, so this stays excluded —
-    // even though `#[cfg(any(test, debug_assertions))]` IS production-satisfiable
-    // in a debug non-test build (via `debug_assertions`). This characterizes the
-    // classifier's current `any`-arm behavior (the load-bearing single-entry
-    // guarantee is the by-construction visibility, not this scan); narrowing the
-    // `any`-arm exclusion is tracked debt, not in scope here.
-    assert!(
+    // [P0] SATISFIABILITY CLOSURE — the heart of FIX B. A
+    // `#[cfg(any(test, debug_assertions))] pub(crate) fn` is PRODUCTION-
+    // SATISFIABLE (a debug non-test build satisfies it via `debug_assertions`),
+    // so it COMPILES into the always-on debug production lib and MUST be COUNTED.
+    // The entailment classifier: `any(...)` entails test ONLY IF ALL operands
+    // entail test — here `debug_assertions` does not, so the predicate does NOT
+    // entail test and the item is COUNTED (the rogue-producer evasion the prior
+    // over-exclusion permitted is now closed).
+    assert_eq!(
         crate_visible_producer_fn_names(
             "#[cfg(any(test, debug_assertions))]\npub(crate) fn t() {}\n"
-        )
-        .is_empty(),
-        "a `#[cfg(any(test, debug_assertions))]` item stays excluded under the classifier's \
-         conservative `any`-arm test-gating (recorded P1 over-exclusion debt)"
+        ),
+        vec!["t".to_string()],
+        "a `#[cfg(any(test, debug_assertions))] pub(crate) fn` is PRODUCTION-satisfiable (via \
+         `debug_assertions` in a debug non-test build) and MUST be COUNTED — `any(...)` entails \
+         test ONLY when ALL operands do (the [P0] satisfiability closure)"
     );
     // ROUND-5 GOV — `#[cfg(not(test))]` is a PRODUCTION-only item (compiled in
     // non-test builds), NOT a test gate. It MUST be COUNTED: a `pub(crate)` fn
@@ -23562,15 +24404,29 @@ fn mirror_entry_surface_classifier_discriminates() {
         crate_visible_producer_fn_names("#[cfg(test)]\npub(crate) fn test_only() {}\n").is_empty(),
         "a `#[cfg(test)] pub(crate) fn` is test-only and must be excluded"
     );
-    // `#[cfg(any(feature = \"x\", test))]` — `test` as the SECOND any-arm still
-    // gates (positive `test` predicate anywhere in `any`/`all`).
-    assert!(
+    // `#[cfg(any(feature = "x", test))]` is PRODUCTION-SATISFIABLE (feature `x`
+    // ON without test), so it MUST be COUNTED — `any(...)` entails test ONLY when
+    // ALL operands do, and `feature = "x"` does not. (Under the prior `test`-in-
+    // any-arm classifier this was wrongly excluded.)
+    assert_eq!(
         crate_visible_producer_fn_names(
             "#[cfg(any(feature = \"x\", test))]\npub(crate) fn maybe_test() {}\n"
+        ),
+        vec!["maybe_test".to_string()],
+        "a `#[cfg(any(feature = \"x\", test))] pub(crate) fn` is PRODUCTION-satisfiable (feature \
+         `x` on without test) and MUST be COUNTED — `any(...)` entails test only when ALL operands \
+         do"
+    );
+    // `#[cfg(all(test, debug_assertions))]` is TEST-ONLY (the conjunction REQUIRES
+    // test in every satisfying config), so it stays EXCLUDED — `all(...)` entails
+    // test iff ANY operand does, and `test` does.
+    assert!(
+        crate_visible_producer_fn_names(
+            "#[cfg(all(test, debug_assertions))]\npub(crate) fn t2() {}\n"
         )
         .is_empty(),
-        "a `#[cfg(any(feature = \"x\", test))] pub(crate) fn` is test-gated (positive `test` in \
-         an `any` arm) and must be excluded"
+        "a `#[cfg(all(test, debug_assertions))] pub(crate) fn` is test-only (the conjunction \
+         requires test) and must be EXCLUDED"
     );
     // `#[cfg(all(unix, not(test)))]` — production (the only test mention is under
     // `not`), so it MUST be counted.
@@ -23605,5 +24461,171 @@ fn mirror_entry_surface_classifier_discriminates() {
         "the REAL owner module must expose EXACTLY the sanctioned producer entry \
          {MIRROR_SANCTIONED_PRODUCER_ENTRIES:?} as its crate-visible producer fns (free OR \
          associated); found {real:?}"
+    );
+}
+
+/// Self-test for the FIX-B value-exposure / trait-exposure / mod.rs-pin
+/// collectors: the genuine `macro_arg_producer.rs` + `mod.rs` pass; a planted
+/// crate-visible const/static fn-pointer of a builder, a non-allowlisted trait
+/// impl, a trait def, an allowlisted impl naming a builder, and a deviating
+/// mod.rs re-export (extra leaf / alias / glob / `pub` module decl) each redden;
+/// `#[cfg(test)]`-gated shapes do not.
+#[test]
+fn mirror_value_trait_and_modrs_collectors_discriminate() {
+    // ── VALUE EXPOSURE ─────────────────────────────────────────────────────
+    // A crate-visible const binding a builder as an fn-pointer reddens.
+    let const_ptr = "pub(crate) const F: fn(&C) -> H = lower_type_expr_structural;\n";
+    assert!(
+        !macro_arg_producer_value_exposure_violations(const_ptr).is_empty(),
+        "a `pub(crate) const F = lower_type_expr_structural;` fn-pointer binding must redden \
+         (value-exposure)"
+    );
+    // A crate-visible static binding a builder reddens.
+    let static_ptr = "pub(crate) static G: fn() = build_macro_hot_ref;\n";
+    assert!(
+        !macro_arg_producer_value_exposure_violations(static_ptr).is_empty(),
+        "a `pub(crate) static G = build_macro_hot_ref;` binding must redden (value-exposure)"
+    );
+    // A crate-visible associated const binding a builder reddens.
+    let assoc_const =
+        "impl MacroHotMirror {\n    pub(crate) const P: fn() = build_script_setup_seed_frames;\n}\n";
+    assert!(
+        !macro_arg_producer_value_exposure_violations(assoc_const).is_empty(),
+        "a crate-visible associated `const P = build_script_setup_seed_frames;` must redden"
+    );
+    // A MODULE-PRIVATE const binding a builder is NOT crate-visible → not a
+    // value-exposure (it cannot be named from another module).
+    let private_const = "const F: fn(&C) -> H = lower_type_expr_structural;\n";
+    assert!(
+        macro_arg_producer_value_exposure_violations(private_const).is_empty(),
+        "a module-private `const F = lower_type_expr_structural;` is not crate-visible and must NOT \
+         redden"
+    );
+    // A crate-visible const NOT referencing a builder is fine.
+    let unrelated_const = "pub(crate) const N: usize = 4;\n";
+    assert!(
+        macro_arg_producer_value_exposure_violations(unrelated_const).is_empty(),
+        "a crate-visible const not naming a builder must NOT redden"
+    );
+    // A `#[cfg(test)]`-gated crate-visible const binding a builder is test-only →
+    // not a production value-exposure.
+    let test_const =
+        "#[cfg(test)]\npub(crate) const F: fn(&C) -> H = lower_type_expr_structural;\n";
+    assert!(
+        macro_arg_producer_value_exposure_violations(test_const).is_empty(),
+        "a `#[cfg(test)]`-gated const fn-pointer must NOT redden (test-only)"
+    );
+
+    // ── TRAIT EXPOSURE ─────────────────────────────────────────────────────
+    // A non-allowlisted trait impl reddens.
+    let foreign_impl = "impl SomeTrait for MacroHotMirror {\n    fn via_trait(&self) {}\n}\n";
+    assert!(
+        !macro_arg_producer_trait_exposure_violations(foreign_impl).is_empty(),
+        "a non-allowlisted `impl SomeTrait for MacroHotMirror` must redden (trait-exposure)"
+    );
+    // A trait impl for a DIFFERENT self type (even Debug) is not the allowlisted
+    // (Debug, MacroHotMirror) pair → reddens.
+    let debug_other =
+        "impl std::fmt::Debug for OtherType {\n    fn fmt(&self, f: &mut F) -> R { todo!() }\n}\n";
+    assert!(
+        !macro_arg_producer_trait_exposure_violations(debug_other).is_empty(),
+        "an `impl Debug for OtherType` is not the allowlisted (Debug, MacroHotMirror) pair and must \
+         redden"
+    );
+    // A trait DEFINITION reddens.
+    let trait_def = "pub(crate) trait Producer {\n    fn make(&self) -> H;\n}\n";
+    assert!(
+        !macro_arg_producer_trait_exposure_violations(trait_def).is_empty(),
+        "a `trait Producer` definition in the producer module must redden"
+    );
+    // The allowlisted `Debug`/`Clone` impls for `MacroHotMirror` are accepted when
+    // their bodies do NOT name a builder.
+    let allowed = "impl std::fmt::Debug for MacroHotMirror {\n    fn fmt(&self, f: &mut F) -> R { f.debug_struct(\"x\").finish() }\n}\nimpl Clone for MacroHotMirror {\n    fn clone(&self) -> Self { Self { } }\n}\n";
+    assert!(
+        macro_arg_producer_trait_exposure_violations(allowed).is_empty(),
+        "the hand-written `Debug`/`Clone` impls for `MacroHotMirror` (no builder in body) must be \
+         allowed"
+    );
+    // An allowlisted impl whose body NAMES a builder reddens (a trait method
+    // reaching a builder).
+    let allowed_but_calls = "impl Clone for MacroHotMirror {\n    fn clone(&self) -> Self { let _ = lower_type_expr_structural; Self { } }\n}\n";
+    assert!(
+        !macro_arg_producer_trait_exposure_violations(allowed_but_calls).is_empty(),
+        "an allowlisted `impl Clone for MacroHotMirror` whose body names a builder must redden"
+    );
+    // A `#[cfg(test)]`-gated foreign trait impl is test-only → not a production
+    // trait-exposure.
+    let test_trait =
+        "#[cfg(test)]\nimpl SomeTrait for MacroHotMirror {\n    fn via_trait(&self) {}\n}\n";
+    assert!(
+        macro_arg_producer_trait_exposure_violations(test_trait).is_empty(),
+        "a `#[cfg(test)]`-gated foreign trait impl must NOT redden (test-only)"
+    );
+
+    // ── mod.rs PIN ─────────────────────────────────────────────────────────
+    // The EXACT sanctioned shape passes.
+    let ok_mod = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    assert!(
+        mod_rs_reexport_shape_violations(ok_mod).is_empty(),
+        "the exact sanctioned mod.rs shape must pass"
+    );
+    // An EXTRA re-exported leaf reddens.
+    let extra_leaf = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror, lower_type_expr_structural};\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(extra_leaf).is_empty(),
+        "an extra re-exported leaf (`lower_type_expr_structural`) in mod.rs must redden"
+    );
+    // A SECOND `pub(crate) use` re-exporting a restricted helper reddens.
+    let extra_use = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\npub(crate) use macro_arg_producer::rogue;\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(extra_use).is_empty(),
+        "a second `pub(crate) use macro_arg_producer::rogue;` in mod.rs must redden"
+    );
+    // An ALIAS reddens.
+    let aliased = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref as hot, MacroHotMirror};\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(aliased).is_empty(),
+        "an aliased re-export leaf in mod.rs must redden"
+    );
+    // A GLOB reddens.
+    let glob = "mod macro_arg_producer;\npub(crate) use macro_arg_producer::*;\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(glob).is_empty(),
+        "a glob re-export in mod.rs must redden"
+    );
+    // A `pub` (not `pub(crate)`) module decl reddens (foreign-nameable).
+    let pub_mod = "pub mod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(pub_mod).is_empty(),
+        "a `pub mod macro_arg_producer;` decl in mod.rs must redden (foreign-nameable)"
+    );
+    // A `pub` (not `pub(crate)`) re-export visibility reddens.
+    let pub_use = "mod macro_arg_producer;\npub use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(pub_use).is_empty(),
+        "a `pub use` (wider than `pub(crate)`) re-export in mod.rs must redden"
+    );
+
+    // ── REAL files pass ALL three collectors ───────────────────────────────
+    let producer_src = std::fs::read_to_string(workspace_path(
+        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+    ))
+    .expect("producer module readable");
+    assert!(
+        macro_arg_producer_value_exposure_violations(&producer_src).is_empty(),
+        "the REAL macro_arg_producer.rs must have NO value-exposure"
+    );
+    assert!(
+        macro_arg_producer_trait_exposure_violations(&producer_src).is_empty(),
+        "the REAL macro_arg_producer.rs must have NO trait-exposure (only the hand-written \
+         Debug/Clone for MacroHotMirror)"
+    );
+    let mod_src = std::fs::read_to_string(workspace_path(
+        "crates/verter_session/src/structural_carrier_producer/mod.rs",
+    ))
+    .expect("mod.rs readable");
+    assert!(
+        mod_rs_reexport_shape_violations(&mod_src).is_empty(),
+        "the REAL mod.rs must match the exact sanctioned shape"
     );
 }
