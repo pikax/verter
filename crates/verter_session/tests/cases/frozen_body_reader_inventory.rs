@@ -2,7 +2,23 @@
 //! `syn`-structural inventory that anchors every SEMANTIC declaration-body
 //! reader (the frozen migration surface for the upcoming body-storage flip)
 //! and the small COMPAT/output body-read set, so the two stay cleanly
-//! separated and a NEW lowered-body reader cannot silently appear.
+//! separated and a NEW lowered-body reader is caught.
+//!
+//! ## What rail closes the surface (read this before trusting the tripwire)
+//!
+//! The COMPLETENESS rail is the ENUMERATION (`SEMANTIC_BODY_READERS` +
+//! `COMPAT_BODY_READERS`) — it is the authoritative frozen list of the body
+//! readers the storage flip migrates, and it covers BOTH bare-field reads
+//! (`<recv>.body` used as a value, e.g. `.body.clone()`) AND method-chain reads
+//! (`<recv>.body.<method>()`). The `<recv>.body.<method>` tripwire (invariant 3)
+//! is a BOUNDED SUPPLEMENT on top of the enumeration: it cheaply reddens a NEW
+//! or MOVED method-chain read that escaped the enumeration, but it is NOT the
+//! completeness rail and does NOT alone prove "no new reader can appear". A new
+//! reader that reads `.body` as a bare field, or that launders a method-chain
+//! read through a local binding (`let b = &lowered.body; b.m()`), is covered by
+//! the ENUMERATION, not the tripwire. The migration additionally carries its own
+//! frozen-file gate and a behavioural parity rail (the retained oracle) on top
+//! of this guard.
 //!
 //! ## Why this guard exists (and that it is TEMPORARY)
 //!
@@ -20,12 +36,15 @@
 //!      pass operates on a stable, enumerated surface).
 //!   2. UNIQUENESS — each anchor resolves to exactly one non-test definition
 //!      (a moved / duplicated / disappeared anchor reddens).
-//!   3. BOUNDED CLASSIFICATION (the load-bearing tripwire) — every
+//!   3. BOUNDED CLASSIFICATION (the tripwire SUPPLEMENT) — every
 //!      `<recv>.body.<TypeDeclBody-method>` read in the production tree sits at
 //!      a `(file, impl/mod, fn)` anchor that is in EITHER the SEMANTIC inventory
 //!      OR the COMPAT inventory. A NEW or MOVED such read outside both reddens
-//!      immediately, so a new lowered-body reader cannot widen the migration
-//!      surface unnoticed.
+//!      immediately. The receiver match unwraps paren/reference wrappers and
+//!      also recognizes the UFCS call form (`TypeDeclBody::m(&x.body)`), so those
+//!      spellings are detected identically — but this is a BOUNDED SUPPLEMENT,
+//!      not the completeness rail: a bare-field read or a local-binding launder
+//!      is caught by the ENUMERATION (invariants 1-2), not here.
 //!   4. COMPAT PURITY — the two body-fact / oracle CONSUMER files
 //!      (`fact_emission.rs`, the oracle `source_walk.rs`) contain NO direct
 //!      lowered-body method-chain read after the compat routing: their only
@@ -47,32 +66,65 @@
 //! in comments / string literals are invisible to the AST walk and cannot trip
 //! (or satisfy) the guard.
 //!
-//! The load-bearing classification net (invariant 3) keys on an UNAMBIGUOUS
-//! STRUCTURAL SHAPE, not on a denylist of identifier spellings and not on a
-//! receiver BINDING NAME (which would fail open on rename): a
-//! `<receiver>.body.<method>` chain whose method is one of `lookup_object` /
-//! `contributors` / `is_merged`. Those three methods are defined ONLY on
-//! `TypeDeclBody` (the type carried by `LoweredTypeDecl.body` /
-//! `PreparedTypeDecl.body`), and the chain requires the read to go through a
-//! `.body` field — so the shape is a precise, type-faithful proxy for "a lowered
-//! type-declaration body read" that needs no type resolution. A bare `group
-//! .contributors()` (on a decl GROUP, not a `.body`) or a `program.body` (an
-//! unrelated `.body` field with no such method) does NOT match the shape.
+//! The tripwire (invariant 3) keys on an UNAMBIGUOUS STRUCTURAL SHAPE, not on a
+//! denylist of identifier spellings and not on a receiver BINDING NAME (which
+//! would fail open on rename): a `<receiver>.body.<method>` chain (or its UFCS
+//! equivalent `TypeDeclBody::<method>(&<receiver>.body)`) whose method is one of
+//! `TypeDeclBody`'s reader methods (`lookup_object` / `contributors` /
+//! `is_merged` / `primary` / `merged_member_names`). The receiver match unwraps
+//! sound paren/reference wrappers, so `(lowered.body).m()` and
+//! `(&lowered.body).m()` are detected identically to `lowered.body.m()`.
+//!
+//! These method NAMES are NOT unique to `TypeDeclBody`: `contributors` /
+//! `primary` also exist on the eval-env `TypeDeclGroup` / `ValueDeclGroup`, and
+//! `is_merged` also exists on `HotPreparedTypeDecl`. The shape stays a SOUND
+//! proxy not because the names are unique, but because the chain requires the
+//! read to go through a `.body` FIELD — and NO `body:` field in the production
+//! tree is typed as a colliding type (`TypeDeclGroup` / `ValueDeclGroup` /
+//! `HotPreparedTypeDecl` / `TypeDeclInfo` / `ValueDeclInfo`). The only `.body`
+//! field carrying these methods is `LoweredTypeDecl.body: TypeDeclBody`. Note
+//! `PreparedTypeDecl.body` is a `TypeExpr`, NOT a `TypeDeclBody` (verter_semantic
+//! `prepared.rs`), so a `PreparedTypeDecl.body` read CANNOT be a `.body.<method>`
+//! chain — it is a bare-FIELD read, anchored by the ENUMERATION, not this
+//! tripwire. The no-colliding-`.body`-field property is a reviewed, VERIFIED
+//! premise (a targeted `body:\s*<colliding-type>` search returns zero hits
+//! today); there is NO concrete false positive on the current tree. A bare
+//! `group.contributors()` (on a decl GROUP, not a `.body`) or a `program.body`
+//! (an unrelated `.body` field with no such method) does NOT match the shape.
 //!
 //! ## Honest scope (what this guard does and does NOT prove)
 //!
 //! Like the sibling inventory guard, this is a presence/uniqueness inventory of
-//! an ENUMERATED set PLUS a SOUND tripwire on a precise structural shape — it is
-//! NOT an exhaustive proof that the enumerated semantic set is complete. The
-//! tripwire keys on the `<recv>.body.<method>` chain; it does NOT (and cannot
-//! soundly, without type resolution) classify a bare `<recv>.body` FIELD read
-//! whose receiver happens to be a lowered/prepared carrier — such reads share a
-//! shape with unrelated `.body` fields (`program.body`, a request body, …). The
-//! ENUMERATION (the SEMANTIC inventory below) is the completeness statement for
-//! those bare-field readers; the migration pass carries its own frozen-file gate
-//! and behavioural parity rail on top. What this guard adds is: every enumerated
-//! reader is anchored and unique, every `<recv>.body.<method>` read is pinned to
-//! a reviewed anchor, and a new such read outside the inventory reddens at once.
+//! an ENUMERATED set PLUS a BOUNDED tripwire on a precise structural shape — it
+//! is NOT an exhaustive proof of completeness ON ITS OWN, and the tripwire is a
+//! SUPPLEMENT, not the completeness rail. Specifically:
+//!
+//! - The tripwire keys on the `<recv>.body.<method>` chain (and its paren/ref +
+//!   UFCS spellings); it does NOT (and cannot soundly, without type resolution)
+//!   classify a bare `<recv>.body` FIELD read — such reads share a shape with
+//!   unrelated `.body` fields (`program.body`, a request body, …). Every
+//!   bare-field semantic reader (e.g. the `PreparedTypeDecl.body` /
+//!   `ResolvedSymbol.body` / `ResolvedImportedRegistrySymbol.body` clones) is
+//!   carried by the ENUMERATION, NOT the tripwire — which is exactly why those
+//!   rows are `method_chain: false`.
+//! - A method-chain read whose receiver is a LOCAL bound from `.body`
+//!   (`let b = &lowered.body; b.m()`) is NOT classified by the tripwire either:
+//!   the receiver is a path, not a `.body` field access. This is an IRREDUCIBLE
+//!   limit of a syntactic guard (resolving the binding would need type
+//!   resolution), DISCLOSED here and covered by the ENUMERATION + the
+//!   migration's frozen-file gate + the behavioural parity rail — it is NOT
+//!   chased with further detector cases (that would be an arms race; the real
+//!   closure of the laundered class is the enumeration and the eventual
+//!   single-typed-accessor funnel the storage flip introduces). The negative
+//!   self-test that codifies this non-detection is a DISCLOSED-limit fixture,
+//!   not a soundness claim.
+//!
+//! The ENUMERATION (the SEMANTIC + COMPAT inventories below) is the completeness
+//! statement; the migration pass carries its own frozen-file gate and
+//! behavioural parity rail on top. What this guard adds is: every enumerated
+//! reader is anchored and unique, every `<recv>.body.<method>` read (incl.
+//! paren/ref/UFCS forms) is pinned to a reviewed anchor, and a new such read
+//! outside the inventory reddens at once.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -395,14 +447,33 @@ fn split_cfg_terms(ts: &proc_macro2::TokenStream) -> Vec<Vec<proc_macro2::TokenT
 // BODY-READ DETECTION — the `<recv>.body.<method>` structural shape
 // ════════════════════════════════════════════════════════════════════
 
-/// The `TypeDeclBody` method names whose invocation ON A `.body` field-access
-/// receiver constitutes a lowered/prepared type-declaration BODY read. These
-/// three methods are defined ONLY on `TypeDeclBody` (the type carried by
-/// `LoweredTypeDecl.body` / `PreparedTypeDecl.body`); requiring the receiver to
-/// be a `.body` field makes the shape a precise, type-faithful proxy with no
-/// type resolution and no binding-name heuristic. A `group.contributors()` (on a
-/// decl GROUP, receiver is not `.body`) does NOT match.
-const BODY_READ_METHODS: &[&str] = &["lookup_object", "contributors", "is_merged"];
+/// The `TypeDeclBody` reader-method names whose invocation against a `.body`
+/// field (the type carried by `LoweredTypeDecl.body`) constitutes a lowered
+/// type-declaration BODY read. This is the FULL set of `TypeDeclBody`'s public
+/// reader methods: `lookup_object`, `contributors`, `is_merged`, `primary`,
+/// `merged_member_names` (verter_semantic `type_eval.rs`).
+///
+/// These are `TypeDeclBody` reader methods — but they are NOT defined ONLY on
+/// `TypeDeclBody`: `contributors` / `primary` also exist on the eval-env
+/// `TypeDeclGroup` / `ValueDeclGroup`, and `is_merged` also exists on
+/// `HotPreparedTypeDecl`. The `<recv>.body.<method>` shape stays a SOUND proxy
+/// not because the method names are unique, but because requiring the receiver
+/// to be a `.body` FIELD access excludes every colliding owner: NO `body:` field
+/// in the production tree is typed as a colliding type (`TypeDeclGroup` /
+/// `ValueDeclGroup` / `HotPreparedTypeDecl` / `TypeDeclInfo` / `ValueDeclInfo`)
+/// — the only `.body` field carrying these methods is `LoweredTypeDecl.body:
+/// TypeDeclBody`. That no-colliding-`.body`-field property is a reviewed,
+/// verified premise (a targeted `body:\s*<colliding-type>` field-type search
+/// returns zero hits today); there is NO concrete false positive on the current
+/// tree. A `group.contributors()` (receiver is a decl GROUP, not `.body`) does
+/// NOT match.
+const BODY_READ_METHODS: &[&str] = &[
+    "lookup_object",
+    "contributors",
+    "is_merged",
+    "primary",
+    "merged_member_names",
+];
 
 /// One structural `fn` DEFINITION discovered by the `syn` walk: the file
 /// (crate-relative, forward-slashed), the fn name, its enclosing impl/trait/mod
@@ -445,10 +516,17 @@ impl FnDef {
 /// statement list. Closures ARE descended (a closure is part of the enclosing
 /// fn's body, not its own anchored item).
 ///
-/// Detection (pure AST shape, no text, no binding name): a method call whose
-/// method ident is in [`BODY_READ_METHODS`] AND whose receiver expression is a
-/// NAMED field access `<expr>.body`. Tokens in comments / string literals are
-/// invisible to the AST and cannot trip this.
+/// Detection (pure AST shape, no text, no binding name): EITHER (a) a method
+/// call whose method ident is in [`BODY_READ_METHODS`] AND whose receiver
+/// expression, after paren/reference unwrap ([`unwrap_receiver`]), is a NAMED
+/// field access `<expr>.body`; OR (b) the UFCS call form
+/// `TypeDeclBody::<method>(&<expr>.body)` — a qualified call whose function-path
+/// final segment is a body-read method and one of whose arguments is a `.body`
+/// field. Tokens in comments / string literals are invisible to the AST and
+/// cannot trip this. A method-chain read laundered through a local binding
+/// (`let b = &lowered.body; b.m()`) is OUT of sound syntactic reach and
+/// deliberately not detected here (covered by the enumeration — see the module
+/// "Honest scope" note).
 struct BodyReadCollector {
     reads: HashSet<String>,
 }
@@ -461,16 +539,73 @@ impl BodyReadCollector {
     }
 }
 
-/// Whether `expr` is a NAMED field access `<something>.body` (the receiver shape
-/// that makes a `TypeDeclBody` method call a lowered-body read).
+/// Peel sound, value-preserving receiver wrappers — parentheses (`(x)`) and a
+/// reference/deref taken inline (`&x` / `&mut x` / `*x`) — that do NOT change
+/// which field/value the chain ultimately reads. So `(lowered.body).m()`,
+/// `(&lowered.body).m()`, and `(&mut lowered.body).m()` all unwrap to the
+/// `lowered.body` field access. This is a BOUNDED, sound normalization (it only
+/// strips wrappers that re-expose the SAME place expression), NOT a spelling
+/// chase: it does not follow a local binding (`let b = &lowered.body; b.m()`),
+/// which is an irreducible launder out of a syntactic guard's sound reach (see
+/// the module "Honest scope" note).
+fn unwrap_receiver(expr: &syn::Expr) -> &syn::Expr {
+    match expr {
+        syn::Expr::Paren(p) => unwrap_receiver(&p.expr),
+        syn::Expr::Group(g) => unwrap_receiver(&g.expr),
+        syn::Expr::Reference(r) => unwrap_receiver(&r.expr),
+        syn::Expr::Unary(syn::ExprUnary {
+            op: syn::UnOp::Deref(_),
+            expr,
+            ..
+        }) => unwrap_receiver(expr),
+        other => other,
+    }
+}
+
+/// Whether `expr`, AFTER paren/reference unwrap, is a NAMED field access
+/// `<something>.body` (the receiver shape that makes a `TypeDeclBody` method call
+/// a lowered-body read). Unwrapping makes `(lowered.body).m()` / `(&lowered
+/// .body).m()` detected identically to `lowered.body.m()`.
 fn is_dot_body_field(expr: &syn::Expr) -> bool {
     matches!(
-        expr,
+        unwrap_receiver(expr),
         syn::Expr::Field(syn::ExprField {
             member: syn::Member::Named(name),
             ..
         }) if *name == "body"
     )
+}
+
+/// Whether `path`'s FINAL segment ident is one of the `TypeDeclBody` reader
+/// methods — used to recognize a UFCS call `TypeDeclBody::lookup_object(&x.body)`
+/// / `<TypeDeclBody>::contributors(...)` whose function path ends in a body-read
+/// method. Returns the method name if so.
+fn ufcs_body_read_method(func: &syn::Expr) -> Option<String> {
+    let path = match func {
+        syn::Expr::Path(p) => &p.path,
+        _ => return None,
+    };
+    // A UFCS body read is a QUALIFIED call: `Type::method(..)` (≥2 segments) or
+    // `<Type>::method(..)` (qself set). A bare `method(..)` free-fn call is NOT
+    // a `.body` read shape and must not match.
+    let qualified =
+        path.segments.len() >= 2 || matches!(func, syn::Expr::Path(p) if p.qself.is_some());
+    if !qualified {
+        return None;
+    }
+    let last = path.segments.last()?;
+    let name = last.ident.to_string();
+    if BODY_READ_METHODS.contains(&name.as_str()) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Whether any argument expression is (after paren/reference unwrap) a `.body`
+/// field access — the receiver-as-argument shape of a UFCS body read.
+fn any_arg_is_dot_body_field<'a>(args: impl Iterator<Item = &'a syn::Expr>) -> bool {
+    args.into_iter().any(is_dot_body_field)
 }
 
 impl<'ast> Visit<'ast> for BodyReadCollector {
@@ -483,6 +618,20 @@ impl<'ast> Visit<'ast> for BodyReadCollector {
         // default `Visit` walk does not enter `ItemFn` from an expression
         // context anyway; closures are walked as part of this body).
         syn::visit::visit_expr_method_call(self, c);
+    }
+
+    /// Detect the UFCS / fully-qualified call form of a body read:
+    /// `TypeDeclBody::lookup_object(&lowered.body)` /
+    /// `<TypeDeclBody>::contributors(&lowered.body)` — a qualified call whose
+    /// function-path final segment is a body-read method AND one of whose
+    /// arguments is (after paren/reference unwrap) a `.body` field access.
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        if let Some(method) = ufcs_body_read_method(&c.func) {
+            if any_arg_is_dot_body_field(c.args.iter()) {
+                self.reads.insert(method);
+            }
+        }
+        syn::visit::visit_expr_call(self, c);
     }
 
     /// Do NOT descend into a nested `fn` item declared inside this body — its
@@ -784,6 +933,18 @@ const SEMANTIC_BODY_READERS: &[ReaderRow] = &[
                  TypeExpr to its callers",
     },
     ReaderRow {
+        file: "src/resolver_core/component_meta_query_engine/route_keys.rs",
+        impl_path: "impl ComponentMetaQueryEngine",
+        fn_name: "enumerate_member_surface_keys_via_route",
+        method_chain: false,
+        reason: "reads prepared.body via the alias-form `prepared_type_decl(..).map(|p| \
+                 p.body.clone())` inside the `try_body` route-key expansion closure (and the \
+                 prepared-value `.type_annotation` route read) — SEMANTIC route expansion per the \
+                 carrier disposition (migrates handle-native). BARE `.body`/`.type_annotation` \
+                 field reads, so the method-chain tripwire structurally cannot catch them — the \
+                 enumeration is their only completeness rail",
+    },
+    ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/helpers.rs",
         impl_path: "",
         fn_name: "resolve_imported_registry_symbol_with_budget",
@@ -808,9 +969,18 @@ const SEMANTIC_BODY_READERS: &[ReaderRow] = &[
     ReaderRow {
         file: "src/host_manage/component_meta_methods.rs",
         impl_path: "impl VerterHost",
-        fn_name: "collect_one_filtered_expr",
+        fn_name: "append_component_meta_registry_entries",
         method_chain: false,
-        reason: "calls named_decl_body (×3) and consumes ResolvedImportedRegistrySymbol.body",
+        reason: "reads the imported-registry symbol body (`resolved.body`, a \
+                 ResolvedImportedRegistrySymbol.body carrier populated from prepared.body.clone()) \
+                 across registry-publication routing: alias-symbolic classification, candidate \
+                 materialization seeding, discriminant inspection, and the whole/route body clone; \
+                 and calls `named_decl_body` (×3) consuming its transitive body result — the \
+                 disposition's `imported registry symbols` + publication-planning semantic readers \
+                 (registry routing + publication, migrates handle-native). The named_decl_body \
+                 calls (and the resolved.body reads) live in THIS single outer fn — NOT in the \
+                 nested `collect_one_filtered_expr` helper, which reads no carrier. All BARE \
+                 `.body` field reads, anchored by the enumeration (not the tripwire)",
     },
     ReaderRow {
         file: "src/meta_resolve/registry_materialize.rs",
@@ -915,12 +1085,50 @@ const SEMANTIC_BODY_READERS: &[ReaderRow] = &[
             "reads lowered.body.lookup_object() (two branches) when resolving through an export",
     },
     ReaderRow {
+        file: "src/resolver_core/external_type_frontier.rs",
+        impl_path: "impl ExternalTypeFrontier",
+        fn_name: "resolve_one",
+        method_chain: false,
+        reason: "re-clones a frontier-produced ResolvedSymbol.body (`existing.body.clone()`) when \
+                 rebuilding a ResolvedSymbol from an already-resolved chain entry — the \
+                 ResolvedSymbol.body carrier is populated FROM the lowered body \
+                 (resolve_through_export), so it is in the external_type_frontier migration set per \
+                 the carrier disposition. A BARE `.body` field read (not a `.body.<method>` chain), \
+                 caught by the enumeration, not the tripwire",
+    },
+    ReaderRow {
         file: "src/host_manage/eval_env.rs",
         impl_path: "impl VerterHost",
         fn_name: "peel_value_decl_alias_graph_native",
         method_chain: false,
         reason: "the typeof peel reads lowered.type_annotation (LoweredValueDecl)",
     },
+    ReaderRow {
+        file: "src/host_manage/eval_env.rs",
+        impl_path: "impl VerterHost",
+        fn_name: "dependency_value_symbol_graph_native",
+        method_chain: false,
+        reason: "the C4 graph-native value-symbol reader reads lowered.type_annotation \
+                 (effective_value_decl → LoweredValueDecl) — same carrier class as \
+                 peel_value_decl_alias_graph_native (NOT the eval-env `.primary().type_annotation` \
+                 on ValueDeclInfo, which is excluded). A BARE `.type_annotation` field read, \
+                 anchored by the enumeration",
+    },
+    // NOTE — the `PreparedValueDecl.type_annotation` reader class
+    // (`eval_env::component_meta_binding_type_entries`,
+    // `project_semantic_dispatch/build.rs::build_typeof`,
+    // `runtime_values::prepared_value_decl_to_value_decl_info`, and the
+    // incidental `route_keys::enumerate_member_surface_keys_via_route` :354 read)
+    // is the prepared-VALUE analog of the `PreparedTypeDecl.body` readers above.
+    // It is DELIBERATELY NOT enumerated here: the original frozen surface
+    // included ZERO such rows, and the carrier disposition §2 migration set names
+    // the value side only structurally (§1 `HotPreparedValueDecl` annotations →
+    // handles), NOT as named migration sites — so whether this class belongs in
+    // the frozen S4 SEMANTIC surface is a genuinely-ambiguous classification not
+    // settled by the disposition §2 list. Per the fix-brief STOP-rule it is
+    // FLAGGED to the block manager rather than guessed; it is intentionally not
+    // added (adding a partial set would make the surface inconsistent; adding the
+    // whole class would expand the frozen surface beyond what is settled).
 ];
 
 /// One anchored COMPAT body reader: a purpose-named compat helper DEFINITION, or
@@ -1184,10 +1392,12 @@ fn unclassified_method_chain_reads(
     out
 }
 
-/// The tripwire: every production `<recv>.body.<method>` lowered-body read sits
-/// at an anchor in EITHER inventory. A NEW or MOVED such read outside both
-/// reddens — a new lowered-body reader cannot silently widen the migration
-/// surface.
+/// The tripwire SUPPLEMENT: every production `<recv>.body.<method>` lowered-body
+/// read (incl. paren/ref-unwrapped and UFCS spellings) sits at an anchor in
+/// EITHER inventory. A NEW or MOVED such read outside both reddens at once. This
+/// is a bounded supplement to the enumeration (invariants 1-2), NOT the
+/// completeness rail — bare-field and local-binding-laundered reads are caught
+/// by the enumeration, not here (see the module "Honest scope" note).
 #[test]
 fn no_method_chain_body_read_outside_the_inventory() {
     let files = production_src_files();
@@ -1262,9 +1472,18 @@ fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
 /// The body-read SHAPE detector discriminates exactly the `<recv>.body.<method>`
 /// chain: it fires on `prepared.body.lookup_object()` / `lowered.body
 /// .contributors()` / `x.body.is_merged()`, but NOT on a `group.contributors()`
-/// (path receiver, not `.body`), NOT on a `body.lookup_object()` (a LOCAL var
-/// named `body`, not a `.body` field), NOT on a bare `program.body` field (no
-/// method), and NOT on a token only inside a comment / string literal.
+/// (path receiver, not `.body`), NOT on a bare `program.body` field (no method),
+/// and NOT on a token only inside a comment / string literal.
+///
+/// The `body.lookup_object()` non-detection below (a LOCAL var named `body`, not
+/// a `.body` field) is a DISCLOSED-LIMIT fixture: it documents that a
+/// method-chain read laundered through a local binding is OUT of the tripwire's
+/// sound syntactic reach (resolving the binding would need type resolution). It
+/// is covered by the ENUMERATION + the migration's frozen-file/parity gate, NOT
+/// by this tripwire — it is NOT a soundness claim and is deliberately NOT chased
+/// with further detector cases (anti-arms-race; see the module "Honest scope").
+/// Paren/reference and UFCS spellings ARE detected — covered by
+/// [`body_read_shape_detector_handles_paren_ref_and_ufcs`].
 #[test]
 fn body_read_shape_detector_discriminates() {
     // FIRES on the three chain shapes.
@@ -1285,8 +1504,10 @@ fn body_read_shape_detector_discriminates() {
     );
 
     // Does NOT fire on a decl-GROUP `.contributors()` (receiver is `group`, not
-    // `.body`), a LOCAL `body.lookup_object()` (path receiver named `body`), or
-    // a bare `program.body` field (no method).
+    // `.body`), a bare `program.body` field (no method), or the DISCLOSED-LIMIT
+    // local-binding launder `let body = ...; body.lookup_object()` (path
+    // receiver named `body`, not a `.body` field — out of sound syntactic reach,
+    // covered by the enumeration, NOT chased).
     let negative = "impl H {\n    \
         fn r(&self, group: &G, program: &Prog) {\n        \
             let _ = group.contributors();\n        \
@@ -1298,8 +1519,9 @@ fn body_read_shape_detector_discriminates() {
     let nr = neg_inv.iter().find(|d| d.name == "r").expect("fn r");
     assert!(
         nr.body_reads.is_empty(),
-        "self-test: a `group.contributors()` (not `.body`), a LOCAL `body.lookup_object()` (path \
-         receiver), and a bare `program.body` field must NOT be detected — got {:?}",
+        "self-test: a `group.contributors()` (not `.body`), the DISCLOSED-LIMIT local \
+         `body.lookup_object()` (path receiver), and a bare `program.body` field must NOT be \
+         detected — got {:?}",
         nr.body_reads
     );
 
@@ -1316,6 +1538,83 @@ fn body_read_shape_detector_discriminates() {
         cr.body_reads.is_empty(),
         "self-test: a `<recv>.body.<method>` mention only inside a comment/string must NOT be \
          detected — got {:?}",
+        cr.body_reads
+    );
+}
+
+/// The BOUNDED hardening: the detector unwraps paren/reference receivers and
+/// recognizes the UFCS call form, and matches the FULL `TypeDeclBody` reader
+/// method set (incl. the newly-added `primary` / `merged_member_names`). Each
+/// planted spelling MUST be detected; the controls (a UFCS-shaped call whose
+/// argument is NOT a `.body` field, and a bare unqualified `lookup_object(x)`
+/// free-fn call) MUST NOT.
+#[test]
+fn body_read_shape_detector_handles_paren_ref_and_ufcs() {
+    // FIRES: paren receiver, ref receiver, ref+paren receiver, deref receiver,
+    // and the two newly-added methods on a plain `.body` receiver.
+    let positive = "impl H {\n    \
+        fn r(&self, lowered: &L) {\n        \
+            let _ = (lowered.body).lookup_object();\n        \
+            let _ = (&lowered.body).contributors();\n        \
+            let _ = (&mut lowered.body).is_merged();\n        \
+            let _ = (*lowered.body).primary();\n        \
+            let _ = lowered.body.merged_member_names();\n    \
+        }\n}\n";
+    let inv = inventory_for(&[("synthetic.rs".to_string(), positive.to_string())]);
+    let r = inv.iter().find(|d| d.name == "r").expect("fn r");
+    for m in [
+        "lookup_object",
+        "contributors",
+        "is_merged",
+        "primary",
+        "merged_member_names",
+    ] {
+        assert!(
+            r.body_reads.contains(m),
+            "self-test (paren/ref hardening): `{m}` via a paren/ref/deref `.body` receiver (or the \
+             new method on a plain `.body`) MUST be detected — got {:?}",
+            r.body_reads
+        );
+    }
+
+    // FIRES: the UFCS / fully-qualified call forms with a `.body` (or
+    // paren/ref-wrapped `.body`) argument.
+    let ufcs = "impl H {\n    \
+        fn r(&self, lowered: &L) {\n        \
+            let _ = TypeDeclBody::contributors(&lowered.body);\n        \
+            let _ = <TypeDeclBody>::lookup_object(lowered.body);\n        \
+            let _ = TypeDeclBody::primary((&lowered.body));\n    \
+        }\n}\n";
+    let uinv = inventory_for(&[("synthetic.rs".to_string(), ufcs.to_string())]);
+    let ur = uinv.iter().find(|d| d.name == "r").expect("fn r");
+    for m in ["contributors", "lookup_object", "primary"] {
+        assert!(
+            ur.body_reads.contains(m),
+            "self-test (UFCS hardening): the UFCS `TypeDeclBody::{m}(&<recv>.body)` form MUST be \
+             detected — got {:?}",
+            ur.body_reads
+        );
+    }
+
+    // CONTROLS — MUST NOT fire:
+    //   1. a UFCS-shaped call whose argument is NOT a `.body` field
+    //      (`&lowered.other`) — the qualified path is a body-read method name but
+    //      no `.body` argument is present.
+    //   2. a bare UNQUALIFIED `lookup_object(x)` free-fn call (single-segment
+    //      path, no qself) — not a `.body`-field read shape even with a `.body`
+    //      argument, because an unqualified call is not a `TypeDeclBody` method
+    //      invocation.
+    let controls = "impl H {\n    \
+        fn r(&self, lowered: &L) {\n        \
+            let _ = TypeDeclBody::contributors(&lowered.other);\n        \
+            let _ = lookup_object(&lowered.body);\n    \
+        }\n}\n";
+    let cinv = inventory_for(&[("synthetic.rs".to_string(), controls.to_string())]);
+    let cr = cinv.iter().find(|d| d.name == "r").expect("fn r");
+    assert!(
+        cr.body_reads.is_empty(),
+        "self-test (hardening controls): a UFCS call with a non-`.body` argument and a bare \
+         unqualified `lookup_object(..)` free-fn call must NOT be detected — got {:?}",
         cr.body_reads
     );
 }
@@ -1395,6 +1694,118 @@ fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
         unclassified_method_chain_reads(&anchor_inv, &allowed).is_empty(),
         "self-test (tripwire GREEN): a `<recv>.body.lookup_object()` read at the inventoried anchor \
          (shallow_file_state.rs :: impl ShallowFileState :: route_closure) must NOT be flagged"
+    );
+}
+
+/// The ENUMERATION is the completeness rail for BARE-FIELD body readers (which
+/// the method-chain tripwire structurally cannot see). This proves:
+///
+///   1. A synthetic bare `<recv>.body.clone()` prepared-style reader at a
+///      NON-inventoried anchor produces ZERO method-chain hits — so the tripwire
+///      is NOT the rail that closes the bare-field class; the enumeration is.
+///   2. The three bare-field semantic readers FIX-1 added (`route_keys ::
+///      enumerate_member_surface_keys_via_route`, `external_type_frontier ::
+///      resolve_one`, `component_meta_methods :: append_component_meta_registry_
+///      entries`) are present in `SEMANTIC_BODY_READERS` AND resolve to exactly
+///      one non-test def on the real tree — the enumeration row is load-bearing.
+///   3. PRESENCE discriminates: the exact `route_keys` anchor IS present; a
+///      deliberately-mutated (wrong-fn-name) variant of it is NOT — so a moved /
+///      removed / renamed bare-field reader reddens
+///      `every_enumerated_body_reader_is_present_at_its_anchor`.
+#[test]
+fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
+    let allowed = method_chain_allowed_anchors();
+
+    // (1) A bare `.body.clone()` read is INVISIBLE to the method-chain tripwire
+    // — confirming the enumeration (not the tripwire) must carry it.
+    let bare_field_reader = "impl Sneaky {\n    \
+        fn new_bare_field_reader(&self, p: &P) -> Option<TypeExpr> {\n        \
+            self.prepared_type_decl(\"x\").map(|p| p.body.clone())\n    \
+        }\n}\n";
+    let bf_inv = inventory_for(&[(
+        "src/resolver_core/some_new_module.rs".to_string(),
+        bare_field_reader.to_string(),
+    )]);
+    let bf = bf_inv
+        .iter()
+        .find(|d| d.name == "new_bare_field_reader")
+        .expect("fn present");
+    assert!(
+        bf.body_reads.is_empty(),
+        "self-test: a bare `<recv>.body.clone()` read must NOT register as a method-chain read — \
+         the tripwire is blind to it, so the enumeration is its only rail. Got {:?}",
+        bf.body_reads
+    );
+    assert!(
+        unclassified_method_chain_reads(&bf_inv, &allowed).is_empty(),
+        "self-test: a bare-field reader at a non-inventoried anchor produces NO tripwire hit — \
+         proving the tripwire cannot be the completeness rail for bare-field readers"
+    );
+
+    // (2) The four FIX-1 bare-field readers are enumerated AND present + unique
+    // on the real tree (the enumeration row is load-bearing).
+    let files = production_src_files();
+    let real_inv = build_fn_inventory(&files);
+    let fix1_anchors: [(&str, &str, &str); 4] = [
+        (
+            "src/resolver_core/component_meta_query_engine/route_keys.rs",
+            "impl ComponentMetaQueryEngine",
+            "enumerate_member_surface_keys_via_route",
+        ),
+        (
+            "src/resolver_core/external_type_frontier.rs",
+            "impl ExternalTypeFrontier",
+            "resolve_one",
+        ),
+        (
+            "src/host_manage/component_meta_methods.rs",
+            "impl VerterHost",
+            "append_component_meta_registry_entries",
+        ),
+        (
+            "src/host_manage/eval_env.rs",
+            "impl VerterHost",
+            "dependency_value_symbol_graph_native",
+        ),
+    ];
+    for (file, impl_path, fn_name) in fix1_anchors {
+        assert!(
+            SEMANTIC_BODY_READERS.iter().any(|r| r.file == file
+                && r.impl_path == impl_path
+                && r.fn_name == fn_name
+                && !r.method_chain),
+            "self-test: the FIX-1 bare-field reader `{file} :: {impl_path} :: {fn_name}` must be a \
+             `method_chain: false` row in SEMANTIC_BODY_READERS"
+        );
+        assert_eq!(
+            anchored_defs(&real_inv, file, impl_path, fn_name).len(),
+            1,
+            "self-test: the FIX-1 reader `{file} :: {impl_path} :: {fn_name}` must resolve to \
+             exactly one non-test def on the real tree (the enumeration row is load-bearing)"
+        );
+    }
+
+    // (3) PRESENCE discriminates on the route_keys anchor: present as-is, absent
+    // when the fn name is mutated — so a moved/renamed bare-field reader reddens
+    // the presence check.
+    assert!(
+        anchored_definition_present(
+            &real_inv,
+            "src/resolver_core/component_meta_query_engine/route_keys.rs",
+            "impl ComponentMetaQueryEngine",
+            "enumerate_member_surface_keys_via_route"
+        ),
+        "self-test: the route_keys bare-field reader IS present at its anchor"
+    );
+    assert!(
+        !anchored_definition_present(
+            &real_inv,
+            "src/resolver_core/component_meta_query_engine/route_keys.rs",
+            "impl ComponentMetaQueryEngine",
+            "enumerate_member_surface_keys_via_route_MUTATED_zzz"
+        ),
+        "self-test (presence discrimination): a mutated route_keys anchor must NOT be present — so \
+         a moved/renamed bare-field reader reddens the presence check"
     );
 }
 
@@ -1652,10 +2063,12 @@ fn real_tree_satisfies_all_four_invariants() {
     );
 }
 
-/// Non-vacuity: parsing the real tree yields a large fn inventory that records
-/// at least one cfg-test fn AND at least one real `<recv>.body.<method>` read,
-/// and the method-chain allowlist is exactly the inventoried `method_chain`
-/// rows (2 COMPAT + 10 SEMANTIC = 12).
+/// Non-vacuity + mechanically-pinned counts: parsing the real tree yields a
+/// large fn inventory that records at least one cfg-test fn AND at least one real
+/// `<recv>.body.<method>` read; the method-chain allowlist is exactly the
+/// inventoried `method_chain` rows (2 COMPAT + 10 SEMANTIC = 12); and the TOTAL
+/// inventory sizes are pinned (37 SEMANTIC `ReaderRow` + 5 COMPAT `CompatRow`)
+/// so the frozen-surface count cannot drift silently.
 #[test]
 fn real_tree_inventory_is_non_vacuous() {
     let files = production_src_files();
@@ -1664,6 +2077,28 @@ fn real_tree_inventory_is_non_vacuous() {
         inv.len() > 100,
         "self-test: the structural inventory must contain many fn definitions — got {}",
         inv.len()
+    );
+    // FIX-4: mechanically pin the honest total inventory sizes. The frozen
+    // SEMANTIC surface is 37 rows = 34 original − 1 corrected mis-attribution
+    // (`collect_one_filtered_expr`, a nested helper that reads NO carrier; its
+    // file's real named_decl_body-caller anchor is
+    // `append_component_meta_registry_entries`) + 4 FIX-1 sweep additions
+    // (route_keys::enumerate_member_surface_keys_via_route,
+    // external_type_frontier::resolve_one,
+    // component_meta_methods::append_component_meta_registry_entries,
+    // eval_env::dependency_value_symbol_graph_native). The
+    // `PreparedValueDecl.type_annotation` class is FLAGGED-not-added (ambiguous —
+    // see the NOTE at the end of SEMANTIC_BODY_READERS). The COMPAT surface is 5
+    // rows.
+    assert_eq!(
+        SEMANTIC_BODY_READERS.len(),
+        37,
+        "self-test (count pin): SEMANTIC_BODY_READERS must have exactly 37 rows"
+    );
+    assert_eq!(
+        COMPAT_BODY_READERS.len(),
+        5,
+        "self-test (count pin): COMPAT_BODY_READERS must have exactly 5 rows"
     );
     assert!(
         inv.iter().any(|d| d.cfg_test),

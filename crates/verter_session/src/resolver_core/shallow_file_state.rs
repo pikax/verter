@@ -1029,13 +1029,21 @@ impl ShallowFileState {
     /// from the semantic readers (which still read the typed body directly). It
     /// is anchored as a COMPAT site by the frozen body-reader inventory guard.
     ///
-    /// `#[allow(dead_code)]`: the sole reach is the typeinfo/hover oracle's
-    /// source walk (`oracle_core::source_walk::walk`), whose outermost entry
-    /// (`oracle_core::driver::run_row`) is the beside-the-live-path equivalence
-    /// harness consumed by the parity guards — the same guard-only reach the
-    /// sibling oracle helpers in `oracle_core::admission` carry the allow for.
-    /// (The previous inline read went through the `pub` `type_decl`, which never
-    /// surfaced this latent visibility fact.)
+    /// `#[allow(dead_code)]`: genuinely dead in a default build. The sole reach
+    /// is the typeinfo/hover oracle's source walk
+    /// (`oracle_core::source_walk::walk`), and the WHOLE `oracle_core` module is
+    /// gated `#[cfg(any(test, feature = "oracle-gen"))]` (`typeinfo/mod.rs`) with
+    /// `oracle-gen` NOT a default feature (`Cargo.toml: default = []`), so the
+    /// default resolver build compiles this helper out entirely. Its outermost
+    /// callers are the `#[oracle_row]`-lifted `#[test]` rows (the proc-macro
+    /// expands to `oracle::run_row(file!(), "<fn>")` — `run_row` itself is the
+    /// one-hop-up `#[cfg(test)] pub(crate)` dispatcher) and the `oracle-gen`-only
+    /// generator binary (`src/bin/oracle_gen`, `required-features =
+    /// ["oracle-gen"]`) — the same guard/generator-only reach the sibling oracle
+    /// helpers in `oracle_core::admission` carry the allow for. The compat
+    /// routing did NOT change reachability: the previous inline read was equally
+    /// cfg-gated but went through the `pub` `type_decl`, which never surfaced
+    /// this latent visibility fact.
     #[allow(dead_code)]
     pub(crate) fn compat_type_contributors_for_typeinfo(
         &self,
