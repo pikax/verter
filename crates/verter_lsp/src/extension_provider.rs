@@ -17,10 +17,11 @@ use tokio::sync::{Mutex, OnceCell};
 use crate::server::{TsQuery, TsQueryParams};
 use crate::tsserver::ipc::{
     build_completion_entry_details_request, build_entry_names_entry, byte_offset_to_tsserver_pos,
-    completion_entry_details_to_resolve_result, concat_display_parts,
-    enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
-    parse_tsserver_code_action, parse_tsserver_completion, parse_tsserver_diagnostic,
-    parse_tsserver_location, parse_tsserver_rename_span, stamp_tsserver_completion_offset,
+    combined_code_fix_args, completion_entry_details_to_resolve_result, concat_display_parts,
+    dedup_error_codes, enrich_completion_with_entry_details, format_quickinfo_hover,
+    merge_diagnostic_sets, parse_tsserver_code_action, parse_tsserver_combined_code_fix,
+    parse_tsserver_completion, parse_tsserver_diagnostic, parse_tsserver_location,
+    parse_tsserver_rename_span, stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
 use crate::type_provider::traits::{ProviderFuture, TypeProvider};
@@ -838,10 +839,17 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         path: &str,
         start_offset: u32,
         end_offset: u32,
+        diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         let file = Self::normalize_path(path);
         let contents_cache = Arc::clone(&self.contents);
+        // Mirror the out-of-process tsserver path: key the fixes off the
+        // diagnostic error codes, short-circuiting when none are numeric.
+        let error_codes = dedup_error_codes(diagnostics);
         Box::pin(async move {
+            if error_codes.is_empty() {
+                return Ok(vec![]);
+            }
             let (sl, sc, el, ec) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&file) {
@@ -863,26 +871,56 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         "startOffset": sc,
                         "endLine": el,
                         "endOffset": ec,
-                        "errorCodes": [],
+                        "errorCodes": error_codes,
                     }),
                 )
                 .await;
 
-            match result {
-                Ok(body) => {
-                    let cache = contents_cache.lock().await;
-                    let actions = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|a| parse_tsserver_code_action(a, &cache))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    Ok(actions)
+            let raw_fixes = match result {
+                Ok(body) => body.as_array().cloned().unwrap_or_default(),
+                Err(_) => return Ok(vec![]),
+            };
+
+            // Single-fix actions first, then their combined "fix all" companions.
+            let mut actions: Vec<TypeCodeAction> = {
+                let cache = contents_cache.lock().await;
+                raw_fixes
+                    .iter()
+                    .filter_map(|a| parse_tsserver_code_action(a, &cache))
+                    .collect()
+            };
+
+            // Follow each DISTINCT combinable `fixId` once (e.g. "Delete all unused
+            // declarations"), titled from the fix's typed `fixAllDescription` —
+            // never a title-string match.
+            let mut combined: Vec<TypeCodeAction> = Vec::new();
+            let mut seen_fix_ids: HashSet<String> = HashSet::new();
+            for fix in &raw_fixes {
+                let Some(fix_id) = fix.get("fixId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if fix_id.is_empty() || !seen_fix_ids.insert(fix_id.to_string()) {
+                    continue;
                 }
-                Err(_) => Ok(vec![]),
+                let fix_all_title = fix
+                    .get("fixAllDescription")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                if let Ok(body) = self
+                    .query("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
+                    .await
+                {
+                    let cache = contents_cache.lock().await;
+                    if let Some(action) =
+                        parse_tsserver_combined_code_fix(&body, fix_all_title.as_deref(), &cache)
+                    {
+                        combined.push(action);
+                    }
+                }
             }
+
+            actions.extend(combined);
+            Ok(actions)
         })
     }
 

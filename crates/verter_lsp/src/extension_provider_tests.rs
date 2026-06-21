@@ -426,3 +426,156 @@ async fn extension_provider_resolve_rejects_non_tsserver_handle_without_transpor
         "fail-closed resolve must not emit a $/verter/tsQuery request"
     );
 }
+
+/// F2 (review finding): the extension provider's `get_code_actions` must surface
+/// BOTH the single "Remove unused declaration" fix AND its combined "Delete all
+/// unused declarations" companion. The companion requires the provider to (a) read
+/// the `fixId` + `fixAllDescription` from the `getCodeFixes` response and (b) follow
+/// up with a `getCombinedCodeFix` request carrying the SHARED
+/// `combined_code_fix_args` scope shape.
+///
+/// This drives the actual Rust combined-fix loop end-to-end through the mock
+/// transport. Discriminating three ways:
+///   * if the provider stopped reading `fixId` from the bridge response, the
+///     combined branch would never run and only ONE action would come back;
+///   * the test asserts the emitted `getCombinedCodeFix` args EXACTLY match
+///     `combined_code_fix_args(file, fix_id)` — `{ scope: { type, args: { file } },
+///     fixId }` — so a drifted arg shape fails loudly;
+///   * the combined action's title comes from `fixAllDescription` (never a
+///     title-string match), proving the typed fix-all path.
+#[tokio::test]
+async fn extension_provider_get_code_actions_surfaces_single_and_combined_unused_fix() {
+    use verter_type_runtime::tsserver::ipc::combined_code_fix_args;
+
+    let file = "/workspace/src/entry.ts";
+    // `const unused = 1` — TS6133 fires at the decl. Byte offsets 6..11 cover the
+    // identifier `unused` (the diagnostic span the handler forwards).
+    let content = "const unused = 1;\n";
+
+    let transport = ScriptedTsQueryTransport::new();
+
+    // open_file → "open" (populates the provider's content cache so byte offsets
+    // convert to 1-based tsserver positions).
+    transport.push_response("open", json!({}));
+
+    // getCodeFixes → the single "Remove unused declaration" fix, carrying the
+    // typed `fixId` + `fixAllDescription` the bridge now forwards.
+    transport.push_response(
+        "getCodeFixes",
+        json!([
+            {
+                "description": "Remove unused declaration for: 'unused'",
+                "fixId": "unusedIdentifier_delete",
+                "fixAllDescription": "Delete all unused declarations",
+                "changes": [
+                    {
+                        "fileName": file,
+                        "textChanges": [
+                            {
+                                "start": { "line": 1, "offset": 1 },
+                                "end": { "line": 1, "offset": 18 },
+                                "newText": ""
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]),
+    );
+
+    // getCombinedCodeFix → the "fix all" companion edits for that fixId.
+    transport.push_response(
+        "getCombinedCodeFix",
+        json!({
+            "changes": [
+                {
+                    "fileName": file,
+                    "textChanges": [
+                        {
+                            "start": { "line": 1, "offset": 1 },
+                            "end": { "line": 1, "offset": 18 },
+                            "newText": ""
+                        }
+                    ]
+                }
+            ]
+        }),
+    );
+
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/workspace");
+
+    provider
+        .open_file(file, content)
+        .await
+        .expect("open_file routes through the mock transport");
+
+    // The diagnostic context: TS6133 over the `unused` identifier (byte 6..11).
+    let diag = ProviderDiagnosticContext {
+        code: 6133,
+        start: 6,
+        end: 11,
+    };
+    let actions = provider
+        .get_code_actions(file, 6, 11, &[diag])
+        .await
+        .expect("get_code_actions routes through the mock transport");
+
+    // The provider followed getCodeFixes with a getCombinedCodeFix, in order.
+    let commands = transport.commands();
+    assert_eq!(
+        commands,
+        vec![
+            "open".to_string(),
+            "getCodeFixes".to_string(),
+            "getCombinedCodeFix".to_string(),
+        ],
+        "the provider must follow getCodeFixes with a getCombinedCodeFix for the combinable fixId"
+    );
+
+    // The getCodeFixes request carried the deduped numeric error code.
+    let cf_args = transport.first_args("getCodeFixes");
+    assert_eq!(cf_args["errorCodes"], json!([6133]));
+
+    // The getCombinedCodeFix request shape EXACTLY matches the shared
+    // `combined_code_fix_args(file, fix_id)` — proving the provider does not
+    // hand-roll the scope shape.
+    let combined_args = transport.first_args("getCombinedCodeFix");
+    assert_eq!(
+        combined_args,
+        combined_code_fix_args(file, "unusedIdentifier_delete"),
+        "the combined-fix request must use the shared combined_code_fix_args scope shape"
+    );
+    assert_eq!(combined_args["scope"]["type"], json!("file"));
+    assert_eq!(combined_args["scope"]["args"]["file"], json!(file));
+    assert_eq!(combined_args["fixId"], json!("unusedIdentifier_delete"));
+
+    // BOTH actions surface: the single deletion AND the combined "Delete all
+    // unused declarations" (titled from `fixAllDescription`).
+    let titles: Vec<&str> = actions.iter().map(|a| a.title.as_str()).collect();
+    assert!(
+        titles
+            .iter()
+            .any(|t| t.contains("Remove unused declaration")),
+        "the single remove-unused fix must be surfaced, got {titles:?}"
+    );
+    assert!(
+        titles.contains(&"Delete all unused declarations"),
+        "the combined fix-all companion (titled from fixAllDescription) must be surfaced, \
+         got {titles:?}"
+    );
+    assert_eq!(
+        actions.len(),
+        2,
+        "exactly the single fix and its combined companion, got {titles:?}"
+    );
+    // The combined action carries the deletion edit (empty new_text).
+    let combined = actions
+        .iter()
+        .find(|a| a.title == "Delete all unused declarations")
+        .expect("combined action present");
+    assert_eq!(combined.edits.len(), 1, "the combined fix carries its edit");
+    assert!(
+        combined.edits[0].new_text.is_empty(),
+        "the combined deletion edit has empty new_text"
+    );
+}

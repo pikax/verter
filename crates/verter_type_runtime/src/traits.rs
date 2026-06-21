@@ -112,11 +112,22 @@ pub trait TypeProvider: Send + Sync {
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>>;
 
+    /// Code actions (quick fixes / refactors) for the carrier range
+    /// `[start_offset, end_offset)` in the queried TSX file.
+    ///
+    /// `diagnostics` carries the codes + TSX-mapped ranges of the diagnostics the
+    /// editor sent with the request (`params.context.diagnostics`), already parsed
+    /// and fail-closed by the LSP handler. The tsserver-family providers feed the
+    /// codes into `getCodeFixes` `errorCodes`; TSGO synthesizes the
+    /// `textDocument/codeAction` `context.diagnostics` array from them. An empty
+    /// slice means the request carried no numeric-coded diagnostics — providers
+    /// short-circuit to an empty result rather than issuing a useless round-trip.
     fn get_code_actions(
         &self,
         path: &str,
         start_offset: u32,
         end_offset: u32,
+        diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>>;
 
     fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>>;

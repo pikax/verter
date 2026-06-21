@@ -459,6 +459,13 @@ export class ExtensionTsService {
 
         return fixes.map((fix) => ({
           description: fix.description,
+          // Pass through the typed fix-all identity so the Rust extension provider
+          // can follow each distinct `fixId` with a `getCombinedCodeFix` request and
+          // surface the "Delete all unused declarations" companion. Both are
+          // OPTIONAL on `ts.CodeFixAction` (a non-combinable fix carries neither);
+          // forwarding `undefined` is harmless (the Rust side reads them as None).
+          fixId: fix.fixId,
+          fixAllDescription: fix.fixAllDescription,
           changes: fix.changes.map((change) => ({
             fileName: change.fileName,
             textChanges: change.textChanges.map((tc) => ({
@@ -471,6 +478,41 @@ export class ExtensionTsService {
             })),
           })),
         }));
+      }
+
+      // The "fix all" companion for a combinable `fixId` (e.g. "Delete all unused
+      // declarations"). The Rust extension provider sends the shared
+      // `combined_code_fix_args` scope shape:
+      //   { scope: { type: "file", args: { file } }, fixId }
+      // (see `verter_type_runtime::tsserver::ipc::combined_code_fix_args`). The
+      // response mirrors the `getCodeFixes` `changes` shape exactly — 1-based
+      // `{ line, offset }` positions — so the shared
+      // `parse_tsserver_combined_code_fix` reads it without a second mapping.
+      case "getCombinedCodeFix": {
+        const scope = args.scope as { type: "file"; args: { file: string } };
+        const file = scope.args.file;
+        const fixId = args.fixId as {} | string;
+
+        const combined = this.service.getCombinedCodeFix(
+          { type: "file", fileName: file },
+          fixId,
+          {},
+          {},
+        );
+
+        return {
+          changes: combined.changes.map((change) => ({
+            fileName: change.fileName,
+            textChanges: change.textChanges.map((tc) => ({
+              start: this.offsetToPosition(this.getFileText(change.fileName), tc.span.start),
+              end: this.offsetToPosition(
+                this.getFileText(change.fileName),
+                tc.span.start + tc.span.length,
+              ),
+              newText: tc.newText,
+            })),
+          })),
+        };
       }
 
       case "encodedSemanticClassifications-full": {

@@ -31,6 +31,7 @@ use crate::features::linked_editing::linked_editing_ranges;
 use crate::features::organize_imports::organize_imports_actions;
 use crate::features::workspace_symbol::workspace_symbols;
 use crate::type_provider::merge;
+use crate::type_provider::protocol::ProviderDiagnosticContext;
 
 use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::server_utils::*;
@@ -439,9 +440,19 @@ pub(super) async fn handle_code_action(
     // prelude) and CORRUPT the module. Code actions stay DEFERRED for the
     // self-file projection — a clean no-op, never a wrong/unmapped edit.
     // (Carrier code actions unchanged.)
+    // The provider's `get_code_actions` issues `getCodeFixes` only — it returns
+    // QUICKFIX-kind actions (e.g. the TS6133 remove-unused-declaration fix and its
+    // delete-all-unused companion), never refactors and never source actions. So
+    // gating it on a non-`quickfix` kind would return quickfixes the client
+    // explicitly did NOT ask for (an LSP `context.only` violation). Gate on
+    // `quickfix` / `None` only; the implicit `None` (all-kinds) case still fires
+    // because `wants_code_action_kind(None, _)` is true. The `source.removeUnused`
+    // SOURCE action (fixAll-on-save / "Source Action…" removing all unused without a
+    // cursor-on-diagnostic) is a separate surface DEFERRED to the `source.*` backlog
+    // — it is intentionally NOT wired into this gate.
     if !server.is_self_file_projection(uri)
         && !server.is_typing_cooldown()
-        && (wants_code_action_kind(only, "quickfix") || wants_code_action_kind(only, "refactor"))
+        && wants_code_action_kind(only, "quickfix")
     {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
@@ -457,8 +468,21 @@ pub(super) async fn handle_code_action(
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                 );
+                // Resolve the editor's diagnostics (codes + ranges) into the
+                // provider-facing context: parse each `code` to an integer and map
+                // each range to TSX byte offsets, fail-closed (an unparseable code
+                // or an unmappable range drops that diagnostic). The provider feeds
+                // these into `getCodeFixes` / `context.diagnostics`.
+                let diag_ctx = build_provider_diagnostic_contexts(
+                    &params.context.diagnostics,
+                    &ctx.carrier_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                );
                 if let (Some(so), Some(eo)) = (start_offset, end_offset) {
-                    if let Ok(type_actions) = tp.get_code_actions(&ctx.tsx_path, so, eo).await {
+                    if let Ok(type_actions) =
+                        tp.get_code_actions(&ctx.tsx_path, so, eo, &diag_ctx).await
+                    {
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let negotiated_encoding = server.position_encoding.read().clone();
@@ -487,6 +511,54 @@ pub(super) async fn handle_code_action(
     } else {
         Some(all_actions)
     })
+}
+
+/// Parse an LSP diagnostic `code` into the integer TypeScript error code the
+/// provider code-fix path keys on.
+///
+/// - `Number(n)` → included when it fits `u32`.
+/// - `String(s)` → parsed as a decimal `u32` (Verter publishes TS codes as
+///   strings, e.g. `"6133"`).
+/// - a non-numeric string or a missing code → `None` (skipped, fail-closed).
+fn parse_diagnostic_code(code: Option<&NumberOrString>) -> Option<u32> {
+    match code? {
+        NumberOrString::Number(n) => u32::try_from(*n).ok(),
+        NumberOrString::String(s) => s.parse::<u32>().ok(),
+    }
+}
+
+/// Resolve the editor's `params.context.diagnostics` into the provider-facing
+/// [`ProviderDiagnosticContext`] list: parse each `code` to an integer and map
+/// each range to TSX byte offsets in the queried generated file.
+///
+/// Fail-closed: a diagnostic whose code is non-numeric, or whose range does not
+/// map cleanly into the TSX, is dropped rather than forwarded with a guessed code
+/// or an off-by-prelude range.
+fn build_provider_diagnostic_contexts(
+    diagnostics: &[Diagnostic],
+    carrier_line_index: &LineIndex,
+    mapper: &crate::documents::provider_projection::ProviderPositionMapper,
+    tsx_line_index: &LineIndex,
+) -> Vec<ProviderDiagnosticContext> {
+    diagnostics
+        .iter()
+        .filter_map(|diag| {
+            let code = parse_diagnostic_code(diag.code.as_ref())?;
+            let start = merge::carrier_position_to_tsx_offset_validated(
+                &diag.range.start,
+                carrier_line_index,
+                mapper,
+                tsx_line_index,
+            )?;
+            let end = merge::carrier_position_to_tsx_offset_validated(
+                &diag.range.end,
+                carrier_line_index,
+                mapper,
+                tsx_line_index,
+            )?;
+            Some(ProviderDiagnosticContext { code, start, end })
+        })
+        .collect()
 }
 
 /// Audit-aware wrapper for [`handle_code_action`].
@@ -1096,6 +1168,182 @@ mod on_type_gate_tests {
         assert_eq!(
             carrier_kind_for_on_type("plaintext", "file:///proj/src/App.svelte"),
             Some(CarrierKind::Svelte),
+        );
+    }
+}
+
+#[cfg(test)]
+mod code_action_diag_ctx_tests {
+    use super::{build_provider_diagnostic_contexts, parse_diagnostic_code};
+    use crate::documents::line_index::LineIndex;
+    use crate::documents::position_map::PositionMapper;
+    use crate::documents::provider_projection::ProviderPositionMapper;
+    use tower_lsp_server::ls_types::{Diagnostic, NumberOrString, Position, Range};
+
+    // ── parse_diagnostic_code: Number / String / non-numeric / missing ──────
+
+    /// Verter publishes TS codes as strings (`code: String("6133")`); the handler
+    /// must parse that decimal string to the integer 6133 the code-fix path needs.
+    #[test]
+    fn parses_string_code_to_integer() {
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::String("6133".to_string()))),
+            Some(6133),
+        );
+    }
+
+    /// A numeric `code` is taken directly when it fits u32.
+    #[test]
+    fn parses_number_code_directly() {
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::Number(6133))),
+            Some(6133),
+        );
+    }
+
+    /// A non-numeric string code is dropped (fail-closed) — never forwarded as a
+    /// guessed/0 code.
+    #[test]
+    fn drops_non_numeric_string_code() {
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::String("notanumber".to_string()))),
+            None,
+        );
+        // An empty string is likewise non-numeric.
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::String(String::new()))),
+            None,
+        );
+    }
+
+    /// A missing code is dropped.
+    #[test]
+    fn drops_missing_code() {
+        assert_eq!(parse_diagnostic_code(None), None);
+    }
+
+    /// A negative numeric code does not fit u32 and is dropped (no wraparound).
+    #[test]
+    fn drops_negative_number_code() {
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::Number(-1))),
+            None,
+        );
+    }
+
+    // ── build_provider_diagnostic_contexts: parse + map + fail-closed ────────
+
+    /// An identity-mapped carrier/TSX (same text, 1:1 source map) lets us assert
+    /// the full pipeline: a `String("6133")`-coded diagnostic over a mapped range
+    /// yields a `ProviderDiagnosticContext { code: 6133, .. }` with a real TSX
+    /// span; a non-numeric-coded diagnostic in the same batch is dropped.
+    fn identity_mapping() -> (ProviderPositionMapper, LineIndex, LineIndex) {
+        let src = "const foo = 1;\nconst bar = 2;\n";
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let source_id = builder.set_source_and_content("App.vue", src);
+        // 1:1 tokens for both lines so carrier positions map straight through.
+        builder.add_token(0, 0, 0, 0, Some(source_id), None);
+        builder.add_token(1, 0, 1, 0, Some(source_id), None);
+        let json = builder.into_sourcemap().to_json_string();
+        let mapper = ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
+        let li = LineIndex::new_utf16(src);
+        let tsx_li = LineIndex::new_utf16(src);
+        (mapper, li, tsx_li)
+    }
+
+    fn diag_at(line: u32, start_char: u32, end_char: u32, code: NumberOrString) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line,
+                    character: start_char,
+                },
+                end: Position {
+                    line,
+                    character: end_char,
+                },
+            },
+            code: Some(code),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn threads_6133_and_drops_non_numeric() {
+        let (mapper, carrier_li, tsx_li) = identity_mapping();
+        let diags = vec![
+            // `const foo` on line 0, cols 0..9 — a TS6133 published as a string.
+            diag_at(0, 0, 9, NumberOrString::String("6133".to_string())),
+            // A non-numeric code in the same batch must be dropped.
+            diag_at(1, 0, 9, NumberOrString::String("oops".to_string())),
+        ];
+        let ctxs = build_provider_diagnostic_contexts(&diags, &carrier_li, &mapper, &tsx_li);
+        assert_eq!(
+            ctxs.len(),
+            1,
+            "only the numeric-coded diagnostic should be threaded; got {ctxs:?}"
+        );
+        assert_eq!(
+            ctxs[0].code, 6133,
+            "the parsed code must be the integer 6133"
+        );
+        // The mapped TSX span covers `const foo` (byte 0..9 on the identity map).
+        assert_eq!(ctxs[0].start, 0);
+        assert_eq!(ctxs[0].end, 9);
+    }
+
+    /// An empty diagnostics list yields an empty context list (the provider call
+    /// then short-circuits).
+    #[test]
+    fn empty_diagnostics_yield_empty_contexts() {
+        let (mapper, carrier_li, tsx_li) = identity_mapping();
+        let ctxs = build_provider_diagnostic_contexts(&[], &carrier_li, &mapper, &tsx_li);
+        assert!(ctxs.is_empty());
+    }
+
+    /// Architect ruling (UPHELD): the forwarding is GENERIC over numeric codes,
+    /// NOT hardcoded to 6133. A non-6133 numeric code (e.g. TS2304
+    /// "cannot find name") over a mappable range IS forwarded to the provider,
+    /// carrying that exact integer code — while a native Verter string code
+    /// (`"verter/..."`) is filtered out by the numeric parse.
+    ///
+    /// Discriminating two ways: a regression that hardcoded `code == 6133` would
+    /// DROP the 2304 context (so `ctxs` would be empty / the code assertion
+    /// fails); a regression that forwarded non-numeric Verter codes would let the
+    /// `"verter/..."` diagnostic through (so the length would be 2). Both the
+    /// `Number(2304)` and the `String("2304")` spellings are exercised.
+    #[test]
+    fn forwards_arbitrary_numeric_code_and_drops_verter_string_code() {
+        let (mapper, carrier_li, tsx_li) = identity_mapping();
+        let diags = vec![
+            // A non-6133 numeric code published as a decimal STRING (the editor form).
+            diag_at(0, 0, 9, NumberOrString::String("2304".to_string())),
+            // The same generic path published as a raw NUMBER on line 1.
+            diag_at(1, 0, 9, NumberOrString::Number(2304)),
+            // A native Verter rule code (string, non-numeric) must NOT be forwarded.
+            diag_at(
+                0,
+                0,
+                9,
+                NumberOrString::String("verter/some-rule".to_string()),
+            ),
+        ];
+        let ctxs = build_provider_diagnostic_contexts(&diags, &carrier_li, &mapper, &tsx_li);
+        assert_eq!(
+            ctxs.len(),
+            2,
+            "both numeric-coded diagnostics (string + number spelling) are forwarded; \
+             the verter/ string code is dropped — got {ctxs:?}"
+        );
+        assert!(
+            ctxs.iter().all(|c| c.code == 2304),
+            "the path forwards the ACTUAL integer code (2304), proving it is generic, \
+             not 6133-locked — got {ctxs:?}"
+        );
+        // No forwarded context may carry a sentinel/zero code from a non-numeric source.
+        assert!(
+            !ctxs.iter().any(|c| c.code == 0),
+            "a non-numeric verter/ code must never be forwarded as a 0 sentinel — got {ctxs:?}"
         );
     }
 }

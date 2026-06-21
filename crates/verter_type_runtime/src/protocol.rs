@@ -299,6 +299,29 @@ pub struct TypeCodeEdit {
     pub new_text: String,
 }
 
+/// A diagnostic's identity carried into a code-action request.
+///
+/// The LSP code-action handler resolves `params.context.diagnostics` into this
+/// shape before calling [`TypeProvider::get_code_actions`]: the parsed integer
+/// error `code` plus the diagnostic range already mapped to TSX byte offsets in
+/// the queried generated file. Backends consume it differently — the
+/// tsserver-family providers feed `code` into `getCodeFixes` `errorCodes`, while
+/// TSGO synthesizes an LSP `Diagnostic` (range from `start`/`end`, integer
+/// `code`) for `textDocument/codeAction` `context.diagnostics`. A diagnostic
+/// whose code is non-numeric or whose range does not map to TSX is dropped
+/// before reaching here (fail-closed), so every context carries a real code and
+/// a real TSX span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDiagnosticContext {
+    /// The diagnostic's TypeScript error code (e.g. `6133` for an unused
+    /// declaration), parsed to an integer from the LSP `NumberOrString` code.
+    pub code: u32,
+    /// Start byte offset of the diagnostic range in the queried TSX file.
+    pub start: u32,
+    /// End byte offset of the diagnostic range in the queried TSX file.
+    pub end: u32,
+}
+
 /// A semantic token from the type provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticToken {

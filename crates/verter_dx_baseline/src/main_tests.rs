@@ -5,7 +5,8 @@ use verter_type_runtime::protocol::{
     CompletionResult, HoverInfo, TypeDiagnostic, TypeLocation, TypeProviderError,
 };
 use verter_type_runtime::protocol::{
-    RenameLocation, SemanticToken, SignatureHelp, TypeCodeAction, TypeDocumentHighlight,
+    ProviderDiagnosticContext, RenameLocation, SemanticToken, SignatureHelp, TypeCodeAction,
+    TypeDocumentHighlight,
 };
 use verter_type_runtime::ProviderFuture;
 
@@ -113,6 +114,7 @@ impl TypeProvider for MockProvider {
         _p: &str,
         _s: u32,
         _e: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         ready!(vec![])
     }

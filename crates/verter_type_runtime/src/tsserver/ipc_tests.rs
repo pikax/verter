@@ -1208,3 +1208,52 @@ fn merge_diagnostic_sets_unions_distinct_tags_across_duplicates() {
         merged[0].tags
     );
 }
+
+/// F6: a single code-fix action whose parsed edit list is EMPTY is dropped
+/// (returns `None`), mirroring `parse_tsserver_combined_code_fix`. An edit-less
+/// action is not actionable and must never leave the parse boundary.
+///
+/// Discriminating: pre-fix `parse_tsserver_code_action` returned
+/// `Some(TypeCodeAction { edits: [] })` for an action with no `textChanges`; this
+/// asserts it is now `None`, so it FAILS against the pre-fix code and PASSES after.
+#[test]
+fn parse_tsserver_code_action_drops_empty_edit_action() {
+    let cache: HashMap<String, String> = HashMap::new();
+
+    // An action whose only change carries an empty `textChanges` array — no edits.
+    let empty_action = serde_json::json!({
+        "description": "Remove unused declaration",
+        "changes": [
+            { "fileName": "d:/test/file.ts", "textChanges": [] }
+        ],
+    });
+    assert!(
+        parse_tsserver_code_action(&empty_action, &cache).is_none(),
+        "an edit-less single-fix action must be dropped (None), not surfaced with empty edits"
+    );
+
+    // Positive control: an action with a real textChange still parses.
+    let real_action = serde_json::json!({
+        "description": "Remove unused declaration",
+        "changes": [
+            {
+                "fileName": "d:/test/file.ts",
+                "textChanges": [
+                    {
+                        "start": { "line": 1, "offset": 1 },
+                        "end": { "line": 1, "offset": 10 },
+                        "newText": ""
+                    }
+                ]
+            }
+        ],
+    });
+    let parsed = parse_tsserver_code_action(&real_action, &cache)
+        .expect("an action with a real edit must survive");
+    assert_eq!(parsed.title, "Remove unused declaration");
+    assert_eq!(parsed.edits.len(), 1, "the single real edit is kept");
+    assert!(
+        parsed.edits[0].new_text.is_empty(),
+        "the deletion edit carries empty new_text"
+    );
+}

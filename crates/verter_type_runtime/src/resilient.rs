@@ -477,12 +477,14 @@ where
         path: &str,
         start_offset: u32,
         end_offset: u32,
+        diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         let path_owned = path.to_string();
+        let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
             let provider = self.get_inner().await?;
             provider
-                .get_code_actions(&path_owned, start_offset, end_offset)
+                .get_code_actions(&path_owned, start_offset, end_offset, &diagnostics)
                 .await
         })
     }

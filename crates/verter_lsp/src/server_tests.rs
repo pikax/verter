@@ -10,8 +10,9 @@ use crate::server::PublishedResolverSnapshot;
 use crate::test_utils::make_test_vfs_workspace_from_registry;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::type_provider::protocol::{
-    CompletionResolveResult, CompletionResult, HoverInfo, InlayHint, RenameLocation, SemanticToken,
-    SignatureHelp, TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation,
+    CompletionResolveResult, CompletionResult, HoverInfo, InlayHint, ProviderDiagnosticContext,
+    RenameLocation, SemanticToken, SignatureHelp, TypeCodeAction, TypeDiagnostic,
+    TypeDocumentHighlight, TypeLocation,
 };
 use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 use crate::ProjectSyncMode;
@@ -97,6 +98,7 @@ impl TypeProvider for SlowConfigurePathsProvider {
         _path: &str,
         _start_offset: u32,
         _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -243,6 +245,7 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
         _path: &str,
         _start_offset: u32,
         _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -396,6 +399,7 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
         _path: &str,
         _start_offset: u32,
         _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -599,6 +603,7 @@ impl TypeProvider for LostContentCompletionProvider {
         _path: &str,
         _start_offset: u32,
         _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -11074,6 +11079,481 @@ async fn self_file_rename_and_code_actions_gated_off() {
     );
 
     drain.abort();
+}
+
+/// ISSUE-8 (TS6133 quick-fix threading): the code-action handler must parse the
+/// editor's `context.diagnostics` codes and forward them to the TypeProvider so a
+/// "Remove unused declaration" fix can be requested. Pressing CTRL+. on an unused
+/// `<script setup>` `const foo` sends the published TS6133 (`code:
+/// String("6133")`); the handler must thread the integer `6133` to
+/// `get_code_actions` AND map the provider's deletion edit back to the `.vue`
+/// source.
+///
+/// Discriminating: before this change the trait had no diagnostics channel and
+/// the handler forwarded none, so `MockCall::GetCodeActions.diagnostics` would be
+/// empty (the code never reaches the provider) and the keyed response would not
+/// fire.
+#[tokio::test]
+async fn code_action_threads_diagnostic_code_to_type_provider_and_maps_edit_back() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // An unused top-level binding: `const foo = 1` is referenced nowhere, so
+    // Block F surfaces TS6133 at this decl span and CTRL+. lands here.
+    let source = "<script setup lang=\"ts\">\nconst foo = 1\n</script>\n<template></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/Unused.vue", source);
+    // Establish the carrier IDE projection so the handler's
+    // `type_provider_context` resolves (the direct-handler call skips the
+    // implicit sync that `server.completion(...)` would perform).
+    server.test_ensure_synced(&uri).await;
+
+    // The carrier range of the unused binding identifier `foo` (a token that
+    // round-trips through the carrier↔TSX mapper). This stands in for the TS6133
+    // diagnostic span the editor sends on CTRL+. and the cursor selection.
+    let decl_start = find_document_position(server, &uri, "foo = 1", 0);
+    let decl_end = find_document_position(server, &uri, "foo = 1", "foo".len());
+
+    // Map that carrier range to TSX offsets so we can arm the keyed mock response
+    // exactly where the handler will query.
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_start = merge::carrier_position_to_tsx_offset_validated(
+        &decl_start,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("decl start maps to tsx");
+    let tsx_end = merge::carrier_position_to_tsx_offset_validated(
+        &decl_end,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("decl end maps to tsx");
+
+    // The provider returns a "Remove unused declaration" action whose edit DELETES
+    // the `const foo = 1` TSX span (new_text empty). The carrier-IDE path maps it
+    // back to the `.vue` source range.
+    provider.set_code_actions(
+        &ctx.tsx_path,
+        tsx_start,
+        tsx_end,
+        vec![TypeCodeAction {
+            title: "Remove unused declaration".to_string(),
+            kind: Some("quickfix".to_string()),
+            edits: vec![crate::type_provider::protocol::TypeCodeEdit {
+                path: ctx.tsx_path.clone(),
+                start: tsx_start,
+                end: tsx_end,
+                new_text: String::new(),
+            }],
+        }],
+    );
+
+    // Drive the handler with the published TS6133 in context.diagnostics — exactly
+    // what the editor sends on CTRL+. over the faded decl.
+    let actions = super::aux_features::handle_code_action(
+        server,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: Range {
+                start: decl_start,
+                end: decl_end,
+            },
+            context: CodeActionContext {
+                diagnostics: vec![Diagnostic {
+                    range: Range {
+                        start: decl_start,
+                        end: decl_end,
+                    },
+                    code: Some(NumberOrString::String("6133".to_string())),
+                    source: Some("ts".to_string()),
+                    message: "'foo' is declared but its value is never read.".to_string(),
+                    ..Default::default()
+                }],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("code_action returns Ok");
+
+    // 1. The integer code 6133 reached the provider via the threaded context.
+    let calls = provider.calls();
+    let threaded = calls.iter().find_map(|c| match c {
+        MockCall::GetCodeActions { diagnostics, .. } => Some(diagnostics.clone()),
+        _ => None,
+    });
+    let threaded = threaded.expect("get_code_actions must have been called");
+    assert!(
+        threaded.iter().any(|d| d.code == 6133),
+        "the TS6133 code must be threaded to the provider, got {threaded:?}"
+    );
+
+    // 2. The provider's deletion action mapped back to the `.vue` source: a
+    //    workspace edit over the carrier with empty new_text covering `const foo`.
+    let actions = actions.expect("an action must be returned");
+    let remove = actions.iter().find_map(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) if ca.title == "Remove unused declaration" => Some(ca),
+        _ => None,
+    });
+    let remove = remove.expect("the remove-unused action must survive map-back");
+    let changes = remove
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("the remove action must carry workspace changes");
+    let (edit_uri, edits) = changes.iter().next().expect("one changed file");
+    assert_eq!(
+        edit_uri, &uri,
+        "the deletion must target the .vue carrier source, not the TSX"
+    );
+    assert_eq!(edits.len(), 1, "one deletion edit");
+    assert!(
+        edits[0].new_text.is_empty(),
+        "a remove-unused fix deletes (empty new_text), got {:?}",
+        edits[0].new_text
+    );
+    // The mapped-back range must cover the `const foo` decl in the .vue source
+    // (line 1, the `<script setup>` body), never a line-0 mis-map.
+    assert_eq!(
+        edits[0].range.start, decl_start,
+        "deletion start must map to the .vue decl, got {:?}",
+        edits[0].range.start
+    );
+    assert_ne!(
+        edits[0].range,
+        Range::default(),
+        "the deletion must never collapse to (0,0)"
+    );
+}
+
+/// F3 (review finding): the provider code-action gate must NOT fire for an
+/// `only=["refactor"]` or `only=["source.removeUnused"]` request. The provider's
+/// `get_code_actions` issues `getCodeFixes` only — it returns QUICKFIX-kind actions
+/// (the TS6133 remove-unused-declaration fix and its delete-all companion), never
+/// refactors and never source actions — so forwarding it on a refactor-only OR a
+/// `source.removeUnused`-only request returns actions the client explicitly did not
+/// ask for (an LSP `context.only` violation). The gate must fire ONLY for
+/// `["quickfix"]` and the implicit all-kinds (`None`) case. The `source.removeUnused`
+/// SOURCE action is a separate surface DEFERRED to the `source.*` backlog and is NOT
+/// wired into this gate.
+///
+/// Discriminating: before this fix the gate included a `source.removeUnused`
+/// arm, so the `only=["source.removeUnused"]` invocation recorded a
+/// `MockCall::GetCodeActions`; this test asserts NO such call is recorded for
+/// source.removeUnused-only (nor for the already-excluded refactor-only) while
+/// one IS recorded for quickfix-only, so it FAILS pre-fix and PASSES post-fix.
+#[tokio::test]
+async fn code_action_provider_gate_excludes_refactor_only_request() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let source = "<script setup lang=\"ts\">\nconst foo = 1\n</script>\n<template></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/RefactorGate.vue", source);
+    server.test_ensure_synced(&uri).await;
+
+    let decl_start = find_document_position(server, &uri, "foo = 1", 0);
+    let decl_end = find_document_position(server, &uri, "foo = 1", "foo".len());
+    let range = Range {
+        start: decl_start,
+        end: decl_end,
+    };
+
+    let make_params = |only: Option<Vec<CodeActionKind>>| CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range,
+        context: CodeActionContext {
+            diagnostics: vec![Diagnostic {
+                range,
+                code: Some(NumberOrString::String("6133".to_string())),
+                source: Some("ts".to_string()),
+                message: "'foo' is declared but its value is never read.".to_string(),
+                ..Default::default()
+            }],
+            only,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let recorded_get_code_actions = |provider: &MockTypeProvider| {
+        provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetCodeActions { .. }))
+    };
+
+    // refactor-only: the provider gate must NOT fire (no quickfix forwarding).
+    super::aux_features::handle_code_action(
+        server,
+        make_params(Some(vec![CodeActionKind::REFACTOR])),
+    )
+    .await
+    .expect("code_action returns Ok");
+    assert!(
+        !recorded_get_code_actions(&provider),
+        "an only=[refactor] request must NOT forward to the provider quickfix path, \
+         got calls={:?}",
+        provider.calls()
+    );
+
+    // quickfix-only: the provider gate MUST fire.
+    provider.clear_calls();
+    super::aux_features::handle_code_action(
+        server,
+        make_params(Some(vec![CodeActionKind::QUICKFIX])),
+    )
+    .await
+    .expect("code_action returns Ok");
+    assert!(
+        recorded_get_code_actions(&provider),
+        "an only=[quickfix] request MUST forward to the provider, got calls={:?}",
+        provider.calls()
+    );
+
+    // source.removeUnused-only: the provider gate must NOT fire. The provider
+    // returns `quickfix`-kind actions, so forwarding a `source.removeUnused`-only
+    // request would leak quickfixes the client did not ask for (a `context.only`
+    // violation). The `source.removeUnused` SOURCE action is deferred to the
+    // `source.*` backlog and is not wired into this gate.
+    provider.clear_calls();
+    let source_only_result = super::aux_features::handle_code_action(
+        server,
+        make_params(Some(vec![CodeActionKind::new("source.removeUnused")])),
+    )
+    .await
+    .expect("code_action returns Ok");
+    assert!(
+        !recorded_get_code_actions(&provider),
+        "an only=[source.removeUnused] request must NOT forward to the provider \
+         quickfix path, got calls={:?}",
+        provider.calls()
+    );
+    // And no `quickfix`-kinded provider action leaks back to the client.
+    let leaked_quickfix =
+        source_only_result
+            .unwrap_or_default()
+            .into_iter()
+            .any(|item| match item {
+                CodeActionOrCommand::CodeAction(action) => action.kind.as_ref().is_some_and(|k| {
+                    k.as_str() == "quickfix" || k.as_str().starts_with("quickfix.")
+                }),
+                CodeActionOrCommand::Command(_) => false,
+            });
+    assert!(
+        !leaked_quickfix,
+        "an only=[source.removeUnused] request must not leak quickfix-kinded \
+         provider actions"
+    );
+
+    // No `only` filter (implicit all-kinds): the provider gate MUST fire.
+    provider.clear_calls();
+    super::aux_features::handle_code_action(server, make_params(None))
+        .await
+        .expect("code_action returns Ok");
+    assert!(
+        recorded_get_code_actions(&provider),
+        "an unfiltered (only=None) request MUST forward to the provider, got calls={:?}",
+        provider.calls()
+    );
+}
+
+/// The `source.removeUnused` source-action kind must NOT leak provider quickfixes
+/// into the response. This proves the scope-creep fix end-to-end at the RESULT
+/// layer (distinct from the call-recording layer the gate test above asserts on):
+/// the provider is armed to return a real `quickfix`-kind "Remove unused
+/// declaration" action over the unused-decl span, and an `only=["source.removeUnused"]`
+/// request must come back with NO quickfix-kind action — `source.removeUnused` is a
+/// SOURCE action deferred to the `source.*` backlog and is out of scope for this
+/// QUICKFIX-only carrier path.
+///
+/// Discriminating: before the fix the gate forwarded `source.removeUnused`-only
+/// requests, so the armed `quickfix` action mapped back into the response and the
+/// assertion FAILS; after the fix the gate does not fire, no provider call is made,
+/// the response carries no quickfix, and the assertion PASSES.
+#[tokio::test]
+async fn code_action_source_only_request_does_not_leak_provider_quickfix() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let source = "<script setup lang=\"ts\">\nconst foo = 1\n</script>\n<template></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/SourceOnlyLeak.vue", source);
+    server.test_ensure_synced(&uri).await;
+
+    let decl_start = find_document_position(server, &uri, "foo = 1", 0);
+    let decl_end = find_document_position(server, &uri, "foo = 1", "foo".len());
+
+    // Arm the provider with a real `quickfix`-kind action exactly where the handler
+    // would query (the carrier range mapped to TSX offsets). If the gate forwards a
+    // source-only request, this action maps back and leaks into the response.
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_start = merge::carrier_position_to_tsx_offset_validated(
+        &decl_start,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("decl start maps to tsx");
+    let tsx_end = merge::carrier_position_to_tsx_offset_validated(
+        &decl_end,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("decl end maps to tsx");
+    provider.set_code_actions(
+        &ctx.tsx_path,
+        tsx_start,
+        tsx_end,
+        vec![TypeCodeAction {
+            title: "Remove unused declaration".to_string(),
+            kind: Some("quickfix".to_string()),
+            edits: vec![crate::type_provider::protocol::TypeCodeEdit {
+                path: ctx.tsx_path.clone(),
+                start: tsx_start,
+                end: tsx_end,
+                new_text: String::new(),
+            }],
+        }],
+    );
+
+    let range = Range {
+        start: decl_start,
+        end: decl_end,
+    };
+    let response = super::aux_features::handle_code_action(
+        server,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range,
+            context: CodeActionContext {
+                diagnostics: vec![Diagnostic {
+                    range,
+                    code: Some(NumberOrString::String("6133".to_string())),
+                    source: Some("ts".to_string()),
+                    message: "'foo' is declared but its value is never read.".to_string(),
+                    ..Default::default()
+                }],
+                only: Some(vec![CodeActionKind::new("source.removeUnused")]),
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("code_action returns Ok");
+
+    // The provider quickfix path must not have run for a source-only request.
+    assert!(
+        !provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetCodeActions { .. })),
+        "an only=[source.removeUnused] request must NOT forward to the provider \
+         quickfix path, got calls={:?}",
+        provider.calls()
+    );
+    // And no quickfix-kinded action may surface in the response — the armed action
+    // would have leaked here pre-fix.
+    let leaked_quickfix = response
+        .unwrap_or_default()
+        .into_iter()
+        .any(|item| match item {
+            CodeActionOrCommand::CodeAction(action) => action
+                .kind
+                .as_ref()
+                .is_some_and(|k| k.as_str() == "quickfix" || k.as_str().starts_with("quickfix.")),
+            CodeActionOrCommand::Command(_) => false,
+        });
+    assert!(
+        !leaked_quickfix,
+        "an only=[source.removeUnused] request must not leak a quickfix-kind action \
+         into the response"
+    );
+}
+
+/// A `source.removeUnused`-only request carrying a NON-unused numeric TS diagnostic
+/// (here TS2304 "Cannot find name") must likewise not forward to the quickfix
+/// provider path. The source-only kind is out of scope for this carrier path
+/// regardless of the diagnostic code, so the gate must never fire for it — proving
+/// the fix does not merely special-case the TS6133 code.
+///
+/// Discriminating: before the fix the gate's `source.removeUnused` arm forwarded
+/// unconditionally (it never inspected the diagnostic code), so a `GetCodeActions`
+/// call WAS recorded and the assertion FAILS; after the fix the gate does not fire
+/// and the assertion PASSES.
+#[tokio::test]
+async fn code_action_source_only_request_does_not_forward_non_unused_diagnostic() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Reuse the proven-mappable `const foo = 1` decl span (the `foo` identifier
+    // round-trips carrier↔TSX), so the ONLY reason the provider is not queried is
+    // the gate refusing a source-only request — not an unmappable range. The
+    // diagnostic carried here is a non-unused TS code (2304), not TS6133.
+    let source = "<script setup lang=\"ts\">\nconst foo = 1\n</script>\n<template></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/SourceOnlyNonUnused.vue", source);
+    server.test_ensure_synced(&uri).await;
+
+    let diag_start = find_document_position(server, &uri, "foo = 1", 0);
+    let diag_end = find_document_position(server, &uri, "foo = 1", "foo".len());
+    let range = Range {
+        start: diag_start,
+        end: diag_end,
+    };
+
+    super::aux_features::handle_code_action(
+        server,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range,
+            context: CodeActionContext {
+                diagnostics: vec![Diagnostic {
+                    range,
+                    // A non-unused numeric TS code (TS2304), not TS6133. The handler
+                    // keys only on `code`/`range`, so the message text is immaterial.
+                    code: Some(NumberOrString::String("2304".to_string())),
+                    source: Some("ts".to_string()),
+                    message: "Cannot find name 'Foo'.".to_string(),
+                    ..Default::default()
+                }],
+                only: Some(vec![CodeActionKind::new("source.removeUnused")]),
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("code_action returns Ok");
+
+    assert!(
+        !provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetCodeActions { .. })),
+        "an only=[source.removeUnused] request must NOT forward to the provider \
+         quickfix path even for a non-unused diagnostic, got calls={:?}",
+        provider.calls()
+    );
 }
 
 #[test]

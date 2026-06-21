@@ -77,6 +77,9 @@ mod inner {
             path: String,
             start_offset: u32,
             end_offset: u32,
+            /// The diagnostic contexts threaded from the handler — lets a test
+            /// assert the parsed error codes (e.g. `[6133]`) reached the provider.
+            diagnostics: Vec<ProviderDiagnosticContext>,
         },
         GetSemanticTokens {
             path: String,
@@ -457,6 +460,7 @@ mod inner {
             _path: &str,
             _start_offset: u32,
             _end_offset: u32,
+            _diagnostics: &[ProviderDiagnosticContext],
         ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
             let msg = self.error_message.clone();
             Box::pin(async move { Err(TypeProviderError::new(msg)) })
@@ -709,12 +713,14 @@ mod inner {
             path: &str,
             start_offset: u32,
             end_offset: u32,
+            diagnostics: &[ProviderDiagnosticContext],
         ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
             let mut state = self.state.lock().unwrap();
             state.calls.push(MockCall::GetCodeActions {
                 path: path.to_string(),
                 start_offset,
                 end_offset,
+                diagnostics: diagnostics.to_vec(),
             });
             let result = state
                 .code_action_responses

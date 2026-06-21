@@ -806,6 +806,7 @@ mod tests {
             _path: &str,
             _start_offset: u32,
             _end_offset: u32,
+            _diagnostics: &[ProviderDiagnosticContext],
         ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
             Box::pin(async { Ok(Vec::new()) })
         }

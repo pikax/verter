@@ -1683,11 +1683,19 @@ impl TypeProvider for TsserverTypeProvider {
         path: &str,
         start_offset: u32,
         end_offset: u32,
+        diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        // tsserver's `getCodeFixes` keys fixes off the diagnostic error codes in
+        // the requested range. With no numeric codes there is nothing to fix, so
+        // short-circuit rather than issue a useless round-trip.
+        let error_codes = dedup_error_codes(diagnostics);
         Box::pin(async move {
+            if error_codes.is_empty() {
+                return Ok(vec![]);
+            }
             let (sl, sc, el, ec) = {
                 let cache = contents_cache.lock().await;
                 match cache.get(&file) {
@@ -1709,26 +1717,60 @@ impl TypeProvider for TsserverTypeProvider {
                         "startOffset": sc,
                         "endLine": el,
                         "endOffset": ec,
-                        "errorCodes": [],
+                        "errorCodes": error_codes,
                     }),
                 )
                 .await;
 
-            match result {
-                Ok(body) => {
-                    let cache = contents_cache.lock().await;
-                    let actions = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|a| parse_tsserver_code_action(a, &cache))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    Ok(actions)
+            let raw_fixes = match result {
+                Ok(body) => body.as_array().cloned().unwrap_or_default(),
+                Err(_) => return Ok(vec![]),
+            };
+
+            // Single-fix actions first, then their combined "fix all" companions —
+            // a stable order independent of provider response ordering.
+            let mut actions: Vec<TypeCodeAction> = {
+                let cache = contents_cache.lock().await;
+                raw_fixes
+                    .iter()
+                    .filter_map(|a| parse_tsserver_code_action(a, &cache))
+                    .collect()
+            };
+
+            // Any fix carrying a `fixId` is combinable: tsserver exposes a
+            // `getCombinedCodeFix` companion that applies the fix across the whole
+            // file (e.g. "Delete all unused declarations" for TS6133). Follow each
+            // DISTINCT `fixId` once, titled from the fix's own `fixAllDescription`
+            // — the combinability decision is the typed `fixId` field, never a
+            // title-string match.
+            let mut combined: Vec<TypeCodeAction> = Vec::new();
+            let mut seen_fix_ids: HashSet<String> = HashSet::new();
+            for fix in &raw_fixes {
+                let Some(fix_id) = fix.get("fixId").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if fix_id.is_empty() || !seen_fix_ids.insert(fix_id.to_string()) {
+                    continue;
                 }
-                Err(_) => Ok(vec![]),
+                let fix_all_title = fix
+                    .get("fixAllDescription")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let combined_result = transport
+                    .request("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
+                    .await;
+                if let Ok(body) = combined_result {
+                    let cache = contents_cache.lock().await;
+                    if let Some(action) =
+                        parse_tsserver_combined_code_fix(&body, fix_all_title.as_deref(), &cache)
+                    {
+                        combined.push(action);
+                    }
+                }
             }
+
+            actions.extend(combined);
+            Ok(actions)
         })
     }
 
@@ -2406,17 +2448,38 @@ pub fn parse_tsserver_rename_span(
     })
 }
 
-/// Parse a tsserver code action / code fix.
+/// Sorted, de-duplicated integer error codes from the request's diagnostics.
 ///
-/// When content is available in `contents_cache`, converts 1-based tsserver positions
-/// to byte offsets. Otherwise, falls back to packed 0-based format.
-pub fn parse_tsserver_code_action(
-    action: &serde_json::Value,
-    contents_cache: &HashMap<String, String>,
-) -> Option<TypeCodeAction> {
-    let description = action.get("description")?.as_str()?.to_string();
-    let changes = action.get("changes")?.as_array()?;
+/// tsserver's `getCodeFixes` keys fixes off the diagnostic error codes present in
+/// the requested range; the same code may appear on several diagnostics, so it is
+/// deduped to one entry. A stable sort keeps the request shape deterministic.
+pub fn dedup_error_codes(diagnostics: &[ProviderDiagnosticContext]) -> Vec<u32> {
+    let mut codes: Vec<u32> = diagnostics.iter().map(|d| d.code).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    codes
+}
 
+/// Build the `getCombinedCodeFix` request args for a combinable `fixId` scoped to
+/// a single file. Shared by the out-of-process tsserver provider and the
+/// in-process extension provider so neither hand-rolls the scope shape.
+pub fn combined_code_fix_args(file: &str, fix_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "scope": { "type": "file", "args": { "file": file } },
+        "fixId": fix_id,
+    })
+}
+
+/// Parse the `changes` array shared by `getCodeFixes` items and
+/// `getCombinedCodeFix` responses into byte-offset [`TypeCodeEdit`]s.
+///
+/// When content is available in `contents_cache`, converts 1-based tsserver
+/// positions to byte offsets. Otherwise, falls back to the packed 0-based format.
+/// Propagates `None` on a malformed `textChanges` entry (fail-closed).
+fn parse_tsserver_file_code_edits(
+    changes: &[serde_json::Value],
+    contents_cache: &HashMap<String, String>,
+) -> Option<Vec<TypeCodeEdit>> {
     let mut edits = Vec::new();
     for change in changes {
         let file = verter_span::path::canonicalize_path(
@@ -2457,9 +2520,55 @@ pub fn parse_tsserver_code_action(
             }
         }
     }
+    Some(edits)
+}
+
+/// Parse a tsserver code action / code fix.
+///
+/// When content is available in `contents_cache`, converts 1-based tsserver positions
+/// to byte offsets. Otherwise, falls back to packed 0-based format.
+pub fn parse_tsserver_code_action(
+    action: &serde_json::Value,
+    contents_cache: &HashMap<String, String>,
+) -> Option<TypeCodeAction> {
+    let description = action.get("description")?.as_str()?.to_string();
+    let changes = action.get("changes")?.as_array()?;
+    let edits = parse_tsserver_file_code_edits(changes, contents_cache)?;
+    // An edit-less single fix is not actionable — drop it, mirroring the
+    // combined-fix path (`parse_tsserver_combined_code_fix`). The merge layer
+    // already discards empty-change actions, so this only makes the two parsers
+    // symmetric (no edit-less action ever leaves the parse boundary).
+    if edits.is_empty() {
+        return None;
+    }
 
     Some(TypeCodeAction {
         title: description,
+        kind: Some("quickfix".to_string()),
+        edits,
+    })
+}
+
+/// Parse a `getCombinedCodeFix` response (`CombinedCodeActions { changes }`) into
+/// a single "fix all" code action.
+///
+/// The combined response carries only the file edits; the user-facing title comes
+/// from the originating fix's `fixAllDescription` (e.g. "Delete all unused
+/// declarations"). When that title is absent the action is dropped — an untitled
+/// fix-all is not surfaced.
+pub fn parse_tsserver_combined_code_fix(
+    body: &serde_json::Value,
+    fix_all_title: Option<&str>,
+    contents_cache: &HashMap<String, String>,
+) -> Option<TypeCodeAction> {
+    let title = fix_all_title?.to_string();
+    let changes = body.get("changes")?.as_array()?;
+    let edits = parse_tsserver_file_code_edits(changes, contents_cache)?;
+    if edits.is_empty() {
+        return None;
+    }
+    Some(TypeCodeAction {
+        title,
         kind: Some("quickfix".to_string()),
         edits,
     })

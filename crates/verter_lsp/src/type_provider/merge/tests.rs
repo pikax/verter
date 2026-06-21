@@ -1268,6 +1268,111 @@ fn merge_code_actions_with_edits() {
     assert_eq!(result.len(), 1);
 }
 
+/// ISSUE-8: a "Remove unused declaration" action whose edit DELETES a carrier-IDE
+/// TSX span (empty `new_text`) maps back to the `.vue` SOURCE range — the deletion
+/// targets the real decl, never a line-0 mis-map. A second edit fragment that
+/// can't map is dropped (fail-closed), and the action survives on its mappable
+/// edit.
+#[test]
+fn merge_code_actions_remove_unused_deletion_maps_back_to_vue_source() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // The TSX `msg` identifier sits at byte offset 6..9 (line 0, cols 6..9) and
+    // maps to the Vue `<script setup>` `const msg` on line 5, cols 6..9.
+    let actions = vec![TypeCodeAction {
+        title: "Remove unused declaration".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![
+            protocol::TypeCodeEdit {
+                path: "/test.vue.tsx".to_string(),
+                start: 6,
+                end: 9,
+                new_text: String::new(),
+            },
+            // An unmappable carrier-IDE fragment (no token covers offset 999) must
+            // be DROPPED, not line-0'd.
+            protocol::TypeCodeEdit {
+                path: "/test.vue.tsx".to_string(),
+                start: 999,
+                end: 1002,
+                new_text: String::new(),
+            },
+        ],
+    }];
+
+    let result = merge_code_actions(
+        actions,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    assert_eq!(
+        result.len(),
+        1,
+        "the remove-unused action must survive map-back"
+    );
+    let CodeActionOrCommand::CodeAction(action) = &result[0] else {
+        panic!("expected a CodeAction");
+    };
+    assert_eq!(action.title, "Remove unused declaration");
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+
+    // F4: the deletion must be keyed by the `.vue` SOURCE URI — never the generated
+    // `.tsx`. A mutant that left the edit on `/test.vue.tsx` now fails here.
+    let (change_uri, edits) = changes
+        .iter()
+        .next()
+        .expect("the action carries one change set");
+    assert_eq!(
+        change_uri.as_str(),
+        "file:///test.vue",
+        "the deletion must be keyed by the .vue source URI, got {change_uri:?}"
+    );
+    assert!(
+        !change_uri.as_str().ends_with(".tsx"),
+        "the deletion must NOT target the generated .tsx, got {change_uri:?}"
+    );
+    assert_eq!(
+        edits.len(),
+        1,
+        "the unmappable fragment must be dropped, leaving only the mapped deletion"
+    );
+    assert!(
+        edits[0].new_text.is_empty(),
+        "a remove-unused deletion has empty new_text, got {:?}",
+        edits[0].new_text
+    );
+    // F4: assert BOTH endpoints of the mapped carrier range — `const msg` (the TSX
+    // `msg` at cols 6..9) maps to Vue line 5, cols 6..9. A same-line-but-wrong span
+    // (e.g. a start-only assertion let a 6..7 mutant pass) now fails.
+    assert_eq!(
+        edits[0].range.start,
+        Position {
+            line: 5,
+            character: 6,
+        },
+        "the deletion start must map to the Vue `const msg` decl on line 5, got {:?}",
+        edits[0].range.start
+    );
+    assert_eq!(
+        edits[0].range.end,
+        Position {
+            line: 5,
+            character: 9,
+        },
+        "the deletion end must map to the end of `msg` on line 5, got {:?}",
+        edits[0].range.end
+    );
+    assert_ne!(
+        edits[0].range,
+        Range::default(),
+        "the deletion must never collapse to (0,0)"
+    );
+}
+
 /// A cross-file (non-carrier) code-action edit keeps its REAL range, read from the target file's
 /// own source — and a target whose source can't be read is FAIL-CLOSED (dropped), never line-0'd.
 #[test]

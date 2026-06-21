@@ -1572,6 +1572,24 @@ fn build_client_capabilities() -> serde_json::Value {
                         "properties": ["documentation", "detail", "additionalTextEdits"]
                     }
                 }
+            },
+            // `get_code_actions` pulls fixes via `textDocument/codeAction`. Without
+            // `codeActionLiteralSupport` TSGO may degrade to command-only actions
+            // whose edits arrive only on a follow-up `codeAction/resolve` — a
+            // resolve round-trip this provider does not implement — so advertise
+            // literal support to keep the INLINE `WorkspaceEdit` on the action.
+            // The value set lists the kinds the handler actually requests in
+            // `context.only`: `quickfix` (the gate TSGO's quickfix providers honor —
+            // this block ships the TS6133 unused-declaration QUICKFIX surface only).
+            // The `source.removeUnused` SOURCE action is deferred to the `source.*`
+            // backlog and is NOT requested here. NO `resolveSupport`/`dataSupport` —
+            // that would force the resolve path.
+            "codeAction": {
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": ["quickfix"]
+                    }
+                }
             }
         }
     })
@@ -2454,22 +2472,51 @@ impl TypeProvider for TsgoTypeProvider {
         path: &str,
         start_offset: u32,
         end_offset: u32,
+        diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
-            let (start_line, start_char, end_line, end_char) = {
+            // TSGO's quickfix path requires a non-empty `context.diagnostics` whose
+            // codes are INTEGERS (it skips string-coded diagnostics). With nothing
+            // to act on, skip the round-trip.
+            if diagnostics.is_empty() {
+                return Ok(vec![]);
+            }
+            let (start_line, start_char, end_line, end_char, context_diagnostics) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
-                    Some(c) => {
-                        let (sl, sc) = offset_to_position(c, start_offset);
-                        let (el, ec) = offset_to_position(c, end_offset);
-                        (sl, sc, el, ec)
-                    }
-                    None => (0, start_offset, 0, end_offset),
-                }
+                let content = cache.get(&path_owned);
+                let to_pos = |off: u32| match content {
+                    Some(c) => offset_to_position(c, off),
+                    None => (0, off),
+                };
+                let (sl, sc) = to_pos(start_offset);
+                let (el, ec) = to_pos(end_offset);
+                // Synthesize the LSP `Diagnostic` array TSGO matches fixes against:
+                // each diagnostic's TSX byte range mapped to a line/character range
+                // via the SAME `offset_to_position` used for the request range, plus
+                // its INTEGER error code.
+                let context_diagnostics: Vec<serde_json::Value> = diagnostics
+                    .iter()
+                    .map(|d| {
+                        let (dsl, dsc) = to_pos(d.start);
+                        let (del, dec) = to_pos(d.end);
+                        serde_json::json!({
+                            "range": {
+                                "start": { "line": dsl, "character": dsc },
+                                "end": { "line": del, "character": dec },
+                            },
+                            "code": d.code,
+                            "severity": 1,
+                            "source": "ts",
+                            "message": "",
+                        })
+                    })
+                    .collect();
+                (sl, sc, el, ec, context_diagnostics)
             };
             let result = transport
                 .request(
@@ -2480,7 +2527,16 @@ impl TypeProvider for TsgoTypeProvider {
                             "start": { "line": start_line, "character": start_char },
                             "end": { "line": end_line, "character": end_char },
                         },
-                        "context": { "diagnostics": [] },
+                        "context": {
+                            "diagnostics": context_diagnostics,
+                            // `quickfix` is the gate TSGO's quickfix providers honor;
+                            // this block requests the TS6133 unused-declaration
+                            // QUICKFIX surface only. The `source.removeUnused` SOURCE
+                            // action is deferred to the `source.*` backlog — not
+                            // requested here. (When tgo ports the per-diagnostic
+                            // remove-unused codefix it returns under `quickfix`.)
+                            "only": ["quickfix"],
+                        },
                     }),
                 )
                 .await?;

@@ -28,6 +28,7 @@
 //!   (`packages/app`, `packages/shared`). Cross-package go-to-def works via the root
 //!   tsconfig's `references` field, but multi-root features are not fully exercised.
 
+mod code_action;
 mod completion;
 mod completion_detail;
 mod definition;
