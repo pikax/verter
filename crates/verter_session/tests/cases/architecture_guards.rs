@@ -23977,6 +23977,22 @@ fn trait_impl_is_allowlisted(trait_path: &syn::Path, self_name: Option<&str>) ->
 ///   (a crate-visible trait could expose a producer-capable default method).
 ///
 /// Skips `#[cfg(test)]`-gated items. Recurses into non-test inline modules.
+///
+/// CONFINEMENT BOUNDARY (closed realistic surface + documented theoretical residual).
+/// The inline-`mod std`/`mod core` trait-shadow class is closed by three layers: the
+/// FOREIGN case is compiler-confined (E0603 — a foreign module cannot name the bare
+/// module-private lowerer); the SAME-MODULE inline-`mod`-with-a-LOCAL-trait-definition
+/// case is rejected here (this collector recurses into non-test inline modules and bans
+/// any `Item::Trait` def/alias, so an inline `mod std { trait LocalClone … }` reddens on
+/// the local def regardless of the module name); and the strengthened same-module
+/// builders/use/attr guards close the rebind/re-export variants. The ONE remaining residual
+/// — an inline `mod std`/`mod core` re-exporting an EXTERNAL crate's `clone::Clone` /
+/// `fmt::Debug` with NO local trait def — is a documented THEORETICAL, insider-only
+/// residual: it requires a crafted `Cargo.toml` dependency exposing a bespoke
+/// `clone::Clone`/`fmt::Debug` module shape AND an inline `mod std` placed inside the
+/// trusted private producer module, far beyond an accidental contributor duplication. It
+/// is accepted as relying on review rather than escalating the source scanner further
+/// (the producer-confinement record lives in `docs/arch/parselower-design.md`).
 fn macro_arg_producer_trait_exposure_violations(src: &str) -> Vec<String> {
     let file = match syn::parse_file(src) {
         Ok(f) => f,
