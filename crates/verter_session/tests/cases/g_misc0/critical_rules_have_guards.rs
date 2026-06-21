@@ -477,6 +477,21 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
             "no_production_macro_arg_eager_lowering_outside_mirror",
             "macro_hot_mirror_producer_is_pure_no_route_resolution",
+            // CRATE-WIDE macro-use-prelude ban: no non-`#[cfg(test)]`
+            // `#[macro_use] extern crate` (nor `#[cfg_attr(…, macro_use)]
+            // extern crate`) anywhere in `verter_session/src/**`. A
+            // `#[macro_use] extern crate` in an ANCESTOR module (the crate
+            // root / a parent `mod.rs`, which the in-file `lower.rs`
+            // expansion-surface guard never reads) injects a proc-macro
+            // derive into the crate-wide macro-use prelude; that derive
+            // resolves at the `#[derive(…)]` site in `lower.rs` and EXPANDS
+            // in `lower.rs`'s own module context, emitting same-module code
+            // that reaches the module-private `lower_type_expr_structural`.
+            // Compiler module-privacy does NOT backstop same-module
+            // expansion; `use macro_crate::name` is the scoped, non-injecting
+            // replacement (and a `use … as Clone` shadow in `lower.rs` is
+            // already rejected by the derive-shadow `use` rail).
+            "verter_session_production_has_no_macro_use_extern_crate",
             // HANDLE-CAPABLE DUAL-READ (additive, ahead of the producer
             // flip): the listed component-meta consumers accept BOTH a
             // parser-produced `TypeExpr` and an already-lowered handle,

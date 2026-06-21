@@ -835,7 +835,7 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 
 // ===========================================================================
 // Structural-carrier producer guard SET — the single structural-carrier producer
-// is defended by nine guards: the PRIMARY module-private lowerer guard
+// is defended by ten guards: the PRIMARY module-private lowerer guard
 // (`structural_carrier_producer_lowerer_is_module_private`), the IN-FILE
 // SINGLE-CALL pin (`structural_lowerer_called_only_through_the_witness_gated_wrapper`
 // — the raw lowerer is CALLED exactly once, inside the witness-gated
@@ -852,10 +852,17 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 // binder-seed-helper privacy guard (`script_setup_binder_helper_is_module_private`),
 // the file-scope ordering tripwire
 // (`no_production_macro_arg_eager_lowering_outside_mirror`), the purity guard
-// (`macro_hot_mirror_producer_is_pure_no_route_resolution`), and the BOUNDED
+// (`macro_hot_mirror_producer_is_pure_no_route_resolution`), the BOUNDED
 // entry-surface token tripwire
-// (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`). The witness
-// below pins that set into the registry; it does not re-define those guards.
+// (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`), and the
+// CRATE-WIDE macro-use-prelude ban
+// (`verter_session_production_has_no_macro_use_extern_crate` — no non-`#[cfg(test)]`
+// `#[macro_use] extern crate` anywhere in `verter_session/src/**`, closing the
+// ANCESTOR vector where a parent module's `#[macro_use] extern crate` injects a
+// proc-macro derive into the crate-wide prelude that resolves + expands in
+// `lower.rs`'s module context — same-module expansion compiler privacy does NOT
+// backstop). The witness below pins that set into the registry; it does not
+// re-define those guards.
 // ===========================================================================
 
 #[test]
@@ -924,6 +931,15 @@ fn structural_carrier_producer_guards_remain_registered() {
             "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
             "the BOUNDED entry-surface tripwire: only the sanctioned witness-gated entries are \
              crate-visible producer fns of the owner module",
+        ),
+        (
+            "verter_session_production_has_no_macro_use_extern_crate",
+            "the CRATE-WIDE macro-use-prelude ban: no non-`#[cfg(test)]` `#[macro_use] extern \
+             crate` (nor `#[cfg_attr(…, macro_use)] extern crate`) anywhere in \
+             `verter_session/src/**`, closing the ANCESTOR vector where a parent module's \
+             `#[macro_use] extern crate` injects a proc-macro derive into the crate-wide prelude \
+             that resolves at the `#[derive(…)]` site in `lower.rs` and expands in `lower.rs`'s \
+             module context (same-module expansion compiler privacy cannot backstop)",
         ),
     ];
 

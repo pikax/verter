@@ -23264,13 +23264,14 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 /// cfg-test exemption suspends these `use` rejections inside a `#[cfg(test)]`-
 /// gated subtree too.
 ///
-/// IN-FILE EXPR / STMT / ITEM MACRO, ATTRIBUTE-MACRO, **AND DERIVE-NAME-SHADOW
-/// IMPORT** CLASSES ARE CLOSED (not residual). After this fix, EVERY same-module
-/// IN-FILE vector is CLOSED — every macro position (item, Expr, stmt,
-/// impl/trait/extern item, method body, assoc-const init), the inline mod, the
-/// out-of-line mod, the `as`-alias, the `let`-binding, the
-/// whitespace/newline-split call, the char-literal masking, every attribute /
-/// derive PROC-MACRO position, AND every derive-NAME-SHADOW `use` import. An
+/// IN-FILE EXPR / STMT / ITEM MACRO, ATTRIBUTE-MACRO, DERIVE-NAME-SHADOW IMPORT,
+/// **AND MACRO-USE-PRELUDE-INJECTION** CLASSES ARE ALL CLOSED (not residual).
+/// EVERY same-module expansion vector — IN-FILE and ANCESTOR-INJECTED — is now
+/// CLOSED: every macro position (item, Expr, stmt, impl/trait/extern item, method
+/// body, assoc-const init), the inline mod, the out-of-line mod, the `as`-alias,
+/// the `let`-binding, the whitespace/newline-split call, the char-literal masking,
+/// every attribute / derive PROC-MACRO position, every derive-NAME-SHADOW `use`
+/// import, AND every crate-wide `#[macro_use] extern crate` prelude injection. An
 /// attribute proc-macro (`#[some_attr] fn f() {}`) and a derive proc-macro
 /// (`#[derive(Evil)] struct S;`) are a `syn::Attribute`, NOT a `syn::Macro`, so
 /// the macro ban (`visit_macro`) never fires on them — the
@@ -23300,11 +23301,31 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 /// a child `#[path]` mod — that case is CLOSED by this guard's rejection of every
 /// non-sanctioned out-of-line / `#[path]` child `mod`, NOT by privacy.
 ///
-/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED) — the out-of-model cases a `syn` source
-/// scan of ONE file structurally cannot reach, NONE of which is an in-file
-/// vector. After the derive-shadow-import close, the derive-shadow vector is no
-/// longer residual (the shadowing `use` is rejected); the only residual is the
-/// OUT-OF-TREE / FOREIGN-NAME class:
+/// The **MACRO-USE-PRELUDE-INJECTION** vector — an ANCESTOR `#[macro_use] extern
+/// crate evil;` (declared in a PARENT module like the crate root `lib.rs` or any
+/// ancestor `mod.rs`, NOT in `lower.rs`) that exports a proc-macro derive named
+/// `Clone` / `Debug` / … — injects that derive into the CRATE-WIDE macro-use
+/// prelude, so it resolves at the `#[derive(Clone)]` site INSIDE `lower.rs` and
+/// EXPANDS IN `lower.rs`'s OWN module context, emitting same-module code that
+/// reaches the bare-private `lower_type_expr_structural` (compiler module-privacy
+/// does NOT backstop same-module expansion). THIS guard reads only `lower.rs`, so
+/// it cannot see an ancestor's `extern crate` — the vector is CLOSED CRATE-WIDE by
+/// the sibling [`verter_session_production_has_no_macro_use_extern_crate`], which
+/// rejects any non-`#[cfg(test)]` `#[macro_use] extern crate` (and
+/// `#[cfg_attr(…, macro_use)] extern crate`) anywhere in `verter_session/src/**`.
+/// The scoped, non-injecting replacement is `use macro_crate::name` (a path import
+/// binds in ITS module scope only, never the crate-wide prelude), and a `use … as
+/// Clone` derive-name shadow IN `lower.rs` is the complementary case already
+/// rejected by the derive-shadow `use` rail above.
+///
+/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED) — the SINGLE out-of-model class a `syn`
+/// source scan structurally cannot reach, which is NOT an expansion vector at
+/// all. With the macro-use-prelude-injection ban landed, the in-file
+/// expr/stmt/item-macro, attribute-macro, derive-name-shadow-import, AND
+/// macro-use-prelude-injection classes are ALL CLOSED (above). The ONLY remaining
+/// residual is the PRIVACY-BACKED FOREIGN / OUT-OF-TREE tail — a body in an
+/// UNRELATED / out-of-tree module the guard never reads, which compiler
+/// module-privacy genuinely blocks from naming the bare-private fn:
 /// - a **GLOB or EXTERNAL re-export whose TARGET DEFINITION lives OUTSIDE the
 ///   walked production-`src` tree** — this guard reads only `lower.rs` and rejects
 ///   a production glob IN `lower.rs`, but it cannot see what an out-of-tree module
@@ -23330,18 +23351,37 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 /// identical guard model — the shared property is the accepted out-of-tree class,
 /// not an identical residual.
 ///
-/// NOT residual (do NOT claim privacy backstops these — they are CLOSED here):
-/// the IN-FILE any-position macro / inline-mod / out-of-line-or-`#[path]`-child-
+/// DESIGN NOTE (structural contingency — the END of scanner-hardening). With the
+/// macro-use-prelude-injection ban, EVERY known same-module expansion vector is
+/// closed and the only residual is the privacy-backed foreign / out-of-tree tail
+/// above (a genuine compile error, not a lint gap). Per the architecture ruling,
+/// scanner-hardening STOPS here: were a FURTHER same-module expansion vector ever
+/// discovered, the correct closure is STRUCTURAL, not another scanner rail —
+/// RELOCATE the raw `lower_type_expr_structural` into a private CHILD
+/// implementation module with NO proc-macro surface (no `#[derive]`, no attribute
+/// macro, no `extern crate`), so the lowerer becomes COMPILER-CONFINED and the
+/// whole same-module-expansion CLASS is unrepresentable by construction rather
+/// than scanned for. That structural move is the CONTINGENCY, deliberately NOT
+/// implemented now (it is unnecessary today — the class is closed); it is recorded
+/// here as the documented next step IF the residual is ever shown to admit a
+/// reachable in-module vector.
+///
+/// NOT residual (do NOT claim privacy backstops these — they are CLOSED): the
+/// IN-FILE any-position macro / inline-mod / out-of-line-or-`#[path]`-child-
 /// mod / alias / binding vectors (rejected by this guard's `syn` walk and the
 /// occurrence rail), every attribute / derive PROC-MACRO on a `lower.rs` item
-/// (rejected by the production-attribute allowlist), AND every derive-NAME-SHADOW
+/// (rejected by the production-attribute allowlist), every derive-NAME-SHADOW
 /// `use` import — a `use … as Clone;` rename, a `use …::Clone;` / grouped leaf,
-/// or a production glob in `lower.rs` (rejected by `visit_item_use`). Compiler
-/// module-privacy is the backstop ONLY for a body in a DIFFERENT/UNRELATED
-/// foreign module (or an out-of-tree re-export target), NOT for same-module
-/// in-file code, NOT for a `#[path]` CHILD of `lower.rs` (a descendant), NOT for
-/// an attribute proc-macro on a `lower.rs` item, and NOT for a derive-shadow
-/// `use` import in `lower.rs` (all closed in-file here).
+/// or a production glob in `lower.rs` (rejected by `visit_item_use`), AND every
+/// crate-wide `#[macro_use] extern crate` prelude injection from ANY ancestor
+/// (rejected by [`verter_session_production_has_no_macro_use_extern_crate`]).
+/// Compiler module-privacy is the backstop ONLY for a body in a
+/// DIFFERENT/UNRELATED foreign module (or an out-of-tree re-export target), NOT
+/// for same-module in-file code, NOT for a `#[path]` CHILD of `lower.rs` (a
+/// descendant), NOT for an attribute proc-macro on a `lower.rs` item, NOT for a
+/// derive-shadow `use` import in `lower.rs`, and NOT for an ancestor
+/// `#[macro_use] extern crate` whose derive expands in `lower.rs`'s module context
+/// (all closed by the rails above).
 #[test]
 fn structural_carrier_producer_lower_has_no_expansion_surface() {
     let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
@@ -25457,6 +25497,245 @@ fn macro_hot_mirror_purity_scanner_discriminates() {
         macro_hot_mirror_impurity_hits(&mirror_src).is_empty(),
         "the production `structural_carrier_producer/macro_surface.rs` must be route-free (pure \
          producer)"
+    );
+}
+
+/// Whether `attr` is a `#[macro_use]` attribute (the bare attribute whose path is
+/// the single segment `macro_use`, with no argument list — `#[macro_use]` or the
+/// rarely-spelled, equally-prelude-injecting `#[macro_use(foo, bar)]`). A
+/// `#[macro_use]` on an `extern crate` injects that crate's exported
+/// macros/derives into the CRATE-WIDE macro-use prelude.
+fn attr_is_macro_use(attr: &syn::Attribute) -> bool {
+    attr.path().is_ident("macro_use")
+}
+
+/// Whether `attr` is a `#[cfg_attr(<pred>, … macro_use …)]` — a `cfg_attr` whose
+/// CONDITIONALLY-ATTACHED attribute list contains `macro_use`. A `cfg_attr` can
+/// attach `macro_use` to an `extern crate` under a PRODUCTION-satisfiable
+/// predicate (`#[cfg_attr(feature = "x", macro_use)]`), so it injects the
+/// crate-wide prelude in any build that satisfies `<pred>` — it is rejected
+/// exactly like a bare `#[macro_use]`. Detection is structural: walk the
+/// `cfg_attr` predicate token stream for a `macro_use` identifier. The `cfg`
+/// predicate itself never contains the ident `macro_use` (it is a config-name /
+/// `feature`/`test`/`all`/`any`/`not` grammar), so any `macro_use` ident in the
+/// stream is necessarily an ATTACHED attribute, not part of the condition.
+fn attr_is_cfg_attr_macro_use(attr: &syn::Attribute) -> bool {
+    if !attr.path().is_ident("cfg_attr") {
+        return false;
+    }
+    let tokens = match &attr.meta {
+        syn::Meta::List(list) => list.tokens.clone(),
+        // `#[cfg_attr]` / `#[cfg_attr = …]` with no predicate list cannot attach
+        // an attribute — not a `macro_use` injection.
+        _ => return false,
+    };
+    token_stream_contains_ident(tokens, "macro_use")
+}
+
+/// Recursively walk `tokens` for a bare identifier exactly equal to `needle`,
+/// descending into every nested group (`(...)`, `[...]`, `{...}`). Used to find
+/// an attached `macro_use` anywhere inside a `cfg_attr` token stream.
+fn token_stream_contains_ident(tokens: proc_macro2::TokenStream, needle: &str) -> bool {
+    use proc_macro2::TokenTree;
+    for tt in tokens {
+        match tt {
+            TokenTree::Ident(id) => {
+                if id == needle {
+                    return true;
+                }
+            }
+            TokenTree::Group(g) => {
+                if token_stream_contains_ident(g.stream(), needle) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Scan one production Rust file `body` for a `#[macro_use] extern crate …;` (or
+/// a `#[cfg_attr(<pred>, macro_use)] extern crate …;`) that is NOT exempted by an
+/// exact `#[cfg(test)]` gate on the same `extern crate` item. Returns one
+/// human-readable violation line per offending `extern crate` (empty = clean).
+///
+/// - A `#[cfg(test)]`-gated `extern crate` is test-only (`cfg(test)` is
+///   unsatisfiable in a normal build), so a `#[macro_use]` there injects no
+///   PRODUCTION prelude — it is EXEMPT (reuses [`attr_is_exactly_cfg_test`], the
+///   same strict matcher the sanctioned-test-mod check uses, so
+///   `cfg(any(test, …))` / a feature cfg do NOT count as a test gate).
+/// - A BARE `extern crate foo;` WITHOUT `#[macro_use]` is INERT in edition 2018+
+///   (it injects no macro names into the prelude), so it is NOT a violation — the
+///   scan only fires on the `#[macro_use]` / `cfg_attr(..., macro_use)` forms.
+fn macro_use_extern_crate_violations(rel: &str, body: &str) -> Vec<String> {
+    let Ok(file) = syn::parse_file(body) else {
+        // A file `syn` cannot parse is skipped (mirrors the other production
+        // scans that `filter_map(.ok())` on `parse_file`).
+        return Vec::new();
+    };
+    let mut violations: Vec<String> = Vec::new();
+    for item in &file.items {
+        let syn::Item::ExternCrate(ec) = item else {
+            continue;
+        };
+        // EXEMPTION: an exact `#[cfg(test)]` gate on the extern-crate item makes
+        // it test-only — its macros never enter a production prelude.
+        if ec.attrs.iter().any(attr_is_exactly_cfg_test) {
+            continue;
+        }
+        let injects_prelude = ec
+            .attrs
+            .iter()
+            .any(|a| attr_is_macro_use(a) || attr_is_cfg_attr_macro_use(a));
+        if injects_prelude {
+            let crate_name = ec.ident.to_string();
+            violations.push(format!(
+                "{rel}: `extern crate {crate_name};` carries `#[macro_use]` (or \
+                 `#[cfg_attr(…, macro_use)]`) outside a `#[cfg(test)]` gate"
+            ));
+        }
+    }
+    violations
+}
+
+/// Crate-wide ban: NO non-`#[cfg(test)]` `#[macro_use] extern crate` (nor a
+/// `#[cfg_attr(…, macro_use)] extern crate`) may exist anywhere in
+/// `crates/verter_session/src/**` production source.
+///
+/// WHY THIS IS CRATE-WIDE (the load-bearing rationale). A `#[macro_use] extern
+/// crate evil;` injects `evil`'s exported macros AND proc-macro DERIVES into the
+/// CRATE-WIDE macro-use prelude. If `evil` exports a derive named `Clone` /
+/// `Debug` / `Default` (any built-in derive name), that injected derive resolves
+/// at the `#[derive(Clone)]` site INSIDE the structural-carrier producer's
+/// `lower.rs` — and the injected proc-macro then EXPANDS IN `lower.rs`'s OWN
+/// module context, where it can emit same-module code that names and calls the
+/// bare module-private `lower_type_expr_structural`. Compiler module-privacy does
+/// NOT backstop this: it is SAME-MODULE expansion, not a foreign module naming
+/// the private fn. The in-file `lower.rs` expansion-surface guard
+/// ([`structural_carrier_producer_lower_has_no_expansion_surface`]) reads only
+/// `lower.rs`, so it cannot see an `extern crate` declared in a PARENT module
+/// (the crate root `lib.rs`, an ancestor `mod.rs`, …) — the injection can come
+/// from ANY ancestor of `lower.rs`, which is why this ban must be crate-wide
+/// rather than `lower.rs`-local.
+///
+/// The scoped, NON-injecting replacement is `use macro_crate::name` (a path
+/// import binds the name in ITS module scope only, never the crate-wide prelude),
+/// and a `use … as Clone` derive-name shadow IN `lower.rs` is ALREADY rejected by
+/// the `lower.rs` derive-shadow `use` rail
+/// ([`use_tree_binds_builtin_derive_name`]). This guard closes the complementary
+/// ANCESTOR vector that `use` rail cannot see.
+///
+/// A bare `extern crate foo;` WITHOUT `#[macro_use]` is INERT in edition 2018+
+/// (no prelude injection) and is therefore NOT rejected; the codebase carries no
+/// production `#[macro_use] extern crate` today, so this guard PASSES on the real
+/// tree (anti-vacuity: the walker asserts it enumerated > 100 production files).
+#[test]
+fn verter_session_production_has_no_macro_use_extern_crate() {
+    let mut violations: Vec<String> = Vec::new();
+    for (rel, src) in session_production_src_files() {
+        violations.extend(macro_use_extern_crate_violations(&rel, &src));
+    }
+    assert!(
+        violations.is_empty(),
+        "single-engine producer CRATE-WIDE MACRO-USE-PRELUDE violation: a non-`#[cfg(test)]` \
+         `#[macro_use] extern crate` (or `#[cfg_attr(…, macro_use)] extern crate`) exists in \
+         `verter_session` production source. `#[macro_use]` injects the crate's macros/derives \
+         into the crate-wide macro-use prelude — a derive named `Clone`/`Debug`/… resolves at the \
+         `#[derive(…)]` site in the structural-carrier producer's `lower.rs` and EXPANDS in \
+         `lower.rs`'s module context (same-module expansion compiler privacy does NOT backstop), \
+         reaching the module-private `lower_type_expr_structural`. Use `use macro_crate::name` \
+         (scoped, non-injecting) instead; a `use … as Clone` derive-name shadow in `lower.rs` is \
+         already rejected by the derive-shadow `use` rail. Violations:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Self-test for [`macro_use_extern_crate_violations`]: a planted
+/// `#[macro_use] extern crate evil;` reddens; a `#[cfg_attr(feature = "x",
+/// macro_use)] extern crate evil;` reddens (a production-satisfiable conditional
+/// attach); a `#[cfg(test)] #[macro_use] extern crate evil;` is EXEMPT (no red —
+/// test-only prelude); a BARE `extern crate evil;` does NOT red (inert in 2018+);
+/// a file with no `extern crate` passes; and the REAL `verter_session` production
+/// tree carries none (anti-vacuity over the real walk).
+#[test]
+fn macro_use_extern_crate_scanner_discriminates() {
+    // REJECT — a plain `#[macro_use] extern crate evil;`: injects `evil`'s
+    // macros/derives into the crate-wide prelude (THE ancestor vector).
+    let plain = "#[macro_use]\nextern crate evil;\n\nfn f() {}\n";
+    assert_eq!(
+        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", plain).len(),
+        1,
+        "a planted `#[macro_use] extern crate evil;` must RED — it injects the crate-wide \
+         macro-use prelude that can shadow a built-in derive at the `lower.rs` `#[derive(…)]` site"
+    );
+    // REJECT — a `#[cfg_attr(feature = "x", macro_use)] extern crate evil;`: a
+    // `cfg_attr` can ATTACH `macro_use` under a PRODUCTION-satisfiable feature,
+    // so it injects the prelude in any build that satisfies `x`.
+    let cfg_attr = "#[cfg_attr(feature = \"x\", macro_use)]\nextern crate evil;\n";
+    assert_eq!(
+        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", cfg_attr).len(),
+        1,
+        "a planted `#[cfg_attr(feature = \"x\", macro_use)] extern crate evil;` must RED — \
+         `cfg_attr` conditionally attaches `macro_use` under a production-satisfiable predicate, \
+         injecting the crate-wide prelude"
+    );
+    // REJECT — `cfg_attr` attaching `macro_use` alongside another attribute (the
+    // nested-meta-list form) is still caught (the token walk descends groups).
+    let cfg_attr_grouped =
+        "#[cfg_attr(all(feature = \"x\", debug_assertions), macro_use)]\nextern crate evil;\n";
+    assert_eq!(
+        macro_use_extern_crate_violations("crates/verter_session/src/a.rs", cfg_attr_grouped).len(),
+        1,
+        "a `cfg_attr` with a nested `all(…)` predicate attaching `macro_use` must RED — the \
+         token walk descends nested groups to find the attached `macro_use`"
+    );
+    // EXEMPT — a `#[cfg(test)] #[macro_use] extern crate evil;`: `cfg(test)` is
+    // unsatisfiable in a normal build, so the injection is test-only.
+    let cfg_test_gated = "#[cfg(test)]\n#[macro_use]\nextern crate evil;\n";
+    assert!(
+        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", cfg_test_gated)
+            .is_empty(),
+        "a `#[cfg(test)] #[macro_use] extern crate evil;` must NOT red — `cfg(test)` gates it to \
+         a test-only build, so it injects no production prelude"
+    );
+    // NON-EXEMPT — `#[cfg(any(test, feature = \"x\"))]` is PRODUCTION-satisfiable
+    // (not a true test gate per `attr_is_exactly_cfg_test`), so a `#[macro_use]`
+    // beside it still reddens.
+    let non_exact_cfg = "#[cfg(any(test, feature = \"x\"))]\n#[macro_use]\nextern crate evil;\n";
+    assert_eq!(
+        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", non_exact_cfg).len(),
+        1,
+        "a `#[cfg(any(test, feature = \"x\"))] #[macro_use] extern crate evil;` must RED — \
+         `cfg(any(test, …))` is satisfiable in a production build, so the exact-`cfg(test)` \
+         exemption does NOT apply"
+    );
+    // DOES NOT RED — a BARE `extern crate evil;` WITHOUT `#[macro_use]`: inert in
+    // edition 2018+ (no prelude injection), so it is not a violation.
+    let bare = "extern crate evil;\n\nfn f() {}\n";
+    assert!(
+        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", bare).is_empty(),
+        "a bare `extern crate evil;` without `#[macro_use]` must NOT red — it is inert in edition \
+         2018+ (injects no macro names into the prelude)"
+    );
+    // DOES NOT RED — a file with no `extern crate` at all passes.
+    let no_extern = "use crate::foo::Bar;\n\nfn f() {}\n";
+    assert!(
+        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", no_extern).is_empty(),
+        "a file with no `extern crate` must pass"
+    );
+    // ANTI-VACUITY over the REAL tree: the crate-wide walk enumerates the real
+    // production corpus and finds ZERO production `#[macro_use] extern crate`
+    // (the LIVE proof the guard passes today, not just on fixtures).
+    let mut real_violations: Vec<String> = Vec::new();
+    for (rel, src) in session_production_src_files() {
+        real_violations.extend(macro_use_extern_crate_violations(&rel, &src));
+    }
+    assert!(
+        real_violations.is_empty(),
+        "the real `verter_session` production tree must carry NO `#[macro_use] extern crate` \
+         today (live anti-vacuity proof). Found:\n  {}",
+        real_violations.join("\n  ")
     );
 }
 
