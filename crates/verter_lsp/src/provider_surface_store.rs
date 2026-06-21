@@ -638,6 +638,94 @@ pub fn external_ide_context_from_snapshot(
     })
 }
 
+/// Locate the byte range of a child component's prop identifier IN the captured
+/// `{carrier}.ts` PUBLIC-API content, keyed by the prop's TYPED `.vue` declaration
+/// identity (its `.vue` decl span + name) — never a text scan of the API content.
+///
+/// This is the one piece a provider-agnostic cross-file Vue-prop rename needs that
+/// a provider's `textDocument/rename` may not itself enumerate (tgo does not): the
+/// child-declaration rename leg, synthesized by Verter as a [`RenameLocation`] whose
+/// `start..end` is the prop name's byte range in the SAME captured API content the
+/// merge maps through. The merge then maps that range back onto the `.vue` via the
+/// snapshot's own source map — byte-identically to how it maps a provider's real
+/// carrier location — so the result dedups against the provider's location by the
+/// final `.vue` range.
+///
+/// IDENTITY-DRIVEN, not text-scanned: the API generator emits the prop name through
+/// the SAME `push_mapped(name, vue_decl_span)` token that seeds this snapshot's
+/// source map, so querying the map for the prop's `.vue` decl-span START yields the
+/// API position the generator wrote the name at. The byte range is then
+/// `[start, start + name.len())` because the generator writes the name VERBATIM
+/// (a position-preserving run), so the API slice equals the name exactly.
+///
+/// FAIL CLOSED (`None`) when any of:
+/// - the snapshot carries no source map (an unmappable surface),
+/// - the prop's `.vue` decl-span start does not resolve to a `.vue` position, or
+///   the map does not map that `.vue` position into the API content (the prop name
+///   was not emitted with a mapped token — e.g. a `defineProps<ImportedType>()`
+///   surface whose props are a bare type ref, not inline members),
+/// - the resolved API position does not convert to a byte offset, or
+/// - the API slice at the resolved range is NOT byte-equal to the prop name (the
+///   correctness tripwire: a wrong/mis-ranged mapping must never emit an edit that
+///   could corrupt the `.vue`).
+///
+/// A `None` here means the caller must NOT synthesize the child-declaration leg
+/// (and, per the fail-closed rename ruling, must not ship a usage-only partial).
+#[must_use]
+pub fn locate_prop_decl_range_in_carrier_api(
+    snapshot: &ProviderSurfaceSnapshot,
+    prop_decl_span: verter_span::Span,
+    prop_name: &str,
+) -> Option<(u32, u32)> {
+    use tower_lsp_server::ls_types::Position;
+    use verter_span::LspPosition;
+
+    // The map is parsed from the SAME bytes as `provider_content`; no map ⇒ no
+    // identity-keyed lookup is possible ⇒ fail closed.
+    let mapper = snapshot.source_map.as_ref()?;
+
+    // The prop's `.vue` decl span is a file-absolute `.vue` byte span (the same
+    // span analysis hands to `location_from_span`). Convert its START to a `.vue`
+    // UTF-16 position — the source map's source column space.
+    let vue_pos = snapshot
+        .carrier_utf16_line_index
+        .offset_to_position(prop_decl_span.start)?;
+
+    // Map the `.vue` decl-span start INTO the API content (source → generated).
+    // This is the inverse of the merge's API→`.vue` hop and lands on the API
+    // position the generator wrote the prop name at (strict in-run lookup; a `.vue`
+    // position the map does not cover returns `None` ⇒ fail closed).
+    let api_pos = mapper
+        .carrier_to_tsx(LspPosition::new(vue_pos.line, vue_pos.character))?
+        .pos;
+
+    // The API UTF-16 position → API byte offset (the `RenameLocation` coordinate
+    // space, encoding-neutral bytes the merge re-derives positions from).
+    let start = snapshot
+        .provider_utf16_line_index
+        .position_to_offset(&Position {
+            line: api_pos.line,
+            character: api_pos.character,
+        })?;
+    // The generator writes the name verbatim, so the API byte length equals the
+    // name's byte length. (`end` is exclusive.)
+    let end = start + prop_name.len() as u32;
+
+    // Correctness tripwire — fail closed, NOT the lookup mechanism. The lookup is
+    // the structured-offset hop above; this only VALIDATES that the resolved range
+    // actually spells the prop name in the API content. A mismatch (mis-ranged
+    // mapping, or a caller name that does not match what the resolved range spells)
+    // must never emit an edit that could corrupt the `.vue` → fail closed.
+    let slice = snapshot
+        .provider_content
+        .get(start as usize..end as usize)?;
+    if slice != prop_name {
+        return None;
+    }
+
+    Some((start, end))
+}
+
 /// Classify a returned carrier PUBLIC-API path into the fail-closed 3-state
 /// [`ApiSurfaceResolution`](crate::type_provider::merge::ApiSurfaceResolution) — the
 /// SINGLE authority the cross-file rename merge routes on. The production rename

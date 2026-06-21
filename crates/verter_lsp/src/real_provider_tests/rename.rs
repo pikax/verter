@@ -1,6 +1,6 @@
 //! Rename tests ported from E2E suite.
 
-use crate::test_harness::{canary_assert_known_limitation, real_provider_test};
+use crate::test_harness::real_provider_test;
 
 real_provider_test!(
     rename_single_project,
@@ -79,25 +79,16 @@ real_provider_test!(
         assert!(edits.is_some(), "cross-file rename foo should return edits");
         let ws_edit = edits.unwrap();
         let file_count = count_files(&ws_edit);
-        if session.is_tsgo() {
-            // SCOPE: this fix is tsserver-ONLY. The cross-file Vue-prop rename mapping is asserted
-            // for tsserver below; TSGO's cross-file rename gap is a SEPARATE, independently-tracked
-            // work item (Block H-tgo) and is NOT addressed here. Do not interpret a passing run as
-            // TSGO support.
-            //
-            // CANARY (TSGO): cross-file prop rename only returns edits in 1 file (the consumer)
-            // instead of propagating to the child component's defineProps type. This canary PANICS
-            // the moment TSGO returns >= 2 files, forcing this branch to be promoted to a real
-            // assert (and the Block H-tgo gap closed) rather than silently passing.
-            canary_assert_known_limitation!(
-                file_count < 2,
-                "TSGO cross-file rename only affects {file_count} file(s), expected >= 2"
-            );
-        } else {
-            // tsserver: the cross-file rename MUST touch >= 2 files (App.vue + MyComp.vue). This is
-            // the corruption-fix's end-to-end gate — it fails (not skips) if the edit is dropped.
-            assert!(file_count >= 2, "cross-file rename should affect >= 2 files, got: {file_count}");
-        }
+        // BOTH providers: the cross-file Vue-prop rename MUST touch >= 2 files
+        // (App.vue usage + MyComp.vue defineProps decl). For tgo this is the
+        // child-declaration leg Verter SYNTHESIZES itself (provider-agnostic) —
+        // tgo's own rename API does not enumerate it across the synthesized
+        // `{carrier}.ts` surface, so the synthesis is what closes the parity gap.
+        // It fails (not skips) if the child edit is dropped.
+        assert!(
+            file_count >= 2,
+            "cross-file rename should affect >= 2 files, got: {file_count}"
+        );
     }
 );
 
@@ -150,18 +141,11 @@ real_provider_test!(
         let pos = session.find_position(&app, r#"foo="literal""#, 0);
         let edits = session.rename_edits(&app, pos, "fooRenamed").await;
 
-        let file_count = edits.as_ref().map(count_files).unwrap_or(0);
-        if session.is_tsgo() {
-            // tgo cross-file rename gap is tracked separately (Block H-tgo). The
-            // canary fires the moment tgo returns >= 2 files (== 1 today).
-            canary_assert_known_limitation!(
-                file_count == 1,
-                "TGO cross-file prop rename (child closed) affects {file_count} file(s), expected 1"
-            );
-            return;
-        }
-
-        // tsserver: BOTH files must be edited (App.vue usage + MyComp.vue decl).
+        // BOTH providers: BOTH files must be edited (App.vue usage + MyComp.vue
+        // decl). For tgo, the child-declaration leg is the one Verter SYNTHESIZES
+        // (provider-agnostic) — its own rename API does not enumerate the child
+        // edit across the synthesized `{carrier}.ts` surface. The child MyComp.vue
+        // is CLOSED, so this also exercises the closed-carrier snapshot mapping.
         let ws_edit = edits.expect("cross-file rename (child closed) must return edits");
         assert!(
             edit_touches(&ws_edit, &app),
@@ -204,6 +188,45 @@ real_provider_test!(
         assert!(
             !child_after.contains("foo: string"),
             "MyComp.vue must no longer declare the original `foo: string` prop:\n{child_after}"
+        );
+    }
+);
+
+// FAIL-CLOSED GUARD — the provider-agnostic child-declaration SYNTHESIS must NEVER
+// fabricate a cross-file child edit for a rename that is NOT on a `<Child prop=…>`
+// usage. Renaming a LOCAL `<script setup>` binding (`doubled`, a computed) is a
+// purely in-/same-file rename: its edits stay within App.vue's own surfaces and
+// must NOT spill into the imported, CLOSED MyComp.vue.
+//
+// DISCRIMINATES: a synthesis that fired on a non-prop position (e.g. mis-resolved
+// the cursor to a child component, or located a bogus carrier range) would inject a
+// spurious `MyComp.vue.ts` rename location → the merge would land a wrong edit in
+// MyComp.vue. The `resolve_child_prop_rename_target` resolution returns `None` for a
+// non-prop cursor (no usage-only / cross-file partial), so MyComp.vue stays
+// untouched. Both providers run the SAME synthesis, so this guards both.
+real_provider_test!(
+    rename_local_binding_does_not_synthesize_cross_file_child_edit,
+    fixture = "single-project",
+    async fn run(session) {
+        let app = session.open_fixture_file("src/App.vue").await;
+        let child_uri = session.workspace_uri("src/MyComp.vue");
+        let _warm = session.wait_until_ready(&app, "action.disabled", 7, "disabled").await;
+
+        // Rename a LOCAL computed binding (NOT a cross-file prop).
+        let pos = session.find_position(&app, "const doubled = computed(", 6);
+        let edits = session.rename_edits(&app, pos, "doubledValue").await;
+        let ws_edit = edits.expect("renaming a local binding must return edits");
+
+        // The rename must touch App.vue (its own usages) …
+        assert!(
+            edit_touches(&ws_edit, &app),
+            "local rename must edit App.vue: {ws_edit:?}"
+        );
+        // … and must NOT fabricate any edit into the imported, CLOSED MyComp.vue.
+        assert!(
+            !edit_touches(&ws_edit, &child_uri),
+            "local-binding rename must NOT synthesize a cross-file edit into MyComp.vue \
+             (fail-closed: synthesis only fires on a `<Child prop=…>` usage): {ws_edit:?}"
         );
     }
 );

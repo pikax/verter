@@ -28,6 +28,22 @@ use super::server_utils::{
 };
 use super::{ResolvedComponentDocument, VerterLanguageServer};
 
+/// The resolved identity of a `<Child prop=…>` rename target: the child's
+/// `{carrier}.ts` PUBLIC-API provider path, the prop name, and the prop's `.vue`
+/// declaration span. Produced by [`VerterLanguageServer::resolve_child_prop_rename_target`]
+/// to drive provider-agnostic synthesis of a cross-file Vue-prop rename's
+/// child-declaration leg.
+pub(super) struct ChildPropRenameTarget {
+    /// The child component's `{carrier}.ts` PUBLIC-API provider path (the surface
+    /// the cross-file prop rename's declaration edit lands against).
+    pub(super) child_carrier_api_path: String,
+    /// The prop name being renamed.
+    pub(super) prop_name: String,
+    /// The prop's `.vue` declaration span (file-absolute `.vue` bytes) — the typed
+    /// identity the API generator keys its source-map token on.
+    pub(super) prop_decl_span: verter_span::Span,
+}
+
 impl VerterLanguageServer {
     pub(super) fn resolve_import_specifier(
         &self,
@@ -572,6 +588,83 @@ impl VerterLanguageServer {
                     }
                 }
             }
+        }
+
+        None
+    }
+
+    /// Resolve a rename position on a `<Child prop=…>` usage to the child's prop
+    /// DECLARATION identity: the child's `{carrier}.ts` PUBLIC-API provider path,
+    /// the prop name, and the prop's `.vue` declaration span.
+    ///
+    /// This drives the provider-AGNOSTIC synthesis of the cross-file rename's
+    /// child-declaration leg (a provider's own `textDocument/rename` may not
+    /// enumerate that leg across the synthesized API surface — tgo does not). It
+    /// reuses the SAME Vue resolution the goto-definition props branch
+    /// ([`Self::try_component_contract_definition`]) uses: walk the template
+    /// components, find the usage whose prop NAME span contains the cursor, resolve
+    /// the child component, and read the matching `defineProps` field's `.vue` decl
+    /// span from the child's analysis macros.
+    ///
+    /// Returns `None` (the caller then synthesizes nothing — never a usage-only
+    /// partial) when the cursor is not on a child component's prop name, the child
+    /// is not a resolvable component, or the prop is not declared in the child's
+    /// macros (a template-only / unresolved prop has no inline API-surface span to
+    /// rename).
+    pub(super) fn resolve_child_prop_rename_target(
+        &self,
+        uri: &Uri,
+        position: &Position,
+    ) -> Option<ChildPropRenameTarget> {
+        let doc = self.documents.get(uri)?;
+        let analysis = self.documents.get_analysis(uri)?;
+        let template = analysis.template.as_ref()?;
+        let offset = doc.line_index.position_to_offset(position)?;
+
+        for element in &template.elements {
+            if !element.is_component {
+                continue;
+            }
+            let Some(component) = template.components.iter().find(|c| {
+                offset >= c.span.start
+                    && offset < c.span.end
+                    && (c.name == element.tag || c.name == to_pascal_case(&element.tag))
+            }) else {
+                continue;
+            };
+
+            // The cursor must be on a prop NAME (not a value / directive).
+            let Some(prop) = component
+                .props
+                .iter()
+                .find(|prop| offset >= prop.name_span.start && offset < prop.name_span.end)
+            else {
+                continue;
+            };
+
+            let child = self.resolve_component_document_for_usage(uri, &analysis, component)?;
+
+            // The prop's `.vue` declaration span comes from the child's
+            // `defineProps` macro fields — the typed identity the API generator
+            // keys its source-map token on. A prop only declared via the template
+            // (no macro field) has no inline API-surface member, so it is NOT a
+            // synthesizable declaration-rename target here.
+            let prop_decl_span = child.analysis.macros.iter().find_map(|mac| {
+                mac.prop_fields
+                    .iter()
+                    .find(|field| field.name == prop.name)
+                    .map(|field| field.span)
+            })?;
+
+            let child_canonical = uri_to_canonical_id(&child.uri);
+            let child_carrier_api_path =
+                verter_workspace::carrier_api_provider_path(&child_canonical);
+
+            return Some(ChildPropRenameTarget {
+                child_carrier_api_path,
+                prop_name: prop.name.clone(),
+                prop_decl_span,
+            });
         }
 
         None

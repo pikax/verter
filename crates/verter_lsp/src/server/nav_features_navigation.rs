@@ -683,8 +683,47 @@ pub(super) async fn handle_rename(
                         .provider_surfaces()
                         .capture_current_carrier_api_set();
 
-                    if let Ok(type_locs) = tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await
+                    if let Ok(mut type_locs) =
+                        tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await
                     {
+                        // PROVIDER-AGNOSTIC child-declaration synthesis. A
+                        // cross-file `<Child prop=…>` rename must edit BOTH the
+                        // parent usage AND the child's `defineProps` declaration.
+                        // The provider's own `textDocument/rename` does not reliably
+                        // enumerate the child-declaration leg across the synthesized
+                        // `{carrier}.ts` API surface (tgo does not), so Verter
+                        // synthesizes that leg itself — from its OWN Vue resolution +
+                        // the pinned snapshot's source map — giving the child edit a
+                        // single deterministic Verter-owned origin for BOTH providers.
+                        //
+                        // FAIL CLOSED: every hop (resolve the child prop target,
+                        // find its captured API snapshot, locate the prop's byte
+                        // range in that snapshot) returns `None` on any uncertainty,
+                        // so a non-resolvable child synthesizes nothing — never a
+                        // usage-only partial. The merge already drops an unmappable
+                        // carrier location, so the worst case is no-worse-than-status-quo.
+                        if let Some(target) = server.resolve_child_prop_rename_target(uri, position)
+                        {
+                            if let Some(snapshot) =
+                                query_snapshot.snapshot_for(&target.child_carrier_api_path)
+                            {
+                                if let Some((start, end)) =
+                                    crate::provider_surface_store::locate_prop_decl_range_in_carrier_api(
+                                        snapshot,
+                                        target.prop_decl_span,
+                                        &target.prop_name,
+                                    )
+                                {
+                                    inject_synthesized_carrier_rename_location(
+                                        &mut type_locs,
+                                        &target.child_carrier_api_path,
+                                        start,
+                                        end,
+                                    );
+                                }
+                            }
+                        }
+
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let negotiated_encoding = server.position_encoding.read().clone();
@@ -736,4 +775,110 @@ pub(super) async fn handle_rename(
     }
 
     Ok(verter_result)
+}
+
+/// Inject Verter's SYNTHESIZED child-declaration carrier rename location into the
+/// provider's rename-location set, deduplicating against the provider's OWN
+/// carrier location for the SAME prop declaration.
+///
+/// The synthesized location and a provider's real carrier location (tsserver
+/// returns one; tgo does not) target the SAME `{carrier}.ts` byte range for the
+/// same prop, so the synthesized leg must be the SINGLE deterministic origin:
+/// drop ONLY a provider location with the EXACT same `(path, start, end)` (the
+/// final merge would also dedup by the mapped `.vue` range, but pruning the exact
+/// duplicate here keeps one deterministic origin regardless of merge order).
+/// Every OTHER provider location — additional valid TS references the Vue-prop
+/// synthesis does not model — is PRESERVED.
+fn inject_synthesized_carrier_rename_location(
+    type_locs: &mut Vec<crate::type_provider::protocol::RenameLocation>,
+    carrier_api_path: &str,
+    start: u32,
+    end: u32,
+) {
+    type_locs.retain(|loc| !(loc.path == carrier_api_path && loc.start == start && loc.end == end));
+    type_locs.push(crate::type_provider::protocol::RenameLocation {
+        path: carrier_api_path.to_string(),
+        start,
+        end,
+    });
+}
+
+#[cfg(test)]
+mod synthesized_rename_injection_tests {
+    use super::inject_synthesized_carrier_rename_location;
+    use crate::type_provider::protocol::RenameLocation;
+
+    const API: &str = "/src/MyComp.vue.ts";
+
+    fn loc(path: &str, start: u32, end: u32) -> RenameLocation {
+        RenameLocation {
+            path: path.to_string(),
+            start,
+            end,
+        }
+    }
+
+    fn count_matching(locs: &[RenameLocation], path: &str, start: u32, end: u32) -> usize {
+        locs.iter()
+            .filter(|l| l.path == path && l.start == start && l.end == end)
+            .count()
+    }
+
+    #[test]
+    fn dedups_provider_location_for_same_prop_decl_to_exactly_one() {
+        // The provider (tsserver) ALSO returned the carrier location for the SAME
+        // prop declaration the synthesis targets.
+        let mut locs = vec![loc(API, 40, 43)];
+        inject_synthesized_carrier_rename_location(&mut locs, API, 40, 43);
+        // EXACTLY one — discriminating: WITHOUT the dedup `retain` this is 2
+        // (the provider's + the synthesized), a duplicate child edit.
+        assert_eq!(
+            count_matching(&locs, API, 40, 43),
+            1,
+            "the child-declaration carrier edit must appear exactly once (one deterministic origin)"
+        );
+    }
+
+    #[test]
+    fn preserves_other_provider_locations() {
+        // The provider returned the matching carrier decl AND other valid locations
+        // (the parent usage in App.vue.tsx, and a DIFFERENT-range carrier ref the
+        // Vue-prop synthesis does not model).
+        let app = "/src/App.vue.tsx";
+        let mut locs = vec![
+            loc(app, 1000, 1003), // parent usage — must survive
+            loc(API, 40, 43),     // same prop decl — deduped against synthesis
+            loc(API, 80, 83),     // a different carrier ref — must survive
+        ];
+        inject_synthesized_carrier_rename_location(&mut locs, API, 40, 43);
+
+        assert_eq!(
+            count_matching(&locs, API, 40, 43),
+            1,
+            "the synthesized prop-decl edit is the single origin"
+        );
+        assert_eq!(
+            count_matching(&locs, app, 1000, 1003),
+            1,
+            "an unrelated provider location (parent usage) must be preserved"
+        );
+        assert_eq!(
+            count_matching(&locs, API, 80, 83),
+            1,
+            "a different-range provider carrier location must be preserved (not broadly dropped)"
+        );
+    }
+
+    #[test]
+    fn injects_when_provider_did_not_report_the_child_decl() {
+        // tgo: the provider did NOT enumerate the child-declaration leg, so the
+        // synthesized location is the ONLY one for the prop decl — it must be added.
+        let mut locs: Vec<RenameLocation> = vec![loc("/src/App.vue.tsx", 1000, 1003)];
+        inject_synthesized_carrier_rename_location(&mut locs, API, 40, 43);
+        assert_eq!(
+            count_matching(&locs, API, 40, 43),
+            1,
+            "the synthesized child-declaration leg must be injected when the provider omits it"
+        );
+    }
 }

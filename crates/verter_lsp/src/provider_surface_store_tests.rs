@@ -1240,3 +1240,173 @@ fn classify_ignores_live_mutation_after_capture_for_current_path() {
          live state. A live re-consultation would have dropped this (VirtualDrop)."
     );
 }
+
+// ── locate_prop_decl_range_in_carrier_api ───────────────────────────────────
+//
+// The ONE missing piece for provider-agnostic cross-file Vue-prop rename: given a
+// captured `{carrier}.ts` API snapshot, the prop's `.vue` decl span, and the prop
+// name, locate the prop identifier's BYTE RANGE in the API content — keyed by the
+// typed `.vue` decl identity through the snapshot's own source map, NOT a text scan.
+
+/// Build a captured API snapshot whose source map maps the API `foo` token back to
+/// the `.vue` `foo` declaration — mirroring how the public-API generator emits the
+/// prop name via `push_mapped(name, vue_decl_span)`. Returns `(snapshot, carrier,
+/// api, vue_foo_decl_span)`.
+fn build_foo_prop_snapshot() -> (
+    Arc<ProviderSurfaceSnapshot>,
+    &'static str,
+    &'static str,
+    verter_span::Span,
+) {
+    let carrier =
+        "<script setup lang=\"ts\">\ndefineProps<{ foo: string; bar: number }>();\n</script>\n";
+    let api = "declare const Child: { new(props?: { foo: string; bar: number }): {} }\n";
+
+    // The `.vue` decl span of `foo` (file-absolute bytes) — the typed identity the
+    // analysis layer hands to `location_from_span`.
+    let vue_foo_start = carrier.find("foo").unwrap() as u32;
+    let vue_foo_span = verter_span::Span {
+        start: vue_foo_start,
+        end: vue_foo_start + 3,
+    };
+
+    // The map token: API `foo` start ↔ `.vue` `foo` start (UTF-16 columns), exactly
+    // the `push_mapped(name, span)` shape.
+    let api_foo = api.find("foo").unwrap() as u32;
+    let (api_line, api_col) = {
+        let before = &api[..api_foo as usize];
+        let line = before.matches('\n').count() as u32;
+        let col = api_foo - before.rfind('\n').map(|i| i as u32 + 1).unwrap_or(0);
+        (line, col)
+    };
+    // `.vue` foo is on line 1 (0-indexed); col is its UTF-16 column on that line.
+    let line1 = carrier.lines().nth(1).unwrap();
+    let vue_foo_in_line = line1.find("foo").unwrap() as u32;
+    let vue_foo_utf16_col: u32 = line1[..vue_foo_in_line as usize]
+        .chars()
+        .map(|c| c.len_utf16() as u32)
+        .sum();
+
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Child.vue", carrier);
+    builder.add_token(
+        api_line,
+        api_col,
+        1,
+        vue_foo_utf16_col,
+        Some(source_id),
+        None,
+    );
+    let source_map_json = builder.into_sourcemap().to_json_string();
+
+    let store = ProviderSurfaceStore::new();
+    let snap = store.record(RecordSurface {
+        provider_path: VPATH.to_string(),
+        kind: ProviderSurfaceKind::CarrierApi,
+        source_canonical: CANONICAL.to_string(),
+        provider_content: Arc::from(api),
+        source_map: Some(
+            crate::documents::provider_projection::ProviderPositionMapper::source_map(
+                crate::documents::position_map::PositionMapper::from_json(&source_map_json)
+                    .unwrap(),
+            ),
+        ),
+        carrier_source: Arc::from(carrier),
+    });
+    (snap, carrier, api, vue_foo_span)
+}
+
+#[test]
+fn locate_prop_decl_range_returns_exact_api_range_and_roundtrips_to_vue() {
+    use crate::type_provider::merge::api_surface_range_to_carrier_range;
+    use tower_lsp_server::ls_types::PositionEncodingKind;
+
+    let (snap, carrier, api, vue_foo_span) = build_foo_prop_snapshot();
+
+    let (start, end) = locate_prop_decl_range_in_carrier_api(&snap, vue_foo_span, "foo")
+        .expect("the locator must find `foo` in the API content via the typed `.vue` span");
+
+    // EXACT: the located byte range must spell `foo` in the API content — discriminating,
+    // a wrong range would slice a different substring.
+    let expected_start = api.find("foo").unwrap() as u32;
+    assert_eq!(
+        start, expected_start,
+        "located API start must be the prop-name start"
+    );
+    assert_eq!(
+        end,
+        expected_start + 3,
+        "located API end must be start + name length"
+    );
+    assert_eq!(&api[start as usize..end as usize], "foo");
+
+    // ROUND-TRIP: feeding the located range back through the SAME merge mapping
+    // (the path a provider's real carrier location takes) lands on the `.vue` `foo`
+    // declaration. This is exactly why the synthesized + real locations dedup.
+    let ctx = external_ide_context_from_snapshot(&snap, PositionEncodingKind::UTF16)
+        .expect("snapshot has a source map");
+    let range = api_surface_range_to_carrier_range(
+        start,
+        end,
+        &ctx.tsx_line_index,
+        &ctx.mapper,
+        &ctx.carrier_line_index,
+        ctx.carrier_negotiated_line_index.as_ref().unwrap(),
+    )
+    .expect("the located API range must map back onto the `.vue`");
+
+    // The carrier `.vue` `foo` is on line 1 at its UTF-16 column.
+    let line1 = carrier.lines().nth(1).unwrap();
+    let vue_foo_in_line = line1.find("foo").unwrap() as u32;
+    let vue_foo_col: u32 = line1[..vue_foo_in_line as usize]
+        .chars()
+        .map(|c| c.len_utf16() as u32)
+        .sum();
+    assert_eq!(
+        range.start.line, 1,
+        "round-trip lands on the `.vue` prop line"
+    );
+    assert_eq!(
+        range.start.character, vue_foo_col,
+        "round-trip lands on the `.vue` prop column (a wrong API range would mis-land)"
+    );
+}
+
+#[test]
+fn locate_prop_decl_range_fails_closed_without_source_map() {
+    // A snapshot with NO source map cannot identity-key the API position → the
+    // locator must fail closed (None), never guess a range.
+    let store = ProviderSurfaceStore::new();
+    let snap = store.record(record_surface(
+        "declare const Child: { new(props?: { foo: string }): {} }\n",
+        "<script setup lang=\"ts\">\ndefineProps<{ foo: string }>();\n</script>\n",
+    ));
+    let span = verter_span::Span { start: 40, end: 43 };
+    assert!(
+        locate_prop_decl_range_in_carrier_api(&snap, span, "foo").is_none(),
+        "no source map → fail closed (no synthesized child edit, no usage-only partial)"
+    );
+}
+
+#[test]
+fn locate_prop_decl_range_fails_closed_on_unmapped_or_mismatched_span() {
+    let (snap, _carrier, _api, _vue_foo_span) = build_foo_prop_snapshot();
+
+    // A `.vue` span the map does NOT cover (e.g. pointing at unmapped script text)
+    // must fail closed — the merge maps only `foo`, so a far-off span resolves to
+    // nothing.
+    let unmapped = verter_span::Span { start: 0, end: 3 };
+    assert!(
+        locate_prop_decl_range_in_carrier_api(&snap, unmapped, "foo").is_none(),
+        "an unmapped `.vue` span must fail closed (no fabricated API range)"
+    );
+
+    // The typed span resolves, but the claimed NAME does not match what the API
+    // content spells there → fail closed (the correctness tripwire), so a
+    // wrong-identity resolution never emits a corrupting edit.
+    let (snap2, _c, _a, vue_foo_span) = build_foo_prop_snapshot();
+    assert!(
+        locate_prop_decl_range_in_carrier_api(&snap2, vue_foo_span, "barbaz").is_none(),
+        "a name mismatch at the resolved range must fail closed"
+    );
+}
