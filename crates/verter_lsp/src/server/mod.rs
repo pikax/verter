@@ -56,6 +56,15 @@ mod provider_state;
 // slots).
 mod component_resolve;
 
+// Cross-file `<Child prop=…>` rename resolution. Inherent-impl extension
+// methods on `VerterLanguageServer` plus the shared classification types
+// (`ChildPropUsage`/`ChildPropRenameClass`/`ChildPropDeclarationProof`), covering
+// the SHARED prop-usage resolution (also used by the goto-definition props branch),
+// inline macro-field declaration resolution, the imported-type declaration
+// `get_definition` upgrade hop, and the rename classification the merged-edit
+// completeness gate consumes.
+mod child_prop_rename;
+
 // Provider-sync orchestration. Inherent-impl extension
 // methods on `VerterLanguageServer` covering diagnostics publishing,
 // IDE/API/non-carrier sync, ensure_*_synced family, unresolved (pre-snapshot) sync,

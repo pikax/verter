@@ -235,6 +235,244 @@ real_provider_test!(
     }
 );
 
+// IMPORTED-TYPE cross-file rename PARITY (`defineProps<ImportedType>()`), tsserver.
+// The child `ImportedPropChild.vue` declares its props via an IMPORTED type
+// (`ChildImportedProps`) whose member declaration lives in a THIRD file,
+// `childImportedProps.ts` — NOT an inline `defineProps` macro field. Renaming the
+// `headline` prop USAGE in the parent must edit BOTH the parent usage AND the
+// imported type's member declaration in the third file.
+//
+// WHAT THIS DISCRIMINATES — the imported-type declaration RESOLUTION + completeness
+// gate. Verter resolves the declaration target by a provider `get_definition` at the
+// SAME parent-usage TSX offset the rename uses (the provider resolves usage ->
+// imported member in one hop), then the completeness gate proves the merged
+// `WorkspaceEdit` edits that resolved third-file member. If the gate resolution
+// regressed, the rename would ship a usage-only partial or fail entirely; either way
+// the third-file edit assertion below fails.
+//
+// tsserver-only (written directly, not via `real_provider_test!`): tgo cannot reach
+// the imported type's member declaration from the parent's program — it resolves the
+// prop usage only to its OWN occurrence (the cross-file project-MEMBERSHIP gap
+// tracked as Block H-membership). tgo therefore correctly FAILS CLOSED for this case
+// (see `rename_cross_file_imported_prop_fails_closed` below, which runs for BOTH
+// providers, and the tgo future-parity tracker
+// `rename_cross_file_imported_prop_tgo_member_parity`). The tsserver imported member
+// IS reachable, so tsserver achieves full cross-file parity here. Mirrors the
+// macro's skip/build gating (build() returns None when absent; hard-fails under
+// VERTER_REQUIRE_TSSERVER=1).
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_cross_file_imported_prop_tsserver() {
+    use crate::test_harness::{TestProviderKind, TestSessionBuilder};
+
+    let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
+        .fixture("single-project")
+        .build()
+        .await
+    else {
+        return;
+    };
+
+    let parent = session
+        .open_fixture_file("src/ImportedPropParent.vue")
+        .await;
+    let _child = session.open_fixture_file("src/ImportedPropChild.vue").await;
+    let decl_uri = session.workspace_uri("src/childImportedProps.ts");
+
+    // Best-effort warm-up only (no gating); the production handler syncs.
+    let _warm = session
+        .wait_until_ready(&parent, "headline=\"hi there\"", 0, "headline")
+        .await;
+
+    // Rename the `headline` prop USAGE on `<ImportedPropChild headline=…>`. tsserver
+    // may need a moment to index the imported-carrier surfaces before it
+    // cross-references the member; retry in a bounded settle loop until BOTH files are
+    // edited (the production sync is what makes the surfaces live — the settle only
+    // lets the provider index a surface the sync already sent).
+    let pos = session.find_position(&parent, "headline=\"hi there\"", 0);
+    let mut ws_edit = None;
+    for attempt in 0..12 {
+        let edits = session.rename_edits(&parent, pos, "headlineRenamed").await;
+        if let Some(edit) = edits {
+            if edit_touches(&edit, &parent) && edit_touches(&edit, &decl_uri) {
+                ws_edit = Some(edit);
+                break;
+            }
+            ws_edit = Some(edit);
+        }
+        if attempt < 11 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    // BOTH files must be edited (parent usage + the imported type's member
+    // declaration in the THIRD file). It FAILS (not skips) if the declaration edit is
+    // dropped — the gate must never ship a usage-only partial.
+    let ws_edit = ws_edit.expect(
+        "cross-file imported-type rename must return edits — the production sync-before-query \
+         must make the imported carrier + type surfaces live for the provider",
+    );
+    assert!(
+        edit_touches(&ws_edit, &parent),
+        "rename must edit the parent ImportedPropParent.vue: {ws_edit:?}"
+    );
+    assert!(
+        edit_touches(&ws_edit, &decl_uri),
+        "rename must edit the imported type's member declaration in the THIRD file \
+         childImportedProps.ts (the imported-type parity case): {ws_edit:?}"
+    );
+
+    // APPLY the edit and verify the declaration is renamed in the third file.
+    let decl_before = read_file(&decl_uri);
+    assert!(
+        decl_before.contains("headline: string"),
+        "fixture precondition: childImportedProps.ts must declare `headline: string`:\n{decl_before}"
+    );
+    let decl_after = apply_edits(&ws_edit, &decl_uri, &decl_before);
+    // STRONG mapping assertion: the renamed prop must appear in its DECLARATION
+    // context — `headlineRenamed: string` (name WITH its declared type), not a bare
+    // substring. A mis-ranged edit would corrupt the declaration.
+    assert!(
+        decl_after.contains("headlineRenamed: string"),
+        "childImportedProps.ts must declare the renamed member `headlineRenamed: string`:\n{decl_after}"
+    );
+    // The ORIGINAL `headline:` member must be gone (renamed in place).
+    assert!(
+        !decl_after.contains("headline: string"),
+        "childImportedProps.ts must no longer declare the original `headline: string`:\n{decl_after}"
+    );
+
+    // The parent usage must be renamed too.
+    let parent_before = read_file(&parent);
+    let parent_after = apply_edits(&ws_edit, &parent, &parent_before);
+    assert!(
+        parent_after.contains("headlineRenamed=")
+            && !parent_after.contains("headline=\"hi there\""),
+        "ImportedPropParent.vue must have the renamed prop usage applied:\n{parent_after}"
+    );
+
+    session.shutdown().await;
+}
+
+// IMPORTED-TYPE cross-file rename PARITY for tgo — the FUTURE expectation, gated
+// `#[ignore]` on a CONFIRMED tgo cross-file project-MEMBERSHIP gap (the same class as
+// `rename_cross_file_prop_child_closed_unprewarmed_tsserver`, tracked as Block
+// H-membership).
+//
+// MEASURED tgo behavior: `get_definition` AND `get_rename_locations` at the parent
+// `<ImportedPropChild headline=…>` usage offset both return ONLY the parent's OWN
+// usage occurrence — tgo does not reach the imported type's member declaration in
+// `childImportedProps.ts` from the parent's program. So Verter's declaration
+// resolution stays `Unknown` and the completeness gate correctly FAILS CLOSED (no
+// usage-only partial — verified by `rename_cross_file_imported_prop_fails_closed`).
+// Achieving tgo member-parity needs the cross-cutting tgo program-membership /
+// sync-ordering fix (affects every nav handler), which is out of scope for the
+// fail-closed gate work. When that lands, tgo will reach the member and this
+// expectation becomes assertable — remove `#[ignore]`.
+//
+// tgo-only, written directly (mirrors the macro's gating): build() returns None when
+// tgo is absent (skip), hard-fails under VERTER_REQUIRE_TSGO=1.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "confirmed tgo cross-file project-membership gap (Block H-membership): tgo resolves a \
+            `<Child prop=…>` imported-type prop usage only to its own occurrence, never the imported \
+            member in the third file, so imported-type cross-file rename parity for tgo needs the \
+            out-of-scope tgo program-membership/sync-ordering fix. tgo correctly FAILS CLOSED today \
+            (no usage-only partial); this lane asserts the future member-parity once membership lands."]
+async fn rename_cross_file_imported_prop_tgo_member_parity() {
+    use crate::test_harness::{TestProviderKind, TestSessionBuilder};
+
+    let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsgo)
+        .fixture("single-project")
+        .build()
+        .await
+    else {
+        return;
+    };
+
+    let parent = session
+        .open_fixture_file("src/ImportedPropParent.vue")
+        .await;
+    let _child = session.open_fixture_file("src/ImportedPropChild.vue").await;
+    let decl_uri = session.workspace_uri("src/childImportedProps.ts");
+    let _warm = session
+        .wait_until_ready(&parent, "headline=\"hi there\"", 0, "headline")
+        .await;
+
+    let pos = session.find_position(&parent, "headline=\"hi there\"", 0);
+    let mut ws_edit = None;
+    for attempt in 0..12 {
+        let edits = session.rename_edits(&parent, pos, "headlineRenamed").await;
+        if let Some(edit) = edits {
+            if edit_touches(&edit, &parent) && edit_touches(&edit, &decl_uri) {
+                ws_edit = Some(edit);
+                break;
+            }
+            ws_edit = Some(edit);
+        }
+        if attempt < 11 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+    let ws_edit = ws_edit.expect("tgo imported-type cross-file rename must return edits");
+    assert!(
+        edit_touches(&ws_edit, &parent) && edit_touches(&ws_edit, &decl_uri),
+        "tgo imported-type rename must edit BOTH the parent usage and the third-file member: {ws_edit:?}"
+    );
+
+    session.shutdown().await;
+}
+
+// FAIL-CLOSED imported-type cross-file rename — BOTH providers. The completeness
+// invariant: a CONFIRMED `<Child prop=…>` rename whose declaration is an imported
+// type must NEVER ship a usage-only partial. Either the rename completes WITH the
+// third-file declaration edit, OR it returns None — never a parent-only edit.
+//
+// Both providers satisfy the invariant by DIFFERENT routes, and BOTH are exercised
+// here: tsserver reaches the imported member and completes (parent + third-file
+// edits); tgo cannot reach the member (the tracked cross-file membership gap), so its
+// declaration stays `Unknown` and the gate fails closed (None). Either way no
+// usage-only partial is shipped.
+//
+// DISCRIMINATES the fail-closed boundary end-to-end: with the gate reverted to the
+// old "unresolved declaration does not gate" behavior, tgo would return a usage-only
+// `WorkspaceEdit` here; the assertion that a parent edit IMPLIES the third-file edit
+// catches it (and the tgo-without-fix run produces exactly the usage-only shape this
+// rejects).
+real_provider_test!(
+    rename_cross_file_imported_prop_fails_closed,
+    fixture = "single-project",
+    async fn run(session) {
+        let parent = session.open_fixture_file("src/ImportedPropParent.vue").await;
+        let _child = session.open_fixture_file("src/ImportedPropChild.vue").await;
+        let decl_uri = session.workspace_uri("src/childImportedProps.ts");
+        let _warm = session
+            .wait_until_ready(&parent, "headline=\"hi there\"", 0, "headline")
+            .await;
+
+        // Rename the `headline` USAGE but ASSERT the fail-closed invariant holds for
+        // any returned edit: a confirmed child-prop rename must NEVER ship a
+        // declaration-less (usage-only) partial. Either the rename completes with the
+        // third-file declaration edit present, OR it returns None — never a
+        // parent-only WorkspaceEdit.
+        let pos = session.find_position(&parent, "headline=\"hi there\"", 0);
+        let edits = session.rename_edits(&parent, pos, "headlineRenamed").await;
+
+        if let Some(ws_edit) = edits {
+            // If ANY edit is returned, the completeness gate guarantees it is NOT a
+            // usage-only partial: a parent edit implies the third-file declaration
+            // edit is also present.
+            if edit_touches(&ws_edit, &parent) {
+                assert!(
+                    edit_touches(&ws_edit, &decl_uri),
+                    "a confirmed imported-type child-prop rename must never ship a usage-only \
+                     partial: if the parent usage is edited, the third-file declaration MUST be \
+                     too (the fail-closed completeness gate): {ws_edit:?}"
+                );
+            }
+        }
+        // None is an acceptable fail-closed outcome.
+    }
+);
+
 // PREWARM REGRESSION GUARD — cross-file rename now DEPENDS on the parent's
 // `did_open` prewarming the imported child's `{carrier}.ts` PUBLIC-API surface
 // into the `ProviderSurfaceStore` (so tsserver can REPORT the cross-file rename

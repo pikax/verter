@@ -21,113 +21,13 @@ use crate::documents::uri_to_canonical_id;
 use crate::features::hover;
 use crate::type_provider::merge;
 
+use super::child_prop_rename::ChildPropUsageClass;
 use super::server_utils::{
     event_name_match_rank, extract_word_at_offset, goto_response_from_locations,
     is_default_export_component_carrier, listener_prop_candidates, location_from_span,
     push_unique_location, resolve_component_for, resolve_import_path, to_pascal_case,
 };
 use super::{ResolvedComponentDocument, VerterLanguageServer};
-
-/// A `<Child prop=…>` prop-usage hit resolved at the cursor: the parent-side
-/// usage facts plus the resolved child component identity. The SHARED resolution
-/// both goto-definition (the props branch of
-/// [`VerterLanguageServer::try_component_contract_definition`]) and cross-file
-/// rename ([`VerterLanguageServer::classify_child_prop_rename`]) build on, so the
-/// two paths cannot drift on the component match, the prop-name-span containment,
-/// or the child resolution.
-pub(super) struct ChildPropUsage {
-    /// The parent SFC's URI (where the `<Child prop=…>` usage lives).
-    pub(super) parent_uri: Uri,
-    /// The prop name at the cursor.
-    pub(super) parent_prop_name: String,
-    /// The `.vue` byte span of just the prop NAME on the usage.
-    pub(super) parent_prop_name_span: verter_span::Span,
-    /// Whether the usage is a same-name shorthand (`:bar` with no expression).
-    pub(super) parent_is_shorthand: bool,
-    /// The child component's `.vue` URI (the file the cross-file prop-rename
-    /// declaration edit must land in).
-    pub(super) child_uri: Uri,
-    /// The child component's `{carrier}.ts` PUBLIC-API provider path (the surface
-    /// the cross-file prop rename's declaration edit lands against).
-    pub(super) child_carrier_api_path: String,
-}
-
-/// A resolved [`ChildPropUsage`] together with the resolved child component
-/// document (its analysis + line index), so both consumers can read the child's
-/// `defineProps` macro fields / template prop definitions without re-resolving.
-pub(super) struct ResolvedChildPropUsage {
-    pub(super) usage: ChildPropUsage,
-    pub(super) child: ResolvedComponentDocument,
-}
-
-/// The outcome of [`VerterLanguageServer::resolve_child_prop_usage_at_cursor`].
-pub(super) enum ChildPropUsageClass {
-    /// The cursor is not on a child component's prop NAME.
-    NotChildProp,
-    /// The cursor is on a `<Child prop=…>` prop name and the child component
-    /// resolved. Boxed — the resolved payload (a full child analysis snapshot) is
-    /// much larger than the empty `NotChildProp` variant.
-    Resolved(Box<ResolvedChildPropUsage>),
-}
-
-/// The resolved identity of a `<Child prop=…>` rename target: the parent-side
-/// usage plus the prop's `.vue` DECLARATION span in the child. Drives
-/// provider-agnostic synthesis of a cross-file Vue-prop rename's child-declaration
-/// leg.
-pub(super) struct ChildPropRenameTarget {
-    /// The parent-side usage facts (parent URI, prop name + name span, the child's
-    /// `.vue` URI and `{carrier}.ts` PUBLIC-API path).
-    pub(super) usage: ChildPropUsage,
-    /// The prop's `.vue` declaration span (file-absolute child `.vue` bytes) — the
-    /// typed identity the API generator keys its source-map token on. The child's
-    /// `defineProps` macro field span, NOT a template-only / navigation-convenience
-    /// fallback (those are not safe rename declarations).
-    pub(super) child_prop_decl_span: verter_span::Span,
-    /// The child `.vue` declaration [`Range`] in the NEGOTIATED encoding (computed
-    /// from `child_prop_decl_span` via the child doc's line index) — the position
-    /// the post-merge completeness gate proves the merged `WorkspaceEdit` actually
-    /// edits. `None` when the decl span does not resolve to a child `.vue`
-    /// position (the gate then has no precise range to assert and fails closed).
-    pub(super) expected_child_decl_range: Option<Range>,
-    /// The parent `.vue` prop-usage NAME [`Range`] in the NEGOTIATED encoding — the
-    /// initiating-edit position. The post-merge gate also proves the merged
-    /// `WorkspaceEdit` edits the parent usage (a declaration-only result is also
-    /// incomplete). `None` when the usage name span does not resolve to a parent
-    /// `.vue` position.
-    pub(super) expected_parent_usage_range: Option<Range>,
-}
-
-/// Why a confirmed `<Child prop=…>` rename has no SAFE declaration leg to
-/// synthesize. A confirmed child-prop rename with any of these reasons is
-/// [`ChildPropRenameClass::ChildPropButNoSafeDeclaration`] — distinct from "not a
-/// child prop at all" — so the post-merge completeness gate can fail closed
-/// (return no edit) instead of shipping a usage-only partial.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ChildPropMissReason {
-    /// The prop is not declared in the child's `defineProps` macro fields (e.g. a
-    /// template-only prop, or a `defineProps<ImportedType>()` surface whose props
-    /// are a bare type ref with no inline member span to rename in place).
-    NoMacroDeclaration,
-}
-
-/// The classification of a rename position with respect to the cross-file
-/// `<Child prop=…>` rename — a 3-state result, NOT a lossy `Option`, so the caller
-/// can distinguish "not a child prop" (fall through to the provider result
-/// untouched) from "a confirmed child prop whose declaration leg cannot be
-/// synthesized" (a post-merge completeness gate must fail closed).
-pub(super) enum ChildPropRenameClass {
-    /// The cursor is not on a child component's prop name → not a cross-file
-    /// child-prop rename. The provider's own result is used as-is.
-    NotChildProp,
-    /// The cursor IS on a child component's prop name, but no SAFE declaration leg
-    /// could be resolved. The rename is incomplete unless the provider's own result
-    /// already lands the child declaration edit; the post-merge gate decides.
-    ChildPropButNoSafeDeclaration { reason: ChildPropMissReason },
-    /// The cursor is on a child component's prop name AND the prop's child
-    /// declaration leg resolved — synthesize it. Boxed — the target payload is much
-    /// larger than the other two variants.
-    Renameable(Box<ChildPropRenameTarget>),
-}
 
 impl VerterLanguageServer {
     pub(super) fn resolve_import_specifier(
@@ -685,167 +585,6 @@ impl VerterLanguageServer {
         None
     }
 
-    /// SHARED `<Child prop=…>` prop-usage resolution: walk the template
-    /// components, find the usage whose prop NAME span contains the cursor, and
-    /// resolve the child component. This is the ONE place the component match +
-    /// prop `name_span` containment + child resolution lives, so goto-definition
-    /// (the props branch of [`Self::try_component_contract_definition`]) and
-    /// cross-file rename ([`Self::classify_child_prop_rename`]) cannot drift on it.
-    ///
-    /// Returns [`ChildPropUsageClass::NotChildProp`] when the cursor is not on a
-    /// child component's prop name, or the child is not a resolvable component.
-    pub(super) fn resolve_child_prop_usage_at_cursor(
-        &self,
-        uri: &Uri,
-        position: &Position,
-    ) -> ChildPropUsageClass {
-        let Some(doc) = self.documents.get(uri) else {
-            return ChildPropUsageClass::NotChildProp;
-        };
-        let Some(analysis) = self.documents.get_analysis(uri) else {
-            return ChildPropUsageClass::NotChildProp;
-        };
-        let Some(template) = analysis.template.as_ref() else {
-            return ChildPropUsageClass::NotChildProp;
-        };
-        let Some(offset) = doc.line_index.position_to_offset(position) else {
-            return ChildPropUsageClass::NotChildProp;
-        };
-
-        for element in &template.elements {
-            if !element.is_component {
-                continue;
-            }
-            let Some(component) = template.components.iter().find(|c| {
-                offset >= c.span.start
-                    && offset < c.span.end
-                    && (c.name == element.tag || c.name == to_pascal_case(&element.tag))
-            }) else {
-                continue;
-            };
-
-            // The cursor must be on a prop NAME (not a value / directive).
-            let Some(prop) = component
-                .props
-                .iter()
-                .find(|prop| offset >= prop.name_span.start && offset < prop.name_span.end)
-            else {
-                continue;
-            };
-
-            let Some(child) = self.resolve_component_document_for_usage(uri, &analysis, component)
-            else {
-                continue;
-            };
-
-            let child_canonical = uri_to_canonical_id(&child.uri);
-            let child_carrier_api_path =
-                verter_workspace::carrier_api_provider_path(&child_canonical);
-
-            return ChildPropUsageClass::Resolved(Box::new(ResolvedChildPropUsage {
-                usage: ChildPropUsage {
-                    parent_uri: uri.clone(),
-                    parent_prop_name: prop.name.clone(),
-                    parent_prop_name_span: prop.name_span,
-                    parent_is_shorthand: prop.is_shorthand,
-                    child_uri: child.uri.clone(),
-                    child_carrier_api_path,
-                },
-                child,
-            }));
-        }
-
-        ChildPropUsageClass::NotChildProp
-    }
-
-    /// Resolve a `<Child prop=…>` usage to the prop's child `.vue` DECLARATION span
-    /// — the child's `defineProps` MACRO field span ONLY. This is the SOLE safe
-    /// rename declaration: it is the typed identity the API generator keys its
-    /// source-map token on, so the synthesized child-declaration leg maps back onto
-    /// the child `.vue` exactly. Template-only prop definitions, the shorthand
-    /// parent binding, and the navigate-to-child-file fallback (all conveniences
-    /// goto-definition offers) are NOT safe rename declarations and are
-    /// deliberately NOT consulted here.
-    ///
-    /// Returns `None` when the prop is not declared in the child's macros.
-    pub(super) fn resolve_child_macro_prop_declaration(
-        &self,
-        resolved: &ResolvedChildPropUsage,
-    ) -> Option<verter_span::Span> {
-        resolved.child.analysis.macros.iter().find_map(|mac| {
-            mac.prop_fields
-                .iter()
-                .find(|field| field.name == resolved.usage.parent_prop_name)
-                .map(|field| field.span)
-        })
-    }
-
-    /// Classify a rename position with respect to the cross-file `<Child prop=…>`
-    /// rename — a 3-state [`ChildPropRenameClass`], NOT a lossy `Option`, so the
-    /// caller distinguishes "not a child prop" from "a confirmed child prop whose
-    /// declaration leg cannot be synthesized" (the latter must fail closed at the
-    /// post-merge completeness gate, never ship a usage-only partial).
-    ///
-    /// Drives the provider-AGNOSTIC synthesis of the cross-file rename's
-    /// child-declaration leg (a provider's own `textDocument/rename` may not
-    /// enumerate that leg across the synthesized API surface — tgo does not). Built
-    /// on the SHARED [`Self::resolve_child_prop_usage_at_cursor`] +
-    /// [`Self::resolve_child_macro_prop_declaration`], so it cannot drift from the
-    /// goto-definition props branch.
-    pub(super) fn classify_child_prop_rename(
-        &self,
-        uri: &Uri,
-        position: &Position,
-    ) -> ChildPropRenameClass {
-        let resolved = match self.resolve_child_prop_usage_at_cursor(uri, position) {
-            ChildPropUsageClass::Resolved(resolved) => resolved,
-            ChildPropUsageClass::NotChildProp => return ChildPropRenameClass::NotChildProp,
-        };
-
-        // The prop's `.vue` declaration span comes from the child's `defineProps`
-        // macro fields ONLY — the typed identity the API generator keys its
-        // source-map token on. A prop only declared via the template (no macro
-        // field) has no inline API-surface member to rename in place: it is a
-        // CONFIRMED child prop with NO safe declaration leg, NOT "not a child prop".
-        let Some(child_prop_decl_span) = self.resolve_child_macro_prop_declaration(&resolved)
-        else {
-            return ChildPropRenameClass::ChildPropButNoSafeDeclaration {
-                reason: ChildPropMissReason::NoMacroDeclaration,
-            };
-        };
-
-        // The child `.vue` decl RANGE in the negotiated encoding — the exact
-        // position the post-merge completeness gate proves the merged
-        // `WorkspaceEdit` edits. Computed via the SAME `location_from_span` path the
-        // goto-definition props branch uses, off the child doc's negotiated-encoding
-        // line index, so the gate's expected range is byte-identical to where the
-        // synthesized leg maps the edit.
-        let expected_child_decl_range = location_from_span(
-            &resolved.child.uri,
-            &resolved.child.line_index,
-            child_prop_decl_span,
-        )
-        .map(|loc| loc.range);
-
-        // The parent usage NAME range in the negotiated encoding — the initiating
-        // edit the gate also proves present (a declaration-only result is also
-        // incomplete). Computed off the parent doc's negotiated-encoding line index.
-        let expected_parent_usage_range = self
-            .documents
-            .get(uri)
-            .and_then(|doc| {
-                location_from_span(uri, &doc.line_index, resolved.usage.parent_prop_name_span)
-            })
-            .map(|loc| loc.range);
-
-        ChildPropRenameClass::Renameable(Box::new(ChildPropRenameTarget {
-            usage: resolved.usage,
-            child_prop_decl_span,
-            expected_child_decl_range,
-            expected_parent_usage_range,
-        }))
-    }
-
     /// Resolve barrel-file export clicks to terminal target.
     ///
     /// When the cursor is on an `ExportSignature` that is a re-export
@@ -978,7 +717,7 @@ impl VerterLanguageServer {
         })
     }
 
-    /// Post-process type provider definition results to follow barrel re-exports.
+    /// Resolve type provider definition results through barrel re-exports.
     ///
     /// When the type provider returns a location in a barrel file (`.ts`/`.js` with
     /// re-exports), resolve each location to the terminal declaration so the user
@@ -1373,7 +1112,7 @@ mod canonicalize_provider_path_tests {
 
     #[test]
     fn delegates_to_owner_strips_extended_prefix_and_trailing_slash() {
-        // Pre-fix the hand-rolled body omitted the `//?/` extended-prefix strip
+        // The hand-rolled body previously omitted the `//?/` extended-prefix strip
         // and the trailing-slash strip, so a Windows extended-prefix path keyed
         // `get_analysis` under `//?/D:/x/` and missed the cache. Delegating to
         // the owner produces the same `d:/x` every other producer keys on.
