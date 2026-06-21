@@ -9,27 +9,44 @@
 //! sites, read via [`dump_structural_body_memo_instrumentation`], reset via
 //! [`reset_structural_body_memo_instrumentation`].
 //!
-//! ## Always-on low-overhead instrumentation
+//! ## Always-on instrumentation cost
 //!
-//! The counters are a relaxed `fetch_add` per memo `get` / `insert`,
-//! UNCONDITIONALLY compiled (the `loop5_instrumentation` model). A relaxed
-//! `fetch_add` on an uncontended atomic is inexpensive enough to leave always-on;
-//! they are NOT cfg-gated. This is NOT zero-cost — every `get`/`insert` performs
-//! the relaxed RMW — but the cost is negligible and the counters are simply NOT
-//! READ in production: no production code path calls `dump_*`; the dump exists
-//! for the perf-consult harness and the tests.
+//! Always-on instrumentation, UNCONDITIONALLY compiled (the `loop5_instrumentation`
+//! model) — NOT cfg-gated. The cost per memo operation, in relaxed atomic RMWs
+//! (`fetch_add`):
 //!
-//! ## Every counter has a live bump site
+//! - every memo `get` performs TWO relaxed RMWs — `LOOKUPS` plus one of `HITS` /
+//!   `MISSES` (see [`record_get`]);
+//! - a NEW-context `insert` performs TWO relaxed RMWs — `CELLS_CREATED` plus the
+//!   context bucket (see [`record_insert_context`]);
+//! - a DUPLICATE `insert` (the key was already present) performs ZERO
+//!   instrumentation RMWs — it does not call [`record_insert_context`] at all.
 //!
-//! Every counter dumped here is bumped from the memo's real `get` / `insert`
-//! methods (via [`record_get`] / [`record_insert_context`]), so each measures
-//! real traffic the moment the cache is wired — no counter reports a constant
-//! zero. The cold-build TIMING (summed cold-lower ns), the cold-lower FAILURE
-//! count, and the direct-lower BYPASS detector land WITH the producer-wiring step
-//! that introduces those paths (their bump sites only exist once the producer
-//! times each cold lower, surfaces a lower failure, and detects a memo bypass);
-//! they are intentionally NOT defined here, because a counter with no production
-//! bump site would report a constant zero until then.
+//! No measurement of this overhead on a hot/parallel production path exists yet,
+//! so this module does not characterize the RMWs as cheap or negligible. The
+//! counters are simply NOT READ in production: no production code path calls
+//! `dump_*`; the dump exists for the perf-consult harness and the tests.
+//!
+//! ## Every counter has a live bump site (but production stays all-zero until wired)
+//!
+//! Every counter dumped here HAS a live bump site in the memo's real `get` /
+//! `insert` methods (via [`record_get`] / [`record_insert_context`]), so each one
+//! will measure real traffic the moment a caller drives the memo. BUT normal
+//! production runs leave every counter ALL-ZERO until the later producer/dispatch
+//! wiring step starts calling `get` / `insert` on a real workload: the memo is
+//! built ahead of its caller (dead-code-until-wired), so nothing bumps the
+//! counters yet. Those pre-wiring zeros are NOT valid perf evidence for the
+//! Option-A-vs-B decision — they are simply "no memo traffic yet", and they
+//! become evidence only after the wiring step drives the memo on a warmed
+//! workload (see [`dump_structural_body_memo_instrumentation`]).
+//!
+//! The cold-build TIMING (summed cold-lower ns), the cold-lower FAILURE count, and
+//! the direct-lower BYPASS detector land WITH the producer-wiring step that
+//! introduces those paths (their bump sites only exist once the producer times
+//! each cold lower, surfaces a lower failure, and detects a memo bypass); they are
+//! intentionally NOT defined here, because a counter with no bump site at all
+//! could never be driven, whereas the counters defined here have real bump sites
+//! that the later wiring step exercises.
 //!
 //! ## Bump sites
 //!
@@ -172,8 +189,12 @@ pub fn reset_structural_body_memo_instrumentation() {
 /// Snapshot every structural-body-memo instrumentation counter as a JSON-shaped
 /// string, so the perf-consult harness can write it as a sidecar alongside the
 /// rest of the audit JSON. Every counter's current value appears as a key, and
-/// every printed counter has a live `get`/`insert` bump site (no constant-zero
-/// counter).
+/// every printed counter has a live `get`/`insert` bump site.
+///
+/// A pre-wiring dump is EXPECTED to be all-zero: the memo has no production caller
+/// yet, so nothing has bumped the counters — an all-zero dump today is correct,
+/// not a bug. The dump becomes perf-consult evidence ONLY after the later
+/// producer/dispatch wiring step drives the memo on a warmed workload.
 pub fn dump_structural_body_memo_instrumentation() -> String {
     let lookups = STRUCTURAL_BODY_MEMO_LOOKUPS.load(Ordering::Relaxed);
     let hits = STRUCTURAL_BODY_MEMO_HITS.load(Ordering::Relaxed);
