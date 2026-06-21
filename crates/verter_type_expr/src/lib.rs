@@ -481,7 +481,7 @@ pub enum ObjectMember {
 /// Every span is in the owning file's source coordinates. `None` only for a
 /// genuinely synthetic member (one with no single source site); never as a
 /// "not implemented" placeholder.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub struct MemberSpans {
     /// Span of the whole member declaration (`name?: T` / `name(): T`).
     pub declaration: Option<Span>,
@@ -548,7 +548,16 @@ pub struct IndexSignatureSpans {
 /// [`Protected`]: MemberVisibility::Protected
 /// [`Private`]: MemberVisibility::Private
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum MemberVisibility {
@@ -1192,4 +1201,35 @@ impl TypeExpr {
     pub fn is_primitive(&self) -> bool {
         matches!(self, Self::Primitive(_))
     }
+}
+
+#[cfg(test)]
+mod no_type_expr_poison_asserts {
+    //! Compile-time negatives: the symbolic-IR owner types in this crate MUST
+    //! NOT implement `NoTypeExpr`. `MemberVisibility` / `MemberSpans` carry the
+    //! derive (they are TypeExpr-free scalars the hot carriers reuse); every
+    //! type that owns a `TypeExpr` (directly or via a member/element) stays
+    //! non-`NoTypeExpr`, so it can never satisfy a hot-carrier field bound.
+    //!
+    //! Each assert FAILS TO COMPILE if its subject ever gains a `NoTypeExpr`
+    //! impl — the discrimination is the compile itself.
+    use super::{
+        FunctionParam, ObjectExpr, ObjectMember, RecursiveConditionalFrame, TupleElement, TypeExpr,
+        ValueRef,
+    };
+    use static_assertions::{assert_impl_all, assert_not_impl_any};
+    use verter_no_typeexpr::NoTypeExpr;
+
+    // The two TypeExpr-free scalars that DO carry the derive.
+    assert_impl_all!(super::MemberVisibility: NoTypeExpr);
+    assert_impl_all!(super::MemberSpans: NoTypeExpr);
+
+    // The symbolic-IR owners that must stay non-`NoTypeExpr`.
+    assert_not_impl_any!(TypeExpr: NoTypeExpr);
+    assert_not_impl_any!(ObjectExpr: NoTypeExpr);
+    assert_not_impl_any!(ValueRef: NoTypeExpr);
+    assert_not_impl_any!(TupleElement: NoTypeExpr);
+    assert_not_impl_any!(RecursiveConditionalFrame: NoTypeExpr);
+    assert_not_impl_any!(FunctionParam: NoTypeExpr);
+    assert_not_impl_any!(ObjectMember: NoTypeExpr);
 }

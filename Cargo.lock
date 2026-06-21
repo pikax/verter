@@ -4127,7 +4127,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallvec",
+ "static_assertions",
  "verter_language",
+ "verter_no_typeexpr",
  "verter_parser",
  "verter_span",
  "verter_type_expr",
@@ -4239,6 +4241,8 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "static_assertions",
+ "verter_no_typeexpr",
  "verter_span",
 ]
 

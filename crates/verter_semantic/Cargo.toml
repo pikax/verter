@@ -22,6 +22,7 @@ verter_workspace = { path = "../verter_workspace" }
 # already depends on parser/workspace/span; verter_language depends on none of
 # them).
 verter_language = { path = "../verter_language" }
+verter_no_typeexpr = { workspace = true }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 rustc-hash = { workspace = true }
@@ -41,3 +42,4 @@ web-time = "1.1"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
+static_assertions = "1.1.0"

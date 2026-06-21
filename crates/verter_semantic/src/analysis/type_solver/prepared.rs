@@ -119,7 +119,7 @@ pub struct PreparedWrapperShape {
 /// Covers structural mapped-type patterns only. Alias forwarding (including
 /// transparent pass-through aliases like `type A<T> = B<T>`) is handled by
 /// `PreparedProjectionClass::ForwardSubject(IdentityParams)` instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, verter_no_typeexpr::NoTypeExpr)]
 pub enum PreparedWrapperKind {
     /// Not a recognized structural wrapper pattern.
     #[default]
@@ -156,7 +156,7 @@ pub enum PreparedKeyRemapShape {
 }
 
 /// Case transform kinds for key remapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
 pub enum PreparedCaseTransformKind {
     Capitalize,
     Uncapitalize,
@@ -175,7 +175,7 @@ pub enum PreparedValueRuleShape {
 }
 
 /// Surface modifiers (optional/readonly) for structural wrapper classification.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, verter_no_typeexpr::NoTypeExpr)]
 pub struct PreparedSurfaceModifiers {
     /// `Some(true)` = add optional, `Some(false)` = remove optional, `None` = unchanged.
     pub optional: Option<bool>,
@@ -227,7 +227,7 @@ pub struct PreparedForwardPayload {
 }
 
 /// How an alias's type parameters relate to the forwarded target's arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
 pub enum PreparedForwardingKind {
     /// Args are exactly the alias's own params in order: `type A<T> = B<T>`.
     /// The alias is structurally transparent for projection purposes.
@@ -267,14 +267,14 @@ pub struct PreparedMember {
 }
 
 /// A cross-file dependency reference in a prepared declaration.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub struct PreparedExternalDep {
     pub canonical_id: String,
     pub symbol_name: String,
 }
 
 /// Provenance metadata for a prepared declaration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_no_typeexpr::NoTypeExpr)]
 pub struct DeclProvenance {
     /// Route kind that resolved this declaration (direct, alias, wildcard).
     pub route_kind: Option<String>,
@@ -403,7 +403,7 @@ pub struct PreparedValueMember {
 
 /// Records the full dependency/provenance set used to build a prepared
 /// declaration. Used for invalidation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, verter_no_typeexpr::NoTypeExpr)]
 pub struct PreparedCacheDeps {
     /// Defining file canonical id + hash.
     pub defining_file: Option<(String, u64)>,
@@ -1932,4 +1932,53 @@ mod tests {
             other => panic!("expected ForwardSubject, got {:?}", other),
         }
     }
+}
+
+#[cfg(test)]
+mod no_type_expr_poison_asserts {
+    //! Compile-time negatives for the `NoTypeExpr` invariant on the prepared /
+    //! type-eval surface. The TypeExpr-free scalar facts the hot carriers reuse
+    //! verbatim DO carry the derive; every sibling that owns a `TypeExpr`
+    //! (directly or via a member/element/payload) MUST stay non-`NoTypeExpr`, so
+    //! it can never satisfy a hot-carrier field bound. Each assert FAILS TO
+    //! COMPILE if its subject ever gains or loses the impl as appropriate.
+    use super::{
+        DeclProvenance, PreparedCacheDeps, PreparedCaseTransformKind, PreparedExternalDep,
+        PreparedForwardPayload, PreparedForwardingKind, PreparedKeyFilterShape,
+        PreparedKeyRemapShape, PreparedMember, PreparedSurfaceModifiers, PreparedValueDecl,
+        PreparedValueMember, PreparedValueRuleShape, PreparedWrapperKind,
+    };
+    use crate::analysis::type_eval::{
+        EnumMemberValue, FunctionSignature, TypeDeclKind, ValueDeclKind,
+    };
+    use crate::analysis::type_solver::host::ResolvedRootIdentity;
+    use static_assertions::{assert_impl_all, assert_not_impl_any};
+    use verter_no_typeexpr::NoTypeExpr;
+
+    // The TypeExpr-free scalars that DO carry the derive (the hot carriers
+    // reuse each verbatim).
+    assert_impl_all!(DeclProvenance: NoTypeExpr);
+    assert_impl_all!(PreparedCacheDeps: NoTypeExpr);
+    assert_impl_all!(PreparedCaseTransformKind: NoTypeExpr);
+    assert_impl_all!(PreparedExternalDep: NoTypeExpr);
+    assert_impl_all!(PreparedForwardingKind: NoTypeExpr);
+    assert_impl_all!(PreparedSurfaceModifiers: NoTypeExpr);
+    assert_impl_all!(PreparedWrapperKind: NoTypeExpr);
+    assert_impl_all!(TypeDeclKind: NoTypeExpr);
+    assert_impl_all!(ValueDeclKind: NoTypeExpr);
+    assert_impl_all!(ResolvedRootIdentity: NoTypeExpr);
+
+    // The danger siblings that own a `TypeExpr` and must stay non-`NoTypeExpr`.
+    assert_not_impl_any!(PreparedKeyFilterShape: NoTypeExpr);
+    assert_not_impl_any!(PreparedKeyRemapShape: NoTypeExpr);
+    assert_not_impl_any!(PreparedValueRuleShape: NoTypeExpr);
+    assert_not_impl_any!(PreparedForwardPayload: NoTypeExpr);
+    assert_not_impl_any!(PreparedMember: NoTypeExpr);
+    assert_not_impl_any!(PreparedValueMember: NoTypeExpr);
+    assert_not_impl_any!(PreparedValueDecl: NoTypeExpr);
+    // `FunctionSignature` / `EnumMemberValue` are the type-eval `TypeExpr`
+    // owners the hot carriers mirror as handle-native shapes; they too stay
+    // non-`NoTypeExpr`.
+    assert_not_impl_any!(FunctionSignature: NoTypeExpr);
+    assert_not_impl_any!(EnumMemberValue: NoTypeExpr);
 }

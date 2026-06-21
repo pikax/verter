@@ -13,7 +13,7 @@
 ///
 /// `canonical_id` always names the defining file, never a barrel hop.
 /// This is the cache key for prepared declarations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub struct ResolvedRootIdentity {
     pub canonical_id: String,
     pub symbol_name: String,
