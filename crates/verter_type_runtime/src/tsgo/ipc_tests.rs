@@ -1452,10 +1452,18 @@ fn code_action_resolves_each_edit_against_its_own_file_content() {
 #[test]
 fn parse_code_action_drops_action_when_all_edits_unresolvable() {
     // A path with no cache entry and no file on disk: the edit's range cannot be
-    // converted to a byte offset, so the edit fails closed and is dropped.
-    let missing = std::env::temp_dir()
-        .join("verter-tgo-codeaction-absent")
-        .join("never-written.ts");
+    // converted to a byte offset, so the edit fails closed and is dropped. The
+    // directory name is made unique (process id + nanos) so the test never relies
+    // on a fixed shared temp path happening to be absent on the host.
+    let unique = format!(
+        "verter-tgo-codeaction-absent-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let missing = std::env::temp_dir().join(unique).join("never-written.ts");
     let missing_uri = path_to_file_uri_string(missing.to_str().unwrap());
 
     let json = serde_json::json!({

@@ -638,9 +638,12 @@ async fn extension_provider_get_code_actions_surfaces_single_and_combined_unused
 ///
 /// Discriminating: the combined edit targets a position (line 3) that exists
 /// only in the UPDATED content. A snapshot taken before the loop holds the
-/// original single-line content, whose codec clamps the past-EOF line to a
-/// different (EOF) byte offset; the fresh per-response snapshot resolves the
-/// line-3 position to its real byte offset. The assertion pins that real offset.
+/// original single-line content, for which the line-3 position is past EOF: the
+/// strict checked converter returns `None`, so the edit DROPS fail-closed, the
+/// combined action never surfaces, and the `expect("the combined fix-all action
+/// surfaces")` below panics. The fresh per-response snapshot resolves the
+/// line-3 position to its real byte offset, so the action surfaces and the
+/// assertion pins that real offset.
 #[tokio::test]
 async fn extension_provider_combined_fix_uses_content_current_as_of_each_response() {
     let file = "/workspace/src/entry.ts";
