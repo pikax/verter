@@ -305,8 +305,12 @@ enum StructuralLowerError {
 ///
 /// PRIVATE (no visibility modifier): reachable only from this module's own
 /// producer paths ([`build_macro_hot_ref`], [`build_script_setup_seed_frames`])
-/// and this module's in-module unit tests. No other module can name it, so a
-/// second structural-carrier producer is unrepresentable by construction.
+/// and this module's in-module unit tests. TWO REGIMES: a FOREIGN second producer
+/// is COMPILER-CONFINED — no other module can NAME this fn (a compile error,
+/// E0603 / E0433), so it is unrepresentable by construction; a SAME-MODULE second
+/// producer is NOT compiler-confined (Rust privacy is module-scoped, so code
+/// written INSIDE this module CAN name it) and is instead POLICED by the bounded
+/// single-producer architecture guards.
 fn lower_type_expr_structural(
     graph: &SemanticGraphStore,
     expr: &TypeExpr,

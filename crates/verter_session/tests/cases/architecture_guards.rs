@@ -21871,12 +21871,16 @@ const MACRO_ARG_PRODUCER_BUILTIN_DERIVES: &[&str] = &[
 /// names, NOT a load-bearing scanner. Rejected (each a `syn`-visible production
 /// surface):
 ///
-/// - a `macro_rules!` DEFINITION, an `include!` / `include_str!` / `include_bytes!`
-///   file splice, or a `concat_idents!` / `paste!` token-synthesising proc-macro
-///   bang — the `visit_macro` override classifies every `syn::Macro` and rejects
-///   these specific code-gen surfaces (an ordinary std declarative macro like
-///   `matches!` / `vec!` / `format!` is allowed: it cannot reach a private builder
-///   from elsewhere);
+/// - ANY production bang-macro INVOCATION (item / expr / stmt position) — the
+///   `visit_macro` override rejects every `syn::Macro` invocation except the
+///   item-position `macro_rules!` (itself rejected through the item path below).
+///   The ban is ALL, NOT a name-denylist: a function-like macro DEFINED anywhere
+///   (mod.rs / a foreign crate / a proc-macro crate) and invoked here is invisible
+///   to `syn` (it never expands it), so a denylist of specific names (`include!`,
+///   `concat_idents!`, `paste!`, …) is inherently incomplete. The real file is
+///   therefore kept bang-macro-FREE: the former `matches!` was de-sugared to a
+///   `match` and the former `vec![…]` to `Vec::from(…)`, so the ban-all rule
+///   passes on the genuine tree;
 /// - a CUSTOM (non-builtin) `#[derive(…)]` — a derive proc-macro expands in the
 ///   module context (a built-in derive on the producer's data types is allowed);
 /// - a `#[macro_use]` attribute (the prelude-injection vector) or any non-inert
@@ -23433,10 +23437,25 @@ fn mirror_entry_is_sanctioned(name: &str) -> bool {
 /// `#[cfg(any(test, debug_assertions))]`, `#[cfg(any(test, feature = "x"))]`,
 /// `#[cfg(not(test))]`, and a bare `#[cfg(debug_assertions)]` are PRODUCTION and
 /// are COUNTED.
+///
+/// `#[cfg_attr(...)]` is NOT an item gate and is IGNORED here. `#[cfg_attr(cond,
+/// X)]` CONDITIONALLY APPLIES attribute `X` when `cond` holds — it NEVER removes
+/// the ITEM from the build; the item is compiled in EVERY configuration. Treating
+/// `cfg_attr` like `cfg` (classifying the item test-gated when its condition
+/// entails test) was UNSOUND: `#[cfg_attr(test, allow(dead_code))] pub(crate) fn
+/// rogue()` is a real production producer entry (compiled into the non-test lib)
+/// yet was wrongly excluded — a single-entry evasion across all three collectors
+/// that call this helper. So `attrs_test_gate` gates on `#[cfg(...)]` ONLY. (A
+/// nested `#[cfg_attr(test, cfg(...))]` injecting a real `cfg` is exotic and the
+/// expansion-surface guard already bans every production `cfg_attr`; the sound
+/// rule here is simply that `cfg_attr` never test-gates the item.)
 fn attrs_test_gate(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         let path = attr.path();
-        if !(path.is_ident("cfg") || path.is_ident("cfg_attr")) {
+        // ONLY `#[cfg(...)]` gates an item out of a build. `#[cfg_attr(...)]`
+        // conditionally applies an attribute and never excludes the item, so it
+        // is not an item gate (see the doc comment above).
+        if !path.is_ident("cfg") {
             return false;
         }
         let tokens = match &attr.meta {
@@ -23444,9 +23463,7 @@ fn attrs_test_gate(attrs: &[syn::Attribute]) -> bool {
             // `#[cfg]` / `#[cfg = …]` with no predicate list: never test-gating.
             _ => return false,
         };
-        // The `#[cfg(...)]` body is a SINGLE predicate (one operand); a
-        // `#[cfg_attr(cond, …)]` body's FIRST top-level operand is the
-        // condition. Classify that leading predicate.
+        // The `#[cfg(...)]` body is a SINGLE predicate (one operand). Classify it.
         match cfg_split_top_level_operands(tokens).into_iter().next() {
             Some(pred) => predicate_entails_test(pred),
             None => false,
@@ -23749,11 +23766,57 @@ fn collect_value_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
 /// `#[derive(Default)]`s, which is an ATTRIBUTE handled by the expansion-surface
 /// derive check, not a trait-impl item). Any OTHER trait impl in the producer
 /// module is a TRAIT-EXPOSURE vector (a trait-dispatch surface that could reach a
-/// producer-capable method) and is rejected. The trait path's FINAL segment is
-/// matched (so `std::fmt::Debug` and `Debug` both qualify) and the self type must
-/// be `MacroHotMirror`.
-const MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPLS: &[(&str, &str)] =
-    &[("Debug", "MacroHotMirror"), ("Clone", "MacroHotMirror")];
+/// producer-capable method) and is rejected.
+///
+/// The allowlist is keyed by the FULL trait path spelling, NOT just the final
+/// segment: a QUALIFIED `impl evil::Clone for MacroHotMirror` (where `evil::Clone`
+/// is a USER-DEFINED trait merely NAMED `Clone`, not `core::clone::Clone` — no
+/// coherence collision with the real hand-written `impl Clone`, so it COMPILES)
+/// must NOT be admitted by a final-segment match. The allowed spellings cover the
+/// KNOWN-GOOD exact std paths only: `Debug` is written qualified as
+/// `std::fmt::Debug` in the real file (so the bare `Debug` plus the two std
+/// spellings are admitted), and `Clone` is written bare (so `Clone` plus the two
+/// std spellings are admitted). Anything else — including a deeper/foreign
+/// qualified path like `evil::Clone` or `evil::Debug` — is rejected. The self type
+/// must be `MacroHotMirror`.
+const MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPL_PATHS: &[(&[&str], &str)] = &[
+    // Debug — bare or the std spellings.
+    (&["Debug"], "MacroHotMirror"),
+    (&["std", "fmt", "Debug"], "MacroHotMirror"),
+    (&["core", "fmt", "Debug"], "MacroHotMirror"),
+    // Clone — bare or the std spellings.
+    (&["Clone"], "MacroHotMirror"),
+    (&["std", "clone", "Clone"], "MacroHotMirror"),
+    (&["core", "clone", "Clone"], "MacroHotMirror"),
+];
+
+/// The leading-colon-stripped segment idents of a trait path
+/// (`std::fmt::Debug` → `["std", "fmt", "Debug"]`, `Clone` → `["Clone"]`).
+fn trait_path_segments(trait_path: &syn::Path) -> Vec<String> {
+    trait_path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect()
+}
+
+/// Whether `(trait_path, self_name)` is an EXACT allowlisted hand-written trait
+/// impl — the full trait-path segments AND the self type must match an
+/// allowlist row. A multi-segment foreign path (`evil::Clone`) never matches a
+/// bare `["Clone"]` row, and a non-std qualified path never matches a std row.
+fn trait_impl_is_allowlisted(trait_path: &syn::Path, self_name: Option<&str>) -> bool {
+    let segs = trait_path_segments(trait_path);
+    MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPL_PATHS
+        .iter()
+        .any(|(allowed_segs, allowed_self)| {
+            segs.len() == allowed_segs.len()
+                && segs
+                    .iter()
+                    .zip(allowed_segs.iter())
+                    .all(|(got, want)| got == want)
+                && Some(*allowed_self) == self_name
+        })
+}
 
 /// Collect TRAIT-exposure violations in `macro_arg_producer.rs`:
 /// - any NON-allowlisted trait impl (the allowlist is the hand-written
@@ -23783,41 +23846,55 @@ fn collect_trait_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
                     continue;
                 }
                 if let Some((_, trait_path, _)) = &imp.trait_ {
-                    let trait_name = trait_path
-                        .segments
-                        .last()
-                        .map(|s| s.ident.to_string())
-                        .unwrap_or_default();
+                    let trait_spelling = trait_path_segments(trait_path).join("::");
                     let self_name = type_path_last_segment(&imp.self_ty);
-                    let allowed = MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPLS
-                        .iter()
-                        .any(|(t, s)| *t == trait_name && Some(*s) == self_name.as_deref());
-                    if !allowed {
+                    // FULL-PATH allowlist: a final-segment match would wrongly admit
+                    // a foreign `evil::Clone`. Match the exact std spellings instead.
+                    if !trait_impl_is_allowlisted(trait_path, self_name.as_deref()) {
                         out.push(format!(
-                            "a non-allowlisted production trait impl `impl {trait_name} for {}` is \
-                             forbidden — only the hand-written `Debug` / `Clone` for \
-                             `MacroHotMirror` are allowed; a trait impl is a dispatch surface that \
-                             could expose a producer-capable method",
+                            "a non-allowlisted production trait impl `impl {trait_spelling} for {}` \
+                             is forbidden — only the hand-written `Debug` / `Clone` (bare or std \
+                             spelling) for `MacroHotMirror` are allowed; a qualified foreign-trait \
+                             path (e.g. `evil::Clone`) is NOT the std trait and a trait impl is a \
+                             dispatch surface that could expose a producer-capable method",
                             self_name.as_deref().unwrap_or("<?>")
                         ));
                         continue;
                     }
-                    // Allowlisted impl: its body must NOT name a producer builder.
+                    // Allowlisted impl: its body must NOT name a producer builder —
+                    // through a METHOD body OR an associated CONST initialiser (an
+                    // assoc-const fn-pointer like `const F: fn(..) = builder;` inside
+                    // an allowlisted impl is equally a trait-dispatch reach to a
+                    // builder).
                     for impl_item in &imp.items {
-                        if let syn::ImplItem::Fn(m) = impl_item {
-                            let block_expr = syn::Expr::Block(syn::ExprBlock {
-                                attrs: Vec::new(),
-                                label: None,
-                                block: m.block.clone(),
-                            });
-                            if expr_references_producer_builder(&block_expr) {
-                                out.push(format!(
-                                    "the allowlisted trait impl `impl {trait_name} for \
-                                     MacroHotMirror`'s method `{}` NAMES a producer builder — a \
-                                     trait method must never reach a lowering builder",
-                                    m.sig.ident
-                                ));
+                        match impl_item {
+                            syn::ImplItem::Fn(m) => {
+                                let block_expr = syn::Expr::Block(syn::ExprBlock {
+                                    attrs: Vec::new(),
+                                    label: None,
+                                    block: m.block.clone(),
+                                });
+                                if expr_references_producer_builder(&block_expr) {
+                                    out.push(format!(
+                                        "the allowlisted trait impl `impl {trait_spelling} for \
+                                         MacroHotMirror`'s method `{}` NAMES a producer builder — a \
+                                         trait method must never reach a lowering builder",
+                                        m.sig.ident
+                                    ));
+                                }
                             }
+                            syn::ImplItem::Const(c) => {
+                                if expr_references_producer_builder(&c.expr) {
+                                    out.push(format!(
+                                        "the allowlisted trait impl `impl {trait_spelling} for \
+                                         MacroHotMirror`'s associated `const {}` NAMES a producer \
+                                         builder as a value — an associated const fn-pointer must \
+                                         never reach a lowering builder",
+                                        c.ident
+                                    ));
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -23896,6 +23973,32 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
                          producer's private builders"
                             .to_string(),
                     );
+                }
+                // The `mod macro_arg_producer;` decl must carry NO attribute other
+                // than (optionally) a STRICT `#[cfg(test)]` gate. A `#[path =
+                // "../evil.rs"]` re-roots the module to an arbitrary source file (a
+                // build-substitution route) while keeping the inherited visibility +
+                // out-of-line shape, and any attribute proc-macro could rewrite the
+                // decl. The strict `attr_is_exactly_cfg_test` recognizer is used
+                // (NOT `attrs_test_gate`, consistent with the test-wiring path) so a
+                // `cfg_attr` / production-satisfiable cfg / `#[path]` is rejected.
+                for attr in &m.attrs {
+                    if attr_is_exactly_cfg_test(attr) {
+                        continue;
+                    }
+                    let attr_path = attr
+                        .path()
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    out.push(format!(
+                        "`mod macro_arg_producer;` carries a forbidden attribute `#[{attr_path}]` — \
+                         the sanctioned decl carries NO attribute other than a strict `#[cfg(test)]`; \
+                         a `#[path = …]` re-roots the producer module to an arbitrary file and a \
+                         proc-macro attribute could rewrite it"
+                    ));
                 }
                 if m.content.is_some() {
                     out.push(
@@ -24087,12 +24190,19 @@ fn describe_item_kind(item: &syn::Item) -> &'static str {
 /// following exotic shapes can evade THIS guard; the IRREDUCIBLE residual is
 /// trust in the one sanctioned producer implementation plus compiler bugs /
 /// build substitution / out-of-tree proc-macros:
-/// - a `const` / `static` FN-POINTER binding (`const P: fn(&C) -> H = …;`) or an
-///   ASSOCIATED const holding a producer fn pointer — not a `fn`-item / `impl`-fn
-///   surface, so not enumerated;
 /// - a FOREIGN-FN shape (`extern "C" { fn <name>(...) -> …; }`);
 /// - a production `#[path = "…"]` module rooted OUTSIDE
 ///   `crates/verter_session/src/**` (not enumerated by `session_production_src_files()`).
+///
+/// CLOSED (no longer a residual gap): a crate-visible `const` / `static`
+/// FN-POINTER binding a producer builder, and an ASSOCIATED const fn-pointer in
+/// an inherent OR trait impl, are now ENUMERATED — the value-exposure collector
+/// covers free `const`/`static` + inherent-impl assoc consts, and the
+/// trait-exposure collector scans an allowlisted trait impl's assoc-const
+/// initialisers (a non-allowlisted trait impl is rejected wholesale). `cfg_attr`
+/// is also handled: `attrs_test_gate` gates the item on `#[cfg(...)]` ONLY, so a
+/// `#[cfg_attr(test, …)]` producer is COUNTED (it compiles in every build) rather
+/// than wrongly excluded — it is not an accepted residual.
 ///
 /// These residuals are ACCEPTED because (i) the COMPILER module-privacy of the
 /// producer-capable code (the PRIMARY guards above) is the airtight guarantee — a
@@ -24438,6 +24548,40 @@ fn mirror_entry_surface_classifier_discriminates() {
         "a `#[cfg(all(unix, not(test)))] pub(crate) fn` is production (test only under `not`) and \
          MUST be counted"
     );
+    // `cfg_attr` IS NOT AN ITEM GATE. A `#[cfg_attr(test, allow(dead_code))]
+    // pub(crate) fn` is compiled into EVERY build (the `cfg_attr` only
+    // CONDITIONALLY APPLIES `allow(dead_code)` under `test`; it never removes the
+    // item), so it is a real PRODUCTION producer entry and MUST be COUNTED. The
+    // prior classifier (treating `cfg_attr` like `cfg` and entailing test on its
+    // condition) wrongly EXCLUDED it — a single-entry evasion across all three
+    // collectors. This is the heart of the cfg_attr fix.
+    assert_eq!(
+        crate_visible_producer_fn_names(
+            "#[cfg_attr(test, allow(dead_code))]\npub(crate) fn rogue() {}\n"
+        ),
+        vec!["rogue".to_string()],
+        "a `#[cfg_attr(test, allow(dead_code))] pub(crate) fn` is compiled in EVERY build (cfg_attr \
+         only conditionally APPLIES an attribute, it never gates the ITEM out) and MUST be COUNTED \
+         — cfg_attr is not an item gate"
+    );
+    // A `cfg_attr` whose condition is UNRELATED to test is likewise not an item
+    // gate — the item is counted.
+    assert_eq!(
+        crate_visible_producer_fn_names(
+            "#[cfg_attr(feature = \"x\", inline)]\npub(crate) fn cfgattr_feature() {}\n"
+        ),
+        vec!["cfgattr_feature".to_string()],
+        "a `#[cfg_attr(feature = \"x\", inline)] pub(crate) fn` is compiled in every build and MUST \
+         be counted — cfg_attr never gates the item out"
+    );
+    // CONVERSELY, the strict `#[cfg(test)]` item gate is UNAFFECTED by the fix: a
+    // genuine `#[cfg(test)] pub(crate) fn` is still EXCLUDED (test-only). This
+    // confirms the cfg_attr split did not regress real test-wiring exclusion.
+    assert!(
+        crate_visible_producer_fn_names("#[cfg(test)]\npub(crate) fn test_wired() {}\n").is_empty(),
+        "a genuine `#[cfg(test)] pub(crate) fn` stays EXCLUDED after the cfg_attr split — the \
+         `cfg(test)` item gate is unaffected"
+    );
     // The REAL owner source exposes EXACTLY the single sanctioned producer entry
     // (revert proof: the production tree is pristine — free + associated coverage
     // across the owner module's two production files).
@@ -24553,6 +24697,46 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
         !macro_arg_producer_trait_exposure_violations(allowed_but_calls).is_empty(),
         "an allowlisted `impl Clone for MacroHotMirror` whose body names a builder must redden"
     );
+    // FULL-PATH ALLOWLIST. A QUALIFIED foreign trait merely NAMED `Clone`
+    // (`impl evil::Clone for MacroHotMirror`) is NOT `core::clone::Clone` — it is a
+    // user-defined trait that compiles (no coherence collision with the real
+    // `impl Clone`) and a final-segment match would WRONGLY admit it. It MUST
+    // redden — the allowlist matches the EXACT std spellings only.
+    let qualified_foreign_clone = "impl evil::Clone for MacroHotMirror {}\n";
+    assert!(
+        !macro_arg_producer_trait_exposure_violations(qualified_foreign_clone).is_empty(),
+        "a qualified foreign `impl evil::Clone for MacroHotMirror` must redden — it is NOT the std \
+         `Clone`; the allowlist matches the full std path spelling, not just the final segment"
+    );
+    // Likewise a qualified foreign `evil::Debug` reddens.
+    let qualified_foreign_debug =
+        "impl evil::Debug for MacroHotMirror {\n    fn fmt(&self, f: &mut F) -> R { todo!() }\n}\n";
+    assert!(
+        !macro_arg_producer_trait_exposure_violations(qualified_foreign_debug).is_empty(),
+        "a qualified foreign `impl evil::Debug for MacroHotMirror` must redden — it is NOT \
+         `std::fmt::Debug`"
+    );
+    // ASSOCIATED-CONST FN-POINTER inside an allowlisted impl. An allowlisted
+    // `impl Clone for MacroHotMirror` whose body holds `const F: fn(..) = builder;`
+    // is a trait-dispatch reach to a builder through an associated const — it MUST
+    // redden (the impl body's assoc-const initialiser is scanned, not only its
+    // method bodies).
+    let allowed_assoc_const_ptr = "impl Clone for MacroHotMirror {\n    const F: fn(&SemanticGraphStore, &TypeExpr) -> () = lower_type_expr_structural;\n    fn clone(&self) -> Self { Self { } }\n}\n";
+    assert!(
+        !macro_arg_producer_trait_exposure_violations(allowed_assoc_const_ptr).is_empty(),
+        "an allowlisted `impl Clone for MacroHotMirror` holding `const F = lower_type_expr_structural;` \
+         must redden — an associated const fn-pointer reaching a builder is a trait-dispatch \
+         value-exposure"
+    );
+    // The std spellings of the allowlisted traits are accepted (a path-spelling
+    // robustness arm): `impl std::clone::Clone` / `impl core::fmt::Debug` pass when
+    // their bodies name no builder.
+    let std_spellings = "impl std::clone::Clone for MacroHotMirror {\n    fn clone(&self) -> Self { Self { } }\n}\nimpl core::fmt::Debug for MacroHotMirror {\n    fn fmt(&self, f: &mut F) -> R { f.debug_struct(\"x\").finish() }\n}\n";
+    assert!(
+        macro_arg_producer_trait_exposure_violations(std_spellings).is_empty(),
+        "the std-spelled `impl std::clone::Clone` / `impl core::fmt::Debug` for `MacroHotMirror` \
+         (no builder in body) must be allowed"
+    );
     // A `#[cfg(test)]`-gated foreign trait impl is test-only → not a production
     // trait-exposure.
     let test_trait =
@@ -24604,6 +24788,25 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
     assert!(
         !mod_rs_reexport_shape_violations(pub_use).is_empty(),
         "a `pub use` (wider than `pub(crate)`) re-export in mod.rs must redden"
+    );
+    // A `#[path = "../evil.rs"]` ATTRIBUTE on the `mod macro_arg_producer;` decl
+    // re-roots the producer module to an arbitrary source file (a
+    // build-substitution route) while keeping the inherited visibility +
+    // out-of-line shape — it MUST redden. The decl must carry NO attribute other
+    // than a strict `#[cfg(test)]`.
+    let path_attr = "#[path = \"../evil.rs\"]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(path_attr).is_empty(),
+        "a `#[path = \"../evil.rs\"] mod macro_arg_producer;` must redden — a `#[path]` re-roots the \
+         producer module to an arbitrary file (build-substitution)"
+    );
+    // A proc-macro / non-inert ATTRIBUTE on the decl likewise reddens (it could
+    // rewrite the module).
+    let proc_attr = "#[some_proc_macro]\nmod macro_arg_producer;\npub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(proc_attr).is_empty(),
+        "a `#[some_proc_macro] mod macro_arg_producer;` decl must redden — a non-cfg-test attribute \
+         could rewrite the producer module"
     );
 
     // ── REAL files pass ALL three collectors ───────────────────────────────
