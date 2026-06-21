@@ -441,6 +441,11 @@ pub fn merge_code_actions(
     negotiated_encoding: PositionEncodingKind,
     source_reader: ExternalSourceReader<'_>,
 ) -> Vec<CodeActionOrCommand> {
+    // Compare provider edit paths against the current TSX path through the single
+    // canonical path owner — never a raw `==`, which treats the same file spelled
+    // differently (backslashes vs forward slashes, drive-letter case, `\\?\`
+    // extended prefix) as a foreign target and false-drops the same-file edit.
+    let current_tsx_canonical = verter_span::path::canonicalize_path_cow(current_tsx_path);
     type_actions
         .into_iter()
         .filter_map(|action| {
@@ -448,12 +453,18 @@ pub fn merge_code_actions(
                 std::collections::HashMap::new();
 
             for edit in action.edits {
-                if is_carrier_ide_path(&edit.path) {
+                // Canonicalize the edit path once and carry it through every downstream
+                // step (identity, carrier-suffix strip, URI emission, source read) so the
+                // path spelling stays consistent and host-VFS reads key correctly.
+                let edit_path = verter_span::path::canonicalize_path_cow(&edit.path);
+                let edit_path = edit_path.as_ref();
+
+                if is_carrier_ide_path(edit_path) {
                     // Map the carrier-IDE offsets through the correct sourcemap, split by identity:
                     // the CURRENT request's TSX uses the in-context mapper; a FOREIGN carrier `.tsx`
                     // requires its own context via the external resolver and is DROPPED on a
                     // miss/failure — never mapped through the current mapper.
-                    let mapped = if edit.path == current_tsx_path {
+                    let mapped = if edit_path == current_tsx_canonical.as_ref() {
                         tsx_range_to_carrier_range(
                             edit.start,
                             edit.end,
@@ -463,7 +474,7 @@ pub fn merge_code_actions(
                         )
                     } else {
                         external_resolver.and_then(|resolver| {
-                            let ctx = resolver(&edit.path)?;
+                            let ctx = resolver(edit_path)?;
                             tsx_range_to_carrier_range(
                                 edit.start,
                                 edit.end,
@@ -475,7 +486,7 @@ pub fn merge_code_actions(
                     };
                     if let Some(range) = mapped {
                         let carrier_path =
-                            normalize_carrier_path(&edit.path, carrier_source_exists);
+                            normalize_carrier_path(edit_path, carrier_source_exists);
                         if let Some(uri) = path_to_uri(carrier_path) {
                             changes.entry(uri).or_default().push(TextEdit {
                                 range,
@@ -489,15 +500,15 @@ pub fn merge_code_actions(
                 // Every other edit: read its own target source and convert the byte offsets, fail
                 // closed (drop) — never emit a line-0 edit. A rewritten carrier-source URL has no
                 // in-context sourcemap bridging the offsets, so it is dropped too.
-                let normalized = normalize_carrier_path(&edit.path, carrier_source_exists);
-                if normalized != edit.path {
+                let normalized = normalize_carrier_path(edit_path, carrier_source_exists);
+                if normalized != edit_path {
                     continue;
                 }
                 let Some(uri) = path_to_uri(normalized) else {
                     continue;
                 };
                 let Some(range) = resolve_external_target_range(
-                    &edit.path,
+                    edit_path,
                     edit.start,
                     edit.end,
                     negotiated_encoding.clone(),

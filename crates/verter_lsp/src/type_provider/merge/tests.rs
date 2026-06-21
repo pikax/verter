@@ -1628,6 +1628,88 @@ fn merge_code_actions_foreign_carrier_edit_maps_through_external_context() {
     );
 }
 
+/// A SAME-FILE carrier edit whose path differs from `current_tsx_path` ONLY in
+/// spelling the canonical normalizer folds (backslashes vs forward slashes, and
+/// drive-letter case) MUST map through the in-context mapper — never be treated
+/// as foreign and dropped. The raw `==` discriminator treated
+/// `C:\proj\test.vue.tsx` and `c:/proj/test.vue.tsx` as distinct files, so with
+/// no external resolver the same-file edit was false-dropped; comparing through
+/// the canonical path identity keeps it.
+#[test]
+fn merge_code_actions_same_file_differently_spelled_path_maps_not_dropped() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // `current_tsx_path` is the canonical spelling; the edit's path is the SAME
+    // file spelled with Windows backslashes and an uppercase drive letter. The
+    // canonical normalizer folds both to `c:/proj/test.vue.tsx`.
+    let current = "c:/proj/test.vue.tsx";
+    let edit_same_file_other_spelling = r"C:\proj\test.vue.tsx";
+
+    let actions = vec![TypeCodeAction {
+        title: "Remove unused declaration".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            // Offsets 6..9 map (in-context) to the carrier `const msg` on line 5.
+            path: edit_same_file_other_spelling.to_string(),
+            start: 6,
+            end: 9,
+            new_text: String::new(),
+        }],
+    }];
+
+    // No external resolver: the raw-`==` code would treat the differently-spelled
+    // path as foreign and, with no resolver, DROP it.
+    let no_external: Option<ExternalIdeResolver> = None;
+    let kept = merge_code_actions(
+        actions,
+        current,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+
+    assert_eq!(
+        kept.len(),
+        1,
+        "a same-file edit spelled with backslashes / uppercase drive must NOT be \
+         dropped as foreign: {kept:?}"
+    );
+    let CodeActionOrCommand::CodeAction(action) = &kept[0] else {
+        panic!("expected a CodeAction");
+    };
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+    let (change_uri, edits) = changes.iter().next().expect("one change set");
+    // The carrier URI must be the canonical `.vue` source (drive lowercased, slashes
+    // forward) — proving the canonical spelling is carried downstream consistently.
+    assert_eq!(
+        change_uri.as_str(),
+        "file:///c:/proj/test.vue",
+        "the same-file edit must key the canonical .vue source URI, got {change_uri:?}"
+    );
+    assert_eq!(
+        edits[0].range.start,
+        Position {
+            line: 5,
+            character: 6,
+        },
+        "the same-file edit must map (in-context) to the carrier `const msg`, got {:?}",
+        edits[0].range.start
+    );
+    assert_eq!(
+        edits[0].range.end,
+        Position {
+            line: 5,
+            character: 9,
+        },
+        "the same-file edit end must map to the end of `msg`, got {:?}",
+        edits[0].range.end
+    );
+}
+
 /// @ai-generated — Empty actions returns empty vec
 #[test]
 fn merge_code_actions_empty() {
