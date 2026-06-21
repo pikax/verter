@@ -145,9 +145,7 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
     /// concurrent `update_file` landing mid-request, exercising the fresh
     /// per-response snapshot the edit paths take.
     #[cfg(test)]
-    pub(crate) fn contents_handle_for_test(
-        &self,
-    ) -> Arc<Mutex<HashMap<String, Arc<str>>>> {
+    pub(crate) fn contents_handle_for_test(&self) -> Arc<Mutex<HashMap<String, Arc<str>>>> {
         Arc::clone(&self.contents)
     }
 

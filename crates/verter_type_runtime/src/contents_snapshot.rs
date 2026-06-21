@@ -233,7 +233,11 @@ mod tests {
             ]
         });
         let paths = lsp_workspace_edit_target_paths(&we);
-        assert_eq!(paths.len(), 2, "both the changes map and documentChanges are scanned");
+        assert_eq!(
+            paths.len(),
+            2,
+            "both the changes map and documentChanges are scanned"
+        );
         assert!(paths.contains("d:/proj/a.ts"));
         assert!(paths.contains("d:/proj/b.ts"));
     }

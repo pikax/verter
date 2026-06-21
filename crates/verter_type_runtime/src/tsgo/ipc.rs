@@ -2599,7 +2599,8 @@ impl TypeProvider for TsgoTypeProvider {
             // Snapshot ONLY the files these actions target and RELEASE the async mutex before
             // parsing, so the per-target blocking disk fallback never runs under the lock (a fix-all
             // could stall the provider). Scanning the responses bounds the snapshot to touched files.
-            let mut target_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut target_paths: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for item in &items {
                 target_paths.extend(crate::contents_snapshot::lsp_code_action_target_paths(item));
             }

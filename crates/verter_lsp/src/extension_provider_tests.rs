@@ -650,7 +650,8 @@ async fn extension_provider_combined_fix_uses_content_current_as_of_each_respons
     let updated = "line0\nline1\nDELETE_ME = 1;\n";
     let line3_start: u32 = 12;
     assert_eq!(
-        updated.as_bytes()[line3_start as usize], b'D',
+        updated.as_bytes()[line3_start as usize],
+        b'D',
         "byte 12 is the start of the third line in the updated content"
     );
 
