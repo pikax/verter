@@ -147,12 +147,10 @@ impl TsQueryTransport for ScriptedTsQueryTransport {
             // await) sees the updated content — modelling a concurrent
             // `update_file` landing while the request was in flight. The provider
             // holds no cache lock at the await point, so `try_lock` succeeds.
-            if state
+            if let Some(mutation) = state
                 .mutations
-                .front()
-                .is_some_and(|m| m.command == params.command)
+                .pop_front_if(|m| m.command == params.command)
             {
-                let mutation = state.mutations.pop_front().unwrap();
                 let mut cache = mutation
                     .handle
                     .try_lock()
