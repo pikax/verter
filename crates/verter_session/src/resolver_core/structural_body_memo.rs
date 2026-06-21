@@ -289,13 +289,28 @@ impl StructuralBodyMemo {
         key: StructuralBodyMemoKey,
         cell: Arc<HotStructuralBodyCell>,
     ) -> Option<Arc<HotStructuralBodyCell>> {
+        // Option-A instrumentation: count the materialized context cell and
+        // attribute it to its (provenance, merge_role) bucket. Reads the key's
+        // own (bundle-private) axis fields and passes them by value — the key
+        // fields stay private. Behavior-preserving: the insert result is
+        // unchanged.
+        super::structural_body_memo_instrumentation::record_insert_context(
+            key.provenance,
+            key.merge_role,
+        );
         self.cells.insert(key, cell)
     }
 
     /// The memoized cell for `key`, or `None` if no cell was inserted for that
     /// exact context. `pub(super)` to match the `pub(super)` key it accepts.
     pub(super) fn get(&self, key: &StructuralBodyMemoKey) -> Option<Arc<HotStructuralBodyCell>> {
-        self.cells.get(key).map(Arc::clone)
+        // Option-A instrumentation: count the lookup and split warm hit vs miss
+        // (the future cold-lower path). Bumping a free static atomic from `&self`
+        // is fine (atomics are interior-mutable) and behavior-preserving: the
+        // returned cell is unchanged.
+        let hit = self.cells.get(key).map(Arc::clone);
+        super::structural_body_memo_instrumentation::record_get(hit.is_some());
+        hit
     }
 
     /// The number of memoized cells.

@@ -54,6 +54,16 @@ const CONTEXTS: [(MemberMergeRole, SurfaceProvenanceContext); 3] = [
 
 #[test]
 fn context_key_distinguishes_exactly_where_a_neutral_key_collides() {
+    // This test drives `memo.get` / `memo.insert`, which bump the process-global
+    // Option-A instrumentation counters. Hold the shared counter-test gate so this
+    // test's memo traffic cannot race a concurrent counter-value assertion in the
+    // sibling instrumentation-test module (the two modules run in one process
+    // under the in-process test surface). This test asserts NOTHING about the
+    // counters; the gate is purely to keep its side effects out of the other
+    // module's exact-count windows.
+    let _gate =
+        crate::resolver_core::structural_body_memo_instrumentation::lock_counter_test_gate();
+
     // Register ONE body descriptor → one slot id.
     let mut registry = StructuralBodyRegistry::new();
     let s = registry.register(type_semantic_descriptor("Props"));
