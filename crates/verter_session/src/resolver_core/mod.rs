@@ -19,6 +19,7 @@ pub mod external_type_frontier;
 mod fallthrough;
 mod fallthrough_request;
 pub mod fallthrough_resolver;
+pub mod hot_prepared;
 pub mod prepared_decl;
 pub mod resolver_runtime;
 pub mod route_demand;

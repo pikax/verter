@@ -153,6 +153,8 @@ pub(crate) mod decl_lowering;
 pub mod fact_emission;
 pub mod framework;
 #[cfg(test)]
+mod hot_prepared_tests;
+#[cfg(test)]
 mod materialized_structure_equivalence_tests;
 #[cfg(test)]
 mod value_symbol_depth_equivalence_tests;

@@ -968,3 +968,306 @@ fn structural_carrier_producer_guards_remain_registered() {
         );
     }
 }
+
+// ===========================================================================
+// Hot prepared-decl CARRIER guards — the session-owned `HotPrepared*`
+// carriers must own NO transitive `TypeExpr`; the `HotTypeRef` handle must
+// stay non-keyable (R6, no `Hash`/`Ord`). These pin the GREEN additive
+// carrier sub-step (the producer flip / reader migration / clone-path
+// deletion are a later session). Both guards are `syn`/string source scans
+// with paired self-tests proving they discriminate.
+// ===========================================================================
+
+/// The BARE typed-IR identifiers that may NOT appear as a field-type path
+/// SEGMENT in any hot carrier type. Each is matched as a WHOLE path segment,
+/// so the `Hot*`-prefixed analogs (`HotTypeParamDecl` / `HotFunctionSignature`
+/// / `HotEnumMemberValue` / `HotPreparedMember` / …) are NOT matched — only
+/// the bare lower-crate name is banned. A hot carrier that re-grew a
+/// `TypeExpr` body (or any `Prepared*` / `ObjectExpr` / `TypeDeclBody`
+/// transitive owner) would carry one of these as a segment.
+const BANNED_TYPED_IR_SEGMENTS: &[&str] = &[
+    "TypeExpr",
+    "ObjectExpr",
+    "TypeParam",
+    "TypeDeclBody",
+    "FunctionSignature",
+    "PreparedTypeDecl",
+    "PreparedValueDecl",
+    "PreparedMember",
+    "PreparedValueMember",
+    "PreparedWrapperShape",
+    "PreparedProjectionClass",
+    "PreparedForwardPayload",
+    "EnumMemberValue",
+];
+
+/// Collect every banned BARE typed-IR identifier that appears as a path
+/// SEGMENT of any field type in any `struct`/`enum` item of the parsed
+/// source. Returns `"<type>.<field-or-variant>: <segment>"` entries. The
+/// scan walks `syn::Type` path segments (so a banned name nested inside
+/// `Option<…>` / `Vec<…>` / `Arc<[…]>` / `FxHashMap<_, …>` generic
+/// arguments is still caught), and matches a segment ONLY as a whole
+/// identifier — `HotTypeParamDecl` (segment `HotTypeParamDecl`) is never
+/// confused with the banned bare `TypeParam`.
+fn banned_typed_ir_field_segments(src: &str) -> Vec<String> {
+    use syn::visit::Visit;
+
+    let file = syn::parse_file(src).expect("parse hot_prepared.rs as a syn::File");
+
+    /// Walks a single field type, recording any banned segment it finds.
+    struct SegScan {
+        owner: String,
+        hits: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for SegScan {
+        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+            let ident = seg.ident.to_string();
+            if BANNED_TYPED_IR_SEGMENTS.contains(&ident.as_str()) {
+                self.hits.push(format!("{}: {ident}", self.owner));
+            }
+            // Descend into generic arguments (`Option<TypeExpr>`,
+            // `Arc<[HotTypeRef]>`, `FxHashMap<K, PreparedMember>`, …).
+            syn::visit::visit_path_segment(self, seg);
+        }
+    }
+
+    let mut hits = Vec::new();
+    for item in &file.items {
+        match item {
+            syn::Item::Struct(s) => {
+                let type_name = s.ident.to_string();
+                for (i, field) in s.fields.iter().enumerate() {
+                    let field_label = field
+                        .ident
+                        .as_ref()
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| format!("#{i}"));
+                    let mut scan = SegScan {
+                        owner: format!("{type_name}.{field_label}"),
+                        hits: Vec::new(),
+                    };
+                    scan.visit_type(&field.ty);
+                    hits.extend(scan.hits);
+                }
+            }
+            syn::Item::Enum(e) => {
+                let type_name = e.ident.to_string();
+                for variant in &e.variants {
+                    for (i, field) in variant.fields.iter().enumerate() {
+                        let field_label = field
+                            .ident
+                            .as_ref()
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| format!("{}#{i}", variant.ident));
+                        let mut scan = SegScan {
+                            owner: format!("{type_name}::{field_label}"),
+                            hits: Vec::new(),
+                        };
+                        scan.visit_type(&field.ty);
+                        hits.extend(scan.hits);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    hits
+}
+
+#[test]
+fn hot_prepared_carriers_own_no_typeexpr() {
+    let src = read_rel("src/resolver_core/hot_prepared.rs");
+    // Anti-vacuity: the file must actually define the carriers (so an empty
+    // / moved file cannot pass this guard trivially).
+    for required in [
+        "struct HotPreparedTypeDecl",
+        "struct HotPreparedValueDecl",
+        "struct HotPreparedMember",
+        "enum HotEnumMemberValue",
+    ] {
+        assert!(
+            src.contains(required),
+            "hot_prepared.rs must define `{required}` — the guard cannot be vacuous"
+        );
+    }
+
+    let hits = banned_typed_ir_field_segments(&src);
+    assert!(
+        hits.is_empty(),
+        "the session hot prepared-decl carriers must own NO transitive typed-IR type — a field \
+         type names a banned bare identifier as a path segment. Every type body must be a \
+         `HotTypeRef` handle or scalar metadata. Offending field types:\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn hot_prepared_carriers_own_no_typeexpr_self_test_discriminates() {
+    // POSITIVE: a synthetic carrier with a `body: TypeExpr` field (and a
+    // banned name buried in a generic argument, and a banned enum-variant
+    // payload) MUST be detected.
+    let planted = "\
+struct HotBad {
+    body: TypeExpr,
+    members: std::collections::HashMap<String, PreparedMember>,
+    params: Vec<TypeParam>,
+}
+enum HotBadEnum {
+    Folded(EnumMemberValue),
+}
+";
+    let planted_hits = banned_typed_ir_field_segments(planted);
+    assert!(
+        planted_hits.iter().any(|h| h.contains("TypeExpr")),
+        "self-test: a planted `body: TypeExpr` field MUST be detected; got {planted_hits:?}"
+    );
+    assert!(
+        planted_hits.iter().any(|h| h.contains("PreparedMember")),
+        "self-test: a banned name buried in a generic argument MUST be detected; got {planted_hits:?}"
+    );
+    assert!(
+        planted_hits.iter().any(|h| h.contains("TypeParam")),
+        "self-test: a `Vec<TypeParam>` field MUST be detected; got {planted_hits:?}"
+    );
+    assert!(
+        planted_hits.iter().any(|h| h.contains("EnumMemberValue")),
+        "self-test: a banned enum-variant payload MUST be detected; got {planted_hits:?}"
+    );
+
+    // NEGATIVE: the handle-native analogs MUST pass — `HotTypeRef`,
+    // `HotTypeParamDecl`, `HotFunctionSignature`, `HotEnumMemberValue` are
+    // NOT the banned bare names, and scalar metadata is fine.
+    let good = "\
+struct HotGood {
+    semantic_body: HotTypeRef,
+    type_parameters: std::sync::Arc<[HotTypeParamDecl]>,
+    signatures: std::sync::Arc<[HotFunctionSignature]>,
+    visibility: verter_type_expr::MemberVisibility,
+}
+enum HotGoodEnum {
+    Folded(HotTypeRef),
+}
+";
+    let good_hits = banned_typed_ir_field_segments(good);
+    assert!(
+        good_hits.is_empty(),
+        "self-test: the handle-native analogs (HotTypeRef / HotTypeParamDecl / \
+         HotFunctionSignature / HotEnumMemberValue) and scalar metadata MUST NOT trip the ban; \
+         got {good_hits:?}"
+    );
+}
+
+/// Extract the `#[derive(...)]` trait list on the line(s) immediately above
+/// the `pub struct HotTypeRef(` definition in `semantic_query.rs`. Returns
+/// the comma-joined trait names. The scan finds the struct line, then walks
+/// upward over attribute lines to the nearest `#[derive(...)]`.
+fn hot_typeref_derive_list(src: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let struct_idx = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("pub struct HotTypeRef("))
+        .expect("semantic_query.rs must define `pub struct HotTypeRef(`");
+    // Walk upward to the nearest `#[derive(...)]` line (skipping doc/attr
+    // lines), bounded so a missing derive does not scan the whole file.
+    for i in (0..struct_idx).rev() {
+        let line = lines[i].trim();
+        if let Some(rest) = line.strip_prefix("#[derive(") {
+            let inner = rest.strip_suffix(")]").unwrap_or(rest);
+            return inner.to_string();
+        }
+        // Stop if we hit a non-attribute, non-doc, non-blank line — the
+        // derive (if any) must be in the contiguous attribute block.
+        if !line.is_empty() && !line.starts_with("#[") && !line.starts_with("//") {
+            break;
+        }
+    }
+    panic!("no `#[derive(...)]` found immediately above `pub struct HotTypeRef(`");
+}
+
+/// True iff a derive trait list contains `Hash` or `Ord` as a WHOLE trait
+/// token (split on `,`, trimmed). Whole-token matching is the discriminating
+/// detail: `PartialOrd` / `PartialEq` must NOT register as a substring
+/// false-positive for `Ord`.
+fn derive_list_has_hash_or_ord(list: &str) -> bool {
+    list.split(',')
+        .map(str::trim)
+        .any(|t| t == "Hash" || t == "Ord")
+}
+
+#[test]
+fn hot_typeref_has_no_hash_or_ord() {
+    let src = read_rel("src/semantic_query.rs");
+    let derive_list = hot_typeref_derive_list(&src);
+    // Anti-vacuity: the real derive carries the EXPECTED handle traits, so a
+    // moved / renamed struct (whose derive we accidentally read) would fail
+    // this floor.
+    assert!(
+        derive_list.contains("Copy") && derive_list.contains("PartialEq"),
+        "the HotTypeRef derive must carry the expected handle traits (Copy, PartialEq); \
+         got `{derive_list}` — the extractor may have read the wrong derive"
+    );
+    assert!(
+        !derive_list_has_hash_or_ord(&derive_list),
+        "R6: `HotTypeRef` must NOT derive `Hash` or `Ord` — a content/version-bearing arena \
+         ordinal must be non-keyable so it cannot be lifted into a `HashMap`/`BTreeMap` cache \
+         key. Found a forbidden trait in the derive list `{derive_list}`."
+    );
+}
+
+#[test]
+fn hot_typeref_has_no_hash_or_ord_self_test_discriminates() {
+    // POSITIVE: a derive list containing `Hash` (or `Ord`) MUST be detected.
+    assert!(
+        derive_list_has_hash_or_ord("Debug, Clone, Copy, PartialEq, Eq, Hash"),
+        "self-test: a derive list containing `Hash` MUST be detected"
+    );
+    assert!(
+        derive_list_has_hash_or_ord("Debug, Ord, PartialOrd"),
+        "self-test: a derive list containing `Ord` MUST be detected"
+    );
+    // NEGATIVE: the real handle derive (no Hash/Ord) MUST pass, and the
+    // `PartialOrd` / `PartialEq` whole-token boundary must NOT false-positive
+    // for `Ord` as a substring.
+    assert!(
+        !derive_list_has_hash_or_ord("Debug, Clone, Copy, PartialEq, Eq"),
+        "self-test: the real handle derive (no Hash/Ord) MUST pass"
+    );
+    assert!(
+        !derive_list_has_hash_or_ord("Debug, PartialOrd"),
+        "self-test: `PartialOrd` MUST NOT register as a substring false-positive for `Ord`"
+    );
+    assert!(
+        !derive_list_has_hash_or_ord("Debug, PartialEq"),
+        "self-test: `PartialEq` MUST NOT register as a substring false-positive for any banned \
+         token"
+    );
+}
+
+#[test]
+fn verter_semantic_has_no_session_dep_is_confirmed_present() {
+    // The hot carriers live in `verter_session` and reference `verter_semantic`
+    // SCALAR types (ResolvedRootIdentity / TypeDeclKind / DeclProvenance / …) —
+    // the ALLOWED direction (session → semantic). The REVERSE edge (which
+    // would let the lower compat-DTO crate carry session `HotTypeRef` handles)
+    // is banned by the EXISTING crate-level guard
+    // `no_verter_semantic_to_verter_session_dep` in architecture_guards.rs.
+    // That guard is crate-level, so the new `hot_prepared` module is
+    // automatically covered. This test CONFIRMS the existing guard is present
+    // (a real `fn` definition, not a hollow rename) rather than duplicating
+    // it.
+    let guards = read_rel("tests/cases/architecture_guards.rs");
+    assert!(
+        guards.contains("fn no_verter_semantic_to_verter_session_dep("),
+        "the existing crate-level reverse-dep guard \
+         `no_verter_semantic_to_verter_session_dep` must remain a real `fn` test in \
+         architecture_guards.rs — it covers the new hot_prepared module (session → semantic is \
+         the allowed direction; the reverse edge is banned)."
+    );
+    // Anti-vacuity: the guard's own subject (the reverse crate name) must be
+    // named in its body, so a renamed-but-hollow guard fails here too.
+    assert!(
+        guards.contains("crates/verter_semantic/Cargo.toml"),
+        "the reverse-dep guard must read `crates/verter_semantic/Cargo.toml` — confirming it is \
+         the real crate-level dependency-direction check, not a hollow stub"
+    );
+}
