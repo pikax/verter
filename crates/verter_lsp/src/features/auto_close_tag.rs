@@ -724,10 +724,16 @@ pub fn auto_close_tag(source: &str, offset: usize) -> Option<String> {
         return None;
     }
 
-    // Check if there's already a closing tag immediately after
-    let remaining = &source[offset..];
-    let expected_close = format!("</{}", tag_name);
-    if remaining.trim_start().starts_with(&expected_close) {
+    // Already closed immediately after? HTML tag names are case-insensitive, so `<DIV>` already
+    // followed by `</div>` is closed — compare the leading `</tag` ASCII-case-insensitively over the
+    // byte slice (safe across char boundaries; `tag_name` may carry a non-ASCII component char).
+    let remaining = source[offset..].trim_start();
+    let expected_close = format!("</{tag_name}");
+    if remaining
+        .as_bytes()
+        .get(..expected_close.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(expected_close.as_bytes()))
+    {
         return None;
     }
 
@@ -755,6 +761,30 @@ mod tests {
         let source = "<template><div>\n</template>";
         let result = auto_close_tag(source, 15);
         assert_eq!(result, Some("$0</div>".to_string()));
+    }
+
+    /// HTML tag names are case-insensitive: an opening `<DIV>` already followed by a
+    /// differently-cased `</div>` is CLOSED, so the raw helper must NOT insert a second close. The
+    /// pre-fix case-sensitive `starts_with("</DIV")` missed the lowercase `</div>` and double-closed.
+    #[test]
+    fn auto_close_raw_uppercase_open_already_closed_lowercase_is_none() {
+        // `<DIV>` ends at offset 5; `</div>` follows immediately (different case).
+        let source = "<DIV></div>";
+        let result = auto_close_tag(source, 5);
+        assert!(
+            result.is_none(),
+            "an already-closed (case-insensitively) tag must NOT be re-closed, got {result:?}"
+        );
+    }
+
+    /// Positive control: `<DIV>` with NO following close still auto-closes, preserving the typed
+    /// case in the inserted tag — proving the case-insensitive already-closed guard did not disable
+    /// the normal insertion.
+    #[test]
+    fn auto_close_raw_uppercase_open_unclosed_inserts_same_case() {
+        let source = "<DIV>";
+        let result = auto_close_tag(source, 5);
+        assert_eq!(result, Some("$0</DIV>".to_string()));
     }
 
     #[test]
