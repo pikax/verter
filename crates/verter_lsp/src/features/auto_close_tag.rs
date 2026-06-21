@@ -564,10 +564,16 @@ fn auto_close_tag_carrier(
         return None;
     }
 
-    // Already closed immediately after?
-    let remaining = &source[offset..];
+    // Already closed immediately after? HTML tag names are case-insensitive, so `<DIV>` already
+    // followed by `</div>` is closed — compare the leading `</tag` ASCII-case-insensitively over the
+    // byte slice (safe across char boundaries; `tag_name` may carry a non-ASCII component char).
+    let remaining = source[offset..].trim_start();
     let expected_close = format!("</{tag_name}");
-    if remaining.trim_start().starts_with(&expected_close) {
+    if remaining
+        .as_bytes()
+        .get(..expected_close.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(expected_close.as_bytes()))
+    {
         return None;
     }
 
@@ -855,6 +861,31 @@ mod tests {
             auto_close_tag_in_carrier(source, off, CarrierKind::Vue),
             Some("$0</div>".to_string()),
             "a `>` in the Vue template region must auto-close",
+        );
+    }
+
+    /// HTML tag names are case-insensitive, so a `<DIV>` already followed by `</div>` (different
+    /// case) is ALREADY CLOSED — auto-close must not insert a duplicate `</DIV>`. The pre-fix
+    /// already-closed guard compared case-sensitively, so `</div>` did not match the expected
+    /// `</DIV` and a duplicate close was emitted.
+    #[test]
+    fn already_closed_check_is_case_insensitive() {
+        let source = "<template><DIV></div></template>";
+        let off = after(source, "<DIV>");
+        assert_eq!(
+            auto_close_tag_in_carrier(source, off, CarrierKind::Vue),
+            None,
+            "a `<DIV>` already closed by `</div>` (different case) must NOT insert a duplicate close",
+        );
+
+        // Positive control: a `<DIV>` with NO following close still auto-closes (case preserved),
+        // proving the case-insensitive guard did not over-fire.
+        let open_only = "<template><DIV>\n</template>";
+        let off = after(open_only, "<DIV>");
+        assert_eq!(
+            auto_close_tag_in_carrier(open_only, off, CarrierKind::Vue),
+            Some("$0</DIV>".to_string()),
+            "an unclosed `<DIV>` must still auto-close, preserving the original case",
         );
     }
 
