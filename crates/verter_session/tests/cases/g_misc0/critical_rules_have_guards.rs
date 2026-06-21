@@ -387,7 +387,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // (scoped to the carrier surface; the global fence lands later).
             "carrier_constructors_do_not_use_unknown_as_control_flow",
             // The query-free structural lowerer
-            // (`structural_carrier_producer/lower.rs`) emits
+            // (`structural_carrier_producer/macro_arg_producer.rs`) emits
             // the typed carriers from the owned `TypeExpr` WITHOUT any
             // resolution / host query, and never materialises a carrier back
             // to `TypeExpr` during emission — it is a producer, not a second
@@ -429,39 +429,35 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "carrier_type_args_accessor_is_exhaustive_and_wildcard_free",
             "map_carrier_type_args_is_exhaustive_and_wildcard_free",
             // STRUCTURAL-CARRIER PRODUCER — single producer (make-unrepresentable):
-            // the raw structural lowerer `lower_type_expr_structural` is owned by
-            // `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
-            // visibility modifier), reachable ONLY through the WITNESS-GATED wrapper
-            // (`emit_macro_arg`). The wrapper requires an unforgeable capability
-            // witness (`MacroProducerWitness`, private field + constructor confined to
-            // its owning surface), so a SECOND structural-carrier producer can neither
-            // name the lowerer nor forge a witness — unrepresentable by construction.
-            // The MODULE-PRIVATE lowerer guard, the IN-FILE SINGLE-CALL pin (the raw
-            // lowerer is CALLED exactly once, inside the witness-gated `emit_macro_arg`
-            // wrapper — closing the in-file case where a future edit adds a SECOND
-            // un-gated `pub(in …)` wrapper that the compiler privacy cannot catch within
-            // `lower.rs`), the EXPANSION-SURFACE companion (`lower.rs` declares NO
-            // production item-position macro / `include!` / out-of-line-or-`#[path]`
-            // child mod / lowerer-`as` reexport — closing the macro-synthesis /
-            // include-splice / child-mod class that reaches the private lowerer without
-            // a third literal identifier token, which the occurrence rail cannot see;
-            // only the `#[cfg(test)]`-gated `structural_lower_tests` test wiring is
-            // allowlisted), the PARENT-SHAPE narrowness guard (the
-            // owner directory holds ONLY the lowerer, the macro producer surface, the
-            // binder helper, mod.rs, and tests), and the WITNESS-unforgeability guard
-            // together are the compiler-enforced LOAD-BEARING confinement; the
-            // binder-seed helper `build_script_setup_seed_frames` is
-            // `pub(in crate::structural_carrier_producer)` (confined to the owner
-            // module), pinned by its own privacy guard. The ENTRY-SURFACE guard is a
-            // BOUNDED defense-in-depth token tripwire (NOT exhaustive — documented
-            // residual tail) that pins the sanctioned witness-gated entry
-            // (`macro_type_arg_hot_ref`) as the ONLY crate-visible producer fn of the
-            // owner module; the ORDERING TRIPWIRE
-            // bans a production macro-arg eager-lowering path outside the producer
-            // module (a FILE-SCOPE catch: whole-function co-presence PLUS the
-            // cross-function-same-file binding-flow helper split); the PURITY guard
-            // bans the full route/import/cross-file-symbol/carrier-head resolution
-            // surface (`prepared_decl_bundle`, `cached_import_route_resolution`,
+            // the raw structural lowerer `lower_type_expr_structural`, the macro
+            // hot-mirror builder, and the binder-seed builder are ALL owned by ONE
+            // module `crate::structural_carrier_producer::macro_arg_producer` and are
+            // MODULE-PRIVATE (no visibility modifier). The owner declares it as a
+            // PRIVATE `mod macro_arg_producer;` re-exporting ONLY
+            // `macro_type_arg_hot_ref` + `MacroHotMirror`, so a SECOND
+            // structural-carrier producer is UNREPRESENTABLE BY CONSTRUCTION: no
+            // foreign module can NAME the private builders (a compile error, E0603 /
+            // E0433), and the producer is COLLAPSED into one module so no same-owner
+            // file can name them either (a third caller is a compile error). The
+            // MODULE-PRIVATE lowerer guard + the PARENT-SHAPE narrowness guard (the
+            // owner directory holds ONLY `macro_arg_producer.rs`, mod.rs, and tests —
+            // so there is no other file that could name the private builders) together
+            // are the compiler-enforced LOAD-BEARING confinement. The SMALL
+            // EXPANSION-SURFACE backstop (`macro_arg_producer.rs` declares NO
+            // production item-position/expr/statement macro / `macro_rules!` /
+            // `include!` / proc-macro attribute / `#[derive]` on a producer-capable
+            // item / out-of-line-or-`#[path]` child mod / `#[macro_use]` — only the
+            // `#[cfg(test)] #[path] mod *_tests;` test wiring is allowlisted) closes
+            // the only same-module code-generation class the structure cannot already
+            // make a compile error. The ENTRY-SURFACE guard is a BOUNDED
+            // defense-in-depth token tripwire (NOT exhaustive — documented residual
+            // tail) pinning `macro_type_arg_hot_ref` as the ONLY crate-visible producer
+            // fn of the owner module; the ORDERING TRIPWIRE bans a production macro-arg
+            // eager-lowering path outside the producer module (a FILE-SCOPE catch:
+            // whole-function co-presence PLUS the cross-function-same-file binding-flow
+            // helper split); the PURITY guard bans the full
+            // route/import/cross-file-symbol/carrier-head resolution surface
+            // (`prepared_decl_bundle`, `cached_import_route_resolution`,
             // `resolve_route_type_edge`, `resolve_type_dependency_canonical`,
             // `resolve_owner_direct_import`, `routed_shallow_state`,
             // `resolve_*_head`, …) inside the producer — resolution + dep recording
@@ -469,29 +465,11 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // structural-carrier lowering and script-setup seeding re-sources from the
             // owner's route-free `IndexedReady` (`raw_source` + `framework_parse`).
             "structural_carrier_producer_lowerer_is_module_private",
-            "structural_lowerer_called_only_through_the_witness_gated_wrapper",
-            "structural_carrier_producer_lower_has_no_expansion_surface",
             "structural_carrier_producer_module_is_narrow",
-            "structural_carrier_producer_witnesses_are_unforgeable",
-            "script_setup_binder_helper_is_module_private",
+            "macro_arg_producer_has_no_production_expansion_surface",
             "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
             "no_production_macro_arg_eager_lowering_outside_mirror",
             "macro_hot_mirror_producer_is_pure_no_route_resolution",
-            // CRATE-WIDE macro-use-prelude ban: no non-`#[cfg(test)]`
-            // `#[macro_use] extern crate` (nor `#[cfg_attr(…, macro_use)]
-            // extern crate`) anywhere in `verter_session/src/**`. A
-            // `#[macro_use] extern crate` in an ANCESTOR module (the crate
-            // root / a parent `mod.rs`, which the in-file `lower.rs`
-            // expansion-surface guard never reads) injects a proc-macro
-            // derive into the crate-wide macro-use prelude; that derive
-            // resolves at the `#[derive(…)]` site in `lower.rs` and EXPANDS
-            // in `lower.rs`'s own module context, emitting same-module code
-            // that reaches the module-private `lower_type_expr_structural`.
-            // Compiler module-privacy does NOT backstop same-module
-            // expansion; `use macro_crate::name` is the scoped, non-injecting
-            // replacement (and a `use … as Clone` shadow in `lower.rs` is
-            // already rejected by the derive-shadow `use` rail).
-            "verter_session_production_has_no_macro_use_extern_crate",
             // HANDLE-CAPABLE DUAL-READ (additive, ahead of the producer
             // flip): the listed component-meta consumers accept BOTH a
             // parser-produced `TypeExpr` and an already-lowered handle,

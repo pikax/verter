@@ -835,41 +835,38 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 
 // ===========================================================================
 // Structural-carrier producer guard SET — the single structural-carrier producer
-// is defended by ten guards: the PRIMARY module-private lowerer guard
-// (`structural_carrier_producer_lowerer_is_module_private`), the IN-FILE
-// SINGLE-CALL pin (`structural_lowerer_called_only_through_the_witness_gated_wrapper`
-// — the raw lowerer is CALLED exactly once, inside the witness-gated
-// `emit_macro_arg` wrapper, closing the in-file case where a second un-gated
-// `pub(in …)` wrapper added inside `lower.rs` could name and call the lowerer),
-// the EXPANSION-SURFACE companion
-// (`structural_carrier_producer_lower_has_no_expansion_surface` — `lower.rs`
-// declares no production macro / include! / out-of-line-or-`#[path]` mod /
-// lowerer-`as` reexport, closing the macro-synthesis / include-splice /
-// child-mod class the occurrence rail cannot see), the PARENT-SHAPE
-// narrowness guard (`structural_carrier_producer_module_is_narrow`), the
-// WITNESS-unforgeability guard (`structural_carrier_producer_witnesses_are_unforgeable`)
-// — together the compiler-enforced make-unrepresentable layer — plus the
-// binder-seed-helper privacy guard (`script_setup_binder_helper_is_module_private`),
+// is COMPILER-CONFINED to ONE module (`macro_arg_producer.rs`), which owns the
+// module-private raw lowerer, the macro hot-mirror builder, and the binder-seed
+// builder; the owner declares it as a PRIVATE `mod macro_arg_producer;`
+// re-exporting only `macro_type_arg_hot_ref` + `MacroHotMirror`. A second
+// structural-carrier producer is therefore UNREPRESENTABLE BY CONSTRUCTION: no
+// foreign module can name the private builders (a compile error), and the
+// producer is collapsed into one module so no same-owner file can name them
+// either (a third caller is a compile error). The set is six guards: the PRIMARY
+// module-private lowerer guard
+// (`structural_carrier_producer_lowerer_is_module_private` — the raw lowerer is
+// a bare module-private fn in `macro_arg_producer.rs`, not re-exported), the
+// PARENT-SHAPE narrowness guard (`structural_carrier_producer_module_is_narrow` —
+// the owner directory contains ONLY `mod.rs`, `macro_arg_producer.rs`, and test
+// modules), together the compiler-enforced make-unrepresentable layer; plus the
+// SMALL no-reintroduce-a-surface backstop
+// (`macro_arg_producer_has_no_production_expansion_surface` — no production
+// macro / `macro_rules!` / `include!` / proc-macro attribute / `#[derive]` on a
+// producer-capable item / out-of-line-or-`#[path]` mod / `#[macro_use]`, the only
+// same-module code-gen class the structure cannot already make a compile error),
 // the file-scope ordering tripwire
 // (`no_production_macro_arg_eager_lowering_outside_mirror`), the purity guard
-// (`macro_hot_mirror_producer_is_pure_no_route_resolution`), the BOUNDED
+// (`macro_hot_mirror_producer_is_pure_no_route_resolution`), and the BOUNDED
 // entry-surface token tripwire
-// (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`), and the
-// CRATE-WIDE macro-use-prelude ban
-// (`verter_session_production_has_no_macro_use_extern_crate` — no non-`#[cfg(test)]`
-// `#[macro_use] extern crate` anywhere in `verter_session/src/**`, closing the
-// ANCESTOR vector where a parent module's `#[macro_use] extern crate` injects a
-// proc-macro derive into the crate-wide prelude that resolves + expands in
-// `lower.rs`'s module context — same-module expansion compiler privacy does NOT
-// backstop). The witness below pins that set into the registry; it does not
-// re-define those guards.
+// (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`). The witness
+// below pins that set into the registry; it does not re-define those guards.
 // ===========================================================================
 
 #[test]
 fn structural_carrier_producer_guards_remain_registered() {
-    // The structural-carrier producer owner module owns the module-private raw
-    // lowerer (reachable only through one unforgeable-witness-gated wrapper,
-    // `emit_macro_arg`).
+    // The structural-carrier producer is collapsed into ONE module
+    // (`macro_arg_producer.rs`) whose producer-capable code is module-private and
+    // reachable from outside only through the re-exported `macro_type_arg_hot_ref`.
     // This witness pins the replacement guard SET into BOTH the registry and the
     // assertion file, catching an accidental removal of the single-engine
     // producer defense.
@@ -882,44 +879,29 @@ fn structural_carrier_producer_guards_remain_registered() {
     const REQUIRED_GUARDS: &[(&str, &str)] = &[
         (
             "structural_carrier_producer_lowerer_is_module_private",
-            "the PRIMARY make-unrepresentable guard: the raw structural lowerer is module-private \
-             in `lower.rs` and not re-exported, so no other module can name it",
-        ),
-        (
-            "structural_lowerer_called_only_through_the_witness_gated_wrapper",
-            "the IN-FILE SINGLE-CALL pin: the raw lowerer is CALLED exactly once, inside the \
-             witness-gated `emit_macro_arg` wrapper, so a second un-gated `pub(in …)` wrapper added \
-             inside `lower.rs` (which the compiler privacy cannot catch within the file) cannot \
-             re-open the producer surface",
-        ),
-        (
-            "structural_carrier_producer_lower_has_no_expansion_surface",
-            "the EXPANSION-SURFACE companion: `lower.rs` declares NO production (non-`#[cfg(test)]`) \
-             item-position macro / `include!` / out-of-line-or-`#[path]` child mod / \
-             lowerer-`as` reexport, closing the macro-synthesis / include-splice / child-mod class \
-             that introduces same-module code reaching the private lowerer WITHOUT a third literal \
-             identifier token (which the occurrence-counting in-file pin cannot see); only the \
-             sanctioned `#[cfg(test)]`-gated `structural_lower_tests` test wiring is allowlisted",
+            "the PRIMARY make-unrepresentable guard: the raw structural lowerer is a bare \
+             module-private fn in `macro_arg_producer.rs` and not re-exported, so no other module \
+             can name it",
         ),
         (
             "structural_carrier_producer_module_is_narrow",
-            "the PARENT-SHAPE guard: the owner directory contains ONLY the raw lowerer, the \
-             witness-gated producer surface, the binder helper, mod.rs, and test modules",
+            "the PARENT-SHAPE guard: the owner directory contains ONLY the single producer module \
+             `macro_arg_producer.rs`, mod.rs, and test modules — so there is no other file that \
+             could name the module-private lowering builders",
         ),
         (
-            "structural_carrier_producer_witnesses_are_unforgeable",
-            "the WITNESS-unforgeability guard: exactly one private-field producer witness, \
-             neither forgeable nor returned crate-visibly outside its owning surface",
-        ),
-        (
-            "script_setup_binder_helper_is_module_private",
-            "the binder-seed-helper privacy guard: `build_script_setup_seed_frames` is \
-             `pub(in crate::structural_carrier_producer)`, confined to the owner module",
+            "macro_arg_producer_has_no_production_expansion_surface",
+            "the SMALL no-reintroduce-a-surface backstop: `macro_arg_producer.rs` declares NO \
+             production (non-`#[cfg(test)]`) macro invocation / `macro_rules!` / `include!` / \
+             proc-macro attribute / `#[derive(…)]` on a producer-capable item / \
+             out-of-line-or-`#[path]` child mod / `#[macro_use]` — the only same-module \
+             code-generation class the compiler module-privacy cannot already make a compile \
+             error; only the sanctioned `#[cfg(test)] #[path] mod *_tests;` wiring is allowlisted",
         ),
         (
             "no_production_macro_arg_eager_lowering_outside_mirror",
             "the file-scope ordering tripwire: no production macro-arg eager lowering outside the \
-             structural-carrier producer module",
+             single producer module `macro_arg_producer.rs`",
         ),
         (
             "macro_hot_mirror_producer_is_pure_no_route_resolution",
@@ -929,17 +911,8 @@ fn structural_carrier_producer_guards_remain_registered() {
         ),
         (
             "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
-            "the BOUNDED entry-surface tripwire: only the sanctioned witness-gated entries are \
-             crate-visible producer fns of the owner module",
-        ),
-        (
-            "verter_session_production_has_no_macro_use_extern_crate",
-            "the CRATE-WIDE macro-use-prelude ban: no non-`#[cfg(test)]` `#[macro_use] extern \
-             crate` (nor `#[cfg_attr(…, macro_use)] extern crate`) anywhere in \
-             `verter_session/src/**`, closing the ANCESTOR vector where a parent module's \
-             `#[macro_use] extern crate` injects a proc-macro derive into the crate-wide prelude \
-             that resolves at the `#[derive(…)]` site in `lower.rs` and expands in `lower.rs`'s \
-             module context (same-module expansion compiler privacy cannot backstop)",
+            "the BOUNDED entry-surface tripwire: only the sanctioned `macro_type_arg_hot_ref` is a \
+             crate-visible producer fn of the owner module",
         ),
     ];
 
@@ -967,4 +940,31 @@ fn structural_carrier_producer_guards_remain_registered() {
          be fully replaced by `structural_carrier_producer_lowerer_is_module_private` — no stale \
          reference may linger in the registry or assertion file"
     );
+
+    // The scanner-cluster guards DELETED by the structural collapse (a second
+    // producer is now a compile error, so the source-scanner rails are gone) must
+    // NOT linger in either registry: their names are removed, not hollow-renamed.
+    // The compiler-confinement (module-private builders in one private module) +
+    // the surviving make-unrepresentable/narrowness/expansion-surface guards
+    // replace them.
+    const RETIRED_SCANNER_GUARDS: &[&str] = &[
+        "structural_lowerer_called_only_through_the_witness_gated_wrapper",
+        "structural_carrier_producer_lower_has_no_expansion_surface",
+        "structural_carrier_producer_witnesses_are_unforgeable",
+        "script_setup_binder_helper_is_module_private",
+        "verter_session_production_has_no_macro_use_extern_crate",
+    ];
+    for retired in RETIRED_SCANNER_GUARDS {
+        assert!(
+            !registry.contains(retired),
+            "the retired scanner-cluster guard `{retired}` must be fully removed from the registry \
+             — the structural collapse to one compiler-confined producer module replaces it; no \
+             stale reference may linger"
+        );
+        assert!(
+            !guards.contains(&format!("fn {retired}(")),
+            "the retired scanner-cluster guard `{retired}` must have NO `fn {retired}(` definition \
+             in architecture_guards.rs — it was deleted, not renamed"
+        );
+    }
 }

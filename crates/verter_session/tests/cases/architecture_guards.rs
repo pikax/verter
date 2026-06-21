@@ -7,15 +7,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-// `IdentExt::unraw()` strips a leading `r#` from an identifier before any
-// name-equality / membership check in the single-producer (`lower.rs`) guard
-// cluster: rustc treats a raw identifier `r#Clone` as the name `Clone` (a raw
-// escape, valid for any non-reserved-keyword name), but `proc_macro2::Ident::
-// to_string()` renders it `"r#Clone"`, so a bare `.to_string()` compare would
-// MISS the raw spelling. Every bound-name / lowerer-name / derive-content match
-// `unraw()`s the ident first so a `r#`-spelled name cannot evade the check.
-use syn::ext::IdentExt;
-
 // Shared denylist consumed by both `audit_no_hot_loop_instrumentation`
 // (defined below) and the focused regression test in
 // `tests/cases/g_compile/compile_audit_no_hot_loop_instrumentation.rs`.
@@ -21213,16 +21204,28 @@ fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
 /// the lowerer only emits typed carriers.
 #[test]
 fn session_graph_lowerer_makes_no_query() {
-    let src = read_workspace_file("crates/verter_session/src/structural_carrier_producer/lower.rs");
+    let src = read_workspace_file(
+        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+    );
     let production = carrier_production_code(&src);
     // Anti-vacuity: the extractor found the real lowerer production code.
     assert!(
         production.contains("fn lower_type_expr_structural"),
         "guard must extract the real structural lowerer production code"
     );
+    // The producer module now co-locates the structural lowerer (query-free) with
+    // the macro hot-mirror accessor `macro_type_arg_hot_ref`, which legitimately
+    // holds a `&dyn ResolverContext` to read the owner's ROUTE-FREE `IndexedReady`
+    // (`ensure_indexed_ready_serve`). So `ResolverContext` / `ensure_indexed_ready`
+    // are NOT in the forbidden list here — the route-free-vs-route distinction is
+    // owned by `macro_hot_mirror_producer_is_pure_no_route_resolution` (which bans
+    // the resolution surface and explicitly ALLOWS the route-free reads). This
+    // guard bans the genuine QUERY / DISPATCH surface, which must be absent across
+    // the WHOLE producer module (the lowerer AND the mirror accessor): a
+    // `ProjectSemanticDispatch` / `SemanticQueryKey` / `.execute(` / resolve query
+    // is a host type-resolution, never performed by a producer.
     for forbidden in [
         "ProjectSemanticDispatch",
-        "ResolverContext",
         "SemanticQueryKey",
         ".execute(",
         "execute_read",
@@ -21230,22 +21233,21 @@ fn session_graph_lowerer_makes_no_query() {
         "resolve_bare_name_in_scope",
         "resolve_type_dependency_canonical",
         "prepared_decl_bundle",
-        "ensure_indexed_ready",
         "type_provider",
         "tsserver",
         // Assembled at compile time so this needle list does not itself carry
         // the literal identifier and trip the
         // `no_session_solver_host_in_production_code` retired-symbol scanner,
         // which greps non-`*_tests.rs` `crates/**` source for `SessionSolverHost`.
-        // The scan against `structural_carrier_producer/lower.rs` is unchanged —
-        // it still looks for the full assembled identifier.
+        // The scan against `structural_carrier_producer/macro_arg_producer.rs` is
+        // unchanged — it still looks for the full assembled identifier.
         concat!("Session", "SolverHost"),
     ] {
         assert!(
             !production.contains(forbidden),
-            "the query-free structural lowerer (structural_carrier_producer/lower.rs) must perform \
-             NO resolution / host query — found `{forbidden}` in production code. Carrier \
-             resolution is a demand-time concern; emit a typed carrier instead."
+            "the query-free structural producer (structural_carrier_producer/macro_arg_producer.rs) \
+             must perform NO resolution / host query — found `{forbidden}` in production code. \
+             Carrier resolution is a demand-time concern; emit a typed carrier instead."
         );
     }
     // Self-discrimination through the SAME extractor (never a bare
@@ -21280,7 +21282,9 @@ fn session_graph_lowerer_makes_no_query() {
 /// carrier.
 #[test]
 fn unresolved_carriers_not_materialized_during_emission() {
-    let src = read_workspace_file("crates/verter_session/src/structural_carrier_producer/lower.rs");
+    let src = read_workspace_file(
+        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+    );
     let production = carrier_production_code(&src);
     assert!(
         production.contains("fn lower_type_expr_structural"),
@@ -21473,20 +21477,19 @@ fn carrier_production_code_scans_post_cfg_test_and_strips_block_comments() {
 
 /// The structural lowerer's defining module: the raw entry
 /// `lower_type_expr_structural` lives under
-/// `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
-/// visibility modifier), so no FOREIGN module — not even a sibling under the
-/// owner module — can NAME it. The only path to it is the witness-gated wrapper
-/// (`emit_macro_arg`). This makes a second production structural-carrier
-/// producer in any OTHER module UNREPRESENTABLE by construction
-/// (compiler-enforced single-engine producer rule), which is why the primary
-/// guard here is a PRIVACY-SHAPE assertion on the owner file, not a foreign
-/// caller scanner. The COMPLEMENTARY in-file case — a future edit adding a
-/// SECOND `pub(in …)` wrapper INSIDE `lower.rs` that names and calls the lowerer
-/// without a `MacroProducerWitness` (which compiler privacy cannot catch within
-/// the defining file) — is pinned by
-/// `structural_lowerer_called_only_through_the_witness_gated_wrapper` (the raw
-/// lowerer is CALLED exactly once, inside `emit_macro_arg`).
-const STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE: &str = "structural_carrier_producer/lower.rs";
+/// `crate::structural_carrier_producer::macro_arg_producer` and is
+/// MODULE-PRIVATE (no visibility modifier). The module itself is a PRIVATE
+/// `mod macro_arg_producer;` (only `macro_type_arg_hot_ref` + `MacroHotMirror`
+/// are re-exported), so no FOREIGN module — and no sibling under the owner
+/// module — can NAME the lowerer. A second production structural-carrier
+/// producer in ANY other file is therefore UNREPRESENTABLE by construction
+/// (compiler-enforced single-engine producer rule), which is why this guard is
+/// a PRIVACY-SHAPE assertion on the owner file, not a foreign caller scanner.
+/// The same-owner case is moot too: there is no other file in the owner module
+/// that could name the private lowerer (the producer is collapsed into this one
+/// module), so a third caller is a compile error.
+const STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE: &str =
+    "structural_carrier_producer/macro_arg_producer.rs";
 
 /// Classify the visibility shape of the `lower_type_expr_structural` definition
 /// in the given source body. Returns the offending reason when the entry
@@ -21529,20 +21532,17 @@ fn structural_lowerer_reexport_violation(body: &str) -> bool {
 
 /// PRIMARY single-engine producer guard (make-unrepresentable): the raw
 /// structural-lowering entry `lower_type_expr_structural` lives ONLY under
-/// `crate::structural_carrier_producer::lower` and is MODULE-PRIVATE (no
-/// visibility modifier) AND is NOT re-exported anywhere in the crate. No FOREIGN
-/// module can name it — a foreign reference is a compile error, not a lint — so
-/// a second structural-carrier producer in any OTHER module is UNREPRESENTABLE
-/// by construction and the single-engine producer rule needs no FOREIGN caller
-/// scanner here. The witnessed wrapper `emit_macro_arg` is the only reachable
-/// surface, gated by an unforgeable capability witness. (The COMPLEMENTARY
-/// in-file case — a second `pub(in …)` wrapper added inside `lower.rs` that the
-/// compiler privacy cannot catch within the defining file — is pinned by
-/// `structural_lowerer_called_only_through_the_witness_gated_wrapper`: the raw
-/// lowerer is CALLED exactly once, inside `emit_macro_arg`.)
+/// `crate::structural_carrier_producer::macro_arg_producer` and is MODULE-PRIVATE
+/// (no visibility modifier) AND is NOT re-exported anywhere in the crate. The
+/// owner declares the module as a PRIVATE `mod macro_arg_producer;` (only
+/// `macro_type_arg_hot_ref` + `MacroHotMirror` are re-exported), so no FOREIGN
+/// module can name the lowerer — a foreign reference is a compile error, not a
+/// lint — and the single-engine producer rule needs no FOREIGN caller scanner
+/// here. The same-owner case is moot: the producer is collapsed into this ONE
+/// module, so there is no other file that could name the private lowerer.
 #[test]
 fn structural_carrier_producer_lowerer_is_module_private() {
-    let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
+    let rel = "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs";
     let body = std::fs::read_to_string(workspace_path(rel))
         .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
     // (a) Anti-vacuity: the owner module must exist at this path and carry the
@@ -21554,8 +21554,7 @@ fn structural_carrier_producer_lowerer_is_module_private() {
          structural-carrier-producer owner re-home regressed"
     );
     // (a) The raw lowerer is defined NOWHERE ELSE in the crate — exactly one
-    // definition, in `lower.rs`. (The witness-gated wrapper `emit_macro_arg`
-    // CALLS it but never re-defines it.)
+    // definition, in `macro_arg_producer.rs`.
     let definitions: Vec<String> = session_production_src_files()
         .into_iter()
         .filter(|(_, src)| src.contains("fn lower_type_expr_structural("))
@@ -21563,16 +21562,19 @@ fn structural_carrier_producer_lowerer_is_module_private() {
         .collect();
     assert_eq!(
         definitions,
-        vec!["crates/verter_session/src/structural_carrier_producer/lower.rs".to_string()],
+        vec![
+            "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs"
+                .to_string()
+        ],
         "the raw `fn lower_type_expr_structural(` must be defined ONLY in \
-         `structural_carrier_producer/lower.rs`; found in {definitions:#?}"
+         `structural_carrier_producer/macro_arg_producer.rs`; found in {definitions:#?}"
     );
     // (b) The definition line carries NO visibility modifier.
     if let Some(reason) = structural_carrier_producer_lowerer_privacy_violation(&body) {
         panic!(
             "single-engine producer rule violated: {reason}. The entry must stay module-private to \
-             `crate::structural_carrier_producer::lower` so a third structural-carrier producer is \
-             unrepresentable by construction."
+             `crate::structural_carrier_producer::macro_arg_producer` so a second structural-carrier \
+             producer is unrepresentable by construction."
         );
     }
     // (c) The lowerer is NOT re-exported anywhere in the crate — a `pub use`
@@ -21641,920 +21643,20 @@ fn structural_carrier_producer_lowerer_privacy_classifier_discriminates() {
     // The REAL owner source is the genuine module-private shape and is not
     // re-exported (revert proof: the production tree is pristine).
     let real = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/lower.rs",
+        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
     .expect("the structural lowerer's owner module must be readable");
     assert!(
         structural_carrier_producer_lowerer_privacy_violation(&real).is_none(),
-        "the REAL `lower_type_expr_structural` in `lower.rs` MUST be a bare module-private fn — if \
-         this reddens, the lowerer's visibility was widened, re-opening the producer surface"
+        "the REAL `lower_type_expr_structural` in `macro_arg_producer.rs` MUST be a bare \
+         module-private fn — if this reddens, the lowerer's visibility was widened, re-opening the \
+         producer surface"
     );
     assert!(
         !structural_lowerer_reexport_violation(&real),
-        "the REAL `lower.rs` must NOT re-export the lowerer"
+        "the REAL `macro_arg_producer.rs` must NOT re-export the lowerer"
     );
 }
-
-/// Comment-strip a Rust source body for the single-call scan: every `//` line
-/// comment and `/* … */` block comment (nested) is replaced by spaces, string /
-/// raw-string literal CONTENTS are blanked to spaces (the delimiters kept,
-/// newlines preserved), AND a CHAR / byte-char literal (`'x'` / `'\n'` / `'"'` /
-/// `'{'` / `'}'`) is consumed as an ATOM whose INNER bytes are blanked to spaces
-/// (the `'` delimiters and the literal's length are kept, like a string), so the
-/// literal can NEVER (i) mis-open string mode and mask the code that follows it
-/// (a `'"'`), NOR (ii) perturb the brace-depth count of the containment scan (a
-/// `'{'` / `'}'`). A char literal is disambiguated from a lifetime (`'a` /
-/// `'static`, which has no closing quote) exactly like rustc. A
-/// `lower_type_expr_structural` mention inside a comment OR a string is therefore
-/// never counted, and a `let _q = '"'; lower_type_expr_structural(g)` line keeps
-/// the rogue reference VISIBLE to the occurrence scan (a string-only stripper
-/// would open string mode at `'"'` and blank the following reference — the
-/// char-literal-aware atom handling closes that; blanking the inner bytes
-/// additionally makes the brace-containment helper's doc TRUE so a `'}'` char
-/// literal inside `emit_macro_arg`'s body cannot mis-balance the depth count).
-/// This mirrors the char-aware `carrier_strip_comments` helper in
-/// this file (same raw/string/char/comment disambiguation), additionally
-/// blanking string AND char-literal CONTENTS since no real reference, and no
-/// brace that must count toward containment, can live inside a literal. The
-/// single-call guard below feeds it the owner source so commented-out /
-/// doc-comment / string / char-masked mentions of the lowerer cannot evade the
-/// occurrence scan, and so a brace inside a char literal cannot mis-attribute a
-/// call to (or out of) the wrapper body.
-fn strip_comments_for_single_call_scan(src: &str) -> String {
-    let bytes = src.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let n = bytes.len();
-    let mut i = 0usize;
-    while i < n {
-        let c = bytes[i];
-        // Raw string: r"..."  /  r#"..."#  /  r##"..."##  ...  — blank the
-        // CONTENT (keep the opening / closing delimiters and newlines).
-        if c == b'r' {
-            let mut j = i + 1;
-            let mut hashes = 0usize;
-            while j < n && bytes[j] == b'#' {
-                hashes += 1;
-                j += 1;
-            }
-            if j < n && bytes[j] == b'"' {
-                out.extend_from_slice(&bytes[i..=j]);
-                let close: Vec<u8> = std::iter::once(b'"')
-                    .chain(std::iter::repeat_n(b'#', hashes))
-                    .collect();
-                let mut k = j + 1;
-                while k + close.len() <= n {
-                    if &bytes[k..k + close.len()] == close.as_slice() {
-                        out.extend_from_slice(close.as_slice());
-                        i = k + close.len();
-                        break;
-                    }
-                    out.push(if bytes[k] == b'\n' { b'\n' } else { b' ' });
-                    k += 1;
-                }
-                if k + close.len() > n {
-                    for b in &bytes[(j + 1)..n] {
-                        out.push(if *b == b'\n' { b'\n' } else { b' ' });
-                    }
-                    i = n;
-                }
-                continue;
-            }
-        }
-        // Regular string literal "..." (with \" escape handling) — blank the
-        // CONTENT (keep the quotes and newlines).
-        if c == b'"' {
-            out.push(b'"');
-            let mut k = i + 1;
-            while k < n {
-                if bytes[k] == b'\\' && k + 1 < n {
-                    out.push(b' ');
-                    out.push(if bytes[k + 1] == b'\n' { b'\n' } else { b' ' });
-                    k += 2;
-                    continue;
-                }
-                if bytes[k] == b'"' {
-                    out.push(b'"');
-                    k += 1;
-                    break;
-                }
-                out.push(if bytes[k] == b'\n' { b'\n' } else { b' ' });
-                k += 1;
-            }
-            i = k;
-            continue;
-        }
-        // Char / byte-char literal 'x' / '\n' / '\u{…}' / '"' / '{' / '}' —
-        // consumed as an ATOM whose INNER bytes are BLANKED to spaces (the `'`
-        // delimiters and the literal's byte length kept), disambiguated from a
-        // lifetime (`'a` / `'static`, which has NO closing quote) exactly like
-        // rustc: a backslash escape, OR a single byte immediately followed by a
-        // closing quote, is a char literal; anything else starting with `'` falls
-        // through as a lifetime. Blanking the inner bytes (not passing them
-        // verbatim) means (i) a `'"'` cannot open the string arm above and blank
-        // the following code — the char-literal string-mode masking is closed —
-        // AND (ii) a `'{'` / `'}'` cannot perturb the brace-depth count of the
-        // containment scan, making the brace-containment helper's doc TRUE.
-        // (Mirrors `carrier_strip_comments`, additionally blanking the content.)
-        if c == b'\'' {
-            // Escaped char literal `'\X…'`: scan to the unescaped closing quote,
-            // blanking every inner byte (the leading `\` included) to a space.
-            if i + 1 < n && bytes[i + 1] == b'\\' {
-                out.push(b'\'');
-                let mut k = i + 1;
-                while k < n {
-                    if bytes[k] == b'\\' && k + 1 < n {
-                        out.push(b' ');
-                        out.push(b' ');
-                        k += 2;
-                        continue;
-                    }
-                    if bytes[k] == b'\'' {
-                        out.push(b'\'');
-                        k += 1;
-                        break;
-                    }
-                    out.push(b' ');
-                    k += 1;
-                }
-                i = k;
-                continue;
-            }
-            // Simple single-byte char literal `'x'` (close quote at i+2): keep
-            // both quotes, blank the single inner byte to a space.
-            if i + 2 < n && bytes[i + 2] == b'\'' {
-                out.push(b'\'');
-                out.push(b' ');
-                out.push(b'\'');
-                i += 3;
-                continue;
-            }
-            // Otherwise a lifetime — fall through to normal byte handling.
-        }
-        // Line comment //
-        if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
-            let mut k = i;
-            while k < n && bytes[k] != b'\n' {
-                out.push(b' ');
-                k += 1;
-            }
-            i = k;
-            continue;
-        }
-        // Block comment /* ... */ with nesting support.
-        if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
-            let mut depth = 1u32;
-            out.push(b' ');
-            out.push(b' ');
-            let mut k = i + 2;
-            while k < n && depth > 0 {
-                if k + 1 < n && bytes[k] == b'/' && bytes[k + 1] == b'*' {
-                    depth += 1;
-                    out.push(b' ');
-                    out.push(b' ');
-                    k += 2;
-                    continue;
-                }
-                if k + 1 < n && bytes[k] == b'*' && bytes[k + 1] == b'/' {
-                    depth -= 1;
-                    out.push(b' ');
-                    out.push(b' ');
-                    k += 2;
-                    continue;
-                }
-                if bytes[k] == b'\n' {
-                    out.push(b'\n');
-                } else {
-                    out.push(b' ');
-                }
-                k += 1;
-            }
-            i = k;
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The byte offsets of EVERY WORD-BOUNDED occurrence of the bare identifier
-/// `lower_type_expr_structural` in `stripped` (comment / string-content /
-/// char-literal-aware-stripped source) — counting the identifier itself, NOT
-/// `ident(`. A leading word boundary (preceding char is start-of-file or a
-/// non-identifier byte) AND a trailing word boundary (following char is
-/// end-of-file or a non-identifier byte) are required, so `xlower_type…` and
-/// `lower_type_expr_structural2` never match. Counting the bare identifier (not
-/// only `ident(`) is the strictly-stronger invariant: an `as`-alias import
-/// (`use …lower_type_expr_structural as raw;`), a `let f = lower_type_expr_structural;`
-/// function-item binding, and a whitespace/newline-split call
-/// (`lower_type_expr_structural (g)` / `…\n(g)`) are ALL extra occurrences of the
-/// identifier and so are seen here, independent of whether a `(` immediately
-/// follows.
-fn structural_lowerer_identifier_offsets(stripped: &str) -> Vec<usize> {
-    let needle = "lower_type_expr_structural";
-    let bytes = stripped.as_bytes();
-    let mut offsets = Vec::new();
-    let mut search_from = 0usize;
-    while let Some(rel) = stripped[search_from..].find(needle) {
-        let abs = search_from + rel;
-        search_from = abs + needle.len();
-        let end = abs + needle.len();
-        // Leading word boundary.
-        let is_word_start =
-            abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
-        // Trailing word boundary — reject `lower_type_expr_structural2` /
-        // `lower_type_expr_structural_v2` (a longer identifier sharing the
-        // prefix), which is NOT a reference to the lowerer.
-        let is_word_end =
-            end >= bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
-        if is_word_start && is_word_end {
-            offsets.push(abs);
-        }
-    }
-    offsets
-}
-
-/// Whether the word-bounded `lower_type_expr_structural` identifier ending at
-/// `ident_end` in `stripped` is a CALL: the next SIGNIFICANT byte after the
-/// identifier — skipping ASCII whitespace (comments are already stripped to
-/// spaces) — is `(`. This is WHITESPACE / NEWLINE tolerant, so
-/// `lower_type_expr_structural(g)`, `lower_type_expr_structural (g)`, and
-/// `lower_type_expr_structural\n(g)` are all calls, while a `use … as` import or
-/// a `let f = lower_type_expr_structural;` binding (no following `(`) is NOT.
-fn structural_lowerer_occurrence_is_call(stripped: &str, ident_end: usize) -> bool {
-    stripped[ident_end..]
-        .bytes()
-        .find(|b| !b.is_ascii_whitespace())
-        == Some(b'(')
-}
-
-/// Whether the word-bounded `lower_type_expr_structural` identifier at `abs` in
-/// `stripped` is the DEFINITION (`fn lower_type_expr_structural`): the token
-/// immediately preceding the identifier (skipping whitespace) is the keyword
-/// `fn`. The definition is never a call site; everything else is a reference.
-fn structural_lowerer_occurrence_is_definition(stripped: &str, abs: usize) -> bool {
-    let preceding = stripped[..abs].trim_end();
-    preceding.ends_with(" fn") || preceding.ends_with("\nfn") || preceding == "fn"
-}
-
-/// The name of the nearest preceding `fn <name>(` definition before `offset`
-/// in `stripped`, or `None` when no `fn …(` precedes it (a free / top-level
-/// call). Used ONLY to NAME the enclosing fn in the violation message; the
-/// actual containment GATE is the brace-balanced
-/// [`offset_is_inside_emit_macro_arg_body`], so this heuristic's
-/// nearest-preceding bound no longer affects correctness — it only labels the
-/// offending encloser for the diagnostic.
-fn nearest_preceding_fn_name(stripped: &str, offset: usize) -> Option<String> {
-    let needle = "fn ";
-    let prefix = &stripped[..offset];
-    let bytes = stripped.as_bytes();
-    let mut best: Option<usize> = None;
-    let mut search_from = 0usize;
-    while let Some(rel) = prefix[search_from..].find(needle) {
-        let abs = search_from + rel;
-        search_from = abs + needle.len();
-        // `fn` must be on a leading word boundary so `…rfn `-like substrings do
-        // not match.
-        let is_word_start =
-            abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
-        if is_word_start {
-            best = Some(abs);
-        }
-    }
-    let fn_at = best?;
-    let after = fn_at + needle.len();
-    // Read the identifier following `fn `.
-    let rest = &stripped[after..];
-    let name: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-/// Whether `offset` (a byte offset into the comment/string/char-stripped
-/// `stripped` source) sits INSIDE the BRACE-BALANCED `{ … }` body of the
-/// `emit_macro_arg` wrapper fn — a true containment scan, NOT the
-/// nearest-preceding-`fn` heuristic [`nearest_preceding_fn_name`] uses for its
-/// diagnostic name. Procedure: locate the word-bounded `fn emit_macro_arg`
-/// header, advance to the FIRST `{` after it (the body's opening brace), then
-/// brace-depth-track (`+1` on `{`, `-1` on `}`) to the matching close; the
-/// offset is contained iff `open < offset < close`. (The stripper already
-/// blanked comments / string contents / char literals to spaces, so no `{` /
-/// `}` inside a literal or comment can perturb the depth count.)
-///
-/// This makes the single-witnessed-call containment INDEPENDENTLY correct
-/// (defense-in-depth): a call placed textually AFTER `emit_macro_arg`'s closing
-/// brace but BEFORE any later `fn` — e.g. in a trailing free item or a
-/// closure-bearing `const` — is no longer mis-attributed to `emit_macro_arg`
-/// (the nearest-preceding-`fn` heuristic would still have named it
-/// `emit_macro_arg`). Returns `false` when no `fn emit_macro_arg` header exists
-/// or its body brace never balances (a truncated / malformed wrapper).
-fn offset_is_inside_emit_macro_arg_body(stripped: &str, offset: usize) -> bool {
-    let needle = "fn emit_macro_arg";
-    let bytes = stripped.as_bytes();
-    // Find the word-bounded `fn emit_macro_arg` header (leading boundary so
-    // `…rfn emit_macro_arg` cannot match). Use the LAST such header before
-    // `offset` if several exist, mirroring nearest-preceding semantics for the
-    // start of the containment scan.
-    let mut header_at: Option<usize> = None;
-    let mut search_from = 0usize;
-    while let Some(rel) = stripped[search_from..].find(needle) {
-        let abs = search_from + rel;
-        search_from = abs + needle.len();
-        let is_word_start =
-            abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
-        // Trailing boundary so `fn emit_macro_arg_v2` does not match.
-        let end = abs + needle.len();
-        let is_word_end =
-            end >= bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
-        if is_word_start && is_word_end {
-            header_at = Some(abs);
-        }
-    }
-    let header_at = match header_at {
-        Some(h) => h,
-        None => return false,
-    };
-    // Advance to the first `{` after the header — the body's opening brace.
-    let open_rel = match stripped[header_at..].find('{') {
-        Some(p) => p,
-        None => return false,
-    };
-    let open = header_at + open_rel;
-    // Brace-depth-track from the open brace to its matching close.
-    let mut depth = 0i32;
-    let mut close: Option<usize> = None;
-    for (i, b) in stripped.bytes().enumerate().skip(open) {
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let close = match close {
-        Some(c) => c,
-        None => return false,
-    };
-    open < offset && offset < close
-}
-
-/// Count word-bounded `lower_type_expr_structural` path references appearing
-/// anywhere inside one `syn` syntax node, via `syn::visit::Visit`. Used to bind
-/// the single-witnessed-call CONTAINMENT to a SPECIFIC `syn::Item` (the
-/// top-level `emit_macro_arg` fn) structurally, independent of byte offsets —
-/// `proc-macro2/span-locations` is NOT enabled in this workspace's `syn`
-/// dev-dep, so a span→offset map is unavailable; a structural visit of the
-/// chosen item's body is the offset-free equivalent. It counts the
-/// last-segment ident of every visited path (`a::b::lower_type_expr_structural`
-/// and a bare `lower_type_expr_structural` both count once), which is exactly
-/// the reference shape the call site uses.
-struct LowererPathRefCounter {
-    count: usize,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for LowererPathRefCounter {
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        if path
-            .segments
-            .last()
-            .is_some_and(|seg| seg.ident == "lower_type_expr_structural")
-        {
-            self.count += 1;
-        }
-        // Descend (a path inside a turbofish / nested expression still counts).
-        syn::visit::visit_path(self, path);
-    }
-}
-
-/// Whether the SINGLE sanctioned reference to `lower_type_expr_structural`
-/// lives inside the REAL TOP-LEVEL `emit_macro_arg` fn item — a `syn::Item::Fn`
-/// named `emit_macro_arg` at the FILE's top level, NOT a fn nested inside any
-/// child `mod`. This binds the containment to the genuine witnessed wrapper
-/// structurally: a call inside a child-mod fn (even one ALSO named
-/// `emit_macro_arg`) puts the reference inside that `Item::Mod`, so the
-/// top-level fn body contains ZERO references → `false` (RED). Because the
-/// occurrence-counting text rail has already proven there is EXACTLY ONE
-/// reference in the whole file, "≥1 reference inside the top-level
-/// `emit_macro_arg` body" is equivalent to "that one reference is inside it".
-///
-/// Offset-free by construction (see [`LowererPathRefCounter`]): it walks the
-/// parsed top-level item's body rather than mapping a byte offset, so it is the
-/// correct primary containment gate under this workspace's
-/// span-locations-disabled `syn`. Returns `false` when `body` does not parse,
-/// when no TOP-LEVEL `fn emit_macro_arg` exists, or when its body holds no
-/// lowerer reference.
-fn single_call_is_in_top_level_emit_macro_arg(body: &str) -> bool {
-    let file = match syn::parse_file(body) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    // ONLY top-level items — a fn named `emit_macro_arg` nested inside a child
-    // `mod` is NOT a top-level item and is deliberately not considered, so a
-    // child-mod witnessed call cannot satisfy containment.
-    let mut total_inside_top_level = 0usize;
-    for item in &file.items {
-        if let syn::Item::Fn(func) = item {
-            if func.sig.ident == "emit_macro_arg" {
-                let mut counter = LowererPathRefCounter { count: 0 };
-                syn::visit::Visit::visit_block(&mut counter, &func.block);
-                total_inside_top_level += counter.count;
-            }
-        }
-    }
-    total_inside_top_level >= 1
-}
-
-/// Classify whether `body` (RAW owner source — the classifier strips comments,
-/// string contents, and char literals internally) satisfies the
-/// single-witnessed-call invariant under the OCCURRENCE-COUNTING rail (strictly
-/// stronger than a substring-call count). The invariant: after stripping, the
-/// bare identifier `lower_type_expr_structural` appears EXACTLY twice — (i) once
-/// as its own definition (`fn lower_type_expr_structural`), and (ii) once as a
-/// CALL (`(` after optional whitespace) whose nearest enclosing fn is the
-/// witness-gated `emit_macro_arg`. ANY third occurrence — an `as`-alias import
-/// (`use …lower_type_expr_structural as raw;`), a `let f = lower_type_expr_structural;`
-/// function-item binding, a whitespace/newline-split second call, or a plain
-/// second wrapper's call — is a violation, because the only sanctioned reference
-/// to the lowerer is the one witnessed call. Returns `None` when the invariant
-/// holds, or `Some(reason)` describing the violation. Anti-vacuity: both the
-/// definition and the one witnessed call must be present (their absence is itself
-/// a violation — the wrapper structure regressed).
-fn structural_lowerer_single_witnessed_call_violation(body: &str) -> Option<String> {
-    let stripped = strip_comments_for_single_call_scan(body);
-    let occurrences = structural_lowerer_identifier_offsets(&stripped);
-    // Partition the word-bounded identifier occurrences into the definition and
-    // the references (everything that is not the `fn …` definition site).
-    let mut definitions = 0usize;
-    let mut references: Vec<usize> = Vec::new();
-    for &abs in &occurrences {
-        if structural_lowerer_occurrence_is_definition(&stripped, abs) {
-            definitions += 1;
-        } else {
-            references.push(abs);
-        }
-    }
-    // Anti-vacuity (a): the definition must exist exactly once.
-    if definitions == 0 {
-        return Some(
-            "anti-vacuity: the raw `fn lower_type_expr_structural` definition is missing — the \
-             single-producer wrapper structure regressed"
-                .to_string(),
-        );
-    }
-    if definitions != 1 {
-        return Some(format!(
-            "the raw `lower_type_expr_structural` must be DEFINED exactly once in `lower.rs` — \
-             found {definitions} definition sites. A second definition is a second producer."
-        ));
-    }
-    // Anti-vacuity (b): there must be exactly one REFERENCE to the lowerer (the
-    // single witnessed call). ZERO references means the witnessed wrapper no
-    // longer calls the lowerer; TWO OR MORE means a second in-file reference was
-    // added — a second un-gated wrapper's call, an `as`-alias import, or a
-    // `let`-binding of the function item — every one of which re-opens the
-    // single-producer surface without presenting a `MacroProducerWitness`.
-    if references.is_empty() {
-        return Some(
-            "anti-vacuity: the raw `lower_type_expr_structural` is never referenced outside its \
-             definition — the witness-gated wrapper `emit_macro_arg` must call it exactly once"
-                .to_string(),
-        );
-    }
-    if references.len() != 1 {
-        return Some(format!(
-            "the raw `lower_type_expr_structural` identifier must appear EXACTLY once outside its \
-             definition (the single witnessed call inside `emit_macro_arg`) — found {} references \
-             in `lower.rs`. A SECOND in-file reference is an un-gated second-wrapper call, an \
-             `as`-alias import (`use …lower_type_expr_structural as <Alias>;`), or a \
-             `let <x> = lower_type_expr_structural;` function-item binding — every one of which \
-             reaches the raw lowerer WITHOUT presenting the `MacroProducerWitness` and re-opens the \
-             single-producer surface",
-            references.len()
-        ));
-    }
-    let reference = references[0];
-    // The single reference must itself be a CALL (whitespace / newline tolerant)
-    // — a bare reference NOT followed by `(` is an alias/binding usage that
-    // hands the function item to another caller, defeating the witness gate.
-    if !structural_lowerer_occurrence_is_call(
-        &stripped,
-        reference + "lower_type_expr_structural".len(),
-    ) {
-        return Some(
-            "the single in-file reference to `lower_type_expr_structural` is NOT a call (no `(` \
-             follows it) — a bare reference (an `as`-alias import or a `let f = \
-             lower_type_expr_structural;` binding) hands the raw function item to another caller, \
-             bypassing the `MacroProducerWitness` gate"
-                .to_string(),
-        );
-    }
-    // The single witnessed call must sit inside the REAL TOP-LEVEL `emit_macro_arg`
-    // fn item. The PRIMARY containment gate is a `syn`-bound structural check
-    // ([`single_call_is_in_top_level_emit_macro_arg`]): the sole reference must be
-    // reachable inside the top-level `Item::Fn` named `emit_macro_arg`, NOT inside
-    // a fn nested in any child `mod`. A child-mod `fn emit_macro_arg` that calls the
-    // lowerer puts the reference inside that `Item::Mod`, so the top-level fn body
-    // holds it ZERO times → REDden (the text `fn emit_macro_arg` search alone would
-    // have mis-attributed the call to the child's header). The BRACE-BALANCED text
-    // containment ([`offset_is_inside_emit_macro_arg_body`]) is retained as a
-    // complementary defense (and the source of the diagnostic encloser name): it
-    // additionally rejects a call placed AFTER the wrapper's closing brace but
-    // before the next `fn` (a trailing free item / closure-bearing const), which is
-    // outside the fn body yet not inside any child mod. BOTH must hold.
-    if single_call_is_in_top_level_emit_macro_arg(body)
-        && offset_is_inside_emit_macro_arg_body(&stripped, reference)
-    {
-        None
-    } else {
-        let enclosing = nearest_preceding_fn_name(&stripped, reference);
-        Some(format!(
-            "the single `lower_type_expr_structural` call must sit inside the REAL TOP-LEVEL \
-             witness-gated `emit_macro_arg` fn item (a `syn::Item::Fn` named `emit_macro_arg` at the \
-             file's top level — NOT a fn nested in a child `mod`), and inside its `{{ … }}` body \
-             (brace-balanced containment), but it does not — its nearest preceding fn header is `{}`. \
-             A call inside a CHILD-mod fn (even one named `emit_macro_arg`), after the top-level \
-             wrapper's closing brace (a trailing free item / closure-bearing const), or in any other \
-             fn reaches the raw lowerer without presenting the `MacroProducerWitness`",
-            enclosing.as_deref().unwrap_or("<no enclosing fn>")
-        ))
-    }
-}
-
-/// SINGLE-PRODUCER HARDENING guard (in-file single-reference pin): the raw
-/// `lower_type_expr_structural` is module-private, so the COMPILER already
-/// makes it unrepresentable to any FOREIGN / sibling module — but WITHIN
-/// `lower.rs` itself the lowerer is nameable, so a future edit could add a
-/// SECOND wrapper there that calls it WITHOUT requiring a `MacroProducerWitness`,
-/// could `use self::lower_type_expr_structural as <Alias>` and call via the
-/// alias, or could `let f = lower_type_expr_structural;` bind the function item —
-/// any of which reaches the lowerer un-gated. No other guard catches that in-file
-/// case (the privacy guard scans the definition's visibility; the entry-surface
-/// guard scans CRATE-VISIBLE entries, not `pub(in …)` wrappers).
-///
-/// This guard pins the EXACT in-file occurrence shape under an
-/// OCCURRENCE-COUNTING invariant (strictly stronger than a substring-call count,
-/// and NON-BYPASSABLE by aliasing): after stripping comments, string contents,
-/// and char literals (char-literal-aware, so a `'"'` cannot mask following code),
-/// the bare identifier `lower_type_expr_structural` appears in `lower.rs` EXACTLY
-/// twice — once as its own definition (`fn lower_type_expr_structural`) and once
-/// as a CALL (`(` after optional whitespace/newline) inside the witness-gated
-/// `emit_macro_arg`. ANY third occurrence — an `as`-alias import, a `let`-binding
-/// of the function item, a whitespace/newline-split second call, or a second
-/// wrapper's call — is a THIRD occurrence and reddens the guard, so the only path
-/// to the lowerer in `lower.rs` is the single witnessed one.
-#[test]
-fn structural_lowerer_called_only_through_the_witness_gated_wrapper() {
-    let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
-    let body = std::fs::read_to_string(workspace_path(rel))
-        .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
-    if let Some(reason) = structural_lowerer_single_witnessed_call_violation(&body) {
-        panic!(
-            "single-producer in-file pin violated in `{rel}`: {reason}. The raw \
-             `lower_type_expr_structural` must be reachable in `lower.rs` ONLY through the \
-             witness-gated `emit_macro_arg` wrapper — exactly one call, inside that wrapper."
-        );
-    }
-}
-
-/// Self-test for the single-witnessed-call classifier under the OCCURRENCE-
-/// COUNTING invariant: the REAL single-call shape passes; a SECOND same-file
-/// `pub(in crate::structural_carrier_producer)` wrapper calling the raw lowerer
-/// is reported; a call moved into a FREE fn (not `emit_macro_arg`) is reported;
-/// every IN-FILE ALIASING BYPASS the prior lexical scanner missed is reported —
-/// an `as`-alias import + call via the alias, a WHITESPACE-split call
-/// (`lower_type_expr_structural (g)`), a NEWLINE-split call, a CHAR-LITERAL-
-/// masked call (`let _q = '"'; lower_type_expr_structural(g)`), and a
-/// `let f = lower_type_expr_structural;` function-item binding; commented-out /
-/// string mentions and an UNRELATED char literal do not count; a missing
-/// definition or missing call is reported (anti-vacuity).
-#[test]
-fn structural_lowerer_single_call_classifier_discriminates() {
-    // CORRECT — the genuine single-call shape: one witnessed wrapper calling the
-    // raw lowerer exactly once.
-    let ok = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-              pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-              lower_type_expr_structural(g)\n\
-              }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(ok).is_none(),
-        "the genuine single-witnessed-call shape (one call, inside `emit_macro_arg`) must PASS"
-    );
-    // WRONG — a SECOND same-file wrapper calling the raw lowerer (the exact
-    // bypass the guard exists to catch): a THIRD identifier occurrence now exists.
-    let two_wrappers = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                        pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                        lower_type_expr_structural(g)\n\
-                        }\n\
-                        pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
-                        lower_type_expr_structural(g)\n\
-                        }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(two_wrappers).is_some(),
-        "a SECOND same-file wrapper calling the raw lowerer must be REPORTED — it is an un-gated \
-         bypass of the witness gate (a third identifier occurrence)"
-    );
-    // WRONG — the single call moved into a FREE fn that is NOT `emit_macro_arg`.
-    let wrong_encloser = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                          fn some_free_fn(g: &G) -> R {\n\
-                          lower_type_expr_structural(g)\n\
-                          }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(wrong_encloser).is_some(),
-        "a call NOT inside `emit_macro_arg` must be REPORTED — only the witnessed wrapper may reach \
-         the raw lowerer"
-    );
-    // WRONG (bypass vector A — the EXACT live-compiling alias bypass): an
-    // `as`-alias import of the lowerer + a second wrapper calling
-    // it via the alias. The genuine witnessed call is still present, but the
-    // `use … as raw_lower_alias;` line is a THIRD identifier occurrence → reported.
-    let as_alias = "use self::lower_type_expr_structural as raw_lower_alias;\n\
-                    fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                    pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                    lower_type_expr_structural(g)\n\
-                    }\n\
-                    pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
-                    raw_lower_alias(g)\n\
-                    }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(as_alias).is_some(),
-        "an `as`-alias import of the lowerer (`use self::lower_type_expr_structural as <Alias>;`) \
-         must be REPORTED — the import line is a third identifier occurrence, and a call via the \
-         alias is then unreachable without one"
-    );
-    // WRONG (bypass vector B — whitespace-split call): a second wrapper calling
-    // `lower_type_expr_structural (g)` with a SPACE before the paren. The
-    // identifier occurrence is counted regardless of the space → reported.
-    let whitespace_split = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                            pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                            lower_type_expr_structural(g)\n\
-                            }\n\
-                            pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
-                            lower_type_expr_structural (g)\n\
-                            }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(whitespace_split).is_some(),
-        "a WHITESPACE-split second call (`lower_type_expr_structural (g)`) must be REPORTED — the \
-         identifier occurrence is counted regardless of the space before `(`"
-    );
-    // WRONG (bypass vector B' — newline-split call): the identifier and its `(`
-    // separated by a newline. Still a counted identifier occurrence → reported.
-    let newline_split = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                         pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                         lower_type_expr_structural(g)\n\
-                         }\n\
-                         pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
-                         lower_type_expr_structural\n\
-                         (g)\n\
-                         }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(newline_split).is_some(),
-        "a NEWLINE-split second call (`lower_type_expr_structural\\n(g)`) must be REPORTED — the \
-         identifier occurrence is counted regardless of the newline before `(`"
-    );
-    // WRONG (bypass vector C — char-literal-masked call): a `'"'` char literal
-    // immediately precedes the rogue call. The CHAR-AWARE stripper consumes the
-    // `'"'` as an atom (it does NOT open string mode), so the following
-    // `lower_type_expr_structural(g)` stays visible → reported.
-    let char_literal_hidden = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                               pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                               lower_type_expr_structural(g)\n\
-                               }\n\
-                               pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
-                               let _q = '\"'; lower_type_expr_structural(g)\n\
-                               }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(char_literal_hidden).is_some(),
-        "a char-literal-masked second call (`let _q = '\\\"'; lower_type_expr_structural(g)`) must \
-         be REPORTED — a `'\\\"'` char literal must NOT open string mode and blank the rogue call"
-    );
-    // WRONG (bypass vector D — `let`-binding of the function item): binding the
-    // raw lowerer to a local hands the un-gated function item to another caller.
-    // The `let f = lower_type_expr_structural;` line is a THIRD occurrence and is
-    // NOT a call (no `(` follows) → reported.
-    let let_binding = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                       pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                       lower_type_expr_structural(g)\n\
-                       }\n\
-                       pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
-                       let f = lower_type_expr_structural;\n\
-                       f(g)\n\
-                       }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(let_binding).is_some(),
-        "a `let f = lower_type_expr_structural;` function-item binding must be REPORTED — it is a \
-         third identifier occurrence that hands the raw lowerer to an un-gated caller"
-    );
-    // Comment / string mentions do NOT count: a body whose only reference is the
-    // witnessed call, plus a commented-out call, a string mention, AND an
-    // UNRELATED `'"'` char literal (which must NOT mask the witnessed call after
-    // it), passes.
-    let with_noise = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                      // lower_type_expr_structural(g) is the raw entry\n\
-                      const D: &str = \"lower_type_expr_structural(x)\";\n\
-                      pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                      let _quote = '\"';\n\
-                      lower_type_expr_structural(g)\n\
-                      }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(with_noise).is_none(),
-        "a commented-out call, a string mention, and an unrelated `'\\\"'` char literal must NOT \
-         inflate the occurrence count — only the one real witnessed reference counts"
-    );
-    // PRECISION — a longer identifier sharing the prefix
-    // (`lower_type_expr_structural_v2`) is NOT a reference to the lowerer; the
-    // trailing word-boundary check excludes it, so the genuine shape still passes.
-    let prefix_decoy = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                        fn lower_type_expr_structural_v2(g: &G) -> R { todo!() }\n\
-                        pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                        lower_type_expr_structural(g)\n\
-                        }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(prefix_decoy).is_none(),
-        "a longer identifier sharing the prefix (`lower_type_expr_structural_v2`) must NOT be \
-         counted as a reference to the lowerer — the trailing word boundary excludes it"
-    );
-    // CHAR-BRACE FALSE-POSITIVE GONE: a `'}'` char literal INSIDE `emit_macro_arg`'s
-    // body must NOT perturb the brace-depth count, so the genuine single witnessed
-    // call still resolves as CONTAINED and the shape PASSES. Before blanking the
-    // char-literal inner bytes, the verbatim `'}'` decremented the depth early and
-    // closed the wrapper body before the call → a false REDden. A matching `'{'`
-    // char literal is also exercised so the count is not accidentally rebalanced.
-    let char_brace_in_body = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                              pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                              let _open = '{';\n\
-                              let _close = '}';\n\
-                              lower_type_expr_structural(g)\n\
-                              }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(char_brace_in_body).is_none(),
-        "a `'{{'` / `'}}'` char literal inside `emit_macro_arg`'s body must NOT perturb the \
-         brace-depth count — the genuine single witnessed call stays CONTAINED and the shape PASSES \
-         (the char-brace false-positive is closed by blanking char-literal inner bytes)"
-    );
-    // Direct stripper assertion (the FIX): the inner bytes of `'{'` / `'}'` / `'"'`
-    // are blanked to spaces while the `'` delimiters AND the literal length survive
-    // — so neither a brace nor a quote inside a char literal survives the strip, yet
-    // an adjacent real `{` (here the wrapper body's own opening brace) does.
-    let stripped_braces =
-        strip_comments_for_single_call_scan("let _o = '{'; let _c = '}'; { real }");
-    assert!(
-        !stripped_braces.contains("'{'") && !stripped_braces.contains("'}'"),
-        "the stripper must blank the inner byte of a `'{{'` / `'}}'` char literal — found a verbatim \
-         brace-bearing char literal in {stripped_braces:?}"
-    );
-    assert_eq!(
-        stripped_braces.matches('{').count(),
-        1,
-        "exactly the ONE real (non-char-literal) `{{` must survive the strip — the `'{{'` char \
-         literal's brace must be blanked, leaving {stripped_braces:?}"
-    );
-    assert_eq!(
-        stripped_braces.matches('}').count(),
-        1,
-        "exactly the ONE real (non-char-literal) `}}` must survive the strip — the `'}}'` char \
-         literal's brace must be blanked, leaving {stripped_braces:?}"
-    );
-    // STRING-MODE INVARIANT PRESERVED: a `'"'` char literal must STILL NOT open
-    // string mode — blanking its inner byte keeps the `'` `' ` `'` delimiters, so the code
-    // AFTER it stays visible (here a rogue `lower_type_expr_structural` mention is
-    // kept countable, proving the quote did not start a string that would swallow
-    // the rest of the line).
-    let stripped_quote =
-        strip_comments_for_single_call_scan("let _q = '\"'; lower_type_expr_structural");
-    assert!(
-        stripped_quote.contains("lower_type_expr_structural"),
-        "a `'\\\"'` char literal must NOT open string mode — the identifier after it must remain \
-         VISIBLE, but the strip swallowed it: {stripped_quote:?}"
-    );
-    // WRONG (BRACE-BALANCED CONTAINMENT — the FIX-2 vector): the SOLE call sits
-    // AFTER `emit_macro_arg`'s closing brace but BEFORE the next `fn`, inside a
-    // trailing free item (a closure-bearing const). The occurrence count is
-    // EXACTLY two (the definition + this one call), so the count gate PASSES and
-    // does NOT fire first — only the brace-balanced containment scan catches it,
-    // proving the containment is INDEPENDENTLY correct (the nearest-preceding-`fn`
-    // heuristic would still have named the encloser `emit_macro_arg` and wrongly
-    // passed). `emit_macro_arg`'s own body is empty here.
-    let after_close_brace = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                             pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                             }\n\
-                             const ROGUE: fn(&G) -> R = |g| lower_type_expr_structural(g);\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(after_close_brace).is_some(),
-        "a call placed AFTER `emit_macro_arg`'s closing brace but before the next `fn` (a trailing \
-         closure-bearing const) must be REPORTED by the BRACE-BALANCED containment — it is no \
-         longer inside the wrapper body even though the nearest-preceding-`fn` heuristic would \
-         still name the encloser `emit_macro_arg`. The occurrence count is exactly two here, so the \
-         count gate does not fire first: only the brace-balanced gate catches it"
-    );
-    // Direct positive/negative self-test of the brace-balanced containment helper:
-    // an offset INSIDE `emit_macro_arg`'s `{ … }` is contained; the same call moved
-    // after the close brace is NOT.
-    let inside_src = "fn emit_macro_arg() {\n    lower_type_expr_structural(g)\n}\n";
-    let inside_off = inside_src
-        .find("lower_type_expr_structural")
-        .expect("inside fixture must contain the call");
-    assert!(
-        offset_is_inside_emit_macro_arg_body(inside_src, inside_off),
-        "an offset inside `emit_macro_arg`'s `{{ … }}` body must be reported as CONTAINED"
-    );
-    let outside_src =
-        "fn emit_macro_arg() {\n}\nconst R: () = { lower_type_expr_structural(g); };\n";
-    let outside_off = outside_src
-        .find("lower_type_expr_structural")
-        .expect("outside fixture must contain the call");
-    assert!(
-        !offset_is_inside_emit_macro_arg_body(outside_src, outside_off),
-        "an offset AFTER `emit_macro_arg`'s closing brace must NOT be reported as contained — the \
-         brace-balanced scan stops at the matching close brace"
-    );
-    // WRONG (CHILD-MOD CONTAINMENT — the FIX-1 vector, the primary same-module
-    // close): a child `mod child { fn emit_macro_arg() { super::lower_type_expr_structural(g) } }`
-    // names the private lowerer from a SAME-MODULE inline child. The top-level
-    // `emit_macro_arg` has an EMPTY body, so the file's SOLE lowerer reference is
-    // the child's call → the occurrence COUNT gate passes (exactly one reference),
-    // but the `syn`-bound TOP-LEVEL containment finds ZERO references in the
-    // top-level `emit_macro_arg` body → REDden. The naive `fn emit_macro_arg` text
-    // search would have mis-attributed the call to the CHILD's header and wrongly
-    // passed.
-    let child_mod_emit = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                          pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                          }\n\
-                          mod child {\n\
-                          fn emit_macro_arg() -> R { super::lower_type_expr_structural(g) }\n\
-                          }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(child_mod_emit).is_some(),
-        "a child-mod `fn emit_macro_arg` calling `super::lower_type_expr_structural` must be \
-         REPORTED — the call is inside the child `Item::Mod`, NOT the top-level wrapper, so the \
-         `syn`-bound TOP-LEVEL containment RED-flags it even though the occurrence count is exactly \
-         one (the primary same-module inline-mod close)"
-    );
-    // Direct self-test of the `syn`-bound top-level containment helper: the
-    // top-level wrapper body holding the call is CONTAINED; the same call moved
-    // into a child-mod fn (top-level body empty) is NOT.
-    let top_level_holds = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
-                           pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                           lower_type_expr_structural(g)\n\
-                           }\n";
-    assert!(
-        single_call_is_in_top_level_emit_macro_arg(top_level_holds),
-        "the call inside the TOP-LEVEL `emit_macro_arg` body must be reported as CONTAINED by the \
-         `syn`-bound top-level containment helper"
-    );
-    assert!(
-        !single_call_is_in_top_level_emit_macro_arg(child_mod_emit),
-        "a call inside a CHILD-mod `emit_macro_arg` (top-level body empty) must NOT be reported as \
-         contained — the helper only counts references inside the TOP-LEVEL `emit_macro_arg` item"
-    );
-    // ANTI-VACUITY — a missing definition is reported.
-    let no_def =
-        "pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G) -> R { other(g) }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(no_def).is_some(),
-        "a missing `fn lower_type_expr_structural(` definition must be REPORTED (anti-vacuity)"
-    );
-    // ANTI-VACUITY — a definition with NO call is reported.
-    let no_call = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n";
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(no_call).is_some(),
-        "a definition that is never CALLED must be REPORTED (anti-vacuity — the witnessed wrapper \
-         must call it once)"
-    );
-    // The REAL owner source satisfies the invariant (revert proof: the
-    // production tree has exactly one witnessed call).
-    let real = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/lower.rs",
-    ))
-    .expect("the structural lowerer's owner module must be readable");
-    assert!(
-        structural_lowerer_single_witnessed_call_violation(&real).is_none(),
-        "the REAL `lower.rs` MUST have exactly one `lower_type_expr_structural` call, inside \
-         `emit_macro_arg` — if this reddens, a second in-file caller was added, re-opening the \
-         single-producer surface"
-    );
-}
-
-/// The SINGLE sanctioned out-of-line child module of `lower.rs`: the
-/// `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod structural_lower_tests;`
-/// test wiring. This is the ONLY non-inline `mod` the expansion-surface guard
-/// allows, and ONLY in its EXACT shape — see [`mod_is_sanctioned_test_wiring`].
-const LOWER_RS_SANCTIONED_TEST_MOD: &str = "structural_lower_tests";
-
-/// The EXACT `#[path = "…"]` the sanctioned test wiring must carry. A `../`- or
-/// otherwise escaping path is rejected: the test body must be the SIBLING
-/// `structural_lower_tests.rs`, not a foreign file pulled in under a test gate.
-const LOWER_RS_SANCTIONED_TEST_MOD_PATH: &str = "structural_lower_tests.rs";
 
 /// Whether `attr` is EXACTLY `#[cfg(test)]` — the meta is a single-token `cfg`
 /// list whose sole token is the bare identifier `test`. This is STRICT by
@@ -22563,7 +21665,7 @@ const LOWER_RS_SANCTIONED_TEST_MOD_PATH: &str = "structural_lower_tests.rs";
 /// cfg that is SATISFIABLE in a non-test production build — only `cfg(test)`,
 /// which is unsatisfiable in a normal build, is a true test-only gate. (The
 /// prior `any token == "test"` matcher accepted `cfg(any(test, feature = "x"))`,
-/// which compiles in production under feature `x` — the hole FIX-2 closes.)
+/// which compiles in production under feature `x` — the hole this closes.)
 fn attr_is_exactly_cfg_test(attr: &syn::Attribute) -> bool {
     if !attr.path().is_ident("cfg") {
         return false;
@@ -22583,25 +21685,30 @@ fn attr_is_exactly_cfg_test(attr: &syn::Attribute) -> bool {
     }
 }
 
-/// Whether an out-of-line `mod` `m` is EXACTLY the sanctioned test wiring:
-/// `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod structural_lower_tests;`.
-/// ALL of the following must hold, exactly — anything else is a production
-/// out-of-line child module (rejected):
+/// Whether an out-of-line `mod` `m` is a SANCTIONED test-wiring child of the
+/// producer module: `#[cfg(test)] #[path = "<name>.rs"] mod <name>;` where the
+/// module name ends with `_tests` and the `#[path]` is EXACTLY the sibling
+/// `<name>.rs`. The producer module wires three such test children
+/// (`structural_lower_tests`, `macro_hot_mirror_tests`,
+/// `script_setup_binder_tests`). ALL of the following must hold, exactly —
+/// anything else is a production out-of-line child module (rejected):
 ///
-/// - the module name is EXACTLY `structural_lower_tests`
-///   ([`LOWER_RS_SANCTIONED_TEST_MOD`]);
+/// - the module name ends with `_tests` (the unit-test sibling convention);
 /// - it carries EXACTLY one `#[cfg(test)]` ([`attr_is_exactly_cfg_test`]) — not
-///   `cfg(any(test, …))` / `cfg(all(…))` / a feature cfg / `cfg_attr`;
-/// - it carries EXACTLY one `#[path = "structural_lower_tests.rs"]`
-///   ([`LOWER_RS_SANCTIONED_TEST_MOD_PATH`]) — not a `../`-escaping or any other
-///   path;
+///   `cfg(any(test, …))` / `cfg(all(…))` / a feature cfg / `cfg_attr`, so it is
+///   never compiled into a production build;
+/// - it carries EXACTLY one `#[path = "<name>.rs"]` matching its own module name
+///   — not a `../`-escaping or any other path (the test body is the named
+///   SIBLING file, not a foreign file pulled in under a test gate);
 /// - it carries NO OTHER attributes (the attribute set is precisely
 ///   `{cfg(test), path}` — a smuggled extra attribute, e.g. a rewriting
 ///   proc-macro attribute, is rejected).
 fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
-    if m.ident != LOWER_RS_SANCTIONED_TEST_MOD {
+    let mod_name = m.ident.to_string();
+    if !mod_name.ends_with("_tests") {
         return false;
     }
+    let expected_path = format!("{mod_name}.rs");
     let mut saw_cfg_test = false;
     let mut saw_exact_path = false;
     for attr in &m.attrs {
@@ -22617,13 +21724,13 @@ fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
             if saw_exact_path {
                 return false;
             }
-            // The path value must be EXACTLY `structural_lower_tests.rs`.
+            // The path value must be EXACTLY the sibling `<name>.rs`.
             let is_exact = match &attr.meta {
                 syn::Meta::NameValue(nv) => match &nv.value {
                     syn::Expr::Lit(syn::ExprLit {
                         lit: syn::Lit::Str(s),
                         ..
-                    }) => s.value() == LOWER_RS_SANCTIONED_TEST_MOD_PATH,
+                    }) => s.value() == expected_path,
                     _ => false,
                 },
                 _ => false,
@@ -22641,114 +21748,13 @@ fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
     saw_cfg_test && saw_exact_path
 }
 
-/// Collect EXPANSION-SURFACE violations in `lower.rs` source `src` — production
-/// (non-`#[cfg(test)]`) constructs that could introduce compiled SAME-MODULE
-/// code reaching the module-private `lower_type_expr_structural` WITHOUT adding
-/// a third literal identifier token (so the occurrence-counting
-/// `structural_lowerer_single_witnessed_call_violation` rail cannot see them).
-///
-/// Parses `src` with `syn` and drives a SINGLE [`ExpansionSurfaceVisitor`] over
-/// the parsed file. The visitor is EXHAUSTIVE OVER MACROS BY CONSTRUCTION: its
-/// `visit_macro` override fires on EVERY `syn::Macro` node anywhere in the AST —
-/// item-position (`macro_rules!` / `include!` / `paste! { … }`), Expr-position,
-/// statement-position, a macro inside an `impl` / `trait` / `extern` block
-/// (`ImplItem::Macro` / `TraitItem::Macro` / `ForeignItem::Macro`), a
-/// trait-default or impl method body, and an associated-const initializer — so
-/// no macro position can be missed. ALL macros are rejected (carrier-guard
-/// parity with `body_has_macro` in `carrier_encapsulation_guards.rs`): after the
-/// `matches!` → `match` de-sugar at `lower.rs:430`, production `lower.rs` has NO
-/// body macro, so the real tree passes; ANY body macro — `matches!`, `format!`,
-/// an imported `synth_call!`, a `matches!(x, _ if synth_call!(g))` guard-nest,
-/// `evil::matches!`, a renamed/imported `matches` — reds.
-///
-/// On top of the exhaustive macro ban the visitor enforces the structural rules
-/// the macro ban does not cover, mirroring the previous walker:
-///
-/// - **out-of-line `#[path]` child `mod`** (`syn::ItemMod` with
-///   `content.is_none()`) — REJECTED unless it is EXACTLY the sanctioned test
-///   wiring ([`mod_is_sanctioned_test_wiring`]: `#[cfg(test)]` exactly,
-///   `#[path = "structural_lower_tests.rs"]` exactly, name
-///   `structural_lower_tests` exactly, no other attrs);
-/// - **production (non-`#[cfg(test)]`) INLINE child `mod child { … }`** — a
-///   same-module surface that can define a second producer or name the private
-///   lowerer. REJECTED. (The real `lower.rs` has none.);
-/// - **`use … lower_type_expr_structural … as <Alias>;`** reexport
-///   (`syn::ItemUse` renaming TO `lower_type_expr_structural`, via the shared
-///   [`use_tree_renames_to`] classifier) — defense-in-depth alongside the
-///   occurrence guard's third-occurrence rail.
-///
-/// CFG-TEST EXEMPTION: a `#[cfg(test)]`-gated subtree is test-only code (it is
-/// dead in any normal build) and is EXEMPT from the macro ban, the production-
-/// attribute allowlist, and the derive-shadow-import rejection — the visitor
-/// tracks a `cfg_test_depth` and those checks fire only when the depth is 0
-/// (production). The sanctioned out-of-line `#[cfg(test)] #[path] mod
-/// structural_lower_tests;` is never descended (its body lives in the SIBLING
-/// `structural_lower_tests.rs`, which `syn::parse_file` over `lower.rs` does not
-/// load), and a `#[cfg(test)]`-gated inline mod / fn / impl-method is recursed
-/// for STRUCTURAL violations while its macros stay exempt — exactly the previous
-/// walker's cfg-test policy.
-///
-/// EXEMPTION BOUND (CONSERVATIVE, not an escape hatch): `cfg_test_depth` is
-/// incremented ONLY by the `within(attrs, …)` wrappers installed on the
-/// attribute-bearing ITEM CONTAINERS a test gate can sit on — `mod` / `fn` /
-/// `impl`(-method) / `trait`(-method) / `const` / `static` / `struct` / `enum` /
-/// `union` / `type` / `foreign-fn` / `use`. A `#[cfg(test)]` on a BARE STATEMENT
-/// or EXPRESSION (a `#[cfg(test)] let x = …;`, a `#[cfg(test)]`-attributed
-/// sub-expression) does NOT increment the depth — so a macro / attribute in that
-/// position would RED even though it is test-only. This is CONSERVATIVE (it reds
-/// test-only code; it NEVER admits production code), i.e. SOUND but stricter than
-/// test code might want — NOT a production hole, and deliberately NOT widened
-/// (widening the exemption to bare stmts/exprs would risk a production hole). The
-/// exemption is therefore the sanctioned cfg(test) MODULE / ITEM-CONTAINER
-/// subtree, never a cfg(test) bare statement/expression.
-///
-/// SCOPE — the IN-FILE macro / mod / alias / ATTRIBUTE AND DERIVE-NAME-SHADOW
-/// IMPORT surface is now CLOSED, not residual (see the guard doc). The macro ban
-/// closes every IN-FILE macro position; the [`check_production_attr`] allowlist
-/// (driven by the `visit_attribute` override) closes the attribute / derive
-/// PROC-MACRO vector (`#[some_attr]`, `#[derive(Evil)]` — a `syn::Attribute`, not
-/// a `syn::Macro`); and `visit_item_use`'s
-/// [`use_tree_binds_builtin_derive_name`] + [`use_tree_has_production_glob`]
-/// rejections close the DERIVE-NAME-SHADOW IMPORT vector (a `use serde_derive::
-/// Serialize as Clone;` re-binds `Clone` to a proc-macro derive the spelling-only
-/// `check_derive_contents_builtin` would wave through, and a production glob could
-/// carry the same shadow invisibly). The ONLY out-of-model case a `syn`-source
-/// walk over ONE file cannot see is a module rooted in a DIFFERENT/UNRELATED file
-/// the guard never reads (or an external re-export / glob whose TARGET DEFINITION
-/// lives OUTSIDE the walked production-src tree) — and there COMPILER
-/// module-privacy blocks that foreign body from naming the bare-private lowerer
-/// (a compile error, the airtight backstop).
-fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
-    let mut violations = Vec::new();
-    let file = match syn::parse_file(src) {
-        Ok(f) => f,
-        Err(e) => {
-            violations.push(format!(
-                "expansion-surface scan could not parse `lower.rs` with `syn`: {e}"
-            ));
-            return violations;
-        }
-    };
-    let mut visitor = ExpansionSurfaceVisitor {
-        violations: Vec::new(),
-        cfg_test_depth: 0,
-    };
-    syn::visit::Visit::visit_file(&mut visitor, &file);
-    violations.append(&mut visitor.violations);
-    violations
-}
-
-/// The STD BUILT-IN derive traits the production attribute allowlist admits.
-/// `lower.rs` derives only subsets of this set (`Debug, Default, Clone` :70;
-/// `Debug, Clone, Copy` :104; `Debug, Clone, PartialEq, Eq` :238). A derive
-/// outside this set — `derive(Evil)`, a qualified `derive(serde::Serialize)`, a
-/// custom proc-macro derive — could synthesise a leaking trait impl reaching the
-/// module-private lowerer, so it is REJECTED. Mirrors the sibling carrier
-/// guard's `ALLOWED_DERIVES` / `check_derive_exact`
-/// (`carrier_encapsulation_guards.rs`), widened from EXACT-set to
-/// any-subset-of-built-ins because (unlike the single frozen carrier struct)
-/// `lower.rs` carries several distinct built-in derive lists.
-const LOWER_RS_BUILTIN_DERIVES: &[&str] = &[
+/// The std/compiler-builtin DERIVES the producer module's data types legitimately
+/// carry (`#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]` on `BinderScope`
+/// / `StructuralLowerContext` / `StructuralLowerError` / `MacroHotMirror`). A
+/// built-in derive is a compiler-known, fully-determined expansion — it cannot
+/// synthesise a call to the module-private builders from elsewhere. A CUSTOM
+/// (proc-macro) derive CAN, so any derive name not in this allowlist is rejected.
+const MACRO_ARG_PRODUCER_BUILTIN_DERIVES: &[&str] = &[
     "Debug",
     "Default",
     "Clone",
@@ -22760,1317 +21766,351 @@ const LOWER_RS_BUILTIN_DERIVES: &[&str] = &[
     "Ord",
 ];
 
-/// Render an attribute's path as a `::`-joined string for a rejection message.
-fn attr_path_string(attr: &syn::Attribute) -> String {
-    attr.path()
-        .segments
-        .iter()
-        .map(|s| s.ident.to_string())
-        .collect::<Vec<_>>()
-        .join("::")
+/// The macro names that are genuine CODE-GENERATION surfaces — a `macro_rules!`
+/// definition, a file splice (`include!` / `include_str!` / `include_bytes!`), or
+/// a token-synthesising proc-macro bang (`concat_idents!` / `paste!`). These can
+/// introduce same-module code reaching the module-private builders WITHOUT a
+/// literal call, so they are rejected. An ordinary std declarative macro
+/// (`matches!` / `vec!` / `format!` / `write!` / `assert!` / …) is NOT a
+/// producer-surface vector — it is compiler-builtin / std, fully hygienic, and
+/// cannot manufacture a private-builder reference — so it is allowed (the genuine
+/// `build_macro_hot_ref` uses `matches!` on `AnalyzedMacroKind`).
+const MACRO_ARG_PRODUCER_FORBIDDEN_MACROS: &[&str] = &[
+    "include",
+    "include_str",
+    "include_bytes",
+    "concat_idents",
+    "paste",
+];
+
+/// Collect PRODUCTION expansion-surface violations in `macro_arg_producer.rs`
+/// source `src` — non-`#[cfg(test)]` constructs that re-introduce a same-module
+/// code-generation surface able to emit code reaching the module-private
+/// lowering builders without naming them literally. The single-producer
+/// guarantee is the COMPILER module-privacy of `macro_arg_producer.rs`; this is
+/// the small no-reintroduce-a-surface backstop the structural design's residual
+/// names, NOT a load-bearing scanner. Rejected (each a `syn`-visible production
+/// surface):
+///
+/// - a `macro_rules!` DEFINITION, an `include!` / `include_str!` / `include_bytes!`
+///   file splice, or a `concat_idents!` / `paste!` token-synthesising proc-macro
+///   bang — the `visit_macro` override classifies every `syn::Macro` and rejects
+///   these specific code-gen surfaces (an ordinary std declarative macro like
+///   `matches!` / `vec!` / `format!` is allowed: it cannot reach a private builder
+///   from elsewhere);
+/// - a CUSTOM (non-builtin) `#[derive(…)]` — a derive proc-macro expands in the
+///   module context (a built-in derive on the producer's data types is allowed);
+/// - a `#[macro_use]` attribute (the prelude-injection vector) or any non-inert
+///   attribute proc-macro on a producer-capable item;
+/// - an out-of-line / `#[path]` child `mod` that is NOT the sanctioned
+///   `#[cfg(test)] #[path] mod *_tests;` test wiring.
+///
+/// Returns the list of human-readable violation strings (empty on the genuine
+/// tree). PRODUCTION-only: a `#[cfg(test)]`-gated item (the unit test children)
+/// is skipped — the `visit_item` override returns early on a `cfg(test)` item,
+/// so neither its macros nor its child items are visited.
+fn macro_arg_producer_expansion_surface_violations(src: &str) -> Vec<String> {
+    use syn::visit::Visit;
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(e) => return vec![format!("parse error: {e}")],
+    };
+    let mut visitor = ExpansionSurfaceVisitor {
+        violations: Vec::new(),
+    };
+    visitor.visit_file(&file);
+    visitor.violations
 }
 
-/// Validate a `#[derive(…)]` attribute's CONTENTS are STD BUILT-IN traits only
-/// ([`LOWER_RS_BUILTIN_DERIVES`]), pushing one violation per offending derive.
-/// A QUALIFIED derive path (`serde::Serialize`, `foo::Clone`) is ALWAYS foreign
-/// (it can resolve to a custom proc-macro derive synthesising code the source
-/// scan cannot see) and is rejected; a bare non-built-in ident (`Evil`,
-/// `SomeProcMacro`) is rejected. Mirrors `check_derive_exact`'s nested-meta walk
-/// and qualified-path rejection in `carrier_encapsulation_guards.rs`.
-fn check_derive_contents_builtin(attr: &syn::Attribute, v: &mut Vec<String>) {
-    let _ = attr.parse_nested_meta(|meta| {
-        if meta.path.segments.len() != 1 {
-            v.push(format!(
-                "qualified derive path `{}` in production `lower.rs` is forbidden — a derive must \
-                 name a bare STD BUILT-IN trait {LOWER_RS_BUILTIN_DERIVES:?} (a qualified path \
-                 could resolve to a custom proc-macro derive synthesising a body reaching the \
-                 module-private `lower_type_expr_structural`)",
-                meta.path
-                    .segments
+/// `syn::Visit` over a production `macro_arg_producer.rs` parse: classifies every
+/// macro position, every producer-capable attribute (custom `#[derive]` /
+/// `#[macro_use]`), and every out-of-line child mod — skipping `#[cfg(test)]`-gated
+/// items by overriding `visit_item` to return early on a `cfg(test)` item (so no
+/// test-only macro / mod / derive is ever counted) and an item-position
+/// `macro_rules!` definition.
+struct ExpansionSurfaceVisitor {
+    violations: Vec<String>,
+}
+
+impl ExpansionSurfaceVisitor {
+    /// Check an item's attribute list: a `#[macro_use]` (prelude injection), a
+    /// CUSTOM (non-builtin) `#[derive(…)]`, or any qualified / proc-macro
+    /// attribute is a code-generation surface. `#[cfg]` / `#[allow]` / `#[expect]`
+    /// / `#[path]` / `#[doc]` and a built-in `#[derive(…)]` are inert and allowed.
+    fn check_attrs(&mut self, attrs: &[syn::Attribute]) {
+        for attr in attrs {
+            let path = attr.path();
+            let single = path.segments.len() == 1;
+            let last = path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
+            if single && last == "macro_use" {
+                self.violations
+                    .push("a production `#[macro_use]` attribute is forbidden".to_string());
+                continue;
+            }
+            if single && last == "derive" {
+                // Admit the derive, then validate every listed derive name is a
+                // compiler built-in — a custom proc-macro derive is rejected.
+                let _ = attr.parse_nested_meta(|meta| {
+                    let name = meta
+                        .path
+                        .segments
+                        .last()
+                        .map(|s| s.ident.to_string())
+                        .unwrap_or_default();
+                    if !MACRO_ARG_PRODUCER_BUILTIN_DERIVES.contains(&name.as_str()) {
+                        self.violations.push(format!(
+                            "a production custom `#[derive({name})]` (a derive proc-macro) is \
+                             forbidden — only std built-in derives are allowed"
+                        ));
+                    }
+                    Ok(())
+                });
+                continue;
+            }
+            // Inert attributes that cannot rewrite / synthesise an item.
+            if single && matches!(last.as_str(), "cfg" | "allow" | "expect" | "path" | "doc") {
+                continue;
+            }
+            // Everything else — a qualified (multi-segment) attribute path or any
+            // other single-segment attribute (an attribute proc-macro) — is a
+            // code-generation surface.
+            self.violations.push(format!(
+                "a production attribute `#[{}]` is forbidden — only `cfg` / `allow` / `expect` / \
+                 `path` / `doc` / a built-in `derive(…)` are inert; a qualified or proc-macro \
+                 attribute can rewrite a producer item to synthesise same-module code",
+                path.segments
                     .iter()
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::")
             ));
-        } else {
-            // Compare on the `unraw()`d name so a raw `#[derive(r#Clone)]` (which
-            // rustc resolves as the built-in `Clone`) is correctly ACCEPTED rather
-            // than spuriously rejected; the display keeps the source spelling.
-            let ident = meta.path.segments[0].ident.to_string();
-            let ident_unraw = meta.path.segments[0].ident.unraw().to_string();
-            if !LOWER_RS_BUILTIN_DERIVES.contains(&ident_unraw.as_str()) {
-                v.push(format!(
-                    "non-built-in derive `{ident}` in production `lower.rs` is forbidden — only the \
-                     STD BUILT-IN derives {LOWER_RS_BUILTIN_DERIVES:?} are permitted (a custom \
-                     derive proc-macro could synthesise a trait impl reaching the module-private \
-                     `lower_type_expr_structural`)"
-                ));
-            }
         }
-        Ok(())
-    });
-}
-
-/// Classify ONE production (`cfg_test_depth == 0`) attribute against the
-/// `lower.rs` allowlist, pushing a violation if it is not permitted. The
-/// permitted set is EXACTLY (everything else — single OR multi-segment — is
-/// rejected, closing the attribute / derive PROC-MACRO vector the macro ban does
-/// not cover, because an attribute proc-macro is a `syn::Attribute`, NOT a
-/// `syn::Macro`, so `visit_macro` never fires on it):
-///
-/// - `#[derive(…)]` whose contents are STD BUILT-IN traits only
-///   ([`check_derive_contents_builtin`]) — `lower.rs` derives at :70/:104/:238;
-/// - EXACTLY `#[cfg(test)]` ([`attr_is_exactly_cfg_test`]) — a `cfg(any(test,
-///   …))` / `cfg(all(…))` / `cfg(feature = …)` / `cfg_attr(…)` is satisfiable in
-///   a production build and is REJECTED, consistent with the exact-cfg-test rule;
-/// - `#[allow(…)]` / `#[expect(…)]` — INERT lint attributes (they cannot rewrite
-///   or swap an item), so they are admitted generally (`lower.rs` carries
-///   `#[allow(clippy::match_like_matches_macro)]` at :436);
-/// - EXACTLY `#[path = "structural_lower_tests.rs"]`
-///   ([`LOWER_RS_SANCTIONED_TEST_MOD_PATH`]) — the sanctioned test-mod path; any
-///   other `#[path]` is rejected (a `../`-escaping or foreign-file redirect);
-/// - `#[doc]` — doc comments (`///` / `//!` lower to `#[doc = …]`) are inert.
-///
-/// Mirrors the sibling carrier guard's `check_attrs` single-segment-allowlist +
-/// `check_derive_exact` derive-content validation
-/// (`carrier_encapsulation_guards.rs`), specialised to the `lower.rs` attribute
-/// surface. A multi-segment path (`tokio::main`, `serde::Serialize`) is always
-/// foreign and rejected.
-fn check_production_attr(attr: &syn::Attribute, v: &mut Vec<String>) {
-    let path = attr.path();
-    let single = path.segments.len() == 1;
-    let last = path
-        .segments
-        .last()
-        .map(|s| s.ident.to_string())
-        .unwrap_or_default();
-
-    // `#[derive(…)]` — admit, then validate the contents are built-ins.
-    if single && last == "derive" {
-        check_derive_contents_builtin(attr, v);
-        return;
-    }
-    // EXACTLY `#[cfg(test)]`. A non-exact cfg / `cfg_attr` is NOT permitted.
-    if single && last == "cfg" {
-        if attr_is_exactly_cfg_test(attr) {
-            return;
-        }
-        v.push(format!(
-            "attribute `#[{}]` in production `lower.rs` is forbidden — only EXACTLY `#[cfg(test)]` \
-             is permitted (a `cfg(any(test, …))` / `cfg(all(…))` / `cfg(feature = …)` is satisfiable \
-             in a production build, and a conditional attribute could swap the item the scan sees)",
-            attr_path_string(attr)
-        ));
-        return;
-    }
-    // INERT lint attributes — they cannot rewrite or swap an item.
-    if single && (last == "allow" || last == "expect") {
-        return;
-    }
-    // EXACTLY `#[path = "structural_lower_tests.rs"]`.
-    if single && last == "path" {
-        let exact = matches!(
-            &attr.meta,
-            syn::Meta::NameValue(nv)
-                if matches!(
-                    &nv.value,
-                    syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })
-                        if s.value() == LOWER_RS_SANCTIONED_TEST_MOD_PATH
-                )
-        );
-        if exact {
-            return;
-        }
-        v.push(format!(
-            "attribute `#[{}]` in production `lower.rs` is forbidden — only the EXACT sanctioned \
-             `#[path = \"{LOWER_RS_SANCTIONED_TEST_MOD_PATH}\"]` is permitted (any other `#[path]` \
-             could redirect a body to a `../`-escaping or foreign file)",
-            attr_path_string(attr)
-        ));
-        return;
-    }
-    // Doc comments (`///` / `//!` → `#[doc = …]`) and the literal `#[doc(...)]`.
-    if single && last == "doc" {
-        return;
-    }
-
-    // Everything else — any other single-segment attribute, ANY multi-segment
-    // (qualified) attribute path, an attribute / derive PROC-MACRO — is REJECTED.
-    v.push(format!(
-        "attribute `#[{}]` in production `lower.rs` is forbidden — only `derive(<std built-ins>)`, \
-         EXACTLY `cfg(test)`, inert `allow(…)` / `expect(…)` lints, the sanctioned `path = \
-         \"{LOWER_RS_SANCTIONED_TEST_MOD_PATH}\"`, and `doc` are permitted. A foreign / qualified / \
-         proc-macro attribute (an attribute or derive proc-macro is a `syn::Attribute`, not a \
-         `syn::Macro`, so the macro ban does not see it) could rewrite a `lower.rs` item to \
-         synthesise same-module code reaching the module-private `lower_type_expr_structural`",
-        attr_path_string(attr)
-    ));
-}
-
-/// The SINGLE expansion-surface scanner for production `lower.rs`. Its
-/// `visit_macro` override is exhaustive over macros BY CONSTRUCTION — every
-/// `syn::Macro` node, in EVERY position (item / Expr / statement / `impl` /
-/// `trait` / `extern` / method body / assoc-const initializer), is visited and
-/// rejected when in production (non-`#[cfg(test)]`) code, mirroring the sibling
-/// carrier guard's `body_has_macro` (`carrier_encapsulation_guards.rs`). On top
-/// of the macro ban it enforces the structural rules a macro ban cannot express:
-/// the out-of-line / production-inline `mod` rejections and the lowerer-`as`
-/// reexport rejection. A `#[cfg(test)]`-gated subtree increments
-/// `cfg_test_depth`, exempting its macros (test-only code), while STRUCTURAL
-/// rules still apply.
-struct ExpansionSurfaceVisitor {
-    violations: Vec<String>,
-    /// Depth of the `#[cfg(test)]`-gated subtree currently being visited. When
-    /// `> 0` the macro ban is suspended (test-only code), exactly matching the
-    /// crate-wide "cfg-test is excluded from production scans" convention.
-    cfg_test_depth: usize,
-}
-
-impl ExpansionSurfaceVisitor {
-    /// Run `body` with `cfg_test_depth` incremented iff `attrs` carries an EXACT
-    /// `#[cfg(test)]` ([`attr_is_exactly_cfg_test`]) — a `#[cfg(any(test, …))]` /
-    /// `#[cfg(all(test, …))]` / feature cfg is satisfiable in a production build
-    /// and does NOT grant the exemption. The macro / structural recursion in
-    /// `body` then sees the adjusted depth.
-    fn within<R>(&mut self, attrs: &[syn::Attribute], body: impl FnOnce(&mut Self) -> R) -> R {
-        let gated = attrs.iter().any(attr_is_exactly_cfg_test);
-        if gated {
-            self.cfg_test_depth += 1;
-        }
-        let out = body(self);
-        if gated {
-            self.cfg_test_depth -= 1;
-        }
-        out
     }
 }
 
 impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
-    /// EXHAUSTIVE macro ban: every `syn::Macro` node — item / Expr / statement /
-    /// `impl` / `trait` / `extern` / method-body / assoc-const-init — reaches
-    /// here. Rejected unless inside a `#[cfg(test)]`-gated subtree (test-only
-    /// code is exempt). Does NOT recurse into the macro's unparsed token stream
-    /// (it is not a navigable AST), so a macro NESTED inside another macro's
-    /// token stream — e.g. the `synth_call!(g)` inside the `if $guard:expr` arm of
-    /// `matches!(x, _ if synth_call!(g))` — is NOT reached as its own node (`syn`
-    /// does not parse macro token streams). That is irrelevant: the guard-nest
-    /// still reds because the OUTER `matches!` is itself banned (ban-all-body-
-    /// macros), NOT because the inner `synth_call!` is reached. A macro sitting in
-    /// a real `syn` node the OUTER walk visits (an arg-position `f(g!())`, a
-    /// `let x = g!();`) IS visited on its own.
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        // Skip `#[cfg(test)]`-gated items entirely (they never compile into a
+        // production build); do NOT descend, so their macros / child mods are
+        // never counted.
+        let attrs: &[syn::Attribute] = match item {
+            syn::Item::Mod(m) => &m.attrs,
+            syn::Item::Macro(m) => &m.attrs,
+            syn::Item::Fn(f) => &f.attrs,
+            syn::Item::Struct(s) => &s.attrs,
+            syn::Item::Enum(e) => &e.attrs,
+            syn::Item::Impl(i) => &i.attrs,
+            syn::Item::Use(u) => &u.attrs,
+            syn::Item::Const(c) => &c.attrs,
+            syn::Item::Static(s) => &s.attrs,
+            syn::Item::Type(t) => &t.attrs,
+            syn::Item::Trait(t) => &t.attrs,
+            syn::Item::ExternCrate(e) => &e.attrs,
+            syn::Item::TraitAlias(t) => &t.attrs,
+            syn::Item::Union(u) => &u.attrs,
+            syn::Item::ForeignMod(f) => &f.attrs,
+            _ => &[],
+        };
+        if attrs.iter().any(attr_is_exactly_cfg_test) {
+            return;
+        }
+        self.check_attrs(attrs);
+        match item {
+            // An item-position `macro_rules!` DEFINITION is a code-generation
+            // surface (`syn::ItemMacro` whose path is `macro_rules`).
+            syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => {
+                self.violations
+                    .push("a production `macro_rules!` definition is forbidden".to_string());
+            }
+            // An out-of-line / `#[path]` child mod that is NOT the sanctioned
+            // `#[cfg(test)] #[path] mod *_tests;` wiring is a production splice
+            // surface.
+            syn::Item::Mod(m) => {
+                if m.content.is_none() && !mod_is_sanctioned_test_wiring(m) {
+                    self.violations.push(format!(
+                        "a production out-of-line / `#[path]` child mod `{}` is forbidden (only the \
+                         sanctioned `#[cfg(test)] #[path] mod *_tests;` wiring is allowed)",
+                        m.ident
+                    ));
+                }
+            }
+            _ => {}
+        }
+        // Recurse into the (non-cfg-test) item so nested items, fn bodies, and
+        // their macro positions are visited.
+        syn::visit::visit_item(self, item);
+    }
+
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if self.cfg_test_depth == 0 {
-            let name = mac
-                .path
-                .segments
-                .last()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_else(|| "<macro>".to_string());
+        // Classify the macro: a file splice / token-synthesising proc-macro bang
+        // is a code-generation surface; an ordinary std declarative macro
+        // (`matches!` / `vec!` / `format!` / …) is NOT (it cannot reach a private
+        // builder from elsewhere) and is allowed. `macro_rules!` definitions are
+        // handled at item position in `visit_item`.
+        let name = mac
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        if MACRO_ARG_PRODUCER_FORBIDDEN_MACROS.contains(&name.as_str()) {
             self.violations.push(format!(
-                "a macro invocation `{name}!( … )` in production `lower.rs` is forbidden — ALL \
-                 body macros are banned (carrier-guard parity): a macro can synthesise same-module \
-                 code reaching the module-private `lower_type_expr_structural` without a third \
-                 literal identifier token the occurrence rail counts (e.g. `synth_call!(g)` \
-                 expanding to `lower_type_expr_structural(g)`, or a `matches!(x, _ if \
-                 synth_call!(g))` guard-nest, or a renamed `evil::matches!`). The deferred-\
-                 conditional `distributive` classification at `lower.rs:430` uses the de-sugared \
-                 `match`, NOT `matches!`, exactly so this file stays body-macro-free."
+                "a production code-generation macro `{name}!` (a file splice / token-synthesising \
+                 proc-macro) is forbidden"
             ));
         }
-        // Intentionally do NOT call `syn::visit::visit_macro` — the token stream
-        // is unparsed and not a navigable AST. A nested macro buried INSIDE
-        // another macro's token stream (e.g. the `synth_call!(g)` in
-        // `matches!(x, _ if synth_call!(g))`) is NOT reached as its own node —
-        // `syn` does not parse macro token streams, and this override deliberately
-        // skips the default traversal — but that is irrelevant: the OUTER macro is
-        // itself banned (ban-all), so the guard-nest reds on the outer `matches!`.
-        // A macro in a real `syn` node the OUTER walk visits (an arg-position
-        // `f(g!())`, a `let x = g!();`) is reached on its own.
-    }
-
-    /// EXHAUSTIVE production-attribute allowlist: every `syn::Attribute` on every
-    /// node `syn::visit` traverses — item / impl-item / trait-item / `let`-stmt /
-    /// const / static / mod (inline) / fn — reaches here, because the default
-    /// `visit_*` methods call `visit_attribute` for each `node.attrs` entry and
-    /// the structural overrides below re-enter the default traversal. Rejected
-    /// unless in the production allowlist ([`check_production_attr`]) — closing the
-    /// attribute / derive PROC-MACRO vector the macro ban CANNOT cover: an
-    /// attribute proc-macro (`#[some_attr] fn f() {}`) or a derive proc-macro
-    /// (`#[derive(Evil)] struct S;`) is a `syn::Attribute`, NOT a `syn::Macro`, so
-    /// `visit_macro` never fires on it, yet it could rewrite a `lower.rs` item to
-    /// synthesise same-module code reaching the private `lower_type_expr_structural`.
-    /// Suspended inside a `#[cfg(test)]`-gated subtree (`cfg_test_depth > 0`):
-    /// test-only code may use any attributes — mirroring the macro-ban exemption.
-    /// (The sanctioned out-of-line `#[cfg(test)] #[path] mod structural_lower_tests;`
-    /// is checked by `mod_is_sanctioned_test_wiring` in the `visit_item_mod` None
-    /// arm, which does NOT re-enter the default traversal, so this override never
-    /// double-rejects that wiring's attrs.)
-    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
-        if self.cfg_test_depth == 0 {
-            check_production_attr(attr, &mut self.violations);
-        }
-        syn::visit::visit_attribute(self, attr);
-    }
-
-    /// Out-of-line vs inline `mod` structural rules (NOT expressible as a macro
-    /// ban), plus the `#[cfg(test)]` exemption bookkeeping for nested macros.
-    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
-        match &m.content {
-            // Inline `mod foo { … }`. A production (non-`#[cfg(test)]`) inline
-            // child mod is a SAME-MODULE surface that can define a second
-            // producer or name the private lowerer — REJECTED. A `#[cfg(test)]`-
-            // gated inline mod is test-only code: allowed, recursed for nested
-            // STRUCTURAL violations with its macros exempt.
-            Some((_, inner)) => {
-                let is_cfg_test = m.attrs.iter().any(attr_is_exactly_cfg_test);
-                if !is_cfg_test {
-                    self.violations.push(format!(
-                        "a production (non-`#[cfg(test)]`) INLINE child module `mod {} {{ … }}` is \
-                         forbidden in `lower.rs` — it is a same-module surface that can define a \
-                         second producer or name the private `lower_type_expr_structural`; the real \
-                         `lower.rs` declares no inline child module",
-                        m.ident,
-                    ));
-                }
-                // Descend either way (defense-in-depth) — the cfg-test gate, if
-                // present, suspends the macro ban for the subtree.
-                self.within(&m.attrs, |s| {
-                    for item in inner {
-                        syn::visit::Visit::visit_item(s, item);
-                    }
-                });
-            }
-            // Out-of-line `mod foo;` — body lives in another file. Allowed ONLY
-            // for the EXACT sanctioned test wiring. (Its body is in the SIBLING
-            // file `syn::parse_file` over `lower.rs` does not load, so there is
-            // nothing further to descend.)
-            None => {
-                if !mod_is_sanctioned_test_wiring(m) {
-                    let has_path = m.attrs.iter().any(|a| a.path().is_ident("path"));
-                    self.violations.push(format!(
-                        "an out-of-line child module `mod {};`{} is forbidden in production \
-                         `lower.rs` — only the EXACT sanctioned `#[cfg(test)] #[path = \
-                         \"structural_lower_tests.rs\"] mod {}` test wiring (exactly `#[cfg(test)]`, \
-                         exactly that `#[path]`, that name, no other attrs) may declare an \
-                         out-of-line child; a production, feature-cfg, `../`-escaping-path, \
-                         wrong-name, or extra-attr child module could carry code reaching the \
-                         private lowerer",
-                        m.ident,
-                        if has_path { " (with `#[path]`)" } else { "" },
-                        LOWER_RS_SANCTIONED_TEST_MOD,
-                    ));
-                }
-            }
-        }
-    }
-
-    /// A `use … as lower_type_expr_structural;` reexport binding mints a nameable
-    /// alias of the private lowerer — defense-in-depth alongside the occurrence
-    /// guard's third-occurrence rail. PLUS the derive-NAME-SHADOW close: a
-    /// PRODUCTION (non-`#[cfg(test)]`) `use` that binds a built-in-derive name
-    /// into scope (`use serde_derive::Serialize as Clone;`, `use evil::Clone;`,
-    /// grouped `use evil::{Foo, Clone};`) re-binds that name to a proc-macro
-    /// derive `check_derive_contents_builtin`'s spelling-only scan would then
-    /// wave through — REJECTED. A production GLOB (`use evil::*;`) could carry the
-    /// same shadow invisibly — REJECTED (mirroring the sibling carrier guard's
-    /// rename-recursion + glob rejection; this surface needs no exhaustive `use`
-    /// allowlist because a foreign non-derive `use evil::Foo;` is inert for the
-    /// producer vector). The `within` wrapper keeps a `#[cfg(test)]`-
-    /// gated `use`'s attrs exempt from the production-attribute check and gates
-    /// these shadow rejections to production (`cfg_test_depth == 0`).
-    fn visit_item_use(&mut self, use_item: &'ast syn::ItemUse) {
-        if use_tree_renames_to(&use_item.tree, "lower_type_expr_structural") {
-            self.violations.push(
-                "a `use … as lower_type_expr_structural;` reexport binding mints a nameable alias \
-                 of the private structural lowerer in `lower.rs` — forbidden"
-                    .to_string(),
-            );
-        }
-        // Derive-NAME-SHADOW vector: gated to production code (a `#[cfg(test)]`-
-        // gated `use` is dead-in-production test wiring and is exempt, mirroring
-        // the macro / attribute bans). A `#[cfg(test)]` directly on THIS `use`
-        // item exempts it via `within`'s depth bump below; a `use` nested inside
-        // an already-cfg-test subtree is exempt via the inherited depth.
-        let cfg_test_here = use_item.attrs.iter().any(attr_is_exactly_cfg_test);
-        if self.cfg_test_depth == 0 && !cfg_test_here {
-            if use_tree_binds_builtin_derive_name(&use_item.tree) {
-                self.violations.push(format!(
-                    "a production `use` import in `lower.rs` binds a built-in-derive name \
-                     {LOWER_RS_BUILTIN_DERIVES:?} into scope (a `use … as Clone;` rename target or a \
-                     `use …::Clone;` / grouped `{{…, Clone}}` leaf) — forbidden. The std prelude \
-                     already provides every built-in derive, so an explicit `use` of one can ONLY \
-                     be a SHADOW: it re-binds the name to a proc-macro derive that \
-                     `#[derive(Clone)]`'s spelling-only check would wave through, letting the \
-                     proc-macro synthesise same-module code reaching the module-private \
-                     `lower_type_expr_structural`"
-                ));
-            }
-            if use_tree_has_production_glob(&use_item.tree) {
-                self.violations.push(
-                    "a production GLOB `use …::*;` import in `lower.rs` is forbidden — a glob can \
-                     bring a built-in-derive-name shadow (or any other binding) into scope WITHOUT \
-                     a visible leaf ident the `syn` scan can inspect; a glob is rejected outright \
-                     (mirroring the sibling carrier guard's glob rejection — a glob is absent from \
-                     its `EXPECTED_USES`). The real `lower.rs` declares no glob import"
-                        .to_string(),
-                );
-            }
-        }
-        self.within(&use_item.attrs, |s| syn::visit::visit_item_use(s, use_item));
-    }
-
-    // ── `#[cfg(test)]` exemption bookkeeping for the macro ban ────────────────
-    // The macro ban is suspended inside any `#[cfg(test)]`-gated item subtree
-    // (test-only code). These overrides increment/decrement `cfg_test_depth`
-    // around the attribute-bearing item containers a test gate can sit on, so a
-    // test-only macro (e.g. a future `assert!` in a `#[cfg(test)]` impl method
-    // like `with_merge_role`) does NOT false-red while a PRODUCTION macro in the
-    // same kind of body still reds. (`visit_item_mod` does its own descent above
-    // and is not re-listed here.)
-
-    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-        self.within(&f.attrs, |s| syn::visit::visit_item_fn(s, f));
-    }
-
-    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-        self.within(&f.attrs, |s| syn::visit::visit_impl_item_fn(s, f));
-    }
-
-    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
-        self.within(&f.attrs, |s| syn::visit::visit_trait_item_fn(s, f));
-    }
-
-    fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
-        self.within(&c.attrs, |s| syn::visit::visit_item_const(s, c));
-    }
-
-    fn visit_item_static(&mut self, s_item: &'ast syn::ItemStatic) {
-        self.within(&s_item.attrs, |s| syn::visit::visit_item_static(s, s_item));
-    }
-
-    fn visit_impl_item_const(&mut self, c: &'ast syn::ImplItemConst) {
-        self.within(&c.attrs, |s| syn::visit::visit_impl_item_const(s, c));
-    }
-
-    fn visit_trait_item_const(&mut self, c: &'ast syn::TraitItemConst) {
-        self.within(&c.attrs, |s| syn::visit::visit_trait_item_const(s, c));
-    }
-
-    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
-        self.within(&i.attrs, |s| syn::visit::visit_item_impl(s, i));
-    }
-
-    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
-        self.within(&t.attrs, |s| syn::visit::visit_item_trait(s, t));
-    }
-
-    fn visit_foreign_item_fn(&mut self, f: &'ast syn::ForeignItemFn) {
-        self.within(&f.attrs, |s| syn::visit::visit_foreign_item_fn(s, f));
-    }
-
-    // The type-definition item containers also carry attributes (notably
-    // `#[derive(…)]`); wrapping them in `within` keeps a `#[cfg(test)]`-gated
-    // definition's attrs exempt, exactly as for the fn / impl / const containers
-    // above. The PRODUCTION (depth-0) `#[derive(…)]` attrs on `lower.rs`'s real
-    // types (:70/:104/:238) are validated to be std built-ins by the
-    // `visit_attribute` override the default traversal re-enters here.
-    fn visit_item_struct(&mut self, s_item: &'ast syn::ItemStruct) {
-        self.within(&s_item.attrs, |s| syn::visit::visit_item_struct(s, s_item));
-    }
-
-    fn visit_item_enum(&mut self, e: &'ast syn::ItemEnum) {
-        self.within(&e.attrs, |s| syn::visit::visit_item_enum(s, e));
-    }
-
-    fn visit_item_union(&mut self, u: &'ast syn::ItemUnion) {
-        self.within(&u.attrs, |s| syn::visit::visit_item_union(s, u));
-    }
-
-    fn visit_item_type(&mut self, t: &'ast syn::ItemType) {
-        self.within(&t.attrs, |s| syn::visit::visit_item_type(s, t));
+        syn::visit::visit_macro(self, mac);
     }
 }
 
-/// COMPANION single-engine producer guard (close the EXPANSION-SURFACE class):
-/// the occurrence-counting in-file pin
-/// (`structural_lowerer_called_only_through_the_witness_gated_wrapper`) closes
-/// the direct / alias / whitespace / newline / char-literal vectors, but it
-/// cannot see a `macro_rules!` / `paste!` / proc-macro that SYNTHESISES a call,
-/// an `include!("external.inc")` that splices a generated body, a same-module
-/// imported Expr/stmt-position macro, an inline child `mod`, or a `#[path]` /
-/// out-of-line child `mod` — each can introduce compiled SAME-MODULE code
-/// reaching the module-private `lower_type_expr_structural` WITHOUT adding a
-/// third literal identifier token (Rust descendant / same-module / inline-mod /
-/// in-file-expanded code CAN reach a module-private item — compiler privacy
-/// blocks only FOREIGN modules). This guard reads `lower.rs` and rejects every
-/// such production (non-`#[cfg(test)]`) expansion surface, mirroring the sibling
-/// guard that closes the same class for `build_script_setup_seed_frames`
-/// (`collect_sanctioned_occurrences` + `macro_hot_mirror_exposes_single_crate_visible_producer_entry`)
-/// and the `syn`-AST `carrier_module_has_no_public_type_args_surface`.
+/// SMALL no-reintroduce-a-surface backstop (the structural design's named
+/// residual): `macro_arg_producer.rs` — the SINGLE producer module that owns the
+/// module-private structural lowerer, macro hot-mirror builder, and binder-seed
+/// builder — declares NO production (non-`#[cfg(test)]`) macro invocation /
+/// `macro_rules!` / `include!` / proc-macro attribute / `#[derive]` on a
+/// producer-capable item / out-of-line-or-`#[path]` child mod / `#[macro_use]`.
 ///
-/// REJECTION SET (production, non-`#[cfg(test)]`): ANY macro invocation in ANY
-/// position — item (`macro_rules!` / `include!` / `include_str!` / function-like
-/// or proc-macro `some_macro!{…}`), Expr, statement, a macro inside an `impl` /
-/// `trait` / `extern` block (`ImplItem::Macro` / `TraitItem::Macro` /
-/// `ForeignItem::Macro`), a trait-default or impl method body, an associated-
-/// const initializer. ALL body macros are BANNED (carrier-guard parity with
-/// `body_has_macro`); the single `visit_macro` override is exhaustive over the
-/// `syn` AST by construction, so NO macro position can be missed and no
-/// name-allowlist (the prior unsound `matches!`-by-name admission) survives. The
-/// guard ALSO rejects a production INLINE child `mod child { … }`; an out-of-line
-/// / `#[path]` child `mod` (any `mod foo;` other than the EXACT sanctioned
-/// wiring); a `use … as lower_type_expr_structural;` reexport. ONLY the EXACT
-/// sanctioned `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod
-/// structural_lower_tests;` test wiring is ALLOWLISTED
-/// ([`mod_is_sanctioned_test_wiring`]: exactly `#[cfg(test)]` — not
-/// `cfg(any(test, …))` / `cfg(all(…))` / a feature cfg — exactly that `#[path]`,
-/// that name, no other attrs); a `#[cfg(test)]`-gated subtree (inline mod, fn,
-/// impl method) is dead-in-production test code and is EXEMPT from the macro ban.
-/// The guard ALSO rejects every PRODUCTION ATTRIBUTE outside a small allowlist
-/// ([`check_production_attr`], driven by the `visit_attribute` override): an
-/// attribute / derive PROC-MACRO (`#[some_attr]`, `#[derive(Evil)]`) is a
-/// `syn::Attribute`, NOT a `syn::Macro`, so the macro ban cannot see it, yet it
-/// could rewrite a `lower.rs` item to synthesise same-module code. ONLY
-/// `derive(<std built-ins {Debug, Default, Clone, Copy, PartialEq, Eq, Hash,
-/// PartialOrd, Ord}>)`, EXACTLY `cfg(test)`, inert `allow` / `expect` lints, the
-/// sanctioned `path = "structural_lower_tests.rs"`, and `doc` are permitted;
-/// every foreign / qualified / multi-segment / `cfg_attr` / non-exact-`cfg` /
-/// non-built-in-or-qualified-`derive` attribute REDS (the sibling carrier guard's
-/// `check_attrs` + `check_derive_exact` machinery, mirrored). The cfg-test
-/// exemption suspends the attribute check inside a `#[cfg(test)]`-gated subtree.
-/// The guard FINALLY rejects every PRODUCTION `use` that binds a BUILT-IN-DERIVE
-/// NAME (`{Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord}`)
-/// into scope — a `use serde_derive::Serialize as Clone;` rename target, a plain
-/// `use evil::Clone;` / grouped `use evil::{…, Clone};` leaf, OR a production
-/// glob `use evil::*;` ([`use_tree_binds_builtin_derive_name`] +
-/// [`use_tree_has_production_glob`] on `visit_item_use`). This closes the
-/// DERIVE-NAME-SHADOW vector the SPELLING-ONLY `check_derive_contents_builtin`
-/// cannot: `#[derive(Clone)]` is accepted if the ident reads `Clone`, but a
-/// `use serde_derive::Serialize as Clone;` re-binds the name to a PROC-MACRO
-/// derive (rustc resolves the derive to the imported macro, NOT the prelude
-/// built-in — RUSTC-CONFIRMED) that synthesises same-module code reaching the
-/// private lowerer; the scan cannot RESOLVE the derive, so it rejects the
-/// source-visible shadowing `use` IMPORT instead (the std prelude already
-/// provides every built-in derive, so an explicit `use` of one can ONLY be a
-/// shadow), mirroring the sibling carrier guard's rename-recursion + glob
-/// rejection (`use_tree_has_rename` / no-glob, `carrier_encapsulation_guards.rs`).
-/// The `lower.rs` surface needs no exhaustive `use` allowlist because a foreign
-/// NON-derive `use` (`use evil::Foo;`) is INERT for the producer vector — it
-/// cannot reach the private lowerer without an additional construct (a macro,
-/// attribute, or derive-content) the macro / attribute / derive-content rails
-/// already reject; the carrier guard's STRICT EXACT 2-import `EXPECTED_USES`
-/// allowlist (which rejects even a foreign non-derive `use`) is its own concern,
-/// NOT what this `use` rejection mirrors. The
-/// cfg-test exemption suspends these `use` rejections inside a `#[cfg(test)]`-
-/// gated subtree too.
-///
-/// IN-FILE EXPR / STMT / ITEM MACRO, ATTRIBUTE-MACRO, DERIVE-NAME-SHADOW IMPORT,
-/// **AND MACRO-USE-PRELUDE-INJECTION** CLASSES ARE ALL CLOSED (not residual).
-/// EVERY same-module expansion vector — IN-FILE and ANCESTOR-INJECTED — is now
-/// CLOSED: every macro position (item, Expr, stmt, impl/trait/extern item, method
-/// body, assoc-const init), the inline mod, the out-of-line mod, the `as`-alias,
-/// the `let`-binding, the whitespace/newline-split call, the char-literal masking,
-/// every attribute / derive PROC-MACRO position, every derive-NAME-SHADOW `use`
-/// import, AND every crate-wide `#[macro_use] extern crate` prelude injection. An
-/// attribute proc-macro (`#[some_attr] fn f() {}`) and a derive proc-macro
-/// (`#[derive(Evil)] struct S;`) are a `syn::Attribute`, NOT a `syn::Macro`, so
-/// the macro ban (`visit_macro`) never fires on them — the
-/// [`check_production_attr`] allowlist (driven by the `visit_attribute` override)
-/// closes that vector by permitting ONLY `derive(<std built-ins>)`, EXACTLY
-/// `cfg(test)`, inert `allow` / `expect` lints, the sanctioned `path`, and `doc`,
-/// rejecting every foreign / qualified / `cfg_attr` / non-built-in-derive
-/// attribute (the sibling carrier guard's `check_attrs` + `check_derive_exact`
-/// machinery, mirrored). The DERIVE-NAME-SHADOW vector — a `use serde_derive::
-/// Serialize as Clone;` (or `use evil::Clone;`, or a production glob) that
-/// re-binds a built-in-derive name to a PROC-MACRO derive the spelling-only
-/// `check_derive_contents_builtin` would then wave through (rustc resolves the
-/// derive to the imported macro, NOT the prelude built-in — RUSTC-CONFIRMED) — is
-/// CLOSED by `visit_item_use`'s [`use_tree_binds_builtin_derive_name`] +
-/// [`use_tree_has_production_glob`] rejection of the source-visible shadowing
-/// `use` IMPORT (the scan cannot RESOLVE a derive, so it rejects the import; the
-/// std prelude already provides every built-in derive, so an explicit `use` of
-/// one can ONLY be a shadow), mirroring the sibling carrier guard's
-/// rename-recursion + glob rejection (`use_tree_has_rename` / no-glob). The
-/// `lower.rs` surface needs no exhaustive `use` allowlist: a foreign non-derive
-/// `use evil::Foo;` is inert for the producer vector (it cannot reach the private
-/// lowerer without an additional macro / attribute / derive-content the other
-/// rails already reject), so this rejection does NOT replicate the carrier
-/// guard's STRICT EXACT 2-import allowlist. A `#[path = "…"]` module
-/// declared as a CHILD of `lower.rs` is a DESCENDANT: it CAN name the private fn
-/// via `super::lower_type_expr_structural`, so compiler privacy does NOT backstop
-/// a child `#[path]` mod — that case is CLOSED by this guard's rejection of every
-/// non-sanctioned out-of-line / `#[path]` child `mod`, NOT by privacy.
-///
-/// The **MACRO-USE-PRELUDE-INJECTION** vector — an ANCESTOR `#[macro_use] extern
-/// crate evil;` (declared in a PARENT module like the crate root `lib.rs` or any
-/// ancestor `mod.rs`, NOT in `lower.rs`) that exports a proc-macro derive named
-/// `Clone` / `Debug` / … — injects that derive into the CRATE-WIDE macro-use
-/// prelude, so it resolves at the `#[derive(Clone)]` site INSIDE `lower.rs` and
-/// EXPANDS IN `lower.rs`'s OWN module context, emitting same-module code that
-/// reaches the bare-private `lower_type_expr_structural` (compiler module-privacy
-/// does NOT backstop same-module expansion). THIS guard reads only `lower.rs`, so
-/// it cannot see an ancestor's `extern crate` — the vector is CLOSED CRATE-WIDE by
-/// the sibling [`verter_session_production_has_no_macro_use_extern_crate`], which
-/// rejects any non-`#[cfg(test)]` `#[macro_use] extern crate` (and
-/// `#[cfg_attr(…, macro_use)] extern crate`) anywhere in `verter_session/src/**`.
-/// The scoped, non-injecting replacement is `use macro_crate::name` (a path import
-/// binds in ITS module scope only, never the crate-wide prelude), and a `use … as
-/// Clone` derive-name shadow IN `lower.rs` is the complementary case already
-/// rejected by the derive-shadow `use` rail above.
-///
-/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED) — the SINGLE out-of-model class a `syn`
-/// source scan structurally cannot reach, which is NOT an expansion vector at
-/// all. With the macro-use-prelude-injection ban landed, the in-file
-/// expr/stmt/item-macro, attribute-macro, derive-name-shadow-import, AND
-/// macro-use-prelude-injection classes are ALL CLOSED (above). The ONLY remaining
-/// residual is the PRIVACY-BACKED FOREIGN / OUT-OF-TREE tail — a body in an
-/// UNRELATED / out-of-tree module the guard never reads, which compiler
-/// module-privacy genuinely blocks from naming the bare-private fn:
-/// - a **GLOB or EXTERNAL re-export whose TARGET DEFINITION lives OUTSIDE the
-///   walked production-`src` tree** — this guard reads only `lower.rs` and rejects
-///   a production glob IN `lower.rs`, but it cannot see what an out-of-tree module
-///   a re-export points to actually contains; AND
-/// - a **module rooted in a DIFFERENT / UNRELATED file** the guard never reads
-///   (NOT a child / descendant of `lower.rs` — e.g. an unrelated module elsewhere
-///   in the crate; a `#[path]` CHILD of `lower.rs` is a descendant and is CLOSED
-///   above, not residual) — this scan reads only `lower.rs`, so it never sees
-///   that foreign body; but because that body is in ANOTHER module, COMPILER
-///   module-privacy DOES block it from naming the bare-private
-///   `lower_type_expr_structural` HOWEVER it is spelled (a compile error, not a
-///   lint — the airtight backstop for the FOREIGN case, by construction).
-///
-/// Both are compiler-privacy-backstopped or unmodelable by a single-file source
-/// scan. The DIRECT precedent for accepting this out-of-tree / foreign-name tail
-/// is `macro_hot_mirror_exposes_single_crate_visible_producer_entry`'s KNOWN
-/// RESIDUAL GAPS, which explicitly documents the same glob / external-reexport-
-/// outside-`src` / out-of-tree-`#[path]` tail it deliberately does NOT chase.
-/// `carrier_module_has_no_public_type_args_surface` accepts the SAME out-of-tree
-/// / foreign-name CLASS (it parses only its two files — `carrier.rs` + the head
-/// view — so it cannot see an out-of-tree re-export / shadow either), but it is a
-/// STRICT EXACT-SHAPE allowlist over a compiler-confined module, NOT a literal
-/// identical guard model — the shared property is the accepted out-of-tree class,
-/// not an identical residual.
-///
-/// DESIGN NOTE (structural contingency — the END of scanner-hardening). With the
-/// macro-use-prelude-injection ban, EVERY known same-module expansion vector is
-/// closed and the only residual is the privacy-backed foreign / out-of-tree tail
-/// above (a genuine compile error, not a lint gap). Per the architecture ruling,
-/// scanner-hardening STOPS here: were a FURTHER same-module expansion vector ever
-/// discovered, the correct closure is STRUCTURAL, not another scanner rail —
-/// RELOCATE the raw `lower_type_expr_structural` into a private CHILD
-/// implementation module with NO proc-macro surface (no `#[derive]`, no attribute
-/// macro, no `extern crate`), so the lowerer becomes COMPILER-CONFINED and the
-/// whole same-module-expansion CLASS is unrepresentable by construction rather
-/// than scanned for. That structural move is the CONTINGENCY, deliberately NOT
-/// implemented now (it is unnecessary today — the class is closed); it is recorded
-/// here as the documented next step IF the residual is ever shown to admit a
-/// reachable in-module vector.
-///
-/// NOT residual (do NOT claim privacy backstops these — they are CLOSED): the
-/// IN-FILE any-position macro / inline-mod / out-of-line-or-`#[path]`-child-
-/// mod / alias / binding vectors (rejected by this guard's `syn` walk and the
-/// occurrence rail), every attribute / derive PROC-MACRO on a `lower.rs` item
-/// (rejected by the production-attribute allowlist), every derive-NAME-SHADOW
-/// `use` import — a `use … as Clone;` rename, a `use …::Clone;` / grouped leaf,
-/// or a production glob in `lower.rs` (rejected by `visit_item_use`), AND every
-/// crate-wide `#[macro_use] extern crate` prelude injection from ANY ancestor
-/// (rejected by [`verter_session_production_has_no_macro_use_extern_crate`]).
-/// Compiler module-privacy is the backstop ONLY for a body in a
-/// DIFFERENT/UNRELATED foreign module (or an out-of-tree re-export target), NOT
-/// for same-module in-file code, NOT for a `#[path]` CHILD of `lower.rs` (a
-/// descendant), NOT for an attribute proc-macro on a `lower.rs` item, NOT for a
-/// derive-shadow `use` import in `lower.rs`, and NOT for an ancestor
-/// `#[macro_use] extern crate` whose derive expands in `lower.rs`'s module context
-/// (all closed by the rails above).
+/// The LOAD-BEARING single-producer guarantee is the COMPILER module-privacy of
+/// `macro_arg_producer.rs` (a foreign caller of the private lowering builders is
+/// a compile error, and the producer is collapsed into ONE module so no
+/// same-owner file can name them either). This guard is the small backstop the
+/// structural design's residual names: it stops a future edit re-introducing a
+/// same-module code-generation surface (a derive / macro_rules! / include! /
+/// `#[macro_use]`-injected derive / a `#[path]` splice) that could emit code
+/// reaching the private builders WITHOUT a literal call — the only class the
+/// structure cannot already make a compile error.
 #[test]
-fn structural_carrier_producer_lower_has_no_expansion_surface() {
-    let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
-    let body = std::fs::read_to_string(workspace_path(rel))
+fn macro_arg_producer_has_no_production_expansion_surface() {
+    let rel = "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs";
+    let src = std::fs::read_to_string(workspace_path(rel))
         .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
-    // Anti-vacuity: the owner module must exist and carry the lowerer definition —
-    // its absence means the owner re-home regressed and the scan would be vacuous.
+    // Anti-vacuity: the producer module must exist and carry the lowerer — its
+    // absence means the owner re-home regressed.
     assert!(
-        body.contains("fn lower_type_expr_structural("),
-        "anti-vacuity: the structural lowerer definition must live at `{rel}` — its absence means \
-         the structural-carrier-producer owner re-home regressed, making this expansion-surface \
-         scan vacuous"
+        src.contains("fn lower_type_expr_structural("),
+        "anti-vacuity: the producer module `{rel}` must carry the structural lowerer"
     );
-    let violations = lower_rs_expansion_surface_violations(&body);
+    let violations = macro_arg_producer_expansion_surface_violations(&src);
     assert!(
         violations.is_empty(),
-        "single-engine producer EXPANSION-SURFACE violation in `{rel}`: production \
-         `lower.rs` introduced a macro / include! / out-of-line-or-`#[path]` mod / lowerer-`as` \
-         reexport that can reach the module-private `lower_type_expr_structural` without a third \
-         literal identifier token (the occurrence-counting in-file pin cannot see it). Only the \
-         sanctioned `#[cfg(test)]`-gated `structural_lower_tests` test wiring may declare an \
-         out-of-line child. Violations:\n  {}",
+        "expansion-surface violation: `macro_arg_producer.rs` must declare NO production \
+         (non-`#[cfg(test)]`) macro invocation / `macro_rules!` / `include!` / proc-macro attribute \
+         / `#[derive(…)]` on a producer-capable item / out-of-line-or-`#[path]` child mod / \
+         `#[macro_use]` — a same-module code-generation surface could emit code reaching the \
+         module-private lowering builders without naming them. Only the sanctioned \
+         `#[cfg(test)] #[path] mod *_tests;` test wiring is allowed. Violations:\n  {}",
         violations.join("\n  ")
     );
 }
 
-/// Self-test for the EXPANSION-SURFACE classifier
-/// [`lower_rs_expansion_surface_violations`]: the REAL `lower.rs` shape passes
-/// (its EXACT `#[cfg(test)] #[path] mod structural_lower_tests;` test wiring does
-/// NOT red); each planted production expansion surface reds —
-///
-/// - item macros: an `include!("generated_lowerer.inc")`, a `macro_rules!`, an
-///   item-position `paste! { … }`, an `include_str!`;
-/// - out-of-line mods: a production `#[path] mod foo;`, a plain `mod foo;`, a
-///   test-gated mod of the WRONG name;
-/// - FIX 2 (exact cfg-test allowlist): a `#[cfg(any(test, feature))]` /
-///   `#[cfg(all(test, …))]` / `#[cfg(feature)]` mod, a `../`-escaping `#[path]`, a
-///   missing `#[path]`, an extra attribute — all red even with the sanctioned
-///   name;
-/// - production INLINE `mod child { … }` reds; a `#[cfg(test)]` inline mod is
-///   allowed;
-/// - BAN-ALL body macros (carrier-guard parity): a body `matches!` now REDS
-///   (the former allowlist was unsound), as does the `matches!(x, _ if
-///   synth_call!(g))` guard-nest, a path-qualified `evil::matches!`, a
-///   renamed-import `matches!` invocation, and an `synth_call!` in any
-///   fn / const / impl-method position;
-/// - EXHAUSTIVE item-position coverage (the single `visit_macro` visitor):
-///   `ImplItem::Macro`, `TraitItem::Macro`, `ForeignItem::Macro`, a
-///   trait-default method body macro, and an assoc-const initializer macro each
-///   red; a `#[cfg(test)]`-gated method body macro stays exempt;
-/// - PRODUCTION-ATTRIBUTE allowlist (close the attribute / derive PROC-MACRO
-///   vector — an attribute is a `syn::Attribute`, NOT a `syn::Macro`, so the
-///   macro ban does not see it): the real `lower.rs` attribute set (`derive` of
-///   std built-ins, `#[cfg(test)]`, `#[allow(clippy::…)]`, doc comments) PASSES,
-///   while a foreign `#[some_attr]`, a `#[derive(Evil)]` / `#[derive(serde::
-///   Serialize)]` (non-built-in / qualified) derive, a `#[cfg(any(test, …))]`
-///   non-exact cfg, a `#[cfg_attr(feature = "x", derive(Clone))]`, and a
-///   `#[tokio::main]` multi-segment attribute each RED; a `#[cfg(test)]`-gated
-///   subtree may use any attribute (exempt);
-/// - DERIVE-NAME-SHADOW IMPORT (close the import vector that defeats the
-///   SPELLING-ONLY derive-contents check): a `use serde_derive::Serialize as
-///   Clone;` rename (the rustc-confirmed vector), a plain `use evil::Clone;`, a
-///   grouped `use evil::{Foo, Clone};`, and a production glob `use evil::*;` each
-///   RED; a legitimate `use std::cell::Cell;` and a `#[cfg(test)]`-gated
-///   shadowing `use` do NOT red.
+/// Self-test for [`macro_arg_producer_expansion_surface_violations`]: the genuine
+/// producer source passes; a planted production macro / `macro_rules!` /
+/// `include!` / `#[derive]` / `#[macro_use]` / out-of-line `#[path]` mod reddens;
+/// the sanctioned `#[cfg(test)] #[path] mod *_tests;` wiring and a `#[cfg(test)]`-
+/// gated macro do NOT.
 #[test]
-fn structural_lower_expansion_surface_classifier_discriminates() {
-    // The REAL minimal genuine shape: `use` imports, the bare module-private fn,
-    // and the sanctioned `#[cfg(test)] #[path] mod` test wiring. PASSES. The fn
-    // bodies use a plain path expression (`DEFAULT`), NOT `todo!()` or `matches!`,
-    // so the ban-all body-macro scan sees NO macro in the genuine shape — the
-    // real `lower.rs` is body-macro-free (its former `matches!` at line 430 is
-    // now the de-sugared `match`).
-    let genuine = "use std::sync::Arc;\n\
-                   fn lower_type_expr_structural(g: &G) -> R { DEFAULT }\n\
-                   pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
-                   lower_type_expr_structural(g)\n\
-                   }\n\
-                   #[cfg(test)]\n\
-                   #[path = \"structural_lower_tests.rs\"]\n\
-                   mod structural_lower_tests;\n";
-    assert!(
-        lower_rs_expansion_surface_violations(genuine).is_empty(),
-        "the genuine `lower.rs` shape (with the `#[cfg(test)] #[path] mod structural_lower_tests;` \
-         test wiring) must PASS the expansion-surface scan"
-    );
-
-    // REJECT — an `include!("generated_lowerer.inc")` item-position include that
-    // could splice a generated body reaching the private lowerer.
-    let include_planted = format!("{genuine}include!(\"generated_lowerer.inc\");\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&include_planted).is_empty(),
-        "a planted `include!(\"generated_lowerer.inc\")` must RED — it can splice a generated body \
-         reaching the private lowerer"
-    );
-
-    // REJECT — an `include_str!`-ONLY fixture (in a `const` initializer, NO item
-    // `include!`): `include_str!("x.inc")` is an Expr-position macro in the const
-    // initializer, so the ban-all body-macro scan catches it ON ITS OWN — the
-    // fixture reds for the intended reason (not because a sibling item `include!`
-    // happens to be present). This discriminates the body-macro path.
-    let include_str_only = format!("{genuine}const SRC: &str = include_str!(\"x.inc\");\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&include_str_only).is_empty(),
-        "a planted `include_str!` in a `const` initializer (no item `include!`) must RED on its own \
-         — the FIX-3 body-macro scan catches the Expr-position `include_str!`"
-    );
-
-    // REJECT — a `macro_rules!` whose body emits a lowerer call. A `syn` scan
-    // cannot expand it, so the occurrence rail sees nothing; the UNCONDITIONAL
-    // item-macro rejection catches it.
-    let macro_rules_planted = format!(
-        "{genuine}macro_rules! gen_call {{\n    ($g:expr) => {{ lower_type_expr_structural($g) }};\n}}\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&macro_rules_planted).is_empty(),
-        "a planted `macro_rules!` whose body emits a lowerer call must RED — the occurrence rail \
-         cannot see inside the macro body, so the item-macro rejection is the catch"
-    );
-
-    // REJECT — an item-position `paste! { … }` invocation (the token-synthesis
-    // vector). Rejected by the UNCONDITIONAL item-macro rule regardless of its
-    // tokens (a `paste!` joining `lower_type_expr_` + `structural` never emits the
-    // whole name as one token, so a name-mention check could not see it).
-    let paste_planted = format!(
-        "{genuine}paste::paste! {{ fn [<lower_type_expr_ structural>](g: &G) -> R {{ todo!() }} }}\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&paste_planted).is_empty(),
-        "a planted item-position `paste! {{ … }}` invocation must RED — the UNCONDITIONAL \
-         item-macro rejection forbids the whole class, so split-token name synthesis cannot evade it"
-    );
-
-    // REJECT — a production `#[path = "external"] mod smuggler;` out-of-line child
-    // (NOT cfg(test)-gated): its body lives in a foreign file that could reach the
-    // private lowerer.
-    let path_mod_planted = format!("{genuine}#[path = \"external.rs\"]\nmod smuggler;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&path_mod_planted).is_empty(),
-        "a planted production `#[path = \"external.rs\"] mod smuggler;` must RED — its out-of-line \
-         body could carry code reaching the private lowerer"
-    );
-
-    // REJECT — a plain production out-of-line `mod smuggler;` (no `#[path]`, no
-    // cfg(test)).
-    let plain_mod_planted = format!("{genuine}mod smuggler;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&plain_mod_planted).is_empty(),
-        "a planted plain production out-of-line `mod smuggler;` must RED — only the sanctioned \
-         `#[cfg(test)]`-gated test wiring may declare an out-of-line child"
-    );
-
-    // REJECT — a `use … as lower_type_expr_structural;` reexport binding minting a
-    // nameable alias of the private lowerer.
-    let use_rename_planted =
-        format!("{genuine}use crate::other::raw as lower_type_expr_structural;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&use_rename_planted).is_empty(),
-        "a planted `use … as lower_type_expr_structural;` reexport must RED — it mints a nameable \
-         alias of the private lowerer"
-    );
-
-    // SOUNDNESS — a TEST-gated out-of-line `mod` of a DIFFERENT name must STILL
-    // red: the allowlist is the EXACT sanctioned `structural_lower_tests` name
-    // (a `#[cfg(test)]` gate alone does not license an arbitrary out-of-line mod).
-    let wrong_name_test_mod =
-        format!("{genuine}#[cfg(test)]\n#[path = \"other_tests.rs\"]\nmod other_tests;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&wrong_name_test_mod).is_empty(),
-        "a `#[cfg(test)]` out-of-line `mod other_tests;` of a NON-sanctioned name must RED — the \
-         allowlist pins the exact `structural_lower_tests` name, not any test-gated out-of-line mod"
-    );
-
-    // ── FIX 2: EXACT cfg-test allowlist ──────────────────────────────────────
-    // These arms hold the SANCTIONED name (`structural_lower_tests`) and the
-    // SANCTIONED path constant, and vary ONLY the axis under test, so each
-    // isolates that the cfg-exactness / path-exactness / extra-attr rule is what
-    // reds (a non-sanctioned NAME would red on the name check instead, confusing
-    // the discrimination). NOTE: these fixtures live in a STRING fed to `syn`, so
-    // the duplicate `structural_lower_tests` module name vs the `genuine` wiring
-    // is never compiled — `syn::parse_file` does not enforce name uniqueness.
-    //
-    // REJECT — a `#[cfg(any(test, feature = "x"))]` gate (the EXACT live-compiling
-    // hole): `cfg(any(test, feature = "x"))` is SATISFIABLE in a non-test
-    // production build under feature `x`, so it is NOT a test-only gate. Sanctioned
-    // name + path; ONLY the non-exact cfg differs.
-    let cfg_any_mod = format!(
-        "{genuine}#[cfg(any(test, feature = \"x\"))]\n#[path = \"structural_lower_tests.rs\"]\nmod structural_lower_tests;\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&cfg_any_mod).is_empty(),
-        "a `#[cfg(any(test, feature = \"x\"))]` out-of-line mod (sanctioned name + path) must RED — \
-         `cfg(any(test, …))` is satisfiable in a production build, so it is not a test-only gate \
-         (only EXACTLY `#[cfg(test)]` is sanctioned)"
-    );
-    // REJECT — a `#[cfg(all(test, feature = "x"))]` gate: `all(test, …)` requires
-    // `test`, but it is still NOT the exact single-token `cfg(test)`. Sanctioned
-    // name + path; ONLY the compound cfg differs.
-    let cfg_all_mod = format!(
-        "{genuine}#[cfg(all(test, feature = \"x\"))]\n#[path = \"structural_lower_tests.rs\"]\nmod structural_lower_tests;\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&cfg_all_mod).is_empty(),
-        "a `#[cfg(all(test, …))]` out-of-line mod (sanctioned name + path) must RED — only the EXACT \
-         single-token `#[cfg(test)]` is sanctioned, not a compound `all(...)`"
-    );
-    // REJECT — a `#[cfg(feature = "x")]` gate (no `test` token at all — a pure
-    // production cfg). Sanctioned name + path; ONLY the feature cfg differs.
-    let cfg_feature_mod = format!(
-        "{genuine}#[cfg(feature = \"x\")]\n#[path = \"structural_lower_tests.rs\"]\nmod structural_lower_tests;\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&cfg_feature_mod).is_empty(),
-        "a `#[cfg(feature = \"x\")]` out-of-line mod (sanctioned name + path) must RED — a feature \
-         cfg is production code, not a test gate"
-    );
-    // REJECT — the SANCTIONED name + EXACT `#[cfg(test)]` but a `../`-ESCAPING path
-    // (`#[path = "../../outside.rs"]`): the body is a foreign file outside the owner
-    // dir, pulled in under a test gate. ONLY the path differs.
-    let escaping_path_mod = format!(
-        "{genuine}#[cfg(test)]\n#[path = \"../../outside.rs\"]\nmod structural_lower_tests;\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&escaping_path_mod).is_empty(),
-        "a `#[cfg(test)] #[path = \"../../outside.rs\"] mod structural_lower_tests;` must RED — the \
-         `../`-escaping path roots the body OUTSIDE the owner dir; only the exact \
-         `structural_lower_tests.rs` sibling path is sanctioned"
-    );
-    // REJECT — the sanctioned name + cfg(test) but NO `#[path]` attribute at all
-    // (an out-of-line `mod structural_lower_tests;` resolving to a default file).
-    // ONLY the missing path differs.
-    let missing_path_mod = format!("{genuine}#[cfg(test)]\nmod structural_lower_tests;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&missing_path_mod).is_empty(),
-        "a `#[cfg(test)] mod structural_lower_tests;` WITHOUT the exact `#[path]` must RED — the \
-         sanctioned wiring requires the explicit `#[path = \"structural_lower_tests.rs\"]`"
-    );
-    // REJECT — the sanctioned shape PLUS an EXTRA attribute (e.g. a rewriting
-    // attribute proc-macro): the attribute set must be exactly `{cfg(test), path}`.
-    // ONLY the extra attribute differs.
-    let extra_attr_mod = format!(
-        "{genuine}#[cfg(test)]\n#[path = \"structural_lower_tests.rs\"]\n#[some_attr]\nmod structural_lower_tests;\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&extra_attr_mod).is_empty(),
-        "the sanctioned wiring PLUS an extra `#[some_attr]` must RED — the attribute set must be \
-         exactly `{{cfg(test), path}}`; a smuggled extra attribute (e.g. a rewriting proc-macro) is \
-         rejected"
-    );
-
-    // ── FIX 1 (part 2): production INLINE child mod rejected ──────────────────
-    // REJECT — a production (non-`#[cfg(test)]`) INLINE `mod child { … }`: a
-    // same-module surface that can define a second producer or name the private
-    // lowerer. The real `lower.rs` declares none.
-    let inline_mod = format!("{genuine}mod helper {{\n    pub(super) const K: u8 = 1;\n}}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&inline_mod).is_empty(),
-        "a production INLINE `mod helper {{ … }}` block must RED — an inline child module is a \
-         same-module surface that can define a second producer or name the private lowerer; the \
-         real `lower.rs` declares no inline child module"
-    );
-    // SOUNDNESS — a `#[cfg(test)]`-gated INLINE mod is test-only code and is
-    // ALLOWED (recursed for completeness), so a benign cfg(test) inline mod does
-    // NOT red.
-    let cfg_test_inline_mod =
-        format!("{genuine}#[cfg(test)]\nmod inner_tests {{\n    const K: u8 = 1;\n}}\n");
-    assert!(
-        lower_rs_expansion_surface_violations(&cfg_test_inline_mod).is_empty(),
-        "a `#[cfg(test)]`-gated INLINE `mod inner_tests {{ … }}` (test-only code) must NOT red — \
-         only PRODUCTION inline child mods are rejected"
-    );
-    // SOUNDNESS — an inline mod that ITSELF contains a forbidden item-position
-    // macro reds (both for the production-inline-mod rule AND, via recursion, the
-    // nested item macro).
-    let inline_mod_with_macro =
-        format!("{genuine}mod helper {{\n    include!(\"nested.inc\");\n}}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&inline_mod_with_macro).is_empty(),
-        "a production inline `mod` (additionally containing an item macro) must RED — the inline \
-         child module itself is forbidden, and the scan also recurses into its body"
-    );
-
-    // ── BAN-ALL body macros (carrier-guard parity, replaces the unsound
-    //    name-allowlist) ───────────────────────────────────────────────────────
-    // REJECT — the FORMER allowlisted `matches!`. After the `matches!` → `match`
-    // de-sugar at `lower.rs:430`, NO body macro is admitted: a body `matches!`
-    // now reds. (The previous name-allowlist was unsound — see the guard-nest /
-    // `evil::matches!` / renamed-`matches` vectors below.)
-    let matches_body =
-        format!("{genuine}fn classify(x: &T) -> bool {{ matches!(x, T::A {{ .. }}) }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&matches_body).is_empty(),
-        "a body `matches!(…)` must now RED — ALL body macros are banned (carrier-guard parity); the \
-         former name-allowlist that admitted `matches!` was unsound"
-    );
-    // REJECT — the GUARD-NEST that defeated the name-allowlist: the macro name is
-    // `matches`, but its `if $guard:expr` arm nests an arbitrary `synth_call!(g)`
-    // that expands to a hidden `lower_type_expr_structural(g)`. The nested
-    // `synth_call!` lives INSIDE the outer `matches!` token stream, which `syn`
-    // does NOT parse, so the inner macro is NOT reached as its own `syn::ExprMacro`
-    // node. The guard-nest reds anyway because the OUTER `matches!` is itself
-    // banned (ban-all-body-macros) — that ban, not reaching the inner node, is the
-    // catch. (The previous name-only allowlist admitted the outer `matches!`,
-    // leaving the inner hidden; ban-all closes it.) This is THE vector the GOV
-    // ruling targeted.
-    let matches_guard_nest =
-        format!("{genuine}fn rogue(x: &T, g: &G) -> bool {{ matches!(x, _ if synth_call!(g)) }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&matches_guard_nest).is_empty(),
-        "a `matches!(x, _ if synth_call!(g))` guard-nest must RED — its `if $guard:expr` arm can \
-         nest an arbitrary macro that synthesises a hidden lowerer call. It reds because the OUTER \
-         `matches!` is banned (ban-all-body-macros), NOT because the inner `synth_call!` is reached \
-         (`syn` does not parse the outer macro's token stream); the former name-allowlist admitted \
-         the outer `matches!` and so missed the inner"
-    );
-    // REJECT — a path-qualified `evil::matches!(…)`: a renamed/imported macro
-    // whose LAST path segment is `matches` but is NOT std `matches!`. The old
-    // last-segment name check admitted it; the ban-all rejects every macro.
-    let evil_matches =
-        format!("{genuine}fn rogue(x: &T) -> bool {{ evil::matches!(x, T::A {{ .. }}) }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&evil_matches).is_empty(),
-        "a path-qualified `evil::matches!(…)` must RED — a name-only allowlist on the last segment \
-         admitted it; the ban-all rejects every macro regardless of path"
-    );
-    // REJECT — a RENAMED import bound to the name `matches` then invoked: the
-    // `use … as matches;` is itself a reexport the alias check does not target
-    // (it targets `lower_type_expr_structural`), but the subsequent `matches!(…)`
-    // invocation is a body macro the ban-all rejects outright.
-    let renamed_matches = format!(
-        "{genuine}use crate::evil::synth as matches;\nfn rogue(g: &G) -> R {{ matches!(g) }}\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&renamed_matches).is_empty(),
-        "a `use … as matches; matches!(g)` renamed-import invocation must RED — the ban-all rejects \
-         the macro invocation regardless of what `matches` was rebound to"
-    );
-    // REJECT — a NON-allowlisted Expr-position `synth_call!(g)` in a fn body: an
-    // imported macro that could expand to `lower_type_expr_structural(g)` adds no
-    // third literal identifier token, so only the body-macro ban catches it.
-    let synth_call_body = format!("{genuine}fn rogue(g: &G) -> R {{ synth_call!(g) }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&synth_call_body).is_empty(),
-        "an Expr-position `synth_call!(g)` in a fn body must RED — it can expand to a hidden \
-         `lower_type_expr_structural(g)` call the occurrence rail cannot see"
-    );
-    // REJECT — a statement-position `synth_call! { g };` (Stmt::Macro).
-    let synth_stmt_body = format!("{genuine}fn rogue(g: &G) {{ synth_call! {{ g }}; }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&synth_stmt_body).is_empty(),
-        "a statement-position `synth_call! {{ g }};` must RED — a Stmt-position macro is also a \
-         body-macro synthesis vector"
-    );
-    // REJECT — a macro in a CONST initializer (Expr-position).
-    let synth_const_init = format!("{genuine}const ROGUE: R = synth_call!(g);\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&synth_const_init).is_empty(),
-        "a macro in a `const` initializer must RED — a macro initializer is an Expr-position macro"
-    );
-    // REJECT — a macro in an IMPL-METHOD body.
-    let synth_impl_method = format!(
-        "{genuine}struct S;\nimpl S {{ fn rogue(&self, g: &G) -> R {{ synth_call!(g) }} }}\n"
-    );
-    assert!(
-        !lower_rs_expansion_surface_violations(&synth_impl_method).is_empty(),
-        "a macro in an impl-method body must RED — the scan visits impl-method bodies too"
-    );
-
-    // ── EXHAUSTIVE item-position macro coverage (the single `visit_macro`
-    //    visitor sees every macro node by construction) ─────────────────────────
-    // REJECT — `syn::ImplItem::Macro`: a macro invocation directly in an `impl`
-    // block (not inside a method body). The position-enumerating walker missed
-    // this; the `visit_macro` override reaches it.
-    let impl_item_macro =
-        format!("{genuine}struct S;\nimpl S {{ synth_call!{{ fn x() {{}} }} }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&impl_item_macro).is_empty(),
-        "a `synth_call! {{ … }}` in `impl` item-position (`ImplItem::Macro`) must RED — `visit_macro` \
-         reaches every macro node, including impl-item-position macros"
-    );
-    // REJECT — `syn::TraitItem::Macro`: a macro invocation in a `trait`
-    // definition's item position.
-    let trait_item_macro = format!("{genuine}trait T {{ synth_call!{{ fn x(); }} }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&trait_item_macro).is_empty(),
-        "a `synth_call! {{ … }}` in `trait` item-position (`TraitItem::Macro`) must RED"
-    );
-    // REJECT — `syn::ForeignItem::Macro`: a macro invocation in an `extern`
-    // block's item position.
-    let foreign_item_macro = format!("{genuine}extern \"C\" {{ synth_call!{{ fn x(); }} }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&foreign_item_macro).is_empty(),
-        "a `synth_call! {{ … }}` in `extern` item-position (`ForeignItem::Macro`) must RED"
-    );
-    // REJECT — a TRAIT DEFAULT METHOD body macro (`TraitItemFn` with a default
-    // block holding a macro).
-    let trait_default_body =
-        format!("{genuine}trait T {{ fn d(&self, g: &G) -> R {{ synth_call!(g) }} }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&trait_default_body).is_empty(),
-        "a macro in a trait DEFAULT method body must RED — the scan visits trait-default method \
-         bodies too"
-    );
-    // REJECT — an ASSOCIATED-CONST INITIALIZER macro (`ImplItem::Const` whose
-    // initializer expr is a macro).
-    let assoc_const_init =
-        format!("{genuine}struct S;\nimpl S {{ const C: R = synth_call!(g); }}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&assoc_const_init).is_empty(),
-        "a macro in an associated-const initializer (`ImplItem::Const`) must RED — the scan visits \
-         assoc-const initializers too"
-    );
-
-    // SOUNDNESS — a `#[cfg(test)]`-gated method body macro (test-only code) does
-    // NOT red: the cfg-test exemption suspends the macro ban for the dead-in-
-    // production subtree (matching `with_merge_role`, the real `#[cfg(test)]`
-    // impl method in `lower.rs`), while the PRODUCTION arms above still red.
-    let cfg_test_method_macro = format!(
-        "{genuine}struct S;\nimpl S {{ #[cfg(test)] fn t(&self, g: &G) -> R {{ synth_call!(g) }} }}\n"
-    );
-    assert!(
-        lower_rs_expansion_surface_violations(&cfg_test_method_macro).is_empty(),
-        "a `#[cfg(test)]`-gated impl-method body macro (test-only code) must NOT red — the cfg-test \
-         exemption suspends the macro ban for the dead-in-production subtree"
-    );
-
-    // ── PRODUCTION-ATTRIBUTE ALLOWLIST (close the attribute / derive PROC-MACRO
-    //    vector: an attribute is a `syn::Attribute`, NOT a `syn::Macro`, so
-    //    `visit_macro` never fires on it) ──────────────────────────────────────
-    // SOUNDNESS — the EXACT attributes the real `lower.rs` carries all PASS: the
-    // three std-built-in derive lists (:70/:104/:238), `#[cfg(test)]` on an item
-    // (:168), `#[allow(clippy::match_like_matches_macro)]` (:436), the sanctioned
-    // `#[path]` (:1080), and a doc comment. (`genuine` itself is already attr-
-    // light, so this arm is the positive proof the allowlist admits the real set.)
-    let real_attrs = format!(
-        "{genuine}\
-         #[derive(Debug, Default, Clone)]\nstruct A;\n\
-         #[derive(Debug, Clone, Copy)]\nstruct B;\n\
-         #[derive(Debug, Clone, PartialEq, Eq)]\nstruct C;\n\
-         /// a doc comment\n\
-         struct D;\n\
-         impl D {{ #[cfg(test)] fn t(&self) {{}} }}\n\
-         fn body() {{ #[allow(clippy::match_like_matches_macro)] let _x = 1; }}\n"
-    );
-    assert!(
-        lower_rs_expansion_surface_violations(&real_attrs).is_empty(),
-        "the EXACT attribute set the real `lower.rs` carries — `derive` of std built-ins \
-         ({LOWER_RS_BUILTIN_DERIVES:?}), `#[cfg(test)]`, `#[allow(clippy::…)]`, a doc comment — must \
-         all PASS the production-attribute allowlist; if this reds the allowlist is too strict and \
-         the real `lower.rs` would false-red"
-    );
-
-    // REJECT — a foreign attribute PROC-MACRO `#[some_attr] fn f() {}` (a
-    // `syn::Attribute`, not a `syn::Macro` — invisible to the macro ban): it could
-    // rewrite the fn to synthesise a hidden lowerer call.
-    let foreign_attr_fn = format!("{genuine}#[some_attr]\nfn f() {{}}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&foreign_attr_fn).is_empty(),
-        "a planted `#[some_attr] fn f() {{}}` attribute proc-macro must RED — an attribute is a \
-         `syn::Attribute`, not a `syn::Macro`, so the macro ban does not see it; the production-\
-         attribute allowlist closes this vector"
-    );
-    // REJECT — a custom derive PROC-MACRO `#[derive(Evil)] struct S;`: a bare but
-    // NON-built-in derive that could synthesise a leaking trait impl.
-    let evil_derive = format!("{genuine}#[derive(Evil)]\nstruct S;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&evil_derive).is_empty(),
-        "a planted `#[derive(Evil)] struct S;` non-built-in derive must RED — only std-built-in \
-         derives {LOWER_RS_BUILTIN_DERIVES:?} are permitted; a custom derive could synthesise a \
-         trait impl reaching the private lowerer"
-    );
-    // REJECT — a QUALIFIED derive `#[derive(serde::Serialize)] struct S;`: a
-    // multi-segment derive path is always foreign (resolves to a custom derive).
-    let qualified_derive = format!("{genuine}#[derive(serde::Serialize)]\nstruct S;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&qualified_derive).is_empty(),
-        "a planted `#[derive(serde::Serialize)] struct S;` qualified derive must RED — a \
-         multi-segment derive path is always foreign; only the bare std built-ins are permitted"
-    );
-    // REJECT — a NON-EXACT cfg `#[cfg(any(test, feature = \"x\"))] fn f() {}`:
-    // satisfiable in a production build under feature `x`, so it is NOT a test gate
-    // and the conditional attribute could swap the item the scan sees.
-    let non_exact_cfg_attr = format!("{genuine}#[cfg(any(test, feature = \"x\"))]\nfn f() {{}}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&non_exact_cfg_attr).is_empty(),
-        "a planted `#[cfg(any(test, feature = \"x\"))] fn f() {{}}` must RED — only EXACTLY \
-         `#[cfg(test)]` is permitted; `cfg(any(test, …))` is satisfiable in a production build"
-    );
-    // REJECT — a `#[cfg_attr(feature = \"x\", derive(Clone))] struct S;`: a
-    // `cfg_attr` can conditionally ATTACH any attribute (here a derive) under a
-    // production feature — a swap vector the exact-cfg rule does not admit.
-    let cfg_attr_swap =
-        format!("{genuine}#[cfg_attr(feature = \"x\", derive(Clone))]\nstruct S;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&cfg_attr_swap).is_empty(),
-        "a planted `#[cfg_attr(feature = \"x\", derive(Clone))] struct S;` must RED — `cfg_attr` can \
-         conditionally attach an arbitrary attribute in a production build; it is never in the \
-         allowlist"
-    );
-    // REJECT — a multi-segment attribute proc-macro `#[tokio::main] fn f() {}`: a
-    // qualified attribute path is always foreign.
-    let multi_segment_attr = format!("{genuine}#[tokio::main]\nfn f() {{}}\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&multi_segment_attr).is_empty(),
-        "a planted `#[tokio::main] fn f() {{}}` multi-segment attribute must RED — a qualified \
-         attribute path is always a foreign proc-macro; only the bare allowlisted attributes pass"
-    );
-    // SOUNDNESS — a `#[cfg(test)]`-gated subtree may use ANY attribute (test-only
-    // code is exempt): a `#[cfg(test)]` inline mod containing a `#[some_attr]` fn
-    // does NOT red, exactly as the macro ban is suspended there.
-    let cfg_test_subtree_attr =
-        format!("{genuine}#[cfg(test)]\nmod inner_tests {{ #[some_attr] fn t() {{}} }}\n");
-    assert!(
-        lower_rs_expansion_surface_violations(&cfg_test_subtree_attr).is_empty(),
-        "a `#[cfg(test)]`-gated subtree containing a `#[some_attr] fn` (test-only code) must NOT red \
-         — the production-attribute allowlist is suspended inside a cfg-test subtree (reusing \
-         `cfg_test_depth`), exactly as the macro ban is"
-    );
-
-    // ── DERIVE-NAME-SHADOW IMPORT (close the import vector that defeats the
-    //    SPELLING-ONLY `check_derive_contents_builtin`) ─────────────────────────
-    // The derive-CONTENTS check is spelling-only: `#[derive(Clone)]` is accepted
-    // if the ident reads `Clone`. But a `use serde_derive::Serialize as Clone;`
-    // re-binds `Clone` to a PROC-MACRO derive (rustc resolves the derive to the
-    // imported macro, NOT the prelude built-in — RUSTC-CONFIRMED), so the proc
-    // macro runs and can synthesise a body reaching the private lowerer. The scan
-    // cannot RESOLVE the derive, so it rejects the shadowing `use` IMPORT instead
-    // (a source-visible line), mirroring the sibling carrier guard's `check_use`
-    // / `use_tree_has_rename` (`carrier_encapsulation_guards.rs`).
-    //
-    // REJECT — a `use … as Clone;` rename re-binding a built-in-derive name to an
-    // imported proc-macro derive (THE rustc-confirmed vector).
-    let derive_rename_shadow = format!("{genuine}use serde_derive::Serialize as Clone;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&derive_rename_shadow).is_empty(),
-        "a production `use serde_derive::Serialize as Clone;` must RED — the `as Clone` rename \
-         re-binds the built-in-derive name `Clone` to an imported proc-macro derive that \
-         `#[derive(Clone)]`'s spelling-only check would then wave through (the rustc-confirmed \
-         derive-name-shadow vector)"
-    );
-    // REJECT — a PLAIN `use evil::Clone;` (no rename): the LEAF ident binds the
-    // name. The prelude already provides `Clone`, so an explicit `use …::Clone;`
-    // can ONLY be a shadow — rejected here by the derive-name-shadow rule (this
-    // guard rejects ONLY derive-name binds + globs, NOT every foreign `use`; the
-    // carrier guard would also reject this import, but via its separate STRICT
-    // EXACT 2-import `EXPECTED_USES` allowlist).
-    let derive_plain_shadow = format!("{genuine}use evil::Clone;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&derive_plain_shadow).is_empty(),
-        "a production `use evil::Clone;` plain import must RED — its leaf ident binds the \
-         built-in-derive name `Clone` to a foreign item, shadowing the prelude built-in (which \
-         needs no `use`); an explicit `use` of a built-in-derive name can only be a shadow"
-    );
-    // REJECT — a GROUPED `use evil::{Foo, Clone};`: the `Clone` leaf inside the
-    // group binds the name (recursion through `UseTree::Group`).
-    let derive_grouped_shadow = format!("{genuine}use evil::{{Foo, Clone}};\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&derive_grouped_shadow).is_empty(),
-        "a production grouped `use evil::{{Foo, Clone}};` must RED — the `Clone` leaf in the group \
-         binds the built-in-derive name (the bound-name extractor recurses grouped trees, mirroring \
-         `use_tree_has_rename`)"
-    );
-    // REJECT — a production GLOB `use evil::*;`: the scan cannot see WHICH names a
-    // glob brings in, so it could carry a built-in-derive-name shadow invisibly.
-    // A production glob is rejected outright (mirroring the carrier guard's glob
-    // rejection — a glob is absent from its `EXPECTED_USES`; the real `lower.rs`
-    // has none).
-    let derive_glob_shadow = format!("{genuine}use evil::*;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&derive_glob_shadow).is_empty(),
-        "a production GLOB `use evil::*;` must RED — a glob can bring a built-in-derive-name shadow \
-         into scope without a visible leaf ident the `syn` scan can inspect; a glob is rejected \
-         outright (mirroring the carrier guard's glob rejection — a glob is absent from its \
-         `EXPECTED_USES`)"
-    );
-    // ── RAW-IDENTIFIER ROBUSTNESS (a `r#`-spelled built-in-derive name binds the
-    //    SAME Rust name, so it must red too) ───────────────────────────────────
-    // rustc treats `r#Clone` as the identifier `Clone` (a raw escape, since `Clone`
-    // is not a reserved keyword), so `use serde_derive::Serialize as r#Clone;`
-    // re-binds the name `Clone` to the imported proc-macro derive EXACTLY as the
-    // non-raw spelling does. But `proc_macro2::Ident::to_string()` renders it
-    // `"r#Clone"`, so a bare `.to_string()` membership check would MISS it. The
-    // bound-name extractor `unraw()`s every ident before the membership compare, so
-    // the raw spelling normalises to `Clone` and is caught.
-    //
-    // REJECT — a RAW rename target `as r#Clone;` (the raw spelling of the
-    // rustc-confirmed `as Clone;` shadow vector).
-    let derive_raw_rename_shadow = format!("{genuine}use serde_derive::Serialize as r#Clone;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&derive_raw_rename_shadow).is_empty(),
-        "a production `use serde_derive::Serialize as r#Clone;` must RED — rustc treats the raw \
-         identifier `r#Clone` as the name `Clone`, so it re-binds the built-in-derive name to an \
-         imported proc-macro derive exactly as `as Clone;` does; the bound-name extractor `unraw()`s \
-         the ident before the membership check, so the `r#` spelling cannot evade it"
-    );
-    // REJECT — a RAW PLAIN leaf `use evil::r#Clone;`: the leaf ident binds the name
-    // `Clone` (raw-escaped), shadowing the prelude built-in.
-    let derive_raw_plain_shadow = format!("{genuine}use evil::r#Clone;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&derive_raw_plain_shadow).is_empty(),
-        "a production `use evil::r#Clone;` must RED — the raw leaf ident `r#Clone` binds the name \
-         `Clone`, shadowing the prelude built-in; `unraw()` normalises `r#Clone` to `Clone` so the \
-         leaf-ident membership check catches the raw spelling"
-    );
-    // REJECT — a RAW GROUPED leaf `use evil::{Foo, r#Clone};`: the `r#Clone` leaf
-    // inside the group binds the name `Clone` (recursion through `UseTree::Group`,
-    // then `unraw()` before the membership check).
-    let derive_raw_grouped_shadow = format!("{genuine}use evil::{{Foo, r#Clone}};\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&derive_raw_grouped_shadow).is_empty(),
-        "a production grouped `use evil::{{Foo, r#Clone}};` must RED — the raw `r#Clone` leaf in the \
-         group binds the built-in-derive name `Clone`; the extractor recurses grouped trees and \
-         `unraw()`s each leaf before the membership check, so the raw spelling cannot evade it"
-    );
-    // REJECT — a RAW `use … as r#lower_type_expr_structural;` reexport binding: the
-    // raw rename target binds the lowerer's name (the occurrence rail's
-    // `use_tree_renames_to` `unraw()`s the rename target before comparing).
-    let raw_lowerer_alias = format!("{genuine}use foo::bar as r#lower_type_expr_structural;\n");
-    assert!(
-        !lower_rs_expansion_surface_violations(&raw_lowerer_alias).is_empty(),
-        "a production `use foo::bar as r#lower_type_expr_structural;` must RED — rustc treats \
-         `r#lower_type_expr_structural` as the name `lower_type_expr_structural`, minting a nameable \
-         alias of the private lowerer; `use_tree_renames_to` `unraw()`s the rename target so the raw \
-         spelling cannot evade the alias-reexport rejection"
-    );
-    // SOUNDNESS — a `use std::clone::Clone as MyClone;` whose rename TARGET is
-    // `MyClone` (NOT a built-in-derive name) must NOT red: `unraw()` does not change
-    // `MyClone`, so the membership check still sees a non-derive name. (Renaming
-    // the std `Clone` TO a non-derive name introduces no shadow under a derive name.)
-    let legit_rename_off_derive = format!("{genuine}use std::clone::Clone as MyClone;\n");
-    assert!(
-        lower_rs_expansion_surface_violations(&legit_rename_off_derive).is_empty(),
-        "a `use std::clone::Clone as MyClone;` must NOT red — the rename TARGET `MyClone` is not a \
-         built-in-derive name, so the bound-name membership check (post-`unraw()`) does not fire; \
-         `unraw()` does not alter a non-raw, non-derive target"
-    );
-    // SOUNDNESS — a LEGITIMATE non-shadowing import (`use std::cell::Cell;`, the
-    // real `lower.rs` carries exactly this at :45) must NOT red: its leaf `Cell`
-    // is not a built-in-derive name, so the shadow rule does not fire.
-    let legit_use = format!("{genuine}use std::cell::Cell;\n");
-    assert!(
-        lower_rs_expansion_surface_violations(&legit_use).is_empty(),
-        "a legitimate non-shadowing `use std::cell::Cell;` (a real `lower.rs` import) must NOT red \
-         — `Cell` is not a built-in-derive name, so the derive-shadow rule does not fire"
-    );
-    // SOUNDNESS — a `#[cfg(test)]`-gated shadowing `use` is dead-in-production
-    // test wiring and is EXEMPT (gated on `cfg_test_depth` / the on-item exact
-    // cfg-test, exactly as the macro and attribute bans are). It does NOT red.
-    let cfg_test_shadow_use =
-        format!("{genuine}#[cfg(test)]\nuse serde_derive::Serialize as Clone;\n");
-    assert!(
-        lower_rs_expansion_surface_violations(&cfg_test_shadow_use).is_empty(),
-        "a `#[cfg(test)]`-gated `use … as Clone;` (test-only code, dead in a production build) must \
-         NOT red — the derive-shadow rejection is suspended inside a cfg-test subtree, exactly as \
-         the macro / attribute bans are"
-    );
-
-    // The REAL owner source passes the expansion-surface scan (revert proof).
+fn macro_arg_producer_expansion_surface_classifier_discriminates() {
+    // ACCEPT — the genuine producer source: explicit `match` (no `matches!`), the
+    // three sanctioned `#[cfg(test)] #[path] mod *_tests;` test children, no
+    // derive / macro_use / out-of-line production mod.
     let real = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/lower.rs",
+        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
-    .expect("the structural lowerer's owner module must be readable");
-    let real_violations = lower_rs_expansion_surface_violations(&real);
+    .expect("the producer module must be readable");
     assert!(
-        real_violations.is_empty(),
-        "the REAL `lower.rs` MUST pass the expansion-surface scan (its `#[cfg(test)] #[path] mod \
-         structural_lower_tests;` test wiring is allowlisted) — if this reddens, a production \
-         macro / include! / extra mod / lowerer-`as` reexport was added. Violations:\n  {}",
-        real_violations.join("\n  ")
+        macro_arg_producer_expansion_surface_violations(&real).is_empty(),
+        "ACCEPT: the REAL `macro_arg_producer.rs` must have NO production expansion surface — if \
+         this reddens, a production macro / derive / macro_use / out-of-line mod was added"
+    );
+    // The sanctioned `#[cfg(test)] #[path] mod *_tests;` wiring alone is allowed.
+    let sanctioned =
+        "#[cfg(test)]\n#[path = \"structural_lower_tests.rs\"]\nmod structural_lower_tests;\n";
+    assert!(
+        macro_arg_producer_expansion_surface_violations(sanctioned).is_empty(),
+        "the sanctioned `#[cfg(test)] #[path] mod structural_lower_tests;` wiring must be allowed"
+    );
+    // A `#[cfg(test)]`-gated code-gen macro is NOT a production surface (test item
+    // is skipped, not descended).
+    let cfg_test_macro = "#[cfg(test)]\nmod t {\n    fn f() { include!(\"x.rs\"); }\n}\n";
+    assert!(
+        macro_arg_producer_expansion_surface_violations(cfg_test_macro).is_empty(),
+        "a `#[cfg(test)]`-gated code-gen macro must NOT be a production violation (the cfg-test \
+         item is skipped, not descended)"
+    );
+    // ACCEPT — an ordinary std declarative body macro (`matches!` / `format!`) is
+    // NOT a code-gen surface (it cannot reach a private builder from elsewhere);
+    // the genuine `build_macro_hot_ref` uses `matches!`.
+    let std_macro = "fn build() { let _ = matches!(x, A | B); let _ = format!(\"{}\", y); }\n";
+    assert!(
+        macro_arg_producer_expansion_surface_violations(std_macro).is_empty(),
+        "an ordinary std declarative macro (`matches!` / `format!`) must NOT redden — it is not a \
+         code-generation surface reaching the private builders"
+    );
+    // ACCEPT — a built-in `#[derive(…)]` on the producer's data types (the genuine
+    // file carries `#[derive(Debug, Default, Clone, Copy, …)]`).
+    let builtin_derive =
+        "#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]\nstruct Ctx { _x: () }\n";
+    assert!(
+        macro_arg_producer_expansion_surface_violations(builtin_derive).is_empty(),
+        "a built-in `#[derive(…)]` on a producer data type must NOT redden (only a custom proc-macro \
+         derive is a code-gen surface)"
+    );
+    // REJECT — a production `macro_rules!` item (defines a new macro here).
+    let macro_rules = "macro_rules! synth { () => {}; }\n";
+    assert!(
+        !macro_arg_producer_expansion_surface_violations(macro_rules).is_empty(),
+        "a production `macro_rules!` item must redden"
+    );
+    // REJECT — a production `include!` file splice.
+    let include = "include!(\"generated.rs\");\n";
+    assert!(
+        !macro_arg_producer_expansion_surface_violations(include).is_empty(),
+        "a production `include!` file splice must redden"
+    );
+    // REJECT — a production CUSTOM (non-builtin) `#[derive(…)]` (a derive
+    // proc-macro) on a producer-capable type.
+    let derive = "#[derive(serde::Serialize)]\nstruct Producer { _x: () }\n";
+    assert!(
+        !macro_arg_producer_expansion_surface_violations(derive).is_empty(),
+        "a production CUSTOM `#[derive(serde::Serialize)]` (a derive proc-macro) must redden"
+    );
+    // REJECT — a production `#[macro_use]` attribute.
+    let macro_use = "#[macro_use]\nextern crate serde;\n";
+    assert!(
+        !macro_arg_producer_expansion_surface_violations(macro_use).is_empty(),
+        "a production `#[macro_use]` attribute must redden"
+    );
+    // REJECT — a NON-sanctioned out-of-line `#[path]` child mod (not test wiring).
+    let path_mod = "#[path = \"second_producer.rs\"]\nmod second_producer;\n";
+    assert!(
+        !macro_arg_producer_expansion_surface_violations(path_mod).is_empty(),
+        "a non-sanctioned production out-of-line `#[path]` child mod must redden"
+    );
+    // REJECT — an out-of-line `mod *_tests;` WITHOUT the `#[cfg(test)]` gate is a
+    // production splice (the gate is mandatory for the sanctioned wiring).
+    let ungated_tests = "#[path = \"structural_lower_tests.rs\"]\nmod structural_lower_tests;\n";
+    assert!(
+        !macro_arg_producer_expansion_surface_violations(ungated_tests).is_empty(),
+        "an out-of-line `mod *_tests;` WITHOUT `#[cfg(test)]` is a production splice and must redden"
     );
 }
 
 /// PARENT-SHAPE guard (load-bearing): the `structural_carrier_producer/`
-/// owner directory contains ONLY the sanctioned members — the raw lowerer
-/// (`lower.rs`), the witness-gated producer surface (`macro_surface.rs`), the
-/// moved binder helper (`script_setup_binder.rs`), the module root (`mod.rs`),
-/// and test modules (`*_tests.rs`). This stops the owner module's boundary
-/// silently growing a SECOND producer surface (a new non-test, non-sanctioned
-/// `.rs` module that could open another path to the lowerer or hold a forged
-/// producer).
+/// owner directory contains ONLY the sanctioned members — the single producer
+/// module (`macro_arg_producer.rs`), the module root (`mod.rs`), and test
+/// modules (`*_tests.rs`). This stops the owner module's boundary silently
+/// growing a SECOND producer surface (a new non-test, non-sanctioned `.rs`
+/// module that could open another path to the module-private lowerer). The
+/// collapse to ONE producer module is what makes a third caller a compile
+/// error — there is no other file that could name the private lowerer.
 #[test]
 fn structural_carrier_producer_module_is_narrow() {
     let dir = workspace_path("crates/verter_session/src/structural_carrier_producer");
-    const SANCTIONED: &[&str] = &[
-        "mod.rs",
-        "lower.rs",
-        "macro_surface.rs",
-        "script_setup_binder.rs",
-    ];
+    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs"];
     let mut found_modules: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read owner dir: {e}")) {
         let path = entry.expect("dir entry").path();
@@ -24108,11 +22148,10 @@ fn structural_carrier_producer_module_is_narrow() {
         .collect();
     assert!(
         extra.is_empty(),
-        "owner-module narrowness violation: `structural_carrier_producer/` may contain ONLY the raw \
-         lowerer (`lower.rs`), the witness-gated producer surface (`macro_surface.rs`), the binder \
-         helper (`script_setup_binder.rs`), `mod.rs`, and test modules (`*_tests.rs`). A new \
-         non-test module here could open a SECOND producer surface or forge a witness. Found extra \
-         modules: {extra:#?}"
+        "owner-module narrowness violation: `structural_carrier_producer/` may contain ONLY the \
+         single producer module (`macro_arg_producer.rs`), `mod.rs`, and test modules \
+         (`*_tests.rs`). A new non-test module here could open a SECOND producer surface or name \
+         the module-private lowerer. Found extra modules: {extra:#?}"
     );
 }
 
@@ -24124,12 +22163,7 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
     // Reuse the SAME sanctioned-set membership predicate the live guard uses by
     // re-stating it here over an in-memory file list, so a divergence in the
     // allowlist reddens.
-    const SANCTIONED: &[&str] = &[
-        "mod.rs",
-        "lower.rs",
-        "macro_surface.rs",
-        "script_setup_binder.rs",
-    ];
+    const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs"];
     let classify = |names: &[&str]| -> Vec<String> {
         names
             .iter()
@@ -24141,9 +22175,7 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
     // The genuine member set (production + tests) has NO extras.
     let genuine = [
         "mod.rs",
-        "lower.rs",
-        "macro_surface.rs",
-        "script_setup_binder.rs",
+        "macro_arg_producer.rs",
         "structural_lower_tests.rs",
         "macro_hot_mirror_tests.rs",
         "script_setup_binder_tests.rs",
@@ -24153,507 +22185,21 @@ fn structural_carrier_producer_narrowness_classifier_discriminates() {
         "the genuine owner member set (sanctioned production + `*_tests.rs`) must have NO extras"
     );
     // A planted extra non-test module IS reported.
-    let with_extra = ["mod.rs", "lower.rs", "second_producer.rs"];
+    let with_extra = ["mod.rs", "macro_arg_producer.rs", "second_producer.rs"];
     assert_eq!(
         classify(&with_extra),
         vec!["second_producer.rs".to_string()],
         "a planted non-test, non-sanctioned module in the owner directory must be reported"
     );
     // A `*_tests.rs` module is NOT reported (test modules are always allowed).
-    let only_test = ["mod.rs", "lower.rs", "extra_invariant_tests.rs"];
+    let only_test = [
+        "mod.rs",
+        "macro_arg_producer.rs",
+        "extra_invariant_tests.rs",
+    ];
     assert!(
         classify(&only_test).is_empty(),
         "a `*_tests.rs` module must be allowed and not reported as an extra"
-    );
-}
-
-/// The sanctioned producer-capability witness and its owning surface file. A
-/// witness is the unforgeable proof a producer surface presents to the
-/// witness-gated lowerer wrapper; there must be EXACTLY this one.
-const STRUCTURAL_CARRIER_PRODUCER_WITNESSES: &[(&str, &str)] =
-    &[("MacroProducerWitness", "macro_surface.rs")];
-
-/// One discovered witness struct: its name, the owner-dir file it lives in, and
-/// whether EVERY field carries inherited (private) visibility (so it cannot be
-/// struct-literal-constructed from outside its module).
-struct WitnessStruct {
-    name: String,
-    file: String,
-    all_fields_private: bool,
-}
-
-/// Walk a parsed file's items (descending inline modules) collecting every
-/// `struct …Witness` definition, recording whether all its fields are private.
-fn collect_witness_structs_in_items(items: &[syn::Item], file: &str, out: &mut Vec<WitnessStruct>) {
-    for item in items {
-        match item {
-            syn::Item::Struct(s) => {
-                let name = s.ident.to_string();
-                if !name.ends_with("Witness") {
-                    continue;
-                }
-                // EVERY field must be private (inherited visibility) so the
-                // struct cannot be literal-constructed (`Witness { … }`) outside
-                // its module. A unit struct (no fields) would be trivially
-                // constructible, so it does NOT count as having a private field.
-                let fields: Vec<&syn::Field> = s.fields.iter().collect();
-                let all_fields_private = !fields.is_empty()
-                    && fields
-                        .iter()
-                        .all(|f| matches!(f.vis, syn::Visibility::Inherited));
-                out.push(WitnessStruct {
-                    name,
-                    file: file.to_string(),
-                    all_fields_private,
-                });
-            }
-            syn::Item::Mod(m) => {
-                if let Some((_, inner)) = &m.content {
-                    collect_witness_structs_in_items(inner, file, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Whether a fn signature's RETURN type names `witness_name` (directly or as
-/// `Self` is NOT considered here — we match the explicit type name, plus the
-/// bare `Self` case is checked by the caller against the impl's self type). The
-/// render is the token-spaced `render_type` form.
-fn return_type_names(sig: &syn::Signature, witness_name: &str) -> bool {
-    match &sig.output {
-        syn::ReturnType::Type(_, ty) => {
-            let rendered = render_type(ty);
-            // Whole-identifier containment so `MacroProducerWitness` does not
-            // match a longer identifier.
-            ident_appears_whole(&rendered, witness_name)
-        }
-        syn::ReturnType::Default => false,
-    }
-}
-
-/// Collect violations where a fn RETURNS a witness type with crate-visible (or
-/// wider) visibility, OR returns a witness from a file OTHER than the witness's
-/// owning surface — either re-opens forging the capability proof from outside
-/// the owning surface. The witness-gated wrapper fns in `lower.rs` take a
-/// `&Witness` PARAMETER and never RETURN one, so they are not flagged.
-fn witness_return_violations(items: &[syn::Item], file: &str, out: &mut Vec<String>) {
-    // Map witness name → its sanctioned owning file.
-    let owning_file = |witness: &str| -> Option<&'static str> {
-        STRUCTURAL_CARRIER_PRODUCER_WITNESSES
-            .iter()
-            .find(|(n, _)| *n == witness)
-            .map(|(_, f)| *f)
-    };
-    fn walk(
-        items: &[syn::Item],
-        file: &str,
-        owning_file: &dyn Fn(&str) -> Option<&'static str>,
-        out: &mut Vec<String>,
-    ) {
-        for item in items {
-            match item {
-                syn::Item::Fn(f) => {
-                    for (witness, owner) in STRUCTURAL_CARRIER_PRODUCER_WITNESSES {
-                        if return_type_names(&f.sig, witness) {
-                            let crate_vis = visibility_is_crate_visible(&f.vis);
-                            let wrong_file = !file.ends_with(owner);
-                            if crate_vis || wrong_file {
-                                out.push(format!(
-                                    "free fn `{}` in `{file}` returns witness `{witness}` \
-                                     (crate_visible={crate_vis}, wrong_file={wrong_file}; the \
-                                     witness's sole owning surface is `{owner}` and its constructor \
-                                     must stay private to it)",
-                                    f.sig.ident
-                                ));
-                            }
-                        }
-                    }
-                }
-                syn::Item::Impl(imp) => {
-                    // The impl's self type (for a `-> Self` return inside an
-                    // `impl Witness` block).
-                    let self_ty = render_type(&imp.self_ty);
-                    for impl_item in &imp.items {
-                        if let syn::ImplItem::Fn(m) = impl_item {
-                            for (witness, owner) in STRUCTURAL_CARRIER_PRODUCER_WITNESSES {
-                                let returns_named = return_type_names(&m.sig, witness);
-                                // `-> Self` inside `impl Witness { … }` also
-                                // returns the witness.
-                                let returns_self = matches!(&m.sig.output, syn::ReturnType::Type(_, ty) if render_type(ty) == "Self")
-                                    && ident_appears_whole(&self_ty, witness);
-                                if returns_named || returns_self {
-                                    let crate_vis = visibility_is_crate_visible(&m.vis);
-                                    let wrong_file = !file.ends_with(owner);
-                                    if crate_vis || wrong_file {
-                                        out.push(format!(
-                                            "associated fn `{}` in `{file}` returns witness \
-                                             `{witness}` (crate_visible={crate_vis}, \
-                                             wrong_file={wrong_file}); the witness's constructor must \
-                                             stay private to its owning surface `{owner}`",
-                                            m.sig.ident
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let _ = owning_file; // owning_file is consulted via the table above.
-                }
-                syn::Item::Mod(m) => {
-                    if let Some((_, inner)) = &m.content {
-                        walk(inner, file, owning_file, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    walk(items, file, &owning_file, out);
-}
-
-/// Collect every production `.rs` file in the owner directory as
-/// `(file-name, parsed-items)`. Test modules (`*_tests.rs`) are excluded — a
-/// test may legitimately mint a witness from within the owning surface subtree.
-fn structural_carrier_producer_owner_files() -> Vec<(String, syn::File)> {
-    let dir = workspace_path("crates/verter_session/src/structural_carrier_producer");
-    let mut out: Vec<(String, syn::File)> = Vec::new();
-    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read owner dir: {e}")) {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .expect("utf-8 file name")
-            .to_string();
-        if name.ends_with("_tests.rs") {
-            continue;
-        }
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let parsed =
-            syn::parse_file(&src).unwrap_or_else(|e| panic!("parse owner file `{name}`: {e}"));
-        out.push((name, parsed));
-    }
-    out
-}
-
-/// WITNESS-UNFORGEABILITY guard (make-unrepresentable): there is EXACTLY one
-/// producer-capability witness — `MacroProducerWitness` (in `macro_surface.rs`)
-/// — with a PRIVATE field (so it cannot be struct-literal-constructed outside
-/// its module), and NO function anywhere RETURNS a witness type with
-/// crate-visible (or wider) visibility or from a file other than the witness's
-/// owning surface. Together with the module-private raw lowerer, this makes a
-/// SECOND structural-carrier producer unrepresentable: a would-be producer can
-/// neither name the lowerer nor forge a witness to reach the witness-gated
-/// wrapper.
-#[test]
-fn structural_carrier_producer_witnesses_are_unforgeable() {
-    let owner_files = structural_carrier_producer_owner_files();
-    // Anti-vacuity: the scan found a real, non-trivial owner surface.
-    assert!(
-        owner_files.len() >= 4,
-        "anti-vacuity: expected at least mod.rs + lower.rs + the macro producer surface + the \
-         binder helper; found {}",
-        owner_files.len()
-    );
-
-    // 1) Collect every `…Witness` struct across the owner directory.
-    let mut witnesses: Vec<WitnessStruct> = Vec::new();
-    for (file, parsed) in &owner_files {
-        collect_witness_structs_in_items(&parsed.items, file, &mut witnesses);
-    }
-    // EXACTLY one witness, with the sanctioned name + owning file.
-    let mut found: Vec<(String, String)> = witnesses
-        .iter()
-        .map(|w| (w.name.clone(), w.file.clone()))
-        .collect();
-    found.sort();
-    let mut expected: Vec<(String, String)> = STRUCTURAL_CARRIER_PRODUCER_WITNESSES
-        .iter()
-        .map(|(n, f)| (n.to_string(), f.to_string()))
-        .collect();
-    expected.sort();
-    assert_eq!(
-        found, expected,
-        "there must be EXACTLY one producer-capability witness at its sanctioned owning \
-         surface ({expected:#?}); found {found:#?}. A second `…Witness` struct (or one in the \
-         wrong file) is a new forging surface."
-    );
-
-    // 2) Each witness has a PRIVATE field (cannot be literal-constructed
-    //    outside its module).
-    for w in &witnesses {
-        assert!(
-            w.all_fields_private,
-            "witness `{}` in `{}` must carry at least one PRIVATE field so it cannot be \
-             struct-literal-constructed (`{} {{ … }}`) outside its module — a forgeable witness \
-             defeats the single-producer gate",
-            w.name, w.file, w.name
-        );
-    }
-
-    // 3) No fn RETURNS a witness type crate-visibly or from a foreign file.
-    let mut violations: Vec<String> = Vec::new();
-    for (file, parsed) in &owner_files {
-        witness_return_violations(&parsed.items, file, &mut violations);
-    }
-    assert!(
-        violations.is_empty(),
-        "witness-unforgeability violation: no function may RETURN a producer witness with \
-         crate-visible (or wider) visibility, nor from a file other than the witness's owning \
-         surface — that would let an outside caller obtain the capability proof and reach the \
-         witness-gated lowerer. The witnessed wrapper fns in `lower.rs` take a `&Witness` PARAMETER \
-         and never return one. Found: {violations:#?}"
-    );
-}
-
-/// Self-test for the witness-unforgeability classifiers: a private-field
-/// witness with a private constructor passes; a PUBLIC-field witness (literal-
-/// constructible) is reported as forgeable; a `pub(crate) fn new -> Witness`
-/// constructor is reported; a witness returned from a foreign file is reported.
-#[test]
-fn structural_carrier_producer_witness_classifier_discriminates() {
-    // A genuine private-field witness with a private constructor.
-    let ok_src =
-        "pub(in crate::structural_carrier_producer) struct MacroProducerWitness { _private: () }\n\
-                  impl MacroProducerWitness { fn new() -> Self { Self { _private: () } } }\n";
-    let ok = syn::parse_file(ok_src).expect("parse ok witness");
-    let mut ok_structs: Vec<WitnessStruct> = Vec::new();
-    collect_witness_structs_in_items(&ok.items, "macro_surface.rs", &mut ok_structs);
-    assert_eq!(ok_structs.len(), 1, "exactly one witness struct found");
-    assert!(
-        ok_structs[0].all_fields_private,
-        "a private-field witness must classify as not-literal-constructible"
-    );
-    let mut ok_returns: Vec<String> = Vec::new();
-    witness_return_violations(&ok.items, "macro_surface.rs", &mut ok_returns);
-    assert!(
-        ok_returns.is_empty(),
-        "a private `fn new -> Self` in the witness's OWN owning file is not a violation, got \
-         {ok_returns:?}"
-    );
-
-    // A PUBLIC-field witness is literal-constructible → forgeable.
-    let pub_field_src =
-        "pub(in crate::structural_carrier_producer) struct MacroProducerWitness { pub seed: () }\n";
-    let pub_field = syn::parse_file(pub_field_src).expect("parse pub-field witness");
-    let mut pf_structs: Vec<WitnessStruct> = Vec::new();
-    collect_witness_structs_in_items(&pub_field.items, "macro_surface.rs", &mut pf_structs);
-    assert!(
-        !pf_structs[0].all_fields_private,
-        "a witness with a `pub` field must be reported as literal-constructible (forgeable)"
-    );
-
-    // A unit-struct witness (no fields) is trivially constructible → NOT
-    // private-field-protected. (A hypothetical second producer surface minting a
-    // fieldless witness — exactly the forging shape this classifier rejects.)
-    let unit_src = "pub(in crate::structural_carrier_producer) struct SecondProducerWitness;\n";
-    let unit = syn::parse_file(unit_src).expect("parse unit witness");
-    let mut unit_structs: Vec<WitnessStruct> = Vec::new();
-    collect_witness_structs_in_items(&unit.items, "second_surface.rs", &mut unit_structs);
-    assert!(
-        !unit_structs[0].all_fields_private,
-        "a fieldless unit-struct witness is trivially constructible and must NOT be treated as \
-         private-field-protected"
-    );
-
-    // A `pub(crate) fn new -> Self` constructor in the witness's owning file is
-    // a crate-visible returner → violation.
-    let pub_ctor_src =
-        "pub(in crate::structural_carrier_producer) struct MacroProducerWitness { _p: () }\n\
-         impl MacroProducerWitness { pub(crate) fn new() -> Self { Self { _p: () } } }\n";
-    let pub_ctor = syn::parse_file(pub_ctor_src).expect("parse pub-ctor witness");
-    let mut pc_returns: Vec<String> = Vec::new();
-    witness_return_violations(&pub_ctor.items, "macro_surface.rs", &mut pc_returns);
-    assert!(
-        !pc_returns.is_empty(),
-        "a `pub(crate) fn new -> Self` constructor (crate-visible witness returner) must be reported"
-    );
-
-    // A witness RETURNED from a FOREIGN file (not its owning surface) is a
-    // violation even at private visibility.
-    let foreign_src = "fn forge() -> MacroProducerWitness { unimplemented!() }\n";
-    let foreign = syn::parse_file(foreign_src).expect("parse foreign returner");
-    let mut foreign_returns: Vec<String> = Vec::new();
-    // `lower.rs` is NOT the owning file of `MacroProducerWitness` (it holds the
-    // witness-gated wrapper, which only takes a `&Witness` param, never returns
-    // one).
-    witness_return_violations(&foreign.items, "lower.rs", &mut foreign_returns);
-    assert!(
-        !foreign_returns.is_empty(),
-        "a fn returning `MacroProducerWitness` from a file other than its owning surface \
-         (`macro_surface.rs`) must be reported"
-    );
-
-    // The REAL owner sources: exactly one witness, private-field, no
-    // crate-visible/foreign returners (revert proof).
-    let real_files = structural_carrier_producer_owner_files();
-    let mut real_witnesses: Vec<WitnessStruct> = Vec::new();
-    let mut real_returns: Vec<String> = Vec::new();
-    for (file, parsed) in &real_files {
-        collect_witness_structs_in_items(&parsed.items, file, &mut real_witnesses);
-        witness_return_violations(&parsed.items, file, &mut real_returns);
-    }
-    assert_eq!(
-        real_witnesses.len(),
-        1,
-        "the REAL owner module must define EXACTLY one witness"
-    );
-    assert!(
-        real_witnesses.iter().all(|w| w.all_fields_private),
-        "the REAL witness must carry a private field"
-    );
-    assert!(
-        real_returns.is_empty(),
-        "the REAL owner module must expose NO crate-visible / foreign witness returner, got \
-         {real_returns:?}"
-    );
-}
-
-/// The defining module of the shared binder-seed helper. It lives UNDER
-/// `crate::structural_carrier_producer` and is
-/// `pub(in crate::structural_carrier_producer)` — confined to the owner module,
-/// mirroring the structural lowerer's own confinement — so no FOREIGN production
-/// module can NAME it. That makes a
-/// second binder-seed producer reachable from outside the module UNREPRESENTABLE
-/// by construction (compiler-enforced — a foreign reference is a compile error,
-/// not a lint). This is the LOAD-BEARING anti-rogue guarantee for the helper;
-/// the bounded token tripwire
-/// (`macro_hot_mirror_exposes_single_crate_visible_producer_entry`) is
-/// defense-in-depth on top of it.
-const SCRIPT_SETUP_BINDER_DEFINING_MODULE: &str =
-    "structural_carrier_producer/script_setup_binder.rs";
-
-/// Classify the visibility shape of the `build_script_setup_seed_frames`
-/// DEFINITION in the given source body. Returns the offending reason when the
-/// entry is NOT the required `pub(in crate::structural_carrier_producer)`
-/// owner-confined shape (the shape that makes a foreign-module binder-seed
-/// producer unrepresentable), or `None` when the shape is correct. Looks at the
-/// DEFINITION line only. ANY broader visibility — bare `pub`, `pub(crate)`,
-/// `pub(super)`, or even `pub(in crate)` (the crate root) — lets a foreign
-/// production module name the helper, re-opening the cross-module producer
-/// surface, and is rejected; only the EXACT
-/// `pub(in crate::structural_carrier_producer)` subtree path passes.
-fn script_setup_binder_privacy_violation(body: &str) -> Option<String> {
-    let needle = "fn build_script_setup_seed_frames(";
-    let def_line = body.lines().find(|l| l.contains(needle))?;
-    let trimmed = def_line.trim_start();
-    if trimmed.starts_with(
-        "pub(in crate::structural_carrier_producer) fn build_script_setup_seed_frames(",
-    ) {
-        return None;
-    }
-    // Any broader visibility (`pub`, `pub(crate)`, `pub(in crate)`,
-    // `pub(super)`, bare) lets a foreign production module name the helper — the
-    // forbidden cross-module-producer shape.
-    Some(format!(
-        "the shared binder-seed helper must be declared \
-         `pub(in crate::structural_carrier_producer) fn build_script_setup_seed_frames(` (confined \
-         to the structural-carrier-producer owner module, so no foreign production module can name \
-         it and open a second binder-seed producer); found: `{}`",
-        trimmed
-    ))
-}
-
-/// PRIMARY by-construction confinement guard for the shared binder-seed helper
-/// (make-unrepresentable): the production helper `build_script_setup_seed_frames`
-/// lives under `crate::structural_carrier_producer::macro_surface::script_setup_binder`
-/// and is `pub(in crate::structural_carrier_producer)`. Its only callers (the
-/// mirror's macro-arg builder and the in-module tests) are within the owner
-/// module subtree; owner-confinement makes a SECOND binder-seed producer
-/// reachable from a foreign module UNREPRESENTABLE (a foreign module cannot name
-/// the fn — a compile error, not a lint), so the no-second-producer rule needs
-/// no caller scanner here. This is the COMPILER-ENFORCED load-bearing layer; the
-/// bounded token tripwire `macro_hot_mirror_exposes_single_crate_visible_producer_entry`
-/// is defense-in-depth on top of it (it is NOT exhaustive — see its doc comment
-/// for the documented residual evasion tail). The TWO together mirror the
-/// structural lowerer's own two-layer confinement
-/// (`structural_carrier_producer_lowerer_is_module_private` + the same token
-/// tripwire).
-///
-/// GOVERNANCE: if the helper's visibility is ever WIDENED (e.g. to `pub(crate)`),
-/// this guard REDs — the widening must be a DELIBERATE re-home to the new
-/// caller's shared owner-confined boundary, reviewed against this guard, never a
-/// passive `pub(crate)` that silently re-opens the cross-module producer surface.
-#[test]
-fn script_setup_binder_helper_is_module_private() {
-    let rel = "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs";
-    let body = std::fs::read_to_string(workspace_path(rel))
-        .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
-    // Anti-vacuity: the defining module must exist at the expected path and carry
-    // the definition — its absence means the helper vanished or moved.
-    assert!(
-        body.contains("fn build_script_setup_seed_frames("),
-        "anti-vacuity: the shared binder-seed helper definition must live at `{rel}` \
-         (`{SCRIPT_SETUP_BINDER_DEFINING_MODULE}`) — its absence means the binder-seed producer \
-         regressed or relocated"
-    );
-    if let Some(reason) = script_setup_binder_privacy_violation(&body) {
-        panic!(
-            "binder-seed-helper confinement rule violated: {reason}. The helper must stay confined \
-             to `crate::structural_carrier_producer` so a second binder-seed producer reachable \
-             from a foreign module is unrepresentable by construction. A widening must be a \
-             deliberate re-home to the new caller's shared owner-confined boundary, not a passive \
-             `pub(crate)`."
-        );
-    }
-}
-
-/// Self-test for [`script_setup_binder_privacy_violation`] (ANTI-ROGUE
-/// RED-PROOF): the genuine `pub(in crate::structural_carrier_producer)` shape is
-/// ACCEPTED; a `pub(crate)` / bare `pub` / `pub(in crate)` (crate-root) WIDENING
-/// is REJECTED. A privacy guard that cannot fail on a widening is a stub — these
-/// plants prove it catches the exact re-opening of the cross-module producer
-/// surface the load-bearing confinement forbids.
-#[test]
-fn script_setup_binder_privacy_classifier_discriminates() {
-    // ACCEPT — the genuine owner-confined shape.
-    let ok = "    pub(in crate::structural_carrier_producer) fn build_script_setup_seed_frames(\n";
-    assert!(
-        script_setup_binder_privacy_violation(ok).is_none(),
-        "the genuine `pub(in crate::structural_carrier_producer)` shape MUST pass — it is confined \
-         to the owner module, so no foreign module can name the helper"
-    );
-    // REJECT — `pub(crate)` (the exact passive widening the ruling forbids): any
-    // foreign production module can now name the helper.
-    let wrong_crate = "    pub(crate) fn build_script_setup_seed_frames(\n";
-    assert!(
-        script_setup_binder_privacy_violation(wrong_crate).is_some(),
-        "a `pub(crate)` widening MUST be reported — it re-opens the cross-module binder-seed \
-         producer surface the compiler-enforced confinement closes"
-    );
-    // REJECT — bare `pub` (wider still).
-    let wrong_pub = "pub fn build_script_setup_seed_frames(\n";
-    assert!(
-        script_setup_binder_privacy_violation(wrong_pub).is_some(),
-        "a bare `pub` widening MUST be reported as a confinement violation"
-    );
-    // REJECT — `pub(in crate)` (the crate ROOT): Rust treats `pub(in crate)` as
-    // identical crate-wide visibility to `pub(crate)`, so a foreign module can
-    // name the helper. Only the DEEPER `pub(in crate::structural_carrier_producer)`
-    // subtree path is owner-confined.
-    let wrong_pub_in_crate = "    pub(in crate) fn build_script_setup_seed_frames(\n";
-    assert!(
-        script_setup_binder_privacy_violation(wrong_pub_in_crate).is_some(),
-        "a `pub(in crate)` (crate-root) shape MUST be reported — it is crate-wide visibility \
-         (identical to `pub(crate)`), not the owner-confined `pub(in crate::structural_carrier_producer)` \
-         subtree path"
-    );
-    // The REAL helper source is the genuine shape (revert proof: the production
-    // tree is pristine — the helper is confined to the owner module).
-    let real = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs",
-    ))
-    .expect("the binder-seed helper's defining file must be readable");
-    assert!(
-        script_setup_binder_privacy_violation(&real).is_none(),
-        "the REAL `build_script_setup_seed_frames` in `script_setup_binder.rs` MUST be \
-         `pub(in crate::structural_carrier_producer)` (confined to the owner module) — if this \
-         reddens, the helper's visibility was widened, re-opening the cross-module producer surface"
     );
 }
 
@@ -24669,15 +22215,14 @@ fn script_setup_binder_privacy_classifier_discriminates() {
 /// surface) must not silently inherit a blanket exemption that would hide an
 /// eager-lowering regression there. Path tail (not anchored) so the check is
 /// OS-portable — `session_production_src_files()` normalises separators to `/`.
-const MACRO_ARG_PRODUCER_SURFACE_EXEMPT_FILES: &[&str] = &[
-    "structural_carrier_producer/macro_surface.rs",
-    "structural_carrier_producer/script_setup_binder.rs",
-];
+const MACRO_ARG_PRODUCER_SURFACE_EXEMPT_FILES: &[&str] =
+    &["structural_carrier_producer/macro_arg_producer.rs"];
 
-/// Whether `rel` is one of the sanctioned macro-arg producer SURFACE files
-/// exempt from the eager-macro-arg-lowering ordering tripwire. ONLY the macro
-/// producer surface (and its binder-seed child) is exempt; every other file in
-/// the owner directory — and everywhere else in production — is in scope.
+/// Whether `rel` is the sanctioned macro-arg producer SURFACE file exempt from
+/// the eager-macro-arg-lowering ordering tripwire. ONLY the single producer
+/// module `macro_arg_producer.rs` (which owns the macro hot mirror builder and
+/// the binder-seed builder) is exempt; every other file in the owner directory
+/// — and everywhere else in production — is in scope.
 fn macro_arg_producer_surface_is_exempt(rel: &str) -> bool {
     MACRO_ARG_PRODUCER_SURFACE_EXEMPT_FILES
         .iter()
@@ -24709,15 +22254,14 @@ fn macro_arg_producer_surface_is_exempt(rel: &str) -> bool {
 ///     `param_ty` in another fn — the flow check requires the lowered subject
 ///     to be the macro-arg-derived binding, not merely co-present.
 fn macro_arg_eager_lowering_violations(rel: &str, body: &str) -> bool {
-    // The macro producer SURFACE files are the sanctioned macro-arg
-    // producer/accessor home — they legitimately read a macro's
-    // `parsed_type_argument` (or, for the binder-seed child, a script-setup
-    // generic's constraint/default) and lower it through the shared structural
-    // lowerer while building the ONE mode-neutral mirror handle. ONLY those
-    // surface files are exempt — NOT the whole owner directory: the raw lowerer
-    // (`lower.rs`) does NO macro-arg reading, and any future owner file (e.g. a
-    // decl-body producer surface) must NOT inherit a blanket exemption, so an
-    // eager macro-arg lowering planted there is still a violation.
+    // The single producer module (`macro_arg_producer.rs`) is the sanctioned
+    // macro-arg producer/accessor home — it legitimately reads a macro's
+    // `parsed_type_argument` (and a script-setup generic's constraint/default)
+    // and lowers it through the module-private structural lowerer while building
+    // the ONE mode-neutral mirror handle. ONLY that module is exempt — NOT the
+    // whole owner directory: any future owner file (e.g. a decl-body producer
+    // surface) must NOT inherit a blanket exemption, so an eager macro-arg
+    // lowering planted there is still a violation.
     if macro_arg_producer_surface_is_exempt(rel) {
         return false;
     }
@@ -25155,11 +22699,10 @@ fn no_production_macro_arg_eager_lowering_outside_mirror() {
 /// `parsed_type_argument`-derived binding handed to an eager lowering in another
 /// function) is now ALSO a violation; either token alone is not; two UNRELATED
 /// functions (a presence-guard read in one, an unrelated eager lowering of a
-/// non-macro `param_ty` in another) are not; the macro producer SURFACE files
-/// (`macro_surface.rs` + its binder-seed child) are exempt, but the owner
-/// module's RAW LOWERER and any FUTURE non-surface owner file are NOT (the
-/// narrowed exemption — only the surface files, not the whole owner directory);
-/// test-gated co-presence is not.
+/// non-macro `param_ty` in another) are not; the single producer module
+/// (`macro_arg_producer.rs`) is exempt, but any FUTURE non-producer owner file
+/// is NOT (the narrowed exemption — only the producer module, not the whole
+/// owner directory); test-gated co-presence is not.
 #[test]
 fn macro_arg_eager_lowering_tripwire_discriminates() {
     let both = "fn f() { let a = mac.parsed_type_argument; dispatch.lower_type_expr_in_scope_with_mode(x); }\n";
@@ -25253,49 +22796,26 @@ fn macro_arg_eager_lowering_tripwire_discriminates() {
     );
     assert!(
         !macro_arg_eager_lowering_violations(
-            "crates/verter_session/src/structural_carrier_producer/macro_surface.rs",
+            "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
             both
         ),
-        "the macro producer surface (`macro_surface.rs`) is the sanctioned producer/accessor — exempt"
+        "the single producer module (`macro_arg_producer.rs`) is the sanctioned \
+         producer/accessor (it owns the mirror builder + the binder-seed builder) — exempt"
     );
-    // The binder-seed child of the macro surface is ALSO an exempt producer
-    // surface (it lowers a script-setup generic's constraint/default while
-    // building the same handle's scope).
-    assert!(
-        !macro_arg_eager_lowering_violations(
-            "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs",
-            both
-        ),
-        "the macro surface's binder-seed child (`script_setup_binder.rs`) is an exempt producer \
-         surface"
-    );
-    // NARROWED EXEMPTION (FIX): an eager macro-arg lowering planted in the OWNER
-    // module's RAW LOWERER (`lower.rs`) is NOT exempt — the raw lowerer does no
-    // macro-arg reading, so a co-located `parsed_type_argument` read + eager
-    // `lower_type_expr_in_scope_with_*` there IS a violation. The former
-    // whole-directory exemption made this INVISIBLE.
-    assert!(
-        macro_arg_eager_lowering_violations(
-            "crates/verter_session/src/structural_carrier_producer/lower.rs",
-            both
-        ),
-        "an eager macro-arg lowering planted in the owner module's raw lowerer (`lower.rs`) MUST be \
-         reported — the narrowed exemption covers ONLY the macro producer surface file(s), not the \
-         whole `structural_carrier_producer/` directory"
-    );
-    // NARROWED EXEMPTION (FIX): a FUTURE non-exempt owner file — e.g. a
+    // NARROWED EXEMPTION (FIX): a FUTURE non-producer owner file — e.g. a
     // hypothetical decl-body producer surface re-introduced later — must NOT
     // inherit a blanket directory exemption: an eager macro-arg lowering there is
     // STILL a violation until that file is explicitly added to the exempt set
-    // with justification.
+    // with justification. (Only `macro_arg_producer.rs` is exempt today, so any
+    // other owner-directory file is in scope.)
     assert!(
         macro_arg_eager_lowering_violations(
             "crates/verter_session/src/structural_carrier_producer/decl_body_surface.rs",
             both
         ),
         "an eager macro-arg lowering planted in a NON-exempt owner file (a hypothetical \
-         `decl_body_surface.rs`) MUST be reported — only the macro producer surface file(s) are \
-         exempt, not the whole owner directory"
+         `decl_body_surface.rs`) MUST be reported — only the single producer module \
+         (`macro_arg_producer.rs`) is exempt, not the whole owner directory"
     );
     // A test-gated co-presence is NOT a production violation (cfg(test) strip).
     let gated = "#[cfg(test)]\nmod t {\n    fn f() { let a = mac.parsed_type_argument; dispatch.lower_type_expr_in_scope_with_mode(x); }\n}\n";
@@ -25487,305 +23007,35 @@ fn macro_hot_mirror_purity_scanner_discriminates() {
         .is_empty(),
         "a #[cfg(test)]-gated route-resolving call is not a production violation"
     );
-    // The REAL macro-surface producer source is clean (revert proof: the
-    // production `macro_surface.rs` carries none of the banned idents).
+    // The REAL producer source is clean (revert proof: the production
+    // `macro_arg_producer.rs` carries none of the banned idents).
     let mirror_src = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/macro_surface.rs",
+        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
-    .expect("the macro-surface producer source must be readable");
+    .expect("the macro-arg producer source must be readable");
     assert!(
         macro_hot_mirror_impurity_hits(&mirror_src).is_empty(),
-        "the production `structural_carrier_producer/macro_surface.rs` must be route-free (pure \
-         producer)"
-    );
-}
-
-/// Whether `attr` is a `#[macro_use]` attribute (the bare attribute whose path is
-/// the single segment `macro_use`, with no argument list — `#[macro_use]` or the
-/// rarely-spelled, equally-prelude-injecting `#[macro_use(foo, bar)]`). A
-/// `#[macro_use]` on an `extern crate` injects that crate's exported
-/// macros/derives into the CRATE-WIDE macro-use prelude.
-fn attr_is_macro_use(attr: &syn::Attribute) -> bool {
-    attr.path().is_ident("macro_use")
-}
-
-/// Whether `attr` is a `#[cfg_attr(<pred>, … macro_use …)]` — a `cfg_attr` whose
-/// CONDITIONALLY-ATTACHED attribute list contains `macro_use`. A `cfg_attr` can
-/// attach `macro_use` to an `extern crate` under a PRODUCTION-satisfiable
-/// predicate (`#[cfg_attr(feature = "x", macro_use)]`), so it injects the
-/// crate-wide prelude in any build that satisfies `<pred>` — it is rejected
-/// exactly like a bare `#[macro_use]`. Detection is structural: walk the
-/// `cfg_attr` predicate token stream for a `macro_use` identifier. The `cfg`
-/// predicate itself never contains the ident `macro_use` (it is a config-name /
-/// `feature`/`test`/`all`/`any`/`not` grammar), so any `macro_use` ident in the
-/// stream is necessarily an ATTACHED attribute, not part of the condition.
-fn attr_is_cfg_attr_macro_use(attr: &syn::Attribute) -> bool {
-    if !attr.path().is_ident("cfg_attr") {
-        return false;
-    }
-    let tokens = match &attr.meta {
-        syn::Meta::List(list) => list.tokens.clone(),
-        // `#[cfg_attr]` / `#[cfg_attr = …]` with no predicate list cannot attach
-        // an attribute — not a `macro_use` injection.
-        _ => return false,
-    };
-    token_stream_contains_ident(tokens, "macro_use")
-}
-
-/// Recursively walk `tokens` for a bare identifier exactly equal to `needle`,
-/// descending into every nested group (`(...)`, `[...]`, `{...}`). Used to find
-/// an attached `macro_use` anywhere inside a `cfg_attr` token stream.
-fn token_stream_contains_ident(tokens: proc_macro2::TokenStream, needle: &str) -> bool {
-    use proc_macro2::TokenTree;
-    for tt in tokens {
-        match tt {
-            TokenTree::Ident(id) => {
-                if id == needle {
-                    return true;
-                }
-            }
-            TokenTree::Group(g) => {
-                if token_stream_contains_ident(g.stream(), needle) {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Scan one production Rust file `body` for a `#[macro_use] extern crate …;` (or
-/// a `#[cfg_attr(<pred>, macro_use)] extern crate …;`) that is NOT exempted by an
-/// exact `#[cfg(test)]` gate on the same `extern crate` item. Returns one
-/// human-readable violation line per offending `extern crate` (empty = clean).
-///
-/// - A `#[cfg(test)]`-gated `extern crate` is test-only (`cfg(test)` is
-///   unsatisfiable in a normal build), so a `#[macro_use]` there injects no
-///   PRODUCTION prelude — it is EXEMPT (reuses [`attr_is_exactly_cfg_test`], the
-///   same strict matcher the sanctioned-test-mod check uses, so
-///   `cfg(any(test, …))` / a feature cfg do NOT count as a test gate).
-/// - A BARE `extern crate foo;` WITHOUT `#[macro_use]` is INERT in edition 2018+
-///   (it injects no macro names into the prelude), so it is NOT a violation — the
-///   scan only fires on the `#[macro_use]` / `cfg_attr(..., macro_use)` forms.
-fn macro_use_extern_crate_violations(rel: &str, body: &str) -> Vec<String> {
-    let Ok(file) = syn::parse_file(body) else {
-        // A file `syn` cannot parse is skipped (mirrors the other production
-        // scans that `filter_map(.ok())` on `parse_file`).
-        return Vec::new();
-    };
-    let mut violations: Vec<String> = Vec::new();
-    for item in &file.items {
-        let syn::Item::ExternCrate(ec) = item else {
-            continue;
-        };
-        // EXEMPTION: an exact `#[cfg(test)]` gate on the extern-crate item makes
-        // it test-only — its macros never enter a production prelude.
-        if ec.attrs.iter().any(attr_is_exactly_cfg_test) {
-            continue;
-        }
-        let injects_prelude = ec
-            .attrs
-            .iter()
-            .any(|a| attr_is_macro_use(a) || attr_is_cfg_attr_macro_use(a));
-        if injects_prelude {
-            let crate_name = ec.ident.to_string();
-            violations.push(format!(
-                "{rel}: `extern crate {crate_name};` carries `#[macro_use]` (or \
-                 `#[cfg_attr(…, macro_use)]`) outside a `#[cfg(test)]` gate"
-            ));
-        }
-    }
-    violations
-}
-
-/// Crate-wide ban: NO non-`#[cfg(test)]` `#[macro_use] extern crate` (nor a
-/// `#[cfg_attr(…, macro_use)] extern crate`) may exist anywhere in
-/// `crates/verter_session/src/**` production source.
-///
-/// WHY THIS IS CRATE-WIDE (the load-bearing rationale). A `#[macro_use] extern
-/// crate evil;` injects `evil`'s exported macros AND proc-macro DERIVES into the
-/// CRATE-WIDE macro-use prelude. If `evil` exports a derive named `Clone` /
-/// `Debug` / `Default` (any built-in derive name), that injected derive resolves
-/// at the `#[derive(Clone)]` site INSIDE the structural-carrier producer's
-/// `lower.rs` — and the injected proc-macro then EXPANDS IN `lower.rs`'s OWN
-/// module context, where it can emit same-module code that names and calls the
-/// bare module-private `lower_type_expr_structural`. Compiler module-privacy does
-/// NOT backstop this: it is SAME-MODULE expansion, not a foreign module naming
-/// the private fn. The in-file `lower.rs` expansion-surface guard
-/// ([`structural_carrier_producer_lower_has_no_expansion_surface`]) reads only
-/// `lower.rs`, so it cannot see an `extern crate` declared in a PARENT module
-/// (the crate root `lib.rs`, an ancestor `mod.rs`, …) — the injection can come
-/// from ANY ancestor of `lower.rs`, which is why this ban must be crate-wide
-/// rather than `lower.rs`-local.
-///
-/// The scoped, NON-injecting replacement is `use macro_crate::name` (a path
-/// import binds the name in ITS module scope only, never the crate-wide prelude),
-/// and a `use … as Clone` derive-name shadow IN `lower.rs` is ALREADY rejected by
-/// the `lower.rs` derive-shadow `use` rail
-/// ([`use_tree_binds_builtin_derive_name`]). This guard closes the complementary
-/// ANCESTOR vector that `use` rail cannot see.
-///
-/// A bare `extern crate foo;` WITHOUT `#[macro_use]` is INERT in edition 2018+
-/// (no prelude injection) and is therefore NOT rejected; the codebase carries no
-/// production `#[macro_use] extern crate` today, so this guard PASSES on the real
-/// tree (anti-vacuity: the walker asserts it enumerated > 100 production files).
-#[test]
-fn verter_session_production_has_no_macro_use_extern_crate() {
-    let mut violations: Vec<String> = Vec::new();
-    for (rel, src) in session_production_src_files() {
-        violations.extend(macro_use_extern_crate_violations(&rel, &src));
-    }
-    assert!(
-        violations.is_empty(),
-        "single-engine producer CRATE-WIDE MACRO-USE-PRELUDE violation: a non-`#[cfg(test)]` \
-         `#[macro_use] extern crate` (or `#[cfg_attr(…, macro_use)] extern crate`) exists in \
-         `verter_session` production source. `#[macro_use]` injects the crate's macros/derives \
-         into the crate-wide macro-use prelude — a derive named `Clone`/`Debug`/… resolves at the \
-         `#[derive(…)]` site in the structural-carrier producer's `lower.rs` and EXPANDS in \
-         `lower.rs`'s module context (same-module expansion compiler privacy does NOT backstop), \
-         reaching the module-private `lower_type_expr_structural`. Use `use macro_crate::name` \
-         (scoped, non-injecting) instead; a `use … as Clone` derive-name shadow in `lower.rs` is \
-         already rejected by the derive-shadow `use` rail. Violations:\n  {}",
-        violations.join("\n  ")
-    );
-}
-
-/// Self-test for [`macro_use_extern_crate_violations`]: a planted
-/// `#[macro_use] extern crate evil;` reddens; a `#[cfg_attr(feature = "x",
-/// macro_use)] extern crate evil;` reddens (a production-satisfiable conditional
-/// attach); a `#[cfg(test)] #[macro_use] extern crate evil;` is EXEMPT (no red —
-/// test-only prelude); a BARE `extern crate evil;` does NOT red (inert in 2018+);
-/// a file with no `extern crate` passes; and the REAL `verter_session` production
-/// tree carries none (anti-vacuity over the real walk).
-#[test]
-fn macro_use_extern_crate_scanner_discriminates() {
-    // REJECT — a plain `#[macro_use] extern crate evil;`: injects `evil`'s
-    // macros/derives into the crate-wide prelude (THE ancestor vector).
-    let plain = "#[macro_use]\nextern crate evil;\n\nfn f() {}\n";
-    assert_eq!(
-        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", plain).len(),
-        1,
-        "a planted `#[macro_use] extern crate evil;` must RED — it injects the crate-wide \
-         macro-use prelude that can shadow a built-in derive at the `lower.rs` `#[derive(…)]` site"
-    );
-    // REJECT — a `#[cfg_attr(feature = "x", macro_use)] extern crate evil;`: a
-    // `cfg_attr` can ATTACH `macro_use` under a PRODUCTION-satisfiable feature,
-    // so it injects the prelude in any build that satisfies `x`.
-    let cfg_attr = "#[cfg_attr(feature = \"x\", macro_use)]\nextern crate evil;\n";
-    assert_eq!(
-        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", cfg_attr).len(),
-        1,
-        "a planted `#[cfg_attr(feature = \"x\", macro_use)] extern crate evil;` must RED — \
-         `cfg_attr` conditionally attaches `macro_use` under a production-satisfiable predicate, \
-         injecting the crate-wide prelude"
-    );
-    // REJECT — `cfg_attr` attaching `macro_use` alongside another attribute (the
-    // nested-meta-list form) is still caught (the token walk descends groups).
-    let cfg_attr_grouped =
-        "#[cfg_attr(all(feature = \"x\", debug_assertions), macro_use)]\nextern crate evil;\n";
-    assert_eq!(
-        macro_use_extern_crate_violations("crates/verter_session/src/a.rs", cfg_attr_grouped).len(),
-        1,
-        "a `cfg_attr` with a nested `all(…)` predicate attaching `macro_use` must RED — the \
-         token walk descends nested groups to find the attached `macro_use`"
-    );
-    // EXEMPT — a `#[cfg(test)] #[macro_use] extern crate evil;`: `cfg(test)` is
-    // unsatisfiable in a normal build, so the injection is test-only.
-    let cfg_test_gated = "#[cfg(test)]\n#[macro_use]\nextern crate evil;\n";
-    assert!(
-        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", cfg_test_gated)
-            .is_empty(),
-        "a `#[cfg(test)] #[macro_use] extern crate evil;` must NOT red — `cfg(test)` gates it to \
-         a test-only build, so it injects no production prelude"
-    );
-    // NON-EXEMPT — `#[cfg(any(test, feature = \"x\"))]` is PRODUCTION-satisfiable
-    // (not a true test gate per `attr_is_exactly_cfg_test`), so a `#[macro_use]`
-    // beside it still reddens.
-    let non_exact_cfg = "#[cfg(any(test, feature = \"x\"))]\n#[macro_use]\nextern crate evil;\n";
-    assert_eq!(
-        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", non_exact_cfg).len(),
-        1,
-        "a `#[cfg(any(test, feature = \"x\"))] #[macro_use] extern crate evil;` must RED — \
-         `cfg(any(test, …))` is satisfiable in a production build, so the exact-`cfg(test)` \
-         exemption does NOT apply"
-    );
-    // DOES NOT RED — a BARE `extern crate evil;` WITHOUT `#[macro_use]`: inert in
-    // edition 2018+ (no prelude injection), so it is not a violation.
-    let bare = "extern crate evil;\n\nfn f() {}\n";
-    assert!(
-        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", bare).is_empty(),
-        "a bare `extern crate evil;` without `#[macro_use]` must NOT red — it is inert in edition \
-         2018+ (injects no macro names into the prelude)"
-    );
-    // DOES NOT RED — a file with no `extern crate` at all passes.
-    let no_extern = "use crate::foo::Bar;\n\nfn f() {}\n";
-    assert!(
-        macro_use_extern_crate_violations("crates/verter_session/src/lib.rs", no_extern).is_empty(),
-        "a file with no `extern crate` must pass"
-    );
-    // ANTI-VACUITY over the REAL tree: the crate-wide walk enumerates the real
-    // production corpus and finds ZERO production `#[macro_use] extern crate`
-    // (the LIVE proof the guard passes today, not just on fixtures).
-    let mut real_violations: Vec<String> = Vec::new();
-    for (rel, src) in session_production_src_files() {
-        real_violations.extend(macro_use_extern_crate_violations(&rel, &src));
-    }
-    assert!(
-        real_violations.is_empty(),
-        "the real `verter_session` production tree must carry NO `#[macro_use] extern crate` \
-         today (live anti-vacuity proof). Found:\n  {}",
-        real_violations.join("\n  ")
+        "the production `structural_carrier_producer/macro_arg_producer.rs` must be route-free \
+         (pure producer)"
     );
 }
 
 /// The SANCTIONED crate-visible PRODUCER entries of the structural-carrier
-/// producer module. The single witness-gated PUBLIC entry whose private
-/// implementation is the shared structural lowerer (`lower_type_expr_structural`,
-/// module-private in `lower.rs`): the macro-arg accessor `macro_type_arg_hot_ref`.
+/// producer module. The ONE public entry whose private implementation is the
+/// module-private shared structural lowerer (`lower_type_expr_structural` in
+/// `macro_arg_producer.rs`): the macro-arg accessor `macro_type_arg_hot_ref`.
 /// No OTHER crate-visible producer fn may appear in the owner module — a second
-/// would be a new outward producer entry. The witnessed wrapper fn
-/// (`emit_macro_arg` on `lower.rs`) and the binder-seed helper are
-/// `pub(in crate::structural_carrier_producer)`, NOT crate-visible, so they never
-/// appear in this scan.
+/// would be a new outward producer entry. The structural lowerer, the macro
+/// hot-mirror builder, and the binder-seed builder are ALL module-private (no
+/// visibility modifier), so they never appear in this crate-visible scan.
 const MIRROR_SANCTIONED_PRODUCER_ENTRIES: &[&str] = &["macro_type_arg_hot_ref"];
 
-/// Structural helpers that are NOT macro-arg producer entries and are the
-/// SANCTIONED-NAME subjects of the bounded crate-wide-uniqueness token tripwire.
-/// Each is a shared STRUCTURAL helper — it does NOT produce a macro-arg graph
-/// node, so it does not re-open a second outward producer entry. The tripwire
-/// pins the NAME (regardless of visibility) to one genuine free-fn occurrence;
-/// the LOAD-BEARING confinement for each is the COMPILER module-privacy on its
-/// own definition (pinned by a dedicated privacy-shape guard), not this list.
-///
-/// - `build_script_setup_seed_frames`: the shared `<script setup generic="…">`
-///   binder-frame builder. It interns the owner's script-setup generics as
-///   `TypeParam` binder nodes and returns a seed `BinderScope` stack; the ONLY
-///   production caller is the mirror's macro-arg builder (the isolation tests
-///   build the seed binder shape from it directly). It is
-///   `pub(in crate::structural_carrier_producer)` — confined to the owner module
-///   — so NO foreign module can NAME it (a compile error, not a lint): the
-///   by-construction, compiler-enforced single-producer guarantee, pinned by
-///   [`script_setup_binder_helper_is_module_private`]. It is NOT crate-visible,
-///   so it never appears in the crate-visible producer scan; the crate-wide
-///   uniqueness pin (a single genuine free-fn occurrence) is visibility-
-///   independent defense-in-depth.
-const MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES: &[&str] = &["build_script_setup_seed_frames"];
-
-/// The ONE production file the sanctioned non-producer helper
-/// `build_script_setup_seed_frames` is confined to. The crate-wide uniqueness
-/// pin asserts the name appears as a definition/binding ONLY here (and nowhere
-/// else in `verter_session` production source). Path tail (not anchored) so the
-/// check is OS-portable — `session_production_src_files()` already normalises
-/// separators to `/`.
-const SANCTIONED_HELPER_DEFINING_FILE: &str = "structural_carrier_producer/script_setup_binder.rs";
-
 /// Whether `name` is a sanctioned structural-carrier-producer crate-visible
-/// entry — a witness-gated PRODUCER entry OR a sanctioned non-producer
-/// structural helper.
+/// entry — the single macro-arg accessor. Every other producer-capable fn is
+/// module-private to `macro_arg_producer.rs` (compiler-confined), so it can
+/// never be crate-visible.
 fn mirror_entry_is_sanctioned(name: &str) -> bool {
     MIRROR_SANCTIONED_PRODUCER_ENTRIES.contains(&name)
-        || MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES.contains(&name)
 }
 
 /// Whether an attribute list test-gates an item — `#[cfg(test)]`,
@@ -26013,682 +23263,56 @@ fn collect_crate_visible_fns_in_items(items: &[syn::Item], names: &mut Vec<Strin
     }
 }
 
-/// The macro-arg PRODUCT type — the producer entry (`macro_type_arg_hot_ref`)
-/// returns `Option<HotTypeRef>`. A sanctioned NON-producer mirror entry must
-/// neither return nor accept it (that is exactly the producer-entry shape this
-/// guard's single-engine concern forbids on a second outward entry).
-const MIRROR_MACRO_ARG_PRODUCT_TYPE: &str = "HotTypeRef";
-
-/// The binder-seed return shape the sanctioned `build_script_setup_seed_frames`
-/// helper produces — token-spaced exactly as `render_type` emits it.
-const MIRROR_BINDER_SEED_RETURN_TYPE: &str = "Vec < BinderScope >";
-
-/// Where an occurrence of the sanctioned name appears. The positive structural
-/// pin requires the SOLE occurrence to be a module-level FREE [`syn::ItemFn`];
-/// every other surface — an associated fn inside ANY `impl` (inherent OR trait),
-/// a trait-item declaration, a MACRO INVOCATION whose tokens mention the name, or
-/// a `use … as <name>` REEXPORT binding — is a usurpation of the sanctioned name,
-/// regardless of how the offending surface aliases the macro-arg product (`Self`
-/// inside `impl HotTypeRef`, a generic bound, a type alias, a macro that expands
-/// to a producer, a reexport that aliases one). The kind is recorded so a
-/// violation can say exactly which non-free surface the usurper took.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SanctionedOccurrenceKind {
-    /// A module-level free `fn` — the only sanctioned shape.
-    Free,
-    /// An associated `fn` inside an inherent `impl` block.
-    InherentAssoc,
-    /// An associated `fn` inside a trait `impl` block (`impl Trait for T`).
-    TraitImplAssoc,
-    /// A trait-item `fn` declaration (`trait T { fn … }`).
-    TraitItem,
-    /// A macro INVOCATION (item / impl-item / trait-item position, including
-    /// `include!` / `macro_rules!`) whose token stream mentions the sanctioned
-    /// name — a surface that could EXPAND to a producer under the name. A `syn`
-    /// scan cannot expand it, so its mere mention of the name is the usurpation.
-    MacroInvocation,
-    /// A `use … as <name>` REEXPORT binding minting a callable entry under the
-    /// sanctioned name.
-    UseRename,
-}
-
-impl SanctionedOccurrenceKind {
-    fn describe(self) -> &'static str {
-        match self {
-            SanctionedOccurrenceKind::Free => "a module-level free fn",
-            SanctionedOccurrenceKind::InherentAssoc => "an associated fn inside an inherent impl",
-            SanctionedOccurrenceKind::TraitImplAssoc => {
-                "an associated fn inside a trait impl (`impl Trait for T`)"
-            }
-            SanctionedOccurrenceKind::TraitItem => "a trait-item fn declaration",
-            SanctionedOccurrenceKind::MacroInvocation => {
-                "a macro invocation whose tokens mention the sanctioned name (a surface that could \
-                 expand to a producer under the name)"
-            }
-            SanctionedOccurrenceKind::UseRename => {
-                "a `use … as <name>` reexport binding under the sanctioned name"
-            }
-        }
-    }
-}
-
-/// One discovered occurrence of the sanctioned name: where it lives (`rel`), the
-/// surface kind, and — for a fn surface — its parsed signature (`None` for a
-/// macro-invocation or use-rename surface, which carries no fn signature). The
-/// positive pin reasons over the PARSED STRUCTURE of the signature (free-fn-ness,
-/// generics, receiver, the param/return shape) — never over rendered whitespace,
-/// arg names, or raw source bytes.
-struct SanctionedOccurrence {
-    rel: String,
-    kind: SanctionedOccurrenceKind,
-    sig: Option<syn::Signature>,
-}
-
-/// Collect occurrences of the sanctioned name `name` across a source's items —
-/// a module-level FREE `fn`, an associated `fn` inside ANY `impl` (inherent OR
-/// trait), a trait-item `fn` declaration, a MACRO INVOCATION at item / impl-item
-/// / trait-item position whose token stream mentions the name (including
-/// `include!` / `macro_rules!`, which parse as item-position macro invocations),
-/// a `use … as <name>` REEXPORT binding, and all of those nested in inline `mod`
-/// blocks. This is intentionally BROADER than a crate-visibility scan: the
-/// positive pin asserts the name has EXACTLY ONE occurrence among the surfaces it
-/// CAN see and that it is the genuine free-fn shape, so any second occurrence in
-/// one of those surfaces (at any visibility) is a usurpation.
-///
-/// SCOPE — BOUNDED, NOT EXHAUSTIVE. This is a `syn`-source collector. It sees the
-/// occurrence surfaces enumerated above; it CANNOT see macro-expanded output or
-/// any definition outside the walked production-`src` tree. The realistic-vector
-/// surfaces below are the high-value ones a routine refactor / copy-paste would
-/// hit, and closing them is worthwhile defense-in-depth — but the LOAD-BEARING
-/// no-second-producer guarantee for the helper is the COMPILER module-privacy of
-/// `build_script_setup_seed_frames` (`pub(in crate::structural_carrier_producer)`, pinned by
-/// `script_setup_binder_helper_is_module_private`), NOT this scanner. See the
-/// guard `macro_hot_mirror_exposes_single_crate_visible_producer_entry` for the
-/// documented residual evasion tail this scanner deliberately does NOT chase.
-///
-/// CFG-INDEPENDENT BY DESIGN (narrows the cfg over-exclusion vector): the genuine
-/// helper is UNCONDITIONAL — it carries no `#[cfg(...)]` at all. So this collector
-/// pins that the sanctioned name appears EXACTLY ONCE (among the surfaces it can
-/// see) regardless of cfg. It therefore does NOT apply `attrs_test_gate`: a
-/// same-name item under ANY cfg (`#[cfg(test)]`, `#[cfg(debug_assertions)]`,
-/// `#[cfg(any(test, debug_assertions))]`, `#[cfg(not(test))]`,
-/// `#[cfg(feature = "…")]`) is necessarily a SECOND occurrence (the genuine one is
-/// cfg-free), so it is counted and rejected — not over-excluded as the
-/// `attrs_test_gate` `any(test, …)` arm would. The genuine fn (cfg-free) is
-/// counted unchanged; any cfg-gated same-name item is now visible and rejected by
-/// the occurrence-count / not-a-free-fn properties.
-///
-/// MACRO TOKEN-STREAM DEFENSE (narrows the macro-generated-producer vector): a
-/// `syn` scan cannot expand macros, so a macro emitting `fn <name>(...)` would be
-/// invisible to a fn-definition-only walk. The genuine helper uses NO macro and
-/// NO `include!`, so the defense is to flag the sanctioned NAME appearing inside
-/// ANY item-position macro invocation token stream: any macro whose tokens
-/// mention the name is a usurpation surface (it could generate a producer under
-/// the name) → recorded as a `MacroInvocation` occurrence (which is not a free
-/// fn ⇒ rejected). A bare call EXPRESSION inside a fn body
-/// (`script_setup_binder::build_script_setup_seed_frames(…)`, the legitimate
-/// call site in `mod.rs`) is NOT an item-position macro and is NOT seen here, so
-/// it is not flagged. NOTE the documented residual: a macro that SYNTHESISES the
-/// name from token FRAGMENTS (`paste!` / `concat_idents!` / a proc-macro joining
-/// `build_script_setup_` + `seed_frames`) never emits the whole name as one
-/// token, so this token-mention check cannot see it — that residual is accepted
-/// (see the guard doc).
-///
-/// USE-REEXPORT DEFENSE (narrows the reexport-under-the-name vector): a
-/// `use some::producer as <name>` creates a callable entry under the sanctioned
-/// name that a fn-definition scan misses. The genuine helper needs NO reexport,
-/// so any `use … as <name>` rename binding is a usurpation → recorded as a
-/// `UseRename` occurrence (not a free fn ⇒ rejected). NOTE the documented
-/// residual: a GLOB reexport (`use other::*`) that re-exports a foreign `<name>`,
-/// or a rename whose target DEFINITION lives outside the walked `src` tree, is
-/// not resolved by this source-only scan — accepted residual (the compiler
-/// privacy of the helper is the real guarantee).
-fn collect_sanctioned_occurrences(
-    items: &[syn::Item],
-    name: &str,
-    rel: &str,
-    out: &mut Vec<SanctionedOccurrence>,
-) {
-    for item in items {
-        match item {
-            syn::Item::Fn(f) => {
-                // `unraw()` so a `fn r#lower_type_expr_structural` producer (which
-                // rustc names `lower_type_expr_structural`) cannot evade detection.
-                if f.sig.ident.unraw() == name {
-                    out.push(SanctionedOccurrence {
-                        rel: rel.to_string(),
-                        kind: SanctionedOccurrenceKind::Free,
-                        sig: Some(f.sig.clone()),
-                    });
-                }
-            }
-            syn::Item::Impl(imp) => {
-                let kind = if imp.trait_.is_some() {
-                    SanctionedOccurrenceKind::TraitImplAssoc
-                } else {
-                    SanctionedOccurrenceKind::InherentAssoc
-                };
-                for impl_item in &imp.items {
-                    match impl_item {
-                        syn::ImplItem::Fn(m) => {
-                            // `unraw()` so a raw `fn r#<name>` associated producer
-                            // cannot evade detection via a `r#` spelling.
-                            if m.sig.ident.unraw() == name {
-                                out.push(SanctionedOccurrence {
-                                    rel: rel.to_string(),
-                                    kind,
-                                    sig: Some(m.sig.clone()),
-                                });
-                            }
-                        }
-                        // An impl-item-position macro invocation that mentions
-                        // the name — a macro that could generate an associated
-                        // fn under the sanctioned name.
-                        syn::ImplItem::Macro(mac) => {
-                            if macro_tokens_mention(&mac.mac, name) {
-                                out.push(SanctionedOccurrence {
-                                    rel: rel.to_string(),
-                                    kind: SanctionedOccurrenceKind::MacroInvocation,
-                                    sig: None,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            syn::Item::Trait(tr) => {
-                for trait_item in &tr.items {
-                    match trait_item {
-                        syn::TraitItem::Fn(m) => {
-                            // `unraw()` so a raw `fn r#<name>` trait-item producer
-                            // cannot evade detection via a `r#` spelling.
-                            if m.sig.ident.unraw() == name {
-                                out.push(SanctionedOccurrence {
-                                    rel: rel.to_string(),
-                                    kind: SanctionedOccurrenceKind::TraitItem,
-                                    sig: Some(m.sig.clone()),
-                                });
-                            }
-                        }
-                        // A trait-item-position macro invocation that mentions
-                        // the name.
-                        syn::TraitItem::Macro(mac) => {
-                            if macro_tokens_mention(&mac.mac, name) {
-                                out.push(SanctionedOccurrence {
-                                    rel: rel.to_string(),
-                                    kind: SanctionedOccurrenceKind::MacroInvocation,
-                                    sig: None,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // An item-position macro invocation — `some_macro! { ... }`,
-            // `macro_rules! m { ... }`, OR `include!("…")` (all parse as
-            // `Item::Macro`). If its token stream mentions the sanctioned name,
-            // it is a usurpation surface (it could expand to a producer under the
-            // name), so it is recorded and rejected. `macro_rules!` definitions
-            // carry their body in `mac.tokens`, so a `macro_rules!` whose body
-            // emits `fn <name>` is caught too.
-            syn::Item::Macro(item_mac) => {
-                if macro_tokens_mention(&item_mac.mac, name) {
-                    out.push(SanctionedOccurrence {
-                        rel: rel.to_string(),
-                        kind: SanctionedOccurrenceKind::MacroInvocation,
-                        sig: None,
-                    });
-                }
-            }
-            // A `use … as <name>` REEXPORT binding — a callable entry under the
-            // sanctioned name a fn-definition scan misses.
-            syn::Item::Use(use_item) => {
-                if use_tree_renames_to(&use_item.tree, name) {
-                    out.push(SanctionedOccurrence {
-                        rel: rel.to_string(),
-                        kind: SanctionedOccurrenceKind::UseRename,
-                        sig: None,
-                    });
-                }
-            }
-            syn::Item::Mod(m) => {
-                if let Some((_, inner)) = &m.content {
-                    collect_sanctioned_occurrences(inner, name, rel, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Whether a macro invocation's token stream mentions the sanctioned `name`. A
-/// `syn` scan cannot expand macros, so any macro invocation (or `macro_rules!` /
-/// `include!` / `include_str!`) whose tokens reference the sanctioned name is
-/// treated as a usurpation surface that could generate a producer under that
-/// name. Walks the token tree recursively, descending into every parenthesised /
-/// braced / bracketed group, and matches the name in TWO positions:
-///
-/// - an `Ident` token whose text equals `name` (an exact identifier match, not a
-///   substring — `build_script_setup_seed_frames_v2` does not match
-///   `build_script_setup_seed_frames`) — catches `macro_rules!`/function-like
-///   macros whose body emits `fn <name>`; and
-/// - a string / byte-string `Literal` whose decoded text CONTAINS the name as a
-///   whole word (word-boundary-delimited) — catches `include!("<name>.rs")` and
-///   `include!(concat!(env!("OUT_DIR"), "/<name>.rs"))`, where the name lives in a
-///   path string literal rather than as a bare ident token. (The genuine helper
-///   uses NO macro and NO `include!`, so any macro referencing the name — ident
-///   OR literal — is suspect.)
-fn macro_tokens_mention(mac: &syn::Macro, name: &str) -> bool {
-    token_stream_mentions_ident(mac.tokens.clone(), name)
-}
-
-/// Recursively walk a `proc_macro2::TokenStream` for the sanctioned `name`,
-/// descending into every `Group` (`(...)` / `{...}` / `[...]`). Matches an
-/// `Ident` token equal to `name` OR a `Literal` token whose rendered text
-/// contains `name` as a whole word (see [`literal_mentions_name_as_word`]).
-fn token_stream_mentions_ident(tokens: proc_macro2::TokenStream, name: &str) -> bool {
-    use proc_macro2::TokenTree;
-    tokens.into_iter().any(|tt| match tt {
-        // `unraw()` so a `macro_rules!` body emitting `fn r#<name>` (which rustc
-        // names `<name>`) cannot evade the ident match via a `r#` spelling.
-        TokenTree::Ident(ident) => ident.unraw() == name,
-        TokenTree::Literal(lit) => literal_mentions_name_as_word(&lit.to_string(), name),
-        TokenTree::Group(group) => token_stream_mentions_ident(group.stream(), name),
-        TokenTree::Punct(_) => false,
-    })
-}
-
-/// Whether a rendered literal token (`"…"` / `b"…"` / `r#"…"#` / a numeric or
-/// char literal) contains `name` as a WHOLE WORD — `name` appears with a
-/// non-identifier character (or string boundary) on each side. This matches the
-/// name inside an `include!("<name>.rs")` path literal (delimiter `.` after the
-/// name) while NOT matching `"<name>_v2"` (an identifier character `_` follows the
-/// name, so it is a different symbol). Walks every `name` substring occurrence
-/// (via `find` over the remaining slice), gating each on both neighbours being
-/// non-`[A-Za-z0-9_]` (or the string boundary).
-fn literal_mentions_name_as_word(rendered_literal: &str, name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let is_ident_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let bytes = rendered_literal.as_bytes();
-    let name_bytes = name.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = rendered_literal[start..].find(name) {
-        let abs = start + pos;
-        let before_ok =
-            abs == 0 || !is_ident_char(rendered_literal[..abs].chars().next_back().unwrap());
-        let after_idx = abs + name_bytes.len();
-        let after_ok = after_idx >= bytes.len()
-            || !is_ident_char(rendered_literal[after_idx..].chars().next().unwrap());
-        if before_ok && after_ok {
-            return true;
-        }
-        start = abs + 1;
-    }
-    false
-}
-
-/// Whether a `use` tree introduces a binding RENAMED to the sanctioned `name` via
-/// `as <name>` — `use a::b as <name>;`, `use a::{c as <name>};`, a nested-group
-/// rename, or a glob-free path whose terminal rename targets the name. Walks the
-/// `UseTree` recursively. A plain `use a::<name>;` (no rename) is NOT a match: the
-/// final path segment being the name without an `as` rename re-exports under the
-/// ORIGINAL module's name, not a freshly minted binding usurping the sanctioned
-/// name — but a `use a::<name> as <name>;` (explicit self-rename) DOES introduce a
-/// fresh binding under the name and is matched by the `Rename` arm. (The genuine
-/// helper needs no `use` at all, so any rename-to-the-name is suspect.)
-fn use_tree_renames_to(tree: &syn::UseTree, name: &str) -> bool {
-    match tree {
-        // `unraw()` the rename target so a raw `as r#lower_type_expr_structural;`
-        // (which rustc binds as `lower_type_expr_structural`) cannot evade the
-        // alias-reexport check via a `r#`-spelled target.
-        syn::UseTree::Rename(rename) => rename.rename.unraw() == name,
-        syn::UseTree::Path(path) => use_tree_renames_to(&path.tree, name),
-        syn::UseTree::Group(group) => group
-            .items
-            .iter()
-            .any(|item| use_tree_renames_to(item, name)),
-        // `use a::b;` (plain) and `use a::*;` (glob) do not mint a fresh binding
-        // under a renamed-to name.
-        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => false,
-    }
-}
-
-/// Whether a `use` tree binds ANY of [`LOWER_RS_BUILTIN_DERIVES`] (the std
-/// built-in derive names — `Debug` / `Default` / `Clone` / `Copy` / `PartialEq` /
-/// `Eq` / `Hash` / `PartialOrd` / `Ord`) INTO SCOPE — either as a `use … as <D>;`
-/// rename TARGET (`use serde_derive::Serialize as Clone;`) or as the bound leaf
-/// of a plain / grouped path (`use evil::Clone;`, `use evil::{Foo, Clone};`).
-///
-/// This closes the derive-NAME-SHADOW vector that `check_derive_contents_builtin`
-/// (a SPELLING-ONLY scan) cannot: `#[derive(Clone)]` is accepted by the spelling
-/// scan if the ident reads `Clone`, but a `use serde_derive::Serialize as Clone;`
-/// import re-binds the name `Clone` to a PROC-MACRO derive (rustc resolves the
-/// derive to the imported macro, NOT the prelude built-in — RUSTC-CONFIRMED),
-/// which can synthesise same-module code reaching the module-private
-/// `lower_type_expr_structural`. A scanner cannot RESOLVE the derive, so it
-/// rejects the shadowing `use` IMPORT instead (a source-visible line in
-/// `lower.rs`). The std prelude ALREADY provides every built-in derive name, so
-/// an EXPLICIT `use …::Clone;` (renamed or not, from any path) can ONLY be a
-/// shadow — never legitimate. Recurses grouped / pathed trees exactly as
-/// [`use_tree_renames_to`] does (mirroring the sibling carrier guard's
-/// `use_tree_has_rename` RECURSION, `carrier_encapsulation_guards.rs`), but
-/// extracts the BOUND NAME (rename target or leaf ident) rather than only
-/// detecting a rename. The extracted name is `unraw()`d before the membership
-/// check so a raw `as r#Clone;` / `use evil::r#Clone;` (which rustc binds as
-/// `Clone`) cannot evade it.
-fn use_tree_binds_builtin_derive_name(tree: &syn::UseTree) -> bool {
-    match tree {
-        // `use … as <D>;` — the RENAME TARGET binds the name. `unraw()` first so a
-        // raw `as r#Clone;` (which rustc binds as `Clone`) normalises before the
-        // membership check and cannot evade it.
-        syn::UseTree::Rename(rename) => {
-            LOWER_RS_BUILTIN_DERIVES.contains(&rename.rename.unraw().to_string().as_str())
-        }
-        // `use a::b;` (no rename) — the LEAF ident binds the name. An explicit
-        // `use …::Clone;` shadows the prelude built-in (which needs no `use`).
-        // `unraw()` first so a raw `use evil::r#Clone;` leaf normalises to `Clone`.
-        syn::UseTree::Name(name) => {
-            LOWER_RS_BUILTIN_DERIVES.contains(&name.ident.unraw().to_string().as_str())
-        }
-        syn::UseTree::Path(path) => use_tree_binds_builtin_derive_name(&path.tree),
-        syn::UseTree::Group(group) => group.items.iter().any(use_tree_binds_builtin_derive_name),
-        // A glob (`use evil::*;`) is handled separately by
-        // [`use_tree_has_production_glob`] — the scan cannot see WHICH names a
-        // glob brings in, so a production glob is rejected outright.
-        syn::UseTree::Glob(_) => false,
-    }
-}
-
-/// Whether a `use` tree contains a GLOB (`use evil::*;`, `use evil::{Foo, *};`) —
-/// recursing grouped / pathed trees. A glob could bring a built-in-derive-name
-/// shadow (or any other shadow) into scope WITHOUT a visible leaf ident the
-/// `syn` scan can inspect, so a PRODUCTION glob in `lower.rs` is the bounded
-/// close: reject it, mirroring the sibling carrier guard's glob rejection (a glob
-/// is absent from its `EXPECTED_USES`, so `check_use` rejects it). The real
-/// `lower.rs` has no glob import.
-fn use_tree_has_production_glob(tree: &syn::UseTree) -> bool {
-    match tree {
-        syn::UseTree::Glob(_) => true,
-        syn::UseTree::Path(path) => use_tree_has_production_glob(&path.tree),
-        syn::UseTree::Group(group) => group.items.iter().any(use_tree_has_production_glob),
-        syn::UseTree::Name(_) | syn::UseTree::Rename(_) => false,
-    }
-}
-
-/// The genuine sanctioned helper's parameter types, rendered token-spaced
-/// exactly as [`render_type`] emits them. The positive pin requires the SOLE
-/// occurrence to carry these three typed params in order. Pinning the parsed
-/// parameter TYPES (not arg names, not whitespace) makes a direct-product param
-/// (`seed: HotTypeRef`) or an alias-shaped param fail; the upstream free-fn /
-/// no-generics / no-receiver / single-occurrence properties already close the
-/// alias/`Self`/generic-bound class, so this is a redundant structural belt.
-const MIRROR_SEED_FRAMES_PARAM_TYPES: &[&str] = &[
-    "& crate :: project_type_store :: IndexedReady",
-    "& SemanticGraphStore",
-    "& NodeScopeId",
-];
-
-/// POSITIVE STRUCTURAL AST PIN for the sanctioned binder-seed helper `fn_name`,
-/// aggregated across ALL scanned `structural_carrier_producer/**` production
-/// sources (the `mirror_sources` parameter is the per-file `(rel, src)` list the
-/// entry-surface guard already retains).
-///
-/// This REPLACES the former negative token-rendering confinement
-/// (`render_type(..).contains("HotTypeRef")`), which was structurally LEAKY: a
-/// usurper could alias the macro-arg product behind `Self` in `impl HotTypeRef`,
-/// a generic bound / `where` clause, a `type H = HotTypeRef` alias, a reexport
-/// (`use … as H`), or an associated-type projection — none of which RENDER the
-/// token `HotTypeRef`, so the negative scan passed them. A POSITIVE contract
-/// closes the whole PARSED-FN-SURFACE alias class at once (within the surfaces a
-/// `syn` source scan CAN see): it asserts the sanctioned name IS EXACTLY the one
-/// genuine production shape, so anything VISIBLE-to-the-scanner that is not that
-/// shape — however it aliases the product — fails. This is a BOUNDED
-/// defense-in-depth tripwire, NOT exhaustive: a macro-expanded or out-of-tree
-/// producer is outside what a source scan can see (the documented residual tail
-/// on `macro_hot_mirror_exposes_single_crate_visible_producer_entry`); the
-/// load-bearing guarantee is the COMPILER module-privacy of the helper. The pin
-/// reasons over PARSED STRUCTURE (free-fn-ness, generics, receiver, the
-/// param/return shape), never over a rendered spelling or raw source bytes, so a
-/// legitimate signature change correctly turns it RED until the sanctioned
-/// surface is reviewed and re-pinned (that is the intended governance, not
-/// brittleness).
-///
-/// The five structural assertions (each independently fatal):
-///
-/// 1. EXACTLY ONE occurrence of the name across ALL scanned sources and ALL
-///    surface kinds (free fn, inherent-`impl` assoc fn, trait-`impl` assoc fn,
-///    trait-item fn, a MACRO INVOCATION whose tokens mention the name — including
-///    `include!` / `macro_rules!` — a `use … as <name>` REEXPORT binding, and
-///    inline-mod nesting), REGARDLESS of cfg (the genuine helper is cfg-free, so a
-///    cfg-gated same-name occurrence is necessarily a second occurrence). ZERO ⇒
-///    the name vanished. >1 ⇒ a second occurrence anywhere is the usurpation
-///    vector.
-/// 2. That one occurrence IS a module-level FREE `ItemFn` — NOT an associated fn
-///    inside any `impl`, NOT a trait method, NOT a macro invocation, NOT a
-///    use-rename. (A `Self`-aliasing or receiver usurper is necessarily an
-///    associated fn; a macro-generated or reexported producer is necessarily a
-///    macro-invocation / use-rename occurrence — all die here.)
-/// 3. Its signature has NO generic params, NO `where` clause, and NO receiver. (A
-///    generic-bound usurper `fn …<T: From<HotTypeRef>>(…)` dies here; a receiver
-///    usurper dies here too, redundantly with #2.)
-/// 4. Its parameters are EXACTLY the three genuine typed params in order
-///    ([`MIRROR_SEED_FRAMES_PARAM_TYPES`]). A direct-product param
-///    (`seed: HotTypeRef`) or any other shape fails.
-/// 5. Its return type is EXACTLY the genuine binder-seed shape
-///    [`MIRROR_BINDER_SEED_RETURN_TYPE`] (`Vec<BinderScope>`). A product return
-///    (`-> HotTypeRef` / `-> Option<HotTypeRef>`) fails.
-fn positive_pin_sanctioned_helper(
-    mirror_sources: &[(String, String)],
-    fn_name: &str,
-) -> Result<(), String> {
-    let mut occurrences: Vec<SanctionedOccurrence> = Vec::new();
-    for (rel, src) in mirror_sources {
-        let file = syn::parse_file(src)
-            .map_err(|e| format!("positive-pin parse of `{rel}` while pinning `{fn_name}`: {e}"))?;
-        collect_sanctioned_occurrences(&file.items, fn_name, rel, &mut occurrences);
-    }
-
-    // #1 — EXACTLY ONE occurrence across every scanned source and every surface
-    // kind (fn definition, macro invocation, use-rename), regardless of cfg.
-    if occurrences.is_empty() {
-        return Err(format!(
-            "positive-pin #1: the sanctioned helper `{fn_name}` has NO occurrence anywhere in the \
-             scanned production source — it must appear EXACTLY ONCE as the genuine module-level \
-             free fn (its disappearance means the binder-seed producer regressed)"
-        ));
-    }
-    if occurrences.len() > 1 {
-        let where_found: Vec<String> = occurrences
-            .iter()
-            .map(|o| format!("{} ({})", o.rel, o.kind.describe()))
-            .collect();
-        return Err(format!(
-            "positive-pin #1: the sanctioned name `{fn_name}` appears {} times across the scanned \
-             production source — it MUST appear EXACTLY ONCE. A second occurrence under the \
-             sanctioned name (in ANY file, ANY surface kind — a fn definition, a macro invocation \
-             whose tokens mention the name, a `use … as <name>` reexport — ANY visibility, ANY \
-             cfg) is the usurpation vector: it cannot be distinguished from the genuine helper by \
-             name, so it rides the allowlist. Occurrences: {where_found:?}",
-            occurrences.len()
-        ));
-    }
-
-    let occurrence = &occurrences[0];
-
-    // #2 — the SOLE occurrence is a module-level FREE fn (not associated, not a
-    // trait method). This is the single property that closes the `Self`-aliasing
-    // vector (`impl HotTypeRef { fn …(seed: Self) -> … }`) the negative scan could
-    // not see: `Self` renders no `HotTypeRef` token, but the fn is an associated
-    // fn, so it is rejected structurally.
-    if occurrence.kind != SanctionedOccurrenceKind::Free {
-        return Err(format!(
-            "positive-pin #2: the sanctioned helper `{fn_name}` in `{}` is {} — it MUST be a \
-             module-level FREE fn. An associated/trait fn can alias the macro-arg product through \
-             `Self` (inside `impl HotTypeRef`), the impl self-type, or a receiver WITHOUT rendering \
-             the token `{MIRROR_MACRO_ARG_PRODUCT_TYPE}`, which a negative spelling scan cannot \
-             catch; pinning the free-fn shape rejects it structurally",
-            occurrence.rel,
-            occurrence.kind.describe()
-        ));
-    }
-
-    // The sole occurrence is `Free` (asserted by #2), and only the fn surfaces
-    // (`Free`/`InherentAssoc`/`TraitImplAssoc`/`TraitItem`) record a signature;
-    // `Free` always carries one by construction. A macro-invocation / use-rename
-    // surface records `sig = None`, but those are never `Free`, so they are
-    // rejected by #2 above and never reach here.
-    let sig = occurrence
-        .sig
-        .as_ref()
-        .expect("a Free sanctioned occurrence always carries a parsed signature");
-
-    // #3 — NO generics, NO `where`, NO receiver. Closes the generic-bound vector
-    // (`fn …<T: From<HotTypeRef>>(t: T) -> …`) and any receiver usurper.
-    if !sig.generics.params.is_empty() {
-        return Err(format!(
-            "positive-pin #3: the sanctioned helper `{fn_name}` declares generic parameters — the \
-             genuine helper is NON-generic. A generic usurper can alias the macro-arg product \
-             through a bound (`<T: From<{MIRROR_MACRO_ARG_PRODUCT_TYPE}>>`) the negative scan never \
-             rendered; a non-generic pin rejects it"
-        ));
-    }
-    if sig.generics.where_clause.is_some() {
-        return Err(format!(
-            "positive-pin #3: the sanctioned helper `{fn_name}` has a `where` clause — the genuine \
-             helper has none. A `where` bound can carry the macro-arg product (or an alias of it) \
-             invisibly to a token scan; a no-`where` pin rejects it"
-        ));
-    }
-    if sig
-        .inputs
-        .iter()
-        .any(|input| matches!(input, syn::FnArg::Receiver(_)))
-    {
-        return Err(format!(
-            "positive-pin #3: the sanctioned helper `{fn_name}` has a `self` receiver — the genuine \
-             helper is a free fn with NO receiver. A receiver carries the impl self-type (e.g. \
-             `impl {MIRROR_MACRO_ARG_PRODUCT_TYPE}`) into the fn without naming the product in a \
-             typed arm; rejecting any receiver closes that vector"
-        ));
-    }
-
-    // #4 — EXACTLY the three genuine typed params, in order, by rendered type. A
-    // direct-product param (`seed: HotTypeRef`) or any reshaping fails. The typed
-    // params are read structurally; their rendered TYPES are fixed and pinned (not
-    // their arg names).
-    let param_types: Vec<String> = sig
-        .inputs
-        .iter()
-        .filter_map(|input| match input {
-            syn::FnArg::Typed(pat_type) => Some(render_type(&pat_type.ty)),
-            syn::FnArg::Receiver(_) => None,
-        })
-        .collect();
-    if param_types.len() != MIRROR_SEED_FRAMES_PARAM_TYPES.len()
-        || param_types
-            .iter()
-            .zip(MIRROR_SEED_FRAMES_PARAM_TYPES)
-            .any(|(actual, expected)| actual != expected)
-    {
-        return Err(format!(
-            "positive-pin #4: the sanctioned helper `{fn_name}` parameter types do not match the \
-             genuine binder-seed shape. Expected (in order) {MIRROR_SEED_FRAMES_PARAM_TYPES:?}; \
-             found {param_types:?}. A usurper that accepts the macro-arg product directly \
-             (`seed: {MIRROR_MACRO_ARG_PRODUCT_TYPE}`) or reshapes the params fails here"
-        ));
-    }
-
-    // #5 — EXACTLY the genuine binder-seed return shape. A product return
-    // (`-> HotTypeRef` / `-> Option<HotTypeRef>`) fails.
-    let return_rendered = match &sig.output {
-        syn::ReturnType::Type(_, ty) => render_type(ty),
-        syn::ReturnType::Default => "()".to_string(),
-    };
-    if return_rendered != MIRROR_BINDER_SEED_RETURN_TYPE {
-        return Err(format!(
-            "positive-pin #5: the sanctioned helper `{fn_name}` must return the genuine binder-seed \
-             shape `{MIRROR_BINDER_SEED_RETURN_TYPE}`; found `{return_rendered}`. A usurper that \
-             returns the macro-arg product (`-> {MIRROR_MACRO_ARG_PRODUCT_TYPE}` / \
-             `-> Option<{MIRROR_MACRO_ARG_PRODUCT_TYPE}>`) fails here"
-        ));
-    }
-
-    Ok(())
-}
-
 /// BOUNDED defense-in-depth tripwire (NOT exhaustive): assert the SANCTIONED
-/// witness-gated producer entry (`macro_type_arg_hot_ref`) is the ONLY
-/// crate-visible (`pub(crate)` / `pub(in crate)` / bare `pub`) PRODUCTION
-/// producer entry of the `structural_carrier_producer` module — covering BOTH
-/// module-level FREE functions AND ASSOCIATED functions inside INHERENT `impl`
-/// blocks (trait-impl methods inherit the trait's visibility and cannot be
-/// independently crate-visible, so they are not a producer-entry vector). No
-/// OTHER crate-visible fn (free or associated) in `structural_carrier_producer/**`
+/// producer entry (`macro_type_arg_hot_ref`) is the ONLY crate-visible
+/// (`pub(crate)` / `pub(in crate)` / bare `pub`) PRODUCTION producer entry of
+/// the `structural_carrier_producer` module — covering BOTH module-level FREE
+/// functions AND ASSOCIATED functions inside INHERENT `impl` blocks (trait-impl
+/// methods inherit the trait's visibility and cannot be independently
+/// crate-visible, so they are not a producer-entry vector). No OTHER
+/// crate-visible fn (free or associated) in `structural_carrier_producer/**`
 /// may expose a second outward producer entry. The `#[cfg(test)]`
-/// `MacroHotMirror::demanded_count` test accessor is excluded by attribute; the
-/// witnessed wrapper fn (`emit_macro_arg` on `lower.rs`) and the binder-seed
-/// helper are `pub(in crate::structural_carrier_producer)` (restricted
-/// visibility — NOT crate-visible); and the raw structural lowerer is
-/// MODULE-PRIVATE (no visibility modifier), so none widens the crate-visible
-/// producer surface.
+/// `MacroHotMirror::demanded_count` test accessor is excluded by attribute; and
+/// the raw structural lowerer, the macro hot-mirror builder, and the binder-seed
+/// builder are ALL MODULE-PRIVATE (no visibility modifier) inside
+/// `macro_arg_producer.rs`, so none widens the crate-visible producer surface.
 ///
 /// LAYER ORDER. This is the SECONDARY layer. The LOAD-BEARING confinement is the
-/// COMPILER privacy of the producer-capable code:
-/// - the raw structural lowerer is MODULE-PRIVATE in `lower.rs` and reachable
-///   only through the one unforgeable-witness-gated wrapper (`emit_macro_arg`),
-///   pinned by `structural_carrier_producer_lowerer_is_module_private` +
-///   `structural_lowerer_called_only_through_the_witness_gated_wrapper` (the
-///   in-file single-call pin) +
-///   `structural_carrier_producer_witnesses_are_unforgeable`;
-/// - the shared binder-seed helper `build_script_setup_seed_frames` is
-///   `pub(in crate::structural_carrier_producer)`, pinned by
-///   `script_setup_binder_helper_is_module_private`.
-///
-/// A foreign module cannot NAME either (a compile error, not a lint), so a second
-/// outward producer is UNREPRESENTABLE by construction — that is the airtight
-/// guarantee. This token-scanning guard is a `syn`-source tripwire layered on
-/// top: it catches the high-value, realistic refactor/copy-paste vectors a future
-/// edit would plausibly introduce, but it is BOUNDED, not exhaustive.
+/// COMPILER privacy of the producer-capable code: the structural lowerer, the
+/// macro hot-mirror builder, and the binder-seed builder are all MODULE-PRIVATE
+/// inside the single producer module `macro_arg_producer.rs` (the owner declares
+/// it as a PRIVATE `mod macro_arg_producer;` re-exporting only
+/// `macro_type_arg_hot_ref` + `MacroHotMirror`), pinned by
+/// `structural_carrier_producer_lowerer_is_module_private` +
+/// `structural_carrier_producer_module_is_narrow`. A foreign module cannot NAME
+/// any of them (a compile error, not a lint), and there is no OTHER file in the
+/// owner module that could name them either, so a second outward producer is
+/// UNREPRESENTABLE by construction — that is the airtight guarantee. This
+/// token-scanning guard is a `syn`-source tripwire layered on top: it catches the
+/// high-value, realistic refactor/copy-paste vector (a new crate-visible producer
+/// fn added to the module), but it is BOUNDED, not exhaustive.
 ///
 /// KNOWN RESIDUAL GAPS (deliberately NOT covered — ACCEPTED). A `syn` source scan
 /// fundamentally cannot see macro-expanded or out-of-tree producers, so the
 /// following exotic shapes can evade THIS guard while the compiler module-privacy
-/// of the helpers still forbids the actual rogue producer:
+/// of the producer-capable code still forbids the actual rogue producer:
 /// - a `const` / `static` FN-POINTER binding (`const P: fn(&C) -> H = …;`) or an
-///   ASSOCIATED const holding a producer fn pointer under the sanctioned name —
-///   not a `fn`-item / `impl`-fn / trait-fn surface, so not enumerated;
-/// - a FOREIGN-FN shape (`extern "C" { fn <name>(...) -> …; }`) under the name;
-/// - SPLIT-TOKEN macro name synthesis: `paste!` / `concat_idents!` / a proc-macro
-///   that joins fragments (`build_script_setup_` + `seed_frames`) so the whole
-///   name is never one ident token — the token-mention check cannot see it;
-/// - a GLOB reexport (`use other::*`) pulling in a foreign `<name>`, or an
-///   EXTERNAL reexport whose target DEFINITION lives outside the walked
-///   production-`src` tree;
+///   ASSOCIATED const holding a producer fn pointer — not a `fn`-item / `impl`-fn
+///   surface, so not enumerated;
+/// - a FOREIGN-FN shape (`extern "C" { fn <name>(...) -> …; }`);
 /// - a production `#[path = "…"]` module rooted OUTSIDE
-///   `crates/verter_session/src/**` (not enumerated by `session_production_src_files()`);
-/// - an `include!(concat!(…))` whose composed path is not a literal the
-///   word-boundary scan can match.
+///   `crates/verter_session/src/**` (not enumerated by `session_production_src_files()`).
 ///
 /// These residuals are ACCEPTED because (i) the COMPILER module-privacy of the
-/// producer-capable helpers (the two PRIMARY guards above) is the airtight
-/// guarantee — a rogue producer reachable from a foreign module is a compile
-/// error regardless of how it is spelled; (ii) a `syn` scan cannot SOUNDLY close
-/// the macro-expansion / out-of-tree tail (chasing it adds occurrence kinds with
-/// no end and no soundness gain); (iii) no live violation exists. Per the
-/// architecture ruling, this guard is NOT extended to chase the const / static /
-/// split-token / glob / out-of-tree tail.
+/// producer-capable code (the PRIMARY guards above) is the airtight guarantee — a
+/// rogue producer reachable from a foreign module is a compile error regardless of
+/// how it is spelled; (ii) a `syn` scan cannot SOUNDLY close the macro-expansion /
+/// out-of-tree tail; (iii) no live violation exists. Per the architecture ruling,
+/// this guard is NOT extended to chase that tail.
 #[test]
 fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     let mut crate_visible: Vec<(String, String)> = Vec::new();
     let mut scanned_mirror_files = 0usize;
-    // Retain each owner file's source so the POSITIVE STRUCTURAL PIN below can
-    // parse every owner file and aggregate occurrences of the sanctioned helper
-    // name module-wide.
-    let mut mirror_sources: Vec<(String, String)> = Vec::new();
     for (rel, src) in session_production_src_files() {
         if !rel.contains("structural_carrier_producer/") {
             continue;
@@ -26697,14 +23321,15 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
         for name in crate_visible_producer_fn_names(&src) {
             crate_visible.push((rel.clone(), name));
         }
-        mirror_sources.push((rel, src));
     }
     // Anti-vacuity: the module must exist and the scan must have found the
-    // sanctioned entries — their absence means the producer-entry move regressed.
+    // sanctioned entry — its absence means the producer-entry move regressed. The
+    // owner module is now narrow (`mod.rs` + `macro_arg_producer.rs`), so at least
+    // one production file is scanned.
     assert!(
-        scanned_mirror_files >= 4,
-        "anti-vacuity: expected at least `mod.rs` + `lower.rs` + the macro producer surface + the \
-         binder helper, found {scanned_mirror_files}"
+        scanned_mirror_files >= 1,
+        "anti-vacuity: expected at least the owner module's production files \
+         (`mod.rs` + `macro_arg_producer.rs`), found {scanned_mirror_files}"
     );
     for sanctioned in MIRROR_SANCTIONED_PRODUCER_ENTRIES {
         assert!(
@@ -26721,120 +23346,14 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
         extra.is_empty(),
         "structural-carrier-producer entry-surface violation: the crate-visible \
          (`pub(crate)`/`pub(in crate)`/`pub`) PRODUCTION producer entries of \
-         `structural_carrier_producer/**` must be EXACTLY the sanctioned witness-gated entry \
-         {MIRROR_SANCTIONED_PRODUCER_ENTRIES:?} (the macro-arg accessor; it wraps the single \
-         module-private structural lowerer through an unforgeable witness) — covering BOTH \
-         module-level FREE functions AND ASSOCIATED functions inside INHERENT `impl` blocks. A \
-         second crate-visible producer fn (free OR associated) re-opens a new outward entry into \
-         the single-producer module. Found extra entries: {extra:#?}. If the module legitimately \
-         needs another crate-visible fn for a NON-producer reason, scope it to a non-producer \
-         surface and add it to the sanctioned set with justification."
-    );
-
-    // POSITIVE STRUCTURAL AST PIN (ANTI-ROGUE): the name-only sanction is
-    // necessary but NOT sufficient — a fn USURPING a sanctioned name could carry
-    // a real macro-arg producer surface. The former confinement rendered each
-    // signature and rejected the token `HotTypeRef` (a NEGATIVE scan); that was
-    // structurally leaky — `Self` inside `impl HotTypeRef`, a generic bound /
-    // `where`, a `type H = HotTypeRef` alias, a reexport, or an associated-type
-    // projection all alias the product WITHOUT rendering its token, so the scan
-    // passed them. The POSITIVE pin instead asserts the sanctioned name IS
-    // EXACTLY the one genuine production shape across ALL mirror sources: exactly
-    // one occurrence (any second definition in any item kind/visibility fails),
-    // a module-level FREE fn (no associated/trait fn), no generics/`where`/
-    // receiver, the genuine three typed params, and the binder-seed
-    // `Vec<BinderScope>` return. Anything VISIBLE-to-the-scanner that is not that
-    // exact shape — however it aliases the macro-arg product — fails, closing the
-    // whole PARSED-FN-SURFACE alias class at once (a BOUNDED tripwire, not
-    // exhaustive over macro-expanded / out-of-tree shapes — see the guard's
-    // documented residual list). (See `positive_pin_sanctioned_helper`.)
-    for sanctioned in MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES {
-        if let Err(reason) = positive_pin_sanctioned_helper(&mirror_sources, sanctioned) {
-            panic!(
-                "sanctioned helper POSITIVE STRUCTURAL PIN violation: {reason}. The name-only \
-                 allowlist is not enough — the sanctioned helper must BE the one genuine \
-                 module-level free fn (no generics/`where`/receiver, the genuine param/return \
-                 shape) with EXACTLY ONE definition across the WHOLE module. Any other shape under \
-                 the sanctioned name — however it aliases the macro-arg product `HotTypeRef` — is a \
-                 usurpation."
-            )
-        }
-    }
-
-    // CRATE-WIDE SANCTIONED-NAME UNIQUENESS (BOUNDED POSITIVE TRIPWIRE). The
-    // owner-scoped pin above proves the sanctioned helper is the one genuine
-    // free fn WITHIN `structural_carrier_producer/**`. This broadens that to the
-    // whole crate: the sanctioned name `build_script_setup_seed_frames` should
-    // appear in ALL WALKED `verter_session` production source — not just the owner
-    // directory — ONLY as that one genuine free fn in `script_setup_binder.rs`, and
-    // nowhere else among the SURFACES THE SCANNER CAN SEE (no fn in another module,
-    // no `use … as` reexport binding, no cfg-gated variant, no item-position macro
-    // invocation token-mentioning the name). Scanning the WHOLE walked tree (not
-    // just `structural_carrier_producer/**`) narrows the out-of-module producer
-    // vector (a usurper under the name in any OTHER walked production module is now
-    // visible);
-    // the surface-broadened, cfg-independent `collect_sanctioned_occurrences` (run
-    // by `positive_pin_sanctioned_helper`) narrows the macro-generated, reexport,
-    // and cfg-gated vectors. This is BOUNDED, not exhaustive: a `#[path]` module
-    // rooted outside `crates/verter_session/src/**`, a split-token macro name
-    // synthesis, a glob/external reexport whose target is out of tree, or a
-    // const/static fn-pointer binding are the documented residuals this scanner
-    // does NOT cover (the helper's compiler module-privacy is the airtight
-    // guarantee). A bare CALL EXPRESSION of the helper inside a fn body (the
-    // legitimate call site in `macro_surface.rs`) is NOT an item-level occurrence
-    // and is correctly NOT counted — only DEFINITIONS / BINDINGS / macro-invocation
-    // surfaces are.
-    let all_sources = session_production_src_files();
-    let mut crate_wide_occurrences: Vec<(String, SanctionedOccurrenceKind)> = Vec::new();
-    for (rel, src) in &all_sources {
-        let file = syn::parse_file(src)
-            .unwrap_or_else(|e| panic!("crate-wide sanctioned-name scan parse of `{rel}`: {e}"));
-        let mut found: Vec<SanctionedOccurrence> = Vec::new();
-        collect_sanctioned_occurrences(
-            &file.items,
-            MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
-            rel,
-            &mut found,
-        );
-        for occ in found {
-            crate_wide_occurrences.push((occ.rel, occ.kind));
-        }
-    }
-    // Anti-vacuity: the crate-wide scan MUST find the one genuine occurrence — its
-    // absence means the scan is broken or the helper vanished.
-    assert_eq!(
-        crate_wide_occurrences.len(),
-        1,
-        "crate-wide sanctioned-name uniqueness (BOUNDED tripwire): `{}` must appear EXACTLY ONCE as \
-         a definition/binding across all WALKED `verter_session` production source — found {} \
-         occurrences {:#?}. A second occurrence under the sanctioned name in any walked production \
-         file (a fn in another module, a `#[path]` child inside the walked tree, a macro invocation \
-         whose tokens mention the name, a `use … as` reexport, or a cfg-gated variant) is a \
-         usurpation: this tripwire pins the name to the ONE genuine free fn in \
-         `script_setup_binder.rs` among the surfaces it CAN see (it is bounded, not exhaustive — the \
-         airtight no-second-producer guarantee is the helper's compiler module-privacy, pinned by \
-         `script_setup_binder_helper_is_module_private`). (A bare call expression of the helper is \
-         not an item-level occurrence and is not counted.)",
-        MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
-        crate_wide_occurrences.len(),
-        crate_wide_occurrences,
-    );
-    let (sole_rel, sole_kind) = &crate_wide_occurrences[0];
-    assert!(
-        sole_rel.ends_with(SANCTIONED_HELPER_DEFINING_FILE),
-        "crate-wide sanctioned-name uniqueness: the sole occurrence of `{}` must live in \
-         `{SANCTIONED_HELPER_DEFINING_FILE}`, but it was found in `{sole_rel}`. The genuine helper \
-         is confined to that one file; an occurrence elsewhere is a usurpation.",
-        MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
-    );
-    assert_eq!(
-        *sole_kind,
-        SanctionedOccurrenceKind::Free,
-        "crate-wide sanctioned-name uniqueness: the sole occurrence of `{}` must be {} — found {}. \
-         The genuine helper is a plain free fn with no macro / reexport / cfg surface.",
-        MIRROR_SANCTIONED_NON_PRODUCER_ENTRIES[0],
-        SanctionedOccurrenceKind::Free.describe(),
-        sole_kind.describe(),
+         `structural_carrier_producer/**` must be EXACTLY the sanctioned entry \
+         {MIRROR_SANCTIONED_PRODUCER_ENTRIES:?} (the macro-arg accessor; it reads the macro hot \
+         mirror populated by the module-private lowering builders) — covering BOTH module-level \
+         FREE functions AND ASSOCIATED functions inside INHERENT `impl` blocks. A second \
+         crate-visible producer fn (free OR associated) re-opens a new outward entry into the \
+         single-producer module. Found extra entries: {extra:#?}. If the module legitimately needs \
+         another crate-visible fn for a NON-producer reason, add it to the sanctioned set with \
+         justification."
     );
 }
 
@@ -27063,14 +23582,13 @@ fn mirror_entry_surface_classifier_discriminates() {
         "a `#[cfg(all(unix, not(test)))] pub(crate) fn` is production (test only under `not`) and \
          MUST be counted"
     );
-    // The REAL owner source exposes EXACTLY the single sanctioned witness-gated
-    // producer entry (revert proof: the production tree is pristine — free +
-    // associated coverage across the owner module).
+    // The REAL owner source exposes EXACTLY the single sanctioned producer entry
+    // (revert proof: the production tree is pristine — free + associated coverage
+    // across the owner module's two production files).
     let mut real: Vec<String> = Vec::new();
     for rel in [
         "crates/verter_session/src/structural_carrier_producer/mod.rs",
-        "crates/verter_session/src/structural_carrier_producer/lower.rs",
-        "crates/verter_session/src/structural_carrier_producer/macro_surface.rs",
+        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
     ] {
         let src = std::fs::read_to_string(workspace_path(rel))
             .unwrap_or_else(|e| panic!("could not read {rel}: {e}"));
@@ -27084,411 +23602,8 @@ fn mirror_entry_surface_classifier_discriminates() {
     expected.sort();
     assert_eq!(
         real, expected,
-        "the REAL owner module must expose EXACTLY the sanctioned witness-gated producer entry \
+        "the REAL owner module must expose EXACTLY the sanctioned producer entry \
          {MIRROR_SANCTIONED_PRODUCER_ENTRIES:?} as its crate-visible producer fns (free OR \
          associated); found {real:?}"
-    );
-
-    // ---- POSITIVE STRUCTURAL AST PIN — ANTI-ROGUE RED-PROOFS. ----
-    //
-    // The SAME classifier the live guard calls (`positive_pin_sanctioned_helper`)
-    // is run here over the REAL source and over each planted evasion vector. The
-    // classifier is SHARED live↔self-test, so a regression that loosens it (e.g.
-    // re-introduces a token-rendering leak) reddens BOTH the live guard and these
-    // proofs together — they cannot diverge. Each plant below RED-proves a
-    // distinct evasion the former NEGATIVE `contains("HotTypeRef")` scan could not
-    // catch; a guard that cannot fail on these is a stub.
-    let real_name = "build_script_setup_seed_frames";
-    let binder_rel =
-        "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs".to_string();
-    let mod_rel =
-        "crates/verter_session/src/structural_carrier_producer/macro_surface.rs".to_string();
-
-    // ACCEPT — the REAL `script_setup_binder.rs` source. Read its actual bytes and
-    // run the SAME classifier the live guard uses. The genuine helper is the lone
-    // module-level free fn with the genuine three params and the `Vec<BinderScope>`
-    // return, so it passes all five structural properties. (The other owner
-    // sources carry no occurrence of the name, so the real `macro_surface.rs` /
-    // `lower.rs` are included to mirror the live module-global view.)
-    let real_binder_src = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/script_setup_binder.rs",
-    ))
-    .expect("the sanctioned helper's defining file must be readable");
-    let real_sources = vec![(binder_rel.clone(), real_binder_src)];
-    assert!(
-        positive_pin_sanctioned_helper(&real_sources, real_name).is_ok(),
-        "ACCEPT: the REAL `build_script_setup_seed_frames` in `script_setup_binder.rs` MUST pass \
-         the positive structural pin — it is the lone module-level free fn with no \
-         generics/`where`/receiver, the genuine three typed params, and the `Vec<BinderScope>` \
-         return. If this reddens, either the genuine helper's shape changed (re-pin after review) \
-         or the classifier regressed"
-    );
-
-    // A synthetic genuine source (the exact genuine free-fn shape) is the positive
-    // control: it ACCEPTS, anchoring that the plants below are rejected for the
-    // SHAPE they perturb, not because the classifier rejects everything.
-    let synthetic_genuine = (
-        binder_rel.clone(),
-        "pub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> Vec<BinderScope> { let _ = HotTypeRef::node; Vec::new() }\n"
-            .to_string(),
-    );
-    assert!(
-        positive_pin_sanctioned_helper(std::slice::from_ref(&synthetic_genuine), real_name).is_ok(),
-        "ACCEPT (positive control): a synthetic source with the exact genuine free-fn shape MUST \
-         pass — an internal `HotTypeRef::node(..)` body call is not a producer-surface exposure \
-         (the pin is signature-structural, never body-scanning)"
-    );
-
-    // Shared reject helper: run the classifier and assert it fails AND that the
-    // failure message names the expected property number (so each reject is
-    // DISCRIMINATING — it fails for the right structural reason, not incidentally).
-    fn assert_rejected(
-        sources: &[(String, String)],
-        name: &str,
-        expected_marker: &str,
-        vector: &str,
-    ) {
-        let result = positive_pin_sanctioned_helper(sources, name);
-        let msg = match result {
-            Ok(()) => panic!(
-                "REJECT FAILED — the {vector} vector PASSED the positive structural pin. A guard \
-                 that cannot fail on a planted evasion is a stub. This vector MUST be rejected by \
-                 {expected_marker}"
-            ),
-            Err(msg) => msg,
-        };
-        assert!(
-            msg.contains(expected_marker),
-            "the {vector} vector was rejected, but by the wrong property — expected the failure to \
-             cite `{expected_marker}` (a discriminating reject), got: {msg}"
-        );
-    }
-
-    // REJECT (#1, duplicate) — the genuine free fn DUPLICATED across two owner
-    // files. Two occurrences of the sanctioned name ⇒ #1 fails (a second
-    // definition anywhere is the usurpation vector). Both are genuine-shaped, so
-    // ONLY the occurrence-count property catches this.
-    let duplicate_sources = vec![
-        synthetic_genuine.clone(),
-        (
-            mod_rel.clone(),
-            "pub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> Vec<BinderScope> { Vec::new() }\n"
-                .to_string(),
-        ),
-    ];
-    assert_rejected(
-        &duplicate_sources,
-        real_name,
-        "positive-pin #1",
-        "duplicate-definition (genuine fn declared twice across files)",
-    );
-    // The #1 message names BOTH offending files (provenance), proving the
-    // aggregate is genuinely module-wide and not single-file-scoped.
-    let dup_msg = positive_pin_sanctioned_helper(&duplicate_sources, real_name).unwrap_err();
-    assert!(
-        dup_msg.contains("macro_surface.rs") && dup_msg.contains("script_setup_binder.rs"),
-        "the duplicate-definition reject must name both offending owner files via provenance — \
-         got: {dup_msg}"
-    );
-
-    // REJECT (#2, `Self`-aliasing associated fn) — `impl HotTypeRef { fn …(seed:
-    // Self) -> Vec<BinderScope> }`. The receiver-LESS `Self`-aliasing vector codex
-    // flagged: `seed: Self` aliases the macro-arg product (`Self` == `HotTypeRef`
-    // inside `impl HotTypeRef`) and RENDERS no `HotTypeRef` token, so the former
-    // negative scan passed it. It is an ASSOCIATED fn ⇒ #2 (not-a-free-fn) rejects
-    // it structurally, independent of the alias.
-    let self_assoc_sources = vec![(
-        binder_rel.clone(),
-        "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(seed: Self) -> Vec<BinderScope> { Vec::new() }\n}\n"
-            .to_string(),
-    )];
-    assert_rejected(
-        &self_assoc_sources,
-        real_name,
-        "positive-pin #2",
-        "`Self`-aliasing associated fn inside `impl HotTypeRef` (non-receiver)",
-    );
-
-    // REJECT (#2, receiver) — `impl HotTypeRef { fn …(self) -> Vec<BinderScope> }`.
-    // The `self` receiver carries the impl self-type (`HotTypeRef`) into the fn
-    // without a typed arm naming it. It is an associated fn ⇒ #2 rejects it (the
-    // free-fn property fires before the receiver property; both would catch it).
-    let receiver_sources = vec![(
-        binder_rel.clone(),
-        "impl HotTypeRef {\n    pub(crate) fn build_script_setup_seed_frames(self) -> Vec<BinderScope> { Vec::new() }\n}\n"
-            .to_string(),
-    )];
-    assert_rejected(
-        &receiver_sources,
-        real_name,
-        "positive-pin #2",
-        "receiver-bearing associated fn inside `impl HotTypeRef`",
-    );
-
-    // REJECT (#3, generic bound) — `fn …<T: From<HotTypeRef>>(t: T) ->
-    // Vec<BinderScope>`. The macro-arg product is aliased through a generic BOUND
-    // (`From<HotTypeRef>`), which the former scan rendered only on the bound, not
-    // on the param type `T` — leaky. The fn is a FREE fn (passes #2) but DECLARES
-    // generics ⇒ #3 (no-generics) rejects it.
-    let generic_sources = vec![(
-        binder_rel.clone(),
-        "pub(crate) fn build_script_setup_seed_frames<T: From<HotTypeRef>>(t: T) -> Vec<BinderScope> { let _ = t; Vec::new() }\n"
-            .to_string(),
-    )];
-    assert_rejected(
-        &generic_sources,
-        real_name,
-        "positive-pin #3",
-        "generic-bound usurper `<T: From<HotTypeRef>>`",
-    );
-
-    // REJECT (#4, direct product param) — `fn …(seed: HotTypeRef) ->
-    // Vec<BinderScope>`. A free, non-generic, no-receiver fn that returns the
-    // binder-seed shape (passes #1/#2/#3/#5) but takes the macro-arg product
-    // DIRECTLY as a param. Its param types do not match the genuine three ⇒ #4
-    // (param-shape) rejects it.
-    let product_param_sources = vec![(
-        binder_rel.clone(),
-        "pub(crate) fn build_script_setup_seed_frames(seed: HotTypeRef) -> Vec<BinderScope> { let _ = seed; Vec::new() }\n"
-            .to_string(),
-    )];
-    assert_rejected(
-        &product_param_sources,
-        real_name,
-        "positive-pin #4",
-        "direct-product param `seed: HotTypeRef`",
-    );
-
-    // REJECT (#5, product return) — `fn …(<genuine params>) -> HotTypeRef`. A
-    // free, non-generic, no-receiver fn with the genuine three params (passes
-    // #1/#2/#3/#4) but RETURNS the macro-arg product. Its return type is not the
-    // binder-seed shape ⇒ #5 (return-shape) rejects it.
-    let product_return_sources = vec![(
-        binder_rel.clone(),
-        "pub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> HotTypeRef { todo!() }\n"
-            .to_string(),
-    )];
-    assert_rejected(
-        &product_return_sources,
-        real_name,
-        "positive-pin #5",
-        "product-return usurper `-> HotTypeRef`",
-    );
-
-    // REJECT (#2, trait-item declaration) — `trait T { fn …(…) -> HotTypeRef; }`.
-    // A trait-item fn declaration under the sanctioned name. It is NOT a free fn
-    // (it is a trait method) ⇒ #2 rejects it (a usurper could route the product
-    // through a trait-method surface invisible to a free-fn-only scan).
-    let trait_item_sources = vec![(
-        binder_rel.clone(),
-        "trait Producer {\n    fn build_script_setup_seed_frames(&self) -> HotTypeRef;\n}\n"
-            .to_string(),
-    )];
-    assert_rejected(
-        &trait_item_sources,
-        real_name,
-        "positive-pin #2",
-        "trait-item fn declaration under the sanctioned name",
-    );
-
-    // REJECT (#1, vanished) — the sanctioned name is absent from all sources.
-    // Anti-vacuity: if the genuine helper disappears (e.g. renamed away), the
-    // binder-seed producer regressed and the pin must redden, not silently pass.
-    let vanished_sources = vec![(
-        binder_rel.clone(),
-        "pub(crate) fn unrelated_helper(g: &G) -> Vec<BinderScope> { Vec::new() }\n".to_string(),
-    )];
-    assert_rejected(
-        &vanished_sources,
-        real_name,
-        "positive-pin #1",
-        "vanished sanctioned name (no definition anywhere)",
-    );
-
-    // ---- BOUNDED-TRIPWIRE COVERAGE — RED-PROOFS FOR THE FOUR REALISTIC VECTORS. ----
-    //
-    // The positive pin above closed the ORDINARY parsed-fn evasion class. These
-    // four plants RED-prove the additional realistic surfaces that a
-    // fn-definition-only, mirror-directory-only, cfg-excluding scan would have
-    // MISSED: a macro-generated producer (whole-name token), a `use … as`
-    // reexport, an out-of-module duplicate, and a cfg-gated production usurper.
-    // These are the high-value vectors a routine refactor / copy-paste would hit,
-    // and they remain part of this bounded tripwire's coverage. They are NOT the
-    // tripwire's documented RESIDUAL gaps — those (const/static fn-pointer,
-    // associated const, foreign-fn, SPLIT-TOKEN macro name synthesis, glob/external
-    // reexport, out-of-tree `#[path]`, `include!(concat!(…))`) are deliberately
-    // uncovered, per the guard's doc comment, because the helper's compiler
-    // module-privacy is the airtight guarantee. Each plant runs the SAME shared
-    // classifier (`positive_pin_sanctioned_helper` over the broadened,
-    // cfg-independent `collect_sanctioned_occurrences`), so a regression that
-    // re-narrows the scan reddens BOTH the live crate-wide guard and these proofs
-    // together. "A guard that cannot fail is a stub."
-
-    // Direct-occurrence helper: parse one synthetic source and return the recorded
-    // sanctioned-name occurrence kinds. Used below to prove a vector is now SEEN
-    // (visibility), distinct from proving the pin REJECTS it.
-    fn occurrence_kinds(src: &str, name: &str) -> Vec<SanctionedOccurrenceKind> {
-        let file = syn::parse_file(src).expect("occurrence-probe parse");
-        let mut out: Vec<SanctionedOccurrence> = Vec::new();
-        collect_sanctioned_occurrences(&file.items, name, "synthetic.rs", &mut out);
-        out.into_iter().map(|o| o.kind).collect()
-    }
-
-    // REJECT (F1, macro-generated producer) — a `macro_rules!` whose body emits
-    // `fn build_script_setup_seed_frames(...) -> HotTypeRef`. A `syn` scan cannot
-    // expand the macro, so a fn-definition-only walk sees NOTHING here (the real
-    // helper is invisible inside the macro body). The broadened scan records the
-    // macro invocation as a `MacroInvocation` occurrence because its token stream
-    // MENTIONS the sanctioned name → it is the SOLE occurrence and is NOT a free fn
-    // ⇒ #2 rejects it. FIRST prove it is SEEN as a macro occurrence (the F1 fix),
-    // then prove the pin rejects it.
-    let macro_gen_src = "macro_rules! gen_producer {\n    () => {\n        pub(crate) fn build_script_setup_seed_frames(seed: HotTypeRef) -> HotTypeRef { todo!() }\n    };\n}\n";
-    assert_eq!(
-        occurrence_kinds(macro_gen_src, real_name),
-        vec![SanctionedOccurrenceKind::MacroInvocation],
-        "F1 visibility: a `macro_rules!` whose body emits `fn {real_name}` MUST be recorded as a \
-         MacroInvocation occurrence — the broadened scan bans the sanctioned name appearing inside \
-         any macro token stream (a `syn` scan cannot expand the macro to see the generated fn)"
-    );
-    let macro_gen_sources = vec![(binder_rel.clone(), macro_gen_src.to_string())];
-    assert_rejected(
-        &macro_gen_sources,
-        real_name,
-        "positive-pin #2",
-        "F1 macro-generated producer (`macro_rules!` body emits `fn <name>`)",
-    );
-    // A function-like macro INVOCATION (not a definition) that merely mentions the
-    // name as an argument ident is ALSO a usurpation surface (it could expand to a
-    // producer) and is rejected.
-    let macro_call_sources = vec![(
-        binder_rel.clone(),
-        "define_seed_producer!(build_script_setup_seed_frames, HotTypeRef);\n".to_string(),
-    )];
-    assert_rejected(
-        &macro_call_sources,
-        real_name,
-        "positive-pin #2",
-        "F1 function-like macro invocation mentioning the sanctioned name",
-    );
-    // An `include!("<name>.rs")` whose PATH string-literal references the name is
-    // caught via the literal word-boundary match (the name lives in a string, not
-    // as a bare ident token).
-    let include_sources = vec![(
-        binder_rel.clone(),
-        "include!(\"build_script_setup_seed_frames.rs\");\n".to_string(),
-    )];
-    assert_rejected(
-        &include_sources,
-        real_name,
-        "positive-pin #2",
-        "F1 `include!(\"<name>.rs\")` referencing the sanctioned name in a path literal",
-    );
-
-    // REJECT (F2, reexport under the name) — `pub(crate) use crate::other::producer
-    // as build_script_setup_seed_frames;`. The pin checks fn DEFINITIONS, so a
-    // `use … as <name>` value-namespace binding (a callable entry under the
-    // sanctioned name) is invisible to a definition-only walk. The broadened scan
-    // records a `UseRename` occurrence → it is the SOLE occurrence and is NOT a
-    // free fn ⇒ #2 rejects it. Prove it is SEEN as a use-rename first.
-    let reexport_src = "pub(crate) use crate::other::producer as build_script_setup_seed_frames;\n";
-    assert_eq!(
-        occurrence_kinds(reexport_src, real_name),
-        vec![SanctionedOccurrenceKind::UseRename],
-        "F2 visibility: a `use … as {real_name}` reexport MUST be recorded as a UseRename \
-         occurrence — it mints a callable entry under the sanctioned name a fn-definition scan \
-         misses"
-    );
-    let reexport_sources = vec![(binder_rel.clone(), reexport_src.to_string())];
-    assert_rejected(
-        &reexport_sources,
-        real_name,
-        "positive-pin #2",
-        "F2 `use … as <name>` reexport binding under the sanctioned name",
-    );
-    // SOUNDNESS (F2): a PLAIN `use` of the genuine helper (no `as` rename) is NOT a
-    // usurpation — it re-exports under the ORIGINAL name, not a freshly minted
-    // binding. It must NOT be recorded, so it does not false-positive the crate-wide
-    // uniqueness scan (the genuine helper may be legitimately imported elsewhere).
-    assert!(
-        occurrence_kinds(
-            "use crate::structural_carrier_producer::script_setup_binder::build_script_setup_seed_frames;\n",
-            real_name,
-        )
-        .is_empty(),
-        "F2 soundness: a plain `use …::{real_name};` (no `as` rename) must NOT be recorded — it is \
-         not a fresh binding usurping the name, so importing the genuine helper stays legal"
-    );
-
-    // REJECT (F3, out-of-module duplicate) — a SECOND genuine-looking
-    // `build_script_setup_seed_frames` free fn in a DIFFERENT file OUTSIDE
-    // `structural_carrier_producer/`. The crate-wide scan aggregates BOTH files →
-    // two occurrences ⇒ #1 rejects it. Both fns are genuine-shaped, so ONLY the
-    // occurrence-count (crate-wide uniqueness) property catches this.
-    let out_of_module_rel = "crates/verter_session/src/host_resolve/seed_smuggler.rs".to_string();
-    let out_of_module_sources = vec![
-        synthetic_genuine.clone(),
-        (
-            out_of_module_rel.clone(),
-            "pub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> Vec<BinderScope> { Vec::new() }\n"
-                .to_string(),
-        ),
-    ];
-    assert_rejected(
-        &out_of_module_sources,
-        real_name,
-        "positive-pin #1",
-        "F3 out-of-module duplicate (second genuine fn in a non-mirror file)",
-    );
-    // The #1 message names the OUT-OF-MODULE offender by its non-owner path,
-    // proving the crate-wide aggregate genuinely reaches outside
-    // `structural_carrier_producer/`.
-    let oom_msg = positive_pin_sanctioned_helper(&out_of_module_sources, real_name).unwrap_err();
-    assert!(
-        oom_msg.contains("host_resolve/seed_smuggler.rs"),
-        "F3: the out-of-module duplicate reject must name the non-owner offender path \
-         `host_resolve/seed_smuggler.rs` (proving the crate-wide scan reaches outside \
-         `structural_carrier_producer/`) — got: {oom_msg}"
-    );
-
-    // REJECT (F4, cfg-gated production usurper) — `#[cfg(any(test,
-    // debug_assertions))] fn build_script_setup_seed_frames(...) -> HotTypeRef`.
-    // The former `attrs_test_gate` OVER-EXCLUDED this (it treated the `test` arm of
-    // `any(...)` as test-gating), so a debug-PRODUCTION usurper under that cfg was
-    // skipped entirely — even though `any(test, debug_assertions)` is satisfiable
-    // in a non-test debug build via `debug_assertions`. The occurrence scan is now
-    // cfg-INDEPENDENT (the genuine helper is cfg-free, so any cfg-gated same-name
-    // item is necessarily a second occurrence): the cfg-gated fn is COUNTED as a
-    // `Free` occurrence. FIRST prove it is now SEEN (the F4 fix — under the old
-    // gate this was EXCLUDED and the scan would have reported ZERO occurrences),
-    // then prove the pin rejects it (its `-> HotTypeRef` product return ⇒ #5).
-    let cfg_usurper_src = "#[cfg(any(test, debug_assertions))]\npub(crate) fn build_script_setup_seed_frames(indexed: &crate::project_type_store::IndexedReady, graph: &SemanticGraphStore, scope: &NodeScopeId) -> HotTypeRef { todo!() }\n";
-    assert_eq!(
-        occurrence_kinds(cfg_usurper_src, real_name),
-        vec![SanctionedOccurrenceKind::Free],
-        "F4 visibility: a `#[cfg(any(test, debug_assertions))]` fn under the sanctioned name MUST \
-         now be COUNTED (as a Free occurrence) — the occurrence scan is cfg-independent, so the \
-         debug-production usurper the old `attrs_test_gate` over-excluded is no longer invisible. \
-         If this reports ZERO, the cfg over-exclusion regressed and the F4 vector reopened"
-    );
-    let cfg_usurper_sources = vec![(binder_rel.clone(), cfg_usurper_src.to_string())];
-    assert_rejected(
-        &cfg_usurper_sources,
-        real_name,
-        "positive-pin #5",
-        "F4 cfg(any(test, debug_assertions)) production usurper with a product return",
-    );
-    // A cfg-gated usurper PLANTED ALONGSIDE the genuine cfg-free helper is a SECOND
-    // occurrence ⇒ #1 (crate-wide uniqueness) rejects it — the most direct proof
-    // that the cfg-gated item is counted, not silently dropped to leave the
-    // genuine fn passing alone.
-    let cfg_plus_genuine_sources = vec![
-        synthetic_genuine.clone(),
-        (mod_rel.clone(), cfg_usurper_src.to_string()),
-    ];
-    assert_rejected(
-        &cfg_plus_genuine_sources,
-        real_name,
-        "positive-pin #1",
-        "F4 cfg-gated usurper alongside the genuine helper (second occurrence, cfg-counted)",
     );
 }

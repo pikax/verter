@@ -1,11 +1,10 @@
-//! Isolation tests for the extracted shared binder-frame builder
+//! Isolation tests for the module-private shared binder-frame builder
 //! ([`super::build_script_setup_seed_frames`]).
 //!
-//! These call the EXTRACTED helper DIRECTLY (not through the macro hot mirror)
-//! to prove the shared `pub(in crate::structural_carrier_producer)` entry — the
-//! helper the mirror's macro-arg builder builds the seed binder shape from —
-//! produces the correct binder shape. Each lowers a bare `Ref` through the
-//! returned frame and
+//! These call the module-private helper DIRECTLY (not through the macro hot
+//! mirror), as an in-module test child, to prove it produces the correct
+//! binder shape — the helper the mirror's macro-arg builder builds the seed
+//! binder shape from. Each lowers a bare `Ref` through the returned frame and
 //! asserts it resolves to the script-setup `TypeParam` binder rather than an
 //! unbound `BareRef` — the exact contract a `<script setup generic="…">` SFC's
 //! open generics depend on.
@@ -14,10 +13,8 @@ use std::sync::Arc;
 
 use verter_type_expr::TypeExpr;
 
-use super::build_script_setup_seed_frames;
+use super::{build_script_setup_seed_frames, BinderScope, StructuralLowerContext};
 use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
-use crate::structural_carrier_producer::lower::{self, BinderScope, StructuralLowerContext};
-use crate::structural_carrier_producer::macro_surface::MacroProducerWitness;
 use crate::types::HostConfig;
 use crate::{FileLanguage, UpsertRequest, VerterHost};
 
@@ -53,14 +50,8 @@ fn lower_ref_through(
         type_arguments: Arc::from(Vec::new()),
     };
     let ctx = StructuralLowerContext::new(frames);
-    let handle = lower::emit_macro_arg(
-        graph,
-        &expr,
-        scope.clone(),
-        &ctx,
-        &MacroProducerWitness::new(),
-    )
-    .expect("a bare Ref must lower structurally");
+    let handle = super::lower_type_expr_structural(graph, &expr, scope.clone(), &ctx)
+        .expect("a bare Ref must lower structurally");
     let node: SemanticNodeId = handle.node();
     (*graph
         .node_data(node)
@@ -92,10 +83,10 @@ fn extracted_builder_seeds_typeparam_binders_for_script_setup_generics() {
         local_scope: None,
     };
 
-    // Call the EXTRACTED helper directly — the shared
-    // `pub(in crate::structural_carrier_producer)` entry the mirror's macro-arg
-    // builder builds the seed binder shape from (the decl-body structural
-    // producer would build the same shape but does NOT call it today).
+    // Call the module-private helper directly (in-module test child) — the
+    // helper the mirror's macro-arg builder builds the seed binder shape from
+    // (the decl-body structural producer would build the same shape but does
+    // NOT call it today).
     let frames = build_script_setup_seed_frames(&indexed, graph, &scope);
     assert_eq!(
         frames.len(),
