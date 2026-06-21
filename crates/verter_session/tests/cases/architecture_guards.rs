@@ -21649,19 +21649,28 @@ fn structural_carrier_producer_lowerer_privacy_classifier_discriminates() {
 /// Comment-strip a Rust source body for the single-call scan: every `//` line
 /// comment and `/* … */` block comment (nested) is replaced by spaces, string /
 /// raw-string literal CONTENTS are blanked to spaces (the delimiters kept,
-/// newlines preserved), AND a CHAR / byte-char literal (`'x'` / `'\n'` / `'"'`)
-/// is consumed as an ATOM (disambiguated from a lifetime) so a `"` inside a char
-/// literal can NEVER mis-open string mode and mask the code that follows it. A
+/// newlines preserved), AND a CHAR / byte-char literal (`'x'` / `'\n'` / `'"'` /
+/// `'{'` / `'}'`) is consumed as an ATOM whose INNER bytes are blanked to spaces
+/// (the `'` delimiters and the literal's length are kept, like a string), so the
+/// literal can NEVER (i) mis-open string mode and mask the code that follows it
+/// (a `'"'`), NOR (ii) perturb the brace-depth count of the containment scan (a
+/// `'{'` / `'}'`). A char literal is disambiguated from a lifetime (`'a` /
+/// `'static`, which has no closing quote) exactly like rustc. A
 /// `lower_type_expr_structural` mention inside a comment OR a string is therefore
 /// never counted, and a `let _q = '"'; lower_type_expr_structural(g)` line keeps
-/// the rogue reference VISIBLE to the occurrence scan (the char-literal bug in
-/// the prior string-only stripper opened string mode at `'"'` and blanked the
-/// following reference — closing that bug is the round-3 hardening). This mirrors
-/// the char-aware `carrier_strip_comments` helper in this file (same
-/// raw/string/char/comment disambiguation), additionally blanking string
-/// CONTENTS since no real reference can live inside a literal. The single-call
-/// guard below feeds it the owner source so commented-out / doc-comment / string
-/// / char-masked mentions of the lowerer cannot evade the occurrence scan.
+/// the rogue reference VISIBLE to the occurrence scan (a string-only stripper
+/// would open string mode at `'"'` and blank the following reference — the
+/// char-literal-aware atom handling closes that; blanking the inner bytes
+/// additionally makes the brace-containment helper's doc TRUE so a `'}'` char
+/// literal inside `emit_macro_arg`'s body cannot mis-balance the depth count).
+/// This mirrors the char-aware `carrier_strip_comments` helper in
+/// this file (same raw/string/char/comment disambiguation), additionally
+/// blanking string AND char-literal CONTENTS since no real reference, and no
+/// brace that must count toward containment, can live inside a literal. The
+/// single-call guard below feeds it the owner source so commented-out /
+/// doc-comment / string / char-masked mentions of the lowerer cannot evade the
+/// occurrence scan, and so a brace inside a char literal cannot mis-attribute a
+/// call to (or out of) the wrapper body.
 fn strip_comments_for_single_call_scan(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -21725,23 +21734,28 @@ fn strip_comments_for_single_call_scan(src: &str) -> String {
             i = k;
             continue;
         }
-        // Char / byte-char literal 'x' / '\n' / '\u{…}' / '"' — consumed as an
-        // ATOM (passed through verbatim), disambiguated from a lifetime
-        // (`'a` / `'static`, which has NO closing quote) exactly like rustc: a
-        // backslash escape, OR a single byte immediately followed by a closing
-        // quote, is a char literal; anything else starting with `'` falls
-        // through as a lifetime. WITHOUT this, a `'"'` char literal opens the
-        // string arm above and blanks the following code — the exact masking the
-        // round-3 hardening closes. (Mirrors `carrier_strip_comments`.)
+        // Char / byte-char literal 'x' / '\n' / '\u{…}' / '"' / '{' / '}' —
+        // consumed as an ATOM whose INNER bytes are BLANKED to spaces (the `'`
+        // delimiters and the literal's byte length kept), disambiguated from a
+        // lifetime (`'a` / `'static`, which has NO closing quote) exactly like
+        // rustc: a backslash escape, OR a single byte immediately followed by a
+        // closing quote, is a char literal; anything else starting with `'` falls
+        // through as a lifetime. Blanking the inner bytes (not passing them
+        // verbatim) means (i) a `'"'` cannot open the string arm above and blank
+        // the following code — the char-literal string-mode masking is closed —
+        // AND (ii) a `'{'` / `'}'` cannot perturb the brace-depth count of the
+        // containment scan, making the brace-containment helper's doc TRUE.
+        // (Mirrors `carrier_strip_comments`, additionally blanking the content.)
         if c == b'\'' {
-            // Escaped char literal `'\X…'`: scan to the unescaped closing quote.
+            // Escaped char literal `'\X…'`: scan to the unescaped closing quote,
+            // blanking every inner byte (the leading `\` included) to a space.
             if i + 1 < n && bytes[i + 1] == b'\\' {
                 out.push(b'\'');
                 let mut k = i + 1;
                 while k < n {
                     if bytes[k] == b'\\' && k + 1 < n {
-                        out.push(bytes[k]);
-                        out.push(bytes[k + 1]);
+                        out.push(b' ');
+                        out.push(b' ');
                         k += 2;
                         continue;
                     }
@@ -21750,15 +21764,18 @@ fn strip_comments_for_single_call_scan(src: &str) -> String {
                         k += 1;
                         break;
                     }
-                    out.push(bytes[k]);
+                    out.push(b' ');
                     k += 1;
                 }
                 i = k;
                 continue;
             }
-            // Simple single-byte char literal `'x'` (close quote at i+2).
+            // Simple single-byte char literal `'x'` (close quote at i+2): keep
+            // both quotes, blank the single inner byte to a space.
             if i + 2 < n && bytes[i + 2] == b'\'' {
-                out.extend_from_slice(&bytes[i..=i + 2]);
+                out.push(b'\'');
+                out.push(b' ');
+                out.push(b'\'');
                 i += 3;
                 continue;
             }
@@ -21983,6 +22000,72 @@ fn offset_is_inside_emit_macro_arg_body(stripped: &str, offset: usize) -> bool {
     open < offset && offset < close
 }
 
+/// Count word-bounded `lower_type_expr_structural` path references appearing
+/// anywhere inside one `syn` syntax node, via `syn::visit::Visit`. Used to bind
+/// the single-witnessed-call CONTAINMENT to a SPECIFIC `syn::Item` (the
+/// top-level `emit_macro_arg` fn) structurally, independent of byte offsets —
+/// `proc-macro2/span-locations` is NOT enabled in this workspace's `syn`
+/// dev-dep, so a span→offset map is unavailable; a structural visit of the
+/// chosen item's body is the offset-free equivalent. It counts the
+/// last-segment ident of every visited path (`a::b::lower_type_expr_structural`
+/// and a bare `lower_type_expr_structural` both count once), which is exactly
+/// the reference shape the call site uses.
+struct LowererPathRefCounter {
+    count: usize,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for LowererPathRefCounter {
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "lower_type_expr_structural")
+        {
+            self.count += 1;
+        }
+        // Descend (a path inside a turbofish / nested expression still counts).
+        syn::visit::visit_path(self, path);
+    }
+}
+
+/// Whether the SINGLE sanctioned reference to `lower_type_expr_structural`
+/// lives inside the REAL TOP-LEVEL `emit_macro_arg` fn item — a `syn::Item::Fn`
+/// named `emit_macro_arg` at the FILE's top level, NOT a fn nested inside any
+/// child `mod`. This binds the containment to the genuine witnessed wrapper
+/// structurally: a call inside a child-mod fn (even one ALSO named
+/// `emit_macro_arg`) puts the reference inside that `Item::Mod`, so the
+/// top-level fn body contains ZERO references → `false` (RED). Because the
+/// occurrence-counting text rail has already proven there is EXACTLY ONE
+/// reference in the whole file, "≥1 reference inside the top-level
+/// `emit_macro_arg` body" is equivalent to "that one reference is inside it".
+///
+/// Offset-free by construction (see [`LowererPathRefCounter`]): it walks the
+/// parsed top-level item's body rather than mapping a byte offset, so it is the
+/// correct primary containment gate under this workspace's
+/// span-locations-disabled `syn`. Returns `false` when `body` does not parse,
+/// when no TOP-LEVEL `fn emit_macro_arg` exists, or when its body holds no
+/// lowerer reference.
+fn single_call_is_in_top_level_emit_macro_arg(body: &str) -> bool {
+    let file = match syn::parse_file(body) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    // ONLY top-level items — a fn named `emit_macro_arg` nested inside a child
+    // `mod` is NOT a top-level item and is deliberately not considered, so a
+    // child-mod witnessed call cannot satisfy containment.
+    let mut total_inside_top_level = 0usize;
+    for item in &file.items {
+        if let syn::Item::Fn(func) = item {
+            if func.sig.ident == "emit_macro_arg" {
+                let mut counter = LowererPathRefCounter { count: 0 };
+                syn::visit::Visit::visit_block(&mut counter, &func.block);
+                total_inside_top_level += counter.count;
+            }
+        }
+    }
+    total_inside_top_level >= 1
+}
+
 /// Classify whether `body` (RAW owner source — the classifier strips comments,
 /// string contents, and char literals internally) satisfies the
 /// single-witnessed-call invariant under the OCCURRENCE-COUNTING rail (strictly
@@ -22067,21 +22150,33 @@ fn structural_lowerer_single_witnessed_call_violation(body: &str) -> Option<Stri
                 .to_string(),
         );
     }
-    // The single witnessed call must sit inside `emit_macro_arg`'s body, checked
-    // by a BRACE-BALANCED containment scan (NOT the nearest-preceding-`fn`
-    // heuristic): a call placed after `emit_macro_arg`'s closing brace but before
-    // the next `fn` is NOT inside the wrapper and must be rejected even though the
-    // nearest-preceding fn name would still read `emit_macro_arg`.
-    if offset_is_inside_emit_macro_arg_body(&stripped, reference) {
+    // The single witnessed call must sit inside the REAL TOP-LEVEL `emit_macro_arg`
+    // fn item. The PRIMARY containment gate is a `syn`-bound structural check
+    // ([`single_call_is_in_top_level_emit_macro_arg`]): the sole reference must be
+    // reachable inside the top-level `Item::Fn` named `emit_macro_arg`, NOT inside
+    // a fn nested in any child `mod`. A child-mod `fn emit_macro_arg` that calls the
+    // lowerer puts the reference inside that `Item::Mod`, so the top-level fn body
+    // holds it ZERO times → REDden (the text `fn emit_macro_arg` search alone would
+    // have mis-attributed the call to the child's header). The BRACE-BALANCED text
+    // containment ([`offset_is_inside_emit_macro_arg_body`]) is retained as a
+    // complementary defense (and the source of the diagnostic encloser name): it
+    // additionally rejects a call placed AFTER the wrapper's closing brace but
+    // before the next `fn` (a trailing free item / closure-bearing const), which is
+    // outside the fn body yet not inside any child mod. BOTH must hold.
+    if single_call_is_in_top_level_emit_macro_arg(body)
+        && offset_is_inside_emit_macro_arg_body(&stripped, reference)
+    {
         None
     } else {
         let enclosing = nearest_preceding_fn_name(&stripped, reference);
         Some(format!(
-            "the single `lower_type_expr_structural` call must sit inside the witness-gated \
-             `emit_macro_arg` wrapper's `{{ … }}` body (brace-balanced containment), but it does \
-             not — its nearest preceding fn header is `{}`. A call after `emit_macro_arg`'s closing \
-             brace (a trailing free item / closure-bearing const) or in any other fn reaches the \
-             raw lowerer without presenting the `MacroProducerWitness`",
+            "the single `lower_type_expr_structural` call must sit inside the REAL TOP-LEVEL \
+             witness-gated `emit_macro_arg` fn item (a `syn::Item::Fn` named `emit_macro_arg` at the \
+             file's top level — NOT a fn nested in a child `mod`), and inside its `{{ … }}` body \
+             (brace-balanced containment), but it does not — its nearest preceding fn header is `{}`. \
+             A call inside a CHILD-mod fn (even one named `emit_macro_arg`), after the top-level \
+             wrapper's closing brace (a trailing free item / closure-bearing const), or in any other \
+             fn reaches the raw lowerer without presenting the `MacroProducerWitness`",
             enclosing.as_deref().unwrap_or("<no enclosing fn>")
         ))
     }
@@ -22170,8 +22265,8 @@ fn structural_lowerer_single_call_classifier_discriminates() {
         "a call NOT inside `emit_macro_arg` must be REPORTED — only the witnessed wrapper may reach \
          the raw lowerer"
     );
-    // WRONG (bypass vector A — the EXACT live-compiling bypass the round-3 review
-    // RED-proved): an `as`-alias import of the lowerer + a second wrapper calling
+    // WRONG (bypass vector A — the EXACT live-compiling alias bypass): an
+    // `as`-alias import of the lowerer + a second wrapper calling
     // it via the alias. The genuine witnessed call is still present, but the
     // `use … as raw_lower_alias;` line is a THIRD identifier occurrence → reported.
     let as_alias = "use self::lower_type_expr_structural as raw_lower_alias;\n\
@@ -22280,6 +22375,59 @@ fn structural_lowerer_single_call_classifier_discriminates() {
         "a longer identifier sharing the prefix (`lower_type_expr_structural_v2`) must NOT be \
          counted as a reference to the lowerer — the trailing word boundary excludes it"
     );
+    // CHAR-BRACE FALSE-POSITIVE GONE: a `'}'` char literal INSIDE `emit_macro_arg`'s
+    // body must NOT perturb the brace-depth count, so the genuine single witnessed
+    // call still resolves as CONTAINED and the shape PASSES. Before blanking the
+    // char-literal inner bytes, the verbatim `'}'` decremented the depth early and
+    // closed the wrapper body before the call → a false REDden. A matching `'{'`
+    // char literal is also exercised so the count is not accidentally rebalanced.
+    let char_brace_in_body = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                              pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                              let _open = '{';\n\
+                              let _close = '}';\n\
+                              lower_type_expr_structural(g)\n\
+                              }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(char_brace_in_body).is_none(),
+        "a `'{{'` / `'}}'` char literal inside `emit_macro_arg`'s body must NOT perturb the \
+         brace-depth count — the genuine single witnessed call stays CONTAINED and the shape PASSES \
+         (the char-brace false-positive is closed by blanking char-literal inner bytes)"
+    );
+    // Direct stripper assertion (the FIX): the inner bytes of `'{'` / `'}'` / `'"'`
+    // are blanked to spaces while the `'` delimiters AND the literal length survive
+    // — so neither a brace nor a quote inside a char literal survives the strip, yet
+    // an adjacent real `{` (here the wrapper body's own opening brace) does.
+    let stripped_braces =
+        strip_comments_for_single_call_scan("let _o = '{'; let _c = '}'; { real }");
+    assert!(
+        !stripped_braces.contains("'{'") && !stripped_braces.contains("'}'"),
+        "the stripper must blank the inner byte of a `'{{'` / `'}}'` char literal — found a verbatim \
+         brace-bearing char literal in {stripped_braces:?}"
+    );
+    assert_eq!(
+        stripped_braces.matches('{').count(),
+        1,
+        "exactly the ONE real (non-char-literal) `{{` must survive the strip — the `'{{'` char \
+         literal's brace must be blanked, leaving {stripped_braces:?}"
+    );
+    assert_eq!(
+        stripped_braces.matches('}').count(),
+        1,
+        "exactly the ONE real (non-char-literal) `}}` must survive the strip — the `'}}'` char \
+         literal's brace must be blanked, leaving {stripped_braces:?}"
+    );
+    // STRING-MODE INVARIANT PRESERVED: a `'"'` char literal must STILL NOT open
+    // string mode — blanking its inner byte keeps the `'` `' ` `'` delimiters, so the code
+    // AFTER it stays visible (here a rogue `lower_type_expr_structural` mention is
+    // kept countable, proving the quote did not start a string that would swallow
+    // the rest of the line).
+    let stripped_quote =
+        strip_comments_for_single_call_scan("let _q = '\"'; lower_type_expr_structural");
+    assert!(
+        stripped_quote.contains("lower_type_expr_structural"),
+        "a `'\\\"'` char literal must NOT open string mode — the identifier after it must remain \
+         VISIBLE, but the strip swallowed it: {stripped_quote:?}"
+    );
     // WRONG (BRACE-BALANCED CONTAINMENT — the FIX-2 vector): the SOLE call sits
     // AFTER `emit_macro_arg`'s closing brace but BEFORE the next `fn`, inside a
     // trailing free item (a closure-bearing const). The occurrence count is
@@ -22321,6 +22469,45 @@ fn structural_lowerer_single_call_classifier_discriminates() {
         "an offset AFTER `emit_macro_arg`'s closing brace must NOT be reported as contained — the \
          brace-balanced scan stops at the matching close brace"
     );
+    // WRONG (CHILD-MOD CONTAINMENT — the FIX-1 vector, the primary same-module
+    // close): a child `mod child { fn emit_macro_arg() { super::lower_type_expr_structural(g) } }`
+    // names the private lowerer from a SAME-MODULE inline child. The top-level
+    // `emit_macro_arg` has an EMPTY body, so the file's SOLE lowerer reference is
+    // the child's call → the occurrence COUNT gate passes (exactly one reference),
+    // but the `syn`-bound TOP-LEVEL containment finds ZERO references in the
+    // top-level `emit_macro_arg` body → REDden. The naive `fn emit_macro_arg` text
+    // search would have mis-attributed the call to the CHILD's header and wrongly
+    // passed.
+    let child_mod_emit = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                          pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                          }\n\
+                          mod child {\n\
+                          fn emit_macro_arg() -> R { super::lower_type_expr_structural(g) }\n\
+                          }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(child_mod_emit).is_some(),
+        "a child-mod `fn emit_macro_arg` calling `super::lower_type_expr_structural` must be \
+         REPORTED — the call is inside the child `Item::Mod`, NOT the top-level wrapper, so the \
+         `syn`-bound TOP-LEVEL containment RED-flags it even though the occurrence count is exactly \
+         one (the primary same-module inline-mod close)"
+    );
+    // Direct self-test of the `syn`-bound top-level containment helper: the
+    // top-level wrapper body holding the call is CONTAINED; the same call moved
+    // into a child-mod fn (top-level body empty) is NOT.
+    let top_level_holds = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                           pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                           lower_type_expr_structural(g)\n\
+                           }\n";
+    assert!(
+        single_call_is_in_top_level_emit_macro_arg(top_level_holds),
+        "the call inside the TOP-LEVEL `emit_macro_arg` body must be reported as CONTAINED by the \
+         `syn`-bound top-level containment helper"
+    );
+    assert!(
+        !single_call_is_in_top_level_emit_macro_arg(child_mod_emit),
+        "a call inside a CHILD-mod `emit_macro_arg` (top-level body empty) must NOT be reported as \
+         contained — the helper only counts references inside the TOP-LEVEL `emit_macro_arg` item"
+    );
     // ANTI-VACUITY — a missing definition is reported.
     let no_def =
         "pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G) -> R { other(g) }\n";
@@ -22352,37 +22539,130 @@ fn structural_lowerer_single_call_classifier_discriminates() {
 /// The SINGLE sanctioned out-of-line child module of `lower.rs`: the
 /// `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod structural_lower_tests;`
 /// test wiring. This is the ONLY non-inline `mod` the expansion-surface guard
-/// allows, and ONLY when it is `#[cfg(test)]`-gated — a production (non-test)
-/// out-of-line `mod` of any name is rejected.
+/// allows, and ONLY in its EXACT shape — see [`mod_is_sanctioned_test_wiring`].
 const LOWER_RS_SANCTIONED_TEST_MOD: &str = "structural_lower_tests";
 
-/// Whether any of `attrs` is a `#[cfg(test)]` / `#[cfg(any(test, …))]` /
-/// `#[cfg(all(…, test, …))]` gate — any `cfg(...)` whose token stream contains
-/// the bare predicate `test` (mirrors the module-private `has_cfg_test` helper
-/// used by the recursion-visitor guard, re-expressed at file scope for the
-/// expansion-surface classifier).
-fn lower_rs_attrs_are_cfg_test(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        if !a.path().is_ident("cfg") {
-            return false;
+/// The EXACT `#[path = "…"]` the sanctioned test wiring must carry. A `../`- or
+/// otherwise escaping path is rejected: the test body must be the SIBLING
+/// `structural_lower_tests.rs`, not a foreign file pulled in under a test gate.
+const LOWER_RS_SANCTIONED_TEST_MOD_PATH: &str = "structural_lower_tests.rs";
+
+/// Whether `attr` is EXACTLY `#[cfg(test)]` — the meta is a single-token `cfg`
+/// list whose sole token is the bare identifier `test`. This is STRICT by
+/// design: it REJECTS `#[cfg(any(test, …))]`, `#[cfg(all(test, …))]`,
+/// `#[cfg(feature = "…")]`, `#[cfg(not(test))]`, `#[cfg_attr(…)]`, and any other
+/// cfg that is SATISFIABLE in a non-test production build — only `cfg(test)`,
+/// which is unsatisfiable in a normal build, is a true test-only gate. (The
+/// prior `any token == "test"` matcher accepted `cfg(any(test, feature = "x"))`,
+/// which compiles in production under feature `x` — the hole FIX-2 closes.)
+fn attr_is_exactly_cfg_test(attr: &syn::Attribute) -> bool {
+    if !attr.path().is_ident("cfg") {
+        return false;
+    }
+    match &attr.meta {
+        syn::Meta::List(list) => {
+            // The token stream must be the single bare ident `test` — no nested
+            // `any(…)` / `all(…)` / `feature = …` / `not(…)` / commas / parens.
+            let mut tokens = list.tokens.clone().into_iter();
+            match (tokens.next(), tokens.next()) {
+                (Some(proc_macro2::TokenTree::Ident(id)), None) => id == "test",
+                _ => false,
+            }
         }
-        let rendered = match &a.meta {
-            syn::Meta::List(list) => list.tokens.to_string(),
-            _ => return false,
-        };
-        rendered
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|token| token == "test")
-    })
+        // `#[cfg]` / `#[cfg = "…"]` are not a `cfg(test)` gate.
+        _ => false,
+    }
 }
 
+/// Whether an out-of-line `mod` `m` is EXACTLY the sanctioned test wiring:
+/// `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod structural_lower_tests;`.
+/// ALL of the following must hold, exactly — anything else is a production
+/// out-of-line child module (rejected):
+///
+/// - the module name is EXACTLY `structural_lower_tests`
+///   ([`LOWER_RS_SANCTIONED_TEST_MOD`]);
+/// - it carries EXACTLY one `#[cfg(test)]` ([`attr_is_exactly_cfg_test`]) — not
+///   `cfg(any(test, …))` / `cfg(all(…))` / a feature cfg / `cfg_attr`;
+/// - it carries EXACTLY one `#[path = "structural_lower_tests.rs"]`
+///   ([`LOWER_RS_SANCTIONED_TEST_MOD_PATH`]) — not a `../`-escaping or any other
+///   path;
+/// - it carries NO OTHER attributes (the attribute set is precisely
+///   `{cfg(test), path}` — a smuggled extra attribute, e.g. a rewriting
+///   proc-macro attribute, is rejected).
+fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
+    if m.ident != LOWER_RS_SANCTIONED_TEST_MOD {
+        return false;
+    }
+    let mut saw_cfg_test = false;
+    let mut saw_exact_path = false;
+    for attr in &m.attrs {
+        if attr_is_exactly_cfg_test(attr) {
+            // Reject a SECOND cfg attribute (only one `cfg(test)` is sanctioned).
+            if saw_cfg_test {
+                return false;
+            }
+            saw_cfg_test = true;
+            continue;
+        }
+        if attr.path().is_ident("path") {
+            if saw_exact_path {
+                return false;
+            }
+            // The path value must be EXACTLY `structural_lower_tests.rs`.
+            let is_exact = match &attr.meta {
+                syn::Meta::NameValue(nv) => match &nv.value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) => s.value() == LOWER_RS_SANCTIONED_TEST_MOD_PATH,
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !is_exact {
+                return false;
+            }
+            saw_exact_path = true;
+            continue;
+        }
+        // Any OTHER attribute (a non-`cfg(test)` cfg, a `cfg_attr`, a derive /
+        // attribute proc-macro, …) disqualifies the sanctioned wiring.
+        return false;
+    }
+    saw_cfg_test && saw_exact_path
+}
+
+/// The INERT macro allowlist for production `lower.rs` Expr/statement-position
+/// macro invocations. Derived from the ACTUAL macro set the file uses — at the
+/// time of writing, EXACTLY one: `matches!` (the deferred-conditional
+/// `distributive` classification at ~`lower.rs:430`).
+///
+/// Each entry is INERT — it cannot synthesise a hidden call to the private
+/// `lower_type_expr_structural` in a way that escapes the occurrence rail's
+/// literal-token count:
+///
+/// - `matches!(value, PATTERN)` — a boolean pattern-match. Its second argument
+///   is a PATTERN, not an expression, so it cannot CALL anything; its first is a
+///   plain sub-expression already covered by the occurrence rail's literal scan
+///   (a `lower_type_expr_structural(…)` written inside `matches!(…)` is a normal
+///   identifier token the text rail counts). It expands to a `match`, never a
+///   fresh call to a private fn that the rail cannot see.
+///
+/// The allowlist is the MINIMAL-over-block close: a blanket Expr/stmt-macro ban
+/// would red the genuine `matches!`, so only the actually-used inert macros are
+/// admitted; ANY other Expr/stmt-position macro (an imported `synth_call!`
+/// expanding to a hidden lowerer call, a `paste!` token-splice, …) reds. Add a
+/// new entry ONLY when `lower.rs` genuinely starts using another inert std/
+/// control macro, and document WHY it is inert here.
+const LOWER_RS_INERT_BODY_MACROS: &[&str] = &["matches"];
+
 /// Collect EXPANSION-SURFACE violations in `lower.rs` source `src` — production
-/// (non-`#[cfg(test)]`) constructs that could introduce compiled same-module
+/// (non-`#[cfg(test)]`) constructs that could introduce compiled SAME-MODULE
 /// code reaching the module-private `lower_type_expr_structural` WITHOUT adding
 /// a third literal identifier token (so the occurrence-counting
 /// `structural_lowerer_single_witnessed_call_violation` rail cannot see them).
-/// Parses `src` with `syn` and walks its items (recursing into inline `mod { … }`
-/// content blocks), recording:
+/// Parses `src` with `syn` and walks its items (descending into fn / const /
+/// static / impl-method BODIES and inline `mod { … }` blocks), recording:
 ///
 /// - an **item-position macro invocation** (`syn::Item::Macro`) — covers
 ///   `macro_rules!` definitions, `include!` / `include_str!`, AND function-like
@@ -22393,13 +22673,23 @@ fn lower_rs_attrs_are_cfg_test(attrs: &[syn::Attribute]) -> bool {
 ///   so a name-mention check could not see it — the genuine `lower.rs` uses NO
 ///   item-position macro at all, so the robust rule is to forbid the whole
 ///   class.
-/// - an **out-of-line / `#[path]` / adorned child `mod`** (`syn::Item::Mod` with
-///   `content.is_none()`) — a `mod foo;` declaration (with or without
-///   `#[path = …]` / `#[cfg(…)]`) whose body lives in another file that could
-///   carry code reaching the private lowerer. REJECTED unless it is the
-///   sanctioned `#[cfg(test)]`-gated test wiring
-///   (`LOWER_RS_SANCTIONED_TEST_MOD`): a production out-of-line `mod` of any
-///   name, OR a non-test `#[path]` `mod`, is a usurpation surface.
+/// - an **Expr / statement-position macro invocation** inside any fn / const /
+///   static / impl-method BODY (`syn::Expr::Macro` / `syn::Stmt::Macro` / a
+///   macro-bearing `let` or item initializer) whose macro path's last segment is
+///   NOT in the INERT allowlist [`LOWER_RS_INERT_BODY_MACROS`]. This closes the
+///   same-module imported-macro synthesis vector — an `synth_call!(g)` expanding
+///   to `lower_type_expr_structural(g)` is reachable inside a fn body and adds no
+///   third literal identifier token, so the occurrence rail cannot see it. The
+///   genuine `matches!` is admitted (inert); any other body macro reds.
+/// - an **out-of-line `#[path]` child `mod`** (`syn::Item::Mod` with
+///   `content.is_none()`) — REJECTED unless it is EXACTLY the sanctioned test
+///   wiring ([`mod_is_sanctioned_test_wiring`]: `#[cfg(test)]` exactly,
+///   `#[path = "structural_lower_tests.rs"]` exactly, name
+///   `structural_lower_tests` exactly, no other attrs).
+/// - a **production (non-`#[cfg(test)]`) INLINE child `mod child { … }`** — a
+///   same-module surface that can define a second producer or name the private
+///   lowerer. REJECTED. (The real `lower.rs` has none.) A `#[cfg(test)]`-gated
+///   inline mod is test-only code and is allowed (and recursed for completeness).
 /// - a **`use … lower_type_expr_structural … as <Alias>;`** reexport
 ///   (`syn::Item::Use` renaming TO `lower_type_expr_structural`, via the shared
 ///   [`use_tree_renames_to`] classifier) — defense-in-depth alongside the
@@ -22407,12 +22697,11 @@ fn lower_rs_attrs_are_cfg_test(attrs: &[syn::Attribute]) -> bool {
 ///
 /// SCOPE — BOUNDED, NOT EXHAUSTIVE (see the guard doc's documented residual):
 /// this is a `syn`-source walk over ONE file. It CANNOT see macro-expanded
-/// output, a `#[path]` module rooted OUTSIDE the walked tree, an attribute /
-/// derive proc-macro that rewrites the file, or split-token name synthesis. The
-/// LOAD-BEARING guarantee is the COMPILER module-privacy of
-/// `lower_type_expr_structural` (a foreign module cannot NAME it — a compile
-/// error, not a lint); this classifier closes the realistic in-file
-/// expansion-surface vectors a routine refactor / copy-paste would introduce.
+/// output, a `#[path]` module rooted OUTSIDE the walked tree, or an attribute /
+/// derive proc-macro that REWRITES the file after parsing. After this fix, ALL
+/// the same-module IN-FILE vectors (inline mod, out-of-line mod, item-macro,
+/// Expr/stmt-macro, alias, let-binding, whitespace, char-literal) are CLOSED;
+/// the residual is exactly those two out-of-model cases (see the guard doc).
 fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
     let mut violations = Vec::new();
     let file = match syn::parse_file(src) {
@@ -22428,9 +22717,70 @@ fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
     violations
 }
 
+/// A `syn::visit::Visit` that records every Expr / statement-position macro
+/// invocation whose macro path's last segment is NOT in the inert allowlist
+/// [`LOWER_RS_INERT_BODY_MACROS`]. Visiting fn / const / static / impl-method
+/// bodies with this catches a same-module imported-macro synthesis (an
+/// `synth_call!(g)` expanding to a hidden private-lowerer call) that the
+/// occurrence-counting text rail cannot see because the whole identifier never
+/// appears as a literal token.
+struct BodyMacroScanner {
+    violations: Vec<String>,
+}
+
+impl BodyMacroScanner {
+    fn record(&mut self, mac: &syn::Macro) {
+        let name = mac
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_else(|| "<macro>".to_string());
+        if !LOWER_RS_INERT_BODY_MACROS.contains(&name.as_str()) {
+            self.violations.push(format!(
+                "an Expr/statement-position macro invocation `{name}!( … )` in a fn / const / \
+                 static / impl-method body of production `lower.rs` is NOT in the inert allowlist \
+                 ({:?}) — it can synthesise same-module code reaching the private \
+                 `lower_type_expr_structural` without a third literal identifier token (e.g. \
+                 `synth_call!(g)` expanding to `lower_type_expr_structural(g)`)",
+                LOWER_RS_INERT_BODY_MACROS
+            ));
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for BodyMacroScanner {
+    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+        self.record(&node.mac);
+        syn::visit::visit_expr_macro(self, node);
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        self.record(&node.mac);
+        syn::visit::visit_stmt_macro(self, node);
+    }
+}
+
+/// Drive a [`BodyMacroScanner`] over one body sub-tree (a fn block or a
+/// const/static initializer expression) and append any non-allowlisted
+/// Expr/stmt-position macro violations it records. `visit` is a closure that
+/// applies the scanner to the concrete node (`|s| s.visit_block(&f.block)`,
+/// `|s| s.visit_expr(&c.expr)`, …), keeping the lifetime local and avoiding a
+/// generic trait while sharing the scan across fn / const / static /
+/// impl-method bodies.
+fn scan_body_macros(violations: &mut Vec<String>, visit: impl FnOnce(&mut BodyMacroScanner)) {
+    let mut scanner = BodyMacroScanner {
+        violations: Vec::new(),
+    };
+    visit(&mut scanner);
+    violations.append(&mut scanner.violations);
+}
+
 /// Recursive item walker for [`lower_rs_expansion_surface_violations`] —
-/// descends inline `mod { … }` content blocks so a violation nested in an inline
-/// module is still seen.
+/// descends fn / const / static / impl-method BODIES (for non-allowlisted
+/// Expr/stmt-position macros) and `#[cfg(test)]`-gated inline `mod { … }`
+/// content blocks (test code), while REJECTING production inline child mods,
+/// out-of-line mods, item macros, and lowerer-`as` reexports.
 fn lower_rs_collect_expansion_surface(items: &[syn::Item], violations: &mut Vec<String>) {
     for item in items {
         match item {
@@ -22454,25 +22804,73 @@ fn lower_rs_collect_expansion_surface(items: &[syn::Item], violations: &mut Vec<
                      third literal identifier token"
                 ));
             }
+            // A free fn body — scan it for non-allowlisted Expr/stmt-position
+            // macros (the same-module imported-macro synthesis vector).
+            syn::Item::Fn(item_fn) => {
+                scan_body_macros(violations, |s| {
+                    syn::visit::Visit::visit_block(s, &item_fn.block)
+                });
+            }
+            // A const / static initializer expression — scan it too (a macro
+            // initializer is an Expr-position macro).
+            syn::Item::Const(item_const) => {
+                scan_body_macros(violations, |s| {
+                    syn::visit::Visit::visit_expr(s, &item_const.expr)
+                });
+            }
+            syn::Item::Static(item_static) => {
+                scan_body_macros(violations, |s| {
+                    syn::visit::Visit::visit_expr(s, &item_static.expr)
+                });
+            }
+            // An `impl` block — scan each method body for body macros.
+            syn::Item::Impl(item_impl) => {
+                for impl_item in &item_impl.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        scan_body_macros(violations, |s| {
+                            syn::visit::Visit::visit_block(s, &method.block)
+                        });
+                    }
+                }
+            }
             syn::Item::Mod(m) => {
                 match &m.content {
-                    // Inline `mod foo { … }` — its body items are walked by this
-                    // same scan (and any call inside is still subject to the
-                    // occurrence-counting rail), so it is allowed; recurse.
-                    Some((_, inner)) => lower_rs_collect_expansion_surface(inner, violations),
+                    // Inline `mod foo { … }`. A production (non-`#[cfg(test)]`)
+                    // inline child mod is a SAME-MODULE surface that can define a
+                    // second producer or name the private lowerer — REJECTED. A
+                    // `#[cfg(test)]`-gated inline mod is test-only code: allowed,
+                    // and recursed into so a nested violation is still seen.
+                    Some((_, inner)) => {
+                        let is_cfg_test = m.attrs.iter().any(attr_is_exactly_cfg_test);
+                        if is_cfg_test {
+                            lower_rs_collect_expansion_surface(inner, violations);
+                        } else {
+                            violations.push(format!(
+                                "a production (non-`#[cfg(test)]`) INLINE child module `mod {} {{ … \
+                                 }}` is forbidden in `lower.rs` — it is a same-module surface that \
+                                 can define a second producer or name the private \
+                                 `lower_type_expr_structural`; the real `lower.rs` declares no inline \
+                                 child module",
+                                m.ident,
+                            ));
+                            // Still descend (defense-in-depth: surface nested
+                            // item/body violations too).
+                            lower_rs_collect_expansion_surface(inner, violations);
+                        }
+                    }
                     // Out-of-line `mod foo;` — body lives in another file. Allowed
-                    // ONLY for the sanctioned `#[cfg(test)]`-gated test wiring.
+                    // ONLY for the EXACT sanctioned test wiring.
                     None => {
-                        let is_sanctioned_test_mod = m.ident == LOWER_RS_SANCTIONED_TEST_MOD
-                            && lower_rs_attrs_are_cfg_test(&m.attrs);
-                        if !is_sanctioned_test_mod {
+                        if !mod_is_sanctioned_test_wiring(m) {
                             let has_path = m.attrs.iter().any(|a| a.path().is_ident("path"));
                             violations.push(format!(
                                 "an out-of-line child module `mod {};`{} is forbidden in production \
-                                 `lower.rs` — only the sanctioned `#[cfg(test)] #[path = \
-                                 \"structural_lower_tests.rs\"] mod {}` test wiring may declare an \
-                                 out-of-line child; a production (or `#[path]`-adorned non-test) \
-                                 child module could carry code reaching the private lowerer",
+                                 `lower.rs` — only the EXACT sanctioned `#[cfg(test)] #[path = \
+                                 \"structural_lower_tests.rs\"] mod {}` test wiring (exactly \
+                                 `#[cfg(test)]`, exactly that `#[path]`, that name, no other attrs) \
+                                 may declare an out-of-line child; a production, feature-cfg, \
+                                 `../`-escaping-path, wrong-name, or extra-attr child module could \
+                                 carry code reaching the private lowerer",
                                 m.ident,
                                 if has_path { " (with `#[path]`)" } else { "" },
                                 LOWER_RS_SANCTIONED_TEST_MOD,
@@ -22503,46 +22901,56 @@ fn lower_rs_collect_expansion_surface(items: &[syn::Item], violations: &mut Vec<
 /// (`structural_lowerer_called_only_through_the_witness_gated_wrapper`) closes
 /// the direct / alias / whitespace / newline / char-literal vectors, but it
 /// cannot see a `macro_rules!` / `paste!` / proc-macro that SYNTHESISES a call,
-/// an `include!("external.inc")` that splices a generated body, or a `#[path]` /
-/// out-of-line child `mod` — each can introduce compiled same-module code
+/// an `include!("external.inc")` that splices a generated body, a same-module
+/// imported Expr/stmt-position macro, an inline child `mod`, or a `#[path]` /
+/// out-of-line child `mod` — each can introduce compiled SAME-MODULE code
 /// reaching the module-private `lower_type_expr_structural` WITHOUT adding a
-/// third literal identifier token (Rust descendant / expanded code CAN reach a
-/// module-private item). This guard reads `lower.rs` and rejects every such
-/// production (non-`#[cfg(test)]`) expansion surface, mirroring the sibling
+/// third literal identifier token (Rust descendant / same-module / inline-mod /
+/// in-file-expanded code CAN reach a module-private item — compiler privacy
+/// blocks only FOREIGN modules). This guard reads `lower.rs` and rejects every
+/// such production (non-`#[cfg(test)]`) expansion surface, mirroring the sibling
 /// guard that closes the same class for `build_script_setup_seed_frames`
 /// (`collect_sanctioned_occurrences` + `macro_hot_mirror_exposes_single_crate_visible_producer_entry`)
 /// and the `syn`-AST `carrier_module_has_no_public_type_args_surface`.
 ///
 /// REJECTION SET (production, non-`#[cfg(test)]`): an item-position macro
 /// invocation (`macro_rules!` / `include!` / `include_str!` / function-like or
-/// proc-macro `some_macro!{…}`); an out-of-line / `#[path]` / adorned child
-/// `mod` (any `mod foo;` other than the sanctioned `#[cfg(test)]`-gated
-/// `structural_lower_tests` wiring); a `use … as lower_type_expr_structural;`
-/// reexport. The sanctioned `#[cfg(test)] #[path = "structural_lower_tests.rs"]
-/// mod structural_lower_tests;` test wiring is ALLOWLISTED (test-gated only).
+/// proc-macro `some_macro!{…}`); a non-allowlisted Expr/statement-position macro
+/// inside a fn / const / static / impl-method body (the inert allowlist is
+/// [`LOWER_RS_INERT_BODY_MACROS`] = the actually-used `matches!`); a production
+/// INLINE child `mod child { … }`; an out-of-line / `#[path]` child `mod` (any
+/// `mod foo;` other than the EXACT sanctioned wiring); a `use … as
+/// lower_type_expr_structural;` reexport. ONLY the EXACT sanctioned
+/// `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod structural_lower_tests;`
+/// test wiring is ALLOWLISTED ([`mod_is_sanctioned_test_wiring`]: exactly
+/// `#[cfg(test)]` — not `cfg(any(test, …))` / `cfg(all(…))` / a feature cfg —
+/// exactly that `#[path]`, that name, no other attrs).
 ///
-/// DOCUMENTED IRREDUCIBLE RESIDUAL (ACCEPTED — matches
-/// `carrier_module_has_no_public_type_args_surface`'s doc and the sibling
-/// entry-surface guard's residual list). A `syn` source scan of one file
-/// fundamentally cannot model:
-/// - a `#[path = "…"]` module rooted OUTSIDE `crates/verter_session/src/**`
-///   (its body is a foreign file this scan never reads);
-/// - an ATTRIBUTE / DERIVE PROC-MACRO applied to the file or an item that
-///   rewrites the token stream after parsing (a `syn` parse sees the
-///   pre-expansion shape only);
-/// - SPLIT-TOKEN macro NAME SYNTHESIS (`paste!` / `concat_idents!` / a proc-macro
-///   joining `lower_type_expr_` + `structural`) so the whole identifier is never
-///   one token — here, the UNCONDITIONAL item-macro rejection already forbids the
-///   carrier (any item-position macro reds regardless of its tokens), so this
-///   residual is narrowed to a macro reaching the lowerer through a NON-item
-///   position the scan does not enumerate.
+/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED). After this fix, ALL the same-module
+/// IN-FILE vectors are CLOSED — inline mod, out-of-line mod, item macro,
+/// Expr/stmt-position macro, `as`-alias, `let`-binding, whitespace/newline-split
+/// call, char-literal masking. The ONLY remaining residual a `syn` source scan
+/// of ONE file cannot model is precisely two cases, NEITHER of which the in-file
+/// closes above touch:
+/// - an **out-of-tree `#[path = "…"]` module** rooting code in a DIFFERENT
+///   module/file OUTSIDE `crates/verter_session/src/structural_carrier_producer/`
+///   — this scan reads only `lower.rs`, so it never sees that foreign file's
+///   body; but that body is in ANOTHER module, so COMPILER module-privacy DOES
+///   block it from naming the bare-private `lower_type_expr_structural` (a
+///   compile error, not a lint — the airtight backstop for the FOREIGN case);
+/// - an **attribute / derive PROC-MACRO that REWRITES `lower.rs`** post-parse —
+///   a `syn` parse sees the PRE-expansion shape, so no source scanner can model
+///   post-expansion code; a proc-macro injecting a lowerer call would have to be
+///   ADDED as an attribute/derive on a `lower.rs` item, itself a reviewed change,
+///   and the codebase accepts this identical residual for its sibling
+///   producer-confinement guards (`carrier_module_has_no_public_type_args_surface`
+///   and `macro_hot_mirror_exposes_single_crate_visible_producer_entry`).
 ///
-/// These residuals are ACCEPTED because the AIRTIGHT backstop is COMPILER
-/// module-privacy: `lower_type_expr_structural` carries NO visibility modifier,
-/// so a foreign module — however it is spelled, expanded, or `#[path]`-rooted —
-/// still cannot NAME it (a compile error, not a lint). This guard is the bounded
-/// in-file expansion-surface rejection layered on top of that guarantee, not a
-/// replacement for it.
+/// NOT residual (do NOT claim privacy backstops these — they are CLOSED here):
+/// the IN-FILE inline-mod / out-of-line-mod / item-macro / Expr-stmt-macro /
+/// alias / binding vectors are all rejected by this guard's `syn` walk and the
+/// occurrence rail. Compiler module-privacy is the backstop ONLY for the
+/// out-of-tree/foreign case above, NOT for same-module in-file code.
 #[test]
 fn structural_carrier_producer_lower_has_no_expansion_surface() {
     let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
@@ -22571,19 +22979,31 @@ fn structural_carrier_producer_lower_has_no_expansion_surface() {
 
 /// Self-test for the EXPANSION-SURFACE classifier
 /// [`lower_rs_expansion_surface_violations`]: the REAL `lower.rs` shape passes
-/// (its `#[cfg(test)] #[path] mod structural_lower_tests;` test wiring does NOT
-/// red); each planted production expansion surface reds — an
-/// `include!("generated_lowerer.inc")`, a `macro_rules!` whose body emits a
-/// lowerer call, an item-position `paste! { … }` invocation, an
-/// `include_str!`, a production `#[path = "…"] mod foo;`, a plain out-of-line
-/// `mod foo;`, and a `use … as lower_type_expr_structural;` reexport; an inline
-/// `mod { … }` block (subject to the occurrence rail) does NOT red.
+/// (its EXACT `#[cfg(test)] #[path] mod structural_lower_tests;` test wiring does
+/// NOT red); each planted production expansion surface reds —
+///
+/// - item macros: an `include!("generated_lowerer.inc")`, a `macro_rules!`, an
+///   item-position `paste! { … }`, an `include_str!`;
+/// - out-of-line mods: a production `#[path] mod foo;`, a plain `mod foo;`, a
+///   test-gated mod of the WRONG name;
+/// - FIX 2 (exact cfg-test allowlist): a `#[cfg(any(test, feature))]` /
+///   `#[cfg(all(test, …))]` / `#[cfg(feature)]` mod, a `../`-escaping `#[path]`, a
+///   missing `#[path]`, an extra attribute — all red even with the sanctioned
+///   name;
+/// - FIX 1 (part 2): a production INLINE `mod child { … }` reds; a `#[cfg(test)]`
+///   inline mod is allowed;
+/// - FIX 3 (body-macro allowlist): a non-allowlisted Expr/stmt-position
+///   `synth_call!` in a fn / const / impl-method body reds; the genuine inert
+///   `matches!` passes.
 #[test]
 fn structural_lower_expansion_surface_classifier_discriminates() {
     // The REAL minimal genuine shape: `use` imports, the bare module-private fn,
-    // and the sanctioned `#[cfg(test)] #[path] mod` test wiring. PASSES.
+    // and the sanctioned `#[cfg(test)] #[path] mod` test wiring. PASSES. The fn
+    // bodies use a plain path expression (`DEFAULT`), NOT `todo!()`, so the
+    // body-macro scan (FIX 3) sees no non-allowlisted macro in the genuine shape
+    // — the real `lower.rs` likewise uses only the inert `matches!`.
     let genuine = "use std::sync::Arc;\n\
-                   fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                   fn lower_type_expr_structural(g: &G) -> R { DEFAULT }\n\
                    pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
                    lower_type_expr_structural(g)\n\
                    }\n\
@@ -22605,12 +23025,16 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
          reaching the private lowerer"
     );
 
-    // REJECT — an `include_str!` item macro (also `Item::Macro`).
-    let include_str_planted =
-        format!("{genuine}const SRC: &str = include_str!(\"x.inc\");\ninclude!(\"x.inc\");\n");
+    // REJECT — an `include_str!`-ONLY fixture (in a `const` initializer, NO item
+    // `include!`): `include_str!("x.inc")` is an Expr-position macro in the const
+    // initializer, so the FIX-3 body-macro scan catches it ON ITS OWN — the
+    // fixture reds for the intended reason (not because a sibling item `include!`
+    // happens to be present). This discriminates the body-macro path.
+    let include_str_only = format!("{genuine}const SRC: &str = include_str!(\"x.inc\");\n");
     assert!(
-        !lower_rs_expansion_surface_violations(&include_str_planted).is_empty(),
-        "a planted `include!`/`include_str!` item macro must RED"
+        !lower_rs_expansion_surface_violations(&include_str_only).is_empty(),
+        "a planted `include_str!` in a `const` initializer (no item `include!`) must RED on its own \
+         — the FIX-3 body-macro scan catches the Expr-position `include_str!`"
     );
 
     // REJECT — a `macro_rules!` whose body emits a lowerer call. A `syn` scan
@@ -22678,24 +23102,156 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
          allowlist pins the exact `structural_lower_tests` name, not any test-gated out-of-line mod"
     );
 
-    // SOUNDNESS — an INLINE `mod helper { … }` block is allowed (its body is
-    // walked by this same scan, and any call inside is still subject to the
-    // occurrence-counting rail), so a benign inline mod does NOT red.
-    let inline_mod = format!("{genuine}mod helper {{\n    pub(super) const K: u8 = 1;\n}}\n");
+    // ── FIX 2: EXACT cfg-test allowlist ──────────────────────────────────────
+    // These arms hold the SANCTIONED name (`structural_lower_tests`) and the
+    // SANCTIONED path constant, and vary ONLY the axis under test, so each
+    // isolates that the cfg-exactness / path-exactness / extra-attr rule is what
+    // reds (a non-sanctioned NAME would red on the name check instead, confusing
+    // the discrimination). NOTE: these fixtures live in a STRING fed to `syn`, so
+    // the duplicate `structural_lower_tests` module name vs the `genuine` wiring
+    // is never compiled — `syn::parse_file` does not enforce name uniqueness.
+    //
+    // REJECT — a `#[cfg(any(test, feature = "x"))]` gate (the EXACT live-compiling
+    // hole): `cfg(any(test, feature = "x"))` is SATISFIABLE in a non-test
+    // production build under feature `x`, so it is NOT a test-only gate. Sanctioned
+    // name + path; ONLY the non-exact cfg differs.
+    let cfg_any_mod = format!(
+        "{genuine}#[cfg(any(test, feature = \"x\"))]\n#[path = \"structural_lower_tests.rs\"]\nmod structural_lower_tests;\n"
+    );
     assert!(
-        lower_rs_expansion_surface_violations(&inline_mod).is_empty(),
-        "an INLINE `mod helper {{ … }}` block (body walked in-place, subject to the occurrence \
-         rail) must NOT red"
+        !lower_rs_expansion_surface_violations(&cfg_any_mod).is_empty(),
+        "a `#[cfg(any(test, feature = \"x\"))]` out-of-line mod (sanctioned name + path) must RED — \
+         `cfg(any(test, …))` is satisfiable in a production build, so it is not a test-only gate \
+         (only EXACTLY `#[cfg(test)]` is sanctioned)"
+    );
+    // REJECT — a `#[cfg(all(test, feature = "x"))]` gate: `all(test, …)` requires
+    // `test`, but it is still NOT the exact single-token `cfg(test)`. Sanctioned
+    // name + path; ONLY the compound cfg differs.
+    let cfg_all_mod = format!(
+        "{genuine}#[cfg(all(test, feature = \"x\"))]\n#[path = \"structural_lower_tests.rs\"]\nmod structural_lower_tests;\n"
+    );
+    assert!(
+        !lower_rs_expansion_surface_violations(&cfg_all_mod).is_empty(),
+        "a `#[cfg(all(test, …))]` out-of-line mod (sanctioned name + path) must RED — only the EXACT \
+         single-token `#[cfg(test)]` is sanctioned, not a compound `all(...)`"
+    );
+    // REJECT — a `#[cfg(feature = "x")]` gate (no `test` token at all — a pure
+    // production cfg). Sanctioned name + path; ONLY the feature cfg differs.
+    let cfg_feature_mod = format!(
+        "{genuine}#[cfg(feature = \"x\")]\n#[path = \"structural_lower_tests.rs\"]\nmod structural_lower_tests;\n"
+    );
+    assert!(
+        !lower_rs_expansion_surface_violations(&cfg_feature_mod).is_empty(),
+        "a `#[cfg(feature = \"x\")]` out-of-line mod (sanctioned name + path) must RED — a feature \
+         cfg is production code, not a test gate"
+    );
+    // REJECT — the SANCTIONED name + EXACT `#[cfg(test)]` but a `../`-ESCAPING path
+    // (`#[path = "../../outside.rs"]`): the body is a foreign file outside the owner
+    // dir, pulled in under a test gate. ONLY the path differs.
+    let escaping_path_mod = format!(
+        "{genuine}#[cfg(test)]\n#[path = \"../../outside.rs\"]\nmod structural_lower_tests;\n"
+    );
+    assert!(
+        !lower_rs_expansion_surface_violations(&escaping_path_mod).is_empty(),
+        "a `#[cfg(test)] #[path = \"../../outside.rs\"] mod structural_lower_tests;` must RED — the \
+         `../`-escaping path roots the body OUTSIDE the owner dir; only the exact \
+         `structural_lower_tests.rs` sibling path is sanctioned"
+    );
+    // REJECT — the sanctioned name + cfg(test) but NO `#[path]` attribute at all
+    // (an out-of-line `mod structural_lower_tests;` resolving to a default file).
+    // ONLY the missing path differs.
+    let missing_path_mod = format!("{genuine}#[cfg(test)]\nmod structural_lower_tests;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&missing_path_mod).is_empty(),
+        "a `#[cfg(test)] mod structural_lower_tests;` WITHOUT the exact `#[path]` must RED — the \
+         sanctioned wiring requires the explicit `#[path = \"structural_lower_tests.rs\"]`"
+    );
+    // REJECT — the sanctioned shape PLUS an EXTRA attribute (e.g. a rewriting
+    // attribute proc-macro): the attribute set must be exactly `{cfg(test), path}`.
+    // ONLY the extra attribute differs.
+    let extra_attr_mod = format!(
+        "{genuine}#[cfg(test)]\n#[path = \"structural_lower_tests.rs\"]\n#[some_attr]\nmod structural_lower_tests;\n"
+    );
+    assert!(
+        !lower_rs_expansion_surface_violations(&extra_attr_mod).is_empty(),
+        "the sanctioned wiring PLUS an extra `#[some_attr]` must RED — the attribute set must be \
+         exactly `{{cfg(test), path}}`; a smuggled extra attribute (e.g. a rewriting proc-macro) is \
+         rejected"
     );
 
+    // ── FIX 1 (part 2): production INLINE child mod rejected ──────────────────
+    // REJECT — a production (non-`#[cfg(test)]`) INLINE `mod child { … }`: a
+    // same-module surface that can define a second producer or name the private
+    // lowerer. The real `lower.rs` declares none.
+    let inline_mod = format!("{genuine}mod helper {{\n    pub(super) const K: u8 = 1;\n}}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&inline_mod).is_empty(),
+        "a production INLINE `mod helper {{ … }}` block must RED — an inline child module is a \
+         same-module surface that can define a second producer or name the private lowerer; the \
+         real `lower.rs` declares no inline child module"
+    );
+    // SOUNDNESS — a `#[cfg(test)]`-gated INLINE mod is test-only code and is
+    // ALLOWED (recursed for completeness), so a benign cfg(test) inline mod does
+    // NOT red.
+    let cfg_test_inline_mod =
+        format!("{genuine}#[cfg(test)]\nmod inner_tests {{\n    const K: u8 = 1;\n}}\n");
+    assert!(
+        lower_rs_expansion_surface_violations(&cfg_test_inline_mod).is_empty(),
+        "a `#[cfg(test)]`-gated INLINE `mod inner_tests {{ … }}` (test-only code) must NOT red — \
+         only PRODUCTION inline child mods are rejected"
+    );
     // SOUNDNESS — an inline mod that ITSELF contains a forbidden item-position
-    // macro IS caught (recursion into inline mod bodies).
+    // macro reds (both for the production-inline-mod rule AND, via recursion, the
+    // nested item macro).
     let inline_mod_with_macro =
         format!("{genuine}mod helper {{\n    include!(\"nested.inc\");\n}}\n");
     assert!(
         !lower_rs_expansion_surface_violations(&inline_mod_with_macro).is_empty(),
-        "an item-position macro NESTED in an inline `mod` body must RED — the scan recurses into \
-         inline mod content"
+        "a production inline `mod` (additionally containing an item macro) must RED — the inline \
+         child module itself is forbidden, and the scan also recurses into its body"
+    );
+
+    // ── FIX 3: Expr/statement-position body-macro allowlist ───────────────────
+    // PASS — the GENUINE `matches!` in a fn body is INERT-allowlisted, so a body
+    // that uses it does NOT red.
+    let matches_body =
+        format!("{genuine}fn classify(x: &T) -> bool {{ matches!(x, T::A {{ .. }}) }}\n");
+    assert!(
+        lower_rs_expansion_surface_violations(&matches_body).is_empty(),
+        "the genuine inert `matches!(…)` in a fn body must PASS the body-macro allowlist (it cannot \
+         synthesise a hidden private-lowerer call)"
+    );
+    // REJECT — a NON-allowlisted Expr-position `synth_call!(g)` in a fn body: an
+    // imported macro that could expand to `lower_type_expr_structural(g)` adds no
+    // third literal identifier token, so only the body-macro scan catches it.
+    let synth_call_body = format!("{genuine}fn rogue(g: &G) -> R {{ synth_call!(g) }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&synth_call_body).is_empty(),
+        "a non-allowlisted Expr-position `synth_call!(g)` in a fn body must RED — it can expand to a \
+         hidden `lower_type_expr_structural(g)` call the occurrence rail cannot see"
+    );
+    // REJECT — a NON-allowlisted statement-position `synth_call! { g };` (Stmt::Macro).
+    let synth_stmt_body = format!("{genuine}fn rogue(g: &G) {{ synth_call! {{ g }}; }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&synth_stmt_body).is_empty(),
+        "a non-allowlisted statement-position `synth_call! {{ g }};` must RED — a Stmt-position macro \
+         is also a body-macro synthesis vector"
+    );
+    // REJECT — a NON-allowlisted macro in a CONST initializer (Expr-position).
+    let synth_const_init = format!("{genuine}const ROGUE: R = synth_call!(g);\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&synth_const_init).is_empty(),
+        "a non-allowlisted macro in a `const` initializer must RED — a macro initializer is an \
+         Expr-position macro"
+    );
+    // REJECT — a NON-allowlisted macro in an IMPL-METHOD body.
+    let synth_impl_method = format!(
+        "{genuine}struct S;\nimpl S {{ fn rogue(&self, g: &G) -> R {{ synth_call!(g) }} }}\n"
+    );
+    assert!(
+        !lower_rs_expansion_surface_violations(&synth_impl_method).is_empty(),
+        "a non-allowlisted macro in an impl-method body must RED — the scan visits impl-method \
+         bodies too"
     );
 
     // The REAL owner source passes the expansion-surface scan (revert proof).
