@@ -22678,12 +22678,15 @@ fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
 /// for STRUCTURAL violations while its macros stay exempt — exactly the previous
 /// walker's cfg-test policy.
 ///
-/// SCOPE — the IN-FILE macro / mod / alias surface is now CLOSED, not residual
-/// (see the guard doc). The only out-of-model cases a `syn`-source walk over ONE
-/// file cannot see are an attribute / derive proc-macro that REWRITES `lower.rs`
-/// post-parse (`syn` sees the PRE-expansion shape) and a module rooted in a
-/// DIFFERENT/UNRELATED file the guard never reads (compiler module-privacy
-/// blocks that foreign body from naming the bare-private lowerer).
+/// SCOPE — the IN-FILE macro / mod / alias AND attribute surface is now CLOSED,
+/// not residual (see the guard doc). The macro ban closes every IN-FILE macro
+/// position; the [`check_production_attr`] allowlist (driven by the
+/// `visit_attribute` override) closes the attribute / derive PROC-MACRO vector
+/// (`#[some_attr]`, `#[derive(Evil)]` — a `syn::Attribute`, not a `syn::Macro`).
+/// The ONLY out-of-model case a `syn`-source walk over ONE file cannot see is a
+/// module rooted in a DIFFERENT/UNRELATED file the guard never reads — and there
+/// COMPILER module-privacy blocks that foreign body from naming the bare-private
+/// lowerer (a compile error, the airtight backstop).
 fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
     let mut violations = Vec::new();
     let file = match syn::parse_file(src) {
@@ -22702,6 +22705,171 @@ fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
     syn::visit::Visit::visit_file(&mut visitor, &file);
     violations.append(&mut visitor.violations);
     violations
+}
+
+/// The STD BUILT-IN derive traits the production attribute allowlist admits.
+/// `lower.rs` derives only subsets of this set (`Debug, Default, Clone` :70;
+/// `Debug, Clone, Copy` :104; `Debug, Clone, PartialEq, Eq` :238). A derive
+/// outside this set — `derive(Evil)`, a qualified `derive(serde::Serialize)`, a
+/// custom proc-macro derive — could synthesise a leaking trait impl reaching the
+/// module-private lowerer, so it is REJECTED. Mirrors the sibling carrier
+/// guard's `ALLOWED_DERIVES` / `check_derive_exact`
+/// (`carrier_encapsulation_guards.rs`), widened from EXACT-set to
+/// any-subset-of-built-ins because (unlike the single frozen carrier struct)
+/// `lower.rs` carries several distinct built-in derive lists.
+const LOWER_RS_BUILTIN_DERIVES: &[&str] = &[
+    "Debug",
+    "Default",
+    "Clone",
+    "Copy",
+    "PartialEq",
+    "Eq",
+    "Hash",
+    "PartialOrd",
+    "Ord",
+];
+
+/// Render an attribute's path as a `::`-joined string for a rejection message.
+fn attr_path_string(attr: &syn::Attribute) -> String {
+    attr.path()
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// Validate a `#[derive(…)]` attribute's CONTENTS are STD BUILT-IN traits only
+/// ([`LOWER_RS_BUILTIN_DERIVES`]), pushing one violation per offending derive.
+/// A QUALIFIED derive path (`serde::Serialize`, `foo::Clone`) is ALWAYS foreign
+/// (it can resolve to a custom proc-macro derive synthesising code the source
+/// scan cannot see) and is rejected; a bare non-built-in ident (`Evil`,
+/// `SomeProcMacro`) is rejected. Mirrors `check_derive_exact`'s nested-meta walk
+/// and qualified-path rejection in `carrier_encapsulation_guards.rs`.
+fn check_derive_contents_builtin(attr: &syn::Attribute, v: &mut Vec<String>) {
+    let _ = attr.parse_nested_meta(|meta| {
+        if meta.path.segments.len() != 1 {
+            v.push(format!(
+                "qualified derive path `{}` in production `lower.rs` is forbidden — a derive must \
+                 name a bare STD BUILT-IN trait {LOWER_RS_BUILTIN_DERIVES:?} (a qualified path \
+                 could resolve to a custom proc-macro derive synthesising a body reaching the \
+                 module-private `lower_type_expr_structural`)",
+                meta.path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            ));
+        } else {
+            let ident = meta.path.segments[0].ident.to_string();
+            if !LOWER_RS_BUILTIN_DERIVES.contains(&ident.as_str()) {
+                v.push(format!(
+                    "non-built-in derive `{ident}` in production `lower.rs` is forbidden — only the \
+                     STD BUILT-IN derives {LOWER_RS_BUILTIN_DERIVES:?} are permitted (a custom \
+                     derive proc-macro could synthesise a trait impl reaching the module-private \
+                     `lower_type_expr_structural`)"
+                ));
+            }
+        }
+        Ok(())
+    });
+}
+
+/// Classify ONE production (`cfg_test_depth == 0`) attribute against the
+/// `lower.rs` allowlist, pushing a violation if it is not permitted. The
+/// permitted set is EXACTLY (everything else — single OR multi-segment — is
+/// rejected, closing the attribute / derive PROC-MACRO vector the macro ban does
+/// not cover, because an attribute proc-macro is a `syn::Attribute`, NOT a
+/// `syn::Macro`, so `visit_macro` never fires on it):
+///
+/// - `#[derive(…)]` whose contents are STD BUILT-IN traits only
+///   ([`check_derive_contents_builtin`]) — `lower.rs` derives at :70/:104/:238;
+/// - EXACTLY `#[cfg(test)]` ([`attr_is_exactly_cfg_test`]) — a `cfg(any(test,
+///   …))` / `cfg(all(…))` / `cfg(feature = …)` / `cfg_attr(…)` is satisfiable in
+///   a production build and is REJECTED, consistent with the exact-cfg-test rule;
+/// - `#[allow(…)]` / `#[expect(…)]` — INERT lint attributes (they cannot rewrite
+///   or swap an item), so they are admitted generally (`lower.rs` carries
+///   `#[allow(clippy::match_like_matches_macro)]` at :436);
+/// - EXACTLY `#[path = "structural_lower_tests.rs"]`
+///   ([`LOWER_RS_SANCTIONED_TEST_MOD_PATH`]) — the sanctioned test-mod path; any
+///   other `#[path]` is rejected (a `../`-escaping or foreign-file redirect);
+/// - `#[doc]` — doc comments (`///` / `//!` lower to `#[doc = …]`) are inert.
+///
+/// Mirrors the sibling carrier guard's `check_attrs` single-segment-allowlist +
+/// `check_derive_exact` derive-content validation
+/// (`carrier_encapsulation_guards.rs`), specialised to the `lower.rs` attribute
+/// surface. A multi-segment path (`tokio::main`, `serde::Serialize`) is always
+/// foreign and rejected.
+fn check_production_attr(attr: &syn::Attribute, v: &mut Vec<String>) {
+    let path = attr.path();
+    let single = path.segments.len() == 1;
+    let last = path
+        .segments
+        .last()
+        .map(|s| s.ident.to_string())
+        .unwrap_or_default();
+
+    // `#[derive(…)]` — admit, then validate the contents are built-ins.
+    if single && last == "derive" {
+        check_derive_contents_builtin(attr, v);
+        return;
+    }
+    // EXACTLY `#[cfg(test)]`. A non-exact cfg / `cfg_attr` is NOT permitted.
+    if single && last == "cfg" {
+        if attr_is_exactly_cfg_test(attr) {
+            return;
+        }
+        v.push(format!(
+            "attribute `#[{}]` in production `lower.rs` is forbidden — only EXACTLY `#[cfg(test)]` \
+             is permitted (a `cfg(any(test, …))` / `cfg(all(…))` / `cfg(feature = …)` is satisfiable \
+             in a production build, and a conditional attribute could swap the item the scan sees)",
+            attr_path_string(attr)
+        ));
+        return;
+    }
+    // INERT lint attributes — they cannot rewrite or swap an item.
+    if single && (last == "allow" || last == "expect") {
+        return;
+    }
+    // EXACTLY `#[path = "structural_lower_tests.rs"]`.
+    if single && last == "path" {
+        let exact = matches!(
+            &attr.meta,
+            syn::Meta::NameValue(nv)
+                if matches!(
+                    &nv.value,
+                    syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. })
+                        if s.value() == LOWER_RS_SANCTIONED_TEST_MOD_PATH
+                )
+        );
+        if exact {
+            return;
+        }
+        v.push(format!(
+            "attribute `#[{}]` in production `lower.rs` is forbidden — only the EXACT sanctioned \
+             `#[path = \"{LOWER_RS_SANCTIONED_TEST_MOD_PATH}\"]` is permitted (any other `#[path]` \
+             could redirect a body to a `../`-escaping or foreign file)",
+            attr_path_string(attr)
+        ));
+        return;
+    }
+    // Doc comments (`///` / `//!` → `#[doc = …]`) and the literal `#[doc(...)]`.
+    if single && last == "doc" {
+        return;
+    }
+
+    // Everything else — any other single-segment attribute, ANY multi-segment
+    // (qualified) attribute path, an attribute / derive PROC-MACRO — is REJECTED.
+    v.push(format!(
+        "attribute `#[{}]` in production `lower.rs` is forbidden — only `derive(<std built-ins>)`, \
+         EXACTLY `cfg(test)`, inert `allow(…)` / `expect(…)` lints, the sanctioned `path = \
+         \"{LOWER_RS_SANCTIONED_TEST_MOD_PATH}\"`, and `doc` are permitted. A foreign / qualified / \
+         proc-macro attribute (an attribute or derive proc-macro is a `syn::Attribute`, not a \
+         `syn::Macro`, so the macro ban does not see it) could rewrite a `lower.rs` item to \
+         synthesise same-module code reaching the module-private `lower_type_expr_structural`",
+        attr_path_string(attr)
+    ));
 }
 
 /// The SINGLE expansion-surface scanner for production `lower.rs`. Its
@@ -22747,10 +22915,14 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
     /// `impl` / `trait` / `extern` / method-body / assoc-const-init — reaches
     /// here. Rejected unless inside a `#[cfg(test)]`-gated subtree (test-only
     /// code is exempt). Does NOT recurse into the macro's unparsed token stream
-    /// (it is not a navigable AST), but that is irrelevant: a nested macro lives
-    /// in a `syn` node the OUTER walk already visits (e.g. the `if $guard:expr`
-    /// arm of `matches!(x, _ if synth_call!(g))` is a real `syn::ExprMacro`
-    /// reached on its own), so the guard-nest vector is caught.
+    /// (it is not a navigable AST), so a macro NESTED inside another macro's
+    /// token stream — e.g. the `synth_call!(g)` inside the `if $guard:expr` arm of
+    /// `matches!(x, _ if synth_call!(g))` — is NOT reached as its own node (`syn`
+    /// does not parse macro token streams). That is irrelevant: the guard-nest
+    /// still reds because the OUTER `matches!` is itself banned (ban-all-body-
+    /// macros), NOT because the inner `synth_call!` is reached. A macro sitting in
+    /// a real `syn` node the OUTER walk visits (an arg-position `f(g!())`, a
+    /// `let x = g!();`) IS visited on its own.
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if self.cfg_test_depth == 0 {
             let name = mac
@@ -22771,9 +22943,38 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
             ));
         }
         // Intentionally do NOT call `syn::visit::visit_macro` — the token stream
-        // is unparsed and not a navigable AST. Every nested macro reachable as a
-        // real `syn` node (a guard-expr macro, an arg-position macro) is visited
-        // on its own by the outer walk, so exhaustiveness is preserved.
+        // is unparsed and not a navigable AST. A nested macro buried INSIDE
+        // another macro's token stream (e.g. the `synth_call!(g)` in
+        // `matches!(x, _ if synth_call!(g))`) is NOT reached as its own node —
+        // `syn` does not parse macro token streams, and this override deliberately
+        // skips the default traversal — but that is irrelevant: the OUTER macro is
+        // itself banned (ban-all), so the guard-nest reds on the outer `matches!`.
+        // A macro in a real `syn` node the OUTER walk visits (an arg-position
+        // `f(g!())`, a `let x = g!();`) is reached on its own.
+    }
+
+    /// EXHAUSTIVE production-attribute allowlist: every `syn::Attribute` on every
+    /// node `syn::visit` traverses — item / impl-item / trait-item / `let`-stmt /
+    /// const / static / mod (inline) / fn — reaches here, because the default
+    /// `visit_*` methods call `visit_attribute` for each `node.attrs` entry and
+    /// the structural overrides below re-enter the default traversal. Rejected
+    /// unless in the production allowlist ([`check_production_attr`]) — closing the
+    /// attribute / derive PROC-MACRO vector the macro ban CANNOT cover: an
+    /// attribute proc-macro (`#[some_attr] fn f() {}`) or a derive proc-macro
+    /// (`#[derive(Evil)] struct S;`) is a `syn::Attribute`, NOT a `syn::Macro`, so
+    /// `visit_macro` never fires on it, yet it could rewrite a `lower.rs` item to
+    /// synthesise same-module code reaching the private `lower_type_expr_structural`.
+    /// Suspended inside a `#[cfg(test)]`-gated subtree (`cfg_test_depth > 0`):
+    /// test-only code may use any attributes — mirroring the macro-ban exemption.
+    /// (The sanctioned out-of-line `#[cfg(test)] #[path] mod structural_lower_tests;`
+    /// is checked by `mod_is_sanctioned_test_wiring` in the `visit_item_mod` None
+    /// arm, which does NOT re-enter the default traversal, so this override never
+    /// double-rejects that wiring's attrs.)
+    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        if self.cfg_test_depth == 0 {
+            check_production_attr(attr, &mut self.violations);
+        }
+        syn::visit::visit_attribute(self, attr);
     }
 
     /// Out-of-line vs inline `mod` structural rules (NOT expressible as a macro
@@ -22830,7 +23031,8 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 
     /// A `use … as lower_type_expr_structural;` reexport binding mints a nameable
     /// alias of the private lowerer — defense-in-depth alongside the occurrence
-    /// guard's third-occurrence rail.
+    /// guard's third-occurrence rail. The `within` wrapper keeps a `#[cfg(test)]`-
+    /// gated `use`'s attrs exempt from the production-attribute check.
     fn visit_item_use(&mut self, use_item: &'ast syn::ItemUse) {
         if use_tree_renames_to(&use_item.tree, "lower_type_expr_structural") {
             self.violations.push(
@@ -22839,7 +23041,7 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
                     .to_string(),
             );
         }
-        syn::visit::visit_item_use(self, use_item);
+        self.within(&use_item.attrs, |s| syn::visit::visit_item_use(s, use_item));
     }
 
     // ── `#[cfg(test)]` exemption bookkeeping for the macro ban ────────────────
@@ -22890,6 +23092,28 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
     fn visit_foreign_item_fn(&mut self, f: &'ast syn::ForeignItemFn) {
         self.within(&f.attrs, |s| syn::visit::visit_foreign_item_fn(s, f));
     }
+
+    // The type-definition item containers also carry attributes (notably
+    // `#[derive(…)]`); wrapping them in `within` keeps a `#[cfg(test)]`-gated
+    // definition's attrs exempt, exactly as for the fn / impl / const containers
+    // above. The PRODUCTION (depth-0) `#[derive(…)]` attrs on `lower.rs`'s real
+    // types (:70/:104/:238) are validated to be std built-ins by the
+    // `visit_attribute` override the default traversal re-enters here.
+    fn visit_item_struct(&mut self, s_item: &'ast syn::ItemStruct) {
+        self.within(&s_item.attrs, |s| syn::visit::visit_item_struct(s, s_item));
+    }
+
+    fn visit_item_enum(&mut self, e: &'ast syn::ItemEnum) {
+        self.within(&e.attrs, |s| syn::visit::visit_item_enum(s, e));
+    }
+
+    fn visit_item_union(&mut self, u: &'ast syn::ItemUnion) {
+        self.within(&u.attrs, |s| syn::visit::visit_item_union(s, u));
+    }
+
+    fn visit_item_type(&mut self, t: &'ast syn::ItemType) {
+        self.within(&t.attrs, |s| syn::visit::visit_item_type(s, t));
+    }
 }
 
 /// COMPANION single-engine producer guard (close the EXPANSION-SURFACE class):
@@ -22927,41 +23151,64 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 /// `cfg(any(test, …))` / `cfg(all(…))` / a feature cfg — exactly that `#[path]`,
 /// that name, no other attrs); a `#[cfg(test)]`-gated subtree (inline mod, fn,
 /// impl method) is dead-in-production test code and is EXEMPT from the macro ban.
+/// The guard ALSO rejects every PRODUCTION ATTRIBUTE outside a small allowlist
+/// ([`check_production_attr`], driven by the `visit_attribute` override): an
+/// attribute / derive PROC-MACRO (`#[some_attr]`, `#[derive(Evil)]`) is a
+/// `syn::Attribute`, NOT a `syn::Macro`, so the macro ban cannot see it, yet it
+/// could rewrite a `lower.rs` item to synthesise same-module code. ONLY
+/// `derive(<std built-ins {Debug, Default, Clone, Copy, PartialEq, Eq, Hash,
+/// PartialOrd, Ord}>)`, EXACTLY `cfg(test)`, inert `allow` / `expect` lints, the
+/// sanctioned `path = "structural_lower_tests.rs"`, and `doc` are permitted;
+/// every foreign / qualified / multi-segment / `cfg_attr` / non-exact-`cfg` /
+/// non-built-in-or-qualified-`derive` attribute REDS (the sibling carrier guard's
+/// `check_attrs` + `check_derive_exact` machinery, mirrored). The cfg-test
+/// exemption suspends the attribute check inside a `#[cfg(test)]`-gated subtree.
 ///
-/// IN-FILE EXPR / STMT / ITEM MACRO CLASS IS CLOSED (not residual). After this
-/// fix, EVERY same-module IN-FILE vector is CLOSED — every macro position (item,
-/// Expr, stmt, impl/trait/extern item, method body, assoc-const init), the
-/// inline mod, the out-of-line mod, the `as`-alias, the `let`-binding, the
-/// whitespace/newline-split call, the char-literal masking. A `#[path = "…"]`
+/// IN-FILE EXPR / STMT / ITEM MACRO **AND ATTRIBUTE-MACRO** CLASSES ARE CLOSED
+/// (not residual). After this fix, EVERY same-module IN-FILE vector is CLOSED —
+/// every macro position (item, Expr, stmt, impl/trait/extern item, method body,
+/// assoc-const init), the inline mod, the out-of-line mod, the `as`-alias, the
+/// `let`-binding, the whitespace/newline-split call, the char-literal masking,
+/// AND every attribute / derive PROC-MACRO position. An attribute proc-macro
+/// (`#[some_attr] fn f() {}`) and a derive proc-macro (`#[derive(Evil)] struct
+/// S;`) are a `syn::Attribute`, NOT a `syn::Macro`, so the macro ban (`visit_
+/// macro`) never fires on them — the [`check_production_attr`] allowlist (driven
+/// by the `visit_attribute` override) closes that vector by permitting ONLY
+/// `derive(<std built-ins>)`, EXACTLY `cfg(test)`, inert `allow` / `expect`
+/// lints, the sanctioned `path`, and `doc`, rejecting every foreign / qualified /
+/// `cfg_attr` / non-built-in-derive attribute (the sibling carrier guard's
+/// `check_attrs` + `check_derive_exact` machinery, mirrored). A `#[path = "…"]`
 /// module declared as a CHILD of `lower.rs` is a DESCENDANT: it CAN name the
 /// private fn via `super::lower_type_expr_structural`, so compiler privacy does
 /// NOT backstop a child `#[path]` mod — that case is CLOSED by this guard's
 /// rejection of every non-sanctioned out-of-line / `#[path]` child `mod`, NOT by
 /// privacy.
 ///
-/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED) — exactly TWO out-of-model cases a
-/// `syn` source scan of ONE file structurally cannot reach, NEITHER an in-file
-/// macro:
-/// - an **attribute / derive PROC-MACRO that REWRITES `lower.rs`** post-parse —
-///   a `syn` parse sees the PRE-expansion shape, so no source scanner can model
-///   post-expansion code; a proc-macro injecting a lowerer call would have to be
-///   ADDED as an attribute/derive on a `lower.rs` item, itself a reviewed change,
-///   and the codebase accepts this identical residual for its sibling
-///   producer-confinement guards (`carrier_module_has_no_public_type_args_surface`
-///   and `macro_hot_mirror_exposes_single_crate_visible_producer_entry`);
+/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED) — exactly ONE out-of-model case a
+/// `syn` source scan of ONE file structurally cannot reach, and it is NOT an
+/// in-file vector:
 /// - a **module rooted in a DIFFERENT / UNRELATED file** the guard never reads
-///   (NOT a child of `lower.rs` — e.g. an unrelated module elsewhere in the
-///   crate) — this scan reads only `lower.rs`, so it never sees that foreign
-///   body; but because that body is in ANOTHER module, COMPILER module-privacy
-///   DOES block it from naming the bare-private `lower_type_expr_structural` (a
-///   compile error, not a lint — the airtight backstop for the FOREIGN case).
+///   (NOT a child / descendant of `lower.rs` — e.g. an unrelated module elsewhere
+///   in the crate; a `#[path]` CHILD of `lower.rs` is a descendant and is CLOSED
+///   above, not residual) — this scan reads only `lower.rs`, so it never sees
+///   that foreign body; but because that body is in ANOTHER module, COMPILER
+///   module-privacy DOES block it from naming the bare-private
+///   `lower_type_expr_structural` HOWEVER it is spelled (a compile error, not a
+///   lint — the airtight backstop for the FOREIGN case, by construction). The
+///   codebase accepts this identical privacy-backstopped foreign-module residual
+///   for its sibling producer-confinement guards
+///   (`carrier_module_has_no_public_type_args_surface` and
+///   `macro_hot_mirror_exposes_single_crate_visible_producer_entry`).
 ///
 /// NOT residual (do NOT claim privacy backstops these — they are CLOSED here):
 /// the IN-FILE any-position macro / inline-mod / out-of-line-or-`#[path]`-child-
-/// mod / alias / binding vectors are all rejected by this guard's `syn` walk and
-/// the occurrence rail. Compiler module-privacy is the backstop ONLY for a body
-/// in a DIFFERENT/UNRELATED foreign module, NOT for same-module in-file code and
-/// NOT for a `#[path]` CHILD of `lower.rs` (a descendant, closed by the guard).
+/// mod / alias / binding vectors (rejected by this guard's `syn` walk and the
+/// occurrence rail) AND every attribute / derive PROC-MACRO on a `lower.rs` item
+/// (rejected by the production-attribute allowlist). Compiler module-privacy is
+/// the backstop ONLY for a body in a DIFFERENT/UNRELATED foreign module, NOT for
+/// same-module in-file code, NOT for a `#[path]` CHILD of `lower.rs` (a
+/// descendant), and NOT for an attribute proc-macro on a `lower.rs` item (closed
+/// by the allowlist).
 #[test]
 fn structural_carrier_producer_lower_has_no_expansion_surface() {
     let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
@@ -23011,7 +23258,16 @@ fn structural_carrier_producer_lower_has_no_expansion_surface() {
 /// - EXHAUSTIVE item-position coverage (the single `visit_macro` visitor):
 ///   `ImplItem::Macro`, `TraitItem::Macro`, `ForeignItem::Macro`, a
 ///   trait-default method body macro, and an assoc-const initializer macro each
-///   red; a `#[cfg(test)]`-gated method body macro stays exempt.
+///   red; a `#[cfg(test)]`-gated method body macro stays exempt;
+/// - PRODUCTION-ATTRIBUTE allowlist (close the attribute / derive PROC-MACRO
+///   vector — an attribute is a `syn::Attribute`, NOT a `syn::Macro`, so the
+///   macro ban does not see it): the real `lower.rs` attribute set (`derive` of
+///   std built-ins, `#[cfg(test)]`, `#[allow(clippy::…)]`, doc comments) PASSES,
+///   while a foreign `#[some_attr]`, a `#[derive(Evil)]` / `#[derive(serde::
+///   Serialize)]` (non-built-in / qualified) derive, a `#[cfg(any(test, …))]`
+///   non-exact cfg, a `#[cfg_attr(feature = "x", derive(Clone))]`, and a
+///   `#[tokio::main]` multi-segment attribute each RED; a `#[cfg(test)]`-gated
+///   subtree may use any attribute (exempt).
 #[test]
 fn structural_lower_expansion_surface_classifier_discriminates() {
     // The REAL minimal genuine shape: `use` imports, the bare module-private fn,
@@ -23244,17 +23500,23 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
     );
     // REJECT — the GUARD-NEST that defeated the name-allowlist: the macro name is
     // `matches`, but its `if $guard:expr` arm nests an arbitrary `synth_call!(g)`
-    // that expands to a hidden `lower_type_expr_structural(g)`. The OUTER walk
-    // reaches the nested `synth_call!` as its OWN `syn::ExprMacro` node, so the
-    // ban-all `visit_macro` reds on BOTH the outer `matches!` and the inner
-    // `synth_call!`. This is THE vector the GOV ruling targeted.
+    // that expands to a hidden `lower_type_expr_structural(g)`. The nested
+    // `synth_call!` lives INSIDE the outer `matches!` token stream, which `syn`
+    // does NOT parse, so the inner macro is NOT reached as its own `syn::ExprMacro`
+    // node. The guard-nest reds anyway because the OUTER `matches!` is itself
+    // banned (ban-all-body-macros) — that ban, not reaching the inner node, is the
+    // catch. (The previous name-only allowlist admitted the outer `matches!`,
+    // leaving the inner hidden; ban-all closes it.) This is THE vector the GOV
+    // ruling targeted.
     let matches_guard_nest =
         format!("{genuine}fn rogue(x: &T, g: &G) -> bool {{ matches!(x, _ if synth_call!(g)) }}\n");
     assert!(
         !lower_rs_expansion_surface_violations(&matches_guard_nest).is_empty(),
-        "a `matches!(x, _ if synth_call!(g))` guard-nest must RED — its `if $guard:expr` arm nests \
-         an arbitrary macro that can synthesise a hidden lowerer call; the ban-all `visit_macro` \
-         reaches the nested `synth_call!` node directly (the name-allowlist could not)"
+        "a `matches!(x, _ if synth_call!(g))` guard-nest must RED — its `if $guard:expr` arm can \
+         nest an arbitrary macro that synthesises a hidden lowerer call. It reds because the OUTER \
+         `matches!` is banned (ban-all-body-macros), NOT because the inner `synth_call!` is reached \
+         (`syn` does not parse the outer macro's token stream); the former name-allowlist admitted \
+         the outer `matches!` and so missed the inner"
     );
     // REJECT — a path-qualified `evil::matches!(…)`: a renamed/imported macro
     // whose LAST path segment is `matches` but is NOT std `matches!`. The old
@@ -23365,6 +23627,99 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
         lower_rs_expansion_surface_violations(&cfg_test_method_macro).is_empty(),
         "a `#[cfg(test)]`-gated impl-method body macro (test-only code) must NOT red — the cfg-test \
          exemption suspends the macro ban for the dead-in-production subtree"
+    );
+
+    // ── PRODUCTION-ATTRIBUTE ALLOWLIST (close the attribute / derive PROC-MACRO
+    //    vector: an attribute is a `syn::Attribute`, NOT a `syn::Macro`, so
+    //    `visit_macro` never fires on it) ──────────────────────────────────────
+    // SOUNDNESS — the EXACT attributes the real `lower.rs` carries all PASS: the
+    // three std-built-in derive lists (:70/:104/:238), `#[cfg(test)]` on an item
+    // (:168), `#[allow(clippy::match_like_matches_macro)]` (:436), the sanctioned
+    // `#[path]` (:1080), and a doc comment. (`genuine` itself is already attr-
+    // light, so this arm is the positive proof the allowlist admits the real set.)
+    let real_attrs = format!(
+        "{genuine}\
+         #[derive(Debug, Default, Clone)]\nstruct A;\n\
+         #[derive(Debug, Clone, Copy)]\nstruct B;\n\
+         #[derive(Debug, Clone, PartialEq, Eq)]\nstruct C;\n\
+         /// a doc comment\n\
+         struct D;\n\
+         impl D {{ #[cfg(test)] fn t(&self) {{}} }}\n\
+         fn body() {{ #[allow(clippy::match_like_matches_macro)] let _x = 1; }}\n"
+    );
+    assert!(
+        lower_rs_expansion_surface_violations(&real_attrs).is_empty(),
+        "the EXACT attribute set the real `lower.rs` carries — `derive` of std built-ins \
+         ({LOWER_RS_BUILTIN_DERIVES:?}), `#[cfg(test)]`, `#[allow(clippy::…)]`, a doc comment — must \
+         all PASS the production-attribute allowlist; if this reds the allowlist is too strict and \
+         the real `lower.rs` would false-red"
+    );
+
+    // REJECT — a foreign attribute PROC-MACRO `#[some_attr] fn f() {}` (a
+    // `syn::Attribute`, not a `syn::Macro` — invisible to the macro ban): it could
+    // rewrite the fn to synthesise a hidden lowerer call.
+    let foreign_attr_fn = format!("{genuine}#[some_attr]\nfn f() {{}}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&foreign_attr_fn).is_empty(),
+        "a planted `#[some_attr] fn f() {{}}` attribute proc-macro must RED — an attribute is a \
+         `syn::Attribute`, not a `syn::Macro`, so the macro ban does not see it; the production-\
+         attribute allowlist closes this vector"
+    );
+    // REJECT — a custom derive PROC-MACRO `#[derive(Evil)] struct S;`: a bare but
+    // NON-built-in derive that could synthesise a leaking trait impl.
+    let evil_derive = format!("{genuine}#[derive(Evil)]\nstruct S;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&evil_derive).is_empty(),
+        "a planted `#[derive(Evil)] struct S;` non-built-in derive must RED — only std-built-in \
+         derives {LOWER_RS_BUILTIN_DERIVES:?} are permitted; a custom derive could synthesise a \
+         trait impl reaching the private lowerer"
+    );
+    // REJECT — a QUALIFIED derive `#[derive(serde::Serialize)] struct S;`: a
+    // multi-segment derive path is always foreign (resolves to a custom derive).
+    let qualified_derive = format!("{genuine}#[derive(serde::Serialize)]\nstruct S;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&qualified_derive).is_empty(),
+        "a planted `#[derive(serde::Serialize)] struct S;` qualified derive must RED — a \
+         multi-segment derive path is always foreign; only the bare std built-ins are permitted"
+    );
+    // REJECT — a NON-EXACT cfg `#[cfg(any(test, feature = \"x\"))] fn f() {}`:
+    // satisfiable in a production build under feature `x`, so it is NOT a test gate
+    // and the conditional attribute could swap the item the scan sees.
+    let non_exact_cfg_attr = format!("{genuine}#[cfg(any(test, feature = \"x\"))]\nfn f() {{}}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&non_exact_cfg_attr).is_empty(),
+        "a planted `#[cfg(any(test, feature = \"x\"))] fn f() {{}}` must RED — only EXACTLY \
+         `#[cfg(test)]` is permitted; `cfg(any(test, …))` is satisfiable in a production build"
+    );
+    // REJECT — a `#[cfg_attr(feature = \"x\", derive(Clone))] struct S;`: a
+    // `cfg_attr` can conditionally ATTACH any attribute (here a derive) under a
+    // production feature — a swap vector the exact-cfg rule does not admit.
+    let cfg_attr_swap =
+        format!("{genuine}#[cfg_attr(feature = \"x\", derive(Clone))]\nstruct S;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&cfg_attr_swap).is_empty(),
+        "a planted `#[cfg_attr(feature = \"x\", derive(Clone))] struct S;` must RED — `cfg_attr` can \
+         conditionally attach an arbitrary attribute in a production build; it is never in the \
+         allowlist"
+    );
+    // REJECT — a multi-segment attribute proc-macro `#[tokio::main] fn f() {}`: a
+    // qualified attribute path is always foreign.
+    let multi_segment_attr = format!("{genuine}#[tokio::main]\nfn f() {{}}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&multi_segment_attr).is_empty(),
+        "a planted `#[tokio::main] fn f() {{}}` multi-segment attribute must RED — a qualified \
+         attribute path is always a foreign proc-macro; only the bare allowlisted attributes pass"
+    );
+    // SOUNDNESS — a `#[cfg(test)]`-gated subtree may use ANY attribute (test-only
+    // code is exempt): a `#[cfg(test)]` inline mod containing a `#[some_attr]` fn
+    // does NOT red, exactly as the macro ban is suspended there.
+    let cfg_test_subtree_attr =
+        format!("{genuine}#[cfg(test)]\nmod inner_tests {{ #[some_attr] fn t() {{}} }}\n");
+    assert!(
+        lower_rs_expansion_surface_violations(&cfg_test_subtree_attr).is_empty(),
+        "a `#[cfg(test)]`-gated subtree containing a `#[some_attr] fn` (test-only code) must NOT red \
+         — the production-attribute allowlist is suspended inside a cfg-test subtree (reusing \
+         `cfg_test_depth`), exactly as the macro ban is"
     );
 
     // The REAL owner source passes the expansion-surface scan (revert proof).
