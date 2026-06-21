@@ -1,92 +1,115 @@
-//! Frozen declaration-BODY-reader inventory guard — a temporary
-//! `syn`-structural inventory that anchors every SEMANTIC declaration-body
-//! reader (the frozen migration surface for the upcoming body-storage flip)
-//! and the small COMPAT/output body-read set, so the two sets stay cleanly
-//! separated and the frozen migration surface is closed by the curated
-//! enumeration plus the mechanically-pinned count, the frozen-file gate, and the
-//! parity rail — with the `<recv>.body.<method>` tripwire as a bounded supplement
-//! (see "What rail closes the surface" below).
+//! Residual `TypeExpr`-body-reader inventory guard — a `syn`-structural
+//! inventory that partitions every declaration-BODY reader still carrying the
+//! lower-crate typed IR (`TypeExpr`) into a `ReaderClass`, so the residual
+//! `TypeExpr` reads are an enumerated, curated, justified set while the
+//! genuinely-graph-backed readers route through the shared hot accessor.
+//!
+//! ## scanner records (durable guard-local record — Structural-Confinement-First)
+//!
+//! ```text
+//! scanner_invariant: only enumerated production anchors may read a declaration
+//!   body as TypeExpr; GraphBackedMigrated anchors must NOT (they route through
+//!   the shared `decl_body_hot_ref` hot accessor / a graph-native arm);
+//!   AuthoredShape / GraphFreeDto / GraphBackedPending / ProducerLowering are the
+//!   justified stay-allowlist (each carries a non-empty reason naming why it
+//!   stays), and OutputCompat is the sanctioned output/fingerprint/oracle read
+//!   set routed through the named compat helpers.
+//! scanner_justification: whether a reader requires authored syntax / lives
+//!   below the session graph / is a deferred larger refactor is an architectural
+//!   judgement not expressible by Rust while raw TypeExpr bodies remain readable.
+//! mechanism_ruling: codex partition-design consult
+//!   gov-partition-consult-OUT.txt (Q-PARTITION) + CTO ratification; temporary
+//!   last-resort scanner; the structural replacement target is private body
+//!   storage plus an AuthoredDeclBody wrapper / a below-graph layering seam, at
+//!   which point the AuthoredShape / GraphFreeDto / GraphBackedPending classes
+//!   empty and this inventory is deleted (see
+//!   docs/arch/authored-shape-graph-native-migration-deferral.md).
+//! hardening_rounds: 0
+//! hardening_history: none — first version of the partitioned guard.
+//! ```
+//!
+//! The three per-class scanner records the codex consult supplies (authored-shape
+//! / graph-free / producer) are reproduced verbatim on each class in
+//! [`ReaderClass`] below.
 //!
 //! ## What rail closes the surface (read this before trusting the tripwire)
 //!
-//! The COMPLETENESS rail is the ENUMERATION (`SEMANTIC_BODY_READERS` +
-//! `COMPAT_BODY_READERS`) — it is the authoritative frozen list of the body
-//! readers the storage flip migrates, and it covers BOTH bare-field reads
-//! (`<recv>.body` used as a value, e.g. `.body.clone()`) AND method-chain reads
-//! (`<recv>.body.<method>()`). Critically, this enumeration is a MANUALLY-CURATED
-//! list: invariants 1-2 (presence + uniqueness) only verify that the rows ALREADY
-//! ON THE LIST are present in the tree and resolve uniquely — they do NOT, and
-//! cannot, auto-discover a NEW reader nobody added to the curated list. A new
-//! reader that reads `.body` as a bare field, or that launders a method-chain
-//! read through a local binding (`let b = &lowered.body; b.m()`), is therefore
-//! NOT auto-detected by this guard; closing the surface against such a reader is
-//! carried by (1) the author keeping the curated enumeration complete, (2) the
-//! mechanically-pinned count assertion reddening if the row count drifts, (3) the
-//! migration's own frozen-file gate, and (4) the behavioural parity rail (the
-//! retained oracle). The `<recv>.body.<method>` tripwire (invariant 3) is a
-//! BOUNDED SUPPLEMENT on top of the enumeration: it cheaply reddens a NEW or
-//! MOVED method-chain read that escaped the enumeration, but it is NOT the
-//! completeness rail, does NOT alone prove "no new reader can appear", and does
-//! NOT cover the bare-field or local-binding-laundered spelling (those are not
-//! auto-caught — by design, for this temporary guard).
+//! The COMPLETENESS rail is the ENUMERATION (`RESIDUAL_BODY_READERS` +
+//! `COMPAT_BODY_READERS`) — it is the authoritative curated list of the
+//! `TypeExpr` body readers, partitioned by `ReaderClass`, and covers BOTH
+//! bare-field reads (`<recv>.body` used as a value, e.g. `.body.clone()`) AND
+//! method-chain reads (`<recv>.body.<method>()`). Critically, this enumeration is
+//! a MANUALLY-CURATED list: invariants 1-2 (presence + uniqueness) only verify
+//! that the rows ALREADY ON THE LIST are present in the tree and resolve
+//! uniquely — they do NOT, and cannot, auto-discover a NEW reader nobody added to
+//! the curated list. A new reader that reads `.body` as a bare field, or that
+//! launders a method-chain read through a local binding
+//! (`let b = &lowered.body; b.m()`), is therefore NOT auto-detected by this
+//! guard; closing the surface against such a reader is carried by (1) the author
+//! keeping the curated enumeration complete, (2) the mechanically-pinned per-class
+//! count assertions reddening if a class's row count drifts, and (3) the
+//! behavioural parity rail (the retained oracle). The `<recv>.body.<method>`
+//! tripwire (invariant 3) is a BOUNDED SUPPLEMENT on top of the enumeration: it
+//! cheaply reddens a NEW or MOVED method-chain read that escaped the enumeration,
+//! but it is NOT the completeness rail, does NOT alone prove "no new reader can
+//! appear", and does NOT cover the bare-field or local-binding-laundered spelling
+//! (those are not auto-caught — by design).
 //!
 //! ## Why this guard exists (and that it is TEMPORARY)
 //!
 //! Type-declaration BODY storage is migrating from the lower-crate typed IR
-//! (`TypeExpr`) to a `verter_session` arena handle. The migration flips the
-//! body PRODUCER and converts every SEMANTIC body reader in ONE pass against a
-//! FROZEN, closed list of reader sites; the small set of OUTPUT/COMPAT body
-//! reads (a fingerprint hash input; a typeinfo/hover oracle contributor read)
-//! are routed through narrow, purpose-named compat helpers BEFORE the flip and
-//! are deliberately NOT in the frozen semantic set.
+//! (`TypeExpr`) to a `verter_session` arena handle (`HotTypeRef`). The genuinely
+//! graph-backed semantic consumers route through the thin `decl_body_hot_ref` hot
+//! accessor (the `SemanticGraphStore` `Instantiate` memo) via graph-native
+//! predicates/materializers; a second class of readers stays on `TypeExpr`
+//! because their decision is intrinsically about the authored syntactic form,
+//! because they live below the session graph, because their migration is a larger
+//! refactor than the bounded accessor flip, because they are the producer mint
+//! itself, or because they are output/compat reads. This inventory enumerates and
+//! partitions exactly that residual set.
 //!
 //! This guard pins, structurally:
-//!   1. PRESENCE — every enumerated SEMANTIC body reader is defined at its
-//!      `(file, impl/mod, fn)` anchor in the production tree (so the migration
-//!      pass operates on a stable, enumerated surface).
+//!   1. PRESENCE — every enumerated reader is defined at its `(file, impl/mod,
+//!      fn)` anchor in the production tree.
 //!   2. UNIQUENESS — each anchor resolves to exactly one non-test definition
 //!      (a moved / duplicated / disappeared anchor reddens).
 //!   3. BOUNDED CLASSIFICATION (the tripwire SUPPLEMENT) — every
 //!      `<recv>.body.<TypeDeclBody-method>` read in the production tree sits at
-//!      a `(file, impl/mod, fn)` anchor that is in EITHER the SEMANTIC inventory
-//!      OR the COMPAT inventory. A NEW or MOVED such read outside both reddens
-//!      immediately. The receiver match unwraps paren/reference wrappers and
-//!      also recognizes the UFCS call form (`TypeDeclBody::m(&x.body)`), so those
-//!      spellings are detected identically — but this is a BOUNDED SUPPLEMENT,
-//!      not the completeness rail: a bare-field read or a local-binding launder
-//!      is NOT caught here, and is NOT auto-caught by invariants 1-2 either
-//!      (those only re-verify the already-curated rows); covering such a reader
-//!      relies on the curated enumeration being kept complete plus the count-pin,
-//!      frozen-file, and parity rails noted above.
+//!      a `(file, impl/mod, fn)` anchor that is in EITHER inventory. A NEW or
+//!      MOVED such read outside both reddens immediately. The receiver match
+//!      unwraps paren/reference wrappers and also recognizes the UFCS call form
+//!      (`TypeDeclBody::m(&x.body)`).
 //!   4. COMPAT PURITY — the two body-fact / oracle CONSUMER files
 //!      (`fact_emission.rs`, the oracle `source_walk.rs`) contain NO direct
-//!      lowered-body method-chain read after the compat routing: their only
-//!      body reads go through the named compat helpers.
+//!      lowered-body method-chain read after the compat routing.
+//!   5. NO GraphBackedMigrated TypeExpr-body read — a `GraphBackedMigrated`
+//!      anchor must NOT read `prepared.body` / a lowered `.body.<method>` /
+//!      `named_decl_body` as a semantic input (it routes through
+//!      `decl_body_hot_ref` / a graph-native arm). If one does, the guard REDS.
 //!
-//! When the migration pass lands, the semantic readers it touches are migrated
-//! and this guard's enumeration no longer describes the tree — at that point the
-//! guard is absorbed/deleted with the readers. It is intentionally TEMPORARY.
+//! When the future block lands the graph-native replacements (heritage-as-
+//! metadata + a graph-native closedness/key-domain classifier, the below-graph
+//! layering seam, and the C3-carrier / C7-split refactors), the AuthoredShape /
+//! GraphFreeDto / GraphBackedPending classes empty and this guard is deleted. It
+//! is intentionally TEMPORARY.
 //!
-//! ## Identity is structural (`syn`), not text — and this is an inventory
-//! guard, NOT a spelling scanner
+//! ## Identity is structural (`syn`), not text
 //!
 //! Every identity-sensitive question — which `fn` a token sits in (including a
 //! token in a NESTED fn / closure), the `impl`/`trait`/`mod` path a `fn` belongs
 //! to, whether a `fn` is `#[cfg(test)]`-gated — is answered by parsing each
 //! production `src/**` file with [`syn::parse_file`] and walking its item tree
-//! (a [`syn::visit::Visit`] impl), exactly as the sibling
-//! `whole_env_consumer_graph_native_inventory.rs` inventory guard does. Tokens
-//! in comments / string literals are invisible to the AST walk and cannot trip
-//! (or satisfy) the guard.
+//! (a [`syn::visit::Visit`] impl). Tokens in comments / string literals are
+//! invisible to the AST walk and cannot trip (or satisfy) the guard.
 //!
 //! The tripwire (invariant 3) keys on an UNAMBIGUOUS STRUCTURAL SHAPE, not on a
-//! denylist of identifier spellings and not on a receiver BINDING NAME (which
-//! would fail open on rename): a `<receiver>.body.<method>` chain (or its UFCS
-//! equivalent `TypeDeclBody::<method>(&<receiver>.body)`) whose method is one of
+//! denylist of identifier spellings and not on a receiver BINDING NAME: a
+//! `<receiver>.body.<method>` chain (or its UFCS equivalent
+//! `TypeDeclBody::<method>(&<receiver>.body)`) whose method is one of
 //! `TypeDeclBody`'s reader methods (`lookup_object` / `contributors` /
 //! `is_merged` / `primary` / `merged_member_names`). The receiver match unwraps
-//! sound paren/reference wrappers, so `(lowered.body).m()` and
-//! `(&lowered.body).m()` are detected identically to `lowered.body.m()`.
+//! sound paren/reference wrappers, so `(lowered.body).m()` and `(&lowered.body)
+//! .m()` are detected identically to `lowered.body.m()`.
 //!
 //! These method NAMES are NOT unique to `TypeDeclBody`: `contributors` /
 //! `primary` also exist on the eval-env `TypeDeclGroup` / `ValueDeclGroup`, and
@@ -99,45 +122,19 @@
 //! `PreparedTypeDecl.body` is a `TypeExpr`, NOT a `TypeDeclBody` (verter_semantic
 //! `prepared.rs`), so a `PreparedTypeDecl.body` read CANNOT be a `.body.<method>`
 //! chain — it is a bare-FIELD read, anchored by the ENUMERATION, not this
-//! tripwire. The no-colliding-`.body`-field property is a reviewed, VERIFIED
-//! premise (a targeted `body:\s*<colliding-type>` search returns zero hits
-//! today); there is NO concrete false positive on the current tree. A bare
-//! `group.contributors()` (on a decl GROUP, not a `.body`) or a `program.body`
-//! (an unrelated `.body` field with no such method) does NOT match the shape.
+//! tripwire.
 //!
 //! ## Honest scope (what this guard does and does NOT prove)
 //!
-//! Like the sibling inventory guard, this is a presence/uniqueness inventory of
-//! an ENUMERATED set PLUS a BOUNDED tripwire on a precise structural shape — it
-//! is NOT an exhaustive proof of completeness ON ITS OWN, and the tripwire is a
-//! SUPPLEMENT, not the completeness rail. Specifically:
-//!
-//! - The tripwire keys on the `<recv>.body.<method>` chain (and its paren/ref +
-//!   UFCS spellings); it does NOT (and cannot soundly, without type resolution)
-//!   classify a bare `<recv>.body` FIELD read — such reads share a shape with
-//!   unrelated `.body` fields (`program.body`, a request body, …). Every
-//!   bare-field semantic reader (e.g. the `PreparedTypeDecl.body` /
-//!   `ResolvedSymbol.body` / `ResolvedImportedRegistrySymbol.body` clones) is
-//!   carried by the ENUMERATION, NOT the tripwire — which is exactly why those
-//!   rows are `method_chain: false`.
-//! - A method-chain read whose receiver is a LOCAL bound from `.body`
-//!   (`let b = &lowered.body; b.m()`) is NOT classified by the tripwire either:
-//!   the receiver is a path, not a `.body` field access. This is an IRREDUCIBLE
-//!   limit of a syntactic guard (resolving the binding would need type
-//!   resolution), DISCLOSED here and covered by the MANUALLY-CURATED ENUMERATION
-//!   (kept complete by the author — not auto-detected) + the migration's
-//!   frozen-file gate + the behavioural parity rail — it is NOT chased with
-//!   further detector cases (that would be an arms race; the real closure of the
-//!   laundered class is the enumeration and the eventual single-typed-accessor
-//!   funnel the storage flip introduces). The negative self-test that codifies
-//!   this non-detection is a DISCLOSED-limit fixture, not a soundness claim.
-//!
-//! The ENUMERATION (the SEMANTIC + COMPAT inventories below) is the completeness
-//! statement; the migration pass carries its own frozen-file gate and
-//! behavioural parity rail on top. What this guard adds is: every enumerated
-//! reader is anchored and unique, every `<recv>.body.<method>` read (incl.
-//! paren/ref/UFCS forms) is pinned to a reviewed anchor, and a new such read
-//! outside the inventory reddens at once.
+//! This is a presence/uniqueness inventory of an ENUMERATED set PLUS a BOUNDED
+//! tripwire on a precise structural shape — it is NOT an exhaustive proof of
+//! completeness ON ITS OWN, and the tripwire is a SUPPLEMENT, not the
+//! completeness rail. A bare `<recv>.body` FIELD read and a method-chain read
+//! laundered through a local binding (`let b = &lowered.body; b.m()`) are out of
+//! the tripwire's sound syntactic reach and covered by the MANUALLY-CURATED
+//! ENUMERATION + the behavioural parity rail — not chased with further detector
+//! cases (anti-arms-race). The negative self-tests that codify this non-detection
+//! are DISCLOSED-limit fixtures, not soundness claims.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -188,7 +185,6 @@ fn production_src_files() -> Vec<(String, String)> {
     }
     out
 }
-
 // ════════════════════════════════════════════════════════════════════
 // `syn` STRUCTURAL INVENTORY — impl-path renderer + cfg-test evaluator
 // (the proven machinery from the sibling inventory guard)
@@ -801,59 +797,198 @@ fn inventory_for(files: &[(String, String)]) -> Vec<FnDef> {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// ANCHOR TABLES — the frozen SEMANTIC surface + the COMPAT surface
+// READER CLASS — the partition the residual TypeExpr body readers carry
 // ════════════════════════════════════════════════════════════════════
 
-/// One anchored declaration-BODY reader: the production file (crate-relative,
-/// forward-slashed), the enclosing impl/trait/mod path (`render_impl_path`
-/// form; `""` for a free file-scope fn), the fn name, whether the fn performs a
-/// `<recv>.body.<method>` method-chain read (so the tripwire's per-anchor view
-/// can be cross-checked against PRESENCE), and a required rationale.
+/// The class a residual `TypeExpr` declaration-body reader belongs to. The
+/// partition is the architectural JUDGEMENT (no compiler fact expresses it while
+/// raw `TypeExpr` bodies stay readable) the curated allowlist records, per the
+/// codex partition-design consult (Q-PARTITION) + CTO ratification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReaderClass {
+    /// MIGRATED onto the shared `decl_body_hot_ref` hot accessor / a graph-native
+    /// arm — these anchors must NO LONGER read a declaration body as `TypeExpr`
+    /// for a semantic decision (enforced by
+    /// [`graph_backed_migrated_anchors_perform_no_typeexpr_body_read`]).
+    GraphBackedMigrated,
+
+    /// Authored-shape reader — the decision is intrinsically about the AUTHORED
+    /// syntactic form (literal `Pick` / `Omit` head, `IndexedAccess` object
+    /// chain, `Ref { type_arguments }`, heritage `extends` / `implements` refs,
+    /// closedness / key-domain over the authored `TypeExpr`). Stays `TypeExpr`.
+    ///
+    /// ```text
+    /// scanner_invariant: Only enumerated production anchors may read a
+    ///   declaration body as TypeExpr for authored-shape decisions. These reads
+    ///   may inspect preserved syntax but must not feed graph-backed semantic
+    ///   reduction.
+    /// scanner_justification: Whether a reader requires authored syntax is an
+    ///   architectural judgment not expressible by Rust while raw TypeExpr bodies
+    ///   remain available.
+    /// mechanism_ruling: Temporary last-resort scanner. Target structural
+    ///   replacement is private body storage plus an AuthoredDeclBody
+    ///   wrapper/tokened accessor.
+    /// hardening_rounds: 0
+    /// ```
+    AuthoredShape,
+
+    /// Graph-free DTO reader — lives BELOW the session `SemanticGraphStore`
+    /// (shallow-file route closures, external-type-frontier resolve paths,
+    /// eval-env value-decl peel) and cannot carry a `HotTypeRef` without making a
+    /// below-graph DTO depend on the session graph. Stays `TypeExpr`.
+    ///
+    /// ```text
+    /// scanner_invariant: Only enumerated below-graph DTO/frontier/eval-env paths
+    ///   may carry declaration bodies as TypeExpr, and they must not depend on
+    ///   HotTypeRef, SemanticGraphStore, or decl_body_hot_ref.
+    /// scanner_justification: These paths intentionally live below the session
+    ///   graph. Current layout may not encode every boundary as a crate
+    ///   dependency.
+    /// mechanism_ruling: Prefer Cargo/module dependency enforcement. Scanner is
+    ///   only for same-crate residual reads.
+    /// hardening_rounds: 0
+    /// ```
+    GraphFreeDto,
+
+    /// Graph-backed-PENDING reader — genuinely graph-backed, but its migration is
+    /// a larger refactor than the bounded accessor flip (the C3 imported-registry
+    /// body carrier, the C4 member-surface-key route enumerator which needs a
+    /// graph-native `SemanticNodeData` key enumerator that does not yet exist, the
+    /// C7 locator split, and the `PreparedValueDecl.type_annotation` value-decl
+    /// handle class). Deferred; stays `TypeExpr` this session.
+    GraphBackedPending,
+
+    /// Producer lowering — the body mint itself (lowers the authored body into
+    /// the semantic graph) and the eager clone path it backs. Exempt: it is the
+    /// required bridge from authored IR into graph IR.
+    ///
+    /// ```text
+    /// scanner_invariant: Only enumerated producer anchors may read the authored
+    ///   body to lower it into the semantic graph and mint a
+    ///   HotTypeRef/SemanticNodeId. They must not return or cache TypeExpr as a
+    ///   hot carrier.
+    /// scanner_justification: The producer is the required bridge from authored IR
+    ///   into graph IR; purpose is not distinguishable while the field is publicly
+    ///   readable.
+    /// mechanism_ruling: Replace with private prepared-body access scoped to
+    ///   producer modules.
+    /// hardening_rounds: 0
+    /// ```
+    ProducerLowering,
+
+    /// Output / compat read — the sanctioned fingerprint-hash input and the
+    /// typeinfo/hover oracle contributor read, routed through the named compat
+    /// helpers. Output-only, not a semantic resolution decision.
+    OutputCompat,
+}
+
+impl ReaderClass {
+    /// The human label used in diagnostics and the per-class count pins.
+    fn label(self) -> &'static str {
+        match self {
+            ReaderClass::GraphBackedMigrated => "GraphBackedMigrated",
+            ReaderClass::AuthoredShape => "AuthoredShape",
+            ReaderClass::GraphFreeDto => "GraphFreeDto",
+            ReaderClass::GraphBackedPending => "GraphBackedPending",
+            ReaderClass::ProducerLowering => "ProducerLowering",
+            ReaderClass::OutputCompat => "OutputCompat",
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ANCHOR TABLES — the partitioned residual TypeExpr surface + COMPAT
+// ════════════════════════════════════════════════════════════════════
+
+/// One anchored residual declaration-BODY reader: the production file
+/// (crate-relative, forward-slashed), the enclosing impl/trait/mod path
+/// (`render_impl_path` form; `""` for a free file-scope fn), the fn name, its
+/// `ReaderClass`, whether the fn performs a `<recv>.body.<method>` method-chain
+/// read (so the tripwire's per-anchor view can be cross-checked against
+/// PRESENCE), and a required rationale naming WHY it sits in its class.
 struct ReaderRow {
     file: &'static str,
     impl_path: &'static str,
     fn_name: &'static str,
+    class: ReaderClass,
     /// `true` iff this reader contains at least one `<recv>.body.<method>`
-    /// (`lookup_object` / `contributors` / `is_merged`) read — the load-bearing
-    /// tripwire shape. `false` for a reader that only reads `<recv>.body` as a
-    /// bare FIELD (or `type_annotation` / `merged_contributors`), which the
-    /// tripwire does not classify (honest scope) but PRESENCE still anchors.
+    /// (`lookup_object` / `contributors` / `is_merged` / `primary` /
+    /// `merged_member_names`) read — the load-bearing tripwire shape. `false` for
+    /// a reader that only reads `<recv>.body` as a bare FIELD (or
+    /// `type_annotation` / `merged_contributors`), which the tripwire does not
+    /// classify (honest scope) but PRESENCE still anchors.
     method_chain: bool,
     reason: &'static str,
 }
 
-/// The frozen SEMANTIC body-reader surface — every site the body-storage
-/// migration will touch / migrate / delete. These read a stored
-/// `PreparedTypeDecl.body` / `LoweredTypeDecl.body` / `LoweredValueDecl
-/// .type_annotation` (or its transitive `named_decl_body` result) for a
-/// SEMANTIC decision (resolution, routing, closure, heritage, projection,
-/// member lookup, cache identity, cross-file facts) — NOT for an output
-/// fingerprint or the typeinfo oracle. `fact_emission.rs` and the oracle
-/// `source_walk.rs` are EXCLUDED (they are COMPAT after the compat routing).
-const SEMANTIC_BODY_READERS: &[ReaderRow] = &[
-    // ── PreparedTypeDecl.body readers ──────────────────────────────────
+/// The residual `TypeExpr` body-reader surface, partitioned by [`ReaderClass`].
+/// `GraphBackedMigrated` rows route through the shared `decl_body_hot_ref` hot
+/// accessor / a graph-native arm and must NOT read a declaration body as
+/// `TypeExpr`; the `AuthoredShape` / `GraphFreeDto` / `GraphBackedPending` /
+/// `ProducerLowering` rows are the justified stay-allowlist. `fact_emission.rs`
+/// and the oracle `source_walk.rs` are EXCLUDED (they are `OutputCompat` in
+/// `COMPAT_BODY_READERS`).
+const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
+    // ── GraphBackedMigrated — routed through decl_body_hot_ref ──────────
     ReaderRow {
-        file: "src/project_semantic_dispatch/build.rs",
-        impl_path: "impl ProjectSemanticDispatch",
-        fn_name: "class_heritage_bases",
+        file: "src/meta_resolve/projectors/macro_payload_substrate.rs",
+        impl_path: "",
+        fn_name: "lower_decl_body_to_node",
+        class: ReaderClass::GraphBackedMigrated,
         method_chain: false,
-        reason: "reads prepared.body to derive a class declaration's heritage base surface",
+        reason: "MIGRATED — resolves the named declaration body to a graph node through the shared \
+                 decl_body_hot_ref hot accessor (the Instantiate memo, published Navigate) and \
+                 returns its node; no longer reads prepared.body, no reverse bridge",
     },
+    // ── ProducerLowering — the mint + the eager clone path it backs ─────
     ReaderRow {
         file: "src/project_semantic_dispatch/build.rs",
         impl_path: "impl ProjectSemanticDispatch",
         fn_name: "lower_decl_body_with_provenance",
+        class: ReaderClass::ProducerLowering,
         method_chain: false,
-        reason: "the body lowering site (reads prepared.body + the merged_contributors gate) — \
-                 DO-NOT-TOUCH; the migration owns its flip",
+        reason: "the body-lowering producer/mint — reads prepared.body + the merged_contributors \
+                 gate to lower the authored body into the semantic graph; the required bridge from \
+                 authored IR into graph IR (the hot accessor wraps THIS producer's Instantiate \
+                 result)",
+    },
+    ReaderRow {
+        file: "src/resolver_core/prepared_decl.rs",
+        impl_path: "",
+        fn_name: "prepare_type_decl_from_lowered",
+        class: ReaderClass::ProducerLowering,
+        method_chain: true,
+        reason: "the eager clone path the producer backs — reads lowered.body via lookup_object() / \
+                 is_merged() / contributors() when building the PreparedTypeDecl; producer-mint \
+                 class, preserved",
+    },
+    ReaderRow {
+        file: "src/resolver_core/prepared_decl.rs",
+        impl_path: "",
+        fn_name: "prepare_local_value_decl",
+        class: ReaderClass::ProducerLowering,
+        method_chain: false,
+        reason: "the value eager clone path — reads lowered.type_annotation (LoweredValueDecl) when \
+                 preparing a local value decl; producer-mint class, preserved",
+    },
+    // ── AuthoredShape — decision is intrinsically about authored syntax ──
+    ReaderRow {
+        file: "src/project_semantic_dispatch/build.rs",
+        impl_path: "impl ProjectSemanticDispatch",
+        fn_name: "class_heritage_bases",
+        class: ReaderClass::AuthoredShape,
+        method_chain: false,
+        reason: "reads prepared.body for the authored heritage extends/implements refs of a class \
+                 declaration body — authored-syntax-intrinsic",
     },
     ReaderRow {
         file: "src/project_semantic_dispatch/raise.rs",
         impl_path: "",
         fn_name: "userland_instantiation_body_is_closed_object",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body to decide whether a userland instantiation body is a closed \
-                 object",
+        reason: "reads prepared.body to classify whether a userland instantiation body is a closed \
+                 object — authored-shape closedness over the TypeExpr",
     },
     ReaderRow {
         // Free file-scope fn — the `impl KeyDomainBinding<'_>` block at raise.rs
@@ -861,331 +996,338 @@ const SEMANTIC_BODY_READERS: &[ReaderRow] = &[
         file: "src/project_semantic_dispatch/raise.rs",
         impl_path: "",
         fn_name: "prepared_decl_body_is_closed_unguarded",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body to decide closedness of a prepared decl body",
+        reason: "reads prepared.body to classify closedness of a prepared decl body — authored-shape \
+                 closedness over the TypeExpr",
     },
     ReaderRow {
         // Free file-scope fn (same as above — outside the KeyDomainBinding impl).
         file: "src/project_semantic_dispatch/raise.rs",
         impl_path: "",
         fn_name: "prepared_instantiation_key_domain_is_closed",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body to decide whether an instantiation's key domain is closed",
+        reason: "reads prepared.body to classify whether an instantiation's key domain is closed — \
+                 authored-shape key-domain over the TypeExpr",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_registry.rs",
         impl_path: "",
         fn_name: "component_meta_registry_owner_local_component_config_alias_name",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason:
-            "reads prepared.body (and a one-hop alias next.body) to classify a ComponentConfig \
-                 alias",
+        reason: "reads prepared.body (and a one-hop alias next.body) to classify a ComponentConfig \
+                 alias by authored shape",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_registry.rs",
         impl_path: "",
         fn_name: "collect_component_meta_registry_public_field_refs",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body across the registry public-field surface",
+        reason: "reads prepared.body across the registry public-field surface to collect authored \
+                 field refs",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_registry.rs",
         impl_path: "",
         fn_name: "collect_component_meta_registry_public_indexed_access_roots",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body to collect indexed-access roots",
+        reason: "reads prepared.body to collect authored indexed-access roots",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
         impl_path: "impl ComponentMetaQueryEngine",
         fn_name: "should_preserve_transitive_ref",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body to decide transitive-ref preservation",
+        reason: "reads prepared.body to decide transitive-ref preservation by authored shape",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
         impl_path: "impl ComponentMetaQueryEngine",
         fn_name: "fast_symbolic_imported_generic_route",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body on the fast symbolic imported-generic route",
+        reason: "reads prepared.body on the fast symbolic imported-generic route (authored ref \
+                 shape)",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
         impl_path: "impl ComponentMetaQueryEngine",
         fn_name: "collapse_same_file_imported_alias_chain",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body when collapsing a same-file imported alias chain",
+        reason: "reads prepared.body when collapsing a same-file imported alias chain (authored \
+                 alias shape)",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
         impl_path: "impl ComponentMetaQueryEngine",
         fn_name: "try_fast_expand_shallow_alias_body",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body on the fast shallow-alias expand path",
+        reason: "reads prepared.body on the fast shallow-alias expand path (authored alias shape)",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
         impl_path: "impl ComponentMetaQueryEngine",
         fn_name: "rewrite_fast_shallow_alias_body",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body on the fast shallow-alias rewrite path",
+        reason: "reads prepared.body on the fast shallow-alias rewrite path (authored alias shape)",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/registry_decl.rs",
         impl_path: "impl ComponentMetaQueryEngine",
         fn_name: "owner_collection_expr",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "reads prepared.body to build the owner collection expression",
+        reason: "reads prepared.body to return the RAW alias body the registry walker classifies by \
+                 authored shape (Ref{type_arguments}); the value is keyed into the TypeExpr-keyed \
+                 OwnerCollectionDb a handle-derived value must never populate — authored-shape, \
+                 stays TypeExpr",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/registry_decl.rs",
         impl_path: "impl ComponentMetaQueryEngine",
         fn_name: "named_decl_body",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
         reason: "the named_decl_body DEFINITION — reads prepared.body and returns the cloned body \
-                 TypeExpr to its callers",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/route_keys.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "enumerate_member_surface_keys_via_route",
-        method_chain: false,
-        reason: "reads prepared.body via the alias-form `prepared_type_decl(..).map(|p| \
-                 p.body.clone())` inside the `try_body` route-key expansion closure (and the \
-                 prepared-value `.type_annotation` route read) — SEMANTIC route expansion per the \
-                 carrier disposition (migrates handle-native). BARE `.body`/`.type_annotation` \
-                 field reads, so the method-chain tripwire structurally cannot catch them — the \
-                 enumeration is their only completeness rail",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/helpers.rs",
-        impl_path: "",
-        fn_name: "resolve_imported_registry_symbol_with_budget",
-        method_chain: false,
-        reason: "builds ResolvedImportedRegistrySymbol.body from prepared.body",
-    },
-    ReaderRow {
-        file: "src/meta_resolve/projectors/macro_payload_substrate.rs",
-        impl_path: "",
-        fn_name: "lower_decl_body_to_node",
-        method_chain: false,
-        reason: "reads prepared.body to lower a decl body into a semantic node",
-    },
-    ReaderRow {
-        file: "src/host_manage/component_meta_methods.rs",
-        impl_path: "impl VerterHost",
-        fn_name: "owner_local_generic_alias_substituted_body_via_dispatch",
-        method_chain: false,
-        reason: "the instantiation fast-lane gate reads prepared.body",
-    },
-    // ── named_decl_body callers (transitive .body via the returned body) ──
-    ReaderRow {
-        file: "src/host_manage/component_meta_methods.rs",
-        impl_path: "impl VerterHost",
-        fn_name: "append_component_meta_registry_entries",
-        method_chain: false,
-        reason: "reads the imported-registry symbol body (`resolved.body`, a \
-                 ResolvedImportedRegistrySymbol.body carrier populated from prepared.body.clone()) \
-                 across registry-publication routing: alias-symbolic classification, candidate \
-                 materialization seeding, discriminant inspection, and the whole/route body clone; \
-                 and calls `named_decl_body` (×3) consuming its transitive body result — the \
-                 disposition's `imported registry symbols` + publication-planning semantic readers \
-                 (registry routing + publication, migrates handle-native). The named_decl_body \
-                 calls (and the resolved.body reads) live in THIS single outer fn — NOT in the \
-                 nested `collect_one_filtered_expr` helper, which reads no carrier. All BARE \
-                 `.body` field reads, anchored by the enumeration (not the tripwire)",
+                 TypeExpr the authored-shape classifiers (C5/C6) and the C7 locator consume",
     },
     ReaderRow {
         file: "src/meta_resolve/registry_materialize.rs",
         impl_path: "",
         fn_name: "nested_symbolic_member_route_should_stay_symbolic",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "calls named_decl_body and inspects the returned body",
+        reason: "calls named_decl_body and classifies the returned body by authored shape \
+                 (Ref{type_arguments} non-empty, utility route, indexed-access route) — \
+                 authored-syntax-intrinsic (codex Q-DISPOSITION C5)",
     },
     ReaderRow {
         file: "src/meta_resolve/materialize/field_types.rs",
         impl_path: "",
         fn_name: "type_expr_has_package_backed_object_like_root_with_fence",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "calls named_decl_body and inspects the returned body",
+        reason: "calls named_decl_body and extracts the authored root (literal Pick/Omit, \
+                 IndexedAccess.object, Ref head) — authored-syntax-intrinsic (codex Q-DISPOSITION \
+                 C6)",
     },
     ReaderRow {
-        file: "src/component_meta_resolution_policy/core.rs",
-        impl_path: "impl PolicyCtx",
-        fn_name: "locate_declaration",
+        file: "src/host_manage/component_meta_methods.rs",
+        impl_path: "impl VerterHost",
+        fn_name: "owner_local_generic_alias_substituted_body_via_dispatch",
+        class: ReaderClass::AuthoredShape,
         method_chain: false,
-        reason: "calls named_decl_body and returns the located declaration body",
+        reason: "the instantiation fast-lane gate reads prepared.body for the authored generic-alias \
+                 substitution shape",
     },
-    // ── Lowered* SEMANTIC readers (the method-chain + bare-field set) ────
-    ReaderRow {
-        file: "src/resolver_core/prepared_decl.rs",
-        impl_path: "",
-        fn_name: "prepare_type_decl_from_lowered",
-        method_chain: true,
-        reason: "the CLONE PATH the migration DELETES — reads lowered.body via lookup_object() / \
-                 is_merged() / contributors(); DO-NOT-TOUCH/DELETE, anchor only",
-    },
-    ReaderRow {
-        file: "src/resolver_core/prepared_decl.rs",
-        impl_path: "",
-        fn_name: "prepare_local_value_decl",
-        method_chain: false,
-        reason:
-            "reads lowered.type_annotation (LoweredValueDecl) when preparing a local value decl",
-    },
+    // ── GraphFreeDto — below the session graph ──────────────────────────
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "route_closure",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason: "reads lowered.body.lookup_object() on the route-closure path",
+        reason: "reads lowered.body.lookup_object() on the route-closure path — below the session \
+                 graph, cannot carry a HotTypeRef",
     },
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "member_path_route_closure",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason: "reads lowered.body.lookup_object() on the member-path route closure",
+        reason: "reads lowered.body.lookup_object() on the member-path route closure — below the \
+                 session graph",
     },
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "member_route_closure",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason: "reads lowered.body.lookup_object() on the member route closure",
+        reason: "reads lowered.body.lookup_object() on the member route closure — below the session \
+                 graph",
     },
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "whole_route_closure",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason: "reads lowered.body.lookup_object() on the whole route closure",
+        reason: "reads lowered.body.lookup_object() on the whole route closure — below the session \
+                 graph",
     },
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "follow_local_symbol_precise",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason: "reads lowered.body.lookup_object() when following a local symbol precisely",
+        reason: "reads lowered.body.lookup_object() when following a local symbol precisely — below \
+                 the session graph",
     },
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "follow_routed_expr",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason: "reads lowered.body.lookup_object() when following a routed expression",
+        reason: "reads lowered.body.lookup_object() when following a routed expression — below the \
+                 session graph",
     },
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "extract_string_literal_keys_from_type_expr",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason: "reads lowered.body.lookup_object() to extract string-literal keys",
+        reason: "reads lowered.body.lookup_object() to extract string-literal keys — below the \
+                 session graph",
     },
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "",
         fn_name: "collect_member_path_seed_names",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason: "reads lowered.body.lookup_object() to collect member-path seed names (free fn)",
+        reason: "reads lowered.body.lookup_object() to collect member-path seed names (free fn) — \
+                 below the session graph",
     },
     ReaderRow {
         file: "src/resolver_core/external_type_frontier.rs",
         impl_path: "impl ExternalTypeFrontier",
         fn_name: "resolve_through_export",
+        class: ReaderClass::GraphFreeDto,
         method_chain: true,
-        reason:
-            "reads lowered.body.lookup_object() (two branches) when resolving through an export",
+        reason: "reads lowered.body.lookup_object() (two branches) when resolving through an export \
+                 — the external-type frontier lives below the session graph",
     },
     ReaderRow {
         file: "src/resolver_core/external_type_frontier.rs",
         impl_path: "impl ExternalTypeFrontier",
         fn_name: "resolve_one",
+        class: ReaderClass::GraphFreeDto,
         method_chain: false,
-        reason: "re-clones a frontier-produced ResolvedSymbol.body (`existing.body.clone()`) when \
-                 rebuilding a ResolvedSymbol from an already-resolved chain entry — the \
-                 ResolvedSymbol.body carrier is populated FROM the lowered body \
-                 (resolve_through_export), so it is in the external_type_frontier migration set per \
-                 the carrier disposition. A BARE `.body` field read (not a `.body.<method>` chain), \
-                 caught by the enumeration, not the tripwire",
+        reason: "re-clones a frontier-produced ResolvedSymbol.body (existing.body.clone(), populated \
+                 FROM the lowered body) when rebuilding from an already-resolved chain entry — the \
+                 frontier lives below the session graph. A BARE .body field read, anchored by the \
+                 enumeration, not the tripwire",
     },
     ReaderRow {
         file: "src/host_manage/eval_env.rs",
         impl_path: "impl VerterHost",
         fn_name: "peel_value_decl_alias_graph_native",
+        class: ReaderClass::GraphFreeDto,
         method_chain: false,
-        reason: "the typeof peel reads lowered.type_annotation (LoweredValueDecl)",
+        reason: "the typeof peel reads lowered.type_annotation (LoweredValueDecl) — the eval-env \
+                 value-decl peel lives below the session graph",
     },
     ReaderRow {
         file: "src/host_manage/eval_env.rs",
         impl_path: "impl VerterHost",
         fn_name: "dependency_value_symbol_graph_native",
+        class: ReaderClass::GraphFreeDto,
         method_chain: false,
-        reason: "the C4 graph-native value-symbol reader reads lowered.type_annotation \
-                 (effective_value_decl → LoweredValueDecl) — same carrier class as \
-                 peel_value_decl_alias_graph_native (NOT the eval-env `.primary().type_annotation` \
-                 on ValueDeclInfo, which is excluded). A BARE `.type_annotation` field read, \
+        reason: "the graph-native value-symbol reader reads lowered.type_annotation \
+                 (effective_value_decl → LoweredValueDecl) — same below-graph carrier class as \
+                 peel_value_decl_alias_graph_native. A BARE .type_annotation field read, anchored by \
+                 the enumeration",
+    },
+    // ── GraphBackedPending — graph-backed, deferred larger refactor ─────
+    ReaderRow {
+        file: "src/resolver_core/component_meta_query_engine/route_keys.rs",
+        impl_path: "impl ComponentMetaQueryEngine",
+        fn_name: "enumerate_member_surface_keys_via_route",
+        class: ReaderClass::GraphBackedPending,
+        method_chain: false,
+        reason: "reads prepared.body via prepared_type_decl(..).map(|p| p.body.clone()) inside the \
+                 try_body route-key expansion closure (and the prepared-value .type_annotation route \
+                 read) — genuinely graph-backed but a graph-native SemanticNodeData member-surface \
+                 KEY enumerator over union/intersection/conditional/object surfaces does not yet \
+                 exist; deferred (codex Q-DISPOSITION C4). BARE .body/.type_annotation field reads, \
                  anchored by the enumeration",
     },
-    // ── PreparedValueDecl.type_annotation readers ──────────────────────
-    //
-    // RESOLUTION (manager-decided): the `PreparedValueDecl.type_annotation`
-    // reader class IS in the frozen S4 SEMANTIC surface and its readers are
-    // enumerated below. The carrier disposition §1 makes `HotPreparedValueDecl`
-    // annotations HANDLES — the SAME rule as `HotPreparedTypeDecl` bodies — and
-    // the S4 closed-file list already commits `prepare_local_value_decl` (the
-    // value clone path) + `LoweredValueDecl.type_annotation` to handle-native.
-    // Therefore `PreparedValueDecl.type_annotation: Option<TypeExpr>` is a
-    // handle-native S4 target and these reads migrate with it. The three sites
-    // are unambiguously SEMANTIC: `build_typeof` feeds the prepared annotation
-    // into `shallow_lower_type_expr_with_context` (pure resolution),
-    // `prepared_value_decl_to_value_decl_info` builds a `ValueDeclInfo` (the
-    // value-resolution surface), and `component_meta_binding_type_entries`
-    // builds the component-meta binding type entries (publication). A FOURTH
-    // reader — `route_keys::enumerate_member_surface_keys_via_route` :354 — also
-    // reads `prepared_value.type_annotation` (the prepared-value route hop) but
-    // is ALREADY anchored above for its sibling `.body` route read in the SAME
-    // fn (one row per `(file, impl, fn)`), so it is not duplicated here; its row
-    // reason names both reads. These are BARE `.type_annotation` FIELD reads, so
-    // the `<recv>.body.<method>` method-chain tripwire structurally cannot catch
-    // them — the enumeration is their only completeness rail (hence
-    // `method_chain: false`).
+    ReaderRow {
+        file: "src/resolver_core/component_meta_query_engine/helpers.rs",
+        impl_path: "",
+        fn_name: "resolve_imported_registry_symbol_with_budget",
+        class: ReaderClass::GraphBackedPending,
+        method_chain: false,
+        reason: "builds the ResolvedImportedRegistrySymbol.body CARRIER from prepared.body (NOT the \
+                 prepared_type_decl(..).is_some() existence check, which stays a cheap shallow \
+                 presence check) — the carrier migrates to identity/HotTypeRef in a larger refactor; \
+                 deferred (codex Q-DISPOSITION C3)",
+    },
+    ReaderRow {
+        file: "src/host_manage/component_meta_methods.rs",
+        impl_path: "impl VerterHost",
+        fn_name: "append_component_meta_registry_entries",
+        class: ReaderClass::GraphBackedPending,
+        method_chain: false,
+        reason: "reads the imported-registry symbol body (resolved.body, the \
+                 ResolvedImportedRegistrySymbol.body carrier populated from prepared.body.clone()) \
+                 across registry-publication routing and calls named_decl_body (×3) — the C3-carrier \
+                 consumer, deferred with the carrier. All BARE .body field reads, anchored by the \
+                 enumeration",
+    },
+    ReaderRow {
+        file: "src/component_meta_resolution_policy/core.rs",
+        impl_path: "impl PolicyCtx",
+        fn_name: "locate_declaration",
+        class: ReaderClass::GraphBackedPending,
+        method_chain: false,
+        reason: "calls named_decl_body and returns the located declaration body TypeExpr — the \
+                 TypeExpr-returning LOCATOR is too broad; it splits into an identity/hot locator and \
+                 an authored-body locator by downstream need in a larger refactor; deferred (codex \
+                 Q-DISPOSITION C7)",
+    },
     ReaderRow {
         file: "src/project_semantic_dispatch/build.rs",
         impl_path: "impl ProjectSemanticDispatch",
         fn_name: "build_typeof",
+        class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "reads prepared.type_annotation (PreparedValueDecl, from \
-                 effective_prepared_value_decl) and feeds it to \
-                 shallow_lower_type_expr_with_context — the typeof composer's value-decl annotation \
-                 resolution; a handle-native S4 target per carrier disposition §1 (value-decl \
-                 annotations → handles). A BARE `.type_annotation` field read, anchored by the \
-                 enumeration, not the tripwire",
+        reason: "reads prepared.type_annotation (PreparedValueDecl, from effective_prepared_value_\
+                 decl) and feeds it to shallow_lower_type_expr_with_context — a graph-feeding \
+                 value-decl annotation reader whose HotPreparedValueDecl handle migration is a \
+                 separate deferred class. A BARE .type_annotation field read, anchored by the \
+                 enumeration",
     },
     ReaderRow {
         file: "src/resolver_core/runtime_values.rs",
         impl_path: "",
         fn_name: "prepared_value_decl_to_value_decl_info",
+        class: ReaderClass::GraphBackedPending,
         method_chain: false,
         reason: "reads prepared.type_annotation.clone() (PreparedValueDecl) when building the \
-                 ValueDeclInfo round-trip into the importing env — the value-resolution surface; a \
-                 handle-native S4 target per carrier disposition §1. A BARE `.type_annotation` field \
-                 read (free fn), anchored by the enumeration",
+                 ValueDeclInfo round-trip into the importing env — the value-resolution surface, a \
+                 deferred value-decl handle class. A BARE .type_annotation field read (free fn), \
+                 anchored by the enumeration",
     },
     ReaderRow {
         file: "src/host_manage/eval_env.rs",
         impl_path: "impl VerterHost",
         fn_name: "component_meta_binding_type_entries",
+        class: ReaderClass::GraphBackedPending,
         method_chain: false,
         reason: "reads decl.type_annotation.clone() (decl = prepared_value_decl(..), a \
-                 PreparedValueDecl) to build the component-meta binding type entries — publication; \
-                 a handle-native S4 target per carrier disposition §1. A BARE `.type_annotation` \
-                 field read, anchored by the enumeration",
+                 PreparedValueDecl) to build the component-meta binding type entries — publication, a \
+                 deferred value-decl handle class. A BARE .type_annotation field read, anchored by \
+                 the enumeration",
     },
 ];
 
 /// One anchored COMPAT body reader: a purpose-named compat helper DEFINITION, or
-/// the CALL SITE fn that routes its body read through such a helper.
+/// the CALL SITE fn that routes its body read through such a helper. All
+/// [`ReaderClass::OutputCompat`].
 struct CompatRow {
     file: &'static str,
     impl_path: &'static str,
@@ -1196,10 +1338,11 @@ struct CompatRow {
     reason: &'static str,
 }
 
-/// The COMPAT body-read surface — the ONLY sanctioned output/compat body reads.
-/// The three purpose-named compat helpers plus the consumer fns that route
-/// through them. After the compat routing, the body-fact emitter and the
-/// typeinfo oracle read a declaration body ONLY through these helpers.
+/// The COMPAT body-read surface — the ONLY sanctioned output/compat body reads
+/// ([`ReaderClass::OutputCompat`]). The three purpose-named compat helpers plus
+/// the consumer fns that route through them. After the compat routing, the
+/// body-fact emitter and the typeinfo oracle read a declaration body ONLY through
+/// these helpers.
 const COMPAT_BODY_READERS: &[CompatRow] = &[
     // ── The three compat helper DEFINITIONS ────────────────────────────
     CompatRow {
@@ -1254,13 +1397,13 @@ const COMPAT_CONSUMER_FILES: &[&str] = &[
 ];
 
 /// Every `(file, impl_path, fn)` anchor that is ALLOWED to contain a
-/// `<recv>.body.<method>` read — the union of the SEMANTIC rows flagged
+/// `<recv>.body.<method>` read — the union of the residual rows flagged
 /// `method_chain` and the COMPAT rows flagged `method_chain`. The tripwire
 /// reddens on any production `.body.<method>` read whose anchor is NOT in this
 /// set.
 fn method_chain_allowed_anchors() -> HashSet<(String, String, String)> {
     let mut set = HashSet::new();
-    for r in SEMANTIC_BODY_READERS {
+    for r in RESIDUAL_BODY_READERS {
         if r.method_chain {
             set.insert((
                 r.file.to_string(),
@@ -1304,7 +1447,7 @@ fn anchored_defs<'a>(inv: &'a [FnDef], file: &str, impl_path: &str, name: &str) 
 /// Every `(file, impl_path, fn)` anchor across BOTH inventories.
 fn all_inventory_anchors() -> Vec<(String, String, String)> {
     let mut out = Vec::new();
-    for r in SEMANTIC_BODY_READERS {
+    for r in RESIDUAL_BODY_READERS {
         out.push((
             r.file.to_string(),
             r.impl_path.to_string(),
@@ -1321,34 +1464,54 @@ fn all_inventory_anchors() -> Vec<(String, String, String)> {
     out
 }
 
+/// The `(file, impl_path, fn)` anchors of every [`ReaderClass::GraphBackedMigrated`]
+/// row — the migrated anchors that must NOT read a declaration body as a
+/// `TypeExpr` semantic input.
+fn graph_backed_migrated_anchors() -> Vec<(String, String, String)> {
+    RESIDUAL_BODY_READERS
+        .iter()
+        .filter(|r| r.class == ReaderClass::GraphBackedMigrated)
+        .map(|r| {
+            (
+                r.file.to_string(),
+                r.impl_path.to_string(),
+                r.fn_name.to_string(),
+            )
+        })
+        .collect()
+}
+
 // ════════════════════════════════════════════════════════════════════
 // INVARIANT 1 — PRESENCE
 // ════════════════════════════════════════════════════════════════════
 
-/// Every enumerated SEMANTIC body reader AND every COMPAT row (helper def +
+/// Every enumerated residual body reader AND every COMPAT row (helper def +
 /// consumer call site) is defined at its `(file, impl/mod, fn)` anchor in the
-/// production tree. A renamed / moved / deleted reader reddens — the migration
-/// pass depends on this enumerated surface being stable.
+/// production tree. A renamed / moved / deleted reader reddens — the partition
+/// depends on this enumerated surface being stable.
 #[test]
 fn every_enumerated_body_reader_is_present_at_its_anchor() {
     let files = production_src_files();
     let inv = build_fn_inventory(&files);
     let mut missing = Vec::new();
 
-    for r in SEMANTIC_BODY_READERS {
+    for r in RESIDUAL_BODY_READERS {
         assert!(
             !r.reason.trim().is_empty(),
-            "semantic reader row `{} :: {} :: {}` must carry a non-empty reason",
+            "residual reader row `{} :: {} :: {}` ({}) must carry a non-empty reason",
             r.file,
             r.impl_path,
-            r.fn_name
+            r.fn_name,
+            r.class.label()
         );
         if !anchored_definition_present(&inv, r.file, r.impl_path, r.fn_name) {
             missing.push(format!(
-                "SEMANTIC reader `{}` is MISSING at its anchor ({} :: {}) — the frozen migration \
-                 surface enumeration is stale (a same-named body elsewhere does NOT satisfy the \
-                 anchor)",
-                r.fn_name, r.file, r.impl_path
+                "{} reader `{}` is MISSING at its anchor ({} :: {}) — the residual partition \
+                 enumeration is stale (a same-named body elsewhere does NOT satisfy the anchor)",
+                r.class.label(),
+                r.fn_name,
+                r.file,
+                r.impl_path
             ));
         }
     }
@@ -1370,7 +1533,7 @@ fn every_enumerated_body_reader_is_present_at_its_anchor() {
     }
     assert!(
         missing.is_empty(),
-        "frozen body-reader inventory: an enumerated reader is absent at its anchor.\n{}",
+        "residual body-reader inventory: an enumerated reader is absent at its anchor.\n{}",
         missing.join("\n")
     );
 }
@@ -1381,8 +1544,8 @@ fn every_enumerated_body_reader_is_present_at_its_anchor() {
 
 /// Each anchored `(file, impl/mod, fn)` resolves to EXACTLY ONE non-test
 /// definition. A second definition at the same anchor makes the anchor
-/// ambiguous and reddens — the migration pass must be able to address each
-/// reader uniquely.
+/// ambiguous and reddens — the partition must be able to address each reader
+/// uniquely.
 #[test]
 fn every_anchored_body_reader_is_unique() {
     let files = production_src_files();
@@ -1400,13 +1563,13 @@ fn every_anchored_body_reader_is_unique() {
     }
     assert!(
         violations.is_empty(),
-        "frozen body-reader inventory: an anchored reader is not unique.\n{}",
+        "residual body-reader inventory: an anchored reader is not unique.\n{}",
         violations.join("\n")
     );
 }
 
 // ════════════════════════════════════════════════════════════════════
-// INVARIANT 3 — BOUNDED CLASSIFICATION (the load-bearing tripwire)
+// INVARIANT 3 — BOUNDED CLASSIFICATION (the tripwire SUPPLEMENT)
 // ════════════════════════════════════════════════════════════════════
 
 /// One un-inventoried `<recv>.body.<method>` read: the file, enclosing impl/mod,
@@ -1420,7 +1583,7 @@ struct UnclassifiedMethodChainRead {
 }
 
 /// Find every production `<recv>.body.<method>` read whose `(file, impl, fn)`
-/// anchor is NOT in the method-chain allowlist (the SEMANTIC + COMPAT rows
+/// anchor is NOT in the method-chain allowlist (the residual + COMPAT rows
 /// flagged `method_chain`). A `#[cfg(test)]`-gated fn is test code and excluded.
 fn unclassified_method_chain_reads(
     inv: &[FnDef],
@@ -1448,11 +1611,7 @@ fn unclassified_method_chain_reads(
 /// The tripwire SUPPLEMENT: every production `<recv>.body.<method>` lowered-body
 /// read (incl. paren/ref-unwrapped and UFCS spellings) sits at an anchor in
 /// EITHER inventory. A NEW or MOVED such read outside both reddens at once. This
-/// is a bounded supplement to the curated enumeration, NOT the completeness rail
-/// — bare-field and local-binding-laundered reads are NOT caught here and are NOT
-/// auto-caught by invariants 1-2 (which only re-verify already-curated rows);
-/// closing the surface against them relies on the curated enumeration being kept
-/// complete plus the count-pin/frozen-file/parity rails (see the module header).
+/// is a bounded supplement to the curated enumeration, NOT the completeness rail.
 #[test]
 fn no_method_chain_body_read_outside_the_inventory() {
     let files = production_src_files();
@@ -1462,16 +1621,16 @@ fn no_method_chain_body_read_outside_the_inventory() {
     for hit in unclassified_method_chain_reads(&inv, &allowed) {
         violations.push(format!(
             "{} :: {} :: fn `{}` performs a `<recv>.body.{:?}` lowered-body read but its anchor is \
-             NOT in the SEMANTIC or COMPAT inventory — a new/moved lowered-body reader appeared. \
-             Add it to SEMANTIC_BODY_READERS (a real semantic reader the migration must migrate) \
-             or COMPAT_BODY_READERS (a sanctioned output/compat read), with method_chain: true.",
+             NOT in the residual or COMPAT inventory — a new/moved lowered-body reader appeared. \
+             Add it to RESIDUAL_BODY_READERS (classified into a ReaderClass) or COMPAT_BODY_READERS \
+             (a sanctioned output/compat read), with method_chain: true.",
             hit.file, hit.impl_path, hit.fn_name, hit.methods
         ));
     }
     assert!(
         violations.is_empty(),
-        "frozen body-reader inventory: an un-inventoried `<recv>.body.<method>` read appeared — the \
-         classification tripwire fired.\n{}",
+        "residual body-reader inventory: an un-inventoried `<recv>.body.<method>` read appeared — \
+         the classification tripwire fired.\n{}",
         violations.join("\n")
     );
 }
@@ -1482,9 +1641,8 @@ fn no_method_chain_body_read_outside_the_inventory() {
 
 /// The two body-fact / oracle CONSUMER files contain NO direct
 /// `<recv>.body.<method>` lowered-body read in any non-test fn — their body
-/// reads route through the named compat helpers (which live in other files /
-/// read `type_annotation`). Any direct method-chain read in these files means
-/// the compat routing regressed.
+/// reads route through the named compat helpers. Any direct method-chain read in
+/// these files means the compat routing regressed.
 #[test]
 fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
     let all = production_src_files();
@@ -1514,8 +1672,138 @@ fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
     }
     assert!(
         violations.is_empty(),
-        "frozen body-reader inventory: a compat consumer file performs a direct lowered-body \
+        "residual body-reader inventory: a compat consumer file performs a direct lowered-body \
          method-chain read — the compat routing regressed.\n{}",
+        violations.join("\n")
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// INVARIANT 5 — NO GraphBackedMigrated TypeExpr-body read
+// ════════════════════════════════════════════════════════════════════
+
+/// The semantic-body-read text shapes a `GraphBackedMigrated` anchor must NOT
+/// contain in its OWN fn body: a `prepared_type_decl(..)`-rooted `.body` read, a
+/// bare `prepared.body` clone, or a `named_decl_body(..)` call. A migrated anchor
+/// routes through `decl_body_hot_ref` / a graph-native arm instead.
+const MIGRATED_FORBIDDEN_BODY_READ_NEEDLES: &[&str] =
+    &["prepared.body", "named_decl_body", "prepared_type_decl"];
+
+/// The marker proving a `GraphBackedMigrated` anchor routes through the shared
+/// hot accessor / a graph-native arm.
+const MIGRATED_HOT_ROUTE_NEEDLES: &[&str] =
+    &["decl_body_hot_ref", "materialize_member_surface_node"];
+
+/// Extract a single fn's source slice from `src` by matching the fn signature
+/// `fn <name>(` and returning the brace-balanced block that follows. Returns
+/// `None` if not found. Used to scope the GraphBackedMigrated text checks to the
+/// migrated fn's OWN body, not the whole file.
+fn fn_body_source<'a>(src: &'a str, fn_name: &str) -> Option<&'a str> {
+    let needle = format!("fn {fn_name}(");
+    let start = src.find(&needle)?;
+    // Find the opening brace of the fn body after the signature.
+    let brace_open = src[start..].find('{')? + start;
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    let mut i = brace_open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[brace_open..=i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Every `GraphBackedMigrated` anchor's OWN fn body (a) contains NO residual
+/// `TypeExpr` declaration-body read (no `prepared.body` / `named_decl_body` /
+/// `prepared_type_decl(..)` semantic body read) AND (b) routes through the shared
+/// hot accessor / a graph-native arm. A migrated reader that regressed to reading
+/// a body `TypeExpr` REDS here.
+#[test]
+fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
+    let files = production_src_files();
+    let inv = build_fn_inventory(&files);
+    let by_rel: std::collections::HashMap<&str, &str> = files
+        .iter()
+        .map(|(r, s)| (r.as_str(), s.as_str()))
+        .collect();
+
+    let migrated = graph_backed_migrated_anchors();
+    assert!(
+        !migrated.is_empty(),
+        "non-vacuity: there must be at least one GraphBackedMigrated anchor (the migrated \
+         non-vacuous consumer) — got none"
+    );
+
+    let mut violations = Vec::new();
+    for (file, impl_path, name) in &migrated {
+        // The anchor must be present + unique (PRESENCE/UNIQUENESS cover this too,
+        // but assert here so a missing migrated anchor reds THIS invariant).
+        let defs = anchored_defs(&inv, file, impl_path, name);
+        if defs.len() != 1 {
+            violations.push(format!(
+                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` resolves to {} \
+                 non-test defs — must be exactly one",
+                defs.len()
+            ));
+            continue;
+        }
+        // (a) The migrated fn must NOT perform a `<recv>.body.<method>` chain read.
+        let fndef = defs[0];
+        if fndef.reads_lowered_body() {
+            let mut methods: Vec<String> = fndef.body_reads.iter().cloned().collect();
+            methods.sort();
+            violations.push(format!(
+                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` STILL performs a \
+                 `<recv>.body.{methods:?}` lowered-body read — a migrated reader must route through \
+                 decl_body_hot_ref / a graph-native arm, not read a body TypeExpr"
+            ));
+        }
+        // (b) Scope the bare-field text checks to the migrated fn's OWN body.
+        let Some(src) = by_rel.get(file.as_str()) else {
+            violations.push(format!(
+                "GraphBackedMigrated anchor file `{file}` not found in tree"
+            ));
+            continue;
+        };
+        let Some(body) = fn_body_source(src, name) else {
+            violations.push(format!(
+                "GraphBackedMigrated anchor `{file} :: fn {name}` body not extractable"
+            ));
+            continue;
+        };
+        for needle in MIGRATED_FORBIDDEN_BODY_READ_NEEDLES {
+            if body.contains(needle) {
+                violations.push(format!(
+                    "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` body contains \
+                     `{needle}` — a migrated reader must NOT read a declaration body as TypeExpr; \
+                     route through decl_body_hot_ref / a graph-native arm"
+                ));
+            }
+        }
+        if !MIGRATED_HOT_ROUTE_NEEDLES
+            .iter()
+            .any(|needle| body.contains(needle))
+        {
+            violations.push(format!(
+                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` body does NOT route \
+                 through the shared hot accessor / a graph-native arm (expected one of \
+                 {MIGRATED_HOT_ROUTE_NEEDLES:?}) — the migration is not in place"
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "residual body-reader inventory: a GraphBackedMigrated anchor still reads a declaration \
+         body as TypeExpr (or is not routed through the hot accessor).\n{}",
         violations.join("\n")
     );
 }
@@ -1531,15 +1819,10 @@ fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
 /// and NOT on a token only inside a comment / string literal.
 ///
 /// The `body.lookup_object()` non-detection below (a LOCAL var named `body`, not
-/// a `.body` field) is a DISCLOSED-LIMIT fixture: it documents that a
-/// method-chain read laundered through a local binding is OUT of the tripwire's
-/// sound syntactic reach (resolving the binding would need type resolution). It
-/// is covered by the MANUALLY-CURATED ENUMERATION (kept complete by the author —
-/// not auto-detected) + the migration's frozen-file/parity gate, NOT by this
-/// tripwire — it is NOT a soundness claim and is deliberately NOT chased
-/// with further detector cases (anti-arms-race; see the module "Honest scope").
-/// Paren/reference and UFCS spellings ARE detected — covered by
-/// [`body_read_shape_detector_handles_paren_ref_and_ufcs`].
+/// a `.body` field) is a DISCLOSED-LIMIT fixture: a method-chain read laundered
+/// through a local binding is OUT of the tripwire's sound syntactic reach. It is
+/// covered by the MANUALLY-CURATED ENUMERATION + the behavioural parity gate, NOT
+/// by this tripwire — deliberately not chased (anti-arms-race).
 #[test]
 fn body_read_shape_detector_discriminates() {
     // FIRES on the three chain shapes.
@@ -1559,11 +1842,8 @@ fn body_read_shape_detector_discriminates() {
         r.body_reads
     );
 
-    // Does NOT fire on a decl-GROUP `.contributors()` (receiver is `group`, not
-    // `.body`), a bare `program.body` field (no method), or the DISCLOSED-LIMIT
-    // local-binding launder `let body = ...; body.lookup_object()` (path
-    // receiver named `body`, not a `.body` field — out of sound syntactic reach,
-    // covered by the enumeration, NOT chased).
+    // Does NOT fire on a decl-GROUP `.contributors()`, a bare `program.body`
+    // field, or the DISCLOSED-LIMIT local-binding launder.
     let negative = "impl H {\n    \
         fn r(&self, group: &G, program: &Prog) {\n        \
             let _ = group.contributors();\n        \
@@ -1581,8 +1861,7 @@ fn body_read_shape_detector_discriminates() {
         nr.body_reads
     );
 
-    // Does NOT fire on a token only inside a comment / string literal (invisible
-    // to the AST).
+    // Does NOT fire on a token only inside a comment / string literal.
     let comment = "impl H {\n    \
         fn r(&self) {\n        \
             // prepared.body.lookup_object() must never appear here\n        \
@@ -1600,14 +1879,14 @@ fn body_read_shape_detector_discriminates() {
 
 /// The BOUNDED hardening: the detector unwraps paren/reference receivers and
 /// recognizes the UFCS call form, and matches the FULL `TypeDeclBody` reader
-/// method set (incl. the newly-added `primary` / `merged_member_names`). Each
-/// planted spelling MUST be detected; the controls (a UFCS-shaped call whose
-/// argument is NOT a `.body` field, and a bare unqualified `lookup_object(x)`
-/// free-fn call) MUST NOT.
+/// method set (incl. `primary` / `merged_member_names`). Each planted spelling
+/// MUST be detected; the controls (a UFCS-shaped call whose argument is NOT a
+/// `.body` field, and a bare unqualified `lookup_object(x)` free-fn call) MUST
+/// NOT.
 #[test]
 fn body_read_shape_detector_handles_paren_ref_and_ufcs() {
     // FIRES: paren receiver, ref receiver, ref+paren receiver, deref receiver,
-    // and the two newly-added methods on a plain `.body` receiver.
+    // and the two methods `primary` / `merged_member_names` on a plain `.body`.
     let positive = "impl H {\n    \
         fn r(&self, lowered: &L) {\n        \
             let _ = (lowered.body).lookup_object();\n        \
@@ -1633,8 +1912,7 @@ fn body_read_shape_detector_handles_paren_ref_and_ufcs() {
         );
     }
 
-    // FIRES: the UFCS / fully-qualified call forms with a `.body` (or
-    // paren/ref-wrapped `.body`) argument.
+    // FIRES: the UFCS / fully-qualified call forms with a `.body` argument.
     let ufcs = "impl H {\n    \
         fn r(&self, lowered: &L) {\n        \
             let _ = TypeDeclBody::contributors(&lowered.body);\n        \
@@ -1652,14 +1930,7 @@ fn body_read_shape_detector_handles_paren_ref_and_ufcs() {
         );
     }
 
-    // CONTROLS — MUST NOT fire:
-    //   1. a UFCS-shaped call whose argument is NOT a `.body` field
-    //      (`&lowered.other`) — the qualified path is a body-read method name but
-    //      no `.body` argument is present.
-    //   2. a bare UNQUALIFIED `lookup_object(x)` free-fn call (single-segment
-    //      path, no qself) — not a `.body`-field read shape even with a `.body`
-    //      argument, because an unqualified call is not a `TypeDeclBody` method
-    //      invocation.
+    // CONTROLS — MUST NOT fire.
     let controls = "impl H {\n    \
         fn r(&self, lowered: &L) {\n        \
             let _ = TypeDeclBody::contributors(&lowered.other);\n        \
@@ -1676,9 +1947,7 @@ fn body_read_shape_detector_handles_paren_ref_and_ufcs() {
 }
 
 /// Nested-fn attribution: a `<recv>.body.lookup_object()` read inside a NESTED
-/// `fn` is attributed to the NESTED fn's anchor, NOT the enclosing fn — so the
-/// per-anchor classification view is correct (this is exactly the case the
-/// line-based grep mis-attributed during grounding).
+/// `fn` is attributed to the NESTED fn's anchor, NOT the enclosing fn.
 #[test]
 fn nested_fn_body_read_is_attributed_to_the_nested_fn() {
     let src = "impl H {\n    \
@@ -1710,8 +1979,8 @@ fn nested_fn_body_read_is_attributed_to_the_nested_fn() {
 
 /// Tripwire RED→GREEN: a NEW un-inventoried fn performing a
 /// `<recv>.body.lookup_object()` read IS flagged; the SAME read at an
-/// inventoried SEMANTIC anchor (`shallow_file_state.rs :: impl ShallowFileState
-/// :: route_closure`) is NOT.
+/// inventoried anchor (`shallow_file_state.rs :: impl ShallowFileState ::
+/// route_closure`) is NOT.
 #[test]
 fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     let allowed = method_chain_allowed_anchors();
@@ -1753,28 +2022,111 @@ fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     );
 }
 
+/// The INVARIANT-5 GraphBackedMigrated-no-read check discriminates: a synthetic
+/// migrated-style fn that ROUTES through `decl_body_hot_ref` and reads no body
+/// passes the per-fn checks, while a regressed variant that reads `prepared.body`
+/// (or `named_decl_body`, or a `.body.<method>` chain) is caught.
+#[test]
+fn graph_backed_migrated_no_read_check_discriminates() {
+    // The forbidden-needle + hot-route classification the production invariant
+    // applies to a migrated fn's own body, exercised directly on synthetic
+    // bodies so the discrimination is provable without mutating the real tree.
+    let clean = "{\n    \
+        let handle = dispatch.decl_body_hot_ref(canonical_id, name, args, prc)?;\n    \
+        Some(handle.node())\n}";
+    let regressed_prepared = "{\n    \
+        let prepared = dispatch.ctx.prepared_type_decl(canonical_id, name)?;\n    \
+        dispatch.lower_type_expr_in_scope_with_mode(canonical_id, &prepared.body, mode)\n}";
+    let regressed_named = "{\n    \
+        let body = engine.named_decl_body(canonical_id, name)?;\n    \
+        Some(lower(body))\n}";
+
+    // (a) hot-route presence.
+    assert!(
+        MIGRATED_HOT_ROUTE_NEEDLES.iter().any(|n| clean.contains(n)),
+        "self-test: a clean migrated body routes through the hot accessor"
+    );
+    assert!(
+        !MIGRATED_HOT_ROUTE_NEEDLES
+            .iter()
+            .any(|n| regressed_prepared.contains(n))
+            && !MIGRATED_HOT_ROUTE_NEEDLES
+                .iter()
+                .any(|n| regressed_named.contains(n)),
+        "self-test: the regressed bodies do NOT route through the hot accessor (so the \
+         not-routed arm of the invariant reds them)"
+    );
+
+    // (b) forbidden-needle presence.
+    assert!(
+        !MIGRATED_FORBIDDEN_BODY_READ_NEEDLES
+            .iter()
+            .any(|n| clean.contains(n)),
+        "self-test: a clean migrated body contains NO forbidden body-read needle — got hits {:?}",
+        MIGRATED_FORBIDDEN_BODY_READ_NEEDLES
+            .iter()
+            .filter(|n| clean.contains(*n))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        MIGRATED_FORBIDDEN_BODY_READ_NEEDLES
+            .iter()
+            .any(|n| regressed_prepared.contains(n)),
+        "self-test: a `prepared.body` / `prepared_type_decl` regression IS caught by the \
+         forbidden-needle scan"
+    );
+    assert!(
+        MIGRATED_FORBIDDEN_BODY_READ_NEEDLES
+            .iter()
+            .any(|n| regressed_named.contains(n)),
+        "self-test: a `named_decl_body` regression IS caught by the forbidden-needle scan"
+    );
+
+    // (c) the real migrated anchor's OWN body extracted from the tree passes both
+    // checks — so the invariant is GREEN on the tree it ships against and not
+    // vacuous.
+    let files = production_src_files();
+    let by_rel: std::collections::HashMap<&str, &str> = files
+        .iter()
+        .map(|(r, s)| (r.as_str(), s.as_str()))
+        .collect();
+    let mut checked_any = false;
+    for (file, _impl_path, name) in graph_backed_migrated_anchors() {
+        let src = by_rel
+            .get(file.as_str())
+            .unwrap_or_else(|| panic!("migrated anchor file `{file}` present"));
+        let body = fn_body_source(src, &name)
+            .unwrap_or_else(|| panic!("migrated anchor `{file} :: fn {name}` body extractable"));
+        assert!(
+            MIGRATED_HOT_ROUTE_NEEDLES.iter().any(|n| body.contains(n)),
+            "self-test (real tree): migrated anchor `{file} :: fn {name}` routes through the hot \
+             accessor / a graph-native arm"
+        );
+        for needle in MIGRATED_FORBIDDEN_BODY_READ_NEEDLES {
+            assert!(
+                !body.contains(needle),
+                "self-test (real tree): migrated anchor `{file} :: fn {name}` body must NOT contain \
+                 `{needle}`"
+            );
+        }
+        checked_any = true;
+    }
+    assert!(
+        checked_any,
+        "self-test: at least one real GraphBackedMigrated anchor must be checked (non-vacuity)"
+    );
+}
+
 /// The ENUMERATION is the completeness rail for BARE-FIELD body readers (which
-/// the method-chain tripwire structurally cannot see). This proves:
-///
-///   1. A synthetic bare `<recv>.body.clone()` prepared-style reader at a
-///      NON-inventoried anchor produces ZERO method-chain hits — so the tripwire
-///      is NOT the rail that closes the bare-field class; the enumeration is.
-///   2. The four bare-field semantic readers FIX-1 added (`route_keys ::
-///      enumerate_member_surface_keys_via_route`, `external_type_frontier ::
-///      resolve_one`, `component_meta_methods :: append_component_meta_registry_
-///      entries`, `eval_env :: dependency_value_symbol_graph_native`) are present
-///      in `SEMANTIC_BODY_READERS` AND resolve to exactly one non-test def on the
-///      real tree — the enumeration row is load-bearing.
-///   3. PRESENCE discriminates: the exact `route_keys` anchor IS present; a
-///      deliberately-mutated (wrong-fn-name) variant of it is NOT — so a moved /
-///      removed / renamed bare-field reader reddens
-///      `every_enumerated_body_reader_is_present_at_its_anchor`.
+/// the method-chain tripwire structurally cannot see). A synthetic bare
+/// `<recv>.body.clone()` reader at a NON-inventoried anchor produces ZERO
+/// method-chain hits; and a representative bare-field reader of each non-migrated
+/// class is present + unique on the real tree.
 #[test]
 fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
     let allowed = method_chain_allowed_anchors();
 
-    // (1) A bare `.body.clone()` read is INVISIBLE to the method-chain tripwire
-    // — confirming the enumeration (not the tripwire) must carry it.
+    // (1) A bare `.body.clone()` read is INVISIBLE to the method-chain tripwire.
     let bare_field_reader = "impl Sneaky {\n    \
         fn new_bare_field_reader(&self, p: &P) -> Option<TypeExpr> {\n        \
             self.prepared_type_decl(\"x\").map(|p| p.body.clone())\n    \
@@ -1799,52 +2151,57 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
          proving the tripwire cannot be the completeness rail for bare-field readers"
     );
 
-    // (2) The four FIX-1 bare-field readers are enumerated AND present + unique
-    // on the real tree (the enumeration row is load-bearing).
+    // (2) Representative bare-field readers of each non-migrated class are
+    // enumerated AND present + unique on the real tree (the enumeration row is
+    // load-bearing). One per class so each class's enumeration is exercised.
     let files = production_src_files();
     let real_inv = build_fn_inventory(&files);
-    let fix1_anchors: [(&str, &str, &str); 4] = [
+    let class_witness: [(&str, &str, &str, ReaderClass); 4] = [
         (
             "src/resolver_core/component_meta_query_engine/route_keys.rs",
             "impl ComponentMetaQueryEngine",
             "enumerate_member_surface_keys_via_route",
+            ReaderClass::GraphBackedPending,
         ),
         (
             "src/resolver_core/external_type_frontier.rs",
             "impl ExternalTypeFrontier",
             "resolve_one",
+            ReaderClass::GraphFreeDto,
         ),
         (
-            "src/host_manage/component_meta_methods.rs",
-            "impl VerterHost",
-            "append_component_meta_registry_entries",
+            "src/meta_resolve/materialize/field_types.rs",
+            "",
+            "type_expr_has_package_backed_object_like_root_with_fence",
+            ReaderClass::AuthoredShape,
         ),
         (
-            "src/host_manage/eval_env.rs",
-            "impl VerterHost",
-            "dependency_value_symbol_graph_native",
+            "src/resolver_core/prepared_decl.rs",
+            "",
+            "prepare_local_value_decl",
+            ReaderClass::ProducerLowering,
         ),
     ];
-    for (file, impl_path, fn_name) in fix1_anchors {
+    for (file, impl_path, fn_name, class) in class_witness {
         assert!(
-            SEMANTIC_BODY_READERS.iter().any(|r| r.file == file
+            RESIDUAL_BODY_READERS.iter().any(|r| r.file == file
                 && r.impl_path == impl_path
                 && r.fn_name == fn_name
-                && !r.method_chain),
-            "self-test: the FIX-1 bare-field reader `{file} :: {impl_path} :: {fn_name}` must be a \
-             `method_chain: false` row in SEMANTIC_BODY_READERS"
+                && r.class == class),
+            "self-test: the bare-field reader `{file} :: {impl_path} :: {fn_name}` must be a \
+             `{}` row in RESIDUAL_BODY_READERS",
+            class.label()
         );
         assert_eq!(
             anchored_defs(&real_inv, file, impl_path, fn_name).len(),
             1,
-            "self-test: the FIX-1 reader `{file} :: {impl_path} :: {fn_name}` must resolve to \
-             exactly one non-test def on the real tree (the enumeration row is load-bearing)"
+            "self-test: the reader `{file} :: {impl_path} :: {fn_name}` must resolve to exactly one \
+             non-test def on the real tree (the enumeration row is load-bearing)"
         );
     }
 
-    // (3) PRESENCE discriminates on the route_keys anchor: present as-is, absent
-    // when the fn name is mutated — so a moved/renamed bare-field reader reddens
-    // the presence check.
+    // (3) PRESENCE discriminates: the exact route_keys anchor IS present; a
+    // mutated variant is NOT.
     assert!(
         anchored_definition_present(
             &real_inv,
@@ -1861,152 +2218,15 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
             "impl ComponentMetaQueryEngine",
             "enumerate_member_surface_keys_via_route_MUTATED_zzz"
         ),
-        "self-test (presence discrimination): a mutated route_keys anchor must NOT be present — so \
-         a moved/renamed bare-field reader reddens the presence check"
-    );
-}
-
-/// The (manager-resolved) `PreparedValueDecl.type_annotation` reader class is
-/// fully enumerated as `method_chain: false` rows and is load-bearing. This
-/// proves:
-///
-///   1. The THREE FIX-2 readers (`build.rs :: impl ProjectSemanticDispatch ::
-///      build_typeof`, `runtime_values.rs :: "" ::
-///      prepared_value_decl_to_value_decl_info`, `eval_env.rs :: impl VerterHost
-///      :: component_meta_binding_type_entries`) are each a
-///      `method_chain: false` row in `SEMANTIC_BODY_READERS` AND resolve to
-///      exactly ONE non-test def on the real tree (present + unique).
-///   2. The FOURTH reader of the same class
-///      (`route_keys :: enumerate_member_surface_keys_via_route`) is present at
-///      its anchor — it carries BOTH the `.body` and the `.type_annotation`
-///      route reads in the same fn, so it is covered by its single existing row
-///      (one row per `(file, impl, fn)`), NOT a duplicate.
-///   3. PRESENCE discriminates: the exact `build_typeof` anchor IS present; a
-///      deliberately-mutated (wrong-fn-name) variant is NOT — so a moved /
-///      removed / renamed reader of this class reddens
-///      `every_enumerated_body_reader_is_present_at_its_anchor`.
-///   4. The reads are BARE `.type_annotation` FIELD reads, INVISIBLE to the
-///      `<recv>.body.<method>` method-chain tripwire — so the enumeration (these
-///      rows), not the tripwire, is the completeness rail for this class.
-#[test]
-fn prepared_value_decl_type_annotation_class_is_enumerated_and_load_bearing() {
-    let allowed = method_chain_allowed_anchors();
-    let files = production_src_files();
-    let real_inv = build_fn_inventory(&files);
-
-    // (1) The three FIX-2 readers are `method_chain: false` rows AND present +
-    // unique on the real tree.
-    let fix2_anchors: [(&str, &str, &str); 3] = [
-        (
-            "src/project_semantic_dispatch/build.rs",
-            "impl ProjectSemanticDispatch",
-            "build_typeof",
-        ),
-        (
-            "src/resolver_core/runtime_values.rs",
-            "",
-            "prepared_value_decl_to_value_decl_info",
-        ),
-        (
-            "src/host_manage/eval_env.rs",
-            "impl VerterHost",
-            "component_meta_binding_type_entries",
-        ),
-    ];
-    for (file, impl_path, fn_name) in fix2_anchors {
-        assert!(
-            SEMANTIC_BODY_READERS.iter().any(|r| r.file == file
-                && r.impl_path == impl_path
-                && r.fn_name == fn_name
-                && !r.method_chain),
-            "self-test: the FIX-2 PreparedValueDecl.type_annotation reader `{file} :: {impl_path} \
-             :: {fn_name}` must be a `method_chain: false` row in SEMANTIC_BODY_READERS"
-        );
-        assert_eq!(
-            anchored_defs(&real_inv, file, impl_path, fn_name).len(),
-            1,
-            "self-test: the FIX-2 reader `{file} :: {impl_path} :: {fn_name}` must resolve to \
-             exactly one non-test def on the real tree (the enumeration row is load-bearing)"
-        );
-    }
-
-    // (2) The fourth reader of the class (route_keys) is present at its anchor —
-    // its single row covers BOTH its `.body` and `.type_annotation` reads.
-    assert!(
-        anchored_definition_present(
-            &real_inv,
-            "src/resolver_core/component_meta_query_engine/route_keys.rs",
-            "impl ComponentMetaQueryEngine",
-            "enumerate_member_surface_keys_via_route"
-        ),
-        "self-test: the fourth PreparedValueDecl.type_annotation reader \
-         (route_keys :: enumerate_member_surface_keys_via_route) IS present at its anchor (its \
-         single row covers both the `.body` and `.type_annotation` route reads)"
-    );
-
-    // (3) PRESENCE discriminates on the build_typeof anchor: present as-is, absent
-    // when the fn name is mutated — so a moved/renamed reader of this class
-    // reddens the presence check.
-    assert!(
-        anchored_definition_present(
-            &real_inv,
-            "src/project_semantic_dispatch/build.rs",
-            "impl ProjectSemanticDispatch",
-            "build_typeof"
-        ),
-        "self-test: the build_typeof PreparedValueDecl.type_annotation reader IS present at its \
-         anchor"
-    );
-    assert!(
-        !anchored_definition_present(
-            &real_inv,
-            "src/project_semantic_dispatch/build.rs",
-            "impl ProjectSemanticDispatch",
-            "build_typeof_MUTATED_zzz"
-        ),
-        "self-test (presence discrimination): a mutated build_typeof anchor must NOT be present — \
-         so a moved/renamed reader of this class reddens the presence check"
-    );
-
-    // (4) A bare `prepared.type_annotation.clone()` read is INVISIBLE to the
-    // method-chain tripwire — confirming the enumeration (these rows), not the
-    // tripwire, carries this class.
-    let bare_value_field_reader = "impl Sneaky {\n    \
-        fn new_prepared_value_reader(&self, prepared: &PreparedValueDecl) -> Option<TypeExpr> {\n        \
-            prepared.type_annotation.clone()\n    \
-        }\n}\n";
-    let bf_inv = inventory_for(&[(
-        "src/resolver_core/some_new_module.rs".to_string(),
-        bare_value_field_reader.to_string(),
-    )]);
-    let bf = bf_inv
-        .iter()
-        .find(|d| d.name == "new_prepared_value_reader")
-        .expect("fn present");
-    assert!(
-        bf.body_reads.is_empty(),
-        "self-test: a bare `prepared.type_annotation.clone()` read must NOT register as a \
-         method-chain read — the tripwire is blind to it, so the enumeration is its only rail. Got \
-         {:?}",
-        bf.body_reads
-    );
-    assert!(
-        unclassified_method_chain_reads(&bf_inv, &allowed).is_empty(),
-        "self-test: a bare PreparedValueDecl.type_annotation reader at a non-inventoried anchor \
-         produces NO tripwire hit — proving the tripwire cannot be the completeness rail for this \
-         class"
+        "self-test (presence discrimination): a mutated route_keys anchor must NOT be present"
     );
 }
 
 /// Tripwire fail-closed on a MOVE: the SAME inventoried fn name moved to a
-/// DIFFERENT impl (or file) is flagged — the anchor is `(file, impl, fn)`, so
-/// `route_closure` in `impl SomethingElse` is NOT covered by the
-/// `impl ShallowFileState :: route_closure` allowance.
+/// DIFFERENT impl is flagged — the anchor is `(file, impl, fn)`.
 #[test]
 fn tripwire_fires_on_moved_inventoried_reader() {
     let allowed = method_chain_allowed_anchors();
-    // `route_closure` (an inventoried name) but in a DIFFERENT impl of the same
-    // file — performing the chain read.
     let moved = "impl ShallowFileState {\n    \
         fn route_closure(&self) {}\n}\n\
         impl SomethingElse {\n    \
@@ -2020,14 +2240,11 @@ fn tripwire_fires_on_moved_inventoried_reader() {
         hits.iter()
             .any(|h| h.fn_name == "route_closure" && h.impl_path == "impl SomethingElse"),
         "self-test (tripwire move RED): `route_closure` moved to `impl SomethingElse` performing \
-         the chain read MUST be flagged — the allowance covers only `impl ShallowFileState :: \
-         route_closure`. Got {:?}",
+         the chain read MUST be flagged. Got {:?}",
         hits.iter()
             .map(|h| (h.impl_path.as_str(), h.fn_name.as_str()))
             .collect::<Vec<_>>()
     );
-    // Discrimination: the anchored `impl ShallowFileState :: route_closure`
-    // (which here performs NO chain read) is not a false positive.
     assert!(
         !hits
             .iter()
@@ -2038,12 +2255,10 @@ fn tripwire_fires_on_moved_inventoried_reader() {
 }
 
 /// Compat-purity RED→GREEN: a synthetic `fact_emission.rs` whose `compute` fn
-/// performs a DIRECT `<recv>.body.lookup_object()` read IS flagged by the
-/// purity scan; a clean version (routing through a helper call, no direct
-/// chain) is NOT.
+/// performs a DIRECT `<recv>.body.lookup_object()` read IS flagged; a clean
+/// version (routing through a helper call) is NOT.
 #[test]
 fn compat_purity_detector_discriminates() {
-    // RED — a direct chain read in a consumer file.
     let dirty = "impl LazyBodyFactSource {\n    \
         fn compute(&self, lowered: &L) {\n        \
             let _ = lowered.body.lookup_object();\n    \
@@ -2063,7 +2278,6 @@ fn compat_purity_detector_discriminates() {
             .collect::<Vec<_>>()
     );
 
-    // GREEN — the routed version calls the helper (no direct chain).
     let clean = "impl LazyBodyFactSource {\n    \
         fn compute(&self, name: &str) {\n        \
             let _ = self.memo.compat_type_body_hash_input(name);\n    \
@@ -2151,9 +2365,7 @@ fn uniqueness_check_discriminates_duplicate() {
 }
 
 /// A `#[cfg(test)]`-gated fn performing the chain read is TEST code and is NOT
-/// flagged by the tripwire (matching the real-tree `shallow_file_state.rs` test
-/// `duplicate_interface_declarations_merge_members`, which reads
-/// `body.body.is_merged()` inside `#[cfg(test)] mod tests`).
+/// flagged by the tripwire.
 #[test]
 fn cfg_test_chain_read_is_not_flagged() {
     let allowed = method_chain_allowed_anchors();
@@ -2163,7 +2375,6 @@ fn cfg_test_chain_read_is_not_flagged() {
         "src/resolver_core/some_new_module.rs".to_string(),
         src.to_string(),
     )]);
-    // The fn IS in the inventory but flagged cfg_test…
     let t = inv.iter().find(|d| d.name == "t").expect("fn t");
     assert!(
         t.cfg_test && t.body_reads.contains("is_merged"),
@@ -2172,7 +2383,6 @@ fn cfg_test_chain_read_is_not_flagged() {
         t.cfg_test,
         t.body_reads
     );
-    // …so the tripwire excludes it.
     assert!(
         unclassified_method_chain_reads(&inv, &allowed)
             .iter()
@@ -2182,22 +2392,22 @@ fn cfg_test_chain_read_is_not_flagged() {
 }
 
 /// One UNPLANTED CONTROL that stays GREEN: the REAL production tree passes ALL
-/// FOUR invariants as-is (presence, uniqueness, the tripwire, and compat
-/// purity) — proving the guard is green on the tree it ships against and the
-/// self-tests above are not the only thing exercised.
+/// FIVE invariants as-is (presence, uniqueness, the tripwire, compat purity, and
+/// the GraphBackedMigrated-no-read rail).
 #[test]
-fn real_tree_satisfies_all_four_invariants() {
+fn real_tree_satisfies_all_invariants() {
     let files = production_src_files();
     let inv = build_fn_inventory(&files);
 
     // (1) Presence — every enumerated reader is anchored.
-    for r in SEMANTIC_BODY_READERS {
+    for r in RESIDUAL_BODY_READERS {
         assert!(
             anchored_definition_present(&inv, r.file, r.impl_path, r.fn_name),
-            "control: SEMANTIC reader `{}` ({} :: {}) must be present on the real tree",
+            "control: residual reader `{}` ({} :: {}) [{}] must be present on the real tree",
             r.fn_name,
             r.file,
-            r.impl_path
+            r.impl_path,
+            r.class.label()
         );
     }
     for r in COMPAT_BODY_READERS {
@@ -2210,7 +2420,7 @@ fn real_tree_satisfies_all_four_invariants() {
         );
     }
 
-    // (2) Uniqueness — every anchor resolves to exactly one def.
+    // (2) Uniqueness.
     for (file, impl_path, name) in all_inventory_anchors() {
         assert_eq!(
             anchored_defs(&inv, &file, &impl_path, &name).len(),
@@ -2219,7 +2429,7 @@ fn real_tree_satisfies_all_four_invariants() {
         );
     }
 
-    // (3) Tripwire — no un-inventoried method-chain read on the real tree.
+    // (3) Tripwire.
     let allowed = method_chain_allowed_anchors();
     let stray = unclassified_method_chain_reads(&inv, &allowed);
     assert!(
@@ -2231,7 +2441,7 @@ fn real_tree_satisfies_all_four_invariants() {
             .collect::<Vec<_>>()
     );
 
-    // (4) Compat purity — neither consumer file performs a direct chain read.
+    // (4) Compat purity.
     let consumer_inv: Vec<&FnDef> = inv
         .iter()
         .filter(|d| {
@@ -2250,14 +2460,37 @@ fn real_tree_satisfies_all_four_invariants() {
             .map(|d| (d.file.as_str(), d.name.as_str()))
             .collect::<Vec<_>>()
     );
+
+    // (5) GraphBackedMigrated-no-read — every migrated anchor reads no body
+    // TypeExpr and routes through the hot accessor.
+    let by_rel: std::collections::HashMap<&str, &str> = files
+        .iter()
+        .map(|(r, s)| (r.as_str(), s.as_str()))
+        .collect();
+    for (file, _impl_path, name) in graph_backed_migrated_anchors() {
+        let src = by_rel
+            .get(file.as_str())
+            .expect("migrated anchor file present");
+        let body = fn_body_source(src, &name).expect("migrated anchor body extractable");
+        for needle in MIGRATED_FORBIDDEN_BODY_READ_NEEDLES {
+            assert!(
+                !body.contains(needle),
+                "control: migrated anchor `{file} :: fn {name}` must NOT contain `{needle}`"
+            );
+        }
+        assert!(
+            MIGRATED_HOT_ROUTE_NEEDLES.iter().any(|n| body.contains(n)),
+            "control: migrated anchor `{file} :: fn {name}` routes through the hot accessor"
+        );
+    }
 }
 
 /// Non-vacuity + mechanically-pinned counts: parsing the real tree yields a
 /// large fn inventory that records at least one cfg-test fn AND at least one real
 /// `<recv>.body.<method>` read; the method-chain allowlist is exactly the
-/// inventoried `method_chain` rows (2 COMPAT + 10 SEMANTIC = 12); and the TOTAL
-/// inventory sizes are pinned (40 SEMANTIC `ReaderRow` + 5 COMPAT `CompatRow`)
-/// so the frozen-surface count cannot drift silently.
+/// inventoried `method_chain` rows; the TOTAL inventory sizes are pinned; and the
+/// PER-CLASS partition counts are pinned so a reader silently changing class (or
+/// the partition drifting) reddens.
 #[test]
 fn real_tree_inventory_is_non_vacuous() {
     let files = production_src_files();
@@ -2267,31 +2500,74 @@ fn real_tree_inventory_is_non_vacuous() {
         "self-test: the structural inventory must contain many fn definitions — got {}",
         inv.len()
     );
-    // Mechanically pin the honest total inventory sizes. The frozen SEMANTIC
-    // surface is 40 rows = 34 original − 1 corrected mis-attribution
-    // (`collect_one_filtered_expr`, a nested helper that reads NO carrier; its
-    // file's real named_decl_body-caller anchor is
-    // `append_component_meta_registry_entries`) + 4 FIX-1 sweep additions
-    // (route_keys::enumerate_member_surface_keys_via_route,
-    // external_type_frontier::resolve_one,
-    // component_meta_methods::append_component_meta_registry_entries,
-    // eval_env::dependency_value_symbol_graph_native) + 3 FIX-2 additions for the
-    // (now manager-resolved) `PreparedValueDecl.type_annotation` reader class
-    // (build.rs::build_typeof, runtime_values::prepared_value_decl_to_value_decl_info,
-    // eval_env::component_meta_binding_type_entries) — the fourth such reader,
-    // route_keys::enumerate_member_surface_keys_via_route, was already counted in
-    // the FIX-1 additions (one row per `(file, impl, fn)`; it reads both `.body`
-    // and `.type_annotation` in the same fn). The COMPAT surface is 5 rows.
+
+    // Total residual + compat surface sizes — pinned so the curated surface
+    // cannot drift silently. The residual surface is the SAME 40 readers the
+    // frozen ledger enumerated, now partitioned by ReaderClass (no reader was
+    // dropped; the migrated anchor `lower_decl_body_to_node` stays enumerated as
+    // the GraphBackedMigrated row). The COMPAT surface is 5 rows.
     assert_eq!(
-        SEMANTIC_BODY_READERS.len(),
+        RESIDUAL_BODY_READERS.len(),
         40,
-        "self-test (count pin): SEMANTIC_BODY_READERS must have exactly 40 rows"
+        "self-test (count pin): RESIDUAL_BODY_READERS must have exactly 40 rows"
     );
     assert_eq!(
         COMPAT_BODY_READERS.len(),
         5,
         "self-test (count pin): COMPAT_BODY_READERS must have exactly 5 rows"
     );
+
+    // Per-class partition pins. 1 GraphBackedMigrated + 3 ProducerLowering + 17
+    // AuthoredShape + 12 GraphFreeDto + 7 GraphBackedPending = 40.
+    let class_count = |c: ReaderClass| {
+        RESIDUAL_BODY_READERS
+            .iter()
+            .filter(|r| r.class == c)
+            .count()
+    };
+    assert_eq!(
+        class_count(ReaderClass::GraphBackedMigrated),
+        1,
+        "self-test (partition pin): exactly one GraphBackedMigrated row (the migrated non-vacuous \
+         anchor)"
+    );
+    assert_eq!(
+        class_count(ReaderClass::ProducerLowering),
+        3,
+        "self-test (partition pin): exactly three ProducerLowering rows (the mint + the two clone \
+         paths)"
+    );
+    assert_eq!(
+        class_count(ReaderClass::AuthoredShape),
+        17,
+        "self-test (partition pin): exactly 17 AuthoredShape rows"
+    );
+    assert_eq!(
+        class_count(ReaderClass::GraphFreeDto),
+        12,
+        "self-test (partition pin): exactly 12 GraphFreeDto rows"
+    );
+    assert_eq!(
+        class_count(ReaderClass::GraphBackedPending),
+        7,
+        "self-test (partition pin): exactly seven GraphBackedPending rows"
+    );
+    assert_eq!(
+        class_count(ReaderClass::OutputCompat),
+        0,
+        "self-test (partition pin): OutputCompat rows live in COMPAT_BODY_READERS, not the residual \
+         table"
+    );
+    assert_eq!(
+        class_count(ReaderClass::GraphBackedMigrated)
+            + class_count(ReaderClass::ProducerLowering)
+            + class_count(ReaderClass::AuthoredShape)
+            + class_count(ReaderClass::GraphFreeDto)
+            + class_count(ReaderClass::GraphBackedPending),
+        RESIDUAL_BODY_READERS.len(),
+        "self-test: the per-class partition must cover every residual row exactly once"
+    );
+
     assert!(
         inv.iter().any(|d| d.cfg_test),
         "self-test: at least one real `#[cfg(test)]` fn must be flagged (proves the gate is not \
@@ -2304,9 +2580,10 @@ fn real_tree_inventory_is_non_vacuous() {
             >= 10,
         "self-test: the real tree must contain many production `<recv>.body.<method>` reads"
     );
+
     // The method-chain allowlist is exactly the inventoried method_chain rows.
     let allowed = method_chain_allowed_anchors();
-    let semantic_chain = SEMANTIC_BODY_READERS
+    let residual_chain = RESIDUAL_BODY_READERS
         .iter()
         .filter(|r| r.method_chain)
         .count();
@@ -2316,7 +2593,7 @@ fn real_tree_inventory_is_non_vacuous() {
         .count();
     assert_eq!(
         allowed.len(),
-        semantic_chain + compat_chain,
+        residual_chain + compat_chain,
         "self-test: the method-chain allowlist size must equal the inventoried method_chain rows"
     );
     assert_eq!(
@@ -2324,8 +2601,8 @@ fn real_tree_inventory_is_non_vacuous() {
         "self-test: exactly two COMPAT helpers perform the `<recv>.body.<method>` chain read"
     );
     assert_eq!(
-        semantic_chain, 10,
-        "self-test: exactly ten SEMANTIC readers perform the `<recv>.body.<method>` chain read"
+        residual_chain, 10,
+        "self-test: exactly ten residual readers perform the `<recv>.body.<method>` chain read"
     );
 }
 
@@ -2334,9 +2611,7 @@ fn real_tree_inventory_is_non_vacuous() {
 // ────────────────────────────────────────────────────────────────────
 
 /// The `impl`-path renderer keeps module quals + type generics, normalizes only
-/// lifetimes: `impl<'a> ComponentMetaQueryEngine<'a>` → `impl
-/// ComponentMetaQueryEngine`; `impl KeyDomainBinding<'_>` → `impl
-/// KeyDomainBinding`; and two genuinely-distinct generic args stay distinct.
+/// lifetimes.
 #[test]
 fn impl_path_renderer_normalizes_only_lifetimes() {
     let lifetimed: ItemImpl = syn::parse_quote!(
@@ -2355,7 +2630,6 @@ fn impl_path_renderer_normalizes_only_lifetimes() {
     );
     let inherent: ItemImpl = syn::parse_quote!(impl VerterHost {});
     assert_eq!(render_impl_path(&inherent), "impl VerterHost");
-    // Type generics are kept (collision-safe).
     let u8_impl: ItemImpl = syn::parse_quote!(impl T for Foo<u8> {});
     let u16_impl: ItemImpl = syn::parse_quote!(impl T for Foo<u16> {});
     assert_ne!(
@@ -2365,9 +2639,7 @@ fn impl_path_renderer_normalizes_only_lifetimes() {
     );
 }
 
-/// The cfg-test evaluator: `cfg(test)` and `cfg(all(unix, test))` are test-only;
-/// `cfg(any(unix, test))`, `cfg(not(test))`, and `cfg(feature = "test_util")`
-/// are PRODUCTION (must be scanned).
+/// The cfg-test evaluator truth table.
 #[test]
 fn cfg_test_evaluator_truth_table() {
     let plain: Attribute = syn::parse_quote!(#[cfg(test)]);
