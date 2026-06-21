@@ -124,8 +124,11 @@ real_provider_test!(
 // `rename_cross_file_prop_child_closed_unprewarmed_tsserver` below, which
 // SUPPRESSES the prewarm; it is `#[ignore]`'d on the tsserver program-membership
 // gap tracked as Block H-membership. This lane remains broad end-to-end coverage
-// (apply + text assertions across both files). tsserver-only; tgo keeps the
-// canary.
+// (apply + text assertions across both files), and runs for BOTH providers: under
+// tsserver the provider's own rename enumerates the child `{carrier}.ts` location,
+// while under tgo the child-declaration leg is the one Verter SYNTHESIZES
+// (provider-agnostic) — tgo's native rename does not enumerate it. Either way the
+// child edit maps back onto MyComp.vue through the same generation-pinned snapshot.
 real_provider_test!(
     rename_cross_file_prop_child_closed,
     fixture = "single-project",
