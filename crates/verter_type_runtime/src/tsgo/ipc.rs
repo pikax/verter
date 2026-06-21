@@ -910,8 +910,8 @@ fn parse_lsp_location(loc: &serde_json::Value, content: Option<&str>) -> Option<
 /// References (and definition / type-definition) span multiple files: a location in file `B`
 /// returned from a query on file `A` carries a `range` whose line:col must be converted to a byte
 /// offset using `B`'s content, NOT `A`'s. Passing the queried file's single snapshot to every
-/// location — as the references path used to do — converts cross-file ranges against the wrong
-/// file, packing garbage byte offsets that surface downstream as line-0 / wrong-position results.
+/// location converts cross-file ranges against the wrong file, packing garbage byte offsets that
+/// surface downstream as line-0 / wrong-position results.
 ///
 /// `content_for(target_path)` hands back the target file's content (from the contents cache);
 /// `parse_lsp_location` falls back to a disk read when it returns `None`.
@@ -3271,7 +3271,7 @@ fn parse_range_to_offsets(range: &serde_json::Value, content: Option<&str>) -> O
 /// Edit-producing parsers (`parse_text_edit_to_code_edit`, `parse_rename_edit`) route through this
 /// so a total cache+disk miss or an out-of-range position never packs a line-0 / clamped offset that
 /// the merge layer would apply as a corrupting WRITE. Navigation-only callers keep the lenient
-/// `parse_range_to_offsets[_with_disk_fallback]` (a packed sentinel is a tolerable display miss).
+/// `parse_range_to_offsets` (a packed sentinel is a tolerable display miss).
 fn parse_range_to_offsets_strict_with_disk_fallback<'a>(
     range: &serde_json::Value,
     path: &str,
@@ -3869,8 +3869,8 @@ mod dto_path_canonicalization_tests {
             loc.start,
             loc.end,
         );
-        // Discriminating negative: a line-0 packed offset (the pre-fix behavior on cache miss)
-        // would be `pack_position(line, char)`; assert we did NOT get that.
+        // Discriminating negative: a cache miss must resolve via disk, never pack a line:col
+        // sentinel `pack_position(line, char)`; assert we did NOT get that.
         assert_ne!(
             loc.start,
             super::pack_position(want_line, want_char),

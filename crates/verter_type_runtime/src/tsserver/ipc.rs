@@ -2461,7 +2461,7 @@ pub fn parse_tsserver_location(
 /// (e.g. an imported component's carrier or a `.ts` declaration). Resolve each span against THAT
 /// file's own content: the in-memory `contents_cache` first, then a per-target disk read on a
 /// cache miss — the SAME content-resolution [`parse_tsserver_location`] gives references /
-/// definition, and the tsgo rename path gives via `parse_range_to_offsets_with_disk_fallback`.
+/// definition, and the tsgo rename path gives via `parse_range_to_offsets_strict_with_disk_fallback`.
 ///
 /// The disk fallback recovers a cross-file target absent from the cache, so its rename edit lands
 /// at the real range instead of being dropped. FAIL CLOSED otherwise: when NEITHER cache nor disk

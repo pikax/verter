@@ -500,11 +500,10 @@ fn test_parse_tsserver_rename_span_with_content() {
 /// A cross-file rename span whose GROUP file is absent from the in-memory contents cache must
 /// resolve its byte offsets against THAT file's own on-disk content (the per-target disk
 /// fallback) — the SAME content-resolution `parse_tsserver_location` gives references and the
-/// tsgo rename path gives via `parse_range_to_offsets_with_disk_fallback`.
+/// tsgo rename path gives via `parse_range_to_offsets_strict_with_disk_fallback`.
 ///
-/// Discriminating regression for the dropped cross-file rename edit: the pre-fix code packed a
-/// 0-based `(line << 16) | col` sentinel on a cache miss, which the merge layer could not map to
-/// a real range — so the cross-file edit was silently dropped (incomplete rename). The renamed
+/// Fails if a cache-miss span packs a 0-based `(line << 16) | col` sentinel the merge layer cannot
+/// map to a real range, silently dropping the cross-file edit (incomplete rename). The renamed
 /// symbol sits on line 3 (1-based), NOT line 0, so a packed line:col fallback is unmistakably
 /// distinguishable from the real byte offset.
 #[test]
@@ -539,7 +538,8 @@ fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
         parsed.start,
         parsed.end,
     );
-    // Discriminating negative: the pre-fix packed fallback would be `(2 << 16) | 13`.
+    // Discriminating negative: assert the offset is the real byte offset, not the packed
+    // line:col fallback `(2 << 16) | 13`.
     let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
     assert_ne!(
         parsed.start, packed_start,
@@ -553,9 +553,9 @@ fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
 /// (returns `None`) — a rename location is a WRITE edit, so a packed `(line << 16) | col` sentinel
 /// applied at a bogus byte offset would CORRUPT the file.
 ///
-/// Discriminating regression: the pre-fix code packed the 0-based sentinel as a final `else` arm and
-/// returned `Some(RenameLocation { start: packed, .. })`. The fixed code returns `None`. The fixture
-/// path does not exist on disk and is not in the (empty) cache.
+/// Fails if a cache+disk miss packs the 0-based sentinel and returns
+/// `Some(RenameLocation { start: packed, .. })` instead of `None`. The fixture path does not exist
+/// on disk and is not in the (empty) cache.
 #[test]
 fn parse_tsserver_rename_span_drops_span_when_content_unavailable() {
     let missing = std::env::temp_dir()
@@ -923,7 +923,7 @@ async fn test_get_semantic_tokens_cache_miss_returns_empty() {
         cache.get("/project/src/Missing.vue.tsx").cloned()
     };
 
-    // With the fix, content is None → early return
+    // A cache miss yields None → the resolver early-returns.
     assert!(content.is_none(), "cache miss should yield None");
     // The actual fix changes the code to `return Ok(vec![])` here,
     // so no transport request is sent. We verify the None path exists.
@@ -1178,9 +1178,9 @@ fn diag_with_tags(
 /// the tag, regardless of which pass emitted it first. Otherwise a `.vue` unused
 /// import stops graying out whenever a tagless duplicate is seen first.
 ///
-/// Discriminating: the pre-fix `merge_diagnostic_sets` kept the FIRST-seen
-/// variant verbatim and dropped the rest, so a tagless-then-tagged ordering lost
-/// the tag entirely. This asserts the tag survives in BOTH orderings.
+/// Discriminating: fails if `merge_diagnostic_sets` keeps only the FIRST-seen
+/// variant and drops the rest, so a tagless-then-tagged ordering loses the tag
+/// entirely. This asserts the tag survives in BOTH orderings.
 #[test]
 fn merge_diagnostic_sets_tag_survives_dedup_when_untagged_duplicate_seen_first() {
     // semantic pass reports it WITHOUT the tag; suggestion pass reports the SAME
@@ -1303,9 +1303,9 @@ fn merge_diagnostic_sets_unions_distinct_tags_across_duplicates() {
 /// (returns `None`), mirroring `parse_tsserver_combined_code_fix`. An edit-less
 /// action is not actionable and must never leave the parse boundary.
 ///
-/// Discriminating: pre-fix `parse_tsserver_code_action` returned
-/// `Some(TypeCodeAction { edits: [] })` for an action with no `textChanges`; this
-/// asserts it is now `None`, so it FAILS against the pre-fix code and PASSES after.
+/// Discriminating: fails if `parse_tsserver_code_action` returns
+/// `Some(TypeCodeAction { edits: [] })` for an action with no `textChanges` instead
+/// of `None` — an edit-less action must not leave the parse boundary.
 #[test]
 fn parse_tsserver_code_action_drops_empty_edit_action() {
     let cache: HashMap<String, Arc<str>> = HashMap::new();
@@ -1360,9 +1360,9 @@ fn parse_tsserver_code_action_drops_empty_edit_action() {
 /// must be DROPPED — a wrong-location edit corrupts the file, so the EDIT path fails closed (unlike
 /// the rename/location paths, which tolerate a packed line:col sentinel for an incomplete nav).
 ///
-/// Discriminating regression: the pre-fix code packed a 0-based `(line << 16) | col` sentinel on a
-/// cache miss and pushed it as a real byte offset, so the merge layer applied the edit at a bogus
-/// offset. The renamed/edited span sits on line 3 (1-based), so the packed value is unmistakably
+/// Discriminating regression: fails if a cache miss packs a 0-based `(line << 16) | col` sentinel
+/// and pushes it as a real byte offset, so the merge layer applies the edit at a bogus offset. The
+/// renamed/edited span sits on line 3 (1-based), so the packed value is unmistakably
 /// distinguishable from any real byte offset.
 #[test]
 fn parse_tsserver_file_code_edits_drops_edit_when_file_unavailable() {
@@ -1395,7 +1395,7 @@ fn parse_tsserver_file_code_edits_drops_edit_when_file_unavailable() {
         edits.is_empty(),
         "an edit whose file is unavailable must be DROPPED (fail-closed), never packed: {edits:?}"
     );
-    // The packed sentinel the pre-fix code would have produced — assert it is absent.
+    // Assert the packed line:col sentinel is absent — a cache+disk miss must drop, never pack.
     let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
     assert!(
         !edits.iter().any(|e| e.start == packed_start),
@@ -1407,8 +1407,8 @@ fn parse_tsserver_file_code_edits_drops_edit_when_file_unavailable() {
 /// past-EOF line) must be DROPPED — never clamped to a content-length offset.
 ///
 /// Discriminating regression: the shared codec (`line_column_to_offset_utf16` → `position_to_offset`)
-/// clamps a past-EOF line/col to `content.len()` and returns a valid-looking WRONG offset, so the
-/// pre-fix edit path emitted an edit at EOF that corrupts the file. The checked converter returns
+/// clamps a past-EOF line/col to `content.len()` and returns a valid-looking WRONG offset; an edit
+/// emitted at that clamped EOF offset corrupts the file. The checked converter returns
 /// `None` for an out-of-range position and the edit is dropped. The fixture content is short (3
 /// lines), so line 999 is unmistakably past EOF.
 #[test]
@@ -1437,7 +1437,7 @@ fn parse_tsserver_file_code_edits_drops_out_of_range_position_not_clamped() {
         "an edit whose position is out of range must be DROPPED (fail-closed), never clamped to a \
          content-length offset: {edits:?}"
     );
-    // Discriminating negative: the clamp the pre-fix code produced was `content.len()`.
+    // Discriminating negative: assert the offset is not the clamped `content.len()`.
     assert!(
         !edits.iter().any(|e| e.start == content.len() as u32),
         "no edit may carry the clamped content-length offset"
@@ -1519,7 +1519,8 @@ fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
         edits[0].end,
     );
     assert_eq!(edits[0].new_text, "renamedSymbol");
-    // Discriminating negative: the pre-fix packed fallback would be `(2 << 16) | 13`.
+    // Discriminating negative: assert the offset is the real byte offset, not the packed
+    // line:col fallback `(2 << 16) | 13`.
     let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
     assert_ne!(
         edits[0].start, packed_start,

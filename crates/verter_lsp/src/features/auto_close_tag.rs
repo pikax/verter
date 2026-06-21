@@ -1408,9 +1408,9 @@ mod tests {
     #[test]
     fn vue_literal_brace_before_tag_does_not_break_attr_guard() {
         // A literal `{` precedes `<div title="a>b">`. Typing the `>` INSIDE the
-        // quoted value must NOT insert a close mid-attribute. Pre-fix the literal
-        // `{` made the brace-aware lookup hide the `<`, so the attribute guard
-        // declined and the fallback wrong-fired `</div>` inside the value.
+        // quoted value must NOT insert a close mid-attribute. Fails if a literal `{`
+        // in Vue text makes the tag lookup hide the `<` so the attribute guard
+        // declines and the fallback wrong-fires `</div>` inside the value.
         let source = "<template>{ <div title=\"a>b\">";
         let off = after(source, "title=\"a>");
         assert_eq!(
@@ -1424,11 +1424,10 @@ mod tests {
     #[test]
     fn vue_literal_brace_then_quote_does_not_suppress_real_close() {
         // Positive complement: a literal `{` AND a literal `"` in Vue text before
-        // `<div>`. Typing the REAL `>` of `<div>` must still close. Pre-fix the
-        // brace-aware lookup opened a spurious quote at brace-depth > 0 on the
-        // literal `"`, swallowed the real tag's `<`, and the attribute guard
-        // wrongly suppressed the close (returned None). With braces inert for Vue
-        // the literal `"` stays literal text and the real close fires.
+        // `<div>`. Typing the REAL `>` of `<div>` must still close. Fails if a
+        // literal `"` at brace-depth > 0 opens a spurious quote that swallows the
+        // real tag's `<` so the attribute guard suppresses the close. Braces are
+        // inert in Vue text, so the literal `"` stays literal text and the close fires.
         let source = "<template><a>{ \"<div>";
         let off = after(source, "<div>");
         assert_eq!(
@@ -1451,11 +1450,11 @@ mod tests {
     #[test]
     fn vue_lt_inside_mustache_string_does_not_misanchor_attr_guard() {
         // A `<` lives literally inside a `{{ "<" }}` interpolation string. Typing
-        // the `>` inside the LATER `title="a>b"` attribute must NOT close. Pre-fix
-        // the brace-blind Vue scan recorded the mustache-interior `<` as the
-        // candidate tag, mis-anchored the quote walk, and the brace-blind fallback
-        // wrong-fired `</div>` mid-attribute. Post-fix the `{{ }}` span is skipped,
-        // the real `<div` anchors the guard, the `>` is seen in-quote → None.
+        // the `>` inside the LATER `title="a>b"` attribute must NOT close. Fails if
+        // the Vue scan records the mustache-interior `<` as the candidate tag,
+        // mis-anchors the quote walk, and wrong-fires `</div>` mid-attribute. The
+        // `{{ }}` span is skipped, the real `<div` anchors the guard, the `>` is
+        // seen in-quote → None.
         let source = "<template>{{ \"<\" }}<div title=\"a>b\">";
         let off = after(source, "title=\"a>");
         assert_eq!(
@@ -1469,11 +1468,11 @@ mod tests {
     #[test]
     fn vue_real_tag_after_mustache_with_lt_string_still_closes() {
         // Positive complement: the same `{{ "<" }}` span precedes `<div>`; typing
-        // the REAL `>` of `<div>` must close. Pre-fix the unmatched `"` from the
-        // mustache string leaked across the brace-blind scan and opened a spurious
-        // quote that swallowed the real tag's `<`, so the attr guard wrongly
-        // reported in-quote and suppressed the close (None). Post-fix the span is
-        // skipped, the real `<div` anchors cleanly, and the close fires.
+        // the REAL `>` of `<div>` must close. Fails if the unmatched `"` from the
+        // mustache string leaks across the scan and opens a spurious quote that
+        // swallows the real tag's `<` so the attr guard reports in-quote and
+        // suppresses the close. The span is skipped, the real `<div` anchors
+        // cleanly, and the close fires.
         let source = "<template>{{ \"<\" }}<div>\n</template>";
         let off = after(source, "<div>");
         assert_eq!(
