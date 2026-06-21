@@ -1114,21 +1114,61 @@ const SEMANTIC_BODY_READERS: &[ReaderRow] = &[
                  on ValueDeclInfo, which is excluded). A BARE `.type_annotation` field read, \
                  anchored by the enumeration",
     },
-    // NOTE — the `PreparedValueDecl.type_annotation` reader class
-    // (`eval_env::component_meta_binding_type_entries`,
-    // `project_semantic_dispatch/build.rs::build_typeof`,
-    // `runtime_values::prepared_value_decl_to_value_decl_info`, and the
-    // incidental `route_keys::enumerate_member_surface_keys_via_route` :354 read)
-    // is the prepared-VALUE analog of the `PreparedTypeDecl.body` readers above.
-    // It is DELIBERATELY NOT enumerated here: the original frozen surface
-    // included ZERO such rows, and the carrier disposition §2 migration set names
-    // the value side only structurally (§1 `HotPreparedValueDecl` annotations →
-    // handles), NOT as named migration sites — so whether this class belongs in
-    // the frozen S4 SEMANTIC surface is a genuinely-ambiguous classification not
-    // settled by the disposition §2 list. Per the fix-brief STOP-rule it is
-    // FLAGGED to the block manager rather than guessed; it is intentionally not
-    // added (adding a partial set would make the surface inconsistent; adding the
-    // whole class would expand the frozen surface beyond what is settled).
+    // ── PreparedValueDecl.type_annotation readers ──────────────────────
+    //
+    // RESOLUTION (manager-decided): the `PreparedValueDecl.type_annotation`
+    // reader class IS in the frozen S4 SEMANTIC surface and its readers are
+    // enumerated below. The carrier disposition §1 makes `HotPreparedValueDecl`
+    // annotations HANDLES — the SAME rule as `HotPreparedTypeDecl` bodies — and
+    // the S4 closed-file list already commits `prepare_local_value_decl` (the
+    // value clone path) + `LoweredValueDecl.type_annotation` to handle-native.
+    // Therefore `PreparedValueDecl.type_annotation: Option<TypeExpr>` is a
+    // handle-native S4 target and these reads migrate with it. The three sites
+    // are unambiguously SEMANTIC: `build_typeof` feeds the prepared annotation
+    // into `shallow_lower_type_expr_with_context` (pure resolution),
+    // `prepared_value_decl_to_value_decl_info` builds a `ValueDeclInfo` (the
+    // value-resolution surface), and `component_meta_binding_type_entries`
+    // builds the component-meta binding type entries (publication). A FOURTH
+    // reader — `route_keys::enumerate_member_surface_keys_via_route` :354 — also
+    // reads `prepared_value.type_annotation` (the prepared-value route hop) but
+    // is ALREADY anchored above for its sibling `.body` route read in the SAME
+    // fn (one row per `(file, impl, fn)`), so it is not duplicated here; its row
+    // reason names both reads. These are BARE `.type_annotation` FIELD reads, so
+    // the `<recv>.body.<method>` method-chain tripwire structurally cannot catch
+    // them — the enumeration is their only completeness rail (hence
+    // `method_chain: false`).
+    ReaderRow {
+        file: "src/project_semantic_dispatch/build.rs",
+        impl_path: "impl ProjectSemanticDispatch",
+        fn_name: "build_typeof",
+        method_chain: false,
+        reason: "reads prepared.type_annotation (PreparedValueDecl, from \
+                 effective_prepared_value_decl) and feeds it to \
+                 shallow_lower_type_expr_with_context — the typeof composer's value-decl annotation \
+                 resolution; a handle-native S4 target per carrier disposition §1 (value-decl \
+                 annotations → handles). A BARE `.type_annotation` field read, anchored by the \
+                 enumeration, not the tripwire",
+    },
+    ReaderRow {
+        file: "src/resolver_core/runtime_values.rs",
+        impl_path: "",
+        fn_name: "prepared_value_decl_to_value_decl_info",
+        method_chain: false,
+        reason: "reads prepared.type_annotation.clone() (PreparedValueDecl) when building the \
+                 ValueDeclInfo round-trip into the importing env — the value-resolution surface; a \
+                 handle-native S4 target per carrier disposition §1. A BARE `.type_annotation` field \
+                 read (free fn), anchored by the enumeration",
+    },
+    ReaderRow {
+        file: "src/host_manage/eval_env.rs",
+        impl_path: "impl VerterHost",
+        fn_name: "component_meta_binding_type_entries",
+        method_chain: false,
+        reason: "reads decl.type_annotation.clone() (decl = prepared_value_decl(..), a \
+                 PreparedValueDecl) to build the component-meta binding type entries — publication; \
+                 a handle-native S4 target per carrier disposition §1. A BARE `.type_annotation` \
+                 field read, anchored by the enumeration",
+    },
 ];
 
 /// One anchored COMPAT body reader: a purpose-named compat helper DEFINITION, or
@@ -1809,6 +1849,138 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
     );
 }
 
+/// The (manager-resolved) `PreparedValueDecl.type_annotation` reader class is
+/// fully enumerated as `method_chain: false` rows and is load-bearing. This
+/// proves:
+///
+///   1. The THREE FIX-2 readers (`build.rs :: impl ProjectSemanticDispatch ::
+///      build_typeof`, `runtime_values.rs :: "" ::
+///      prepared_value_decl_to_value_decl_info`, `eval_env.rs :: impl VerterHost
+///      :: component_meta_binding_type_entries`) are each a
+///      `method_chain: false` row in `SEMANTIC_BODY_READERS` AND resolve to
+///      exactly ONE non-test def on the real tree (present + unique).
+///   2. The FOURTH reader of the same class
+///      (`route_keys :: enumerate_member_surface_keys_via_route`) is present at
+///      its anchor — it carries BOTH the `.body` and the `.type_annotation`
+///      route reads in the same fn, so it is covered by its single existing row
+///      (one row per `(file, impl, fn)`), NOT a duplicate.
+///   3. PRESENCE discriminates: the exact `build_typeof` anchor IS present; a
+///      deliberately-mutated (wrong-fn-name) variant is NOT — so a moved /
+///      removed / renamed reader of this class reddens
+///      `every_enumerated_body_reader_is_present_at_its_anchor`.
+///   4. The reads are BARE `.type_annotation` FIELD reads, INVISIBLE to the
+///      `<recv>.body.<method>` method-chain tripwire — so the enumeration (these
+///      rows), not the tripwire, is the completeness rail for this class.
+#[test]
+fn prepared_value_decl_type_annotation_class_is_enumerated_and_load_bearing() {
+    let allowed = method_chain_allowed_anchors();
+    let files = production_src_files();
+    let real_inv = build_fn_inventory(&files);
+
+    // (1) The three FIX-2 readers are `method_chain: false` rows AND present +
+    // unique on the real tree.
+    let fix2_anchors: [(&str, &str, &str); 3] = [
+        (
+            "src/project_semantic_dispatch/build.rs",
+            "impl ProjectSemanticDispatch",
+            "build_typeof",
+        ),
+        (
+            "src/resolver_core/runtime_values.rs",
+            "",
+            "prepared_value_decl_to_value_decl_info",
+        ),
+        (
+            "src/host_manage/eval_env.rs",
+            "impl VerterHost",
+            "component_meta_binding_type_entries",
+        ),
+    ];
+    for (file, impl_path, fn_name) in fix2_anchors {
+        assert!(
+            SEMANTIC_BODY_READERS.iter().any(|r| r.file == file
+                && r.impl_path == impl_path
+                && r.fn_name == fn_name
+                && !r.method_chain),
+            "self-test: the FIX-2 PreparedValueDecl.type_annotation reader `{file} :: {impl_path} \
+             :: {fn_name}` must be a `method_chain: false` row in SEMANTIC_BODY_READERS"
+        );
+        assert_eq!(
+            anchored_defs(&real_inv, file, impl_path, fn_name).len(),
+            1,
+            "self-test: the FIX-2 reader `{file} :: {impl_path} :: {fn_name}` must resolve to \
+             exactly one non-test def on the real tree (the enumeration row is load-bearing)"
+        );
+    }
+
+    // (2) The fourth reader of the class (route_keys) is present at its anchor —
+    // its single row covers BOTH its `.body` and `.type_annotation` reads.
+    assert!(
+        anchored_definition_present(
+            &real_inv,
+            "src/resolver_core/component_meta_query_engine/route_keys.rs",
+            "impl ComponentMetaQueryEngine",
+            "enumerate_member_surface_keys_via_route"
+        ),
+        "self-test: the fourth PreparedValueDecl.type_annotation reader \
+         (route_keys :: enumerate_member_surface_keys_via_route) IS present at its anchor (its \
+         single row covers both the `.body` and `.type_annotation` route reads)"
+    );
+
+    // (3) PRESENCE discriminates on the build_typeof anchor: present as-is, absent
+    // when the fn name is mutated — so a moved/renamed reader of this class
+    // reddens the presence check.
+    assert!(
+        anchored_definition_present(
+            &real_inv,
+            "src/project_semantic_dispatch/build.rs",
+            "impl ProjectSemanticDispatch",
+            "build_typeof"
+        ),
+        "self-test: the build_typeof PreparedValueDecl.type_annotation reader IS present at its \
+         anchor"
+    );
+    assert!(
+        !anchored_definition_present(
+            &real_inv,
+            "src/project_semantic_dispatch/build.rs",
+            "impl ProjectSemanticDispatch",
+            "build_typeof_MUTATED_zzz"
+        ),
+        "self-test (presence discrimination): a mutated build_typeof anchor must NOT be present — \
+         so a moved/renamed reader of this class reddens the presence check"
+    );
+
+    // (4) A bare `prepared.type_annotation.clone()` read is INVISIBLE to the
+    // method-chain tripwire — confirming the enumeration (these rows), not the
+    // tripwire, carries this class.
+    let bare_value_field_reader = "impl Sneaky {\n    \
+        fn new_prepared_value_reader(&self, prepared: &PreparedValueDecl) -> Option<TypeExpr> {\n        \
+            prepared.type_annotation.clone()\n    \
+        }\n}\n";
+    let bf_inv = inventory_for(&[(
+        "src/resolver_core/some_new_module.rs".to_string(),
+        bare_value_field_reader.to_string(),
+    )]);
+    let bf = bf_inv
+        .iter()
+        .find(|d| d.name == "new_prepared_value_reader")
+        .expect("fn present");
+    assert!(
+        bf.body_reads.is_empty(),
+        "self-test: a bare `prepared.type_annotation.clone()` read must NOT register as a \
+         method-chain read — the tripwire is blind to it, so the enumeration is its only rail. Got \
+         {:?}",
+        bf.body_reads
+    );
+    assert!(
+        unclassified_method_chain_reads(&bf_inv, &allowed).is_empty(),
+        "self-test: a bare PreparedValueDecl.type_annotation reader at a non-inventoried anchor \
+         produces NO tripwire hit — proving the tripwire cannot be the completeness rail for this \
+         class"
+    );
+}
+
 /// Tripwire fail-closed on a MOVE: the SAME inventoried fn name moved to a
 /// DIFFERENT impl (or file) is flagged — the anchor is `(file, impl, fn)`, so
 /// `route_closure` in `impl SomethingElse` is NOT covered by the
@@ -2078,22 +2250,25 @@ fn real_tree_inventory_is_non_vacuous() {
         "self-test: the structural inventory must contain many fn definitions — got {}",
         inv.len()
     );
-    // FIX-4: mechanically pin the honest total inventory sizes. The frozen
-    // SEMANTIC surface is 37 rows = 34 original − 1 corrected mis-attribution
+    // Mechanically pin the honest total inventory sizes. The frozen SEMANTIC
+    // surface is 40 rows = 34 original − 1 corrected mis-attribution
     // (`collect_one_filtered_expr`, a nested helper that reads NO carrier; its
     // file's real named_decl_body-caller anchor is
     // `append_component_meta_registry_entries`) + 4 FIX-1 sweep additions
     // (route_keys::enumerate_member_surface_keys_via_route,
     // external_type_frontier::resolve_one,
     // component_meta_methods::append_component_meta_registry_entries,
-    // eval_env::dependency_value_symbol_graph_native). The
-    // `PreparedValueDecl.type_annotation` class is FLAGGED-not-added (ambiguous —
-    // see the NOTE at the end of SEMANTIC_BODY_READERS). The COMPAT surface is 5
-    // rows.
+    // eval_env::dependency_value_symbol_graph_native) + 3 FIX-2 additions for the
+    // (now manager-resolved) `PreparedValueDecl.type_annotation` reader class
+    // (build.rs::build_typeof, runtime_values::prepared_value_decl_to_value_decl_info,
+    // eval_env::component_meta_binding_type_entries) — the fourth such reader,
+    // route_keys::enumerate_member_surface_keys_via_route, was already counted in
+    // the FIX-1 additions (one row per `(file, impl, fn)`; it reads both `.body`
+    // and `.type_annotation` in the same fn). The COMPAT surface is 5 rows.
     assert_eq!(
         SEMANTIC_BODY_READERS.len(),
-        37,
-        "self-test (count pin): SEMANTIC_BODY_READERS must have exactly 37 rows"
+        40,
+        "self-test (count pin): SEMANTIC_BODY_READERS must have exactly 40 rows"
     );
     assert_eq!(
         COMPAT_BODY_READERS.len(),
