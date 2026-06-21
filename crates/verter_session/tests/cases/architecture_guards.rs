@@ -21647,15 +21647,21 @@ fn structural_carrier_producer_lowerer_privacy_classifier_discriminates() {
 }
 
 /// Comment-strip a Rust source body for the single-call scan: every `//` line
-/// comment and `/* … */` block comment (nested) is replaced by spaces, AND
-/// string / raw-string literal CONTENTS are blanked to spaces (the delimiters
-/// kept, newlines preserved) — a `lower_type_expr_structural(` mention inside a
-/// comment OR a string is therefore never mistaken for a call. This mirrors the
-/// proven `strip_comments` helper used elsewhere in this file (the literal/raw
-/// scanner is identical; this variant additionally blanks string CONTENTS since
-/// no real call can live inside a literal). The single-call guard below feeds it
-/// the owner source so commented-out / doc-comment / string mentions of the
-/// lowerer cannot inflate the call count.
+/// comment and `/* … */` block comment (nested) is replaced by spaces, string /
+/// raw-string literal CONTENTS are blanked to spaces (the delimiters kept,
+/// newlines preserved), AND a CHAR / byte-char literal (`'x'` / `'\n'` / `'"'`)
+/// is consumed as an ATOM (disambiguated from a lifetime) so a `"` inside a char
+/// literal can NEVER mis-open string mode and mask the code that follows it. A
+/// `lower_type_expr_structural` mention inside a comment OR a string is therefore
+/// never counted, and a `let _q = '"'; lower_type_expr_structural(g)` line keeps
+/// the rogue reference VISIBLE to the occurrence scan (the char-literal bug in
+/// the prior string-only stripper opened string mode at `'"'` and blanked the
+/// following reference — closing that bug is the round-3 hardening). This mirrors
+/// the char-aware `carrier_strip_comments` helper in this file (same
+/// raw/string/char/comment disambiguation), additionally blanking string
+/// CONTENTS since no real reference can live inside a literal. The single-call
+/// guard below feeds it the owner source so commented-out / doc-comment / string
+/// / char-masked mentions of the lowerer cannot evade the occurrence scan.
 fn strip_comments_for_single_call_scan(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -21719,6 +21725,45 @@ fn strip_comments_for_single_call_scan(src: &str) -> String {
             i = k;
             continue;
         }
+        // Char / byte-char literal 'x' / '\n' / '\u{…}' / '"' — consumed as an
+        // ATOM (passed through verbatim), disambiguated from a lifetime
+        // (`'a` / `'static`, which has NO closing quote) exactly like rustc: a
+        // backslash escape, OR a single byte immediately followed by a closing
+        // quote, is a char literal; anything else starting with `'` falls
+        // through as a lifetime. WITHOUT this, a `'"'` char literal opens the
+        // string arm above and blanks the following code — the exact masking the
+        // round-3 hardening closes. (Mirrors `carrier_strip_comments`.)
+        if c == b'\'' {
+            // Escaped char literal `'\X…'`: scan to the unescaped closing quote.
+            if i + 1 < n && bytes[i + 1] == b'\\' {
+                out.push(b'\'');
+                let mut k = i + 1;
+                while k < n {
+                    if bytes[k] == b'\\' && k + 1 < n {
+                        out.push(bytes[k]);
+                        out.push(bytes[k + 1]);
+                        k += 2;
+                        continue;
+                    }
+                    if bytes[k] == b'\'' {
+                        out.push(b'\'');
+                        k += 1;
+                        break;
+                    }
+                    out.push(bytes[k]);
+                    k += 1;
+                }
+                i = k;
+                continue;
+            }
+            // Simple single-byte char literal `'x'` (close quote at i+2).
+            if i + 2 < n && bytes[i + 2] == b'\'' {
+                out.extend_from_slice(&bytes[i..=i + 2]);
+                i += 3;
+                continue;
+            }
+            // Otherwise a lifetime — fall through to normal byte handling.
+        }
         // Line comment //
         if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
             let mut k = i;
@@ -21766,36 +21811,64 @@ fn strip_comments_for_single_call_scan(src: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The byte offsets of every WORD-BOUNDED `lower_type_expr_structural(` CALL
-/// site in `stripped` (comment-stripped source), EXCLUDING the definition
-/// (`fn lower_type_expr_structural(`). A "call" is the identifier on a leading
-/// word boundary immediately followed by `(`; a leading `fn ` (the definition)
-/// is excluded.
-fn structural_lowerer_call_offsets(stripped: &str) -> Vec<usize> {
-    let needle = "lower_type_expr_structural(";
+/// The byte offsets of EVERY WORD-BOUNDED occurrence of the bare identifier
+/// `lower_type_expr_structural` in `stripped` (comment / string-content /
+/// char-literal-aware-stripped source) — counting the identifier itself, NOT
+/// `ident(`. A leading word boundary (preceding char is start-of-file or a
+/// non-identifier byte) AND a trailing word boundary (following char is
+/// end-of-file or a non-identifier byte) are required, so `xlower_type…` and
+/// `lower_type_expr_structural2` never match. Counting the bare identifier (not
+/// only `ident(`) is the strictly-stronger invariant: an `as`-alias import
+/// (`use …lower_type_expr_structural as raw;`), a `let f = lower_type_expr_structural;`
+/// function-item binding, and a whitespace/newline-split call
+/// (`lower_type_expr_structural (g)` / `…\n(g)`) are ALL extra occurrences of the
+/// identifier and so are seen here, independent of whether a `(` immediately
+/// follows.
+fn structural_lowerer_identifier_offsets(stripped: &str) -> Vec<usize> {
+    let needle = "lower_type_expr_structural";
     let bytes = stripped.as_bytes();
     let mut offsets = Vec::new();
     let mut search_from = 0usize;
     while let Some(rel) = stripped[search_from..].find(needle) {
         let abs = search_from + rel;
         search_from = abs + needle.len();
-        // Leading word boundary: reject a mid-identifier match
-        // (`xlower_type_expr_structural(`).
+        let end = abs + needle.len();
+        // Leading word boundary.
         let is_word_start =
             abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
-        if !is_word_start {
-            continue;
+        // Trailing word boundary — reject `lower_type_expr_structural2` /
+        // `lower_type_expr_structural_v2` (a longer identifier sharing the
+        // prefix), which is NOT a reference to the lowerer.
+        let is_word_end =
+            end >= bytes.len() || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+        if is_word_start && is_word_end {
+            offsets.push(abs);
         }
-        // The DEFINITION line is `fn lower_type_expr_structural(` — exclude it.
-        // The token immediately preceding the identifier (skipping whitespace)
-        // being `fn` marks the definition, never a call.
-        let preceding = stripped[..abs].trim_end();
-        if preceding.ends_with(" fn") || preceding.ends_with("\nfn") || preceding == "fn" {
-            continue;
-        }
-        offsets.push(abs);
     }
     offsets
+}
+
+/// Whether the word-bounded `lower_type_expr_structural` identifier ending at
+/// `ident_end` in `stripped` is a CALL: the next SIGNIFICANT byte after the
+/// identifier — skipping ASCII whitespace (comments are already stripped to
+/// spaces) — is `(`. This is WHITESPACE / NEWLINE tolerant, so
+/// `lower_type_expr_structural(g)`, `lower_type_expr_structural (g)`, and
+/// `lower_type_expr_structural\n(g)` are all calls, while a `use … as` import or
+/// a `let f = lower_type_expr_structural;` binding (no following `(`) is NOT.
+fn structural_lowerer_occurrence_is_call(stripped: &str, ident_end: usize) -> bool {
+    stripped[ident_end..]
+        .bytes()
+        .find(|b| !b.is_ascii_whitespace())
+        == Some(b'(')
+}
+
+/// Whether the word-bounded `lower_type_expr_structural` identifier at `abs` in
+/// `stripped` is the DEFINITION (`fn lower_type_expr_structural`): the token
+/// immediately preceding the identifier (skipping whitespace) is the keyword
+/// `fn`. The definition is never a call site; everything else is a reference.
+fn structural_lowerer_occurrence_is_definition(stripped: &str, abs: usize) -> bool {
+    let preceding = stripped[..abs].trim_end();
+    preceding.ends_with(" fn") || preceding.ends_with("\nfn") || preceding == "fn"
 }
 
 /// The name of the nearest preceding `fn <name>(` definition before `offset`
@@ -21840,45 +21913,92 @@ fn nearest_preceding_fn_name(stripped: &str, offset: usize) -> Option<String> {
     }
 }
 
-/// Classify whether `body` (RAW owner source — the classifier comment-strips
-/// internally) satisfies the single-witnessed-call invariant: the raw
-/// `lower_type_expr_structural` is CALLED exactly once outside its definition,
-/// and that one call is inside `emit_macro_arg`'s body. Returns `None` when the
-/// invariant holds, or `Some(reason)` describing the violation. Anti-vacuity:
-/// the definition and the one call must BOTH be present (their absence is
-/// itself a violation — the wrapper structure regressed).
+/// Classify whether `body` (RAW owner source — the classifier strips comments,
+/// string contents, and char literals internally) satisfies the
+/// single-witnessed-call invariant under the OCCURRENCE-COUNTING rail (strictly
+/// stronger than a substring-call count). The invariant: after stripping, the
+/// bare identifier `lower_type_expr_structural` appears EXACTLY twice — (i) once
+/// as its own definition (`fn lower_type_expr_structural`), and (ii) once as a
+/// CALL (`(` after optional whitespace) whose nearest enclosing fn is the
+/// witness-gated `emit_macro_arg`. ANY third occurrence — an `as`-alias import
+/// (`use …lower_type_expr_structural as raw;`), a `let f = lower_type_expr_structural;`
+/// function-item binding, a whitespace/newline-split second call, or a plain
+/// second wrapper's call — is a violation, because the only sanctioned reference
+/// to the lowerer is the one witnessed call. Returns `None` when the invariant
+/// holds, or `Some(reason)` describing the violation. Anti-vacuity: both the
+/// definition and the one witnessed call must be present (their absence is itself
+/// a violation — the wrapper structure regressed).
 fn structural_lowerer_single_witnessed_call_violation(body: &str) -> Option<String> {
     let stripped = strip_comments_for_single_call_scan(body);
-    // Anti-vacuity (a): the definition must exist.
-    if !stripped.contains("fn lower_type_expr_structural(") {
+    let occurrences = structural_lowerer_identifier_offsets(&stripped);
+    // Partition the word-bounded identifier occurrences into the definition and
+    // the references (everything that is not the `fn …` definition site).
+    let mut definitions = 0usize;
+    let mut references: Vec<usize> = Vec::new();
+    for &abs in &occurrences {
+        if structural_lowerer_occurrence_is_definition(&stripped, abs) {
+            definitions += 1;
+        } else {
+            references.push(abs);
+        }
+    }
+    // Anti-vacuity (a): the definition must exist exactly once.
+    if definitions == 0 {
         return Some(
-            "anti-vacuity: the raw `fn lower_type_expr_structural(` definition is missing — the \
+            "anti-vacuity: the raw `fn lower_type_expr_structural` definition is missing — the \
              single-producer wrapper structure regressed"
                 .to_string(),
         );
     }
-    let calls = structural_lowerer_call_offsets(&stripped);
-    // Anti-vacuity (b): there must be exactly one call (its absence means the
-    // witnessed wrapper no longer calls the lowerer; more than one means a
-    // second un-gated wrapper was added in-file, bypassing the witness gate).
-    if calls.is_empty() {
+    if definitions != 1 {
+        return Some(format!(
+            "the raw `lower_type_expr_structural` must be DEFINED exactly once in `lower.rs` — \
+             found {definitions} definition sites. A second definition is a second producer."
+        ));
+    }
+    // Anti-vacuity (b): there must be exactly one REFERENCE to the lowerer (the
+    // single witnessed call). ZERO references means the witnessed wrapper no
+    // longer calls the lowerer; TWO OR MORE means a second in-file reference was
+    // added — a second un-gated wrapper's call, an `as`-alias import, or a
+    // `let`-binding of the function item — every one of which re-opens the
+    // single-producer surface without presenting a `MacroProducerWitness`.
+    if references.is_empty() {
         return Some(
-            "anti-vacuity: the raw `lower_type_expr_structural` is never CALLED outside its \
+            "anti-vacuity: the raw `lower_type_expr_structural` is never referenced outside its \
              definition — the witness-gated wrapper `emit_macro_arg` must call it exactly once"
                 .to_string(),
         );
     }
-    if calls.len() != 1 {
+    if references.len() != 1 {
         return Some(format!(
-            "the raw `lower_type_expr_structural` must be CALLED exactly once (only by the \
-             witness-gated `emit_macro_arg` wrapper) — found {} call sites in `lower.rs`. A SECOND \
-             same-file caller is an un-gated wrapper that bypasses the `MacroProducerWitness` gate \
-             and re-opens the single-producer surface",
-            calls.len()
+            "the raw `lower_type_expr_structural` identifier must appear EXACTLY once outside its \
+             definition (the single witnessed call inside `emit_macro_arg`) — found {} references \
+             in `lower.rs`. A SECOND in-file reference is an un-gated second-wrapper call, an \
+             `as`-alias import (`use …lower_type_expr_structural as <Alias>;`), or a \
+             `let <x> = lower_type_expr_structural;` function-item binding — every one of which \
+             reaches the raw lowerer WITHOUT presenting the `MacroProducerWitness` and re-opens the \
+             single-producer surface",
+            references.len()
         ));
     }
-    // The one call must be inside `emit_macro_arg`'s body.
-    let enclosing = nearest_preceding_fn_name(&stripped, calls[0]);
+    let reference = references[0];
+    // The single reference must itself be a CALL (whitespace / newline tolerant)
+    // — a bare reference NOT followed by `(` is an alias/binding usage that
+    // hands the function item to another caller, defeating the witness gate.
+    if !structural_lowerer_occurrence_is_call(
+        &stripped,
+        reference + "lower_type_expr_structural".len(),
+    ) {
+        return Some(
+            "the single in-file reference to `lower_type_expr_structural` is NOT a call (no `(` \
+             follows it) — a bare reference (an `as`-alias import or a `let f = \
+             lower_type_expr_structural;` binding) hands the raw function item to another caller, \
+             bypassing the `MacroProducerWitness` gate"
+                .to_string(),
+        );
+    }
+    // The single witnessed call must sit inside `emit_macro_arg`'s body.
+    let enclosing = nearest_preceding_fn_name(&stripped, reference);
     match enclosing.as_deref() {
         Some("emit_macro_arg") => None,
         other => Some(format!(
@@ -21890,18 +22010,28 @@ fn structural_lowerer_single_witnessed_call_violation(body: &str) -> Option<Stri
     }
 }
 
-/// SINGLE-PRODUCER HARDENING guard (in-file single-call pin): the raw
+/// SINGLE-PRODUCER HARDENING guard (in-file single-reference pin): the raw
 /// `lower_type_expr_structural` is module-private, so the COMPILER already
 /// makes it unrepresentable to any FOREIGN / sibling module — but WITHIN
 /// `lower.rs` itself the lowerer is nameable, so a future edit could add a
 /// SECOND wrapper there that calls it WITHOUT requiring a `MacroProducerWitness`,
-/// and that un-gated wrapper would be callable by the owner surfaces, bypassing
-/// the witness gate. No other guard catches that in-file case (the privacy guard
-/// scans the definition's visibility; the entry-surface guard scans CRATE-VISIBLE
-/// entries, not `pub(in …)` wrappers). This guard PINS the in-file shape: the raw
-/// lowerer is CALLED exactly once outside its definition, and that single call is
-/// inside the witness-gated `emit_macro_arg` wrapper — so the only path to the
-/// lowerer in `lower.rs` is the witnessed one.
+/// could `use self::lower_type_expr_structural as <Alias>` and call via the
+/// alias, or could `let f = lower_type_expr_structural;` bind the function item —
+/// any of which reaches the lowerer un-gated. No other guard catches that in-file
+/// case (the privacy guard scans the definition's visibility; the entry-surface
+/// guard scans CRATE-VISIBLE entries, not `pub(in …)` wrappers).
+///
+/// This guard pins the EXACT in-file occurrence shape under an
+/// OCCURRENCE-COUNTING invariant (strictly stronger than a substring-call count,
+/// and NON-BYPASSABLE by aliasing): after stripping comments, string contents,
+/// and char literals (char-literal-aware, so a `'"'` cannot mask following code),
+/// the bare identifier `lower_type_expr_structural` appears in `lower.rs` EXACTLY
+/// twice — once as its own definition (`fn lower_type_expr_structural`) and once
+/// as a CALL (`(` after optional whitespace/newline) inside the witness-gated
+/// `emit_macro_arg`. ANY third occurrence — an `as`-alias import, a `let`-binding
+/// of the function item, a whitespace/newline-split second call, or a second
+/// wrapper's call — is a THIRD occurrence and reddens the guard, so the only path
+/// to the lowerer in `lower.rs` is the single witnessed one.
 #[test]
 fn structural_lowerer_called_only_through_the_witness_gated_wrapper() {
     let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
@@ -21916,11 +22046,17 @@ fn structural_lowerer_called_only_through_the_witness_gated_wrapper() {
     }
 }
 
-/// Self-test for the single-witnessed-call classifier: the REAL single-call
-/// shape passes; a SECOND same-file `pub(in crate::structural_carrier_producer)`
-/// wrapper calling the raw lowerer is reported; a call moved into a FREE fn (not
-/// `emit_macro_arg`) is reported; commented-out / string mentions do not count;
-/// a missing definition or missing call is reported (anti-vacuity).
+/// Self-test for the single-witnessed-call classifier under the OCCURRENCE-
+/// COUNTING invariant: the REAL single-call shape passes; a SECOND same-file
+/// `pub(in crate::structural_carrier_producer)` wrapper calling the raw lowerer
+/// is reported; a call moved into a FREE fn (not `emit_macro_arg`) is reported;
+/// every IN-FILE ALIASING BYPASS the prior lexical scanner missed is reported —
+/// an `as`-alias import + call via the alias, a WHITESPACE-split call
+/// (`lower_type_expr_structural (g)`), a NEWLINE-split call, a CHAR-LITERAL-
+/// masked call (`let _q = '"'; lower_type_expr_structural(g)`), and a
+/// `let f = lower_type_expr_structural;` function-item binding; commented-out /
+/// string mentions and an UNRELATED char literal do not count; a missing
+/// definition or missing call is reported (anti-vacuity).
 #[test]
 fn structural_lowerer_single_call_classifier_discriminates() {
     // CORRECT — the genuine single-call shape: one witnessed wrapper calling the
@@ -21934,7 +22070,7 @@ fn structural_lowerer_single_call_classifier_discriminates() {
         "the genuine single-witnessed-call shape (one call, inside `emit_macro_arg`) must PASS"
     );
     // WRONG — a SECOND same-file wrapper calling the raw lowerer (the exact
-    // bypass the guard exists to catch): two calls now exist.
+    // bypass the guard exists to catch): a THIRD identifier occurrence now exists.
     let two_wrappers = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
                         pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
                         lower_type_expr_structural(g)\n\
@@ -21945,7 +22081,7 @@ fn structural_lowerer_single_call_classifier_discriminates() {
     assert!(
         structural_lowerer_single_witnessed_call_violation(two_wrappers).is_some(),
         "a SECOND same-file wrapper calling the raw lowerer must be REPORTED — it is an un-gated \
-         bypass of the witness gate"
+         bypass of the witness gate (a third identifier occurrence)"
     );
     // WRONG — the single call moved into a FREE fn that is NOT `emit_macro_arg`.
     let wrong_encloser = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
@@ -21957,18 +22093,115 @@ fn structural_lowerer_single_call_classifier_discriminates() {
         "a call NOT inside `emit_macro_arg` must be REPORTED — only the witnessed wrapper may reach \
          the raw lowerer"
     );
-    // Comment / string mentions do NOT count as calls: a body whose only call is
-    // the witnessed one, plus a commented-out call and a string mention, passes.
+    // WRONG (bypass vector A — the EXACT live-compiling bypass the round-3 review
+    // RED-proved): an `as`-alias import of the lowerer + a second wrapper calling
+    // it via the alias. The genuine witnessed call is still present, but the
+    // `use … as raw_lower_alias;` line is a THIRD identifier occurrence → reported.
+    let as_alias = "use self::lower_type_expr_structural as raw_lower_alias;\n\
+                    fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                    pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                    lower_type_expr_structural(g)\n\
+                    }\n\
+                    pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
+                    raw_lower_alias(g)\n\
+                    }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(as_alias).is_some(),
+        "an `as`-alias import of the lowerer (`use self::lower_type_expr_structural as <Alias>;`) \
+         must be REPORTED — the import line is a third identifier occurrence, and a call via the \
+         alias is then unreachable without one"
+    );
+    // WRONG (bypass vector B — whitespace-split call): a second wrapper calling
+    // `lower_type_expr_structural (g)` with a SPACE before the paren. The
+    // identifier occurrence is counted regardless of the space → reported.
+    let whitespace_split = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                            pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                            lower_type_expr_structural(g)\n\
+                            }\n\
+                            pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
+                            lower_type_expr_structural (g)\n\
+                            }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(whitespace_split).is_some(),
+        "a WHITESPACE-split second call (`lower_type_expr_structural (g)`) must be REPORTED — the \
+         identifier occurrence is counted regardless of the space before `(`"
+    );
+    // WRONG (bypass vector B' — newline-split call): the identifier and its `(`
+    // separated by a newline. Still a counted identifier occurrence → reported.
+    let newline_split = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                         pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                         lower_type_expr_structural(g)\n\
+                         }\n\
+                         pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
+                         lower_type_expr_structural\n\
+                         (g)\n\
+                         }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(newline_split).is_some(),
+        "a NEWLINE-split second call (`lower_type_expr_structural\\n(g)`) must be REPORTED — the \
+         identifier occurrence is counted regardless of the newline before `(`"
+    );
+    // WRONG (bypass vector C — char-literal-masked call): a `'"'` char literal
+    // immediately precedes the rogue call. The CHAR-AWARE stripper consumes the
+    // `'"'` as an atom (it does NOT open string mode), so the following
+    // `lower_type_expr_structural(g)` stays visible → reported.
+    let char_literal_hidden = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                               pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                               lower_type_expr_structural(g)\n\
+                               }\n\
+                               pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
+                               let _q = '\"'; lower_type_expr_structural(g)\n\
+                               }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(char_literal_hidden).is_some(),
+        "a char-literal-masked second call (`let _q = '\\\"'; lower_type_expr_structural(g)`) must \
+         be REPORTED — a `'\\\"'` char literal must NOT open string mode and blank the rogue call"
+    );
+    // WRONG (bypass vector D — `let`-binding of the function item): binding the
+    // raw lowerer to a local hands the un-gated function item to another caller.
+    // The `let f = lower_type_expr_structural;` line is a THIRD occurrence and is
+    // NOT a call (no `(` follows) → reported.
+    let let_binding = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                       pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                       lower_type_expr_structural(g)\n\
+                       }\n\
+                       pub(in crate::structural_carrier_producer) fn emit_decl_body_arm_v2(g: &G) -> R {\n\
+                       let f = lower_type_expr_structural;\n\
+                       f(g)\n\
+                       }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(let_binding).is_some(),
+        "a `let f = lower_type_expr_structural;` function-item binding must be REPORTED — it is a \
+         third identifier occurrence that hands the raw lowerer to an un-gated caller"
+    );
+    // Comment / string mentions do NOT count: a body whose only reference is the
+    // witnessed call, plus a commented-out call, a string mention, AND an
+    // UNRELATED `'"'` char literal (which must NOT mask the witnessed call after
+    // it), passes.
     let with_noise = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
                       // lower_type_expr_structural(g) is the raw entry\n\
                       const D: &str = \"lower_type_expr_structural(x)\";\n\
                       pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                      let _quote = '\"';\n\
                       lower_type_expr_structural(g)\n\
                       }\n";
     assert!(
         structural_lowerer_single_witnessed_call_violation(with_noise).is_none(),
-        "a commented-out call and a string mention must NOT inflate the call count — only the one \
-         real witnessed call counts"
+        "a commented-out call, a string mention, and an unrelated `'\\\"'` char literal must NOT \
+         inflate the occurrence count — only the one real witnessed reference counts"
+    );
+    // PRECISION — a longer identifier sharing the prefix
+    // (`lower_type_expr_structural_v2`) is NOT a reference to the lowerer; the
+    // trailing word-boundary check excludes it, so the genuine shape still passes.
+    let prefix_decoy = "fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+                        fn lower_type_expr_structural_v2(g: &G) -> R { todo!() }\n\
+                        pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
+                        lower_type_expr_structural(g)\n\
+                        }\n";
+    assert!(
+        structural_lowerer_single_witnessed_call_violation(prefix_decoy).is_none(),
+        "a longer identifier sharing the prefix (`lower_type_expr_structural_v2`) must NOT be \
+         counted as a reference to the lowerer — the trailing word boundary excludes it"
     );
     // ANTI-VACUITY — a missing definition is reported.
     let no_def =
@@ -24480,17 +24713,20 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
 /// PRODUCTION item are COUNTED.
 #[test]
 fn mirror_entry_surface_classifier_discriminates() {
-    // Baseline: one sanctioned free entry + a restricted lowerer + an impl-block
-    // method/associated-fn (BOTH module-private — `new` has inherited visibility,
-    // `demanded_count` is `#[cfg(test)]`) → only the sanctioned entry is
-    // reported. The restricted lowerer (`pub(in …)`) is not crate-visible.
+    // Baseline: one sanctioned free entry + a restricted-subtree helper + an
+    // impl-block method/associated-fn (BOTH module-private — `new` has inherited
+    // visibility, `demanded_count` is `#[cfg(test)]`) → only the sanctioned entry
+    // is reported. The restricted-subtree helper (`pub(in …)`) is not
+    // crate-visible. (A synthetic `pub(in …)` example name is used here, NOT the
+    // structural lowerer — the lowerer's real shape is bare module-private, not
+    // `pub(in …)`.)
     let ok = "pub(crate) fn macro_type_arg_hot_ref(ctx: &C) -> Option<H> { None }\n\
-              pub(in crate::structural_carrier_producer) fn lower_type_expr_structural(g: &G) -> R { todo!() }\n\
+              pub(in crate::structural_carrier_producer) fn restricted_subtree_helper(g: &G) -> R { todo!() }\n\
               impl Ctx {\n    fn new(b: &[B]) -> Self { Self }\n    #[cfg(test)]\n    pub(crate) fn demanded_count(&self) -> usize { 0 }\n}\n";
     assert_eq!(
         crate_visible_producer_fn_names(ok),
         vec!["macro_type_arg_hot_ref".to_string()],
-        "only the `pub(crate)` free fn is a crate-visible entry; the restricted lowerer, the \
+        "only the `pub(crate)` free fn is a crate-visible entry; the restricted-subtree helper, the \
          module-private `impl`-block `new`, and the `#[cfg(test)]` `demanded_count` are not"
     );
     // INJECT a second module-level `pub(crate)` FREE producer → now TWO entries.

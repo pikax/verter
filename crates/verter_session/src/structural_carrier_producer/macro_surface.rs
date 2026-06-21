@@ -103,7 +103,10 @@ pub(in crate::structural_carrier_producer) struct MacroProducerWitness {
 
 impl MacroProducerWitness {
     /// Mint the macro-surface capability proof. Private to this surface
-    /// (`macro_surface`): only the macro hot-mirror builder constructs it.
+    /// (`macro_surface`): the builder path constructs it, INCLUDING the
+    /// binder-seed helper (`script_setup_binder`), which reaches the lowerer
+    /// through the witnessed [`super::lower::emit_macro_arg`] entry as part of
+    /// building a macro handle's scope.
     fn new() -> Self {
         Self { _private: () }
     }
