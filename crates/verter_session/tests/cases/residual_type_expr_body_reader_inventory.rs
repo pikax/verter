@@ -125,15 +125,33 @@
 //!
 //! ## Honest scope (what this guard does and does NOT prove)
 //!
-//! This is a presence/uniqueness inventory of an ENUMERATED set PLUS a BOUNDED
-//! tripwire on a precise structural shape — it is NOT an exhaustive proof of
-//! completeness ON ITS OWN, and the tripwire is a SUPPLEMENT, not the
-//! completeness rail. A bare `<recv>.body` FIELD read and a method-chain read
-//! laundered through a local binding (`let b = &lowered.body; b.m()`) are out of
-//! the tripwire's sound syntactic reach and covered by the MANUALLY-CURATED
-//! ENUMERATION + the behavioural parity rail — not chased with further detector
-//! cases (anti-arms-race). The negative self-tests that codify this non-detection
-//! are DISCLOSED-limit fixtures, not soundness claims.
+//! **This guard is NOT a structural completeness rail for NEW bare-field
+//! declaration-body readers.** It is a CURATED ENUMERATION (the authoritative,
+//! manually-maintained partition) + a BOUNDED method-chain TRIPWIRE (a supplement
+//! that cheaply catches a new/moved `<recv>.body.<method>` read) + the
+//! GraphBackedMigrated `syn` AST no-read rail (scoped to the EXACTLY enumerated
+//! migrated anchors, NOT a global field scanner) — all backed by the behavioural
+//! parity rail (the retained oracle). It is NOT an exhaustive proof that no new
+//! body reader can appear, and NONE of its three structural rails alone closes
+//! that surface.
+//!
+//! Concretely, the DISCLOSED INTERIM LIMITATION: a NEW non-inventoried bare
+//! `<recv>.body` / `<recv>.type_annotation` FIELD read at a NEW anchor (used as a
+//! value, e.g. `.body.clone()`), and a method-chain read laundered through a local
+//! binding (`let b = &lowered.body; b.m()`), are OUT of the method-chain tripwire's
+//! sound syntactic reach — they are caught ONLY if the author keeps the
+//! MANUALLY-CURATED ENUMERATION complete (and by the behavioural parity rail), NOT
+//! by an automatic structural scan. This hole is INHERITED from the prior frozen
+//! guard and is correctly DEFERRED: closing it (a private-body refactor + an
+//! `AuthoredDeclBody` wrapper / a global direct-field scanner) is the later
+//! migration block's work, NOT this guard's. The
+//! `enumeration_is_the_completeness_rail_for_bare_field_readers` self-test PROVES
+//! this hole exists (a synthetic new bare-field reader passes the tripwire). The
+//! GraphBackedMigrated AST no-read rail does NOT close it either: that rail is
+//! scoped to the enumerated migrated anchors, so a brand-new bare-field reader at a
+//! brand-new anchor is outside its scope by construction. The negative self-tests
+//! that codify this non-detection are DISCLOSED-limit fixtures, not soundness
+//! claims.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -658,6 +676,249 @@ fn collect_body_reads(block: &syn::Block) -> HashSet<String> {
     c.reads
 }
 
+// ════════════════════════════════════════════════════════════════════
+// GraphBackedMigrated no-read AUDIT — a `syn` AST visitor over ONE anchored
+// fn body (FIX-2). Replaces the old brace-balanced TEXT needle scan: this is
+// a structural visitor that cannot see comments/strings, is alias/rename
+// robust, and is scoped to the EXACT `(impl_path, fn)` anchor.
+// ════════════════════════════════════════════════════════════════════
+
+/// The forbidden CALL idents a `GraphBackedMigrated` anchor must NOT invoke in
+/// its own body — the body-locator producers a migrated reader must route AROUND
+/// (it reaches the body through `decl_body_hot_ref` instead). Matched as a
+/// method-call ident OR a call-path FINAL segment (so `engine.named_decl_body(..)`
+/// and `Self::named_decl_body(..)` / `prepared_type_decl(..)` all match), NOT as
+/// a text needle.
+const MIGRATED_FORBIDDEN_CALL_IDENTS: &[&str] = &["prepared_type_decl", "named_decl_body"];
+
+/// The forbidden FIELD-access member names a `GraphBackedMigrated` anchor must NOT
+/// read in its own body — a `<expr>.body` or `<expr>.type_annotation` declaration-
+/// body field read (the `TypeExpr` carrier). Matched structurally as a
+/// `syn::Member::Named`, so `prepared.body`, `(get_prepared()).body`, and an
+/// aliased `p.body` (where `let p = get_prepared();`) are ALL caught — the launder
+/// the text needle `"prepared.body"` missed.
+const MIGRATED_FORBIDDEN_FIELD_MEMBERS: &[&str] = &["body", "type_annotation"];
+
+/// The REQUIRED hot-route call ident a `GraphBackedMigrated` anchor MUST invoke —
+/// the shared hot accessor. Matched as a method-call ident or a call-path final
+/// segment. (`materialize_member_surface_node` is the alternate graph-native arm
+/// for the member-surface route; either satisfies the requirement.)
+const MIGRATED_REQUIRED_HOT_ROUTE_IDENTS: &[&str] =
+    &["decl_body_hot_ref", "materialize_member_surface_node"];
+
+/// A `syn::visit::Visit` AST auditor over ONE anchored fn's body: structurally
+/// collects (a) every forbidden `TypeExpr`-body read — a `<expr>.body` /
+/// `<expr>.type_annotation` field access OR a `prepared_type_decl` /
+/// `named_decl_body` call — and (b) whether the body invokes the required
+/// `decl_body_hot_ref` (or the alternate graph-native arm). Descends closures and
+/// nested expressions but NOT nested item-`fn`s (a nested fn is a separate anchor),
+/// matching the per-anchor scope of [`BodyReadCollector`]. Tokens in comments /
+/// string literals are invisible to the AST and cannot satisfy or trip it.
+struct MigratedBodyAuditor {
+    /// The forbidden read shapes found, each a human label
+    /// (`<recv>.body field read` / `named_decl_body(..) call` / …) for the
+    /// diagnostic.
+    forbidden_reads: Vec<String>,
+    /// Whether the required hot-route call was found.
+    routes_through_hot_accessor: bool,
+}
+
+impl MigratedBodyAuditor {
+    fn new() -> Self {
+        Self {
+            forbidden_reads: Vec::new(),
+            routes_through_hot_accessor: false,
+        }
+    }
+}
+
+/// The FINAL segment ident of a call's function path (for a path call
+/// `a::b::c(..)` → `c`; for `<T>::m(..)` → `m`). `None` if `func` is not a path.
+fn call_path_final_ident(func: &syn::Expr) -> Option<String> {
+    match func {
+        syn::Expr::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
+impl<'ast> Visit<'ast> for MigratedBodyAuditor {
+    fn visit_expr_field(&mut self, f: &'ast syn::ExprField) {
+        if let syn::Member::Named(name) = &f.member {
+            let n = name.to_string();
+            if MIGRATED_FORBIDDEN_FIELD_MEMBERS.contains(&n.as_str()) {
+                self.forbidden_reads
+                    .push(format!("`<expr>.{n}` field read"));
+            }
+        }
+        syn::visit::visit_expr_field(self, f);
+    }
+
+    fn visit_expr_method_call(&mut self, c: &'ast syn::ExprMethodCall) {
+        let m = c.method.to_string();
+        if MIGRATED_FORBIDDEN_CALL_IDENTS.contains(&m.as_str()) {
+            self.forbidden_reads.push(format!("`.{m}(..)` method call"));
+        }
+        if MIGRATED_REQUIRED_HOT_ROUTE_IDENTS.contains(&m.as_str()) {
+            self.routes_through_hot_accessor = true;
+        }
+        syn::visit::visit_expr_method_call(self, c);
+    }
+
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        if let Some(ident) = call_path_final_ident(&c.func) {
+            if MIGRATED_FORBIDDEN_CALL_IDENTS.contains(&ident.as_str()) {
+                self.forbidden_reads.push(format!("`{ident}(..)` call"));
+            }
+            if MIGRATED_REQUIRED_HOT_ROUTE_IDENTS.contains(&ident.as_str()) {
+                self.routes_through_hot_accessor = true;
+            }
+        }
+        syn::visit::visit_expr_call(self, c);
+    }
+
+    /// Do NOT descend into a nested item-`fn` — its reads belong to its own
+    /// anchor (matching `BodyReadCollector`). Closures ARE descended (the default
+    /// walk enters closure bodies as part of this fn).
+    fn visit_item_fn(&mut self, _f: &'ast ItemFn) {
+        // intentionally empty: nested item-fns are a separate anchor
+    }
+}
+
+/// The structural verdict for ONE `GraphBackedMigrated` anchor body: the forbidden
+/// `TypeExpr`-body reads it performs (empty = clean) and whether it routes through
+/// the hot accessor. Produced by [`audit_migrated_anchor_block`].
+#[derive(Debug)]
+struct MigratedBodyVerdict {
+    forbidden_reads: Vec<String>,
+    routes_through_hot_accessor: bool,
+}
+
+/// Run the [`MigratedBodyAuditor`] `syn` visitor over one fn `Block`.
+fn audit_migrated_anchor_block(block: &syn::Block) -> MigratedBodyVerdict {
+    let mut a = MigratedBodyAuditor::new();
+    a.visit_block(block);
+    MigratedBodyVerdict {
+        forbidden_reads: a.forbidden_reads,
+        routes_through_hot_accessor: a.routes_through_hot_accessor,
+    }
+}
+
+/// A `syn::visit::Visit` over ONE production file that, tracking the same
+/// impl/trait/mod path stack + cfg-test depth as [`InventoryScanner`], finds the
+/// EXACT `(impl_path, fn_name)` anchor and audits its body with
+/// [`audit_migrated_anchor_block`]. Scoping by the rendered `impl_path` (not line
+/// proximity) ensures the RIGHT fn in the RIGHT impl is checked. Records every
+/// matching anchor's verdict (PRESENCE/UNIQUENESS guard the count separately).
+struct MigratedAnchorAuditScanner<'a> {
+    target_impl_path: &'a str,
+    target_fn: &'a str,
+    path_stack: Vec<String>,
+    cfg_test_depth: u32,
+    /// Verdicts for every NON-test anchor matching `(target_impl_path,
+    /// target_fn)` in this file.
+    verdicts: Vec<MigratedBodyVerdict>,
+}
+
+impl<'a> MigratedAnchorAuditScanner<'a> {
+    fn new(target_impl_path: &'a str, target_fn: &'a str) -> Self {
+        Self {
+            target_impl_path,
+            target_fn,
+            path_stack: Vec::new(),
+            cfg_test_depth: 0,
+            verdicts: Vec::new(),
+        }
+    }
+
+    fn current_path(&self) -> String {
+        self.path_stack.join("::")
+    }
+
+    /// Audit `block` IFF the current `(impl_path, fn)` and cfg-test status match
+    /// the non-test target anchor.
+    fn maybe_audit(&mut self, fn_ident: &syn::Ident, block: &syn::Block, fn_is_cfg_test: bool) {
+        if self.cfg_test_depth > 0 || fn_is_cfg_test {
+            return;
+        }
+        if self.current_path() == self.target_impl_path && *fn_ident == self.target_fn {
+            self.verdicts.push(audit_migrated_anchor_block(block));
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for MigratedAnchorAuditScanner<'_> {
+    fn visit_item_mod(&mut self, m: &'ast ItemMod) {
+        let entered_test = attrs_are_cfg_test(&m.attrs);
+        if entered_test {
+            self.cfg_test_depth += 1;
+        }
+        self.path_stack.push(format!("mod {}", m.ident));
+        syn::visit::visit_item_mod(self, m);
+        self.path_stack.pop();
+        if entered_test {
+            self.cfg_test_depth -= 1;
+        }
+    }
+
+    fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
+        let entered_test = attrs_are_cfg_test(&i.attrs);
+        if entered_test {
+            self.cfg_test_depth += 1;
+        }
+        self.path_stack.push(render_impl_path(i));
+        syn::visit::visit_item_impl(self, i);
+        self.path_stack.pop();
+        if entered_test {
+            self.cfg_test_depth -= 1;
+        }
+    }
+
+    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+        let entered_test = attrs_are_cfg_test(&t.attrs);
+        if entered_test {
+            self.cfg_test_depth += 1;
+        }
+        self.path_stack.push(format!("trait {}", t.ident));
+        syn::visit::visit_item_trait(self, t);
+        self.path_stack.pop();
+        if entered_test {
+            self.cfg_test_depth -= 1;
+        }
+    }
+
+    fn visit_item_fn(&mut self, f: &'ast ItemFn) {
+        self.maybe_audit(&f.sig.ident, &f.block, attrs_are_cfg_test(&f.attrs));
+        syn::visit::visit_item_fn(self, f);
+    }
+
+    fn visit_impl_item_fn(&mut self, f: &'ast ImplItemFn) {
+        self.maybe_audit(&f.sig.ident, &f.block, attrs_are_cfg_test(&f.attrs));
+        syn::visit::visit_impl_item_fn(self, f);
+    }
+
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        if let Some(block) = &f.default {
+            self.maybe_audit(&f.sig.ident, block, attrs_are_cfg_test(&f.attrs));
+        }
+        syn::visit::visit_trait_item_fn(self, f);
+    }
+}
+
+/// Parse `src` and audit the EXACT non-test `(impl_path, fn_name)` anchor's body
+/// with the `syn` [`MigratedBodyAuditor`]. Returns each matching anchor's verdict
+/// (normally exactly one — UNIQUENESS pins the count).
+fn audit_migrated_anchor(
+    file: &str,
+    src: &str,
+    impl_path: &str,
+    fn_name: &str,
+) -> Vec<MigratedBodyVerdict> {
+    let parsed = syn::parse_file(src).unwrap_or_else(|e| panic!("parse {file}: {e}"));
+    let mut scanner = MigratedAnchorAuditScanner::new(impl_path, fn_name);
+    syn_visit_file(&mut scanner, &parsed);
+    scanner.verdicts
+}
+
 /// The `syn::Visit` scanner that builds the structural fn-definition inventory
 /// for one file, tracking the enclosing impl/trait/mod path stack and a cfg-test
 /// nesting depth. Free `fn`s (`ItemFn`), `impl`-method `fn`s (`ImplItemFn`), and
@@ -850,12 +1111,38 @@ enum ReaderClass {
     /// ```
     GraphFreeDto,
 
-    /// Graph-backed-PENDING reader — genuinely graph-backed, but its migration is
-    /// a larger refactor than the bounded accessor flip (the C3 imported-registry
-    /// body carrier, the C4 member-surface-key route enumerator which needs a
-    /// graph-native `SemanticNodeData` key enumerator that does not yet exist, the
-    /// C7 locator split, and the `PreparedValueDecl.type_annotation` value-decl
-    /// handle class). Deferred; stays `TypeExpr` this session.
+    /// Graph-backed-PENDING reader — TRANSITIONAL MIGRATION DEBT, NOT a
+    /// final-state stay-class. Every row here is a genuinely graph-backed reader
+    /// that WILL migrate to `decl_body_hot_ref` / graph-native dispatch in a later
+    /// session; it stays on `TypeExpr` ONLY because its migration is a larger
+    /// refactor than the bounded accessor flip (the C3 imported-registry body
+    /// carrier needs to carry identity / `HotTypeRef`; the C4 member-surface-route
+    /// key enumerator needs a graph-native `SemanticNodeData` key enumerator that
+    /// does not yet exist; the C7 locator splits into identity/hot vs authored-body
+    /// locators; the `PreparedValueDecl.type_annotation` value-decl handle class
+    /// needs a `HotPreparedValueDecl` annotation handle). Unlike the
+    /// `AuthoredShape` / `GraphFreeDto` / `ProducerLowering` / `OutputCompat`
+    /// stay-classes (which record WHY a reader stays `TypeExpr` indefinitely), this
+    /// class is a NON-GROWTH RATCHET with a TARGET COUNT OF 0: it may only shrink
+    /// (a row leaves the moment its seam lands), never grow, and the cap guard
+    /// [`graph_backed_pending_is_capped_transitional_debt`] REDDENS on any growth.
+    /// Each row's `reason` names its FUTURE MIGRATION SEAM.
+    ///
+    /// ```text
+    /// scanner_invariant: transitional debt, target count 0 — every
+    ///   GraphBackedPending row is a graph-backed reader awaiting a named future
+    ///   migration seam; the class shrinks to empty, never grows, and is NOT a
+    ///   justified final reader class.
+    /// scanner_justification: which graph-backed reader needs a larger refactor
+    ///   (a carrier identity flip, a graph-native key enumerator, a locator split,
+    ///   a value-decl annotation handle) before it can route through
+    ///   decl_body_hot_ref is an architectural judgement; the named seam in each
+    ///   row records the future migration, not a permanent stay-reason.
+    /// mechanism_ruling: non-growth ratchet — the cap REDs on growth and is
+    ///   LOWERED when a seam lands; the class empties as the seams land and this
+    ///   inventory is deleted.
+    /// hardening_rounds: 0
+    /// ```
     GraphBackedPending,
 
     /// Producer lowering — the body mint itself (lowers the authored body into
@@ -1247,12 +1534,13 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "enumerate_member_surface_keys_via_route",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "reads prepared.body via prepared_type_decl(..).map(|p| p.body.clone()) inside the \
-                 try_body route-key expansion closure (and the prepared-value .type_annotation route \
-                 read) — genuinely graph-backed but a graph-native SemanticNodeData member-surface \
-                 KEY enumerator over union/intersection/conditional/object surfaces does not yet \
-                 exist; deferred. BARE .body/.type_annotation field reads, anchored by the \
-                 enumeration",
+        reason: "TRANSITIONAL DEBT (target 0) — reads prepared.body via \
+                 prepared_type_decl(..).map(|p| p.body.clone()) inside the try_body route-key \
+                 expansion closure (and the prepared-value .type_annotation route read). FUTURE \
+                 MIGRATION SEAM: a graph-native SemanticNodeData member-surface-ROUTE key enumerator \
+                 (an IndexedAccess/Conditional-distributing variant over union/intersection/ \
+                 conditional/object surfaces), which does not yet exist. BARE .body/.type_annotation \
+                 field reads, anchored by the enumeration",
     },
     ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/helpers.rs",
@@ -1260,10 +1548,11 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "resolve_imported_registry_symbol_with_budget",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "builds the ResolvedImportedRegistrySymbol.body CARRIER from prepared.body (NOT the \
-                 prepared_type_decl(..).is_some() existence check, which stays a cheap shallow \
-                 presence check) — the carrier migrates to identity/HotTypeRef in a larger refactor; \
-                 deferred",
+        reason: "TRANSITIONAL DEBT (target 0) — builds the ResolvedImportedRegistrySymbol.body \
+                 CARRIER from prepared.body (NOT the prepared_type_decl(..).is_some() existence \
+                 check, which stays a cheap shallow presence check). FUTURE MIGRATION SEAM: the C3 \
+                 imported-registry body carrier carries identity / HotTypeRef + graph-native \
+                 materialization instead of a TypeExpr body",
     },
     ReaderRow {
         file: "src/host_manage/component_meta_methods.rs",
@@ -1271,11 +1560,12 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "append_component_meta_registry_entries",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "reads the imported-registry symbol body (resolved.body, the \
-                 ResolvedImportedRegistrySymbol.body carrier populated from prepared.body.clone()) \
-                 across registry-publication routing and calls named_decl_body (×3) — the C3-carrier \
-                 consumer, deferred with the carrier. All BARE .body field reads, anchored by the \
-                 enumeration",
+        reason: "TRANSITIONAL DEBT (target 0) — reads the imported-registry symbol body \
+                 (resolved.body, the ResolvedImportedRegistrySymbol.body carrier populated from \
+                 prepared.body.clone()) across registry-publication routing and calls named_decl_body \
+                 (×3). FUTURE MIGRATION SEAM: migrates WITH the C3 carrier — once the carrier holds \
+                 identity / HotTypeRef + graph-native materialization, this consumer routes through \
+                 it. All BARE .body field reads, anchored by the enumeration",
     },
     ReaderRow {
         file: "src/component_meta_resolution_policy/core.rs",
@@ -1283,9 +1573,11 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "locate_declaration",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "calls named_decl_body and returns the located declaration body TypeExpr — the \
-                 TypeExpr-returning LOCATOR is too broad; it splits into an identity/hot locator and \
-                 an authored-body locator by downstream need in a larger refactor; deferred",
+        reason: "TRANSITIONAL DEBT (target 0) — calls named_decl_body and returns the located \
+                 declaration body TypeExpr; the TypeExpr-returning LOCATOR is too broad. FUTURE \
+                 MIGRATION SEAM: the C7 locator splits into an identity/hot-locator (for semantic \
+                 consumers) vs an authored-body-locator (for authored-shape policy code), by \
+                 downstream need",
     },
     ReaderRow {
         file: "src/project_semantic_dispatch/build.rs",
@@ -1293,11 +1585,11 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "build_typeof",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "reads prepared.type_annotation (PreparedValueDecl, from effective_prepared_value_\
-                 decl) and feeds it to shallow_lower_type_expr_with_context — a graph-feeding \
-                 value-decl annotation reader whose HotPreparedValueDecl handle migration is a \
-                 separate deferred class. A BARE .type_annotation field read, anchored by the \
-                 enumeration",
+        reason: "TRANSITIONAL DEBT (target 0) — reads prepared.type_annotation (PreparedValueDecl, \
+                 from effective_prepared_value_decl) and feeds it to \
+                 shallow_lower_type_expr_with_context, a graph-feeding value-decl annotation reader. \
+                 FUTURE MIGRATION SEAM: the HotPreparedValueDecl annotation handle class. A BARE \
+                 .type_annotation field read, anchored by the enumeration",
     },
     ReaderRow {
         file: "src/resolver_core/runtime_values.rs",
@@ -1305,10 +1597,11 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "prepared_value_decl_to_value_decl_info",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "reads prepared.type_annotation.clone() (PreparedValueDecl) when building the \
-                 ValueDeclInfo round-trip into the importing env — the value-resolution surface, a \
-                 deferred value-decl handle class. A BARE .type_annotation field read (free fn), \
-                 anchored by the enumeration",
+        reason: "TRANSITIONAL DEBT (target 0) — reads prepared.type_annotation.clone() \
+                 (PreparedValueDecl) when building the ValueDeclInfo round-trip into the importing \
+                 env, the value-resolution surface. FUTURE MIGRATION SEAM: the HotPreparedValueDecl \
+                 annotation handle class. A BARE .type_annotation field read (free fn), anchored by \
+                 the enumeration",
     },
     ReaderRow {
         file: "src/host_manage/eval_env.rs",
@@ -1316,10 +1609,11 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         fn_name: "component_meta_binding_type_entries",
         class: ReaderClass::GraphBackedPending,
         method_chain: false,
-        reason: "reads decl.type_annotation.clone() (decl = prepared_value_decl(..), a \
-                 PreparedValueDecl) to build the component-meta binding type entries — publication, a \
-                 deferred value-decl handle class. A BARE .type_annotation field read, anchored by \
-                 the enumeration",
+        reason: "TRANSITIONAL DEBT (target 0) — reads decl.type_annotation.clone() (decl = \
+                 prepared_value_decl(..), a PreparedValueDecl) to build the component-meta binding \
+                 type entries (publication). FUTURE MIGRATION SEAM: the HotPreparedValueDecl \
+                 annotation handle class. A BARE .type_annotation field read, anchored by the \
+                 enumeration",
     },
 ];
 
@@ -1680,51 +1974,16 @@ fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
 // INVARIANT 5 — NO GraphBackedMigrated TypeExpr-body read
 // ════════════════════════════════════════════════════════════════════
 
-/// The semantic-body-read text shapes a `GraphBackedMigrated` anchor must NOT
-/// contain in its OWN fn body: a `prepared_type_decl(..)`-rooted `.body` read, a
-/// bare `prepared.body` clone, or a `named_decl_body(..)` call. A migrated anchor
-/// routes through `decl_body_hot_ref` / a graph-native arm instead.
-const MIGRATED_FORBIDDEN_BODY_READ_NEEDLES: &[&str] =
-    &["prepared.body", "named_decl_body", "prepared_type_decl"];
-
-/// The marker proving a `GraphBackedMigrated` anchor routes through the shared
-/// hot accessor / a graph-native arm.
-const MIGRATED_HOT_ROUTE_NEEDLES: &[&str] =
-    &["decl_body_hot_ref", "materialize_member_surface_node"];
-
-/// Extract a single fn's source slice from `src` by matching the fn signature
-/// `fn <name>(` and returning the brace-balanced block that follows. Returns
-/// `None` if not found. Used to scope the GraphBackedMigrated text checks to the
-/// migrated fn's OWN body, not the whole file.
-fn fn_body_source<'a>(src: &'a str, fn_name: &str) -> Option<&'a str> {
-    let needle = format!("fn {fn_name}(");
-    let start = src.find(&needle)?;
-    // Find the opening brace of the fn body after the signature.
-    let brace_open = src[start..].find('{')? + start;
-    let bytes = src.as_bytes();
-    let mut depth = 0usize;
-    let mut i = brace_open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&src[brace_open..=i]);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Every `GraphBackedMigrated` anchor's OWN fn body (a) contains NO residual
-/// `TypeExpr` declaration-body read (no `prepared.body` / `named_decl_body` /
-/// `prepared_type_decl(..)` semantic body read) AND (b) routes through the shared
-/// hot accessor / a graph-native arm. A migrated reader that regressed to reading
-/// a body `TypeExpr` REDS here.
+/// Every `GraphBackedMigrated` anchor's OWN fn body (a) performs NO forbidden
+/// `TypeExpr` declaration-body read — no `<expr>.body` / `<expr>.type_annotation`
+/// field access, no `prepared_type_decl(..)` / `named_decl_body(..)` call — AND
+/// (b) routes through the shared `decl_body_hot_ref` hot accessor (or the
+/// alternate graph-native `materialize_member_surface_node` arm). This is a `syn`
+/// AST audit ([`MigratedBodyAuditor`]) scoped to the EXACT `(file, impl_path, fn)`
+/// anchor — NOT a text/needle scan: it is alias/rename robust, sees neither
+/// comments nor string literals, and proves the precise anchor identity (the right
+/// fn in the right impl). A migrated reader that regressed to reading a body
+/// `TypeExpr` (even through an aliased local binding) REDS here.
 #[test]
 fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
     let files = production_src_files();
@@ -1754,47 +2013,41 @@ fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
             ));
             continue;
         }
-        // (a) The migrated fn must NOT perform a `<recv>.body.<method>` chain read.
-        let fndef = defs[0];
-        if fndef.reads_lowered_body() {
-            let mut methods: Vec<String> = fndef.body_reads.iter().cloned().collect();
-            methods.sort();
-            violations.push(format!(
-                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` STILL performs a \
-                 `<recv>.body.{methods:?}` lowered-body read — a migrated reader must route through \
-                 decl_body_hot_ref / a graph-native arm, not read a body TypeExpr"
-            ));
-        }
-        // (b) Scope the bare-field text checks to the migrated fn's OWN body.
         let Some(src) = by_rel.get(file.as_str()) else {
             violations.push(format!(
                 "GraphBackedMigrated anchor file `{file}` not found in tree"
             ));
             continue;
         };
-        let Some(body) = fn_body_source(src, name) else {
-            violations.push(format!(
-                "GraphBackedMigrated anchor `{file} :: fn {name}` body not extractable"
-            ));
-            continue;
-        };
-        for needle in MIGRATED_FORBIDDEN_BODY_READ_NEEDLES {
-            if body.contains(needle) {
+        // The `syn` AST audit, scoped to the exact `(impl_path, fn)` anchor.
+        let verdicts = audit_migrated_anchor(file, src, impl_path, name);
+        let verdict = match verdicts.as_slice() {
+            [v] => v,
+            other => {
                 violations.push(format!(
-                    "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` body contains \
-                     `{needle}` — a migrated reader must NOT read a declaration body as TypeExpr; \
-                     route through decl_body_hot_ref / a graph-native arm"
+                    "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` resolved to {} \
+                     audited (non-test) bodies — must be exactly one",
+                    other.len()
                 ));
+                continue;
             }
-        }
-        if !MIGRATED_HOT_ROUTE_NEEDLES
-            .iter()
-            .any(|needle| body.contains(needle))
-        {
+        };
+        // (a) No forbidden TypeExpr-body read (AST-structural — field access OR
+        //     locator call, incl. aliased-launder).
+        if !verdict.forbidden_reads.is_empty() {
             violations.push(format!(
-                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` body does NOT route \
-                 through the shared hot accessor / a graph-native arm (expected one of \
-                 {MIGRATED_HOT_ROUTE_NEEDLES:?}) — the migration is not in place"
+                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` STILL performs \
+                 forbidden TypeExpr-body read(s) {:?} — a migrated reader must route through \
+                 decl_body_hot_ref / a graph-native arm, not read a declaration body as TypeExpr",
+                verdict.forbidden_reads
+            ));
+        }
+        // (b) Routes through the hot accessor / a graph-native arm.
+        if !verdict.routes_through_hot_accessor {
+            violations.push(format!(
+                "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` does NOT call the \
+                 shared hot accessor / a graph-native arm (expected one of \
+                 {MIGRATED_REQUIRED_HOT_ROUTE_IDENTS:?}) — the migration is not in place"
             ));
         }
     }
@@ -2020,68 +2273,118 @@ fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     );
 }
 
-/// The INVARIANT-5 GraphBackedMigrated-no-read check discriminates: a synthetic
-/// migrated-style fn that ROUTES through `decl_body_hot_ref` and reads no body
-/// passes the per-fn checks, while a regressed variant that reads `prepared.body`
-/// (or `named_decl_body`, or a `.body.<method>` chain) is caught.
+/// The INVARIANT-5 GraphBackedMigrated-no-read AST audit discriminates (FIX-2):
+/// fed SYNTHETIC source through the `syn` parse + [`audit_migrated_anchor`], a
+/// clean migrated fn that routes through `decl_body_hot_ref` and reads no body
+/// passes; a regressed fn that reads `prepared.body`, that calls `named_decl_body`
+/// / `prepared_type_decl`, OR that LAUNDERS the body read through an aliased local
+/// binding (`let p = get_prepared(); p.body.clone()`) is caught. The aliased case
+/// is the launder the OLD text needle `"prepared.body"` MISSED — proving the AST
+/// upgrade is real. This exercises the AST visitor, NOT a text path.
 #[test]
 fn graph_backed_migrated_no_read_check_discriminates() {
-    // The forbidden-needle + hot-route classification the production invariant
-    // applies to a migrated fn's own body, exercised directly on synthetic
-    // bodies so the discrimination is provable without mutating the real tree.
-    let clean = "{\n    \
-        let handle = dispatch.decl_body_hot_ref(canonical_id, name, args, prc)?;\n    \
-        Some(handle.node())\n}";
-    let regressed_prepared = "{\n    \
-        let prepared = dispatch.ctx.prepared_type_decl(canonical_id, name)?;\n    \
-        dispatch.lower_type_expr_in_scope_with_mode(canonical_id, &prepared.body, mode)\n}";
-    let regressed_named = "{\n    \
-        let body = engine.named_decl_body(canonical_id, name)?;\n    \
-        Some(lower(body))\n}";
+    // Synthetic anchors share one impl/fn anchor shape so the scanner finds them.
+    let audit = |body_src: &str| -> MigratedBodyVerdict {
+        let src = format!("impl Synthetic {{\n    fn migrated(&self) {{ {body_src} }}\n}}\n");
+        let mut v = audit_migrated_anchor("src/synthetic.rs", &src, "impl Synthetic", "migrated");
+        assert_eq!(
+            v.len(),
+            1,
+            "self-test: the synthetic anchor must resolve to exactly one audited body"
+        );
+        v.pop().unwrap()
+    };
 
-    // (a) hot-route presence.
+    // CLEAN — routes through the hot accessor, reads no body field, no locator call.
+    let clean =
+        audit("let handle = dispatch.decl_body_hot_ref(cid, name, args, prc)?; handle.node()");
     assert!(
-        MIGRATED_HOT_ROUTE_NEEDLES.iter().any(|n| clean.contains(n)),
-        "self-test: a clean migrated body routes through the hot accessor"
+        clean.routes_through_hot_accessor,
+        "self-test (clean): a migrated body that calls decl_body_hot_ref routes through the hot \
+         accessor"
     );
     assert!(
-        !MIGRATED_HOT_ROUTE_NEEDLES
+        clean.forbidden_reads.is_empty(),
+        "self-test (clean): a clean migrated body performs NO forbidden TypeExpr-body read — got {:?}",
+        clean.forbidden_reads
+    );
+
+    // REGRESSED — direct `prepared.body` field read + `prepared_type_decl` call.
+    let regressed_prepared =
+        audit("let prepared = dispatch.ctx.prepared_type_decl(cid, name)?; lower(&prepared.body)");
+    assert!(
+        !regressed_prepared.routes_through_hot_accessor,
+        "self-test (regressed prepared): does NOT route through the hot accessor (the not-routed arm \
+         reds it)"
+    );
+    assert!(
+        regressed_prepared
+            .forbidden_reads
             .iter()
-            .any(|n| regressed_prepared.contains(n))
-            && !MIGRATED_HOT_ROUTE_NEEDLES
+            .any(|r| r.contains("body"))
+            && regressed_prepared
+                .forbidden_reads
                 .iter()
-                .any(|n| regressed_named.contains(n)),
-        "self-test: the regressed bodies do NOT route through the hot accessor (so the \
-         not-routed arm of the invariant reds them)"
+                .any(|r| r.contains("prepared_type_decl")),
+        "self-test (regressed prepared): the AST audit catches BOTH the `prepared.body` field read \
+         and the `prepared_type_decl(..)` call — got {:?}",
+        regressed_prepared.forbidden_reads
     );
 
-    // (b) forbidden-needle presence.
+    // REGRESSED — `named_decl_body` call.
+    let regressed_named = audit("let body = engine.named_decl_body(cid, name)?; lower(body)");
     assert!(
-        !MIGRATED_FORBIDDEN_BODY_READ_NEEDLES
-            .iter()
-            .any(|n| clean.contains(n)),
-        "self-test: a clean migrated body contains NO forbidden body-read needle — got hits {:?}",
-        MIGRATED_FORBIDDEN_BODY_READ_NEEDLES
-            .iter()
-            .filter(|n| clean.contains(*n))
-            .collect::<Vec<_>>()
+        !regressed_named.routes_through_hot_accessor,
+        "self-test (regressed named): does NOT route through the hot accessor"
     );
     assert!(
-        MIGRATED_FORBIDDEN_BODY_READ_NEEDLES
+        regressed_named
+            .forbidden_reads
             .iter()
-            .any(|n| regressed_prepared.contains(n)),
-        "self-test: a `prepared.body` / `prepared_type_decl` regression IS caught by the \
-         forbidden-needle scan"
-    );
-    assert!(
-        MIGRATED_FORBIDDEN_BODY_READ_NEEDLES
-            .iter()
-            .any(|n| regressed_named.contains(n)),
-        "self-test: a `named_decl_body` regression IS caught by the forbidden-needle scan"
+            .any(|r| r.contains("named_decl_body")),
+        "self-test (regressed named): the AST audit catches the `named_decl_body(..)` call — got {:?}",
+        regressed_named.forbidden_reads
     );
 
-    // (c) the real migrated anchor's OWN body extracted from the tree passes both
-    // checks — so the invariant is GREEN on the tree it ships against and not
+    // ALIASED LAUNDER — the read goes through a renamed local binding, so the OLD
+    // text needle `"prepared.body"` would NOT fire (the binding is named `p`). The
+    // AST audit catches the `p.body` field access structurally. THIS is the
+    // upgrade's load-bearing discrimination.
+    let aliased_launder = audit("let p = get_prepared(cid, name); let _ = p.body.clone(); None");
+    assert!(
+        aliased_launder
+            .forbidden_reads
+            .iter()
+            .any(|r| r.contains("body")),
+        "self-test (ALIASED LAUNDER): the AST audit MUST catch `p.body` where `let p = \
+         get_prepared(..)` — the aliased body read the old text needle `prepared.body` missed. Got \
+         {:?}",
+        aliased_launder.forbidden_reads
+    );
+    // Sanity that this case really is a launder past the OLD needle: the literal
+    // text `prepared.body` is absent from the laundered body source, yet the AST
+    // audit still flags it.
+    assert!(
+        !"let p = get_prepared(cid, name); let _ = p.body.clone(); None".contains("prepared.body"),
+        "self-test (launder premise): the laundered source must NOT contain the literal \
+         `prepared.body` text — otherwise it is not a real launder past the old needle"
+    );
+
+    // ALIASED LAUNDER via `type_annotation` too (the value-decl body carrier).
+    let aliased_annotation =
+        audit("let d = effective_value_decl(cid); let _ = d.type_annotation.clone(); None");
+    assert!(
+        aliased_annotation
+            .forbidden_reads
+            .iter()
+            .any(|r| r.contains("type_annotation")),
+        "self-test (ALIASED LAUNDER, annotation): the AST audit MUST catch `d.type_annotation` \
+         through an aliased binding — got {:?}",
+        aliased_annotation.forbidden_reads
+    );
+
+    // (c) the real migrated anchor's OWN body, audited via the AST path, passes
+    // BOTH checks — so the invariant is GREEN on the tree it ships against and not
     // vacuous.
     let files = production_src_files();
     let by_rel: std::collections::HashMap<&str, &str> = files
@@ -2089,24 +2392,29 @@ fn graph_backed_migrated_no_read_check_discriminates() {
         .map(|(r, s)| (r.as_str(), s.as_str()))
         .collect();
     let mut checked_any = false;
-    for (file, _impl_path, name) in graph_backed_migrated_anchors() {
+    for (file, impl_path, name) in graph_backed_migrated_anchors() {
         let src = by_rel
             .get(file.as_str())
             .unwrap_or_else(|| panic!("migrated anchor file `{file}` present"));
-        let body = fn_body_source(src, &name)
-            .unwrap_or_else(|| panic!("migrated anchor `{file} :: fn {name}` body extractable"));
+        let verdicts = audit_migrated_anchor(&file, src, &impl_path, &name);
+        assert_eq!(
+            verdicts.len(),
+            1,
+            "self-test (real tree): migrated anchor `{file} :: {impl_path} :: fn {name}` must \
+             resolve to exactly one audited body"
+        );
+        let verdict = &verdicts[0];
         assert!(
-            MIGRATED_HOT_ROUTE_NEEDLES.iter().any(|n| body.contains(n)),
+            verdict.routes_through_hot_accessor,
             "self-test (real tree): migrated anchor `{file} :: fn {name}` routes through the hot \
              accessor / a graph-native arm"
         );
-        for needle in MIGRATED_FORBIDDEN_BODY_READ_NEEDLES {
-            assert!(
-                !body.contains(needle),
-                "self-test (real tree): migrated anchor `{file} :: fn {name}` body must NOT contain \
-                 `{needle}`"
-            );
-        }
+        assert!(
+            verdict.forbidden_reads.is_empty(),
+            "self-test (real tree): migrated anchor `{file} :: fn {name}` performs NO forbidden \
+             TypeExpr-body read — got {:?}",
+            verdict.forbidden_reads
+        );
         checked_any = true;
     }
     assert!(
@@ -2115,11 +2423,15 @@ fn graph_backed_migrated_no_read_check_discriminates() {
     );
 }
 
-/// The ENUMERATION is the completeness rail for BARE-FIELD body readers (which
-/// the method-chain tripwire structurally cannot see). A synthetic bare
-/// `<recv>.body.clone()` reader at a NON-inventoried anchor produces ZERO
-/// method-chain hits; and a representative bare-field reader of each non-migrated
-/// class is present + unique on the real tree.
+/// The MANUALLY-CURATED enumeration — NOT any automatic structural scan — is the
+/// only rail for BARE-FIELD body readers (which the method-chain tripwire
+/// structurally cannot see, and which the GraphBackedMigrated AST no-read rail does
+/// not cover at a NEW anchor). This test PROVES the DISCLOSED INTERIM LIMITATION: a
+/// synthetic bare `<recv>.body.clone()` reader at a NON-inventoried anchor produces
+/// ZERO method-chain hits, so a brand-new bare-field reader is NOT auto-caught — it
+/// is closed ONLY by the author keeping the enumeration complete + the behavioural
+/// parity rail. A representative bare-field reader of each non-migrated class is
+/// present + unique on the real tree (the enumeration rows are load-bearing).
 #[test]
 fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
     let allowed = method_chain_allowed_anchors();
@@ -2460,24 +2772,31 @@ fn real_tree_satisfies_all_invariants() {
     );
 
     // (5) GraphBackedMigrated-no-read — every migrated anchor reads no body
-    // TypeExpr and routes through the hot accessor.
+    // TypeExpr and routes through the hot accessor (the `syn` AST audit).
     let by_rel: std::collections::HashMap<&str, &str> = files
         .iter()
         .map(|(r, s)| (r.as_str(), s.as_str()))
         .collect();
-    for (file, _impl_path, name) in graph_backed_migrated_anchors() {
+    for (file, impl_path, name) in graph_backed_migrated_anchors() {
         let src = by_rel
             .get(file.as_str())
             .expect("migrated anchor file present");
-        let body = fn_body_source(src, &name).expect("migrated anchor body extractable");
-        for needle in MIGRATED_FORBIDDEN_BODY_READ_NEEDLES {
-            assert!(
-                !body.contains(needle),
-                "control: migrated anchor `{file} :: fn {name}` must NOT contain `{needle}`"
-            );
-        }
+        let verdicts = audit_migrated_anchor(file.as_str(), src, &impl_path, &name);
+        assert_eq!(
+            verdicts.len(),
+            1,
+            "control: migrated anchor `{file} :: {impl_path} :: fn {name}` must resolve to exactly \
+             one audited body"
+        );
+        let verdict = &verdicts[0];
         assert!(
-            MIGRATED_HOT_ROUTE_NEEDLES.iter().any(|n| body.contains(n)),
+            verdict.forbidden_reads.is_empty(),
+            "control: migrated anchor `{file} :: fn {name}` must perform NO forbidden TypeExpr-body \
+             read — got {:?}",
+            verdict.forbidden_reads
+        );
+        assert!(
+            verdict.routes_through_hot_accessor,
             "control: migrated anchor `{file} :: fn {name}` routes through the hot accessor"
         );
     }
@@ -2548,7 +2867,10 @@ fn real_tree_inventory_is_non_vacuous() {
     assert_eq!(
         class_count(ReaderClass::GraphBackedPending),
         7,
-        "self-test (partition pin): exactly seven GraphBackedPending rows"
+        "self-test (partition pin): exactly seven GraphBackedPending rows TODAY. \
+         GraphBackedPending is TRANSITIONAL MIGRATION DEBT (target 0), NOT a final stay-class — the \
+         non-growth ratchet is `graph_backed_pending_is_capped_transitional_debt`; this exact pin \
+         coexists with the cap and is LOWERED (toward 0) when a pending row's seam lands"
     );
     assert_eq!(
         class_count(ReaderClass::OutputCompat),
@@ -2601,6 +2923,167 @@ fn real_tree_inventory_is_non_vacuous() {
     assert_eq!(
         residual_chain, 10,
         "self-test: exactly ten residual readers perform the `<recv>.body.<method>` chain read"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// GraphBackedPending — NON-GROWTH RATCHET (transitional migration debt)
+// ════════════════════════════════════════════════════════════════════
+
+/// The non-growth CAP on the `GraphBackedPending` transitional-debt class — its
+/// CURRENT count. The class is a ratchet: it may only SHRINK as each pending
+/// row's named migration seam lands. The cap REDDENS on growth (a new pending
+/// row), and is LOWERED toward [`GRAPH_BACKED_PENDING_TARGET`] when a row
+/// migrates. It is NOT a justified final allowlist size.
+const GRAPH_BACKED_PENDING_CAP: usize = 7;
+
+/// The FINAL TARGET for the `GraphBackedPending` class: ZERO. Every row is
+/// transitional migration debt that leaves the class the moment its seam lands;
+/// when the count reaches 0 the class (and this guard) is deleted.
+const GRAPH_BACKED_PENDING_TARGET: usize = 0;
+
+/// Count the [`ReaderClass::GraphBackedPending`] rows in an arbitrary row slice —
+/// the reusable cap predicate the production ratchet guard and its discriminating
+/// self-test both call (so the self-test can feed a synthetic over-cap slice and
+/// prove the cap REDDENS).
+fn count_pending_in(rows: &[ReaderRow]) -> usize {
+    rows.iter()
+        .filter(|r| r.class == ReaderClass::GraphBackedPending)
+        .count()
+}
+
+/// NON-GROWTH RATCHET (FIX-1): the `GraphBackedPending` class is TRANSITIONAL
+/// MIGRATION DEBT, not a final reader class — it carries a FINAL TARGET of 0 and
+/// must never GROW past its current cap. A NEW pending row (a graph-backed reader
+/// deferred instead of migrated) pushes the count over
+/// [`GRAPH_BACKED_PENDING_CAP`] and REDDENS this guard; when a pending row's named
+/// seam lands and it leaves the class, the cap is LOWERED toward 0. This is the
+/// ratchet rail; the exact `== 7` pin in `real_tree_inventory_is_non_vacuous`
+/// coexists with it.
+#[test]
+fn graph_backed_pending_is_capped_transitional_debt() {
+    let pending = count_pending_in(RESIDUAL_BODY_READERS);
+    assert!(
+        pending <= GRAPH_BACKED_PENDING_CAP,
+        "GraphBackedPending is TRANSITIONAL MIGRATION DEBT with a FINAL TARGET of \
+         {GRAPH_BACKED_PENDING_TARGET} — it must never GROW. The class has {pending} rows but the \
+         non-growth cap is {GRAPH_BACKED_PENDING_CAP}: a new graph-backed reader was DEFERRED \
+         (added to GraphBackedPending) instead of migrated to decl_body_hot_ref / graph-native \
+         dispatch. Migrate it through its named seam, or — if a deferral is genuinely unavoidable — \
+         a MANUAL cap raise is a recorded architecture decision, not a silent edit. The ratchet only \
+         shrinks toward {GRAPH_BACKED_PENDING_TARGET}; it does not grow."
+    );
+    // Belt-and-braces: the cap itself must not have been quietly raised above the
+    // landed count (the ratchet ceiling tracks today's exact count, lowered as
+    // rows migrate — never padded with headroom that would silently absorb a new
+    // pending row).
+    assert_eq!(
+        GRAPH_BACKED_PENDING_CAP, pending,
+        "the GraphBackedPending non-growth cap ({GRAPH_BACKED_PENDING_CAP}) must equal the landed \
+         pending count ({pending}) — the ratchet ceiling carries NO growth headroom; lower it as \
+         rows migrate, never pad it"
+    );
+    assert_eq!(
+        GRAPH_BACKED_PENDING_TARGET, 0,
+        "the GraphBackedPending FINAL TARGET is 0 (the class empties as every seam lands)"
+    );
+}
+
+/// DISCRIMINATING self-test for the non-growth cap: the cap predicate REDDENS on a
+/// synthetic inventory carrying an 8th `GraphBackedPending` row (growth past the
+/// cap of 7) and is GREEN at exactly 7. Proves the ratchet fires on a NEW deferred
+/// reader rather than silently absorbing it.
+#[test]
+fn graph_backed_pending_cap_reddens_on_growth() {
+    // A synthetic pending row template — `'static` literals so it fits `ReaderRow`.
+    const fn synthetic_pending(fn_name: &'static str) -> ReaderRow {
+        ReaderRow {
+            file: "src/synthetic/over_cap_module.rs",
+            impl_path: "impl Synthetic",
+            fn_name,
+            class: ReaderClass::GraphBackedPending,
+            method_chain: false,
+            reason:
+                "synthetic transitional-debt row (target 0) — FUTURE MIGRATION SEAM: a synthetic \
+                     graph-native arm; exists ONLY to exercise the non-growth cap",
+        }
+    }
+
+    // GREEN at exactly the cap (7 synthetic pending rows).
+    let at_cap: [ReaderRow; 7] = [
+        synthetic_pending("p0"),
+        synthetic_pending("p1"),
+        synthetic_pending("p2"),
+        synthetic_pending("p3"),
+        synthetic_pending("p4"),
+        synthetic_pending("p5"),
+        synthetic_pending("p6"),
+    ];
+    assert_eq!(
+        count_pending_in(&at_cap),
+        GRAPH_BACKED_PENDING_CAP,
+        "self-test: a synthetic 7-row pending inventory sits exactly AT the cap"
+    );
+    assert!(
+        count_pending_in(&at_cap) <= GRAPH_BACKED_PENDING_CAP,
+        "self-test (cap GREEN): the cap predicate PASSES at exactly {GRAPH_BACKED_PENDING_CAP} \
+         pending rows"
+    );
+
+    // RED at cap + 1 (a synthetic 8th pending row — a NEW deferred reader).
+    let over_cap: [ReaderRow; 8] = [
+        synthetic_pending("p0"),
+        synthetic_pending("p1"),
+        synthetic_pending("p2"),
+        synthetic_pending("p3"),
+        synthetic_pending("p4"),
+        synthetic_pending("p5"),
+        synthetic_pending("p6"),
+        // The planted 8th row — growth the ratchet must reject.
+        synthetic_pending("p7_new_deferred_reader"),
+    ];
+    assert_eq!(
+        count_pending_in(&over_cap),
+        GRAPH_BACKED_PENDING_CAP + 1,
+        "self-test: a synthetic 8-row pending inventory grows the class by one"
+    );
+    assert!(
+        count_pending_in(&over_cap) > GRAPH_BACKED_PENDING_CAP,
+        "self-test (cap RED): the cap predicate FAILS the moment an 8th pending row is added — the \
+         non-growth ratchet reddens on a NEW deferred graph-backed reader rather than absorbing it. \
+         (Non-migrated rows of OTHER classes do NOT count: only GraphBackedPending growth trips the \
+         ratchet.)"
+    );
+
+    // Discrimination: a synthetic row of a DIFFERENT class does NOT count toward
+    // the pending cap (the ratchet is scoped to GraphBackedPending only).
+    let mixed: [ReaderRow; 8] = [
+        synthetic_pending("p0"),
+        synthetic_pending("p1"),
+        synthetic_pending("p2"),
+        synthetic_pending("p3"),
+        synthetic_pending("p4"),
+        synthetic_pending("p5"),
+        synthetic_pending("p6"),
+        ReaderRow {
+            file: "src/synthetic/over_cap_module.rs",
+            impl_path: "impl Synthetic",
+            fn_name: "authored_shape_not_pending",
+            class: ReaderClass::AuthoredShape,
+            method_chain: false,
+            reason:
+                "synthetic AuthoredShape row — must NOT count toward the GraphBackedPending cap",
+        },
+    ];
+    assert_eq!(
+        count_pending_in(&mixed),
+        GRAPH_BACKED_PENDING_CAP,
+        "self-test (cap scope): an 8th row of a NON-pending class does NOT grow the pending count — \
+         the ratchet counts ONLY GraphBackedPending rows"
+    );
+    assert!(
+        count_pending_in(&mixed) <= GRAPH_BACKED_PENDING_CAP,
+        "self-test (cap scope GREEN): a non-pending 8th row keeps the cap predicate GREEN"
     );
 }
 
