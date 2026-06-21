@@ -1195,7 +1195,11 @@ fn test_parse_code_action() {
             }
         }
     });
-    let action = parse_code_action(&json, &|_p| None).unwrap();
+    // Seed resolvable content for the edit's target so the (now fail-closed) edit survives; the
+    // assertion under test is the parsed action structure, not packed-offset survival. The (0,0)
+    // range resolves against any content.
+    let content_for = |p: &str| -> Option<&str> { (p == "/test.ts").then_some("") };
+    let action = parse_code_action(&json, &content_for).unwrap();
     assert_eq!(action.title, "Add import");
     assert_eq!(action.kind.as_deref(), Some("quickfix"));
     assert_eq!(action.edits.len(), 1);

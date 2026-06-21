@@ -3241,36 +3241,11 @@ fn parse_range_to_offsets(range: &serde_json::Value, content: Option<&str>) -> O
     }
 }
 
-/// Like [`parse_range_to_offsets`], but resolves a cache-miss target (`content_for` returns
-/// `None`) against ITS OWN file content on disk before falling back to packed positions — the
-/// SAME per-target disk fallback [`parse_lsp_location`] gives references / definition.
-///
-/// Rename and code-action edits span multiple files; a cross-file target the queried session never
-/// opened is absent from the in-memory contents cache. Without the disk read, the range converts
-/// through `pack_position`, producing a line-0 edit in the WRONG file — for a rename that CORRUPTS
-/// the file. Reading the target's own source (the file tsgo already saw to compute the edit)
-/// converts the range against the correct content.
-fn parse_range_to_offsets_with_disk_fallback<'a>(
-    range: &serde_json::Value,
-    path: &str,
-    content_for: &impl Fn(&str) -> Option<&'a str>,
-) -> Option<(u32, u32)> {
-    let disk_content;
-    let content = match content_for(path) {
-        Some(content) => Some(content),
-        None => {
-            disk_content = std::fs::read_to_string(path).ok();
-            disk_content.as_deref()
-        }
-    };
-    parse_range_to_offsets(range, content)
-}
-
-/// Like [`parse_range_to_offsets_with_disk_fallback`], but FAIL CLOSED for EDIT paths: resolves the
-/// target content (cache → disk) and, when content is unavailable, returns `None` (NO
-/// `pack_position` sentinel). With content present it converts through the CHECKED
-/// [`position_to_offset_checked`], so an out-of-range position DROPS instead of clamping to EOF, and
-/// an inverted `start > end` span drops too.
+/// Like [`parse_range_to_offsets`], but FAIL CLOSED for EDIT paths: resolves the target content
+/// (cache → disk) and, when content is unavailable, returns `None` (NO `pack_position` sentinel).
+/// With content present it converts through the CHECKED [`position_to_offset_checked`], so an
+/// out-of-range position DROPS instead of clamping to EOF, and an inverted `start > end` span drops
+/// too.
 ///
 /// Edit-producing parsers (`parse_text_edit_to_code_edit`, `parse_rename_edit`) route through this
 /// so a total cache+disk miss or an out-of-range position never packs a line-0 / clamped offset that
