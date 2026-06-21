@@ -323,22 +323,27 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
 /// truncates a legitimate chain.
 pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 
-/// Lower a named declaration's prepared body `TypeExpr` to a semantic
-/// node in `Navigate` mode (terminal carriers preserved). Returns the
-/// lowered body node — for a conditional alias body
+/// Resolve a named declaration's body to a graph node in `Navigate` mode
+/// (terminal carriers preserved) through the shared hot accessor. Returns
+/// the resolved body node — for a conditional alias body
 /// (`type X = A extends B ? C : D`) this is the `Conditional` node whose
-/// branch refs the emit branch-merge enumerates.
+/// branch refs the emit branch-merge enumerates. The accessor drives the
+/// shared `Instantiate` query (the single resolution engine), so the node
+/// stays graph-native and is never materialised back to a `TypeExpr`.
+/// `args` is empty — a bare named-decl demand carries no explicit type
+/// arguments.
 fn lower_decl_body_to_node(
     dispatch: &ProjectSemanticDispatch<'_>,
     canonical_id: &str,
     name: &str,
 ) -> Option<SemanticNodeId> {
-    let prepared = dispatch.ctx.prepared_type_decl(canonical_id, name)?;
-    dispatch.lower_type_expr_in_scope_with_mode(
+    let handle = dispatch.decl_body_hot_ref(
         canonical_id,
-        &prepared.body,
-        ProjectionMode::Navigate,
-    )
+        name,
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+    )?;
+    Some(handle.node())
 }
 
 #[allow(dead_code)]
