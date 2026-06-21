@@ -975,8 +975,11 @@ fn structural_carrier_producer_guards_remain_registered() {
 // stay non-keyable (R6, no `Hash`/`Ord`). These pin the GREEN additive
 // carrier sub-step (the producer flip / reader migration / clone-path
 // deletion are a later session). The carrier-field guard is an ALLOWLIST (an
-// unrecognized field type REDS — closing the future-owner + alias-launder
-// evasion BY CONSTRUCTION); the `HotTypeRef` non-keyability is enforced by the
+// unrecognized DIRECTLY-WRITTEN field type REDS — it catches the future-owner
+// case by spelling, but matching written spellings it CANNOT catch a `use … as`
+// alias / `pub use` re-export / module-shadow to an ALLOWED spelling; the
+// compiler `NoTypeExpr` marker trait is the structural close for that residual);
+// the `HotTypeRef` non-keyability is enforced by the
 // compiler `assert_not_impl_any!` next to the struct (see semantic_query.rs)
 // plus the derive-vector guard in architecture_guards.rs. The allowlist guard
 // is a `syn` source scan with a paired self-test proving it discriminates.
@@ -1003,9 +1006,11 @@ const ALLOWED_CONTAINER_SEGMENTS: &[&str] = &[
 /// The explicitly-allowlisted LEAF type identifiers — every hot carrier field
 /// must, after peeling allowed containers/tuples/slices, bottom out in one of
 /// these (OR in `HotTypeRef`, OR in any `Hot*`-prefixed nested carrier, which
-/// are recognized structurally, NOT by this list). Any OTHER leaf identifier
-/// (a future `TypeExpr`-owner, a `use … as` alias, an un-audited new type)
-/// REDS — that is the whole point of an allowlist over a denylist.
+/// are recognized structurally, NOT by this list). Any OTHER DIRECTLY-WRITTEN
+/// leaf identifier (a future `TypeExpr`-owner, an un-audited new type) REDS —
+/// that is the whole point of an allowlist over a denylist. (A `use … as`
+/// alias to an ALLOWED spelling evades this spelling check; the compiler
+/// `NoTypeExpr` marker trait is the structural close for that residual.)
 ///
 /// The non-`Hot`/non-primitive entries are each AUDITED to own NO `TypeExpr`:
 /// they are the scalar facts the carriers reuse verbatim from the lower crate
@@ -1178,11 +1183,17 @@ fn quote_type(ty: &syn::Type) -> String {
 
 /// Walk every `struct`/`enum` field type (and every module-local `type X = …;`
 /// alias RHS) in the parsed source and collect every leaf / container that is
-/// NOT on the carrier-field allowlist. A `use … as` alias is closed BY
-/// CONSTRUCTION: the allowlist matches the field type's WRITTEN identifier, so
-/// `use verter_type_expr::TypeExpr as Body; … body: Body` REDS on the
-/// un-allowlisted `Body` leaf regardless of what it aliases (we do not — and
-/// need not — resolve the alias). Returns `"<owner>: <ident> (…)"` entries.
+/// NOT on the carrier-field allowlist. The allowlist matches the field type's
+/// WRITTEN spelling, so it catches a directly-written banned owner (`body:
+/// TypeExpr`), an unrecognized direct type, and a module-local `type Body =
+/// TypeExpr;` alias RHS (its RHS reds on `TypeExpr`). It CANNOT catch an alias /
+/// re-export / module-shadow to an ALLOWED spelling: this function ignores
+/// `use` items (`Item::Use`), so `use verter_type_expr::TypeExpr as HotBody; …
+/// body: HotBody`, `use TypeExpr as Span`, or a re-exported `Hot*` struct owning
+/// a `TypeExpr` PASS — the leaf is judged on its allowed written name and the
+/// alias is never resolved. The compiler `NoTypeExpr` marker trait (which
+/// resolves the actual field type) is the structural close for that residual.
+/// Returns `"<owner>: <ident> (…)"` entries.
 fn non_allowlisted_field_types(src: &str) -> Vec<String> {
     let file = syn::parse_file(src).expect("parse hot_prepared.rs as a syn::File");
     let mut hits = Vec::new();
@@ -1279,12 +1290,16 @@ fn hot_prepared_carriers_own_no_typeexpr() {
 
 #[test]
 fn hot_prepared_carriers_own_no_typeexpr_self_test_discriminates() {
-    // POSITIVE: every TypeExpr-owner form the allowlist must REJECT. The
-    // allowlist closes the arms-race — a NEW TypeExpr-owner that the old
-    // ENUMERATED denylist never listed (`ValueRef`, `TupleElement`,
-    // `RecursiveConditionalFrame`, `MergedTypeBody`), a `use … as` alias
-    // launder, and the previously-covered `TypeExpr` / `FunctionParam` /
-    // `FunctionExpr` owners must ALL RED because none is on the allowlist.
+    // POSITIVE: every DIRECTLY-WRITTEN TypeExpr-owner form the allowlist must
+    // REJECT. The allowlist beats the old ENUMERATED denylist on the
+    // direct-spelling axis — a NEW TypeExpr-owner the denylist never listed
+    // (`ValueRef`, `TupleElement`, `RecursiveConditionalFrame`,
+    // `MergedTypeBody`), a module-local `type Body = TypeExpr;` alias RHS, and
+    // the previously-covered `TypeExpr` / `FunctionParam` / `FunctionExpr`
+    // owners must ALL RED because none is on the allowlist. (NOTE: this is a
+    // SPELLING check — a `use TypeExpr as HotBody; … body: HotBody` cross-item
+    // alias to an ALLOWED spelling EVADES it; that residual is closed by the
+    // compiler `NoTypeExpr` marker trait, not by this scanner.)
     let planted = "\
 struct HotBad {
     body: TypeExpr,
@@ -1385,6 +1400,85 @@ enum HotGoodEnum {
          Arc<[HotTypeRef]>, FxHashMap<Arc<str>, HotPreparedMember>, tuples of allowed leaves), the \
          primitive scalars, and the explicitly-allowlisted TypeExpr-free scalar set MUST all PASS \
          the allowlist — it must not be over-strict; got {good_hits:?}"
+    );
+}
+
+/// Regression-lock for the walker's FAIL-CLOSED `other =>` arm and the
+/// Array/Reference recursion. The headline robustness property of
+/// [`walk_field_type`] is that an unrecognized `syn::Type` shape (fn-pointer,
+/// raw pointer, `dyn`, `impl Trait`, …) does NOT silently pass — it reds via
+/// the `other =>` arm — and that `Type::Array` / `Type::Reference` recurse to
+/// their element so a `TypeExpr` hidden inside `[TypeExpr; N]` or `&TypeExpr`
+/// is still caught. The sibling self-test above plants no unrecognized-shape
+/// case, so a future edit that turned `other =>` into a silent skip (or dropped
+/// the Array/Reference recursion) would re-open the hole with GREEN tests. This
+/// test pins both: the RED-proof is to temporarily make `other =>` skip (e.g.
+/// `other => {}`) — the fn-pointer/raw-pointer cases below then fail.
+///
+/// Verified ACTUAL walker behavior:
+/// - `fn() -> TypeExpr`  → `syn::Type::BareFn` → `other =>` arm → RED (the whole
+///   rendered shape, including `TypeExpr`, is recorded as unrecognized).
+/// - `*const TypeExpr`   → `syn::Type::Ptr` → `other =>` arm → RED.
+/// - `[TypeExpr; 2]`     → `syn::Type::Array` → recurses to the element → RED.
+/// - `&'static TypeExpr` → `syn::Type::Reference` → recurses to the target → RED.
+/// - `[HotTypeRef; 2]`   → Array recurses to an ALLOWED leaf → PASS (control).
+/// - `&'static HotTypeRef` → Reference recurses to an ALLOWED leaf → PASS.
+///   (`fn() -> HotTypeRef` is deliberately NOT asserted-pass: a fn-pointer hits
+///   the conservatively fail-closed `other =>` arm and reds even over an allowed
+///   leaf — that is correct, not a bug.)
+#[test]
+fn hot_prepared_carriers_own_no_typeexpr_self_test_fails_closed_on_unrecognized_shapes() {
+    // POSITIVE: the fail-closed `other =>` arm (fn-pointer / raw pointer) and
+    // the Array/Reference recursion each catch a `TypeExpr`-bearing field.
+    let planted = "\
+struct HotWeird {
+    weird: fn() -> TypeExpr,
+    raw: *const TypeExpr,
+    arr: [TypeExpr; 2],
+    r: &'static TypeExpr,
+}
+";
+    let hits = non_allowlisted_field_types(planted);
+    // The fn-pointer reds via `other =>`: the recorded hit is the rendered
+    // shape (which contains `TypeExpr`), keyed by its owner. Assert by owner
+    // prefix so the exact rendering of the fn-pointer is not over-pinned.
+    for owner_field in ["HotWeird.weird", "HotWeird.raw"] {
+        assert!(
+            hits.iter()
+                .any(|h| h.starts_with(&format!("{owner_field}: "))
+                    && h.contains("unrecognized field-type shape")),
+            "self-test: the FAIL-CLOSED `other =>` arm MUST red the unrecognized-shape field \
+             `{owner_field}` (a fn-pointer / raw pointer owning a `TypeExpr`) — if it silently \
+             passed, a future weakening of `other =>` would re-open the hole with green tests; got \
+             {hits:?}"
+        );
+    }
+    // The Array and Reference recursion each reach the `TypeExpr` element/target.
+    for owner_field in ["HotWeird.arr", "HotWeird.r"] {
+        assert!(
+            hits.iter()
+                .any(|h| h.starts_with(&format!("{owner_field}: TypeExpr "))),
+            "self-test: the `Type::Array` / `Type::Reference` recursion MUST reach the `TypeExpr` \
+             element/target of `{owner_field}` and red it; got {hits:?}"
+        );
+    }
+
+    // NEGATIVE control: Array/Reference over an ALLOWED leaf recurse to the
+    // allowed leaf and PASS — the recursion is not over-strict. (Fn-pointers are
+    // intentionally NOT in this control: they fail-closed even over an allowed
+    // leaf, which is correct.)
+    let good = "\
+struct HotWeirdOk {
+    arr_ok: [HotTypeRef; 2],
+    ref_ok: &'static HotTypeRef,
+}
+";
+    let good_hits = non_allowlisted_field_types(good);
+    assert!(
+        good_hits.is_empty(),
+        "self-test: `Type::Array` / `Type::Reference` over an ALLOWED leaf (`[HotTypeRef; 2]`, \
+         `&'static HotTypeRef`) MUST recurse to the allowed leaf and PASS — the recursion must not \
+         be over-strict; got {good_hits:?}"
     );
 }
 
