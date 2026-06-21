@@ -37,6 +37,10 @@ graph-native classifier that does not yet exist.
   indexed-access route).
 - `meta_resolve/materialize/field_types.rs::type_expr_has_package_backed_object_like_root_with_fence` — the
   root extraction is authored-shape-intrinsic (literal `Pick` / `Omit`, `IndexedAccess.object`, `Ref` head).
+- `component_meta_query_engine/registry_decl.rs::owner_collection_expr` (C1) — returns the RAW alias body the
+  registry walker classifies by authored shape (`Ref { type_arguments }`); the value is keyed into the
+  `TypeExpr`-keyed `OwnerCollectionDb`, which a handle-derived value must never populate, so it stays
+  `TypeExpr` (the residual inventory classifies it AuthoredShape per that reason).
 
 **Future graph-native migration** = heritage-as-explicit-metadata (the authored heritage refs surfaced as a
 typed, addressable metadata facet rather than recovered from the body `TypeExpr`) + a dedicated
@@ -73,15 +77,37 @@ with the rest:
   broad; it splits into an identity/hot locator (for semantic consumers) and an explicit authored-body
   locator (for authored-shape policy code), by downstream need.
 
-## What migrates NOW (the bounded session — for contrast)
+## What migrates NOW (the bounded session)
 
-The thin `decl_body_hot_ref` accessor + the mint at `lower_decl_body_with_provenance`, with the genuinely
-graph-backed consumers that have an EXISTING graph-native arm to route through migrated onto it:
-- the NON-VACUOUS anchor `meta_resolve/projectors/macro_payload_substrate.rs::lower_decl_body_to_node`;
-- the C1 member-surface body callers (through the existing `materialize_member_surface_node`);
-- the C2 owner-collection graph arm (`owner_collection_surface_from_node` gains its production caller);
-- the C4 route-key enumeration (`enumerate_member_surface_keys_via_route`) through a graph-native key
-  enumerator.
+ONLY the thin shared accessor + the single non-vacuous consumer that has an EXISTING graph-native arm to
+route through:
+
+- the thin `decl_body_hot_ref` accessor (`project_semantic_dispatch/mod.rs`) over the existing
+  `SemanticGraphStore` `Instantiate` memo — no new store/cache (R6: the returned `HotTypeRef` is never lifted
+  into a cache key);
+- the NON-VACUOUS C-anchor `meta_resolve/projectors/macro_payload_substrate.rs::lower_decl_body_to_node`,
+  re-pointed onto `decl_body_hot_ref` (the emit-payload conditional-root carrier walk now reaches a named
+  alias body through the shared hot accessor instead of lowering the prepared body `TypeExpr` directly —
+  node-equivalent, no reverse bridge).
+
+The producer/mint (`lower_decl_body_with_provenance`) is unchanged — the accessor WRAPS its `Instantiate`
+result; it is not itself migrated (it stays the authored-IR→graph-IR bridge).
+
+**Explicitly NOT migrated this session** (all genuinely deferred — see the deferred classes above):
+
+- **C1** (`component_meta_query_engine/registry_decl.rs::owner_collection_expr`) — returns the RAW alias body
+  the registry walker classifies by authored shape (`Ref { type_arguments }`), and the value is keyed into the
+  `TypeExpr`-keyed `OwnerCollectionDb`, which a handle-derived value must NEVER populate. Classified
+  **AuthoredShape** (see §1) — it stays `TypeExpr`; there is no member-surface body caller that takes a
+  freshly-cloned declaration body, so the existing `materialize_member_surface_node` arm has no non-vacuous
+  production caller to migrate it onto.
+- **C2** (`component_meta_query_engine/registry_decl.rs::owner_collection_surface_from_node`) — the dormant
+  graph arm stays `#[allow(dead_code)]`: it is producer-blocked (no settled handle holder / non-vacuous
+  production caller exists yet), and giving it one would require touching the `TypeExpr`-keyed
+  `OwnerCollectionDb` keying.
+- **C4** (`component_meta_query_engine/route_keys.rs::enumerate_member_surface_keys_via_route`) — the
+  graph-native `SemanticNodeData` member-surface-route key enumerator (over union/intersection/conditional/
+  object surfaces) does not yet exist. Classified **graph-backed-PENDING** (§3) — it stays `TypeExpr`.
 
 ## Closure criterion
 
