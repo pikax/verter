@@ -32,6 +32,7 @@
 
 use std::sync::Arc;
 
+use static_assertions::assert_not_impl_any;
 use verter_semantic::analysis::Hash16;
 
 // Re-export the solver's primitive enum so semantic nodes and the type
@@ -153,6 +154,14 @@ impl HotTypeRef {
         self.0
     }
 }
+
+// R6 / handle non-keyability — compiler-enforced, any-file, any-aliasing.
+// `HotTypeRef` is a generation-local arena ordinal and MUST NEVER be a cache
+// key: it must implement neither `Hash` nor a total/partial order, by derive
+// OR by a hand-written impl ANYWHERE in the crate. `assert_not_impl_any!`
+// fails to COMPILE if any such impl exists — strictly stronger than a
+// source-text scan (it cannot be evaded by file location or import aliasing).
+assert_not_impl_any!(HotTypeRef: std::hash::Hash, std::cmp::Ord, std::cmp::PartialOrd);
 
 /// Canonicalize a node-id sequence into a true SET: sorted ascending and
 /// deduplicated. The content-free node-set cache-key axes

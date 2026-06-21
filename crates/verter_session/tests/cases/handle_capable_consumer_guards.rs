@@ -974,147 +974,217 @@ fn structural_carrier_producer_guards_remain_registered() {
 // carriers must own NO transitive `TypeExpr`; the `HotTypeRef` handle must
 // stay non-keyable (R6, no `Hash`/`Ord`). These pin the GREEN additive
 // carrier sub-step (the producer flip / reader migration / clone-path
-// deletion are a later session). Both guards are `syn`/string source scans
-// with paired self-tests proving they discriminate.
+// deletion are a later session). The carrier-field guard is an ALLOWLIST (an
+// unrecognized field type REDS — closing the future-owner + alias-launder
+// evasion BY CONSTRUCTION); the `HotTypeRef` non-keyability is enforced by the
+// compiler `assert_not_impl_any!` next to the struct (see semantic_query.rs)
+// plus the derive-vector guard in architecture_guards.rs. The allowlist guard
+// is a `syn` source scan with a paired self-test proving it discriminates.
 // ===========================================================================
 
-/// The BARE typed-IR identifiers that may NOT appear as a field-type path
-/// SEGMENT in any hot carrier type. Each is matched as a WHOLE path segment,
-/// so the `Hot*`-prefixed analogs (`HotTypeParamDecl` / `HotFunctionSignature`
-/// / `HotEnumMemberValue` / `HotPreparedMember` / …) are NOT matched — only
-/// the bare lower-crate name is banned. A hot carrier that re-grew a
-/// `TypeExpr` body (or any `Prepared*` / `ObjectExpr` / `ObjectMember` /
-/// `ObjectProperty` / `MethodSignature` / `IndexSignature` / `FunctionExpr` /
-/// `FunctionParam` / `TypeDeclBody` transitive owner) would carry one of these
-/// as a segment.
+/// Type-constructor identifiers that MAY appear as a CONTAINER in a hot
+/// carrier field type — the guard recurses into their generic arguments and
+/// requires every contained type to itself be allowlisted (a container is
+/// transparent: `Option<HotTypeRef>` is allowed because `HotTypeRef` is an
+/// allowed leaf; `Option<TypeExpr>` REDS because `TypeExpr` is not). For a map
+/// (`FxHashMap` / `HashMap` / `BTreeMap`) BOTH the key and the value recurse.
+/// Tuples `(...)` and slices `[T]` are container SHAPES handled directly by the
+/// recursive walker (they are not path segments), so they are not listed here.
+const ALLOWED_CONTAINER_SEGMENTS: &[&str] = &[
+    "Option",
+    "Vec",
+    "Arc",
+    "Box",
+    "FxHashMap",
+    "HashMap",
+    "BTreeMap",
+];
+
+/// The explicitly-allowlisted LEAF type identifiers — every hot carrier field
+/// must, after peeling allowed containers/tuples/slices, bottom out in one of
+/// these (OR in `HotTypeRef`, OR in any `Hot*`-prefixed nested carrier, which
+/// are recognized structurally, NOT by this list). Any OTHER leaf identifier
+/// (a future `TypeExpr`-owner, a `use … as` alias, an un-audited new type)
+/// REDS — that is the whole point of an allowlist over a denylist.
 ///
-/// This set is the COMPLETE roster of every lower-crate type that transitively
-/// owns a `TypeExpr` and could plausibly be named in a hot field — not a
-/// hand-picked subset. The original roster missed the `verter_type_expr`
-/// object/function owner types (`FunctionParam`, `FunctionExpr`,
-/// `IndexSignature`, `MethodSignature`, `ObjectProperty`, `ObjectMember`),
-/// which is exactly how the `HotFunctionParam.ty` storage hole (a real
-/// `verter_type_expr::FunctionParam.ty: TypeExpr`) slipped past the guard.
-const BANNED_TYPED_IR_SEGMENTS: &[&str] = &[
-    // Root typed-IR + lowering shapes.
-    "TypeExpr",
-    "ObjectExpr",
-    "ObjectMember",
-    "ObjectProperty",
-    "IndexSignature",
-    "MethodSignature",
-    "FunctionExpr",
-    "FunctionParam",
-    "TypeParam",
-    "TypeDeclBody",
-    "FunctionSignature",
-    "EnumMemberValue",
-    // Prepared-decl shapes that own a `TypeExpr` (or own one transitively).
-    "PreparedTypeDecl",
-    "PreparedValueDecl",
-    "PreparedMember",
-    "PreparedValueMember",
-    "PreparedWrapperShape",
-    "PreparedKeyFilterShape",
-    "PreparedKeyRemapShape",
-    "PreparedValueRuleShape",
-    "PreparedProjectionClass",
-    "PreparedForwardPayload",
+/// The non-`Hot`/non-primitive entries are each AUDITED to own NO `TypeExpr`:
+/// they are the scalar facts the carriers reuse verbatim from the lower crate
+/// (`Span`, the decl-kind/provenance/cache/dep/visibility/span discriminants,
+/// and the prepared wrapper/projection scalar discriminant enums). Adding a
+/// new leaf here is a DELIBERATE edit requiring a one-line justification that
+/// the type owns no `TypeExpr` — that forced review is the allowlist's value.
+const ALLOWED_LEAF_SEGMENTS: &[&str] = &[
+    // --- Primitive / std scalars ---
+    "str",
+    "String",
+    "bool",
+    "char",
+    "f32",
+    "f64",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "usize",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "isize",
+    // --- The handle (the whole point) ---
+    "HotTypeRef",
+    // --- Explicitly-allowlisted REUSED SCALAR types (each AUDITED to own no
+    //     `TypeExpr`) ---
+    "Span",                      // verter_span — a source byte range.
+    "ResolvedRootIdentity",      // a (canonical_id, whole_hash) identity pair.
+    "TypeDeclKind",              // a type-decl discriminant.
+    "ValueDeclKind",             // a value-decl discriminant.
+    "PreparedExternalDep",       // a cross-file dependency identity.
+    "DeclProvenance",            // a provenance discriminant.
+    "PreparedCacheDeps",         // a cache-dependency fact bundle.
+    "MemberVisibility",          // a member-visibility discriminant.
+    "MemberSpans",               // member source-span metadata.
+    "PreparedWrapperKind",       // a wrapper-kind discriminant.
+    "PreparedCaseTransformKind", // a case-transform discriminant.
+    "PreparedSurfaceModifiers",  // surface readonly/optional modifier flags.
+    "PreparedForwardingKind",    // a forwarding-kind discriminant.
 ];
 
-/// Known typed-IR OWNER-type name SUFFIXES — a path segment whose identifier
-/// ENDS WITH one of these is treated as a typed-IR owner even if the bare name
-/// is not literally in [`BANNED_TYPED_IR_SEGMENTS`]. This is the
-/// belt-and-suspenders arm: a re-exported/aliased variant such as
-/// `MyModuleFunctionParam` or `SomePreparedWrapperShape` that ends in a known
-/// owner name cannot launder a `TypeExpr` past the exact-match list. The
-/// handle-native analogs are immune because they are `Hot*`-PREFIXED, not
-/// owner-SUFFIXED (`HotTypeRef` / `HotFunctionSignature` end in `Ref` /
-/// `Signature`, never in a banned owner suffix — see the negative self-test).
-const KNOWN_TYPEEXPR_OWNER_SUFFIXES: &[&str] = &[
-    "TypeExpr",
-    "ObjectExpr",
-    "ObjectMember",
-    "ObjectProperty",
-    "IndexSignature",
-    "MethodSignature",
-    "FunctionExpr",
-    "FunctionParam",
-    "PreparedWrapperShape",
-    "PreparedKeyFilterShape",
-    "PreparedKeyRemapShape",
-    "PreparedValueRuleShape",
-    "PreparedForwardPayload",
-    "PreparedTypeDecl",
-    "PreparedValueDecl",
-];
-
-/// Whether a path-segment identifier ends in a known typed-IR owner suffix
-/// WITHOUT being a sanctioned handle-native (`Hot*`) analog. The `Hot*` prefix
-/// is the explicit allow-form: a `Hot`-prefixed name is a handle-native mirror
-/// by construction, so it is never an owner even if it textually contains an
-/// owner substring. (None of the real `Hot*` carriers end in a banned owner
-/// suffix anyway; the prefix guard is defensive.)
-fn segment_is_owner_suffix(ident: &str) -> Option<&'static str> {
-    if ident.starts_with("Hot") {
-        return None;
-    }
-    KNOWN_TYPEEXPR_OWNER_SUFFIXES
-        .iter()
-        .copied()
-        .find(|suffix| ident.ends_with(suffix) && ident.len() > suffix.len())
+/// Whether `ident` is a sanctioned hot-carrier leaf: the `HotTypeRef` handle
+/// OR any `Hot*`-PREFIXED nested carrier (`HotPreparedMember`,
+/// `HotTypeParamDecl`, `HotFunctionSignature`, `HotEnumMemberValue`,
+/// `HotPreparedWrapperShape`, `HotPreparedForwardPayload`, `HotProjectionClass`,
+/// `HotKeyFilterShape`, …). Nested `Hot*` carriers are allowed because the
+/// scan recurses into ALL hot carriers in the file, so the invariant is checked
+/// transitively — a `Hot*` carrier cannot smuggle a `TypeExpr` past the
+/// allowlist, because ITS fields are scanned too.
+fn is_hot_carrier_leaf(ident: &str) -> bool {
+    ident.starts_with("Hot")
 }
 
-/// Collect every banned BARE typed-IR identifier that appears as a path
-/// SEGMENT of any field type in any `struct`/`enum` item of the parsed
-/// source, every field whose type segment ENDS in a known typed-IR owner
-/// suffix, AND every local `type X = …;` alias whose aliased type names a
-/// banned segment (so a field cannot launder `TypeExpr` through a module-local
-/// alias). Returns `"<owner>: <segment>"` entries. The scan walks `syn::Type`
-/// path segments (so a banned name nested inside `Option<…>` / `Vec<…>` /
-/// `Arc<[…]>` / `FxHashMap<_, …>` / a tuple `(…, …)` generic argument is still
-/// caught), and matches a bare segment ONLY as a whole identifier —
-/// `HotTypeParamDecl` (segment `HotTypeParamDecl`) is never confused with the
-/// banned bare `TypeParam`.
-fn banned_typed_ir_field_segments(src: &str) -> Vec<String> {
-    use syn::visit::Visit;
+/// Whether `ident` is an explicitly-allowlisted TypeExpr-free leaf scalar.
+fn is_allowed_leaf_scalar(ident: &str) -> bool {
+    ALLOWED_LEAF_SEGMENTS.contains(&ident)
+}
 
-    let file = syn::parse_file(src).expect("parse hot_prepared.rs as a syn::File");
+/// Whether `ident` is an allowed transparent container (recurse into generics).
+fn is_allowed_container(ident: &str) -> bool {
+    ALLOWED_CONTAINER_SEGMENTS.contains(&ident)
+}
 
-    /// Walks a single field type, recording any banned segment it finds —
-    /// both exact-match bare banned identifiers and owner-suffix matches.
-    struct SegScan {
-        owner: String,
-        hits: Vec<String>,
-    }
-    impl<'ast> Visit<'ast> for SegScan {
-        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+/// The instruction appended to every allowlist violation message.
+const ALLOWLIST_FIX_HINT: &str = "use a `HotTypeRef` handle for any type body, OR — if this is a \
+     genuinely new TypeExpr-FREE scalar — add its exact name to `ALLOWED_LEAF_SEGMENTS` WITH a \
+     one-line justification that it owns no `TypeExpr`";
+
+/// Recursively walk a single field type, recording every LEAF path-segment
+/// identifier (and every CONTAINER) that is NOT on the allowlist. The walk is
+/// path-precise: only the LAST segment of a path is the type IDENTIFIER (so a
+/// fully-qualified `verter_span::Span` is judged on `Span`, never on the
+/// `verter_span` module qualifier). The walker recurses into:
+///
+/// - the LAST segment's generic arguments when that segment is an allowed
+///   CONTAINER (`Option<…>`, `Vec<…>`, `Arc<…>`, `Box<…>`, a map's K AND V);
+/// - tuple elements `(A, B)` (every element must be allowlisted);
+/// - slice / array element types `[T]` (as inside `Arc<[T]>`);
+/// - reference targets `&T`, `&mut T`, grouped/parenthesized types.
+///
+/// A leaf path segment (one that is neither a container nor any of the above
+/// shapes) MUST be `HotTypeRef`, a `Hot*` carrier, or an allowlisted scalar —
+/// otherwise it is recorded as `"<owner>: <ident> (not on the carrier-field \
+/// allowlist; …)"`. An UNRECOGNIZED container identifier (e.g. a hand-rolled
+/// wrapper type that is NOT one of the allowed containers) is ALSO recorded —
+/// the allowlist does not silently recurse through unknown containers.
+fn walk_field_type(owner: &str, ty: &syn::Type, hits: &mut Vec<String>) {
+    match ty {
+        syn::Type::Path(p) => {
+            // The type IDENTIFIER is the LAST path segment; leading segments
+            // are module qualifiers and are NOT judged.
+            let Some(seg) = p.path.segments.last() else {
+                return;
+            };
             let ident = seg.ident.to_string();
-            if BANNED_TYPED_IR_SEGMENTS.contains(&ident.as_str()) {
-                self.hits.push(format!("{}: {ident}", self.owner));
-            } else if let Some(suffix) = segment_is_owner_suffix(&ident) {
-                self.hits.push(format!(
-                    "{}: {ident} (ends in typed-IR owner suffix `{suffix}`)",
-                    self.owner
+            // Gather this segment's angle-bracketed generic argument types
+            // (e.g. the `T` in `Option<T>`, the `K`/`V` in `FxHashMap<K, V>`).
+            let generic_tys: Vec<&syn::Type> = match &seg.arguments {
+                syn::PathArguments::AngleBracketed(ab) => ab
+                    .args
+                    .iter()
+                    .filter_map(|a| match a {
+                        syn::GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+
+            if is_allowed_container(&ident) {
+                // Transparent container: recurse into EVERY generic argument
+                // (a map's K and V both recurse). The container itself owns no
+                // value identity, so it is allowed without being a leaf.
+                for g in generic_tys {
+                    walk_field_type(owner, g, hits);
+                }
+                return;
+            }
+
+            // A non-container path segment is a LEAF. It must be allowlisted.
+            let allowed = ident == "HotTypeRef"
+                || is_hot_carrier_leaf(&ident)
+                || is_allowed_leaf_scalar(&ident);
+            if !allowed {
+                hits.push(format!(
+                    "{owner}: {ident} (not on the carrier-field allowlist; {ALLOWLIST_FIX_HINT})"
                 ));
             }
-            // Descend into generic arguments (`Option<TypeExpr>`,
-            // `Arc<[HotTypeRef]>`, `FxHashMap<K, PreparedMember>`, a tuple
-            // `(HotTypeRef, MethodSignature)`, …).
-            syn::visit::visit_path_segment(self, seg);
+            // A leaf is not expected to carry generic arguments (the carriers
+            // bottom out in concrete scalars/handles), but if a future field
+            // wrote `SomeScalar<TypeExpr>` we still recurse so the inner
+            // `TypeExpr` is not hidden behind an un-allowlisted (already-RED)
+            // generic head.
+            for g in generic_tys {
+                walk_field_type(owner, g, hits);
+            }
+        }
+        syn::Type::Tuple(t) => {
+            // A tuple `(A, B, …)` — every element must be allowlisted.
+            for elem in &t.elems {
+                walk_field_type(owner, elem, hits);
+            }
+        }
+        syn::Type::Slice(s) => walk_field_type(owner, &s.elem, hits),
+        syn::Type::Array(a) => walk_field_type(owner, &a.elem, hits),
+        syn::Type::Reference(r) => walk_field_type(owner, &r.elem, hits),
+        syn::Type::Paren(p) => walk_field_type(owner, &p.elem, hits),
+        syn::Type::Group(g) => walk_field_type(owner, &g.elem, hits),
+        // Any OTHER `syn::Type` shape (a bare trait object, a fn pointer, an
+        // impl-trait, a macro type, …) is NOT a recognized hot-carrier field
+        // shape — record it so the allowlist does not silently pass it.
+        other => {
+            let rendered = quote_type(other);
+            hits.push(format!(
+                "{owner}: {rendered} (unrecognized field-type shape; not on the carrier-field \
+                 allowlist; {ALLOWLIST_FIX_HINT})"
+            ));
         }
     }
+}
 
-    /// Scan a single `syn::Type` (a field type, or an alias RHS) under `owner`.
-    fn scan_ty(owner: String, ty: &syn::Type) -> Vec<String> {
-        let mut scan = SegScan {
-            owner,
-            hits: Vec::new(),
-        };
-        scan.visit_type(ty);
-        scan.hits
-    }
+/// Render a `syn::Type` to its source-ish string for an error message.
+fn quote_type(ty: &syn::Type) -> String {
+    use quote::ToTokens;
+    ty.to_token_stream().to_string()
+}
 
+/// Walk every `struct`/`enum` field type (and every module-local `type X = …;`
+/// alias RHS) in the parsed source and collect every leaf / container that is
+/// NOT on the carrier-field allowlist. A `use … as` alias is closed BY
+/// CONSTRUCTION: the allowlist matches the field type's WRITTEN identifier, so
+/// `use verter_type_expr::TypeExpr as Body; … body: Body` REDS on the
+/// un-allowlisted `Body` leaf regardless of what it aliases (we do not — and
+/// need not — resolve the alias). Returns `"<owner>: <ident> (…)"` entries.
+fn non_allowlisted_field_types(src: &str) -> Vec<String> {
+    let file = syn::parse_file(src).expect("parse hot_prepared.rs as a syn::File");
     let mut hits = Vec::new();
     for item in &file.items {
         match item {
@@ -1126,7 +1196,7 @@ fn banned_typed_ir_field_segments(src: &str) -> Vec<String> {
                         .as_ref()
                         .map(|id| id.to_string())
                         .unwrap_or_else(|| format!("#{i}"));
-                    hits.extend(scan_ty(format!("{type_name}.{field_label}"), &field.ty));
+                    walk_field_type(&format!("{type_name}.{field_label}"), &field.ty, &mut hits);
                 }
             }
             syn::Item::Enum(e) => {
@@ -1138,17 +1208,22 @@ fn banned_typed_ir_field_segments(src: &str) -> Vec<String> {
                             .as_ref()
                             .map(|id| id.to_string())
                             .unwrap_or_else(|| format!("{}#{i}", variant.ident));
-                        hits.extend(scan_ty(format!("{type_name}::{field_label}"), &field.ty));
+                        walk_field_type(
+                            &format!("{type_name}::{field_label}"),
+                            &field.ty,
+                            &mut hits,
+                        );
                     }
                 }
             }
-            // TYPE-ALIAS arm: a module-local `type X = …;` whose RHS names a
-            // banned/owner-suffix segment would let a field launder a
-            // `TypeExpr` through the alias (`type Body = TypeExpr; … field:
-            // Body`). The bare alias NAME (`X`) is fine — its RHS is scanned.
+            // TYPE-ALIAS arm: a module-local `type X = …;` whose RHS names an
+            // un-allowlisted type would let a field launder a `TypeExpr`
+            // through the alias (`type Body = TypeExpr; … field: Body`). The
+            // alias RHS is scanned through the SAME allowlist; the bare alias
+            // NAME (`X`) is not a field, so it is not judged.
             syn::Item::Type(t) => {
                 let alias_name = t.ident.to_string();
-                hits.extend(scan_ty(format!("type {alias_name} ="), &t.ty));
+                walk_field_type(&format!("type {alias_name} ="), &t.ty, &mut hits);
             }
             _ => {}
         }
@@ -1172,301 +1247,166 @@ fn hot_prepared_carriers_own_no_typeexpr() {
             "hot_prepared.rs must define `{required}` — the guard cannot be vacuous"
         );
     }
+    // Anti-vacuity: the scan must actually FIND fields (so a parse that yields
+    // zero carrier fields cannot pass trivially). The real file has many.
+    let scanned_any = {
+        let file = syn::parse_file(&src).expect("parse hot_prepared.rs as a syn::File");
+        file.items.iter().any(|it| match it {
+            syn::Item::Struct(s) => !s.fields.is_empty(),
+            syn::Item::Enum(e) => e
+                .variants
+                .iter()
+                .any(|v| !matches!(v.fields, syn::Fields::Unit)),
+            _ => false,
+        })
+    };
+    assert!(
+        scanned_any,
+        "hot_prepared.rs must contain carrier fields for the allowlist scan to judge — anti-vacuity"
+    );
 
-    let hits = banned_typed_ir_field_segments(&src);
+    let hits = non_allowlisted_field_types(&src);
     assert!(
         hits.is_empty(),
-        "the session hot prepared-decl carriers must own NO transitive typed-IR type — a field \
-         type names a banned bare identifier as a path segment. Every type body must be a \
-         `HotTypeRef` handle or scalar metadata. Offending field types:\n{}",
+        "the session hot prepared-decl carriers must own NO transitive typed-IR type. The \
+         carrier-field guard is an ALLOWLIST: every field type, after peeling allowed containers \
+         (`Option`/`Vec`/`Arc`/`Box`/map/tuple/slice), must bottom out in a `HotTypeRef` handle, a \
+         nested `Hot*` carrier, or an explicitly-allowlisted TypeExpr-free scalar. The following \
+         field types are NOT on the allowlist — each must {ALLOWLIST_FIX_HINT}:\n{}",
         hits.join("\n")
     );
 }
 
 #[test]
 fn hot_prepared_carriers_own_no_typeexpr_self_test_discriminates() {
-    // POSITIVE: a synthetic carrier with a `body: TypeExpr` field (and a
-    // banned name buried in a generic argument, and a banned enum-variant
-    // payload) MUST be detected.
+    // POSITIVE: every TypeExpr-owner form the allowlist must REJECT. The
+    // allowlist closes the arms-race — a NEW TypeExpr-owner that the old
+    // ENUMERATED denylist never listed (`ValueRef`, `TupleElement`,
+    // `RecursiveConditionalFrame`, `MergedTypeBody`), a `use … as` alias
+    // launder, and the previously-covered `TypeExpr` / `FunctionParam` /
+    // `FunctionExpr` owners must ALL RED because none is on the allowlist.
     let planted = "\
 struct HotBad {
     body: TypeExpr,
-    members: std::collections::HashMap<String, PreparedMember>,
-    params: Vec<TypeParam>,
+    value_ref: ValueRef,
+    tuple: TupleElement,
+    frame: RecursiveConditionalFrame,
+    merged: MergedTypeBody,
+    params: Vec<FunctionParam>,
+    maybe: Option<FunctionExpr>,
+    nested: std::sync::Arc<[TupleElement]>,
+    map: FxHashMap<std::sync::Arc<str>, MergedTypeBody>,
+}
+type Body = TypeExpr;
+struct HotLaunder {
+    body: Body,
 }
 enum HotBadEnum {
-    Folded(EnumMemberValue),
+    Folded(ValueRef),
 }
 ";
-    let planted_hits = banned_typed_ir_field_segments(planted);
+    let hits = non_allowlisted_field_types(planted);
+    for (owner_field, offender) in [
+        ("HotBad.body", "TypeExpr"),
+        ("HotBad.value_ref", "ValueRef"),
+        ("HotBad.tuple", "TupleElement"),
+        ("HotBad.frame", "RecursiveConditionalFrame"),
+        ("HotBad.merged", "MergedTypeBody"),
+        ("HotBad.params", "FunctionParam"),
+        ("HotBad.maybe", "FunctionExpr"),
+        ("HotBad.nested", "TupleElement"),
+        ("HotBad.map", "MergedTypeBody"),
+        ("HotLaunder.body", "Body"),
+        ("HotBadEnum::Folded#0", "ValueRef"),
+    ] {
+        assert!(
+            hits.iter()
+                .any(|h| h.starts_with(&format!("{owner_field}: {offender} "))),
+            "self-test: the allowlist MUST RED `{owner_field}: {offender}` (a future/aliased \
+             TypeExpr-owner the old denylist never enumerated) — that was the review gap; got \
+             {hits:?}"
+        );
+    }
+    // The alias-launder `type Body = TypeExpr;` RHS must ALSO be caught (a
+    // field laundering through it reds on the un-allowlisted `Body`, and the
+    // alias RHS itself reds on `TypeExpr`).
     assert!(
-        planted_hits.iter().any(|h| h.contains("TypeExpr")),
-        "self-test: a planted `body: TypeExpr` field MUST be detected; got {planted_hits:?}"
-    );
-    assert!(
-        planted_hits.iter().any(|h| h.contains("PreparedMember")),
-        "self-test: a banned name buried in a generic argument MUST be detected; got {planted_hits:?}"
-    );
-    assert!(
-        planted_hits.iter().any(|h| h.contains("TypeParam")),
-        "self-test: a `Vec<TypeParam>` field MUST be detected; got {planted_hits:?}"
-    );
-    assert!(
-        planted_hits.iter().any(|h| h.contains("EnumMemberValue")),
-        "self-test: a banned enum-variant payload MUST be detected; got {planted_hits:?}"
-    );
-
-    // POSITIVE (strengthened): the FOUR new evasion forms the original list
-    // missed — the exact class that let the `FunctionParam.ty: TypeExpr`
-    // storage hole through. A FULLY-QUALIFIED `verter_type_expr::FunctionParam`,
-    // a `Vec<FunctionExpr>`, a TUPLE field `(HotTypeRef, MethodSignature)`, and
-    // a module-local `type Foo = TypeExpr;` alias field MUST all be caught.
-    let planted_owners = "\
-struct HotBadOwners {
-    fq_param: verter_type_expr::FunctionParam,
-    exprs: Vec<FunctionExpr>,
-    tup: (HotTypeRef, verter_type_expr::MethodSignature),
-    idx: Option<IndexSignature>,
-}
-type Foo = TypeExpr;
-struct HotLaunders {
-    body: Foo,
-}
-";
-    let owner_hits = banned_typed_ir_field_segments(planted_owners);
-    assert!(
-        owner_hits
-            .iter()
-            .any(|h| h.contains("fq_param") && h.contains("FunctionParam")),
-        "self-test: a fully-qualified `verter_type_expr::FunctionParam` field MUST be detected \
-         (the closed [P0] storage-hole class); got {owner_hits:?}"
-    );
-    assert!(
-        owner_hits
-            .iter()
-            .any(|h| h.contains("exprs") && h.contains("FunctionExpr")),
-        "self-test: a `Vec<FunctionExpr>` field MUST be detected; got {owner_hits:?}"
-    );
-    assert!(
-        owner_hits
-            .iter()
-            .any(|h| h.contains("tup") && h.contains("MethodSignature")),
-        "self-test: a tuple field `(HotTypeRef, MethodSignature)` MUST be detected; got {owner_hits:?}"
-    );
-    assert!(
-        owner_hits
-            .iter()
-            .any(|h| h.contains("idx") && h.contains("IndexSignature")),
-        "self-test: an `Option<IndexSignature>` field MUST be detected; got {owner_hits:?}"
-    );
-    assert!(
-        owner_hits
-            .iter()
-            .any(|h| h.contains("type Foo") && h.contains("TypeExpr")),
-        "self-test: a local `type Foo = TypeExpr;` alias (a field could launder TypeExpr through \
-         it) MUST be detected on the alias RHS; got {owner_hits:?}"
+        hits.iter().any(|h| h.starts_with("type Body =: TypeExpr ")),
+        "self-test: the `type Body = TypeExpr;` alias RHS MUST be caught by the allowlist scan; \
+         got {hits:?}"
     );
 
-    // POSITIVE (owner SUFFIX): a re-exported/aliased owner-suffixed name
-    // (`MyFunctionParam`, `SomePreparedWrapperShape`) that is NOT literally in
-    // the exact-match list MUST still be caught by the suffix arm.
-    let planted_suffix = "\
-struct HotBadSuffix {
-    aliased: MyFunctionParam,
-    wrapped: SomePreparedWrapperShape,
-}
-";
-    let suffix_hits = banned_typed_ir_field_segments(planted_suffix);
-    assert!(
-        suffix_hits
-            .iter()
-            .any(|h| h.contains("aliased") && h.contains("owner suffix")),
-        "self-test: an owner-suffixed `MyFunctionParam` field MUST be caught by the suffix arm; \
-         got {suffix_hits:?}"
-    );
-    assert!(
-        suffix_hits
-            .iter()
-            .any(|h| h.contains("wrapped") && h.contains("owner suffix")),
-        "self-test: an owner-suffixed `SomePreparedWrapperShape` field MUST be caught by the \
-         suffix arm; got {suffix_hits:?}"
-    );
-
-    // NEGATIVE: the handle-native analogs MUST pass — `HotTypeRef`,
-    // `HotTypeParamDecl`, `HotFunctionSignature`, `HotEnumMemberValue`,
-    // `HotPreparedForwardPayload`, `HotKeyFilterShape` are NOT the banned bare
-    // names, are `Hot*`-PREFIXED (so the owner-suffix arm skips them), and
-    // scalar metadata + the reused scalar enums are fine.
+    // NEGATIVE: the REAL handle-native shapes + the allowlisted scalar set +
+    // nested `Hot*` carriers + `Arc<[HotTypeRef]>` + `FxHashMap<Arc<str>,
+    // HotPreparedMember>` MUST all PASS — they are the only thing a faithful
+    // carrier writes, and the allowlist is not over-strict.
     let good = "\
 struct HotGood {
+    name: std::sync::Arc<str>,
     semantic_body: HotTypeRef,
+    constraint: Option<HotTypeRef>,
     type_parameters: std::sync::Arc<[HotTypeParamDecl]>,
     signatures: std::sync::Arc<[HotFunctionSignature]>,
-    classifier_filter: HotKeyFilterShape,
+    member_index: FxHashMap<std::sync::Arc<str>, HotPreparedMember>,
+    enum_members: Option<Vec<(std::sync::Arc<str>, HotEnumMemberValue)>>,
+    handles: std::sync::Arc<[HotTypeRef]>,
+    classifier: HotPreparedClassifierMeta,
     forward: HotPreparedForwardPayload,
+    optional: bool,
+    source_param_index: Option<u16>,
+    root_identity: ResolvedRootIdentity,
+    kind: TypeDeclKind,
+    value_kind: ValueDeclKind,
+    external_deps: Vec<PreparedExternalDep>,
+    provenance: DeclProvenance,
+    cache_deps: PreparedCacheDeps,
+    name_resolution: FxHashMap<String, ResolvedRootIdentity>,
     wrapper_kind: PreparedWrapperKind,
     case_kind: PreparedCaseTransformKind,
     forwarding: PreparedForwardingKind,
     modifiers: PreparedSurfaceModifiers,
     visibility: verter_type_expr::MemberVisibility,
-    origin: std::sync::Arc<str>,
+    spans: verter_type_expr::MemberSpans,
+    span: Option<verter_span::Span>,
+    exported_name: Option<String>,
+    is_method: bool,
 }
 enum HotGoodEnum {
     Folded(HotTypeRef),
+    Deferred(HotTypeRef),
     CaseTransform(PreparedCaseTransformKind),
+    All,
 }
 ";
-    let good_hits = banned_typed_ir_field_segments(good);
+    let good_hits = non_allowlisted_field_types(good);
     assert!(
         good_hits.is_empty(),
-        "self-test: the handle-native analogs (HotTypeRef / HotTypeParamDecl / \
-         HotFunctionSignature / HotKeyFilterShape / HotPreparedForwardPayload), the REUSED scalar \
-         enums (PreparedWrapperKind / PreparedCaseTransformKind / PreparedForwardingKind / \
-         PreparedSurfaceModifiers — none own a TypeExpr), and scalar metadata MUST NOT trip the \
-         ban; got {good_hits:?}"
+        "self-test: the faithful handle-native shapes (HotTypeRef handles, nested Hot* carriers, \
+         Arc<[HotTypeRef]>, FxHashMap<Arc<str>, HotPreparedMember>, tuples of allowed leaves), the \
+         primitive scalars, and the explicitly-allowlisted TypeExpr-free scalar set MUST all PASS \
+         the allowlist — it must not be over-strict; got {good_hits:?}"
     );
 }
 
-// NOTE on the HotTypeRef DERIVE-vector R6 check: it is already covered
-// ROBUSTLY by `hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived` in
-// `tests/cases/architecture_guards.rs`, which extracts the FULL stacked-derive
-// vector via the shared `carrier_struct_derive_list` helper (unioning EVERY
-// `#[derive(...)]` line above the struct — a strictly more robust extractor
-// than a single line-walk) and rejects `Hash`/`Ord` whole-tokens. Duplicating
-// the derive-vector check here would be redundant, so this file ADDS ONLY the
-// coverage that guard does NOT have: the MANUAL-impl scan below. A hand-written
-// `impl Hash for HotTypeRef` / `impl Ord for HotTypeRef` / `impl PartialOrd for
-// HotTypeRef` would make the handle keyable WITHOUT touching the derive list,
-// bypassing the derive-vector guard entirely — both codex review legs flagged
-// this gap. The scan syn-parses `semantic_query.rs` and rejects any such impl.
-
-/// Collect every hand-written `impl … Hash/Ord/PartialOrd … for HotTypeRef`
-/// in `src` (a parsed Rust file). Returns one `"impl <Trait> for HotTypeRef"`
-/// entry per offending impl. A derived impl is an ATTRIBUTE (`#[derive(...)]`),
-/// never an `impl` item, so this scan sees ONLY manual impls — the coverage the
-/// derive-vector guard cannot reach. The trait path's LAST segment is matched
-/// whole (`Hash` / `Ord` / `PartialOrd`), so `std::hash::Hash`,
-/// `core::hash::Hash`, and a bare `Hash` are all caught, while an unrelated
-/// trait whose name merely contains the substring is not.
-fn manual_hash_or_ord_impls_for_hottyperef(src: &str) -> Vec<String> {
-    let file = syn::parse_file(src).expect("parse semantic_query.rs as a syn::File");
-
-    /// The self type of `impl ... for T` is `HotTypeRef` (last path segment).
-    fn self_ty_is_hottyperef(ty: &syn::Type) -> bool {
-        matches!(ty, syn::Type::Path(p)
-            if p.path.segments.last().map(|s| s.ident == "HotTypeRef").unwrap_or(false))
-    }
-
-    let mut hits = Vec::new();
-    for item in &file.items {
-        let syn::Item::Impl(imp) = item else {
-            continue;
-        };
-        // Only trait impls (`impl Trait for T`) — an inherent `impl HotTypeRef`
-        // (the `new`/`node` accessors) is fine.
-        let Some((_, trait_path, _)) = &imp.trait_ else {
-            continue;
-        };
-        if !self_ty_is_hottyperef(&imp.self_ty) {
-            continue;
-        }
-        let last = match trait_path.segments.last() {
-            Some(seg) => seg.ident.to_string(),
-            None => continue,
-        };
-        // `Ord` / `PartialOrd` are both a total-/partial-order keyability rail;
-        // `Hash` is the hashing rail. Any of the three on `HotTypeRef` makes it
-        // map-keyable, which R6 forbids for a content/version-bearing ordinal.
-        if matches!(last.as_str(), "Hash" | "Ord" | "PartialOrd") {
-            hits.push(format!("impl {last} for HotTypeRef"));
-        }
-    }
-    hits
-}
-
-#[test]
-fn hot_typeref_has_no_manual_hash_or_ord_impl() {
-    let src = read_rel("src/semantic_query.rs");
-    // Anti-vacuity: the real `struct HotTypeRef` and its inherent impl exist,
-    // so this guard is scanning the right file (a moved/renamed handle would
-    // make the floor below fail).
-    assert!(
-        src.contains("struct HotTypeRef("),
-        "semantic_query.rs must define `struct HotTypeRef(` — the guard cannot be vacuous"
-    );
-    assert!(
-        src.contains("impl HotTypeRef"),
-        "semantic_query.rs must define the inherent `impl HotTypeRef` (new/node) — anti-vacuity"
-    );
-
-    let hits = manual_hash_or_ord_impls_for_hottyperef(&src);
-    assert!(
-        hits.is_empty(),
-        "R6: `HotTypeRef` must NOT have a hand-written `impl Hash`/`impl Ord`/`impl PartialOrd` — \
-         a manual impl would make the content/version-bearing arena ordinal map-keyable WITHOUT a \
-         `#[derive(Hash/Ord)]` (bypassing the derive-vector guard). Found:\n{}",
-        hits.join("\n")
-    );
-}
-
-#[test]
-fn hot_typeref_has_no_manual_hash_or_ord_impl_self_test_discriminates() {
-    // POSITIVE: every manual-impl form MUST be detected — bare `Hash`, the
-    // fully-qualified `std::hash::Hash` / `core::hash::Hash`, `Ord`, and
-    // `PartialOrd` (a partial-order rail is still keyable into a BTreeMap-style
-    // structure via the total-order it implies on a finite domain).
-    for (planted, needle) in [
-        (
-            "impl Hash for HotTypeRef { fn hash<H>(&self, _: &mut H) {} }",
-            "impl Hash for HotTypeRef",
-        ),
-        (
-            "impl std::hash::Hash for HotTypeRef { fn hash<H>(&self, _: &mut H) {} }",
-            "impl Hash for HotTypeRef",
-        ),
-        (
-            "impl core::hash::Hash for HotTypeRef { fn hash<H>(&self, _: &mut H) {} }",
-            "impl Hash for HotTypeRef",
-        ),
-        (
-            "impl Ord for HotTypeRef { fn cmp(&self, _: &Self) -> std::cmp::Ordering { todo!() } }",
-            "impl Ord for HotTypeRef",
-        ),
-        (
-            "impl PartialOrd for HotTypeRef { fn partial_cmp(&self, _: &Self) -> Option<std::cmp::Ordering> { None } }",
-            "impl PartialOrd for HotTypeRef",
-        ),
-    ] {
-        let hits = manual_hash_or_ord_impls_for_hottyperef(planted);
-        assert!(
-            hits.iter().any(|h| h == needle),
-            "self-test: a planted `{needle}` MUST be detected; got {hits:?}"
-        );
-    }
-
-    // NEGATIVE: the sanctioned inherent impl and unrelated trait impls MUST
-    // pass — an `impl HotTypeRef` (no trait), an `impl PartialEq for HotTypeRef`
-    // (equality is fine; it is the keying traits that are banned), and a
-    // Hash/Ord impl for a DIFFERENT type MUST NOT trip.
-    let good = "\
-impl HotTypeRef {
-    pub fn new(node: SemanticNodeId) -> Self { Self(node) }
-    pub fn node(self) -> SemanticNodeId { self.0 }
-}
-impl PartialEq for HotTypeRef {
-    fn eq(&self, other: &Self) -> bool { self.0 == other.0 }
-}
-impl Hash for SomeOtherType {
-    fn hash<H>(&self, _: &mut H) {}
-}
-";
-    let good_hits = manual_hash_or_ord_impls_for_hottyperef(good);
-    assert!(
-        good_hits.is_empty(),
-        "self-test: the inherent `impl HotTypeRef`, an `impl PartialEq for HotTypeRef`, and a \
-         `Hash` impl for a DIFFERENT type MUST NOT trip the manual-impl ban; got {good_hits:?}"
-    );
-}
+// NOTE on the HotTypeRef R6 non-keyability check. It is enforced by TWO rails,
+// neither of which is a source-text scan in THIS file:
+//
+//   (1) the DERIVE vector — `hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived`
+//       in `tests/cases/architecture_guards.rs`, which extracts the FULL
+//       stacked-derive vector via the shared `carrier_struct_derive_list`
+//       helper (unioning EVERY `#[derive(...)]` line above the struct) and
+//       rejects `Hash`/`Ord` whole-tokens; and
+//   (2) any IMPL form — a COMPILER assertion next to the struct in production
+//       source: `assert_not_impl_any!(HotTypeRef: std::hash::Hash, std::cmp::Ord,
+//       std::cmp::PartialOrd);` in `semantic_query.rs`. It fails to COMPILE if
+//       `HotTypeRef` ever implements any of those traits — by derive OR by a
+//       hand-written `impl` ANYWHERE in the crate, under ANY import aliasing.
+//
+// The compiler assertion strictly SUPERSEDES a source-text manual-impl scanner
+// (a scan can only see one file and is evadable by file location or import
+// aliasing). `assert_not_impl_any!` closes the hand-written-`impl` gap
+// structurally — any-file, any-alias — so no source scan is duplicated in this
+// file.
 
 #[test]
 fn verter_semantic_has_no_session_dep_is_confirmed_present() {

@@ -16,12 +16,22 @@
 //! `TypeDeclBody` / `FunctionSignature` / enum-member-value / prepared-decl /
 //! prepared-member / prepared-wrapper-shape / prepared-projection /
 //! prepared-forward-payload owner of one).
-//! Every type body is a [`HotTypeRef`] or scalar metadata. The structural
-//! guard `hot_prepared_carriers_own_no_typeexpr`
-//! (`tests/cases/handle_capable_consumer_guards.rs`) enforces this by parsing
-//! this file with `syn` and rejecting any banned typed-IR identifier as a
-//! field-type path segment, any field whose type segment ends in a known
-//! typed-IR owner, and any local type alias that launders a typed-IR type.
+//! Every type body is a [`HotTypeRef`] or scalar metadata. The invariant is
+//! enforced STRUCTURALLY — not by an enumerated denylist of banned owners — by
+//! two rails:
+//! (a) the ALLOWLIST guard `hot_prepared_carriers_own_no_typeexpr`
+//! (`tests/cases/handle_capable_consumer_guards.rs`) parses this file with
+//! `syn`, walks every carrier field's type tree, and asserts each leaf bottoms
+//! out in an ALLOWED constructor — a [`HotTypeRef`] handle, an allowed
+//! container (`Option`/`Vec`/`Arc`/`Box`/map/tuple/slice) thereof, a nested
+//! `Hot*` carrier, or an explicitly-allowlisted TypeExpr-free scalar. Any
+//! UNRECOGNIZED type (a future `TypeExpr`-owner, a `use … as` alias) REDS by
+//! construction — nothing unrecognized passes; and
+//! (b) the compiler `assert_not_impl_any!` next to [`HotTypeRef`] keeps the
+//! handle non-keyable (R6: no `Hash`/`Ord`/`PartialOrd`).
+//! The fully compiler-enforced `NoTypeExpr` marker trait is the planned durable
+//! end-state for this invariant; it is not in place yet — the allowlist plus
+//! the compiler assert are the sound interim.
 //!
 //! These carriers are a FAITHFUL handle-native mirror of the lower-crate
 //! shapes: every scalar field present on the lower-crate `Prepared*` shape is
