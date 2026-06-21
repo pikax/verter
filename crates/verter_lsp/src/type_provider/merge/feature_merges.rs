@@ -14,7 +14,7 @@ use crate::type_provider::protocol::{
 
 use super::definition::{
     is_carrier_api_path, is_carrier_ide_path, normalize_carrier_path, path_to_uri,
-    resolve_carrier_tsx_range, resolve_external_target_range,
+    resolve_carrier_ide_range_strict, resolve_carrier_tsx_range, resolve_external_target_range,
 };
 use super::position::{
     api_surface_range_to_carrier_range, tsx_range_to_carrier_range, ApiSurfaceResolution,
@@ -441,11 +441,6 @@ pub fn merge_code_actions(
     negotiated_encoding: PositionEncodingKind,
     source_reader: ExternalSourceReader<'_>,
 ) -> Vec<CodeActionOrCommand> {
-    // Compare provider edit paths against the current TSX path through the single
-    // canonical path owner — never a raw `==`, which treats the same file spelled
-    // differently (backslashes vs forward slashes, drive-letter case, `\\?\`
-    // extended prefix) as a foreign target and false-drops the same-file edit.
-    let current_tsx_canonical = verter_span::path::canonicalize_path_cow(current_tsx_path);
     type_actions
         .into_iter()
         .filter_map(|action| {
@@ -460,30 +455,20 @@ pub fn merge_code_actions(
                 let edit_path = edit_path.as_ref();
 
                 if is_carrier_ide_path(edit_path) {
-                    // Map the carrier-IDE offsets through the correct sourcemap, split by identity:
-                    // the CURRENT request's TSX uses the in-context mapper; a FOREIGN carrier `.tsx`
-                    // requires its own context via the external resolver and is DROPPED on a
-                    // miss/failure — never mapped through the current mapper.
-                    let mapped = if edit_path == current_tsx_canonical.as_ref() {
-                        tsx_range_to_carrier_range(
-                            edit.start,
-                            edit.end,
-                            tsx_line_index,
-                            mapper,
-                            carrier_line_index,
-                        )
-                    } else {
-                        external_resolver.and_then(|resolver| {
-                            let ctx = resolver(edit_path)?;
-                            tsx_range_to_carrier_range(
-                                edit.start,
-                                edit.end,
-                                &ctx.tsx_line_index,
-                                &ctx.mapper,
-                                &ctx.carrier_line_index,
-                            )
-                        })
-                    };
+                    // Map the carrier-IDE offsets through the single shared strict mapper, split by
+                    // canonical identity: the CURRENT request's TSX uses the in-context mapper; a
+                    // FOREIGN carrier `.tsx` requires its own context via the external resolver and
+                    // is DROPPED on a miss/failure — never mapped through the current mapper.
+                    let mapped = resolve_carrier_ide_range_strict(
+                        edit_path,
+                        edit.start,
+                        edit.end,
+                        current_tsx_path,
+                        tsx_line_index,
+                        mapper,
+                        carrier_line_index,
+                        external_resolver,
+                    );
                     if let Some(range) = mapped {
                         let carrier_path =
                             normalize_carrier_path(edit_path, carrier_source_exists);

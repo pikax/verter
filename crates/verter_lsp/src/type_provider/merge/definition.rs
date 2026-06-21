@@ -30,7 +30,7 @@ use super::position::{
 /// The caller MUST then DROP the reference / rename edit — never substitute `Range::default()`,
 /// which silently sends "Find All References" to line 0 of the wrong file, or worse, writes a
 /// rename's new name at line 0 and CORRUPTS the target. This mirrors the definition path's
-/// [`resolve_definition_carrier_tsx_range`] fail-closed contract.
+/// [`resolve_carrier_ide_range_strict`] fail-closed contract.
 pub(crate) fn resolve_carrier_tsx_range(
     path: &str,
     start: u32,
@@ -110,15 +110,20 @@ pub(crate) fn resolve_external_target_range(
     })
 }
 
-/// Resolve a definition/type-definition carrier IDE (`{carrier}.tsx`/`.jsx`) target's byte
-/// offsets to a carrier-source [`Range`], FAIL-CLOSED.
+/// Resolve a carrier IDE (`{carrier}.tsx`/`.jsx`) target's byte offsets to a carrier-source
+/// [`Range`], FAIL-CLOSED. The single strict carrier-IDE mapper shared by every edit/navigation
+/// merge (definition, type-definition, references, rename, code actions).
 ///
 /// The provider's offsets index a generated IDE TSX file; mapping them back to the carrier
 /// source requires THAT file's own CodeTransform sourcemap, so the resolver is split by
 /// whether the target is the file currently being queried:
 ///
-/// - **Current provider file** (`path == current_tsx_path`): the in-context `mapper` / line
-///   indexes passed by the handler already describe this exact TSX, so map through them.
+/// - **Current provider file** (`path` is the SAME canonical file as `current_tsx_path`): the
+///   in-context `mapper` / line indexes passed by the handler already describe this exact TSX,
+///   so map through them. Identity is decided by the single canonical path owner
+///   ([`verter_span::path::canonicalize_path_cow`]) — never a raw `==`, which would treat the
+///   same file spelled differently (backslashes vs forward slashes, drive-letter case, a
+///   `\\?\` extended prefix) as foreign and false-drop a genuine same-file edit.
 /// - **Foreign carrier IDE file** (another component's generated file): only the external
 ///   resolver can supply the correct mapper. The current file's mapper describes a *different*
 ///   file, so reusing it would land on the wrong token — and the old `.unwrap_or_default()`
@@ -132,17 +137,14 @@ pub(crate) fn resolve_external_target_range(
 /// synthetic / prelude / unmapped region returns `None` (fail-closed preserved).
 ///
 /// Returns `None` whenever the correct sourcemap is unavailable (no/unknown external resolver)
-/// or the offsets do not map. The caller MUST drop the location — never substitute
-/// `Range::default()`, which silently sends the editor to line 0.
-///
-/// Scope: definition and type-definition only (both route through
-/// [`merge_definitions_with_barrel_resolver`]). References / rename / code actions handle their
-/// own packed positions separately and do not use this resolver.
+/// or the offsets do not map. The caller MUST drop the location/edit — never substitute
+/// `Range::default()`, which silently sends the editor to line 0, or for a rename WRITES the
+/// new name at line 0 of the wrong file and corrupts it.
 #[expect(
     clippy::too_many_arguments,
     reason = "current-file context (path + indexes + mapper) plus the foreign-file resolver"
 )]
-fn resolve_definition_carrier_tsx_range(
+pub(crate) fn resolve_carrier_ide_range_strict(
     path: &str,
     start: u32,
     end: u32,
@@ -152,7 +154,11 @@ fn resolve_definition_carrier_tsx_range(
     current_carrier_line_index: &LineIndex,
     external_resolver: Option<ExternalIdeResolver<'_>>,
 ) -> Option<Range> {
-    if path == current_tsx_path {
+    // Same-file identity via the single canonical path owner (backslash→slash, drive-letter
+    // case, `\\?\` extended prefix all folded) — NEVER a raw `==`.
+    if verter_span::path::canonicalize_path_cow(path)
+        == verter_span::path::canonicalize_path_cow(current_tsx_path)
+    {
         return tsx_range_to_carrier_range(
             start,
             end,
@@ -268,7 +274,7 @@ pub fn merge_definitions_with_barrel_resolver(
                 if is_carrier_ide_path(&loc.path) {
                     let uri =
                         path_to_uri(normalize_carrier_path(&loc.path, carrier_source_exists))?;
-                    let range = resolve_definition_carrier_tsx_range(
+                    let range = resolve_carrier_ide_range_strict(
                         &loc.path,
                         loc.start,
                         loc.end,
