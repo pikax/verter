@@ -816,6 +816,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Error(_) => handle.node(),
         }
     }
+
+    /// Resolve a named declaration's body to a hot graph handle by executing the
+    /// shared `Instantiate` query (which carries args/substitutions/projection
+    /// mode/resolve-env — the semantic axes a body-only cache lacks) and wrapping
+    /// the resulting node. Reuses the `SemanticGraphStore` `Instantiate` memo —
+    /// the single resolution engine — so no new store/cache is introduced. The
+    /// returned `HotTypeRef` is never lifted into a cache key (R6).
+    ///
+    /// `args` is the caller's explicit type arguments (empty for a bare
+    /// named-decl body demand with no explicit type arguments; non-empty when
+    /// instantiating `Foo<T>` or with active substitutions). `prc` is the
+    /// caller's exact projection-reduction context.
+    pub(crate) fn decl_body_hot_ref(
+        &self,
+        canonical: &str,
+        symbol: &str,
+        args: Arc<[SemanticNodeId]>,
+        prc: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::semantic_query::HotTypeRef> {
+        let slot = self.type_slot_for(Arc::from(canonical), Arc::from(symbol));
+        let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
+            base: slot,
+            args,
+            context: self.instantiate_context_for(canonical, prc),
+        });
+        crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
+        match read.value {
+            QueryResult::Value(id) | QueryResult::Recursive(id) => {
+                Some(crate::semantic_query::HotTypeRef::new(id))
+            }
+            QueryResult::Error(_) => None,
+        }
+    }
 }
 
 pub(super) fn empty_signature() -> DepSignature {
