@@ -822,6 +822,30 @@ fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
     position_to_offset_with_encoding(content, line, character, PositionEncoding::Utf16)
 }
 
+/// Convert an LSP 0-based `(line, character)` to a byte offset, returning `None` when the position
+/// is OUT OF RANGE for `content` instead of clamping it to EOF.
+///
+/// [`position_to_offset_with_encoding`] fails OPEN — a past-EOF line or a column past the line end
+/// clamps to `content.len()` / the line end and returns a valid-looking WRONG offset. That is
+/// acceptable for a navigation sentinel, but for an EDIT a clamped wrong offset corrupts the file,
+/// so the edit path validates the position is real and DROPS it otherwise. EDIT-PATH-LOCAL: does
+/// not change the shared codec. `character` is UTF-16 code units.
+fn position_to_offset_checked(content: &str, line: u32, character: u32) -> Option<u32> {
+    let idx = LineIndex::new(content, PositionEncoding::Utf16);
+    if line as usize >= idx.line_count() {
+        return None; // past-EOF line
+    }
+    // The line's UTF-16 width; a column past it would clamp.
+    let line_start = idx.line_start(line as usize)?;
+    let line_end = idx.line_end(line as usize)?; // before the newline / EOF
+    let line_text = content.get(line_start as usize..line_end as usize)?;
+    let line_utf16_len: u32 = line_text.encode_utf16().count() as u32;
+    if character > line_utf16_len {
+        return None; // column past the line end
+    }
+    idx.position_to_offset(crate::codec::LineColumn { line, character })
+}
+
 /// Parse an LSP Location JSON value into a `TypeLocation`, using content for offset resolution.
 ///
 /// Converts TSGO's `file://` URI to a filesystem path so downstream code
@@ -2724,11 +2748,16 @@ impl TypeProvider for TsgoTypeProvider {
                     let ec = end.get("character")?.as_u64()? as u32;
                     let new_text = edit.get("newText")?.as_str()?.to_string();
 
-                    let (start_offset, end_offset) = if let Some(ref c) = content_snapshot {
-                        (position_to_offset(c, sl, sc), position_to_offset(c, el, ec))
-                    } else {
-                        (pack_position(sl, sc), pack_position(el, ec))
-                    };
+                    // FAIL CLOSED: a completion `additionalTextEdit` (e.g. an auto-import insertion)
+                    // is a WRITE edit. On a cache miss DROP it (no `pack_position` line-0 sentinel),
+                    // and convert through the CHECKED converter so an out-of-range position drops
+                    // rather than clamping to EOF. An inverted span drops too.
+                    let c = content_snapshot.as_ref()?;
+                    let start_offset = position_to_offset_checked(c, sl, sc)?;
+                    let end_offset = position_to_offset_checked(c, el, ec)?;
+                    if start_offset > end_offset {
+                        return None;
+                    }
 
                     Some(ResolvedTextEdit {
                         start: start_offset,
@@ -2968,11 +2997,12 @@ fn parse_rename_edit<'a>(
     // the raw `file://` URI (which would split file identity vs the documents/VFS layer on
     // Windows). The same canonical path keys the per-target content lookup.
     let path = uri_to_file_path(uri);
-    // Resolve each rename edit's range against ITS OWN file content, with a per-target disk
-    // fallback for a cache miss — exactly like `parse_lsp_location` (references / definition). A
-    // cross-file rename target the queried session never opened would otherwise pack a line-0 edit
-    // that CORRUPTS the file.
-    let (start, end) = parse_range_to_offsets_with_disk_fallback(range, &path, content_for)?;
+    // Resolve each rename edit's range against ITS OWN file content, with a per-target disk fallback
+    // for a cache miss. FAIL CLOSED via the STRICT converter: a rename is a WRITE edit, so a total
+    // cache+disk miss or an out-of-range position DROPS the location (returns None) rather than
+    // packing a line-0 / clamped offset that CORRUPTS the file. The caller collects via push-if-Some,
+    // so a dropped location skips only that span.
+    let (start, end) = parse_range_to_offsets_strict_with_disk_fallback(range, &path, content_for)?;
     Some(RenameLocation { path, start, end })
 }
 
@@ -3084,10 +3114,11 @@ fn parse_text_edit_to_code_edit<'a>(
     let new_text = te.get("newText")?.as_str()?.to_string();
     // Canonical filesystem-path ID (see `parse_rename_edit`), not the raw URI; keys the content.
     let path = uri_to_file_path(uri);
-    // Per-target content with a disk fallback for a cache miss — same readback as references /
-    // definition (`parse_lsp_location`). A cross-file code-action edit target the session never
-    // opened would otherwise pack a line-0 edit against the WRONG file.
-    let (start, end) = parse_range_to_offsets_with_disk_fallback(range, &path, content_for)?;
+    // Per-target content with a disk fallback for a cache miss. FAIL CLOSED via the STRICT converter:
+    // a total cache+disk miss or an out-of-range position DROPS the edit (returns None) rather than
+    // packing a line-0 / clamped offset that the merge layer would apply at the WRONG location and
+    // corrupt the file. The caller collects via push-if-Some, so a dropped edit skips only itself.
+    let (start, end) = parse_range_to_offsets_strict_with_disk_fallback(range, &path, content_for)?;
     Some(TypeCodeEdit {
         path,
         start,
@@ -3233,6 +3264,46 @@ fn parse_range_to_offsets_with_disk_fallback<'a>(
         }
     };
     parse_range_to_offsets(range, content)
+}
+
+/// Like [`parse_range_to_offsets_with_disk_fallback`], but FAIL CLOSED for EDIT paths: resolves the
+/// target content (cache → disk) and, when content is unavailable, returns `None` (NO
+/// `pack_position` sentinel). With content present it converts through the CHECKED
+/// [`position_to_offset_checked`], so an out-of-range position DROPS instead of clamping to EOF, and
+/// an inverted `start > end` span drops too.
+///
+/// Edit-producing parsers (`parse_text_edit_to_code_edit`, `parse_rename_edit`) route through this
+/// so a total cache+disk miss or an out-of-range position never packs a line-0 / clamped offset that
+/// the merge layer would apply as a corrupting WRITE. Navigation-only callers keep the lenient
+/// `parse_range_to_offsets[_with_disk_fallback]` (a packed sentinel is a tolerable display miss).
+fn parse_range_to_offsets_strict_with_disk_fallback<'a>(
+    range: &serde_json::Value,
+    path: &str,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
+) -> Option<(u32, u32)> {
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let sl = start.get("line")?.as_u64()? as u32;
+    let sc = start.get("character")?.as_u64()? as u32;
+    let el = end.get("line")?.as_u64()? as u32;
+    let ec = end.get("character")?.as_u64()? as u32;
+
+    let disk_content;
+    let content = match content_for(path) {
+        Some(content) => Some(content),
+        None => {
+            disk_content = std::fs::read_to_string(path).ok();
+            disk_content.as_deref()
+        }
+    };
+    // FAIL CLOSED on a total content miss — never pack a line-0 offset for a WRITE edit.
+    let c = content?;
+    let s = position_to_offset_checked(c, sl, sc)?;
+    let e = position_to_offset_checked(c, el, ec)?;
+    if s > e {
+        return None;
+    }
+    Some((s, e))
 }
 
 /// Extract a string from a MarkupContent or plain string JSON value.
@@ -3735,7 +3806,12 @@ mod dto_path_canonicalization_tests {
     fn parse_rename_edit_stores_canonical_path_not_raw_uri() {
         // The DTO path must be the canonical filesystem ID, NEVER the raw URI.
         // Reverting `parse_rename_edit` to `path: uri.to_string()` fails this.
-        let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), &|_p| None).unwrap();
+        // Seed resolvable content keyed by the CANONICAL path so the (now fail-closed) rename
+        // location survives; the assertion under test is the canonical path, not the raw URI.
+        let content = "ab";
+        let content_for =
+            |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
+        let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), &content_for).unwrap();
         assert_eq!(loc.path, "d:/proj/App.vue");
         assert_ne!(loc.path, "file:///D:/proj/App.vue");
         assert!(!loc.path.starts_with("file://"));
@@ -3873,11 +3949,73 @@ mod dto_path_canonicalization_tests {
             },
             "newText": "x"
         });
+        // Seed resolvable content keyed by the CANONICAL path so the (now fail-closed) edit survives;
+        // the assertion under test is that the stored path is canonical, not the raw `file://` URI.
+        let content = "ab";
+        let content_for =
+            |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
         let edit =
-            parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, &|_p| None).unwrap();
+            parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, &content_for).unwrap();
         assert_eq!(edit.path, "d:/proj/App.vue");
         assert_ne!(edit.path, "file:///D:/proj/App.vue");
         assert!(!edit.path.starts_with("file://"));
+    }
+
+    /// A code-action text edit whose target is absent from the cache AND unreadable on disk must be
+    /// DROPPED (returns `None`) — never pack a line-0 offset. Discriminating: the pre-fix path
+    /// wrapped `pack_position` in `Some`, so `?` did NOT drop it and the edit survived at a packed
+    /// offset that corrupts the WRONG file.
+    #[test]
+    fn parse_text_edit_to_code_edit_drops_when_content_unavailable() {
+        let te = serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            },
+            "newText": "x"
+        });
+        // Cache miss for everything; the canonical path `d:/proj/gone.ts` does not exist on disk.
+        let edit = parse_text_edit_to_code_edit("file:///D:/proj/gone.ts", &te, &|_p| None);
+        assert!(
+            edit.is_none(),
+            "a code-action edit whose content is unavailable must be DROPPED (fail-closed), never \
+             packed: {edit:?}"
+        );
+    }
+
+    /// A rename edit whose target is absent from the cache AND unreadable on disk must be DROPPED —
+    /// a rename is a WRITE edit, so a packed line-0 offset corrupts the file. Same RED as the
+    /// code-edit twin.
+    #[test]
+    fn parse_rename_edit_drops_when_content_unavailable() {
+        let loc = parse_rename_edit("file:///D:/proj/gone.ts", &edit_json(), &|_p| None);
+        assert!(
+            loc.is_none(),
+            "a rename edit whose content is unavailable must be DROPPED (fail-closed), never \
+             packed: {loc:?}"
+        );
+    }
+
+    /// A code-action edit whose content IS available but whose position is OUT OF RANGE (past EOF)
+    /// is DROPPED, not clamped to a content-length offset — a clamped WRITE corrupts the file.
+    #[test]
+    fn parse_text_edit_to_code_edit_drops_out_of_range_position() {
+        let te = serde_json::json!({
+            "range": {
+                // Line 999 is far past the 1-line content → the codec would clamp to EOF.
+                "start": { "line": 999, "character": 0 },
+                "end": { "line": 999, "character": 3 }
+            },
+            "newText": "boom"
+        });
+        let content = "short";
+        let content_for =
+            |p: &str| -> Option<&str> { (p == "d:/proj/oob.ts").then_some(content) };
+        let edit = parse_text_edit_to_code_edit("file:///D:/proj/oob.ts", &te, &content_for);
+        assert!(
+            edit.is_none(),
+            "an out-of-range code-action edit must be DROPPED, never clamped to EOF: {edit:?}"
+        );
     }
 }
 
