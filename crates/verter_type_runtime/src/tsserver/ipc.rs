@@ -2473,9 +2473,12 @@ pub fn combined_code_fix_args(file: &str, fix_id: &str) -> serde_json::Value {
 /// Parse the `changes` array shared by `getCodeFixes` items and
 /// `getCombinedCodeFix` responses into byte-offset [`TypeCodeEdit`]s.
 ///
-/// When content is available in `contents_cache`, converts 1-based tsserver
-/// positions to byte offsets. Otherwise, falls back to the packed 0-based format.
-/// Propagates `None` on a malformed `textChanges` entry (fail-closed).
+/// Resolves each edit's 1-based tsserver position against ITS OWN target file's content: the
+/// in-memory `contents_cache` first, then the file's on-disk content as a per-target fallback (the
+/// same content resolution the rename/location paths use). FAIL CLOSED: when neither yields the
+/// target's content, the edit is DROPPED — a wrong-location edit corrupts the file, so unlike the
+/// rename/location paths the EDIT path emits no packed line:col sentinel. Propagates `None` on a
+/// malformed `textChanges` entry.
 fn parse_tsserver_file_code_edits(
     changes: &[serde_json::Value],
     contents_cache: &HashMap<String, String>,
@@ -2488,7 +2491,13 @@ fn parse_tsserver_file_code_edits(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default(),
         );
-        let content = contents_cache.get(&file);
+        let disk_content;
+        let content = if let Some(content) = contents_cache.get(&file) {
+            Some(content.as_str())
+        } else {
+            disk_content = std::fs::read_to_string(&file).ok();
+            disk_content.as_deref()
+        };
         if let Some(text_changes) = change.get("textChanges").and_then(|v| v.as_array()) {
             for tc in text_changes {
                 let start = tc.get("start")?;
@@ -2499,17 +2508,13 @@ fn parse_tsserver_file_code_edits(
                 let el = end.get("line")?.as_u64()? as u32;
                 let eo = end.get("offset")?.as_u64()? as u32;
 
-                let (s, e) = if let Some(c) = content {
-                    (
-                        tsserver_pos_to_byte_offset(c, sl, so),
-                        tsserver_pos_to_byte_offset(c, el, eo),
-                    )
-                } else {
-                    (
-                        ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF),
-                        ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF),
-                    )
+                // FAIL CLOSED: no content for this target → DROP the edit (never a packed sentinel
+                // that would write at a bogus byte offset).
+                let Some(c) = content else {
+                    continue;
                 };
+                let s = tsserver_pos_to_byte_offset(c, sl, so);
+                let e = tsserver_pos_to_byte_offset(c, el, eo);
 
                 edits.push(TypeCodeEdit {
                     path: file.clone(),

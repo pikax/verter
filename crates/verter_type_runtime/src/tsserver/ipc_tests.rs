@@ -1257,3 +1257,105 @@ fn parse_tsserver_code_action_drops_empty_edit_action() {
         "the deletion edit carries empty new_text"
     );
 }
+
+/// A code-edit whose target file is absent from the in-memory contents cache AND unreadable on disk
+/// must be DROPPED — a wrong-location edit corrupts the file, so the EDIT path fails closed (unlike
+/// the rename/location paths, which tolerate a packed line:col sentinel for an incomplete nav).
+///
+/// Discriminating regression: the pre-fix code packed a 0-based `(line << 16) | col` sentinel on a
+/// cache miss and pushed it as a real byte offset, so the merge layer applied the edit at a bogus
+/// offset. The renamed/edited span sits on line 3 (1-based), so the packed value is unmistakably
+/// distinguishable from any real byte offset.
+#[test]
+fn parse_tsserver_file_code_edits_drops_edit_when_file_unavailable() {
+    // A path that does not exist on disk and is NOT in the (empty) contents cache.
+    let missing = std::env::temp_dir()
+        .join(format!(
+            "verter-tsserver-missing-{}-does-not-exist.ts",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .replace('\\', "/");
+    // Belt-and-suspenders: ensure it really is absent.
+    let _ = std::fs::remove_file(&missing);
+
+    let changes = vec![serde_json::json!({
+        "fileName": missing,
+        "textChanges": [
+            {
+                "start": { "line": 3, "offset": 14 },
+                "end": { "line": 3, "offset": 21 },
+                "newText": "renamed"
+            }
+        ]
+    })];
+    let cache: HashMap<String, String> = HashMap::new();
+
+    let edits = parse_tsserver_file_code_edits(&changes, &cache)
+        .expect("a well-formed (but unresolvable) change array still returns Some(empty)");
+    assert!(
+        edits.is_empty(),
+        "an edit whose file is unavailable must be DROPPED (fail-closed), never packed: {edits:?}"
+    );
+    // The packed sentinel the pre-fix code would have produced — assert it is absent.
+    let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
+    assert!(
+        !edits.iter().any(|e| e.start == packed_start),
+        "no edit may carry the packed (line<<16)|col sentinel"
+    );
+}
+
+/// A code-edit whose target file is absent from the contents cache but PRESENT on disk resolves its
+/// byte offsets against THAT file's own on-disk content (the per-target disk fallback), matching the
+/// rename/location paths' content resolution.
+#[test]
+fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "verter-tsserver-codeedit-disk-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let file_path = temp_root.join("child.ts");
+    let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
+    std::fs::write(&file_path, content).unwrap();
+    // The fn canonicalizes `fileName`; feed the already-canonical form so the on-disk read targets
+    // the file we wrote (forward slashes, lowercase drive letter on Windows).
+    let file_key = verter_span::path::canonicalize_path(&file_path.to_string_lossy());
+    // CACHE MISS for this path → forces the per-target disk fallback.
+    let cache: HashMap<String, String> = HashMap::new();
+
+    // tsserver positions are 1-based: `renamed` is on line 3, column 14.
+    let changes = vec![serde_json::json!({
+        "fileName": file_key,
+        "textChanges": [
+            {
+                "start": { "line": 3, "offset": 14 },
+                "end": { "line": 3, "offset": 21 },
+                "newText": "renamedSymbol"
+            }
+        ]
+    })];
+
+    let edits = parse_tsserver_file_code_edits(&changes, &cache).unwrap();
+    let want_start = content.find("renamed").unwrap() as u32;
+    let want_end = want_start + "renamed".len() as u32;
+    assert_eq!(edits.len(), 1, "the disk-resolved edit must survive");
+    assert_eq!(
+        (edits[0].start, edits[0].end),
+        (want_start, want_end),
+        "the edit must resolve against the target's own disk content (byte offsets {want_start}..\
+         {want_end}), not a packed sentinel — got {}..{}",
+        edits[0].start,
+        edits[0].end,
+    );
+    assert_eq!(edits[0].new_text, "renamedSymbol");
+    // Discriminating negative: the pre-fix packed fallback would be `(2 << 16) | 13`.
+    let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
+    assert_ne!(
+        edits[0].start, packed_start,
+        "must NOT be the packed (line<<16)|col fallback (the corrupting path)"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
