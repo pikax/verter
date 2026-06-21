@@ -912,6 +912,94 @@ fn parse_completion_item_drops_text_edit_range_when_content_unavailable() {
     assert_eq!(item.edit_range_end, None);
 }
 
+// The completion `textEdit` replace-range is a REAL edit applied on accept. A `line`/`character`
+// that exceeds `u32::MAX` must DROP the range — never SILENTLY truncate it. `u32::MAX + 1` wraps to
+// `0` (a valid line 0 / char 0) under a lossy `as u32`, so the checked converter alone cannot catch
+// it; with VALID content the only reason to drop is the overflow, which is what discriminates the
+// fix. The range endpoints must be `None`, never the wrapped in-range offset.
+#[test]
+fn parse_completion_item_drops_text_edit_range_on_position_overflow() {
+    let overflow = u32::MAX as u64 + 1;
+    let json = serde_json::json!({
+        "label": "myVar",
+        "kind": 6,
+        "textEdit": {
+            "range": {
+                "start": { "line": overflow, "character": 0 },
+                "end": { "line": 0, "character": 5 }
+            },
+            "newText": "myVar"
+        }
+    });
+    // Content is valid and large enough for the WRAPPED (line 0 / char 0..5) position, so the only
+    // reason the range can drop is the u64>u32 overflow itself.
+    let content = "myVar = 1";
+    let item = parse_completion_item(&json, Some(content)).unwrap();
+    assert_eq!(item.label, "myVar");
+    assert_eq!(
+        item.edit_range_start, None,
+        "a u64>u32::MAX replace-range must be DROPPED, never truncated into an in-range offset"
+    );
+    assert_eq!(item.edit_range_end, None);
+
+    // POSITIVE CONTROL: an in-range replace-range with the SAME content is still produced — the
+    // overflow guard must not change in-range behavior.
+    let json_ok = serde_json::json!({
+        "label": "myVar",
+        "kind": 6,
+        "textEdit": {
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 5 }
+            },
+            "newText": "myVar"
+        }
+    });
+    let ok = parse_completion_item(&json_ok, Some(content)).unwrap();
+    assert_eq!(
+        (ok.edit_range_start, ok.edit_range_end),
+        (Some(0), Some(5)),
+        "an in-range replace-range must still resolve to the correct offsets"
+    );
+}
+
+// A completion `additionalTextEdit` (e.g. an auto-import insertion) is a WRITE edit. A
+// `line`/`character` that exceeds `u32::MAX` must DROP the edit — never SILENTLY truncate it.
+// `u32::MAX + 1` wraps to `0` (a valid line 0 / char 0) under a lossy `as u32`, which the checked
+// converter would ACCEPT, so the truncation must fail closed first. With VALID content the only
+// reason to drop is the overflow, which is what makes this discriminating.
+#[test]
+fn parse_additional_text_edit_drops_on_position_overflow() {
+    let overflow = u32::MAX as u64 + 1;
+    let edit = serde_json::json!({
+        "range": {
+            "start": { "line": overflow, "character": 0 },
+            "end": { "line": 0, "character": 3 }
+        },
+        "newText": "import { foo } from './foo';\n"
+    });
+    let content = "const a = 1;";
+    let resolved = parse_additional_text_edit(&edit, Some(content));
+    assert!(
+        resolved.is_none(),
+        "a u64>u32::MAX additionalTextEdit position must be DROPPED, never truncated into an \
+         in-range offset: {resolved:?}"
+    );
+
+    // POSITIVE CONTROL: an in-range additionalTextEdit with the SAME content is still produced.
+    let edit_ok = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 0 }
+        },
+        "newText": "import { foo } from './foo';\n"
+    });
+    let ok = parse_additional_text_edit(&edit_ok, Some(content))
+        .expect("an in-range additionalTextEdit must still be produced");
+    assert_eq!((ok.start, ok.end), (0, 0), "in-range offsets unchanged");
+    assert_eq!(ok.new_text, "import { foo } from './foo';\n");
+}
+
 // When the replace-range is dropped fail-closed (content unavailable), the
 // completion must still carry the provider's intended insert text so accepting
 // it inserts that text — not the display `label`, which can differ from the

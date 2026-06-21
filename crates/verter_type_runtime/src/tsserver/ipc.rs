@@ -2503,10 +2503,10 @@ pub fn parse_tsserver_rename_span(
 ) -> Option<RenameLocation> {
     let start = span.get("start")?;
     let end = span.get("end")?;
-    let sl = start.get("line")?.as_u64()? as u32;
-    let so = start.get("offset")?.as_u64()? as u32;
-    let el = end.get("line")?.as_u64()? as u32;
-    let eo = end.get("offset")?.as_u64()? as u32;
+    let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let so = u32::try_from(start.get("offset")?.as_u64()?).ok()?;
+    let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let eo = u32::try_from(end.get("offset")?.as_u64()?).ok()?;
 
     let disk_content;
     let content = if let Some(content) = contents_cache.get(file) {
@@ -2592,10 +2592,18 @@ fn parse_tsserver_file_code_edits(
                 let start = tc.get("start")?;
                 let end = tc.get("end")?;
                 let new_text = tc.get("newText")?.as_str()?.to_string();
-                let sl = start.get("line")?.as_u64()? as u32;
-                let so = start.get("offset")?.as_u64()? as u32;
-                let el = end.get("line")?.as_u64()? as u32;
-                let eo = end.get("offset")?.as_u64()? as u32;
+                // FAIL CLOSED on a u64>u32::MAX position: a lossy `as u32` would wrap a huge
+                // line/offset into an in-range value the checked converter accepts, landing the
+                // WRITE at the wrong location. `try_from` DROPS this edit instead — `continue`, not
+                // `?`, so one overflowing edit never discards the other (valid) edits in the batch.
+                let (Some(sl), Some(so), Some(el), Some(eo)) = (
+                    u32::try_from(start.get("line")?.as_u64()?).ok(),
+                    u32::try_from(start.get("offset")?.as_u64()?).ok(),
+                    u32::try_from(end.get("line")?.as_u64()?).ok(),
+                    u32::try_from(end.get("offset")?.as_u64()?).ok(),
+                ) else {
+                    continue;
+                };
 
                 // FAIL CLOSED: no content for this target → DROP the edit (never a packed sentinel
                 // that would write at a bogus byte offset).

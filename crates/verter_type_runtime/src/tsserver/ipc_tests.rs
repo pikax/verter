@@ -601,6 +601,46 @@ fn parse_tsserver_rename_span_drops_out_of_range_position() {
     );
 }
 
+/// A rename span whose `line`/`offset` exceeds `u32::MAX` must be DROPPED — never SILENTLY truncated.
+/// tsserver positions are 1-based, so the danger value wraps to a VALID 1-based position:
+/// `u32::MAX as u64 + 2` truncates to `1` (line 1 / offset 1, i.e. 0-based line 0 / col 0) under a
+/// lossy `as u32`, which the checked converter would ACCEPT. With VALID content the only reason to
+/// drop is the overflow itself — the truncation must fail closed BEFORE the converter runs. A rename
+/// location is a WRITE edit, so a wrapped offset would corrupt the file at the wrong location.
+#[test]
+fn parse_tsserver_rename_span_drops_on_position_overflow() {
+    let content = "const x = 1;\nconst y = 2;\n";
+    let mut cache: HashMap<String, Arc<str>> = HashMap::new();
+    cache.insert("d:/proj/r.ts".to_string(), Arc::from(content));
+
+    // u32::MAX + 2 → truncates to 1 (a VALID 1-based line/offset) under a lossy `as u32`.
+    let overflow = u32::MAX as u64 + 2;
+    let span = serde_json::json!({
+        "start": { "line": overflow, "offset": 1 },
+        "end": { "line": 1, "offset": 2 },
+    });
+
+    let parsed = parse_tsserver_rename_span(&span, "d:/proj/r.ts", &cache);
+    assert!(
+        parsed.is_none(),
+        "a u64>u32::MAX rename span must be DROPPED, never truncated into an in-range offset: \
+         {parsed:?}"
+    );
+
+    // POSITIVE CONTROL: the in-range 1-based span still resolves to the correct byte offsets.
+    let span_ok = serde_json::json!({
+        "start": { "line": 1, "offset": 1 },
+        "end": { "line": 1, "offset": 2 },
+    });
+    let ok = parse_tsserver_rename_span(&span_ok, "d:/proj/r.ts", &cache)
+        .expect("an in-range rename span must still resolve");
+    assert_eq!(
+        (ok.start, ok.end),
+        (0, 1),
+        "in-range 1-based (1,1)..(1,2) maps to byte offsets 0..1, unchanged"
+    );
+}
+
 #[test]
 fn test_parse_tsserver_location_non_ascii() {
     // tsserver uses UTF-16 code units for offset
@@ -1440,6 +1480,85 @@ fn parse_tsserver_file_code_edits_drops_out_of_range_position_not_clamped() {
     assert!(
         !edits.iter().any(|e| e.start == content.len() as u32),
         "no edit may carry the clamped content-length offset"
+    );
+}
+
+/// A code-edit whose `line`/`offset` exceeds `u32::MAX` must be DROPPED — never SILENTLY truncated.
+/// tsserver positions are 1-based, so the danger value wraps to a VALID 1-based position: `u32::MAX
+/// + 2` truncates to `1` (line 1 / offset 1 → 0-based line 0 / col 0) under a lossy `as u32`, which
+/// the checked converter would ACCEPT — so the truncation must fail closed BEFORE the converter
+/// runs. With VALID content the only reason to drop is the overflow itself; an edit emitted at the
+/// wrapped offset would corrupt the file at the wrong location. Verified through both
+/// `parse_tsserver_file_code_edits` directly and the `parse_tsserver_code_action` wrapper.
+#[test]
+fn parse_tsserver_file_code_edits_drops_on_position_overflow() {
+    let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
+    let path = "d:/proj/ovf.ts".to_string();
+    let mut cache: HashMap<String, Arc<str>> = HashMap::new();
+    cache.insert(path.clone(), Arc::from(content));
+
+    // u32::MAX + 2 → truncates to 1 (a VALID 1-based line/offset) under a lossy `as u32`.
+    let overflow = u32::MAX as u64 + 2;
+    let changes = vec![serde_json::json!({
+        "fileName": path,
+        "textChanges": [
+            {
+                "start": { "line": overflow, "offset": 1 },
+                "end": { "line": 1, "offset": 2 },
+                "newText": "boom"
+            }
+        ]
+    })];
+
+    let edits = parse_tsserver_file_code_edits(&changes, &cache)
+        .expect("a well-formed change array still returns Some(empty)");
+    assert!(
+        edits.is_empty(),
+        "a u64>u32::MAX edit position must be DROPPED, never truncated into an in-range offset: \
+         {edits:?}"
+    );
+
+    // The same overflow routed through the code-action wrapper drops the only edit, so the
+    // edit-less action is dropped (None) rather than surfaced with a wrong-location edit.
+    let action = serde_json::json!({
+        "description": "Apply fix",
+        "changes": [
+            {
+                "fileName": path,
+                "textChanges": [
+                    {
+                        "start": { "line": overflow, "offset": 1 },
+                        "end": { "line": 1, "offset": 2 },
+                        "newText": "boom"
+                    }
+                ]
+            }
+        ],
+    });
+    assert!(
+        parse_tsserver_code_action(&action, &cache).is_none(),
+        "a code action whose only edit overflows must drop to None, never surface a wrong-location \
+         edit"
+    );
+
+    // POSITIVE CONTROL: an in-range 1-based edit with the SAME content is still produced.
+    let changes_ok = vec![serde_json::json!({
+        "fileName": path,
+        "textChanges": [
+            {
+                "start": { "line": 1, "offset": 1 },
+                "end": { "line": 1, "offset": 2 },
+                "newText": "x"
+            }
+        ]
+    })];
+    let ok = parse_tsserver_file_code_edits(&changes_ok, &cache)
+        .expect("a well-formed change array returns Some");
+    assert_eq!(ok.len(), 1, "the in-range edit is kept");
+    assert_eq!(
+        (ok[0].start, ok[0].end),
+        (0, 1),
+        "in-range 1-based (1,1)..(1,2) maps to byte offsets 0..1, unchanged"
     );
 }
 

@@ -1031,10 +1031,10 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
             let range = te.get("range")?;
             let start = range.get("start")?;
             let end = range.get("end")?;
-            let sl = start.get("line")?.as_u64()? as u32;
-            let sc = start.get("character")?.as_u64()? as u32;
-            let el = end.get("line")?.as_u64()? as u32;
-            let ec = end.get("character")?.as_u64()? as u32;
+            let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+            let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
+            let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+            let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
             let c = content?;
             let s = position_to_offset_checked(c, sl, sc)?;
             let e = position_to_offset_checked(c, el, ec)?;
@@ -2781,33 +2781,7 @@ impl TypeProvider for TsgoTypeProvider {
 
             let additional_text_edits: Vec<ResolvedTextEdit> = edits
                 .iter()
-                .filter_map(|edit| {
-                    let range = edit.get("range")?;
-                    let start = range.get("start")?;
-                    let end = range.get("end")?;
-                    let sl = start.get("line")?.as_u64()? as u32;
-                    let sc = start.get("character")?.as_u64()? as u32;
-                    let el = end.get("line")?.as_u64()? as u32;
-                    let ec = end.get("character")?.as_u64()? as u32;
-                    let new_text = edit.get("newText")?.as_str()?.to_string();
-
-                    // FAIL CLOSED: a completion `additionalTextEdit` (e.g. an auto-import insertion)
-                    // is a WRITE edit. On a cache miss DROP it (no `pack_position` line-0 sentinel),
-                    // and convert through the CHECKED converter so an out-of-range position drops
-                    // rather than clamping to EOF. An inverted span drops too.
-                    let c = content_snapshot.as_ref()?;
-                    let start_offset = position_to_offset_checked(c, sl, sc)?;
-                    let end_offset = position_to_offset_checked(c, el, ec)?;
-                    if start_offset > end_offset {
-                        return None;
-                    }
-
-                    Some(ResolvedTextEdit {
-                        start: start_offset,
-                        end: end_offset,
-                        new_text,
-                    })
-                })
+                .filter_map(|edit| parse_additional_text_edit(edit, content_snapshot.as_deref()))
                 .collect();
 
             if additional_text_edits.is_empty() {
@@ -3155,6 +3129,43 @@ fn parse_code_action<'a>(
     Some(TypeCodeAction { title, kind, edits })
 }
 
+/// Parse one completion `additionalTextEdit` (e.g. an auto-import insertion) into a resolved
+/// byte-offset edit against the file's content.
+///
+/// FAIL CLOSED: an `additionalTextEdit` is a WRITE edit. On a content miss the edit is DROPPED (no
+/// `pack_position` line-0 sentinel); the range converts through the CHECKED converter so an
+/// out-of-range position drops rather than clamping to EOF, and an inverted span drops too. A
+/// `line`/`character` exceeding `u32::MAX` drops here via the checked `u32::try_from` — never a
+/// silent `as u32` truncation that would wrap a huge value into an in-range offset and land the
+/// WRITE at the wrong location. The caller collects via `filter_map`, so a dropped edit skips only
+/// itself.
+fn parse_additional_text_edit(
+    edit: &serde_json::Value,
+    content: Option<&str>,
+) -> Option<ResolvedTextEdit> {
+    let range = edit.get("range")?;
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
+    let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
+    let new_text = edit.get("newText")?.as_str()?.to_string();
+
+    let c = content?;
+    let start_offset = position_to_offset_checked(c, sl, sc)?;
+    let end_offset = position_to_offset_checked(c, el, ec)?;
+    if start_offset > end_offset {
+        return None;
+    }
+
+    Some(ResolvedTextEdit {
+        start: start_offset,
+        end: end_offset,
+        new_text,
+    })
+}
+
 fn parse_text_edit_to_code_edit<'a>(
     uri: &str,
     te: &serde_json::Value,
@@ -3308,10 +3319,10 @@ fn parse_range_to_offsets_strict_with_disk_fallback<'a>(
 ) -> Option<(u32, u32)> {
     let start = range.get("start")?;
     let end = range.get("end")?;
-    let sl = start.get("line")?.as_u64()? as u32;
-    let sc = start.get("character")?.as_u64()? as u32;
-    let el = end.get("line")?.as_u64()? as u32;
-    let ec = end.get("character")?.as_u64()? as u32;
+    let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
+    let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
 
     let disk_content;
     let content = match content_for(path) {
@@ -4061,6 +4072,77 @@ mod dto_path_canonicalization_tests {
             edit.is_none(),
             "an out-of-range code-action edit must be DROPPED, never clamped to EOF: {edit:?}"
         );
+    }
+
+    /// A `line`/`character` that exceeds `u32::MAX` must DROP the edit. The danger is a SILENT
+    /// `as u32` truncation: `u32::MAX as u64 + 1` wraps to `0`, an in-range (line 0 / char 0)
+    /// position the checked converter would ACCEPT — so the edit would land at the wrong offset.
+    /// Content is valid and the wrapped position is in range, so the ONLY reason to drop is the
+    /// overflow itself; that is what makes this discriminating.
+    #[test]
+    fn parse_text_edit_to_code_edit_drops_on_position_overflow() {
+        // u32::MAX + 1 → truncates to 0 (a VALID line 0 / char 0) under a lossy `as u32`.
+        let overflow = u32::MAX as u64 + 1;
+        let te = serde_json::json!({
+            "range": {
+                "start": { "line": overflow, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            },
+            "newText": "boom"
+        });
+        let content = "ab";
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/ovf.ts").then_some(content) };
+        let edit = parse_text_edit_to_code_edit("file:///D:/proj/ovf.ts", &te, &content_for);
+        assert!(
+            edit.is_none(),
+            "a u64>u32::MAX position must be DROPPED, never truncated into an in-range offset: \
+             {edit:?}"
+        );
+
+        // POSITIVE CONTROL: an in-range position with the SAME content still produces the correct
+        // edit — the overflow guard must not change in-range behavior.
+        let te_ok = serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            },
+            "newText": "x"
+        });
+        let ok = parse_text_edit_to_code_edit("file:///D:/proj/ovf.ts", &te_ok, &content_for)
+            .expect("an in-range edit must still be produced");
+        assert_eq!((ok.start, ok.end), (0, 1), "in-range offsets unchanged");
+    }
+
+    /// A rename span whose `character` exceeds `u32::MAX` must DROP the location. `u32::MAX + 1`
+    /// truncates to `0` (a valid char 0 on line 0) under a lossy `as u32`, so the checked converter
+    /// alone cannot catch it — the truncation must fail closed BEFORE the converter runs.
+    #[test]
+    fn parse_rename_edit_drops_on_position_overflow() {
+        let overflow = u32::MAX as u64 + 1;
+        let edit = serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": overflow }
+            }
+        });
+        let content = "ab";
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/ovf.ts").then_some(content) };
+        let loc = parse_rename_edit("file:///D:/proj/ovf.ts", &edit, &content_for);
+        assert!(
+            loc.is_none(),
+            "a u64>u32::MAX rename position must be DROPPED, never truncated: {loc:?}"
+        );
+
+        // POSITIVE CONTROL: the in-range rename span still resolves to the correct offsets.
+        let edit_ok = serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            }
+        });
+        let ok = parse_rename_edit("file:///D:/proj/ovf.ts", &edit_ok, &content_for)
+            .expect("an in-range rename span must still resolve");
+        assert_eq!((ok.start, ok.end), (0, 1), "in-range offsets unchanged");
     }
 }
 
