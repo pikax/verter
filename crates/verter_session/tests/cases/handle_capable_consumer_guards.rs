@@ -1182,32 +1182,82 @@ struct HotNotAsserted { a: u32 }
 }
 
 /// The audited single exception to the hand-impl ban: the one
-/// `impl … NoTypeExprWitness … for HotTypeRef` in `semantic_query.rs`. Any
-/// OTHER hand-written `NoTypeExpr` / `NoTypeExprWitness` impl in
+/// `impl … NoTypeExprWitness … for HotTypeRef` in `semantic_query.rs`. The
+/// invariant allows EXACTLY this one self type — identified by an EXACT
+/// whole-ident match on the self-type's last path segment (never a substring,
+/// so `HotTypeRefAlias` / `HotTypeRefSneaky` are NOT exempted). Any OTHER
+/// hand-written `NoTypeExpr` / `NoTypeExprWitness` impl in
 /// `verter_session/src/**` is a violation.
-const AUDITED_HAND_WITNESS_NEEDLE: &str = "NoTypeExprWitness for HotTypeRef";
+const AUDITED_HAND_WITNESS_SELF_TY: &str = "HotTypeRef";
 
-/// Lines in `src` that hand-write an `impl … NoTypeExpr[Witness] … for …`. The
-/// blanket bridge makes the public `NoTypeExpr` non-hand-implementable (a manual
-/// impl is `E0119`), but the HIDDEN `NoTypeExprWitness` CAN be hand-written for a
-/// local type — that is the one route that satisfies the bound WITHOUT the
+/// A hand-written `impl … NoTypeExpr[Witness] … for <SelfTy>` discovered in a
+/// source file: the self-type's last path-segment ident (for the exact audited
+/// match) plus a rendered form for the error message.
+struct HandWrittenWitnessImpl {
+    /// Last path segment ident of the impl's self type (e.g. `HotTypeRef`,
+    /// `HotTypeRefAlias`, `SneakyForgery`). Whole-ident — the audited-exception
+    /// check compares this with `==`, never `contains`/`starts_with`.
+    self_ty: String,
+    /// Human-readable `impl <Trait> for <SelfTy>` rendering for diagnostics.
+    rendered: String,
+}
+
+/// The last path-segment ident of a `syn::Type`, if it is a (possibly qualified)
+/// path type — `verter_no_typeexpr::__private::NoTypeExprWitness` → `Some(
+/// "NoTypeExprWitness")`, `HotTypeRefAlias` → `Some("HotTypeRefAlias")`. Non-path
+/// self/trait types (references, tuples, …) yield `None`.
+fn type_path_last_ident(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(tp) => tp.path.segments.last().map(|seg| seg.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// Hand-written `impl … NoTypeExpr[Witness] … for …` items in `src`. The blanket
+/// bridge makes the public `NoTypeExpr` non-hand-implementable (a manual impl is
+/// `E0119`), but the HIDDEN `NoTypeExprWitness` CAN be hand-written for a local
+/// type — that is the one route that satisfies the bound WITHOUT the
 /// field-recursive derive, so it must be banned save the audited `HotTypeRef`
-/// exception. Matches the textual `impl ... NoTypeExpr... for` shape (the derive
-/// emits no such `impl ... for` source line; only a hand-written impl does).
-fn hand_written_no_type_expr_impls(src: &str) -> Vec<String> {
+/// exception.
+///
+/// Parses the file with `syn` (consistent with the sibling coverage guard
+/// `every_hot_carrier_opts_into_no_type_expr`) and walks `syn::Item::Impl`: a
+/// TRAIT impl whose trait path's LAST segment ident is `NoTypeExpr` or
+/// `NoTypeExprWitness` is a hand-written witness impl. Resolving the item (not
+/// the text) means a LINE-SPLIT or reformatted `impl …\n    for X {}` is caught
+/// identically to a single-line one — the previous per-line `starts_with("impl")
+/// && contains(...) && contains(" for ")` scan missed any impl split across
+/// lines. The derive emits its `impl` from a proc-macro token stream, never as a
+/// source `impl … for` item, so a `#[derive(NoTypeExpr)]` carrier is not flagged.
+fn hand_written_no_type_expr_impls(src: &str) -> Vec<HandWrittenWitnessImpl> {
+    let file = syn::parse_file(src).expect("parse production source as a syn file");
     let mut hits = Vec::new();
-    for raw in src.lines() {
-        let line = raw.trim();
-        if !line.starts_with("impl") {
+    for item in &file.items {
+        let syn::Item::Impl(imp) = item else {
+            continue;
+        };
+        let Some((_, trait_path, _)) = &imp.trait_ else {
+            // An inherent impl (`impl X { … }`) is never a witness impl.
+            continue;
+        };
+        let Some(trait_ident) = trait_path.segments.last().map(|seg| seg.ident.to_string()) else {
+            continue;
+        };
+        if trait_ident != "NoTypeExpr" && trait_ident != "NoTypeExprWitness" {
             continue;
         }
-        if !line.contains("NoTypeExpr") {
-            continue;
-        }
-        if !line.contains(" for ") {
-            continue;
-        }
-        hits.push(line.to_string());
+        let self_ty = type_path_last_ident(&imp.self_ty)
+            .unwrap_or_else(|| "<non-path self type>".to_string());
+        let trait_rendered = trait_path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        hits.push(HandWrittenWitnessImpl {
+            rendered: format!("impl {trait_rendered} for {self_ty} {{}}"),
+            self_ty,
+        });
     }
     hits
 }
@@ -1220,31 +1270,38 @@ fn no_hand_written_no_type_expr_impls_except_audited_hot_type_ref() {
     // the single audited `HotTypeRef` witness.
     //
     // Honest residual: a `use ...::NoTypeExprWitness as Alias; impl Alias for X`
-    // could evade this textual scan. That is acceptable — forging the witness is
-    // a deliberate hostile act, not drift, and even a forged witness on a
-    // DERIVED carrier cannot hide a `TypeExpr` (the field-recursion still fails
-    // the build). The scan defends the realistic accidental case.
+    // (an aliased TRAIT NAME) could evade this `syn` scan — the trait path's last
+    // segment would be `Alias`, not `NoTypeExprWitness`. That is acceptable —
+    // forging the witness is a deliberate hostile act, not drift, and even a
+    // forged witness on a DERIVED carrier cannot hide a `TypeExpr` (the
+    // field-recursion still fails the build). Resolving the IMPL ITEM (not the
+    // text) is what closes the prior line-split hole; the only residual is a
+    // deliberate trait-name alias. The scan defends the realistic accidental
+    // case any-formatting, any-line-split.
     let mut violations = Vec::new();
     let mut audited_seen = false;
     for (rel, src) in production_src_files() {
-        for line in hand_written_no_type_expr_impls(&src) {
-            if line.contains(AUDITED_HAND_WITNESS_NEEDLE) {
+        for hit in hand_written_no_type_expr_impls(&src) {
+            // EXACT whole-ident match on the self type — `HotTypeRefAlias` /
+            // `HotTypeRefSneaky` are NOT the audited exception (a `contains`
+            // would have wrongly exempted them).
+            if hit.self_ty == AUDITED_HAND_WITNESS_SELF_TY {
                 audited_seen = true;
                 continue;
             }
-            violations.push(format!("{rel}: {line}"));
+            violations.push(format!("{rel}: {}", hit.rendered));
         }
     }
     assert!(
         violations.is_empty(),
         "no hand-written `NoTypeExpr`/`NoTypeExprWitness` impl may appear in \
-         `verter_session/src/**` except the single audited `{AUDITED_HAND_WITNESS_NEEDLE}` in \
-         semantic_query.rs — found: {violations:?}. A new type that needs the marker must \
+         `verter_session/src/**` except the single audited witness for `{AUDITED_HAND_WITNESS_SELF_TY}` \
+         in semantic_query.rs — found: {violations:?}. A new type that needs the marker must \
          `#[derive(NoTypeExpr)]` (field-recursive), never hand-write the witness."
     );
     assert!(
         audited_seen,
-        "the audited `impl … {AUDITED_HAND_WITNESS_NEEDLE}` must be PRESENT in \
+        "the audited `impl … NoTypeExprWitness for {AUDITED_HAND_WITNESS_SELF_TY}` must be PRESENT in \
          verter_session/src — its absence means the single sanctioned witness was deleted (the \
          `HotTypeRef` handle would then fail its own `assert_impl_all!`), not that the ban is clean."
     );
@@ -1261,19 +1318,22 @@ impl verter_no_typeexpr::__private::NoTypeExprWitness for HotTypeRef {}
 ";
     let hits = hand_written_no_type_expr_impls(planted);
     assert!(
-        hits.iter().any(|h| h.contains("SneakyForgery")),
+        hits.iter().any(|h| h.self_ty == "SneakyForgery"),
         "self-test: the scan MUST flag a planted second hand-witness `SneakyForgery` — if it \
-         missed it, a forged witness on a non-derived type would pass; got {hits:?}"
+         missed it, a forged witness on a non-derived type would pass; got selves {:?}",
+        hits.iter().map(|h| &h.self_ty).collect::<Vec<_>>()
     );
     assert!(
-        hits.iter().any(|h| h.contains(AUDITED_HAND_WITNESS_NEEDLE)),
+        hits.iter()
+            .any(|h| h.self_ty == AUDITED_HAND_WITNESS_SELF_TY),
         "self-test: the scan MUST also see the audited `HotTypeRef` witness (so the allowlist arm \
-         is reachable); got {hits:?}"
+         is reachable); got selves {:?}",
+        hits.iter().map(|h| &h.self_ty).collect::<Vec<_>>()
     );
 
     // NEGATIVE control: a `#[derive(NoTypeExpr)]` line (what every carrier uses)
     // must NOT be mistaken for a hand-written impl — the derive emits no
-    // `impl … for` source line.
+    // `impl … for` source item (it expands from a proc-macro token stream).
     let good = "\
 #[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 struct HotThing { a: u32 }
@@ -1282,7 +1342,104 @@ struct HotThing { a: u32 }
     assert!(
         good_hits.is_empty(),
         "self-test: a `#[derive(NoTypeExpr)]` carrier must NOT be flagged as a hand-written impl — \
-         the derive is the sanctioned route; got {good_hits:?}"
+         the derive is the sanctioned route; got selves {:?}",
+        good_hits.iter().map(|h| &h.self_ty).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn hand_impl_scan_catches_line_split_impl_a_single_line_scan_would_miss() {
+    // FINDING-1 REGRESSION: a hand-witness impl SPLIT across lines —
+    //   impl verter_no_typeexpr::__private::NoTypeExprWitness
+    //       for SneakyForgery {}
+    // — has NO single source line that is `starts_with("impl")` AND
+    // `contains("NoTypeExpr")` AND `contains(" for ")` simultaneously, so the
+    // previous per-line detector EVADED it. The `syn` scan resolves the IMPL
+    // ITEM regardless of formatting, so it flags the split impl identically.
+    let line_split = "\
+impl verter_no_typeexpr::__private::NoTypeExprWitness
+    for SneakyForgery {}
+";
+    let hits = hand_written_no_type_expr_impls(line_split);
+    assert!(
+        hits.iter().any(|h| h.self_ty == "SneakyForgery"),
+        "self-test: the `syn` scan MUST flag a LINE-SPLIT hand-witness impl for `SneakyForgery` — \
+         the prior single-line detector missed it; got selves {:?}",
+        hits.iter().map(|h| &h.self_ty).collect::<Vec<_>>()
+    );
+
+    // Discriminating proof that the OLD single-line predicate genuinely MISSED
+    // this exact shape — no individual trimmed line satisfies all three of the
+    // old conjuncts, so the legacy scan would have produced ZERO hits here.
+    let legacy_would_have_hit = line_split.lines().any(|raw| {
+        let line = raw.trim();
+        line.starts_with("impl") && line.contains("NoTypeExpr") && line.contains(" for ")
+    });
+    assert!(
+        !legacy_would_have_hit,
+        "self-test invariant: the legacy single-line scan must MISS this line-split impl (that is \
+         the bug the `syn` rewrite closes) — if a single line now satisfies all three conjuncts, \
+         this regression no longer discriminates the fix"
+    );
+}
+
+#[test]
+fn hand_impl_audited_exception_is_exact_self_ty_not_prefix() {
+    // FINDING-2 REGRESSION: the audited exception is the EXACTLY-`HotTypeRef`
+    // self type. A self type that merely STARTS with `HotTypeRef`
+    // (`HotTypeRefAlias`, `HotTypeRefSneaky`) is a VIOLATION — the prior
+    // `contains("NoTypeExprWitness for HotTypeRef")` substring match wrongly
+    // exempted them. Both the exact-`HotTypeRef` exemption and the
+    // `HotTypeRefAlias` violation are exercised through the SAME classification
+    // the production guard uses (exact `== AUDITED_HAND_WITNESS_SELF_TY`).
+    let planted = "\
+impl verter_no_typeexpr::__private::NoTypeExprWitness for HotTypeRef {}
+impl verter_no_typeexpr::__private::NoTypeExprWitness for HotTypeRefAlias {}
+";
+    let hits = hand_written_no_type_expr_impls(planted);
+
+    // The exact `HotTypeRef` impl is recognised as the audited exception.
+    assert!(
+        hits.iter().any(|h| h.self_ty == AUDITED_HAND_WITNESS_SELF_TY),
+        "self-test: the EXACT `HotTypeRef` self type must be present as the audited exception; got \
+         selves {:?}",
+        hits.iter().map(|h| &h.self_ty).collect::<Vec<_>>()
+    );
+
+    // `HotTypeRefAlias` is captured with a DISTINCT whole self-ty that does NOT
+    // equal the audited self type — so the production guard's
+    // `hit.self_ty == AUDITED_HAND_WITNESS_SELF_TY` classifier treats it as a
+    // VIOLATION (it would have been wrongly exempted by a `contains` check).
+    let alias_self = hits
+        .iter()
+        .map(|h| h.self_ty.as_str())
+        .find(|s| *s == "HotTypeRefAlias")
+        .expect("self-test: the `HotTypeRefAlias` impl must be discovered as a hand-witness impl");
+    assert_ne!(
+        alias_self, AUDITED_HAND_WITNESS_SELF_TY,
+        "self-test: `HotTypeRefAlias` must NOT equal the audited self type — the exact whole-ident \
+         match is what stops a `HotTypeRef`-prefixed name from stealing the exemption"
+    );
+
+    // Belt-and-braces: replicate the production guard's split and assert the
+    // alias lands in the violations bucket, the exact name in the audited bucket.
+    let mut violations = Vec::new();
+    let mut audited_seen = false;
+    for hit in &hits {
+        if hit.self_ty == AUDITED_HAND_WITNESS_SELF_TY {
+            audited_seen = true;
+        } else {
+            violations.push(hit.self_ty.clone());
+        }
+    }
+    assert!(
+        audited_seen,
+        "self-test: exact `HotTypeRef` must be exempted"
+    );
+    assert!(
+        violations.contains(&"HotTypeRefAlias".to_string()),
+        "self-test: `HotTypeRefAlias` must be flagged as a violation, not exempted; violations = \
+         {violations:?}"
     );
 }
 

@@ -28,7 +28,9 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Type};
+use syn::punctuated::Punctuated;
+use syn::token::Comma;
+use syn::{parse_quote, Data, DeriveInput, Fields, Type, WherePredicate};
 
 /// Derive the hidden `NoTypeExpr` witness for a `struct` or `enum`, bounding
 /// every field's type on the public `NoTypeExpr` trait. Rejects `union`.
@@ -62,26 +64,32 @@ fn expand_witness(input: &DeriveInput) -> proc_macro2::TokenStream {
         }
     };
 
-    // Re-emit the existing where-predicates (if any) and append one
-    // `<field-ty>: ::verter_no_typeexpr::NoTypeExpr` bound per field. The public
-    // trait is the bound a field author reasons about; the blanket bridge in
-    // `verter_no_typeexpr` makes `NoTypeExpr` equivalent to the hidden witness,
-    // so bounding on the public trait still drives the recursion.
-    let existing_predicates = where_clause.map(|w| {
-        let preds = &w.predicates;
-        quote! { #preds }
-    });
-    let field_bounds = field_types.iter().map(|ty| {
-        quote! { #ty: ::verter_no_typeexpr::NoTypeExpr }
-    });
+    // Build ONE combined predicate list: the input's existing where-predicates
+    // (if any) ANDed with one `<field-ty>: ::verter_no_typeexpr::NoTypeExpr`
+    // bound per field. Folding both into a single `Punctuated<_, Comma>` makes
+    // the separators the punctuation's responsibility, so the concatenation is
+    // always well-formed regardless of whether the source where-clause carried a
+    // trailing comma — re-emitting `#predicates` followed directly by the field
+    // bounds would otherwise splice the last existing predicate into the first
+    // field bound (`where T: Clone t: NoTypeExpr`, an unparsable token stream).
+    //
+    // The public trait is the bound a field author reasons about; the blanket
+    // bridge in `verter_no_typeexpr` makes `NoTypeExpr` equivalent to the hidden
+    // witness, so bounding on the public trait still drives the recursion.
+    let mut predicates: Punctuated<WherePredicate, Comma> = Punctuated::new();
+    if let Some(w) = where_clause {
+        predicates.extend(w.predicates.iter().cloned());
+    }
+    for ty in &field_types {
+        predicates.push(parse_quote! { #ty: ::verter_no_typeexpr::NoTypeExpr });
+    }
 
     quote! {
         #[automatically_derived]
         impl #impl_generics ::verter_no_typeexpr::__private::NoTypeExprWitness
             for #ident #ty_generics
         where
-            #existing_predicates
-            #(#field_bounds,)*
+            #predicates
         {}
     }
 }
@@ -182,6 +190,60 @@ mod tests {
             out.contains("Vec < T > : :: verter_no_typeexpr :: NoTypeExpr"),
             "the generic field type must be bounded: {out}"
         );
+    }
+
+    #[test]
+    fn generic_struct_with_existing_where_clause_emits_parseable_impl() {
+        // REGRESSION (where-clause concatenation): a generic input that already
+        // carries a where-clause WITHOUT a trailing comma must still expand to a
+        // PARSEABLE `impl`. The pre-fix emission re-emitted `#predicates`
+        // followed directly by the field bounds, so `where T: Clone` spliced
+        // into the first field bound — `where T : Clone t : … NoTypeExpr` — which
+        // does NOT parse as an `ItemImpl` (the proc-macro would fail with
+        // "produced unparsable tokens"). Discriminating: this `syn::parse_str`
+        // FAILS against the pre-fix emitter and PASSES once the existing
+        // predicates are comma-separated from the field bounds.
+        let out = expand_str("struct G<T> where T: Clone { t: T }");
+        syn::parse_str::<syn::ItemImpl>(&out).unwrap_or_else(|e| {
+            panic!("where-bearing derive output must parse as an `impl`: {e}\n---\n{out}")
+        });
+        // Both the existing predicate and the field bound must survive, joined by
+        // a comma (the separator the bug dropped).
+        assert!(
+            out.contains("T : Clone , T : :: verter_no_typeexpr :: NoTypeExpr"),
+            "the existing `T: Clone` predicate must be comma-separated from the field bound: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_struct_with_trailing_comma_where_clause_does_not_double_comma() {
+        // The combined-`Punctuated` fix must NOT double-comma when the source
+        // where-clause ALREADY ends in a trailing comma. `syn`'s `Punctuated`
+        // owns the separators, so the output parses and contains exactly one
+        // comma between the existing predicate and the first field bound.
+        let out = expand_str("struct G<T> where T: Clone, { t: T }");
+        syn::parse_str::<syn::ItemImpl>(&out).unwrap_or_else(|e| {
+            panic!("trailing-comma where-bearing derive output must parse: {e}\n---\n{out}")
+        });
+        assert!(
+            !out.contains(", ,") && !out.contains(",,"),
+            "a trailing-comma source where-clause must not produce a double comma: {out}"
+        );
+        assert!(
+            out.contains("T : Clone , T : :: verter_no_typeexpr :: NoTypeExpr"),
+            "exactly one comma must join the existing predicate and the field bound: {out}"
+        );
+    }
+
+    #[test]
+    fn no_where_struct_still_emits_parseable_impl() {
+        // The empty-existing-predicates path (no source where-clause) must also
+        // expand to a parseable `impl` — the combined-`Punctuated` fix carries
+        // only the field bounds in that case.
+        let out = expand_str("struct S { a: u32, b: String }");
+        syn::parse_str::<syn::ItemImpl>(&out).unwrap_or_else(|e| {
+            panic!("no-where derive output must parse as an `impl`: {e}\n---\n{out}")
+        });
     }
 
     #[test]
