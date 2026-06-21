@@ -22105,6 +22105,17 @@ fn use_leaf_bound_name(tree: &syn::UseTree) -> Option<String> {
 ///   undecidable from the `use` alone, so conservatively rejected);
 /// - a `#[macro_use]` attribute (prelude injection of derive macros).
 ///
+/// It ALSO bans rebinding the crate-root names `std`/`core` in the module — a `use
+/// … as std;` / `use … as core;` alias (or a single-segment `use std;`/`use
+/// core;`) whose LOCAL bound name is `std`/`core`, and an `extern crate … as
+/// std|core;` rename. The full-path trait-impl allowlist
+/// ([`MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPL_PATHS`]) lists the qualified spellings
+/// `std::clone::Clone` / `std::fmt::Debug` / `core::…`; rebinding `std`/`core`
+/// would let a FOREIGN trait be SPELLED as an allowlisted `std::clone::Clone` path
+/// and slip through the syntactic allowlist. Banning the rebind keeps those
+/// qualified std-spellings SEMANTICALLY exact (a normal `use std::fmt;` binds
+/// `fmt`, not `std`, so it is unaffected).
+///
 /// The genuine `macro_arg_producer.rs` imports (`std::cell::Cell`,
 /// `std::sync::{Arc, OnceLock}`, `rustc_hash::FxHashMap`, `verter_type_expr::{…}`,
 /// `crate::…`, and the fn-local `verter_semantic::analysis::AnalyzedMacroKind`)
@@ -22155,6 +22166,29 @@ fn macro_arg_producer_derive_shadow_import_violations(src: &str) -> Vec<String> 
                                  to a foreign macro (derive-shadow)"
                             ));
                         }
+                        // CRATE-ROOT REBIND: a `use … as std;` / `use … as core;`
+                        // (or a single-segment `use std;` / `use core;`) binds the
+                        // LOCAL name `std`/`core` to something other than the genuine
+                        // crate root. The full-path trait-impl allowlist
+                        // (`MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPL_PATHS`) lists the
+                        // qualified spellings `std::clone::Clone` / `std::fmt::Debug` /
+                        // `core::…`; once `std`/`core` is rebound, a FOREIGN trait could
+                        // be SPELLED as an allowlisted `std::clone::Clone` and pass the
+                        // syntactic allowlist. Banning the rebind keeps the qualified
+                        // std-spellings SEMANTICALLY exact, so the allowlist is not
+                        // merely syntactic. (A normal `use std::fmt;` binds `fmt`, `use
+                        // std::clone::Clone;` binds `Clone` — neither binds `std`, so
+                        // neither is affected.)
+                        if bound == "std" || bound == "core" {
+                            self.violations.push(format!(
+                                "a production import binding the crate-root name `{bound}` (under \
+                                 `{prefix}`) is forbidden in the producer module — a `use … as \
+                                 {bound};` rebinds the crate root the full-path trait-impl \
+                                 allowlist's qualified `{bound}::…` spellings depend on, so a \
+                                 foreign trait could be spelled as an allowlisted `{bound}::…` path \
+                                 (crate-root-rebind)"
+                            ));
+                        }
                     }
                 }
             }
@@ -22179,6 +22213,33 @@ fn macro_arg_producer_derive_shadow_import_violations(src: &str) -> Vec<String> 
                 );
             }
             syn::visit::visit_attribute(self, attr);
+        }
+        fn visit_item_extern_crate(&mut self, ec: &'ast syn::ItemExternCrate) {
+            // The overridden `visit_item` does NOT skip a `#[cfg(test)]` extern-crate
+            // (its attrs match omits `ExternCrate`), so this override gates cfg-test
+            // itself — matching `visit_item_use`'s `attrs_test_gate` treatment.
+            if attrs_test_gate(&ec.attrs) {
+                return;
+            }
+            // CRATE-ROOT REBIND via extern-crate rename: `extern crate evil as std;`
+            // (or `as core;`) rebinds the crate-root name the full-path trait-impl
+            // allowlist's qualified `std::…` / `core::…` spellings depend on, so a
+            // foreign trait could be spelled as an allowlisted `std::clone::Clone`
+            // path. Only the rename TO `std`/`core` is this evasion — a bare `extern
+            // crate foo;` (no rename) binds `foo`, not `std`/`core`, and is unaffected.
+            if let Some((_as, rename)) = &ec.rename {
+                let bound = unraw_ident(&rename.to_string()).to_string();
+                if bound == "std" || bound == "core" {
+                    self.violations.push(format!(
+                        "a production `extern crate {} as {bound};` is forbidden in the producer \
+                         module — it rebinds the crate-root name `{bound}` the full-path trait-impl \
+                         allowlist's qualified `{bound}::…` spellings depend on, so a foreign trait \
+                         could be spelled as an allowlisted `{bound}::…` path (crate-root-rebind)",
+                        ec.ident
+                    ));
+                }
+            }
+            syn::visit::visit_item_extern_crate(self, ec);
         }
         fn visit_item(&mut self, item: &'ast syn::Item) {
             // Skip a `#[cfg(test)]`-gated item wholesale (its imports are
@@ -22415,6 +22476,85 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
     assert!(
         macro_arg_producer_derive_shadow_import_violations(test_shadow).is_empty(),
         "a `#[cfg(test)]`-gated shadow import must NOT redden (test-only)"
+    );
+
+    // ── crate-root-rebind rejection (companion to the full-path trait allowlist)
+    // A `use … as std;` rebinds the crate-root name `std` the qualified
+    // `std::clone::Clone` allowlist spelling depends on → a foreign trait could be
+    // spelled as an allowlisted path. REJECT.
+    let rebind_std_use = "use evil as std;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(rebind_std_use).is_empty(),
+        "a `use evil as std;` rebinding the crate-root name `std` must redden (crate-root-rebind — \
+         it would let a foreign trait be spelled as an allowlisted `std::clone::Clone`)"
+    );
+    // A `use … as core;` rebinds `core`. REJECT.
+    let rebind_core_use = "use evil as core;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(rebind_core_use).is_empty(),
+        "a `use evil as core;` rebinding the crate-root name `core` must redden (crate-root-rebind)"
+    );
+    // A `use crate::semantic_query as std;` (a real-shaped in-crate module rebound to
+    // `std`) likewise binds the LOCAL name `std`. REJECT — this is the exact live
+    // plant shape.
+    let rebind_intra_crate = "use crate::semantic_query as std;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(rebind_intra_crate).is_empty(),
+        "a `use crate::semantic_query as std;` rebinding the local name `std` to an in-crate \
+         module must redden (crate-root-rebind)"
+    );
+    // An `extern crate evil as std;` renames the crate root to `std`. REJECT.
+    let rebind_extern_std = "extern crate evil as std;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(rebind_extern_std).is_empty(),
+        "an `extern crate evil as std;` rename to `std` must redden (crate-root-rebind)"
+    );
+    // An `extern crate evil as core;` renames the crate root to `core`. REJECT.
+    let rebind_extern_core = "extern crate evil as core;\n";
+    assert!(
+        !macro_arg_producer_derive_shadow_import_violations(rebind_extern_core).is_empty(),
+        "an `extern crate evil as core;` rename to `core` must redden (crate-root-rebind)"
+    );
+    // CONTROL (GREEN) — a normal `use std::sync::Arc;` binds the LEAF `Arc`, NOT
+    // `std`; the real file uses exactly this `std::…` shape. Must NOT redden.
+    let control_std_leaf = "use std::sync::Arc;\n";
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(control_std_leaf).is_empty(),
+        "a normal `use std::sync::Arc;` binds the leaf `Arc`, not `std`, and must NOT redden (the \
+         real producer imports use this shape)"
+    );
+    // CONTROL (GREEN) — `use core::cell::Cell;` binds `Cell`, not `core`.
+    let control_core_leaf = "use core::cell::Cell;\n";
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(control_core_leaf).is_empty(),
+        "a normal `use core::cell::Cell;` binds the leaf `Cell`, not `core`, and must NOT redden"
+    );
+    // CONTROL (GREEN) — a grouped `use std::sync::{Arc, OnceLock};` (the real file's
+    // exact import) binds `Arc` and `OnceLock`, NOT `std`. Must NOT redden.
+    let control_std_group = "use std::sync::{Arc, OnceLock};\n";
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(control_std_group).is_empty(),
+        "a grouped `use std::sync::{{Arc, OnceLock}};` (the real producer import) binds the leaves, \
+         not `std`, and must NOT redden"
+    );
+    // CONTROL (GREEN) — a bare `extern crate proc_macro;` with NO rename to std/core
+    // binds `proc_macro`, not `std`/`core`. Must NOT redden.
+    let control_extern_bare = "extern crate proc_macro;\n";
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(control_extern_bare).is_empty(),
+        "a bare `extern crate proc_macro;` (no rename to std/core) must NOT redden"
+    );
+    // A `#[cfg(test)]`-gated crate-root rebind is test-only → not a production
+    // rebind. Must NOT redden.
+    let test_rebind = "#[cfg(test)]\nuse evil as std;\n";
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(test_rebind).is_empty(),
+        "a `#[cfg(test)]`-gated `use evil as std;` must NOT redden (test-only)"
+    );
+    let test_rebind_extern = "#[cfg(test)]\nextern crate evil as std;\n";
+    assert!(
+        macro_arg_producer_derive_shadow_import_violations(test_rebind_extern).is_empty(),
+        "a `#[cfg(test)]`-gated `extern crate evil as std;` must NOT redden (test-only)"
     );
 }
 
@@ -23779,6 +23919,16 @@ fn collect_value_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
 /// std spellings are admitted). Anything else — including a deeper/foreign
 /// qualified path like `evil::Clone` or `evil::Debug` — is rejected. The self type
 /// must be `MacroHotMirror`.
+///
+/// The qualified `std::…` / `core::…` spellings in this allowlist are kept
+/// SEMANTICALLY exact (not merely syntactic) by the companion crate-root-rebind
+/// rule in [`macro_arg_producer_derive_shadow_import_violations`], which bans
+/// rebinding the local names `std`/`core` in the producer module (via a `use … as
+/// std;` / `use … as core;` alias OR an `extern crate … as std|core;` rename).
+/// Without that companion ban, a same-module rebind (`use evil as std;`) followed
+/// by `impl std::clone::Clone for MacroHotMirror {}` would SPELL as an allowlisted
+/// path while resolving to a FOREIGN trait; with the rebind banned, `std`/`core`
+/// necessarily resolve to the genuine crate roots, so these spellings are exact.
 const MACRO_ARG_PRODUCER_ALLOWED_TRAIT_IMPL_PATHS: &[(&[&str], &str)] = &[
     // Debug — bare or the std spellings.
     (&["Debug"], "MacroHotMirror"),
