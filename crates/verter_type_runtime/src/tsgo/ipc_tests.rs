@@ -886,6 +886,56 @@ fn test_parse_completion_item() {
     assert_eq!(item.insert_text.as_deref(), Some("myVar"));
 }
 
+// The completion `textEdit` replace-range is a REAL edit applied on accept. When the file content
+// is unavailable, the range cannot be proven, so it must be DROPPED — the item degrades to a
+// plain insert. The range endpoints must be `None`, never a packed line:col sentinel that would
+// corrupt the file.
+#[test]
+fn parse_completion_item_drops_text_edit_range_when_content_unavailable() {
+    let json = serde_json::json!({
+        "label": "myVar",
+        "kind": 6,
+        "textEdit": {
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 5 }
+            },
+            "newText": "myVar"
+        }
+    });
+    let item = parse_completion_item(&json, None).unwrap();
+    assert_eq!(item.label, "myVar");
+    assert_eq!(
+        item.edit_range_start, None,
+        "an unprovable replace-range must be dropped, never packed"
+    );
+    assert_eq!(item.edit_range_end, None);
+}
+
+// With content present but a range past EOF, the replace-range is unprovable and must be DROPPED,
+// not clamped to a content-length offset.
+#[test]
+fn parse_completion_item_drops_out_of_range_text_edit() {
+    let content = "short";
+    let json = serde_json::json!({
+        "label": "myVar",
+        "kind": 6,
+        "textEdit": {
+            "range": {
+                "start": { "line": 999, "character": 0 },
+                "end": { "line": 999, "character": 3 }
+            },
+            "newText": "myVar"
+        }
+    });
+    let item = parse_completion_item(&json, Some(content)).unwrap();
+    assert_eq!(
+        item.edit_range_start, None,
+        "an out-of-range replace-range must be dropped, never clamped"
+    );
+    assert_eq!(item.edit_range_end, None);
+}
+
 #[test]
 fn test_parse_completion_item_lsp_kind_property() {
     // LSP kind 10 = Property — must map to CompletionKind::Property, not Text

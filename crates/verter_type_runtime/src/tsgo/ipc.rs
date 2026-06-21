@@ -1009,7 +1009,10 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // Parse textEdit range for edit_range_start/end
+    // The textEdit replace-range is applied as a REAL edit when the completion is accepted, so it
+    // is fail-closed: when the content is unavailable, or the range cannot be proven against it,
+    // the range is DROPPED (endpoints stay `None`) and the consumer degrades to a plain insert
+    // rather than emitting a packed or clamped offset that would corrupt the file.
     let (edit_range_start, edit_range_end) = item
         .get("textEdit")
         .and_then(|te| {
@@ -1020,14 +1023,13 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
             let sc = start.get("character")?.as_u64()? as u32;
             let el = end.get("line")?.as_u64()? as u32;
             let ec = end.get("character")?.as_u64()? as u32;
-            if let Some(c) = content {
-                Some((
-                    Some(position_to_offset(c, sl, sc)),
-                    Some(position_to_offset(c, el, ec)),
-                ))
-            } else {
-                Some((Some(pack_position(sl, sc)), Some(pack_position(el, ec))))
+            let c = content?;
+            let s = position_to_offset_checked(c, sl, sc)?;
+            let e = position_to_offset_checked(c, el, ec)?;
+            if s > e {
+                return None;
             }
+            Some((Some(s), Some(e)))
         })
         .unwrap_or((None, None));
 
