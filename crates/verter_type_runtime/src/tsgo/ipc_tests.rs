@@ -1354,6 +1354,47 @@ fn code_action_resolves_each_edit_against_its_own_file_content() {
     );
 }
 
+/// A code action whose only edit targets content that is absent from the cache
+/// AND unreadable on disk fails closed: the edit is dropped, leaving no edits,
+/// so the whole action is dropped (`None`) rather than surfaced as an
+/// unactionable no-op. Mirrors `parse_tsserver_code_action`'s empty-edit drop.
+///
+/// Discriminating: an action that always returns `Some` would surface this
+/// edit-less action; the assertion requires `None`.
+#[test]
+fn parse_code_action_drops_action_when_all_edits_unresolvable() {
+    // A path with no cache entry and no file on disk: the edit's range cannot be
+    // converted to a byte offset, so the edit fails closed and is dropped.
+    let missing = std::env::temp_dir()
+        .join("verter-tgo-codeaction-absent")
+        .join("never-written.ts");
+    let missing_uri = path_to_file_uri_string(missing.to_str().unwrap());
+
+    let json = serde_json::json!({
+        "title": "Add import",
+        "kind": "quickfix",
+        "edit": {
+            "changes": {
+                missing_uri: [{
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 0 }
+                    },
+                    "newText": "import { ref } from 'vue';\n"
+                }]
+            }
+        }
+    });
+
+    // The content lookup never resolves this path (cache miss), and the disk
+    // fallback inside the parser fails too, so the only edit is dropped.
+    let action = parse_code_action(&json, &|_target_path| None);
+    assert!(
+        action.is_none(),
+        "an action whose every edit failed closed must be dropped (None), not surfaced with empty edits"
+    );
+}
+
 // ── Dead pipe / process crash regression tests ──────────────
 
 /// Helper: spawn a short-lived child process that exits immediately.

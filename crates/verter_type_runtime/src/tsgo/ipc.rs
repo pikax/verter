@@ -3123,6 +3123,13 @@ fn parse_code_action<'a>(
         }
     }
 
+    // An edit-less action is not actionable — drop it, mirroring
+    // `parse_tsserver_code_action`, so a no-op action never leaves the parse
+    // boundary (every edit may have failed closed on unresolvable content).
+    if edits.is_empty() {
+        return None;
+    }
+
     Some(TypeCodeAction { title, kind, edits })
 }
 
