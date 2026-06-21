@@ -41,6 +41,42 @@ fn test_roundtrip_position_conversion() {
     }
 }
 
+// A UTF-16 column that lands between the two halves of an astral (surrogate-pair) character is
+// not a real scalar boundary, so an EDIT placed there cannot be proven and must be DROPPED.
+// `'😀'` occupies UTF-16 cols 9 (start) and 10 (the trailing surrogate half) on this line:
+// `l e t   x   =   '` = cols 0..=8, `😀` = cols 9,10, closing `'` = col 11, `;` = col 12.
+// tsserver positions are 1-based.
+#[test]
+fn tsserver_checked_drops_mid_surrogate_column() {
+    let content = "let x = '😀';";
+    // 0-based col 10 == 1-based offset 11 lands on the trailing surrogate half of the emoji.
+    assert_eq!(
+        tsserver_pos_to_byte_offset_checked(content, 1, 11),
+        None,
+        "a UTF-16 column inside an astral character is not a scalar boundary and must be dropped"
+    );
+}
+
+#[test]
+fn tsserver_checked_accepts_position_after_astral() {
+    let content = "let x = '😀';";
+    // 0-based col 11 == 1-based offset 12 is the closing quote, immediately AFTER the emoji.
+    let off = tsserver_pos_to_byte_offset_checked(content, 1, 12)
+        .expect("the position immediately after an astral character is a valid scalar boundary");
+    // `let x = '` is 9 bytes, `😀` is 4 UTF-8 bytes → byte offset 13 is the closing quote.
+    assert_eq!(off, 13);
+    assert_eq!(&content.as_bytes()[off as usize], &b'\'');
+}
+
+#[test]
+fn tsserver_checked_accepts_eol_insertion_on_astral_line() {
+    let content = "let x = '😀';";
+    // EOL insertion: 0-based col == line UTF-16 length (13) == 1-based offset 14.
+    let off = tsserver_pos_to_byte_offset_checked(content, 1, 14)
+        .expect("an end-of-line insertion position is a valid scalar boundary");
+    assert_eq!(off as usize, content.len());
+}
+
 #[test]
 fn test_parse_tsserver_diagnostic() {
     let content = "const x = 1;\nconst y: string = 42;";

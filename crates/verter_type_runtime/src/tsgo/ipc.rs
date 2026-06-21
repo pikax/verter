@@ -843,7 +843,16 @@ fn position_to_offset_checked(content: &str, line: u32, character: u32) -> Optio
     if character > line_utf16_len {
         return None; // column past the line end
     }
-    idx.position_to_offset(crate::codec::LineColumn { line, character })
+    let target = crate::codec::LineColumn { line, character };
+    let offset = idx.position_to_offset(target)?;
+    // A column landing between the two halves of an astral (surrogate-pair) character is not a
+    // UTF-16 scalar boundary; the codec rounds it to an adjacent character, yielding an offset that
+    // does NOT map back to the requested column. Require the round-trip to be exact so an EDIT is
+    // only accepted at a real boundary; drop it otherwise.
+    if idx.offset_to_position(offset)? != target {
+        return None;
+    }
+    Some(offset)
 }
 
 /// Parse an LSP Location JSON value into a `TypeLocation`, using content for offset resolution.

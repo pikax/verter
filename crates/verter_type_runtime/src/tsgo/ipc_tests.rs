@@ -89,6 +89,41 @@ impl Drop for ForcedTraceEnv {
 }
 
 /// rewrite_vue_imports_for_tsgo rewrites .vue imports to .vue.ts for type resolution
+// A UTF-16 column that lands between the two halves of an astral (surrogate-pair) character is
+// not a real scalar boundary, so an EDIT placed there cannot be proven and must be DROPPED.
+// `'😀'` occupies 0-based UTF-16 cols 9 (start) and 10 (the trailing surrogate half) on this line:
+// `l e t   x   =   '` = cols 0..=8, `😀` = cols 9,10, closing `'` = col 11, `;` = col 12.
+// tgo positions are 0-based.
+#[test]
+fn tgo_checked_drops_mid_surrogate_column() {
+    let content = "let x = '😀';";
+    assert_eq!(
+        position_to_offset_checked(content, 0, 10),
+        None,
+        "a UTF-16 column inside an astral character is not a scalar boundary and must be dropped"
+    );
+}
+
+#[test]
+fn tgo_checked_accepts_position_after_astral() {
+    let content = "let x = '😀';";
+    // Col 11 is the closing quote, immediately AFTER the emoji.
+    let off = position_to_offset_checked(content, 0, 11)
+        .expect("the position immediately after an astral character is a valid scalar boundary");
+    // `let x = '` is 9 bytes, `😀` is 4 UTF-8 bytes → byte offset 13 is the closing quote.
+    assert_eq!(off, 13);
+    assert_eq!(&content.as_bytes()[off as usize], &b'\'');
+}
+
+#[test]
+fn tgo_checked_accepts_eol_insertion_on_astral_line() {
+    let content = "let x = '😀';";
+    // EOL insertion: 0-based col == line UTF-16 length (13).
+    let off = position_to_offset_checked(content, 0, 13)
+        .expect("an end-of-line insertion position is a valid scalar boundary");
+    assert_eq!(off as usize, content.len());
+}
+
 #[test]
 fn test_rewrite_vue_imports_to_vue_ts() {
     let input = r#"import Foo from './Foo.vue'
