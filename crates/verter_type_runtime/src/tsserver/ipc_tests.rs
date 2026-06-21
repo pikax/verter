@@ -1232,7 +1232,15 @@ fn parse_tsserver_code_action_drops_empty_edit_action() {
         "an edit-less single-fix action must be dropped (None), not surfaced with empty edits"
     );
 
-    // Positive control: an action with a real textChange still parses.
+    // Positive control: an action with a real textChange (whose target content is RESOLVABLE)
+    // still parses. The edit path is fail-closed — it surfaces an edit only when the target's
+    // content is available (cache or disk) to convert the 1-based position to a byte offset — so
+    // the control seeds the cache for this path.
+    let mut resolvable_cache: HashMap<String, String> = HashMap::new();
+    resolvable_cache.insert(
+        "d:/test/file.ts".to_string(),
+        "const unused = 1;\n".to_string(),
+    );
     let real_action = serde_json::json!({
         "description": "Remove unused declaration",
         "changes": [
@@ -1248,7 +1256,7 @@ fn parse_tsserver_code_action_drops_empty_edit_action() {
             }
         ],
     });
-    let parsed = parse_tsserver_code_action(&real_action, &cache)
+    let parsed = parse_tsserver_code_action(&real_action, &resolvable_cache)
         .expect("an action with a real edit must survive");
     assert_eq!(parsed.title, "Remove unused declaration");
     assert_eq!(parsed.edits.len(), 1, "the single real edit is kept");
