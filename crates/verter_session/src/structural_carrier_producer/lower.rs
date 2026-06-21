@@ -427,10 +427,17 @@ fn lower_node(
                 lower_node(graph, true_type, scope, &true_ctx)?
             };
             let false_branch_ref = lower_node(graph, false_type, scope, ctx)?;
-            let distributive = matches!(
-                graph.node_data(check).as_deref(),
-                Some(SemanticNodeData::TypeParam { .. })
-            );
+            // This `match` is intentionally the de-sugared form of `matches!`:
+            // the single-producer expansion-surface guard bans ALL body macros
+            // in this file (so an imported synth macro cannot manufacture a
+            // hidden call to the module-private lowerer), and `matches!` is a
+            // body macro. Clippy's `match_like_matches_macro` suggestion to
+            // collapse this back to `matches!` MUST NOT be applied here.
+            #[allow(clippy::match_like_matches_macro)]
+            let distributive = match graph.node_data(check).as_deref() {
+                Some(SemanticNodeData::TypeParam { .. }) => true,
+                _ => false,
+            };
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Conditional {
                     check,

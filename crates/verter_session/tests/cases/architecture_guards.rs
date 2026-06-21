@@ -22632,76 +22632,58 @@ fn mod_is_sanctioned_test_wiring(m: &syn::ItemMod) -> bool {
     saw_cfg_test && saw_exact_path
 }
 
-/// The INERT macro allowlist for production `lower.rs` Expr/statement-position
-/// macro invocations. Derived from the ACTUAL macro set the file uses — at the
-/// time of writing, EXACTLY one: `matches!` (the deferred-conditional
-/// `distributive` classification at ~`lower.rs:430`).
-///
-/// Each entry is INERT — it cannot synthesise a hidden call to the private
-/// `lower_type_expr_structural` in a way that escapes the occurrence rail's
-/// literal-token count:
-///
-/// - `matches!(value, PATTERN)` — a boolean pattern-match. Its second argument
-///   is a PATTERN, not an expression, so it cannot CALL anything; its first is a
-///   plain sub-expression already covered by the occurrence rail's literal scan
-///   (a `lower_type_expr_structural(…)` written inside `matches!(…)` is a normal
-///   identifier token the text rail counts). It expands to a `match`, never a
-///   fresh call to a private fn that the rail cannot see.
-///
-/// The allowlist is the MINIMAL-over-block close: a blanket Expr/stmt-macro ban
-/// would red the genuine `matches!`, so only the actually-used inert macros are
-/// admitted; ANY other Expr/stmt-position macro (an imported `synth_call!`
-/// expanding to a hidden lowerer call, a `paste!` token-splice, …) reds. Add a
-/// new entry ONLY when `lower.rs` genuinely starts using another inert std/
-/// control macro, and document WHY it is inert here.
-const LOWER_RS_INERT_BODY_MACROS: &[&str] = &["matches"];
-
 /// Collect EXPANSION-SURFACE violations in `lower.rs` source `src` — production
 /// (non-`#[cfg(test)]`) constructs that could introduce compiled SAME-MODULE
 /// code reaching the module-private `lower_type_expr_structural` WITHOUT adding
 /// a third literal identifier token (so the occurrence-counting
 /// `structural_lowerer_single_witnessed_call_violation` rail cannot see them).
-/// Parses `src` with `syn` and walks its items (descending into fn / const /
-/// static / impl-method BODIES and inline `mod { … }` blocks), recording:
 ///
-/// - an **item-position macro invocation** (`syn::Item::Macro`) — covers
-///   `macro_rules!` definitions, `include!` / `include_str!`, AND function-like
-///   `some_macro! { … }` / `(…)` / `[…]` (`paste!`, `concat_idents!`, a
-///   proc-macro that synthesises a call). REJECTED UNCONDITIONALLY (not keyed on
-///   the token stream mentioning the lowerer name): a `paste!` joining
-///   `lower_type_expr_` + `structural` never emits the whole name as one token,
-///   so a name-mention check could not see it — the genuine `lower.rs` uses NO
-///   item-position macro at all, so the robust rule is to forbid the whole
-///   class.
-/// - an **Expr / statement-position macro invocation** inside any fn / const /
-///   static / impl-method BODY (`syn::Expr::Macro` / `syn::Stmt::Macro` / a
-///   macro-bearing `let` or item initializer) whose macro path's last segment is
-///   NOT in the INERT allowlist [`LOWER_RS_INERT_BODY_MACROS`]. This closes the
-///   same-module imported-macro synthesis vector — an `synth_call!(g)` expanding
-///   to `lower_type_expr_structural(g)` is reachable inside a fn body and adds no
-///   third literal identifier token, so the occurrence rail cannot see it. The
-///   genuine `matches!` is admitted (inert); any other body macro reds.
-/// - an **out-of-line `#[path]` child `mod`** (`syn::Item::Mod` with
+/// Parses `src` with `syn` and drives a SINGLE [`ExpansionSurfaceVisitor`] over
+/// the parsed file. The visitor is EXHAUSTIVE OVER MACROS BY CONSTRUCTION: its
+/// `visit_macro` override fires on EVERY `syn::Macro` node anywhere in the AST —
+/// item-position (`macro_rules!` / `include!` / `paste! { … }`), Expr-position,
+/// statement-position, a macro inside an `impl` / `trait` / `extern` block
+/// (`ImplItem::Macro` / `TraitItem::Macro` / `ForeignItem::Macro`), a
+/// trait-default or impl method body, and an associated-const initializer — so
+/// no macro position can be missed. ALL macros are rejected (carrier-guard
+/// parity with `body_has_macro` in `carrier_encapsulation_guards.rs`): after the
+/// `matches!` → `match` de-sugar at `lower.rs:430`, production `lower.rs` has NO
+/// body macro, so the real tree passes; ANY body macro — `matches!`, `format!`,
+/// an imported `synth_call!`, a `matches!(x, _ if synth_call!(g))` guard-nest,
+/// `evil::matches!`, a renamed/imported `matches` — reds.
+///
+/// On top of the exhaustive macro ban the visitor enforces the structural rules
+/// the macro ban does not cover, mirroring the previous walker:
+///
+/// - **out-of-line `#[path]` child `mod`** (`syn::ItemMod` with
 ///   `content.is_none()`) — REJECTED unless it is EXACTLY the sanctioned test
 ///   wiring ([`mod_is_sanctioned_test_wiring`]: `#[cfg(test)]` exactly,
 ///   `#[path = "structural_lower_tests.rs"]` exactly, name
-///   `structural_lower_tests` exactly, no other attrs).
-/// - a **production (non-`#[cfg(test)]`) INLINE child `mod child { … }`** — a
+///   `structural_lower_tests` exactly, no other attrs);
+/// - **production (non-`#[cfg(test)]`) INLINE child `mod child { … }`** — a
 ///   same-module surface that can define a second producer or name the private
-///   lowerer. REJECTED. (The real `lower.rs` has none.) A `#[cfg(test)]`-gated
-///   inline mod is test-only code and is allowed (and recursed for completeness).
-/// - a **`use … lower_type_expr_structural … as <Alias>;`** reexport
-///   (`syn::Item::Use` renaming TO `lower_type_expr_structural`, via the shared
+///   lowerer. REJECTED. (The real `lower.rs` has none.);
+/// - **`use … lower_type_expr_structural … as <Alias>;`** reexport
+///   (`syn::ItemUse` renaming TO `lower_type_expr_structural`, via the shared
 ///   [`use_tree_renames_to`] classifier) — defense-in-depth alongside the
 ///   occurrence guard's third-occurrence rail.
 ///
-/// SCOPE — BOUNDED, NOT EXHAUSTIVE (see the guard doc's documented residual):
-/// this is a `syn`-source walk over ONE file. It CANNOT see macro-expanded
-/// output, a `#[path]` module rooted OUTSIDE the walked tree, or an attribute /
-/// derive proc-macro that REWRITES the file after parsing. After this fix, ALL
-/// the same-module IN-FILE vectors (inline mod, out-of-line mod, item-macro,
-/// Expr/stmt-macro, alias, let-binding, whitespace, char-literal) are CLOSED;
-/// the residual is exactly those two out-of-model cases (see the guard doc).
+/// CFG-TEST EXEMPTION: a `#[cfg(test)]`-gated subtree is test-only code (it is
+/// dead in any normal build) and is EXEMPT from the macro ban — the visitor
+/// tracks a `cfg_test_depth` and `visit_macro` rejects only when the depth is 0
+/// (production). The sanctioned out-of-line `#[cfg(test)] #[path] mod
+/// structural_lower_tests;` is never descended (its body lives in the SIBLING
+/// `structural_lower_tests.rs`, which `syn::parse_file` over `lower.rs` does not
+/// load), and a `#[cfg(test)]`-gated inline mod / fn / impl-method is recursed
+/// for STRUCTURAL violations while its macros stay exempt — exactly the previous
+/// walker's cfg-test policy.
+///
+/// SCOPE — the IN-FILE macro / mod / alias surface is now CLOSED, not residual
+/// (see the guard doc). The only out-of-model cases a `syn`-source walk over ONE
+/// file cannot see are an attribute / derive proc-macro that REWRITES `lower.rs`
+/// post-parse (`syn` sees the PRE-expansion shape) and a module rooted in a
+/// DIFFERENT/UNRELATED file the guard never reads (compiler module-privacy
+/// blocks that foreign body from naming the bare-private lowerer).
 fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
     let mut violations = Vec::new();
     let file = match syn::parse_file(src) {
@@ -22713,186 +22695,200 @@ fn lower_rs_expansion_surface_violations(src: &str) -> Vec<String> {
             return violations;
         }
     };
-    lower_rs_collect_expansion_surface(&file.items, &mut violations);
+    let mut visitor = ExpansionSurfaceVisitor {
+        violations: Vec::new(),
+        cfg_test_depth: 0,
+    };
+    syn::visit::Visit::visit_file(&mut visitor, &file);
+    violations.append(&mut visitor.violations);
     violations
 }
 
-/// A `syn::visit::Visit` that records every Expr / statement-position macro
-/// invocation whose macro path's last segment is NOT in the inert allowlist
-/// [`LOWER_RS_INERT_BODY_MACROS`]. Visiting fn / const / static / impl-method
-/// bodies with this catches a same-module imported-macro synthesis (an
-/// `synth_call!(g)` expanding to a hidden private-lowerer call) that the
-/// occurrence-counting text rail cannot see because the whole identifier never
-/// appears as a literal token.
-struct BodyMacroScanner {
+/// The SINGLE expansion-surface scanner for production `lower.rs`. Its
+/// `visit_macro` override is exhaustive over macros BY CONSTRUCTION — every
+/// `syn::Macro` node, in EVERY position (item / Expr / statement / `impl` /
+/// `trait` / `extern` / method body / assoc-const initializer), is visited and
+/// rejected when in production (non-`#[cfg(test)]`) code, mirroring the sibling
+/// carrier guard's `body_has_macro` (`carrier_encapsulation_guards.rs`). On top
+/// of the macro ban it enforces the structural rules a macro ban cannot express:
+/// the out-of-line / production-inline `mod` rejections and the lowerer-`as`
+/// reexport rejection. A `#[cfg(test)]`-gated subtree increments
+/// `cfg_test_depth`, exempting its macros (test-only code), while STRUCTURAL
+/// rules still apply.
+struct ExpansionSurfaceVisitor {
     violations: Vec<String>,
+    /// Depth of the `#[cfg(test)]`-gated subtree currently being visited. When
+    /// `> 0` the macro ban is suspended (test-only code), exactly matching the
+    /// crate-wide "cfg-test is excluded from production scans" convention.
+    cfg_test_depth: usize,
 }
 
-impl BodyMacroScanner {
-    fn record(&mut self, mac: &syn::Macro) {
-        let name = mac
-            .path
-            .segments
-            .last()
-            .map(|s| s.ident.to_string())
-            .unwrap_or_else(|| "<macro>".to_string());
-        if !LOWER_RS_INERT_BODY_MACROS.contains(&name.as_str()) {
+impl ExpansionSurfaceVisitor {
+    /// Run `body` with `cfg_test_depth` incremented iff `attrs` carries an EXACT
+    /// `#[cfg(test)]` ([`attr_is_exactly_cfg_test`]) — a `#[cfg(any(test, …))]` /
+    /// `#[cfg(all(test, …))]` / feature cfg is satisfiable in a production build
+    /// and does NOT grant the exemption. The macro / structural recursion in
+    /// `body` then sees the adjusted depth.
+    fn within<R>(&mut self, attrs: &[syn::Attribute], body: impl FnOnce(&mut Self) -> R) -> R {
+        let gated = attrs.iter().any(attr_is_exactly_cfg_test);
+        if gated {
+            self.cfg_test_depth += 1;
+        }
+        let out = body(self);
+        if gated {
+            self.cfg_test_depth -= 1;
+        }
+        out
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
+    /// EXHAUSTIVE macro ban: every `syn::Macro` node — item / Expr / statement /
+    /// `impl` / `trait` / `extern` / method-body / assoc-const-init — reaches
+    /// here. Rejected unless inside a `#[cfg(test)]`-gated subtree (test-only
+    /// code is exempt). Does NOT recurse into the macro's unparsed token stream
+    /// (it is not a navigable AST), but that is irrelevant: a nested macro lives
+    /// in a `syn` node the OUTER walk already visits (e.g. the `if $guard:expr`
+    /// arm of `matches!(x, _ if synth_call!(g))` is a real `syn::ExprMacro`
+    /// reached on its own), so the guard-nest vector is caught.
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if self.cfg_test_depth == 0 {
+            let name = mac
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_else(|| "<macro>".to_string());
             self.violations.push(format!(
-                "an Expr/statement-position macro invocation `{name}!( … )` in a fn / const / \
-                 static / impl-method body of production `lower.rs` is NOT in the inert allowlist \
-                 ({:?}) — it can synthesise same-module code reaching the private \
-                 `lower_type_expr_structural` without a third literal identifier token (e.g. \
-                 `synth_call!(g)` expanding to `lower_type_expr_structural(g)`)",
-                LOWER_RS_INERT_BODY_MACROS
+                "a macro invocation `{name}!( … )` in production `lower.rs` is forbidden — ALL \
+                 body macros are banned (carrier-guard parity): a macro can synthesise same-module \
+                 code reaching the module-private `lower_type_expr_structural` without a third \
+                 literal identifier token the occurrence rail counts (e.g. `synth_call!(g)` \
+                 expanding to `lower_type_expr_structural(g)`, or a `matches!(x, _ if \
+                 synth_call!(g))` guard-nest, or a renamed `evil::matches!`). The deferred-\
+                 conditional `distributive` classification at `lower.rs:430` uses the de-sugared \
+                 `match`, NOT `matches!`, exactly so this file stays body-macro-free."
             ));
         }
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for BodyMacroScanner {
-    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
-        self.record(&node.mac);
-        syn::visit::visit_expr_macro(self, node);
+        // Intentionally do NOT call `syn::visit::visit_macro` — the token stream
+        // is unparsed and not a navigable AST. Every nested macro reachable as a
+        // real `syn` node (a guard-expr macro, an arg-position macro) is visited
+        // on its own by the outer walk, so exhaustiveness is preserved.
     }
 
-    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        self.record(&node.mac);
-        syn::visit::visit_stmt_macro(self, node);
-    }
-}
-
-/// Drive a [`BodyMacroScanner`] over one body sub-tree (a fn block or a
-/// const/static initializer expression) and append any non-allowlisted
-/// Expr/stmt-position macro violations it records. `visit` is a closure that
-/// applies the scanner to the concrete node (`|s| s.visit_block(&f.block)`,
-/// `|s| s.visit_expr(&c.expr)`, …), keeping the lifetime local and avoiding a
-/// generic trait while sharing the scan across fn / const / static /
-/// impl-method bodies.
-fn scan_body_macros(violations: &mut Vec<String>, visit: impl FnOnce(&mut BodyMacroScanner)) {
-    let mut scanner = BodyMacroScanner {
-        violations: Vec::new(),
-    };
-    visit(&mut scanner);
-    violations.append(&mut scanner.violations);
-}
-
-/// Recursive item walker for [`lower_rs_expansion_surface_violations`] —
-/// descends fn / const / static / impl-method BODIES (for non-allowlisted
-/// Expr/stmt-position macros) and `#[cfg(test)]`-gated inline `mod { … }`
-/// content blocks (test code), while REJECTING production inline child mods,
-/// out-of-line mods, item macros, and lowerer-`as` reexports.
-fn lower_rs_collect_expansion_surface(items: &[syn::Item], violations: &mut Vec<String>) {
-    for item in items {
-        match item {
-            // An item-position macro invocation — `some_macro! { … }`,
-            // `macro_rules! m { … }`, `include!("…")`, `include_str!("…")` (all
-            // parse as `Item::Macro`). Forbidden UNCONDITIONALLY in production
-            // `lower.rs`.
-            syn::Item::Macro(item_mac) => {
-                let mac_name = item_mac
-                    .mac
-                    .path
-                    .segments
-                    .last()
-                    .map(|s| s.ident.to_string())
-                    .unwrap_or_else(|| "<macro>".to_string());
-                violations.push(format!(
-                    "an item-position macro invocation `{mac_name}!{{ … }}` (a `macro_rules!` \
-                     definition, an `include!` / `include_str!`, or a function-like / proc-macro \
-                     invocation) is forbidden in production `lower.rs` — it can synthesise \
-                     same-module code reaching the private `lower_type_expr_structural` without a \
-                     third literal identifier token"
-                ));
-            }
-            // A free fn body — scan it for non-allowlisted Expr/stmt-position
-            // macros (the same-module imported-macro synthesis vector).
-            syn::Item::Fn(item_fn) => {
-                scan_body_macros(violations, |s| {
-                    syn::visit::Visit::visit_block(s, &item_fn.block)
+    /// Out-of-line vs inline `mod` structural rules (NOT expressible as a macro
+    /// ban), plus the `#[cfg(test)]` exemption bookkeeping for nested macros.
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        match &m.content {
+            // Inline `mod foo { … }`. A production (non-`#[cfg(test)]`) inline
+            // child mod is a SAME-MODULE surface that can define a second
+            // producer or name the private lowerer — REJECTED. A `#[cfg(test)]`-
+            // gated inline mod is test-only code: allowed, recursed for nested
+            // STRUCTURAL violations with its macros exempt.
+            Some((_, inner)) => {
+                let is_cfg_test = m.attrs.iter().any(attr_is_exactly_cfg_test);
+                if !is_cfg_test {
+                    self.violations.push(format!(
+                        "a production (non-`#[cfg(test)]`) INLINE child module `mod {} {{ … }}` is \
+                         forbidden in `lower.rs` — it is a same-module surface that can define a \
+                         second producer or name the private `lower_type_expr_structural`; the real \
+                         `lower.rs` declares no inline child module",
+                        m.ident,
+                    ));
+                }
+                // Descend either way (defense-in-depth) — the cfg-test gate, if
+                // present, suspends the macro ban for the subtree.
+                self.within(&m.attrs, |s| {
+                    for item in inner {
+                        syn::visit::Visit::visit_item(s, item);
+                    }
                 });
             }
-            // A const / static initializer expression — scan it too (a macro
-            // initializer is an Expr-position macro).
-            syn::Item::Const(item_const) => {
-                scan_body_macros(violations, |s| {
-                    syn::visit::Visit::visit_expr(s, &item_const.expr)
-                });
-            }
-            syn::Item::Static(item_static) => {
-                scan_body_macros(violations, |s| {
-                    syn::visit::Visit::visit_expr(s, &item_static.expr)
-                });
-            }
-            // An `impl` block — scan each method body for body macros.
-            syn::Item::Impl(item_impl) => {
-                for impl_item in &item_impl.items {
-                    if let syn::ImplItem::Fn(method) = impl_item {
-                        scan_body_macros(violations, |s| {
-                            syn::visit::Visit::visit_block(s, &method.block)
-                        });
-                    }
+            // Out-of-line `mod foo;` — body lives in another file. Allowed ONLY
+            // for the EXACT sanctioned test wiring. (Its body is in the SIBLING
+            // file `syn::parse_file` over `lower.rs` does not load, so there is
+            // nothing further to descend.)
+            None => {
+                if !mod_is_sanctioned_test_wiring(m) {
+                    let has_path = m.attrs.iter().any(|a| a.path().is_ident("path"));
+                    self.violations.push(format!(
+                        "an out-of-line child module `mod {};`{} is forbidden in production \
+                         `lower.rs` — only the EXACT sanctioned `#[cfg(test)] #[path = \
+                         \"structural_lower_tests.rs\"] mod {}` test wiring (exactly `#[cfg(test)]`, \
+                         exactly that `#[path]`, that name, no other attrs) may declare an \
+                         out-of-line child; a production, feature-cfg, `../`-escaping-path, \
+                         wrong-name, or extra-attr child module could carry code reaching the \
+                         private lowerer",
+                        m.ident,
+                        if has_path { " (with `#[path]`)" } else { "" },
+                        LOWER_RS_SANCTIONED_TEST_MOD,
+                    ));
                 }
             }
-            syn::Item::Mod(m) => {
-                match &m.content {
-                    // Inline `mod foo { … }`. A production (non-`#[cfg(test)]`)
-                    // inline child mod is a SAME-MODULE surface that can define a
-                    // second producer or name the private lowerer — REJECTED. A
-                    // `#[cfg(test)]`-gated inline mod is test-only code: allowed,
-                    // and recursed into so a nested violation is still seen.
-                    Some((_, inner)) => {
-                        let is_cfg_test = m.attrs.iter().any(attr_is_exactly_cfg_test);
-                        if is_cfg_test {
-                            lower_rs_collect_expansion_surface(inner, violations);
-                        } else {
-                            violations.push(format!(
-                                "a production (non-`#[cfg(test)]`) INLINE child module `mod {} {{ … \
-                                 }}` is forbidden in `lower.rs` — it is a same-module surface that \
-                                 can define a second producer or name the private \
-                                 `lower_type_expr_structural`; the real `lower.rs` declares no inline \
-                                 child module",
-                                m.ident,
-                            ));
-                            // Still descend (defense-in-depth: surface nested
-                            // item/body violations too).
-                            lower_rs_collect_expansion_surface(inner, violations);
-                        }
-                    }
-                    // Out-of-line `mod foo;` — body lives in another file. Allowed
-                    // ONLY for the EXACT sanctioned test wiring.
-                    None => {
-                        if !mod_is_sanctioned_test_wiring(m) {
-                            let has_path = m.attrs.iter().any(|a| a.path().is_ident("path"));
-                            violations.push(format!(
-                                "an out-of-line child module `mod {};`{} is forbidden in production \
-                                 `lower.rs` — only the EXACT sanctioned `#[cfg(test)] #[path = \
-                                 \"structural_lower_tests.rs\"] mod {}` test wiring (exactly \
-                                 `#[cfg(test)]`, exactly that `#[path]`, that name, no other attrs) \
-                                 may declare an out-of-line child; a production, feature-cfg, \
-                                 `../`-escaping-path, wrong-name, or extra-attr child module could \
-                                 carry code reaching the private lowerer",
-                                m.ident,
-                                if has_path { " (with `#[path]`)" } else { "" },
-                                LOWER_RS_SANCTIONED_TEST_MOD,
-                            ));
-                        }
-                    }
-                }
-            }
-            // A `use … as lower_type_expr_structural;` reexport binding minting a
-            // nameable alias of the private lowerer (defense-in-depth alongside
-            // the occurrence guard's third-occurrence rail).
-            syn::Item::Use(use_item) => {
-                if use_tree_renames_to(&use_item.tree, "lower_type_expr_structural") {
-                    violations.push(
-                        "a `use … as lower_type_expr_structural;` reexport binding mints a nameable \
-                         alias of the private structural lowerer in `lower.rs` — forbidden"
-                            .to_string(),
-                    );
-                }
-            }
-            _ => {}
         }
+    }
+
+    /// A `use … as lower_type_expr_structural;` reexport binding mints a nameable
+    /// alias of the private lowerer — defense-in-depth alongside the occurrence
+    /// guard's third-occurrence rail.
+    fn visit_item_use(&mut self, use_item: &'ast syn::ItemUse) {
+        if use_tree_renames_to(&use_item.tree, "lower_type_expr_structural") {
+            self.violations.push(
+                "a `use … as lower_type_expr_structural;` reexport binding mints a nameable alias \
+                 of the private structural lowerer in `lower.rs` — forbidden"
+                    .to_string(),
+            );
+        }
+        syn::visit::visit_item_use(self, use_item);
+    }
+
+    // ── `#[cfg(test)]` exemption bookkeeping for the macro ban ────────────────
+    // The macro ban is suspended inside any `#[cfg(test)]`-gated item subtree
+    // (test-only code). These overrides increment/decrement `cfg_test_depth`
+    // around the attribute-bearing item containers a test gate can sit on, so a
+    // test-only macro (e.g. a future `assert!` in a `#[cfg(test)]` impl method
+    // like `with_merge_role`) does NOT false-red while a PRODUCTION macro in the
+    // same kind of body still reds. (`visit_item_mod` does its own descent above
+    // and is not re-listed here.)
+
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        self.within(&f.attrs, |s| syn::visit::visit_item_fn(s, f));
+    }
+
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        self.within(&f.attrs, |s| syn::visit::visit_impl_item_fn(s, f));
+    }
+
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        self.within(&f.attrs, |s| syn::visit::visit_trait_item_fn(s, f));
+    }
+
+    fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
+        self.within(&c.attrs, |s| syn::visit::visit_item_const(s, c));
+    }
+
+    fn visit_item_static(&mut self, s_item: &'ast syn::ItemStatic) {
+        self.within(&s_item.attrs, |s| syn::visit::visit_item_static(s, s_item));
+    }
+
+    fn visit_impl_item_const(&mut self, c: &'ast syn::ImplItemConst) {
+        self.within(&c.attrs, |s| syn::visit::visit_impl_item_const(s, c));
+    }
+
+    fn visit_trait_item_const(&mut self, c: &'ast syn::TraitItemConst) {
+        self.within(&c.attrs, |s| syn::visit::visit_trait_item_const(s, c));
+    }
+
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        self.within(&i.attrs, |s| syn::visit::visit_item_impl(s, i));
+    }
+
+    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+        self.within(&t.attrs, |s| syn::visit::visit_item_trait(s, t));
+    }
+
+    fn visit_foreign_item_fn(&mut self, f: &'ast syn::ForeignItemFn) {
+        self.within(&f.attrs, |s| syn::visit::visit_foreign_item_fn(s, f));
     }
 }
 
@@ -22913,44 +22909,59 @@ fn lower_rs_collect_expansion_surface(items: &[syn::Item], violations: &mut Vec<
 /// (`collect_sanctioned_occurrences` + `macro_hot_mirror_exposes_single_crate_visible_producer_entry`)
 /// and the `syn`-AST `carrier_module_has_no_public_type_args_surface`.
 ///
-/// REJECTION SET (production, non-`#[cfg(test)]`): an item-position macro
-/// invocation (`macro_rules!` / `include!` / `include_str!` / function-like or
-/// proc-macro `some_macro!{…}`); a non-allowlisted Expr/statement-position macro
-/// inside a fn / const / static / impl-method body (the inert allowlist is
-/// [`LOWER_RS_INERT_BODY_MACROS`] = the actually-used `matches!`); a production
-/// INLINE child `mod child { … }`; an out-of-line / `#[path]` child `mod` (any
-/// `mod foo;` other than the EXACT sanctioned wiring); a `use … as
-/// lower_type_expr_structural;` reexport. ONLY the EXACT sanctioned
-/// `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod structural_lower_tests;`
-/// test wiring is ALLOWLISTED ([`mod_is_sanctioned_test_wiring`]: exactly
-/// `#[cfg(test)]` — not `cfg(any(test, …))` / `cfg(all(…))` / a feature cfg —
-/// exactly that `#[path]`, that name, no other attrs).
+/// REJECTION SET (production, non-`#[cfg(test)]`): ANY macro invocation in ANY
+/// position — item (`macro_rules!` / `include!` / `include_str!` / function-like
+/// or proc-macro `some_macro!{…}`), Expr, statement, a macro inside an `impl` /
+/// `trait` / `extern` block (`ImplItem::Macro` / `TraitItem::Macro` /
+/// `ForeignItem::Macro`), a trait-default or impl method body, an associated-
+/// const initializer. ALL body macros are BANNED (carrier-guard parity with
+/// `body_has_macro`); the single `visit_macro` override is exhaustive over the
+/// `syn` AST by construction, so NO macro position can be missed and no
+/// name-allowlist (the prior unsound `matches!`-by-name admission) survives. The
+/// guard ALSO rejects a production INLINE child `mod child { … }`; an out-of-line
+/// / `#[path]` child `mod` (any `mod foo;` other than the EXACT sanctioned
+/// wiring); a `use … as lower_type_expr_structural;` reexport. ONLY the EXACT
+/// sanctioned `#[cfg(test)] #[path = "structural_lower_tests.rs"] mod
+/// structural_lower_tests;` test wiring is ALLOWLISTED
+/// ([`mod_is_sanctioned_test_wiring`]: exactly `#[cfg(test)]` — not
+/// `cfg(any(test, …))` / `cfg(all(…))` / a feature cfg — exactly that `#[path]`,
+/// that name, no other attrs); a `#[cfg(test)]`-gated subtree (inline mod, fn,
+/// impl method) is dead-in-production test code and is EXEMPT from the macro ban.
 ///
-/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED). After this fix, ALL the same-module
-/// IN-FILE vectors are CLOSED — inline mod, out-of-line mod, item macro,
-/// Expr/stmt-position macro, `as`-alias, `let`-binding, whitespace/newline-split
-/// call, char-literal masking. The ONLY remaining residual a `syn` source scan
-/// of ONE file cannot model is precisely two cases, NEITHER of which the in-file
-/// closes above touch:
-/// - an **out-of-tree `#[path = "…"]` module** rooting code in a DIFFERENT
-///   module/file OUTSIDE `crates/verter_session/src/structural_carrier_producer/`
-///   — this scan reads only `lower.rs`, so it never sees that foreign file's
-///   body; but that body is in ANOTHER module, so COMPILER module-privacy DOES
-///   block it from naming the bare-private `lower_type_expr_structural` (a
-///   compile error, not a lint — the airtight backstop for the FOREIGN case);
+/// IN-FILE EXPR / STMT / ITEM MACRO CLASS IS CLOSED (not residual). After this
+/// fix, EVERY same-module IN-FILE vector is CLOSED — every macro position (item,
+/// Expr, stmt, impl/trait/extern item, method body, assoc-const init), the
+/// inline mod, the out-of-line mod, the `as`-alias, the `let`-binding, the
+/// whitespace/newline-split call, the char-literal masking. A `#[path = "…"]`
+/// module declared as a CHILD of `lower.rs` is a DESCENDANT: it CAN name the
+/// private fn via `super::lower_type_expr_structural`, so compiler privacy does
+/// NOT backstop a child `#[path]` mod — that case is CLOSED by this guard's
+/// rejection of every non-sanctioned out-of-line / `#[path]` child `mod`, NOT by
+/// privacy.
+///
+/// HONEST IRREDUCIBLE RESIDUAL (ACCEPTED) — exactly TWO out-of-model cases a
+/// `syn` source scan of ONE file structurally cannot reach, NEITHER an in-file
+/// macro:
 /// - an **attribute / derive PROC-MACRO that REWRITES `lower.rs`** post-parse —
 ///   a `syn` parse sees the PRE-expansion shape, so no source scanner can model
 ///   post-expansion code; a proc-macro injecting a lowerer call would have to be
 ///   ADDED as an attribute/derive on a `lower.rs` item, itself a reviewed change,
 ///   and the codebase accepts this identical residual for its sibling
 ///   producer-confinement guards (`carrier_module_has_no_public_type_args_surface`
-///   and `macro_hot_mirror_exposes_single_crate_visible_producer_entry`).
+///   and `macro_hot_mirror_exposes_single_crate_visible_producer_entry`);
+/// - a **module rooted in a DIFFERENT / UNRELATED file** the guard never reads
+///   (NOT a child of `lower.rs` — e.g. an unrelated module elsewhere in the
+///   crate) — this scan reads only `lower.rs`, so it never sees that foreign
+///   body; but because that body is in ANOTHER module, COMPILER module-privacy
+///   DOES block it from naming the bare-private `lower_type_expr_structural` (a
+///   compile error, not a lint — the airtight backstop for the FOREIGN case).
 ///
 /// NOT residual (do NOT claim privacy backstops these — they are CLOSED here):
-/// the IN-FILE inline-mod / out-of-line-mod / item-macro / Expr-stmt-macro /
-/// alias / binding vectors are all rejected by this guard's `syn` walk and the
-/// occurrence rail. Compiler module-privacy is the backstop ONLY for the
-/// out-of-tree/foreign case above, NOT for same-module in-file code.
+/// the IN-FILE any-position macro / inline-mod / out-of-line-or-`#[path]`-child-
+/// mod / alias / binding vectors are all rejected by this guard's `syn` walk and
+/// the occurrence rail. Compiler module-privacy is the backstop ONLY for a body
+/// in a DIFFERENT/UNRELATED foreign module, NOT for same-module in-file code and
+/// NOT for a `#[path]` CHILD of `lower.rs` (a descendant, closed by the guard).
 #[test]
 fn structural_carrier_producer_lower_has_no_expansion_surface() {
     let rel = "crates/verter_session/src/structural_carrier_producer/lower.rs";
@@ -22990,18 +23001,25 @@ fn structural_carrier_producer_lower_has_no_expansion_surface() {
 ///   `#[cfg(all(test, …))]` / `#[cfg(feature)]` mod, a `../`-escaping `#[path]`, a
 ///   missing `#[path]`, an extra attribute — all red even with the sanctioned
 ///   name;
-/// - FIX 1 (part 2): a production INLINE `mod child { … }` reds; a `#[cfg(test)]`
-///   inline mod is allowed;
-/// - FIX 3 (body-macro allowlist): a non-allowlisted Expr/stmt-position
-///   `synth_call!` in a fn / const / impl-method body reds; the genuine inert
-///   `matches!` passes.
+/// - production INLINE `mod child { … }` reds; a `#[cfg(test)]` inline mod is
+///   allowed;
+/// - BAN-ALL body macros (carrier-guard parity): a body `matches!` now REDS
+///   (the former allowlist was unsound), as does the `matches!(x, _ if
+///   synth_call!(g))` guard-nest, a path-qualified `evil::matches!`, a
+///   renamed-import `matches!` invocation, and an `synth_call!` in any
+///   fn / const / impl-method position;
+/// - EXHAUSTIVE item-position coverage (the single `visit_macro` visitor):
+///   `ImplItem::Macro`, `TraitItem::Macro`, `ForeignItem::Macro`, a
+///   trait-default method body macro, and an assoc-const initializer macro each
+///   red; a `#[cfg(test)]`-gated method body macro stays exempt.
 #[test]
 fn structural_lower_expansion_surface_classifier_discriminates() {
     // The REAL minimal genuine shape: `use` imports, the bare module-private fn,
     // and the sanctioned `#[cfg(test)] #[path] mod` test wiring. PASSES. The fn
-    // bodies use a plain path expression (`DEFAULT`), NOT `todo!()`, so the
-    // body-macro scan (FIX 3) sees no non-allowlisted macro in the genuine shape
-    // — the real `lower.rs` likewise uses only the inert `matches!`.
+    // bodies use a plain path expression (`DEFAULT`), NOT `todo!()` or `matches!`,
+    // so the ban-all body-macro scan sees NO macro in the genuine shape — the
+    // real `lower.rs` is body-macro-free (its former `matches!` at line 430 is
+    // now the de-sugared `match`).
     let genuine = "use std::sync::Arc;\n\
                    fn lower_type_expr_structural(g: &G) -> R { DEFAULT }\n\
                    pub(in crate::structural_carrier_producer) fn emit_macro_arg(g: &G, _w: &W) -> R {\n\
@@ -23027,7 +23045,7 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
 
     // REJECT — an `include_str!`-ONLY fixture (in a `const` initializer, NO item
     // `include!`): `include_str!("x.inc")` is an Expr-position macro in the const
-    // initializer, so the FIX-3 body-macro scan catches it ON ITS OWN — the
+    // initializer, so the ban-all body-macro scan catches it ON ITS OWN — the
     // fixture reds for the intended reason (not because a sibling item `include!`
     // happens to be present). This discriminates the body-macro path.
     let include_str_only = format!("{genuine}const SRC: &str = include_str!(\"x.inc\");\n");
@@ -23211,47 +23229,142 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
          child module itself is forbidden, and the scan also recurses into its body"
     );
 
-    // ── FIX 3: Expr/statement-position body-macro allowlist ───────────────────
-    // PASS — the GENUINE `matches!` in a fn body is INERT-allowlisted, so a body
-    // that uses it does NOT red.
+    // ── BAN-ALL body macros (carrier-guard parity, replaces the unsound
+    //    name-allowlist) ───────────────────────────────────────────────────────
+    // REJECT — the FORMER allowlisted `matches!`. After the `matches!` → `match`
+    // de-sugar at `lower.rs:430`, NO body macro is admitted: a body `matches!`
+    // now reds. (The previous name-allowlist was unsound — see the guard-nest /
+    // `evil::matches!` / renamed-`matches` vectors below.)
     let matches_body =
         format!("{genuine}fn classify(x: &T) -> bool {{ matches!(x, T::A {{ .. }}) }}\n");
     assert!(
-        lower_rs_expansion_surface_violations(&matches_body).is_empty(),
-        "the genuine inert `matches!(…)` in a fn body must PASS the body-macro allowlist (it cannot \
-         synthesise a hidden private-lowerer call)"
+        !lower_rs_expansion_surface_violations(&matches_body).is_empty(),
+        "a body `matches!(…)` must now RED — ALL body macros are banned (carrier-guard parity); the \
+         former name-allowlist that admitted `matches!` was unsound"
+    );
+    // REJECT — the GUARD-NEST that defeated the name-allowlist: the macro name is
+    // `matches`, but its `if $guard:expr` arm nests an arbitrary `synth_call!(g)`
+    // that expands to a hidden `lower_type_expr_structural(g)`. The OUTER walk
+    // reaches the nested `synth_call!` as its OWN `syn::ExprMacro` node, so the
+    // ban-all `visit_macro` reds on BOTH the outer `matches!` and the inner
+    // `synth_call!`. This is THE vector the GOV ruling targeted.
+    let matches_guard_nest =
+        format!("{genuine}fn rogue(x: &T, g: &G) -> bool {{ matches!(x, _ if synth_call!(g)) }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&matches_guard_nest).is_empty(),
+        "a `matches!(x, _ if synth_call!(g))` guard-nest must RED — its `if $guard:expr` arm nests \
+         an arbitrary macro that can synthesise a hidden lowerer call; the ban-all `visit_macro` \
+         reaches the nested `synth_call!` node directly (the name-allowlist could not)"
+    );
+    // REJECT — a path-qualified `evil::matches!(…)`: a renamed/imported macro
+    // whose LAST path segment is `matches` but is NOT std `matches!`. The old
+    // last-segment name check admitted it; the ban-all rejects every macro.
+    let evil_matches =
+        format!("{genuine}fn rogue(x: &T) -> bool {{ evil::matches!(x, T::A {{ .. }}) }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&evil_matches).is_empty(),
+        "a path-qualified `evil::matches!(…)` must RED — a name-only allowlist on the last segment \
+         admitted it; the ban-all rejects every macro regardless of path"
+    );
+    // REJECT — a RENAMED import bound to the name `matches` then invoked: the
+    // `use … as matches;` is itself a reexport the alias check does not target
+    // (it targets `lower_type_expr_structural`), but the subsequent `matches!(…)`
+    // invocation is a body macro the ban-all rejects outright.
+    let renamed_matches = format!(
+        "{genuine}use crate::evil::synth as matches;\nfn rogue(g: &G) -> R {{ matches!(g) }}\n"
+    );
+    assert!(
+        !lower_rs_expansion_surface_violations(&renamed_matches).is_empty(),
+        "a `use … as matches; matches!(g)` renamed-import invocation must RED — the ban-all rejects \
+         the macro invocation regardless of what `matches` was rebound to"
     );
     // REJECT — a NON-allowlisted Expr-position `synth_call!(g)` in a fn body: an
     // imported macro that could expand to `lower_type_expr_structural(g)` adds no
-    // third literal identifier token, so only the body-macro scan catches it.
+    // third literal identifier token, so only the body-macro ban catches it.
     let synth_call_body = format!("{genuine}fn rogue(g: &G) -> R {{ synth_call!(g) }}\n");
     assert!(
         !lower_rs_expansion_surface_violations(&synth_call_body).is_empty(),
-        "a non-allowlisted Expr-position `synth_call!(g)` in a fn body must RED — it can expand to a \
-         hidden `lower_type_expr_structural(g)` call the occurrence rail cannot see"
+        "an Expr-position `synth_call!(g)` in a fn body must RED — it can expand to a hidden \
+         `lower_type_expr_structural(g)` call the occurrence rail cannot see"
     );
-    // REJECT — a NON-allowlisted statement-position `synth_call! { g };` (Stmt::Macro).
+    // REJECT — a statement-position `synth_call! { g };` (Stmt::Macro).
     let synth_stmt_body = format!("{genuine}fn rogue(g: &G) {{ synth_call! {{ g }}; }}\n");
     assert!(
         !lower_rs_expansion_surface_violations(&synth_stmt_body).is_empty(),
-        "a non-allowlisted statement-position `synth_call! {{ g }};` must RED — a Stmt-position macro \
-         is also a body-macro synthesis vector"
+        "a statement-position `synth_call! {{ g }};` must RED — a Stmt-position macro is also a \
+         body-macro synthesis vector"
     );
-    // REJECT — a NON-allowlisted macro in a CONST initializer (Expr-position).
+    // REJECT — a macro in a CONST initializer (Expr-position).
     let synth_const_init = format!("{genuine}const ROGUE: R = synth_call!(g);\n");
     assert!(
         !lower_rs_expansion_surface_violations(&synth_const_init).is_empty(),
-        "a non-allowlisted macro in a `const` initializer must RED — a macro initializer is an \
-         Expr-position macro"
+        "a macro in a `const` initializer must RED — a macro initializer is an Expr-position macro"
     );
-    // REJECT — a NON-allowlisted macro in an IMPL-METHOD body.
+    // REJECT — a macro in an IMPL-METHOD body.
     let synth_impl_method = format!(
         "{genuine}struct S;\nimpl S {{ fn rogue(&self, g: &G) -> R {{ synth_call!(g) }} }}\n"
     );
     assert!(
         !lower_rs_expansion_surface_violations(&synth_impl_method).is_empty(),
-        "a non-allowlisted macro in an impl-method body must RED — the scan visits impl-method \
+        "a macro in an impl-method body must RED — the scan visits impl-method bodies too"
+    );
+
+    // ── EXHAUSTIVE item-position macro coverage (the single `visit_macro`
+    //    visitor sees every macro node by construction) ─────────────────────────
+    // REJECT — `syn::ImplItem::Macro`: a macro invocation directly in an `impl`
+    // block (not inside a method body). The position-enumerating walker missed
+    // this; the `visit_macro` override reaches it.
+    let impl_item_macro =
+        format!("{genuine}struct S;\nimpl S {{ synth_call!{{ fn x() {{}} }} }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&impl_item_macro).is_empty(),
+        "a `synth_call! {{ … }}` in `impl` item-position (`ImplItem::Macro`) must RED — `visit_macro` \
+         reaches every macro node, including impl-item-position macros"
+    );
+    // REJECT — `syn::TraitItem::Macro`: a macro invocation in a `trait`
+    // definition's item position.
+    let trait_item_macro = format!("{genuine}trait T {{ synth_call!{{ fn x(); }} }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&trait_item_macro).is_empty(),
+        "a `synth_call! {{ … }}` in `trait` item-position (`TraitItem::Macro`) must RED"
+    );
+    // REJECT — `syn::ForeignItem::Macro`: a macro invocation in an `extern`
+    // block's item position.
+    let foreign_item_macro = format!("{genuine}extern \"C\" {{ synth_call!{{ fn x(); }} }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&foreign_item_macro).is_empty(),
+        "a `synth_call! {{ … }}` in `extern` item-position (`ForeignItem::Macro`) must RED"
+    );
+    // REJECT — a TRAIT DEFAULT METHOD body macro (`TraitItemFn` with a default
+    // block holding a macro).
+    let trait_default_body =
+        format!("{genuine}trait T {{ fn d(&self, g: &G) -> R {{ synth_call!(g) }} }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&trait_default_body).is_empty(),
+        "a macro in a trait DEFAULT method body must RED — the scan visits trait-default method \
          bodies too"
+    );
+    // REJECT — an ASSOCIATED-CONST INITIALIZER macro (`ImplItem::Const` whose
+    // initializer expr is a macro).
+    let assoc_const_init =
+        format!("{genuine}struct S;\nimpl S {{ const C: R = synth_call!(g); }}\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&assoc_const_init).is_empty(),
+        "a macro in an associated-const initializer (`ImplItem::Const`) must RED — the scan visits \
+         assoc-const initializers too"
+    );
+
+    // SOUNDNESS — a `#[cfg(test)]`-gated method body macro (test-only code) does
+    // NOT red: the cfg-test exemption suspends the macro ban for the dead-in-
+    // production subtree (matching `with_merge_role`, the real `#[cfg(test)]`
+    // impl method in `lower.rs`), while the PRODUCTION arms above still red.
+    let cfg_test_method_macro = format!(
+        "{genuine}struct S;\nimpl S {{ #[cfg(test)] fn t(&self, g: &G) -> R {{ synth_call!(g) }} }}\n"
+    );
+    assert!(
+        lower_rs_expansion_surface_violations(&cfg_test_method_macro).is_empty(),
+        "a `#[cfg(test)]`-gated impl-method body macro (test-only code) must NOT red — the cfg-test \
+         exemption suspends the macro ban for the dead-in-production subtree"
     );
 
     // The REAL owner source passes the expansion-surface scan (revert proof).
