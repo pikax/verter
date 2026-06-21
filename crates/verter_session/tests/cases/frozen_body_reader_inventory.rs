@@ -1,8 +1,11 @@
 //! Frozen declaration-BODY-reader inventory guard — a temporary
 //! `syn`-structural inventory that anchors every SEMANTIC declaration-body
 //! reader (the frozen migration surface for the upcoming body-storage flip)
-//! and the small COMPAT/output body-read set, so the two stay cleanly
-//! separated and a NEW lowered-body reader is caught.
+//! and the small COMPAT/output body-read set, so the two sets stay cleanly
+//! separated and the frozen migration surface is closed by the curated
+//! enumeration plus the mechanically-pinned count, the frozen-file gate, and the
+//! parity rail — with the `<recv>.body.<method>` tripwire as a bounded supplement
+//! (see "What rail closes the surface" below).
 //!
 //! ## What rail closes the surface (read this before trusting the tripwire)
 //!
@@ -1756,11 +1759,12 @@ fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
 ///   1. A synthetic bare `<recv>.body.clone()` prepared-style reader at a
 ///      NON-inventoried anchor produces ZERO method-chain hits — so the tripwire
 ///      is NOT the rail that closes the bare-field class; the enumeration is.
-///   2. The three bare-field semantic readers FIX-1 added (`route_keys ::
+///   2. The four bare-field semantic readers FIX-1 added (`route_keys ::
 ///      enumerate_member_surface_keys_via_route`, `external_type_frontier ::
 ///      resolve_one`, `component_meta_methods :: append_component_meta_registry_
-///      entries`) are present in `SEMANTIC_BODY_READERS` AND resolve to exactly
-///      one non-test def on the real tree — the enumeration row is load-bearing.
+///      entries`, `eval_env :: dependency_value_symbol_graph_native`) are present
+///      in `SEMANTIC_BODY_READERS` AND resolve to exactly one non-test def on the
+///      real tree — the enumeration row is load-bearing.
 ///   3. PRESENCE discriminates: the exact `route_keys` anchor IS present; a
 ///      deliberately-mutated (wrong-fn-name) variant of it is NOT — so a moved /
 ///      removed / renamed bare-field reader reddens
