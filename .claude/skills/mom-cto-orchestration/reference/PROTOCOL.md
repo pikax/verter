@@ -195,7 +195,7 @@ Plan-end scratch/report clutter already in git history is purged by a dedicated 
 
 Every binding design/plan is committed to `docs/arch/<name>-design.md` and referenced in the master-plan locked-designs index. At land, mirror is byte-identical to reviewed design; confirm verifies tracked + referenced + `cmp` identical.
 
-Mid-plan deferrals require codex-DEFER ruling and debt-ledger row in `docs/arch`. FEED-FORWARD is valid only mid-plan. Plan close-out requires empty debt ledger and zero open deferrals/carry-forward.
+Mid-plan deferrals require codex-DEFER ruling and debt-ledger row in `docs/arch`, and are legitimate ONLY when the ruling shows either (a) the work is outside the current block/scope and owned by a named later phase/block, OR (b) a named later prerequisite must come first for a concrete safety or architecture reason — never merely "less work later" or any other effort-only basis (deferring in-scope work stays P0). Any deferral-created or deferral-preserved dual implementation — old+new side-by-side, shim, fallback, or feature flag — is WIP-ONLY: it may live in `wip:` history but MUST NOT land in a conventional commit, consistent with one-clean-cutover. A typed single-path placeholder, such as a `Deferred` / `Unsupported` registry arm, is not a dual implementation and is exempt from this dual-implementation ban ONLY; any actual deferral it represents stays subject to the codex-DEFER ruling, debt-ledger row, and close-out rules. FEED-FORWARD is valid only mid-plan. Plan close-out requires empty debt ledger and zero open deferrals/carry-forward.
 
 ## Confirm / Integration Gates
 
