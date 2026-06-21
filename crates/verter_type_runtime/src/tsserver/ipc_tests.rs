@@ -390,7 +390,7 @@ fn test_format_quickinfo_hover_with_docs() {
 fn test_parse_tsserver_location_with_content() {
     let content = "const x = 1;\nconst y = 2;\nconst z = 3;";
     let mut cache = HashMap::new();
-    cache.insert("d:/test/file.ts".to_string(), content.to_string());
+    cache.insert("d:/test/file.ts".to_string(), Arc::from(content));
 
     let loc = serde_json::json!({
         "file": "d:/test/file.ts",
@@ -437,7 +437,7 @@ fn test_parse_tsserver_location_line_10_not_packed() {
     }
     let content = lines.join("\n");
     let mut cache = HashMap::new();
-    cache.insert("d:/test/file.ts".to_string(), content.clone());
+    cache.insert("d:/test/file.ts".to_string(), Arc::from(content.as_str()));
 
     let loc = serde_json::json!({
         "file": "d:/test/file.ts",
@@ -485,7 +485,7 @@ fn test_parse_tsserver_location_without_cache_reads_disk_content() {
 fn test_parse_tsserver_rename_span_with_content() {
     let content = "const x = 1;\nconst y = 2;";
     let mut cache = HashMap::new();
-    cache.insert("d:/test/file.ts".to_string(), content.to_string());
+    cache.insert("d:/test/file.ts".to_string(), Arc::from(content));
     let span = serde_json::json!({
         "start": { "line": 2, "offset": 7 },
         "end": { "line": 2, "offset": 8 },
@@ -571,7 +571,7 @@ fn parse_tsserver_rename_span_drops_span_when_content_unavailable() {
         "start": { "line": 3, "offset": 14 },
         "end": { "line": 3, "offset": 21 },
     });
-    let cache: HashMap<String, String> = HashMap::new();
+    let cache: HashMap<String, Arc<str>> = HashMap::new();
 
     let parsed = parse_tsserver_rename_span(&span, &missing, &cache);
     assert!(
@@ -586,8 +586,8 @@ fn parse_tsserver_rename_span_drops_span_when_content_unavailable() {
 #[test]
 fn parse_tsserver_rename_span_drops_out_of_range_position() {
     let content = "const x = 1;\nconst y = 2;\n";
-    let mut cache: HashMap<String, String> = HashMap::new();
-    cache.insert("d:/proj/r.ts".to_string(), content.to_string());
+    let mut cache: HashMap<String, Arc<str>> = HashMap::new();
+    cache.insert("d:/proj/r.ts".to_string(), Arc::from(content));
 
     let span = serde_json::json!({
         "start": { "line": 999, "offset": 1 },
@@ -607,7 +607,7 @@ fn test_parse_tsserver_location_non_ascii() {
     // "café" = 5 bytes UTF-8 (c=1, a=1, f=1, é=2), 4 UTF-16 code units
     let content = "café\nworld";
     let mut cache = HashMap::new();
-    cache.insert("d:/test/file.ts".to_string(), content.to_string());
+    cache.insert("d:/test/file.ts".to_string(), Arc::from(content));
 
     let loc = serde_json::json!({
         "file": "d:/test/file.ts",
@@ -753,7 +753,8 @@ async fn run_update_file_capture(
         next_seq: AtomicI64::new(1),
     });
 
-    let contents_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let opened_files: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // Pre-populate caches to simulate an already-open file
@@ -761,7 +762,7 @@ async fn run_update_file_capture(
         contents_cache
             .lock()
             .await
-            .insert(file.to_string(), old.to_string());
+            .insert(file.to_string(), Arc::from(old));
         opened_files.lock().await.insert(file.to_string());
     }
 
@@ -779,7 +780,7 @@ async fn run_update_file_capture(
     contents_cache
         .lock()
         .await
-        .insert(file.clone(), content.clone());
+        .insert(file.clone(), Arc::from(content.as_str()));
 
     let mut opened = opened_files.lock().await;
     if opened.contains(&file) {
@@ -914,7 +915,8 @@ async fn test_update_file_first_open_uses_open_command() {
 async fn test_get_semantic_tokens_cache_miss_returns_empty() {
     // Simulate what get_semantic_tokens does on cache miss:
     // It should return Ok(vec![]) without sending any request.
-    let contents_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     let content = {
         let cache = contents_cache.lock().await;
@@ -1306,7 +1308,7 @@ fn merge_diagnostic_sets_unions_distinct_tags_across_duplicates() {
 /// asserts it is now `None`, so it FAILS against the pre-fix code and PASSES after.
 #[test]
 fn parse_tsserver_code_action_drops_empty_edit_action() {
-    let cache: HashMap<String, String> = HashMap::new();
+    let cache: HashMap<String, Arc<str>> = HashMap::new();
 
     // An action whose only change carries an empty `textChanges` array — no edits.
     let empty_action = serde_json::json!({
@@ -1324,10 +1326,10 @@ fn parse_tsserver_code_action_drops_empty_edit_action() {
     // still parses. The edit path is fail-closed — it surfaces an edit only when the target's
     // content is available (cache or disk) to convert the 1-based position to a byte offset — so
     // the control seeds the cache for this path.
-    let mut resolvable_cache: HashMap<String, String> = HashMap::new();
+    let mut resolvable_cache: HashMap<String, Arc<str>> = HashMap::new();
     resolvable_cache.insert(
         "d:/test/file.ts".to_string(),
-        "const unused = 1;\n".to_string(),
+        Arc::from("const unused = 1;\n"),
     );
     let real_action = serde_json::json!({
         "description": "Remove unused declaration",
@@ -1385,7 +1387,7 @@ fn parse_tsserver_file_code_edits_drops_edit_when_file_unavailable() {
             }
         ]
     })];
-    let cache: HashMap<String, String> = HashMap::new();
+    let cache: HashMap<String, Arc<str>> = HashMap::new();
 
     let edits = parse_tsserver_file_code_edits(&changes, &cache)
         .expect("a well-formed (but unresolvable) change array still returns Some(empty)");
@@ -1413,8 +1415,8 @@ fn parse_tsserver_file_code_edits_drops_edit_when_file_unavailable() {
 fn parse_tsserver_file_code_edits_drops_out_of_range_position_not_clamped() {
     let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
     let path = "d:/proj/oob.ts".to_string();
-    let mut cache: HashMap<String, String> = HashMap::new();
-    cache.insert(path.clone(), content.to_string());
+    let mut cache: HashMap<String, Arc<str>> = HashMap::new();
+    cache.insert(path.clone(), Arc::from(content));
 
     // Line 999 is far past the file's 3 lines → the codec would clamp to EOF.
     let changes = vec![serde_json::json!({
@@ -1449,8 +1451,8 @@ fn parse_tsserver_file_code_edits_drops_out_of_range_position_not_clamped() {
 fn parse_tsserver_file_code_edits_drops_inverted_span() {
     let content = "const alpha = 1;\nconst beta = 2;\n";
     let path = "d:/proj/inv.ts".to_string();
-    let mut cache: HashMap<String, String> = HashMap::new();
-    cache.insert(path.clone(), content.to_string());
+    let mut cache: HashMap<String, Arc<str>> = HashMap::new();
+    cache.insert(path.clone(), Arc::from(content));
 
     // start is on line 2 (later), end is on line 1 (earlier) → start byte > end byte.
     let changes = vec![serde_json::json!({
@@ -1490,7 +1492,7 @@ fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
     // the file we wrote (forward slashes, lowercase drive letter on Windows).
     let file_key = verter_span::path::canonicalize_path(&file_path.to_string_lossy());
     // CACHE MISS for this path → forces the per-target disk fallback.
-    let cache: HashMap<String, String> = HashMap::new();
+    let cache: HashMap<String, Arc<str>> = HashMap::new();
 
     // tsserver positions are 1-based: `renamed` is on line 3, column 14.
     let changes = vec![serde_json::json!({

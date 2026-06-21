@@ -1501,7 +1501,8 @@ async fn test_read_loop_exits_on_eof() {
         Arc::new(Mutex::new(HashMap::new()));
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let contents_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
     tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
 
@@ -1573,7 +1574,8 @@ async fn test_provider_operations_fail_after_process_death() {
     // Start the read_loop (it will exit immediately on EOF)
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let contents_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     tokio::spawn(read_loop(
         stdout,
         Arc::clone(&pending),
@@ -2257,7 +2259,8 @@ async fn concurrent_requests_with_server_requests_do_not_deadlock() {
         Arc::new(Mutex::new(HashMap::new()));
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let contents_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Set up the channel-based writer
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
@@ -2545,13 +2548,14 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
         Arc::new(Mutex::new(HashMap::new()));
     let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let contents_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Pre-populate contents_cache with a known synced file.
     // Key must match what uri_to_file_path() returns for the URI.
     contents_cache.lock().await.insert(
         "d:/project/src/App.vue.tsx".to_string(),
-        "const x = 1;".to_string(),
+        Arc::from("const x = 1;"),
     );
 
     let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);

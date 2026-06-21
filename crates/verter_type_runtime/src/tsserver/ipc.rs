@@ -261,7 +261,7 @@ async fn read_loop(
     stdout: tokio::process::ChildStdout,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
-    contents_cache: Arc<Mutex<HashMap<String, String>>>,
+    contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     crash_notify: Option<Arc<Notify>>,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -337,7 +337,7 @@ async fn handle_message(
     msg: &serde_json::Value,
     pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
     diagnostics_cache: &Mutex<HashMap<String, Vec<TypeDiagnostic>>>,
-    contents_cache: &Mutex<HashMap<String, String>>,
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
 ) {
     let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -598,7 +598,7 @@ pub struct TsserverTypeProvider {
     /// tsserver child process. Killed on drop.
     child: Child,
     /// Cached file contents for position conversion.
-    contents: Arc<Mutex<HashMap<String, String>>>,
+    contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Files that have been sent to tsserver via `open` command.
     /// Used by `update_file` to decide between `open` vs `updateOpen`.
     /// `load_file` adds to `contents` but NOT to `opened_files`.
@@ -752,7 +752,7 @@ impl TsserverTypeProvider {
 
         let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
+        let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // Start the read loop
@@ -840,7 +840,7 @@ impl TypeProvider for TsserverTypeProvider {
                     contents_cache
                         .lock()
                         .await
-                        .insert(file.clone(), content.clone());
+                        .insert(file.clone(), Arc::from(content.as_str()));
                     opened_files.lock().await.insert(file.clone());
                     // tsserver `open` command doesn't return a response.
                     // projectRootPath tells tsserver where to find tsconfig.json.
@@ -884,7 +884,7 @@ impl TypeProvider for TsserverTypeProvider {
                 "tsserver_load_file",
                 format!("file={} content_len={}", file, content.len()),
                 async {
-                    contents_cache.lock().await.insert(file, content);
+                    contents_cache.lock().await.insert(file, content.into());
                     crate::type_runtime_trace_event!(
                         "tsserver_load_file_result",
                         "cached_only=true".to_string()
@@ -924,7 +924,7 @@ impl TypeProvider for TsserverTypeProvider {
                     contents_cache
                         .lock()
                         .await
-                        .insert(file.clone(), content.clone());
+                        .insert(file.clone(), Arc::from(content.as_str()));
 
                     let mut opened = opened_files.lock().await;
                     if opened.contains(&file) {
@@ -1574,7 +1574,7 @@ impl TypeProvider for TsserverTypeProvider {
             let locs = {
                 // Bind a `Copy` `&HashMap` for the per-target closures; the lock is already dropped,
                 // so the disk fallback inside the parser runs unlocked.
-                let cache: &HashMap<String, String> = &cache_snapshot;
+                let cache: &HashMap<String, Arc<str>> = &cache_snapshot;
                 result
                     .get("locs")
                     .and_then(|v| v.as_array())
@@ -2414,7 +2414,7 @@ fn tsserver_completion_documentation(detail: &serde_json::Value) -> Option<Strin
 /// byte offsets. Otherwise, falls back to packed 0-based `(line << 16) | col` format.
 pub fn parse_tsserver_location(
     loc: &serde_json::Value,
-    contents_cache: &HashMap<String, String>,
+    contents_cache: &HashMap<String, Arc<str>>,
 ) -> Option<TypeLocation> {
     let file = verter_span::path::canonicalize_path(
         loc.get("file").and_then(|v| v.as_str()).unwrap_or_default(),
@@ -2428,7 +2428,7 @@ pub fn parse_tsserver_location(
 
     let disk_content;
     let content = if let Some(content) = contents_cache.get(&file) {
-        Some(content.as_str())
+        Some(content.as_ref())
     } else {
         disk_content = std::fs::read_to_string(&file).ok();
         disk_content.as_deref()
@@ -2473,7 +2473,7 @@ pub fn parse_tsserver_location(
 pub fn parse_tsserver_rename_span(
     span: &serde_json::Value,
     file: &str,
-    contents_cache: &HashMap<String, String>,
+    contents_cache: &HashMap<String, Arc<str>>,
 ) -> Option<RenameLocation> {
     let start = span.get("start")?;
     let end = span.get("end")?;
@@ -2484,7 +2484,7 @@ pub fn parse_tsserver_rename_span(
 
     let disk_content;
     let content = if let Some(content) = contents_cache.get(file) {
-        Some(content.as_str())
+        Some(content.as_ref())
     } else {
         disk_content = std::fs::read_to_string(file).ok();
         disk_content.as_deref()
@@ -2544,7 +2544,7 @@ pub fn combined_code_fix_args(file: &str, fix_id: &str) -> serde_json::Value {
 /// malformed `textChanges` entry.
 fn parse_tsserver_file_code_edits(
     changes: &[serde_json::Value],
-    contents_cache: &HashMap<String, String>,
+    contents_cache: &HashMap<String, Arc<str>>,
 ) -> Option<Vec<TypeCodeEdit>> {
     let mut edits = Vec::new();
     for change in changes {
@@ -2556,7 +2556,7 @@ fn parse_tsserver_file_code_edits(
         );
         let disk_content;
         let content = if let Some(content) = contents_cache.get(&file) {
-            Some(content.as_str())
+            Some(content.as_ref())
         } else {
             disk_content = std::fs::read_to_string(&file).ok();
             disk_content.as_deref()
@@ -2609,7 +2609,7 @@ fn parse_tsserver_file_code_edits(
 /// sentinel (a wrong-offset edit corrupts the file). An action whose edits all drop is dropped.
 pub fn parse_tsserver_code_action(
     action: &serde_json::Value,
-    contents_cache: &HashMap<String, String>,
+    contents_cache: &HashMap<String, Arc<str>>,
 ) -> Option<TypeCodeAction> {
     let description = action.get("description")?.as_str()?.to_string();
     let changes = action.get("changes")?.as_array()?;
@@ -2639,7 +2639,7 @@ pub fn parse_tsserver_code_action(
 pub fn parse_tsserver_combined_code_fix(
     body: &serde_json::Value,
     fix_all_title: Option<&str>,
-    contents_cache: &HashMap<String, String>,
+    contents_cache: &HashMap<String, Arc<str>>,
 ) -> Option<TypeCodeAction> {
     let title = fix_all_title?.to_string();
     let changes = body.get("changes")?.as_array()?;
@@ -2676,7 +2676,7 @@ pub fn parse_tsserver_combined_code_fix(
 pub fn completion_entry_details_to_resolve_result(
     detail: &serde_json::Value,
     target_file: &str,
-    contents_cache: &HashMap<String, String>,
+    contents_cache: &HashMap<String, Arc<str>>,
 ) -> Option<CompletionResolveResult> {
     let canonical_target = verter_span::path::canonicalize_path(target_file);
 

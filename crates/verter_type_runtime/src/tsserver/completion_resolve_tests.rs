@@ -12,6 +12,7 @@
 //!     same-file `ResolvedTextEdit`s.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::protocol::CompletionResolveData;
 use crate::tsserver::ipc::{
@@ -271,7 +272,7 @@ fn entry_details_map_same_file_auto_import_to_resolved_edits() {
     // Generated content: the import lands at byte 0 (start of file).
     cache.insert(
         generated.to_string(),
-        "const x = 1;\nexport default {};\n".to_string(),
+        Arc::from("const x = 1;\nexport default {};\n"),
     );
 
     let result = completion_entry_details_to_resolve_result(&detail, generated, &cache)

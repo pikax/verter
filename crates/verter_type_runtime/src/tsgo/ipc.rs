@@ -514,7 +514,7 @@ async fn read_loop(
     stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
-    contents_cache: Arc<Mutex<HashMap<String, String>>>,
+    contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     interactive_tx: mpsc::Sender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
 ) {
@@ -1149,7 +1149,7 @@ pub struct TsgoTypeProvider {
     /// Document version counter per path.
     versions: Arc<Mutex<HashMap<String, i32>>>,
     /// Cached file contents for byte-offset → LSP position conversion.
-    contents: Arc<Mutex<HashMap<String, String>>>,
+    contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Cached diagnostics from textDocument/publishDiagnostics push notifications.
     /// Used as fallback when pull diagnostics (textDocument/diagnostic) fails.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
@@ -1236,7 +1236,7 @@ impl TsgoTypeProvider {
         let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
+        let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // Start the read loop in a background task (uses interactive_tx for auto-replies)
@@ -1358,7 +1358,7 @@ impl TsgoTypeProvider {
                     contents_cache
                         .lock()
                         .await
-                        .insert(path_owned.clone(), content.clone());
+                        .insert(path_owned.clone(), Arc::from(content.as_str()));
                     versions.lock().await.insert(path_owned, 1);
                     transport
                         .notify_with_priority(
@@ -1406,7 +1406,7 @@ impl TsgoTypeProvider {
             contents_cache
                 .lock()
                 .await
-                .insert(path_owned.clone(), content.clone());
+                .insert(path_owned.clone(), Arc::from(content.as_str()));
 
             let mut vers = versions.lock().await;
             if let Some(v) = vers.get_mut(&path_owned) {
@@ -1687,7 +1687,7 @@ impl TypeProvider for TsgoTypeProvider {
                     contents_cache
                         .lock()
                         .await
-                        .insert(path_owned.clone(), content.clone());
+                        .insert(path_owned.clone(), Arc::from(content.as_str()));
                     // Mark as opened with version 1
                     versions.lock().await.insert(path_owned, 1);
                     transport
@@ -1733,7 +1733,7 @@ impl TypeProvider for TsgoTypeProvider {
                     contents_cache
                         .lock()
                         .await
-                        .insert(path_owned, content_owned);
+                        .insert(path_owned, content_owned.into());
                     crate::type_runtime_trace_event!(
                         "tsgo_load_file_result",
                         "cached_only=true".to_string()
@@ -1766,7 +1766,7 @@ impl TypeProvider for TsgoTypeProvider {
             contents_cache
                 .lock()
                 .await
-                .insert(path_owned.clone(), content.clone());
+                .insert(path_owned.clone(), Arc::from(content.as_str()));
 
             let mut vers = versions.lock().await;
             if let Some(v) = vers.get_mut(&path_owned) {
@@ -2315,9 +2315,9 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|value| value.as_str())
                         .map(uri_to_file_path)?;
                     let target_content = if target_path == path_owned {
-                        cache.get(&path_owned).map(|text| text.as_str())
+                        cache.get(&path_owned).map(|text| text.as_ref())
                     } else {
-                        cache.get(&target_path).map(|text| text.as_str())
+                        cache.get(&target_path).map(|text| text.as_ref())
                     };
                     parse_lsp_location(loc, target_content)
                 })
@@ -2373,9 +2373,9 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|value| value.as_str())
                         .map(uri_to_file_path)?;
                     let target_content = if target_path == path_owned {
-                        cache.get(&path_owned).map(|text| text.as_str())
+                        cache.get(&path_owned).map(|text| text.as_ref())
                     } else {
-                        cache.get(&target_path).map(|text| text.as_str())
+                        cache.get(&target_path).map(|text| text.as_ref())
                     };
                     parse_lsp_location(loc, target_content)
                 })
@@ -2416,7 +2416,7 @@ impl TypeProvider for TsgoTypeProvider {
             // the WRONG file.
             let cache = contents_cache.lock().await;
             Ok(parse_lsp_locations_per_target(&locations, |target_path| {
-                cache.get(target_path).map(|text| text.as_str())
+                cache.get(target_path).map(|text| text.as_ref())
             }))
         })
     }
@@ -2465,7 +2465,7 @@ impl TypeProvider for TsgoTypeProvider {
             let mut locations = Vec::new();
             parse_workspace_edit_locations(
                 &result,
-                &|target_path| cache_snapshot.get(target_path).map(|text| text.as_str()),
+                &|target_path| cache_snapshot.get(target_path).map(|text| text.as_ref()),
                 &mut locations,
             );
             Ok(locations)
@@ -2594,7 +2594,7 @@ impl TypeProvider for TsgoTypeProvider {
                 .iter()
                 .filter_map(|item| {
                     parse_code_action(item, &|target_path| {
-                        cache_snapshot.get(target_path).map(|text| text.as_str())
+                        cache_snapshot.get(target_path).map(|text| text.as_ref())
                     })
                 })
                 .collect())

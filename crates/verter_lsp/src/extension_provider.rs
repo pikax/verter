@@ -94,7 +94,7 @@ pub struct ExtensionTypeProvider<T = LspTsQueryTransport> {
     /// Transport for the `$/verter/tsQuery` request envelope.
     transport: T,
     /// Cached file contents for position conversion (byte offset ↔ line/col).
-    contents: Arc<Mutex<HashMap<String, String>>>,
+    contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Files that have been sent to the extension via `open` command.
     opened_files: Arc<Mutex<HashSet<String>>>,
     /// Workspace root path (forward slashes).
@@ -166,7 +166,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             contents_cache
                 .lock()
                 .await
-                .insert(file.clone(), content.clone());
+                .insert(file.clone(), Arc::from(content.as_str()));
             opened_files.lock().await.insert(file.clone());
             self.query(
                 "open",
@@ -190,7 +190,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache.lock().await.insert(file, content);
+            contents_cache.lock().await.insert(file, content.into());
             Ok(())
         })
     }
@@ -210,7 +210,7 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
             contents_cache
                 .lock()
                 .await
-                .insert(file.clone(), content.clone());
+                .insert(file.clone(), Arc::from(content.as_str()));
 
             let mut opened = opened_files.lock().await;
             if opened.contains(&file) {
@@ -550,17 +550,21 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            let locs = {
-                let cache = contents_cache.lock().await;
-                result
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
-                    .unwrap_or_default()
+            // Snapshot then release before parsing: `parse_tsserver_location` can fall back to a
+            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
+            // pointer-map clone (`Arc<str>` values).
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                guard.clone()
             };
+            let locs = result
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|loc| parse_tsserver_location(loc, &cache_snapshot))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             Ok(locs)
         })
@@ -593,17 +597,21 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            let locs = {
-                let cache = contents_cache.lock().await;
-                result
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
-                    .unwrap_or_default()
+            // Snapshot then release before parsing: `parse_tsserver_location` can fall back to a
+            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
+            // pointer-map clone (`Arc<str>` values).
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                guard.clone()
             };
+            let locs = result
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|loc| parse_tsserver_location(loc, &cache_snapshot))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             Ok(locs)
         })
@@ -632,18 +640,22 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            let locs = {
-                let cache = contents_cache.lock().await;
-                result
-                    .get("refs")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| parse_tsserver_location(loc, &cache))
-                            .collect()
-                    })
-                    .unwrap_or_default()
+            // Snapshot then release before parsing: `parse_tsserver_location` can fall back to a
+            // blocking disk read on a cache miss for a cross-file target. The snapshot is a cheap
+            // pointer-map clone (`Arc<str>` values).
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                guard.clone()
             };
+            let locs = result
+                .get("refs")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|loc| parse_tsserver_location(loc, &cache_snapshot))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             Ok(locs)
         })
@@ -678,11 +690,19 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            let locs = {
+            // Snapshot the cache and release the lock BEFORE parsing: a rename span resolves its
+            // target through `parse_tsserver_rename_span`, which can fall back to a blocking disk
+            // read on a cache miss. Holding the async mutex across that read would block every other
+            // task contending for the cache. The snapshot is a cheap pointer-map clone (`Arc<str>`
+            // values).
+            let cache_snapshot = {
                 let guard = contents_cache.lock().await;
+                guard.clone()
+            };
+            let locs = {
                 // Bind a `Copy` `&HashMap` so each per-target closure can capture the cache by
-                // shared reference (the `MutexGuard` itself is not `Copy`).
-                let cache: &HashMap<String, String> = &guard;
+                // shared reference.
+                let cache: &HashMap<String, Arc<str>> = &cache_snapshot;
                 result
                     .get("locs")
                     .and_then(|v| v.as_array())
@@ -881,14 +901,21 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 Err(_) => return Ok(vec![]),
             };
 
-            // Single-fix actions first, then their combined "fix all" companions.
-            let mut actions: Vec<TypeCodeAction> = {
-                let cache = contents_cache.lock().await;
-                raw_fixes
-                    .iter()
-                    .filter_map(|a| parse_tsserver_code_action(a, &cache))
-                    .collect()
+            // Snapshot the cache and release the lock BEFORE parsing: `parse_tsserver_code_action`
+            // and `parse_tsserver_combined_code_fix` can fall back to a blocking disk read on a
+            // cache miss. Holding the async mutex across those reads — and re-acquiring it per
+            // combinable `fixId` below — would block every other task contending for the cache. The
+            // snapshot is a cheap pointer-map clone (`Arc<str>` values), reused for both passes.
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                guard.clone()
             };
+
+            // Single-fix actions first, then their combined "fix all" companions.
+            let mut actions: Vec<TypeCodeAction> = raw_fixes
+                .iter()
+                .filter_map(|a| parse_tsserver_code_action(a, &cache_snapshot))
+                .collect();
 
             // Follow each DISTINCT combinable `fixId` once (e.g. "Delete all unused
             // declarations"), titled from the fix's typed `fixAllDescription` —
@@ -910,10 +937,11 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     .query("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
                     .await
                 {
-                    let cache = contents_cache.lock().await;
-                    if let Some(action) =
-                        parse_tsserver_combined_code_fix(&body, fix_all_title.as_deref(), &cache)
-                    {
+                    if let Some(action) = parse_tsserver_combined_code_fix(
+                        &body,
+                        fix_all_title.as_deref(),
+                        &cache_snapshot,
+                    ) {
                         combined.push(action);
                     }
                 }
