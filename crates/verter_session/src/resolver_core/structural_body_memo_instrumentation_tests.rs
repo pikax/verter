@@ -3,27 +3,25 @@
 //! [`bucket_index_distinct_for_each_context`]: it asserts
 //! [`context_bucket_index`] maps each of the 6 `(provenance, merge_role)` pairs to
 //! a DISTINCT index — a colliding or constant index fn FAILS it. The remaining
-//! assertions drive the REAL memo `get`/`insert` and the test-exercised-only
-//! increment helpers and assert the dump reflects the exact values, proving the
-//! counters are real atomics (not stubs).
+//! assertions drive the REAL memo `get`/`insert` and assert the dump reflects the
+//! exact values, proving the counters are real atomics (not stubs). Every counter
+//! exercised here has a live `get`/`insert` bump site.
 //!
 //! The counters are process-global statics; under the in-process test surface
-//! multiple tests share a process. These tests serialize on [`COUNTER_LOCK`] and
-//! [`reset_structural_body_memo_instrumentation`] at the top so the
-//! counter-VALUE assertions are not raced by a concurrent test mutating the same
-//! statics. (The pure-arithmetic [`bucket_index_distinct_for_each_context`] reads
-//! no shared mutable state, but takes the lock too for uniformity.)
+//! multiple tests share a process. These tests serialize on
+//! [`lock_counter_test_gate`] and [`reset_structural_body_memo_instrumentation`]
+//! at the top so the counter-VALUE assertions are not raced by a concurrent test
+//! mutating the same statics. (The pure-arithmetic
+//! [`bucket_index_distinct_for_each_context`] reads no shared mutable state, but
+//! takes the lock too for uniformity.)
 
 use std::sync::Arc;
 
 use super::{
     context_bucket_index, dump_structural_body_memo_instrumentation, lock_counter_test_gate,
-    record_cold_build_ns, record_direct_lower_bypass, record_error,
     reset_structural_body_memo_instrumentation, CONTEXT_BUCKET_COUNT,
-    STRUCTURAL_BODY_MEMO_CELLS_CREATED, STRUCTURAL_BODY_MEMO_COLD_BUILDS,
-    STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL, STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS,
-    STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS, STRUCTURAL_BODY_MEMO_ERRORS,
-    STRUCTURAL_BODY_MEMO_HITS, STRUCTURAL_BODY_MEMO_LOOKUPS,
+    STRUCTURAL_BODY_MEMO_CELLS_CREATED, STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS,
+    STRUCTURAL_BODY_MEMO_HITS, STRUCTURAL_BODY_MEMO_LOOKUPS, STRUCTURAL_BODY_MEMO_MISSES,
 };
 use crate::resolver_core::structural_body_memo::{
     HotStructuralBodyCell, StructuralBodyDescriptor, StructuralBodyKind, StructuralBodyMemo,
@@ -111,9 +109,9 @@ fn bucket_index_distinct_for_each_context() {
 }
 
 // -- Assertion 2: counters reflect the real get/insert bumps. ---------------
-// A `get` miss bumps LOOKUPS + COLD_BUILDS (not HITS); an `insert` bumps
+// A `get` miss bumps LOOKUPS + MISSES (not HITS); an `insert` bumps
 // CELLS_CREATED + the right context bucket; a `get` HIT (after the insert) bumps
-// LOOKUPS + HITS (not COLD_BUILDS). Drives the REAL memo methods so the wiring is
+// LOOKUPS + HITS (not MISSES). Drives the REAL memo methods so the wiring is
 // exercised end to end.
 #[test]
 fn counters_reflect_real_get_and_insert_bumps() {
@@ -128,7 +126,7 @@ fn counters_reflect_real_get_and_insert_bumps() {
     let merge_role = MemberMergeRole::OwnBody;
     let key = StructuralBodyMemoKey::new(slot, provenance, merge_role);
 
-    // (a) A `get` MISS before any insert: LOOKUPS=1, COLD_BUILDS=1, HITS=0.
+    // (a) A `get` MISS before any insert: LOOKUPS=1, MISSES=1, HITS=0.
     assert!(
         memo.get(&key).is_none(),
         "the cold get must miss (nothing inserted yet)"
@@ -139,9 +137,9 @@ fn counters_reflect_real_get_and_insert_bumps() {
         "miss bumps LOOKUPS"
     );
     assert_eq!(
-        STRUCTURAL_BODY_MEMO_COLD_BUILDS.load(RELAXED),
+        STRUCTURAL_BODY_MEMO_MISSES.load(RELAXED),
         1,
-        "a miss bumps COLD_BUILDS"
+        "a miss bumps MISSES"
     );
     assert_eq!(
         STRUCTURAL_BODY_MEMO_HITS.load(RELAXED),
@@ -163,7 +161,7 @@ fn counters_reflect_real_get_and_insert_bumps() {
         "an insert bumps the context bucket for its (provenance, merge_role)"
     );
 
-    // (c) A `get` HIT (same key): LOOKUPS=2, HITS=1, COLD_BUILDS still 1.
+    // (c) A `get` HIT (same key): LOOKUPS=2, HITS=1, MISSES still 1.
     assert!(
         memo.get(&key).is_some(),
         "the warm get must hit (the cell was inserted)"
@@ -179,16 +177,19 @@ fn counters_reflect_real_get_and_insert_bumps() {
         "the warm get bumps HITS to 1"
     );
     assert_eq!(
-        STRUCTURAL_BODY_MEMO_COLD_BUILDS.load(RELAXED),
+        STRUCTURAL_BODY_MEMO_MISSES.load(RELAXED),
         1,
-        "the warm get must NOT bump COLD_BUILDS (still 1 from the earlier miss)"
+        "the warm get must NOT bump MISSES (still 1 from the earlier miss)"
     );
 }
 
-// -- Assertion 3: per-bucket attribution across distinct contexts. ----------
+// -- Assertion 3: per-bucket attribution + distinct-only counting. ----------
 // Insert cells under 2 DIFFERENT contexts of the SAME slot; the 2 corresponding
 // buckets each read 1 and the other 4 read 0 — the buckets attribute distinct
-// contexts to distinct slots.
+// contexts to distinct slots. THEN re-insert the SAME context key (a duplicate):
+// CELLS_CREATED and the bucket must NOT re-bump (distinct-only counting). This
+// DISCRIMINATES the pre-fix bug where the bump happened BEFORE the insert result
+// was known and a duplicate over-counted.
 #[test]
 fn context_buckets_attribute_distinct_contexts() {
     let _gate = lock_counter_test_gate();
@@ -229,46 +230,35 @@ fn context_buckets_attribute_distinct_contexts() {
     assert_eq!(
         STRUCTURAL_BODY_MEMO_CELLS_CREATED.load(RELAXED),
         2,
-        "two inserts → CELLS_CREATED == 2"
+        "two distinct inserts → CELLS_CREATED == 2"
     );
-}
 
-// -- Assertion 4: the test-exercised-only counters are real atomics. --------
-// `record_cold_build_ns` / `record_error` / `record_direct_lower_bypass` move
-// their atomics — proving they are real counters, not stubs. (Their PRODUCTION
-// bump sites land with the producer-wiring step.)
-#[test]
-fn test_exercised_only_counters_are_real() {
-    let _gate = lock_counter_test_gate();
-    reset_structural_body_memo_instrumentation();
-
-    record_cold_build_ns(4242);
-    record_cold_build_ns(58); // sums, not last-wins
-    record_error();
-    record_error();
-    record_error();
-    record_direct_lower_bypass();
-
-    assert_eq!(
-        STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL.load(RELAXED),
-        4300,
-        "record_cold_build_ns must SUM (4242 + 58), not overwrite"
+    // Distinct-only: re-inserting an EXISTING context key (same slot + same
+    // provenance + same merge_role) replaces the cell but must NOT re-bump
+    // CELLS_CREATED or the bucket — the memo counts DISTINCT context cells, not
+    // raw insert calls. (Pre-fix, the bump ran before the insert result was
+    // known and this duplicate over-counted to 3.)
+    let dup = memo.insert(StructuralBodyMemoKey::new(slot, ctx_a.0, ctx_a.1), cell(99));
+    assert!(
+        dup.is_some(),
+        "re-inserting the same context key must report the replaced cell"
     );
     assert_eq!(
-        STRUCTURAL_BODY_MEMO_ERRORS.load(RELAXED),
-        3,
-        "record_error must bump per call"
+        STRUCTURAL_BODY_MEMO_CELLS_CREATED.load(RELAXED),
+        2,
+        "a re-insert of an existing context must NOT re-bump CELLS_CREATED (distinct-only)"
     );
     assert_eq!(
-        STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS.load(RELAXED),
+        STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS[idx_a].load(RELAXED),
         1,
-        "record_direct_lower_bypass must bump per call"
+        "a re-insert of an existing context must NOT re-bump its bucket (distinct-only)"
     );
 }
 
-// -- Assertion 5: dump + reset round-trip. ----------------------------------
+// -- Assertion 4: dump + reset round-trip. ----------------------------------
 // `dump_*` contains every counter's value (and the right ones reflect the bumps);
-// `reset_*` zeroes them all (a post-reset dump reads all-zero).
+// `reset_*` zeroes them all (a post-reset dump reads all-zero). Every dumped
+// counter has a live get/insert bump site — no constant-zero counter.
 #[test]
 fn dump_contains_every_counter_and_reset_zeroes_all() {
     let _gate = lock_counter_test_gate();
@@ -283,22 +273,16 @@ fn dump_contains_every_counter_and_reset_zeroes_all() {
         SurfaceProvenanceContext::Structural,
         MemberMergeRole::Authored,
     );
-    let _ = memo.get(&key); // miss → LOOKUPS=1, COLD_BUILDS=1
+    let _ = memo.get(&key); // miss → LOOKUPS=1, MISSES=1
     memo.insert(key, cell(7)); // CELLS_CREATED=1, bucket 0 = 1
     let _ = memo.get(&key); // hit → LOOKUPS=2, HITS=1
-    record_cold_build_ns(123);
-    record_error();
-    record_direct_lower_bypass();
 
     let dump = dump_structural_body_memo_instrumentation();
     for key_name in [
         "STRUCTURAL_BODY_MEMO_LOOKUPS",
         "STRUCTURAL_BODY_MEMO_HITS",
-        "STRUCTURAL_BODY_MEMO_COLD_BUILDS",
+        "STRUCTURAL_BODY_MEMO_MISSES",
         "STRUCTURAL_BODY_MEMO_CELLS_CREATED",
-        "STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL",
-        "STRUCTURAL_BODY_MEMO_ERRORS",
-        "STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS",
         "STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS",
     ] {
         assert!(
@@ -316,22 +300,20 @@ fn dump_contains_every_counter_and_reset_zeroes_all() {
         "dump must reflect HITS=1; got: {dump}"
     );
     assert!(
-        dump.contains("\"STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL\": 123"),
-        "dump must reflect the cold-build ns total; got: {dump}"
+        dump.contains("\"STRUCTURAL_BODY_MEMO_MISSES\": 1"),
+        "dump must reflect MISSES=1; got: {dump}"
+    );
+    assert!(
+        dump.contains("\"STRUCTURAL_BODY_MEMO_CELLS_CREATED\": 1"),
+        "dump must reflect CELLS_CREATED=1; got: {dump}"
     );
 
     // -- reset zeroes EVERY counter. ----------------------------------------
     reset_structural_body_memo_instrumentation();
     assert_eq!(STRUCTURAL_BODY_MEMO_LOOKUPS.load(RELAXED), 0);
     assert_eq!(STRUCTURAL_BODY_MEMO_HITS.load(RELAXED), 0);
-    assert_eq!(STRUCTURAL_BODY_MEMO_COLD_BUILDS.load(RELAXED), 0);
+    assert_eq!(STRUCTURAL_BODY_MEMO_MISSES.load(RELAXED), 0);
     assert_eq!(STRUCTURAL_BODY_MEMO_CELLS_CREATED.load(RELAXED), 0);
-    assert_eq!(STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL.load(RELAXED), 0);
-    assert_eq!(STRUCTURAL_BODY_MEMO_ERRORS.load(RELAXED), 0);
-    assert_eq!(
-        STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS.load(RELAXED),
-        0
-    );
     for (idx, bucket) in STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS.iter().enumerate() {
         assert_eq!(
             bucket.load(RELAXED),
@@ -344,11 +326,8 @@ fn dump_contains_every_counter_and_reset_zeroes_all() {
     assert!(
         post.contains("\"STRUCTURAL_BODY_MEMO_LOOKUPS\": 0")
             && post.contains("\"STRUCTURAL_BODY_MEMO_HITS\": 0")
-            && post.contains("\"STRUCTURAL_BODY_MEMO_COLD_BUILDS\": 0")
-            && post.contains("\"STRUCTURAL_BODY_MEMO_CELLS_CREATED\": 0")
-            && post.contains("\"STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL\": 0")
-            && post.contains("\"STRUCTURAL_BODY_MEMO_ERRORS\": 0")
-            && post.contains("\"STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS\": 0"),
+            && post.contains("\"STRUCTURAL_BODY_MEMO_MISSES\": 0")
+            && post.contains("\"STRUCTURAL_BODY_MEMO_CELLS_CREATED\": 0"),
         "a post-reset dump must read all-zero; got: {post}"
     );
 }

@@ -3,42 +3,45 @@
 //! These are the MEASURED escalation evidence for the A-vs-B perf consult on the
 //! context-keyed structural body memo
 //! ([`StructuralBodyMemo`](super::structural_body_memo::StructuralBodyMemo)): the
-//! warm hit-rate, distinct-live-contexts-per-body fan-out, arena pressure, and
-//! relower-once-per-context cost. They follow the
-//! [`loop5_instrumentation`](crate::loop5_instrumentation) model EXACTLY:
-//! module-scope relaxed [`AtomicU64`] counters, bumped at the real memo sites,
-//! read via [`dump_structural_body_memo_instrumentation`], reset via
+//! warm hit-rate, distinct-live-contexts-per-body fan-out, and arena pressure.
+//! They follow the [`loop5_instrumentation`](crate::loop5_instrumentation) model
+//! EXACTLY: module-scope relaxed [`AtomicU64`] counters, bumped at the real memo
+//! sites, read via [`dump_structural_body_memo_instrumentation`], reset via
 //! [`reset_structural_body_memo_instrumentation`].
 //!
-//! ## Zero-cost-off
+//! ## Always-on low-overhead instrumentation
 //!
-//! The counters are unconditionally compiled relaxed atomics — they are INERT in
-//! production: a relaxed `fetch_add` on an uncontended atomic on the (currently
-//! dead-code-until-wired) memo path is negligible, and NOTHING in production
-//! READS them. They are NOT cfg-gated off (the loop5 model does not gate). The
-//! "zero-cost-off" property is read-side: no production code path calls
-//! `dump_*`; the dump exists for the perf-consult harness and the tests.
+//! The counters are a relaxed `fetch_add` per memo `get` / `insert`,
+//! UNCONDITIONALLY compiled (the `loop5_instrumentation` model). A relaxed
+//! `fetch_add` on an uncontended atomic is inexpensive enough to leave always-on;
+//! they are NOT cfg-gated. This is NOT zero-cost — every `get`/`insert` performs
+//! the relaxed RMW — but the cost is negligible and the counters are simply NOT
+//! READ in production: no production code path calls `dump_*`; the dump exists
+//! for the perf-consult harness and the tests.
 //!
-//! ## Bump-site split
+//! ## Every counter has a live bump site
 //!
-//! The hit-rate + fan-out counters ([`STRUCTURAL_BODY_MEMO_LOOKUPS`],
-//! [`STRUCTURAL_BODY_MEMO_HITS`], [`STRUCTURAL_BODY_MEMO_COLD_BUILDS`],
-//! [`STRUCTURAL_BODY_MEMO_CELLS_CREATED`], [`STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS`])
-//! are bumped NOW from the memo's real `get`/`insert` methods (via
-//! [`record_get`] / [`record_insert_context`]), so they measure real traffic the
-//! moment the cache is wired. The cold-build timing / failure / wiring-gap
-//! counters ([`STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL`],
-//! [`STRUCTURAL_BODY_MEMO_ERRORS`], [`STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS`])
-//! have NO production cold-build/error/bypass path yet — that path lands with the
-//! producer-wiring step — so they are DEFINED + test-exercised now via the public
-//! [`record_cold_build_ns`] / [`record_error`] / [`record_direct_lower_bypass`]
-//! increment helpers, and the producer-wiring step adds their production bump
-//! sites. This is honest: the counter exists + is test-exercised; the production
-//! bump site lands with the wiring.
+//! Every counter dumped here is bumped from the memo's real `get` / `insert`
+//! methods (via [`record_get`] / [`record_insert_context`]), so each measures
+//! real traffic the moment the cache is wired — no counter reports a constant
+//! zero. The cold-build TIMING (summed cold-lower ns), the cold-lower FAILURE
+//! count, and the direct-lower BYPASS detector land WITH the producer-wiring step
+//! that introduces those paths (their bump sites only exist once the producer
+//! times each cold lower, surfaces a lower failure, and detects a memo bypass);
+//! they are intentionally NOT defined here, because a counter with no production
+//! bump site would report a constant zero until then.
+//!
+//! ## Bump sites
+//!
+//! - [`STRUCTURAL_BODY_MEMO_LOOKUPS`] / [`STRUCTURAL_BODY_MEMO_HITS`] /
+//!   [`STRUCTURAL_BODY_MEMO_MISSES`] — every memo `get` (via [`record_get`]).
+//! - [`STRUCTURAL_BODY_MEMO_CELLS_CREATED`] /
+//!   [`STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS`] — every memo `insert` that
+//!   materializes a genuinely NEW distinct context cell (via
+//!   [`record_insert_context`]); a re-insert over an existing key does NOT bump.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::instant::Instant;
 use crate::semantic_query::{MemberMergeRole, SurfaceProvenanceContext};
 
 // ---------------------------------------------------------------------------
@@ -53,31 +56,25 @@ pub static STRUCTURAL_BODY_MEMO_LOOKUPS: AtomicU64 = AtomicU64::new(0);
 /// memoized). Bumped from `get` when the lookup hits.
 pub static STRUCTURAL_BODY_MEMO_HITS: AtomicU64 = AtomicU64::new(0);
 
-/// `get` calls that MISSED (returned `None`) — the future cold-lower path. Bumped
-/// from `get` when the lookup misses. `LOOKUPS == HITS + COLD_BUILDS`.
-pub static STRUCTURAL_BODY_MEMO_COLD_BUILDS: AtomicU64 = AtomicU64::new(0);
+/// `get` calls that MISSED (returned `None`). A miss is the TRIGGER for a future
+/// cold lower, NOT a cold build itself — the cold BUILD is what the producer-
+/// wiring step does AFTER a miss, so this counts memo misses honestly. Bumped
+/// from `get` when the lookup misses. `LOOKUPS == HITS + MISSES`.
+pub static STRUCTURAL_BODY_MEMO_MISSES: AtomicU64 = AtomicU64::new(0);
 
-/// `insert` calls — the number of distinct context cells materialized into the
-/// memo. Bumped from `insert`. Arena-pressure axis: extra cells from duplicate
-/// contexts show up as `CELLS_CREATED` outrunning the distinct bodies.
+/// `insert` calls that materialized a genuinely NEW distinct context cell (the
+/// `insert` returned `None`) — the number of distinct context cells in the memo.
+/// Bumped from `insert` ONLY when the key was not already present; a re-insert
+/// over an existing key does NOT bump. Arena-pressure axis: extra cells from
+/// distinct contexts show up as `CELLS_CREATED` outrunning the distinct bodies.
 pub static STRUCTURAL_BODY_MEMO_CELLS_CREATED: AtomicU64 = AtomicU64::new(0);
-
-/// Summed nanoseconds of cold builds (time ONLY the cold-lower path, never warm
-/// hits). Bumped by the producer-wiring step's cold-lower path; DEFINED +
-/// test-exercised now via [`record_cold_build_ns`] / [`ColdBuildTimerGuard`].
-/// Divide by [`STRUCTURAL_BODY_MEMO_COLD_BUILDS`] for the mean cold-build ns.
-pub static STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
-
-/// Cold builds that failed to produce a cell. Bumped by the producer-wiring
-/// step's cold-lower error path; DEFINED + test-exercised now via
-/// [`record_error`].
-pub static STRUCTURAL_BODY_MEMO_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 /// The number of distinct (provenance × merge_role) contexts each body fans out
 /// into, attributed across the 2 × 3 = 6-element cross-product (indexed by
-/// [`context_bucket_index`]). Bumped per `insert` (per context cell created).
-/// Distinct-live-contexts-per-body axis: a body that fans into many contexts
-/// distributes its inserts across multiple buckets.
+/// [`context_bucket_index`]). Bumped per NEW `insert` (per distinct context cell
+/// created — a re-insert over an existing key does NOT bump). Distinct-live-
+/// contexts-per-body axis: a body that fans into many contexts distributes its
+/// inserts across multiple buckets.
 pub static STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS: [AtomicU64; CONTEXT_BUCKET_COUNT] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -86,12 +83,6 @@ pub static STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS: [AtomicU64; CONTEXT_BUCKET_COUN
     AtomicU64::new(0),
     AtomicU64::new(0),
 ];
-
-/// Live-wiring-gap detector: a future path that lowers a context-body WITHOUT
-/// consulting the memo bumps this. The producer-wiring step asserts it stays 0
-/// (the memo is actually consulted). DEFINED + test-exercised now via
-/// [`record_direct_lower_bypass`].
-pub static STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// The number of context buckets: 2 `SurfaceProvenanceContext` variants ×
 /// 3 `MemberMergeRole` variants. The exhaustive `context_bucket_index` match
@@ -131,7 +122,7 @@ pub fn context_bucket_index(
 // ---------------------------------------------------------------------------
 
 /// Record one `get` lookup: always bump `LOOKUPS`; bump `HITS` if the lookup hit
-/// (returned a cell), else bump `COLD_BUILDS` (the miss / future cold-lower path).
+/// (returned a cell), else bump `MISSES` (the miss / future cold-lower trigger).
 /// Called from [`StructuralBodyMemo::get`](super::structural_body_memo::StructuralBodyMemo::get).
 #[inline]
 pub(super) fn record_get(hit: bool) {
@@ -139,15 +130,19 @@ pub(super) fn record_get(hit: bool) {
     if hit {
         STRUCTURAL_BODY_MEMO_HITS.fetch_add(1, Ordering::Relaxed);
     } else {
-        STRUCTURAL_BODY_MEMO_COLD_BUILDS.fetch_add(1, Ordering::Relaxed);
+        STRUCTURAL_BODY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Record one `insert`: bump `CELLS_CREATED` and the context bucket for the
-/// inserted cell's `(provenance, merge_role)`. Called from
-/// [`StructuralBodyMemo::insert`](super::structural_body_memo::StructuralBodyMemo::insert),
-/// which reads its own (bundle-private) key fields and passes them here — the key
-/// fields stay private; this helper takes the two axis enums by value.
+/// Record one `insert` that materialized a NEW distinct context cell: bump
+/// `CELLS_CREATED` and the context bucket for the inserted cell's
+/// `(provenance, merge_role)`. Called from
+/// [`StructuralBodyMemo::insert`](super::structural_body_memo::StructuralBodyMemo::insert)
+/// ONLY when `HashMap::insert` returned `None` (the key was not already present),
+/// so a re-insert over an existing key does NOT re-bump and `CELLS_CREATED`
+/// stays the count of distinct context cells. `insert` reads its own
+/// (bundle-private) key fields and passes them here — the key fields stay
+/// private; this helper takes the two axis enums by value.
 #[inline]
 pub(super) fn record_insert_context(
     provenance: SurfaceProvenanceContext,
@@ -159,67 +154,6 @@ pub(super) fn record_insert_context(
 }
 
 // ---------------------------------------------------------------------------
-// Test-exercised-only helpers — the producer-wiring step adds their production
-// bump sites (no cold-build / error / bypass path exists yet).
-// ---------------------------------------------------------------------------
-
-/// Add `ns` to the cold-build ns total. The production cold-lower path (which
-/// times itself, e.g. via [`ColdBuildTimerGuard`]) lands with the producer-wiring
-/// step; defined + test-exercised now.
-#[inline]
-pub fn record_cold_build_ns(ns: u64) {
-    STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL.fetch_add(ns, Ordering::Relaxed);
-}
-
-/// Record one cold build that failed to produce a cell. The production error path
-/// lands with the producer-wiring step; defined + test-exercised now.
-#[inline]
-pub fn record_error() {
-    STRUCTURAL_BODY_MEMO_ERRORS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record one direct-lower bypass (a path that lowered a context-body WITHOUT
-/// consulting the memo). The production detector lands with the producer-wiring
-/// step; defined + test-exercised now.
-#[inline]
-pub fn record_direct_lower_bypass() {
-    STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// RAII timer that adds elapsed nanoseconds to
-/// [`STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL`] on drop — the cold-build timing
-/// guard the producer-wiring step wraps each cold-lower body in. Modelled on the
-/// loop5 `TimerGuard` (ns-only variant: the `COLD_BUILDS` count is recorded by
-/// the `get` miss, so this guard times without re-counting). Defined +
-/// test-exercised now.
-pub struct ColdBuildTimerGuard {
-    started: Instant,
-}
-
-impl ColdBuildTimerGuard {
-    /// Capture the start time; on drop, add the elapsed ns to the cold-build ns
-    /// total.
-    pub fn new() -> Self {
-        Self {
-            started: Instant::now(),
-        }
-    }
-}
-
-impl Default for ColdBuildTimerGuard {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Drop for ColdBuildTimerGuard {
-    fn drop(&mut self) {
-        let elapsed_ns = self.started.elapsed().as_nanos() as u64;
-        STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL.fetch_add(elapsed_ns, Ordering::Relaxed);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // reset + dump (test isolation + perf-consult read)
 // ---------------------------------------------------------------------------
 
@@ -228,11 +162,8 @@ impl Drop for ColdBuildTimerGuard {
 pub fn reset_structural_body_memo_instrumentation() {
     STRUCTURAL_BODY_MEMO_LOOKUPS.store(0, Ordering::Relaxed);
     STRUCTURAL_BODY_MEMO_HITS.store(0, Ordering::Relaxed);
-    STRUCTURAL_BODY_MEMO_COLD_BUILDS.store(0, Ordering::Relaxed);
+    STRUCTURAL_BODY_MEMO_MISSES.store(0, Ordering::Relaxed);
     STRUCTURAL_BODY_MEMO_CELLS_CREATED.store(0, Ordering::Relaxed);
-    STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL.store(0, Ordering::Relaxed);
-    STRUCTURAL_BODY_MEMO_ERRORS.store(0, Ordering::Relaxed);
-    STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS.store(0, Ordering::Relaxed);
     for slot in STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS.iter() {
         slot.store(0, Ordering::Relaxed);
     }
@@ -240,16 +171,14 @@ pub fn reset_structural_body_memo_instrumentation() {
 
 /// Snapshot every structural-body-memo instrumentation counter as a JSON-shaped
 /// string, so the perf-consult harness can write it as a sidecar alongside the
-/// rest of the audit JSON. Every counter's current value appears as a key.
+/// rest of the audit JSON. Every counter's current value appears as a key, and
+/// every printed counter has a live `get`/`insert` bump site (no constant-zero
+/// counter).
 pub fn dump_structural_body_memo_instrumentation() -> String {
     let lookups = STRUCTURAL_BODY_MEMO_LOOKUPS.load(Ordering::Relaxed);
     let hits = STRUCTURAL_BODY_MEMO_HITS.load(Ordering::Relaxed);
-    let cold_builds = STRUCTURAL_BODY_MEMO_COLD_BUILDS.load(Ordering::Relaxed);
+    let misses = STRUCTURAL_BODY_MEMO_MISSES.load(Ordering::Relaxed);
     let cells_created = STRUCTURAL_BODY_MEMO_CELLS_CREATED.load(Ordering::Relaxed);
-    let cold_build_ns_total = STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL.load(Ordering::Relaxed);
-    let errors = STRUCTURAL_BODY_MEMO_ERRORS.load(Ordering::Relaxed);
-    let direct_lower_bypass_calls =
-        STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS.load(Ordering::Relaxed);
 
     let mut per_bucket = String::new();
     for (idx, bucket) in STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS.iter().enumerate() {
@@ -266,11 +195,8 @@ pub fn dump_structural_body_memo_instrumentation() -> String {
         "{{\n  \
          \"STRUCTURAL_BODY_MEMO_LOOKUPS\": {lookups},\n  \
          \"STRUCTURAL_BODY_MEMO_HITS\": {hits},\n  \
-         \"STRUCTURAL_BODY_MEMO_COLD_BUILDS\": {cold_builds},\n  \
+         \"STRUCTURAL_BODY_MEMO_MISSES\": {misses},\n  \
          \"STRUCTURAL_BODY_MEMO_CELLS_CREATED\": {cells_created},\n  \
-         \"STRUCTURAL_BODY_MEMO_COLD_BUILD_NS_TOTAL\": {cold_build_ns_total},\n  \
-         \"STRUCTURAL_BODY_MEMO_ERRORS\": {errors},\n  \
-         \"STRUCTURAL_BODY_MEMO_DIRECT_LOWER_BYPASS_CALLS\": {direct_lower_bypass_calls},\n  \
          \"STRUCTURAL_BODY_MEMO_CONTEXT_BUCKETS\": {{{per_bucket}\n  }}\n}}"
     )
 }
@@ -279,17 +205,25 @@ pub fn dump_structural_body_memo_instrumentation() -> String {
 /// [`StructuralBodyMemo`](super::structural_body_memo::StructuralBodyMemo) and
 /// therefore mutate the global instrumentation counters. The counters are
 /// process-global statics and `cargo test` runs tests in PARALLEL threads in one
-/// process, so EVERY test that drives a memo (this module's counter-value tests
-/// AND the sibling `structural_body_memo` core test) must hold this gate while it
-/// runs — otherwise one test's `get`/`insert` bumps race another's exact-count
-/// assertions. Acquire via [`lock_counter_test_gate`] (poison-tolerant, so one
-/// genuine assertion failure reports its OWN message instead of a misleading
-/// `PoisonError` in every sibling test).
+/// process, so ANY test that drives [`StructuralBodyMemo::get`](super::structural_body_memo::StructuralBodyMemo::get)
+/// / [`StructuralBodyMemo::insert`](super::structural_body_memo::StructuralBodyMemo::insert)
+/// OR asserts counter values MUST acquire this gate FIRST (the counters are
+/// process-global; un-gated concurrent memo traffic races the exact-count
+/// assertions). This module's counter-value tests AND the sibling
+/// `structural_body_memo` core test both hold the gate while they run — otherwise
+/// one test's `get`/`insert` bumps race another's exact-count assertions. Acquire
+/// via [`lock_counter_test_gate`] (poison-tolerant, so one genuine assertion
+/// failure reports its OWN message instead of a misleading `PoisonError` in every
+/// sibling test).
 #[cfg(test)]
 pub(crate) static COUNTER_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Acquire [`COUNTER_TEST_GATE`], tolerating prior poisoning (a previous test
 /// that panicked while holding it). Returns the guard for RAII release.
+///
+/// Any test that drives [`StructuralBodyMemo::get`](super::structural_body_memo::StructuralBodyMemo::get)
+/// / [`StructuralBodyMemo::insert`](super::structural_body_memo::StructuralBodyMemo::insert)
+/// OR asserts counter values MUST call this first — see [`COUNTER_TEST_GATE`].
 #[cfg(test)]
 pub(crate) fn lock_counter_test_gate() -> std::sync::MutexGuard<'static, ()> {
     COUNTER_TEST_GATE

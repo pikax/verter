@@ -289,16 +289,23 @@ impl StructuralBodyMemo {
         key: StructuralBodyMemoKey,
         cell: Arc<HotStructuralBodyCell>,
     ) -> Option<Arc<HotStructuralBodyCell>> {
-        // Option-A instrumentation: count the materialized context cell and
-        // attribute it to its (provenance, merge_role) bucket. Reads the key's
-        // own (bundle-private) axis fields and passes them by value — the key
-        // fields stay private. Behavior-preserving: the insert result is
-        // unchanged.
-        super::structural_body_memo_instrumentation::record_insert_context(
-            key.provenance,
-            key.merge_role,
-        );
-        self.cells.insert(key, cell)
+        // Read the key's own (bundle-private) axis fields BEFORE the move (the key
+        // is `Copy`, but capture them up front so they survive the insert) — the
+        // key fields stay private; the instrumentation helper takes them by value.
+        let (provenance, merge_role) = (key.provenance, key.merge_role);
+        let previous = self.cells.insert(key, cell);
+        // Option-A instrumentation: count a genuinely NEW distinct context cell
+        // and attribute it to its (provenance, merge_role) bucket ONLY when the
+        // insert replaced nothing (`insert` returned `None`). A re-insert over an
+        // existing key does NOT re-bump, so CELLS_CREATED stays the count of
+        // distinct context cells. Behavior-preserving: the insert result
+        // (`previous`) is returned unchanged.
+        if previous.is_none() {
+            super::structural_body_memo_instrumentation::record_insert_context(
+                provenance, merge_role,
+            );
+        }
+        previous
     }
 
     /// The memoized cell for `key`, or `None` if no cell was inserted for that
