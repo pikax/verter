@@ -27,6 +27,7 @@
 
 pub mod backend;
 pub mod codec;
+pub mod contents_snapshot;
 pub mod discovery;
 pub mod protocol;
 pub mod provider_adapter;

@@ -141,6 +141,16 @@ impl<T: TsQueryTransport> ExtensionTypeProvider<T> {
         verter_span::path::canonicalize_path(path)
     }
 
+    /// Share the contents-cache handle so a scripted transport can simulate a
+    /// concurrent `update_file` landing mid-request, exercising the fresh
+    /// per-response snapshot the edit paths take.
+    #[cfg(test)]
+    pub(crate) fn contents_handle_for_test(
+        &self,
+    ) -> Arc<Mutex<HashMap<String, Arc<str>>>> {
+        Arc::clone(&self.contents)
+    }
+
     fn project_root_for(&self, file: &str) -> String {
         let roots = self.project_roots.read();
         verter_span::path::longest_project_root(file, &roots, &self.workspace_root).to_string()
@@ -690,14 +700,19 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 )
                 .await?;
 
-            // Snapshot the cache and release the lock BEFORE parsing: a rename span resolves its
-            // target through `parse_tsserver_rename_span`, which can fall back to a blocking disk
-            // read on a cache miss. Holding the async mutex across that read would block every other
-            // task contending for the cache. The snapshot is a cheap pointer-map clone (`Arc<str>`
-            // values).
+            // Snapshot ONLY this response's target files and release the lock BEFORE parsing: a
+            // rename span resolves its target through `parse_tsserver_rename_span`, which can fall
+            // back to a blocking disk read on a cache miss. Holding the async mutex across that read
+            // would block every other task contending for the cache. Scanning the response bounds
+            // the snapshot to the files it touches.
+            let target_paths =
+                verter_type_runtime::contents_snapshot::tsserver_rename_target_paths(&result);
             let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                verter_type_runtime::contents_snapshot::targeted_contents_snapshot(
+                    &guard,
+                    &target_paths,
+                )
             };
             let locs = {
                 // Bind a `Copy` `&HashMap` so each per-target closure can capture the cache by
@@ -901,20 +916,28 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 Err(_) => return Ok(vec![]),
             };
 
-            // Snapshot the cache and release the lock BEFORE parsing: `parse_tsserver_code_action`
-            // and `parse_tsserver_combined_code_fix` can fall back to a blocking disk read on a
-            // cache miss. Holding the async mutex across those reads — and re-acquiring it per
-            // combinable `fixId` below — would block every other task contending for the cache. The
-            // snapshot is a cheap pointer-map clone (`Arc<str>` values), reused for both passes.
-            let cache_snapshot = {
+            // Snapshot ONLY the files these single-fix actions target, then release the lock BEFORE
+            // parsing: `parse_tsserver_code_action` can fall back to a blocking disk read on a cache
+            // miss. Holding the async mutex across those reads would block every other task
+            // contending for the cache. Scanning the responses bounds the snapshot to touched files.
+            let mut single_fix_paths: HashSet<String> = HashSet::new();
+            for fix in &raw_fixes {
+                single_fix_paths.extend(
+                    verter_type_runtime::contents_snapshot::tsserver_code_action_target_paths(fix),
+                );
+            }
+            let single_fix_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                verter_type_runtime::contents_snapshot::targeted_contents_snapshot(
+                    &guard,
+                    &single_fix_paths,
+                )
             };
 
             // Single-fix actions first, then their combined "fix all" companions.
             let mut actions: Vec<TypeCodeAction> = raw_fixes
                 .iter()
-                .filter_map(|a| parse_tsserver_code_action(a, &cache_snapshot))
+                .filter_map(|a| parse_tsserver_code_action(a, &single_fix_snapshot))
                 .collect();
 
             // Follow each DISTINCT combinable `fixId` once (e.g. "Delete all unused
@@ -937,10 +960,24 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     .query("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
                     .await
                 {
+                    // Snapshot ONLY this combined response's target files, taken FRESH after the
+                    // await so it reflects content current as of this response (a concurrent
+                    // `update_file` during the await must not convert offsets against stale text).
+                    let target_paths =
+                        verter_type_runtime::contents_snapshot::tsserver_combined_code_fix_target_paths(
+                            &body,
+                        );
+                    let combined_snapshot = {
+                        let guard = contents_cache.lock().await;
+                        verter_type_runtime::contents_snapshot::targeted_contents_snapshot(
+                            &guard,
+                            &target_paths,
+                        )
+                    };
                     if let Some(action) = parse_tsserver_combined_code_fix(
                         &body,
                         fix_all_title.as_deref(),
-                        &cache_snapshot,
+                        &combined_snapshot,
                     ) {
                         combined.push(action);
                     }

@@ -2465,12 +2465,14 @@ impl TypeProvider for TsgoTypeProvider {
 
             // Cross-file rename: convert each edit's range against ITS OWN target file's content
             // (disk fallback inside the parser), never the queried file's single snapshot — a
-            // line-0 edit in the wrong file CORRUPTS it. Snapshot the cache and RELEASE the async
-            // mutex before parsing, so the per-target blocking disk fallback never runs under the
-            // lock (a multi-file rename would otherwise stall the provider).
+            // line-0 edit in the wrong file CORRUPTS it. Snapshot ONLY this workspace edit's target
+            // files and RELEASE the async mutex before parsing, so the per-target blocking disk
+            // fallback never runs under the lock (a multi-file rename would otherwise stall the
+            // provider). Scanning the response bounds the snapshot to the touched files.
+            let target_paths = crate::contents_snapshot::lsp_workspace_edit_target_paths(&result);
             let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
             };
             let mut locations = Vec::new();
             parse_workspace_edit_locations(
@@ -2594,11 +2596,16 @@ impl TypeProvider for TsgoTypeProvider {
             let items = result.as_array().cloned().unwrap_or_default();
             // Cross-file code-action edits: resolve each edit's range against ITS OWN target file's
             // content (disk fallback inside the parser), never the queried file's single snapshot.
-            // Snapshot the cache and RELEASE the async mutex before parsing, so the per-target
-            // blocking disk fallback never runs under the lock (a fix-all could stall the provider).
+            // Snapshot ONLY the files these actions target and RELEASE the async mutex before
+            // parsing, so the per-target blocking disk fallback never runs under the lock (a fix-all
+            // could stall the provider). Scanning the responses bounds the snapshot to touched files.
+            let mut target_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for item in &items {
+                target_paths.extend(crate::contents_snapshot::lsp_code_action_target_paths(item));
+            }
             let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
             };
             Ok(items
                 .iter()

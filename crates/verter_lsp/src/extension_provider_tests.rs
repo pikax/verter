@@ -43,12 +43,27 @@ struct TsQueryCall {
     arguments: Value,
 }
 
+/// A contents-cache mutation to apply when a given command is served, used to
+/// simulate a concurrent `update_file` landing mid-request.
+struct ScriptedCacheMutation {
+    /// Apply when this command is requested.
+    command: String,
+    /// Canonical cache key to overwrite.
+    path: String,
+    /// Replacement content.
+    content: Arc<str>,
+    /// Shared handle to the provider's contents cache.
+    handle: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<str>>>>,
+}
+
 #[derive(Default)]
 struct ScriptState {
     /// Every emitted envelope, in emission order.
     calls: Vec<TsQueryCall>,
     /// Scripted `(expected_command, response_body)` pairs, popped FIFO.
     responses: VecDeque<(String, Value)>,
+    /// Cache mutations to apply (FIFO) when their command is served.
+    mutations: VecDeque<ScriptedCacheMutation>,
 }
 
 /// A scripted, in-memory [`TsQueryTransport`] for headless provider tests.
@@ -73,6 +88,27 @@ impl ScriptedTsQueryTransport {
             .unwrap()
             .responses
             .push_back((command.to_string(), body));
+    }
+
+    /// Queue a contents-cache mutation applied just before `command`'s response
+    /// is returned — simulating a concurrent `update_file` during the await.
+    fn push_cache_mutation(
+        &self,
+        command: &str,
+        path: &str,
+        content: &str,
+        handle: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<str>>>>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .mutations
+            .push_back(ScriptedCacheMutation {
+                command: command.to_string(),
+                path: path.to_string(),
+                content: Arc::from(content),
+                handle,
+            });
     }
 
     /// Snapshot every recorded envelope in emission order.
@@ -106,6 +142,23 @@ impl TsQueryTransport for ScriptedTsQueryTransport {
                 command: params.command.clone(),
                 arguments: params.arguments.clone(),
             });
+            // Apply a queued cache mutation for this command BEFORE returning the
+            // response, so the provider's per-response snapshot (taken after this
+            // await) sees the updated content — modelling a concurrent
+            // `update_file` landing while the request was in flight. The provider
+            // holds no cache lock at the await point, so `try_lock` succeeds.
+            if state
+                .mutations
+                .front()
+                .is_some_and(|m| m.command == params.command)
+            {
+                let mutation = state.mutations.pop_front().unwrap();
+                let mut cache = mutation
+                    .handle
+                    .try_lock()
+                    .expect("provider holds no cache lock at the request await point");
+                cache.insert(mutation.path, mutation.content);
+            }
             match state.responses.pop_front() {
                 Some((expected, body)) => {
                     assert_eq!(
@@ -577,5 +630,108 @@ async fn extension_provider_get_code_actions_surfaces_single_and_combined_unused
     assert!(
         combined.edits[0].new_text.is_empty(),
         "the combined deletion edit has empty new_text"
+    );
+}
+
+/// The combined "fix all" branch converts each `getCombinedCodeFix` response's
+/// edit offsets against content current as of THAT response, not a snapshot
+/// taken once before the loop. A concurrent `update_file` landing while the
+/// combined request is in flight must be reflected when the response is parsed.
+///
+/// Discriminating: the combined edit targets a position (line 3) that exists
+/// only in the UPDATED content. A snapshot taken before the loop holds the
+/// original single-line content, whose codec clamps the past-EOF line to a
+/// different (EOF) byte offset; the fresh per-response snapshot resolves the
+/// line-3 position to its real byte offset. The assertion pins that real offset.
+#[tokio::test]
+async fn extension_provider_combined_fix_uses_content_current_as_of_each_response() {
+    let file = "/workspace/src/entry.ts";
+    let original = "const unused = 1;\n";
+    // Three lines; the combined edit targets line 3. Byte 12 is the start of the
+    // third line (`line0\n` = 6 bytes, `line1\n` = 6 bytes).
+    let updated = "line0\nline1\nDELETE_ME = 1;\n";
+    let line3_start: u32 = 12;
+    assert_eq!(
+        updated.as_bytes()[line3_start as usize], b'D',
+        "byte 12 is the start of the third line in the updated content"
+    );
+
+    let transport = ScriptedTsQueryTransport::new();
+    transport.push_response("open", json!({}));
+    // Single fix on line 1 — valid against both the original and updated content.
+    transport.push_response(
+        "getCodeFixes",
+        json!([
+            {
+                "description": "Remove unused declaration for: 'unused'",
+                "fixId": "unusedIdentifier_delete",
+                "fixAllDescription": "Delete all unused declarations",
+                "changes": [
+                    {
+                        "fileName": file,
+                        "textChanges": [
+                            {
+                                "start": { "line": 1, "offset": 1 },
+                                "end": { "line": 1, "offset": 6 },
+                                "newText": ""
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]),
+    );
+    // Combined response edits LINE 3 — only resolvable against the updated content.
+    transport.push_response(
+        "getCombinedCodeFix",
+        json!({
+            "changes": [
+                {
+                    "fileName": file,
+                    "textChanges": [
+                        {
+                            "start": { "line": 3, "offset": 1 },
+                            "end": { "line": 3, "offset": 10 },
+                            "newText": ""
+                        }
+                    ]
+                }
+            ]
+        }),
+    );
+
+    let provider = ExtensionTypeProvider::with_transport(transport.clone(), "/workspace");
+    provider
+        .open_file(file, original)
+        .await
+        .expect("open_file routes through the mock transport");
+
+    // The concurrent edit lands while the combined request is in flight.
+    transport.push_cache_mutation(
+        "getCombinedCodeFix",
+        &verter_span::path::canonicalize_path(file),
+        updated,
+        provider.contents_handle_for_test(),
+    );
+
+    let diag = ProviderDiagnosticContext {
+        code: 6133,
+        start: 6,
+        end: 11,
+    };
+    let actions = provider
+        .get_code_actions(file, 6, 11, &[diag])
+        .await
+        .expect("get_code_actions routes through the mock transport");
+
+    let combined = actions
+        .iter()
+        .find(|a| a.title == "Delete all unused declarations")
+        .expect("the combined fix-all action surfaces");
+    assert_eq!(combined.edits.len(), 1, "the combined fix carries its edit");
+    assert_eq!(
+        combined.edits[0].start, line3_start,
+        "the combined edit's offset must be computed against content current as of the response \
+         (the line-3 start at byte {line3_start}), not a stale pre-loop snapshot"
     );
 }

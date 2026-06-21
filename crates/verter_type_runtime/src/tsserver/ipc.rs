@@ -1564,12 +1564,15 @@ impl TypeProvider for TsserverTypeProvider {
                 )
                 .await?;
 
-            // Snapshot the contents cache, then RELEASE the async mutex BEFORE parsing: the
-            // per-target parse runs a blocking `std::fs::read_to_string` disk fallback, and a
-            // multi-file rename could stall the provider if that disk I/O ran under the lock.
+            // Snapshot ONLY this response's target files, then RELEASE the async mutex BEFORE
+            // parsing: the per-target parse runs a blocking `std::fs::read_to_string` disk fallback,
+            // and a multi-file rename could stall the provider if that disk I/O ran under the lock.
+            // Scanning the response keeps the snapshot bounded by the files it touches and current
+            // as of this response, not the whole cache.
+            let target_paths = crate::contents_snapshot::tsserver_rename_target_paths(&result);
             let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
             };
             let locs = {
                 // Bind a `Copy` `&HashMap` for the per-target closures; the lock is already dropped,
@@ -1776,12 +1779,19 @@ impl TypeProvider for TsserverTypeProvider {
                 Err(_) => return Ok(vec![]),
             };
 
-            // Snapshot the contents cache, then RELEASE the async mutex BEFORE parsing: each edit's
-            // parse runs a blocking `std::fs::read_to_string` disk fallback, and a fix-all touching
-            // many files could stall the provider if that disk I/O ran under the lock.
+            // Snapshot ONLY the files these fixes target, then RELEASE the async mutex BEFORE
+            // parsing: each edit's parse runs a blocking `std::fs::read_to_string` disk fallback,
+            // and a fix-all touching many files could stall the provider if that disk I/O ran under
+            // the lock. Scanning the responses keeps the snapshot bounded by the touched files.
+            let mut target_paths: HashSet<String> = HashSet::new();
+            for fix in &raw_fixes {
+                target_paths.extend(crate::contents_snapshot::tsserver_code_action_target_paths(
+                    fix,
+                ));
+            }
             let cache_snapshot = {
                 let guard = contents_cache.lock().await;
-                guard.clone()
+                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
             };
 
             // Single-fix actions first, then their combined "fix all" companions —
@@ -1814,11 +1824,14 @@ impl TypeProvider for TsserverTypeProvider {
                     .request("getCombinedCodeFix", combined_code_fix_args(&file, fix_id))
                     .await;
                 if let Ok(body) = combined_result {
-                    // Re-snapshot fresh (the request may have synced new files) and RELEASE the lock
-                    // before parsing — the parse runs a blocking disk fallback per edit.
+                    // Snapshot ONLY this combined response's target files, taken FRESH (the request
+                    // may have synced new files), and RELEASE the lock before parsing — the parse
+                    // runs a blocking disk fallback per edit.
+                    let target_paths =
+                        crate::contents_snapshot::tsserver_combined_code_fix_target_paths(&body);
                     let cache = {
                         let guard = contents_cache.lock().await;
-                        guard.clone()
+                        crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
                     };
                     if let Some(action) =
                         parse_tsserver_combined_code_fix(&body, fix_all_title.as_deref(), &cache)
