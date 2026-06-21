@@ -21,30 +21,78 @@ use crate::type_provider::merge;
 use super::server_utils::{location_from_span, to_pascal_case};
 use super::{ResolvedComponentDocument, TypeProviderContext, VerterLanguageServer};
 
-/// The first [`Location`] of a [`GotoDefinitionResponse`], if any — the single
-/// mapped target the imported-type declaration hop reads back.
-fn first_location_of(response: Option<GotoDefinitionResponse>) -> Option<Location> {
-    match response? {
-        GotoDefinitionResponse::Scalar(loc) => Some(loc),
-        GotoDefinitionResponse::Array(mut locs) => {
-            if locs.is_empty() {
-                None
-            } else {
-                Some(locs.swap_remove(0))
-            }
-        }
-        GotoDefinitionResponse::Link(mut links) => {
-            if links.is_empty() {
-                None
-            } else {
-                let link = links.swap_remove(0);
-                Some(Location {
-                    uri: link.target_uri,
-                    range: link.target_selection_range,
-                })
-            }
-        }
+/// ALL mapped [`Location`]s of a [`GotoDefinitionResponse`] — the full candidate
+/// set the imported-type declaration hop considers (NOT just the first). A
+/// definition merge can map a single provider hop to several candidates (e.g. the
+/// usage occurrence plus the real member); the declaration selector must inspect
+/// every one so a leading non-declaration candidate does not discard a later valid
+/// declaration.
+fn all_locations_of(response: Option<GotoDefinitionResponse>) -> Vec<Location> {
+    match response {
+        None => Vec::new(),
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Link(links)) => links
+            .into_iter()
+            .map(|link| Location {
+                uri: link.target_uri,
+                range: link.target_selection_range,
+            })
+            .collect(),
     }
+}
+
+/// Select the single validated DECLARATION `{uri, range}` from the full set of
+/// mapped definition candidates — the in-layer declaration proof for the
+/// imported-type rename hop. Pure over its inputs (the spelling check is injected),
+/// so it is unit-testable with synthetic candidate sets.
+///
+/// `get_definition` is a declaration query by the LSP contract, so the mapped
+/// candidates are declaration-shaped; this function adds the bounded, no-resolver
+/// hardening on top of that contract:
+/// - Considers ALL `mapped_locations` (never just the first), so a leading
+///   non-declaration candidate (e.g. the parent's own usage occurrence a
+///   project-membership-limited provider can resolve to) does not discard a later
+///   genuine declaration.
+/// - Accepts a candidate ONLY when (a) its resolved range spells EXACTLY the prop
+///   name (`spells_prop_name`, the name-equality VALIDATION tripwire) AND (b) it is
+///   a DISTINCT location from the initiating usage — a candidate equal to ANY
+///   `parent_usage_ranges` entry (same `uri` and `range`) is the usage itself, never
+///   a declaration, and is rejected.
+///
+/// Returns the first candidate that passes BOTH gates, or `None` (fail closed) when
+/// no candidate is an accepted declaration — the gate then ships no usage-only
+/// partial.
+fn select_validated_declaration(
+    mapped_locations: Vec<Location>,
+    parent_usage_ranges: &[(Uri, Range)],
+    prop_name: &str,
+    spells_prop_name: impl Fn(&Uri, Range, &str) -> bool,
+) -> Option<(Uri, Range)> {
+    mapped_locations.into_iter().find_map(|location| {
+        // REJECT a candidate that coincides with the INITIATING parent usage: a
+        // provider whose cross-file project membership cannot reach the imported
+        // member resolves `get_definition` back to the prop's OWN usage occurrence —
+        // that is NOT a declaration. A declaration must be a DISTINCT location from
+        // the usage; accepting a usage location would make the gate's declaration-leg
+        // and usage-leg checks pass on the SAME edit, re-opening the usage-only-partial
+        // leak.
+        let is_parent_usage = parent_usage_ranges.iter().any(|(usage_uri, usage_range)| {
+            location.uri == *usage_uri && location.range == *usage_range
+        });
+        if is_parent_usage {
+            return None;
+        }
+
+        // TRIPWIRE: the resolved source range must spell EXACTLY the prop name — a
+        // name-equality VALIDATION of the structurally-resolved range, never a text
+        // search that drives the result. Fail closed on mismatch.
+        if spells_prop_name(&location.uri, location.range, prop_name) {
+            Some((location.uri, location.range))
+        } else {
+            None
+        }
+    })
 }
 
 /// A `<Child prop=…>` prop-usage hit resolved at the cursor: the parent-side
@@ -386,27 +434,30 @@ impl VerterLanguageServer {
             return;
         }
 
-        let Some((uri, range)) =
-            self.map_definition_to_validated_decl(type_defs, parent_tsx_path, &prop_name)
-        else {
-            return;
-        };
-
-        // REJECT a resolved target that coincides with the INITIATING parent usage
-        // itself: a provider whose cross-file project membership cannot reach the
-        // imported member (tgo does not, for an imported-type prop) resolves
+        // The initiating parent usage location(s) a resolved candidate must be
+        // DISTINCT from: a provider whose cross-file project membership cannot reach
+        // the imported member (tgo does not, for an imported-type prop) resolves
         // `get_definition` back to the prop's OWN usage occurrence in the parent
         // carrier — that is NOT a declaration. Accepting it would make the gate's
         // declaration-leg and parent-usage-leg checks pass on the SAME parent edit,
-        // re-opening the usage-only-partial leak. A usage-resolved target leaves the
-        // declaration `Unknown`, so the gate fails closed (no usage-only partial) —
-        // the architecturally-honest outcome for a provider that cannot resolve the
-        // cross-file member.
-        let resolves_to_parent_usage =
-            uri == target.usage.parent_uri && target.expected_parent_usage_range == Some(range);
-        if resolves_to_parent_usage {
+        // re-opening the usage-only-partial leak. The selector rejects any candidate
+        // equal to one of these, so a usage-resolved target leaves the declaration
+        // `Unknown` and the gate fails closed — the architecturally-honest outcome for
+        // a provider that cannot resolve the cross-file member.
+        let parent_usage_ranges: Vec<(Uri, Range)> = target
+            .expected_parent_usage_range
+            .map(|range| (target.usage.parent_uri.clone(), range))
+            .into_iter()
+            .collect();
+
+        let Some((uri, range)) = self.map_definition_to_validated_decl(
+            type_defs,
+            parent_tsx_path,
+            &prop_name,
+            &parent_usage_ranges,
+        ) else {
             return;
-        }
+        };
 
         target.declaration = ChildPropDeclarationProof::Known {
             uri,
@@ -421,18 +472,22 @@ impl VerterLanguageServer {
     /// validated declaration `{uri, range}` — the imported-type member declaration
     /// the completeness gate proves the provider's own rename edits.
     ///
-    /// Routes the locations through the SAME definition-merge mapping go-to-definition
-    /// uses (carrier IDE/API surfaces map through their own source maps; every other
-    /// target reads its own source and converts byte offsets) — no second resolver.
-    /// Returns the FIRST mapped location whose resolved source range spells EXACTLY
-    /// the prop name (the correctness TRIPWIRE: a name-equality VALIDATION of the
-    /// resolved range, fail-closed on mismatch). `None` when nothing maps cleanly or
-    /// no mapped range spells the prop name.
+    /// Routes the FULL location set through the SAME definition-merge mapping
+    /// go-to-definition uses (carrier IDE/API surfaces map through their own source
+    /// maps; every other target reads its own source and converts byte offsets) — no
+    /// second resolver, ONE merge over the whole set so its cross-candidate dedup +
+    /// non-carrier preference apply. Then [`select_validated_declaration`] picks the
+    /// declaration: it considers ALL mapped candidates (never just the first) and
+    /// accepts one only when it is DISTINCT from the initiating parent usage AND its
+    /// resolved source range spells EXACTLY the prop name (the correctness TRIPWIRE: a
+    /// name-equality VALIDATION of the resolved range). `None` when nothing maps
+    /// cleanly or no mapped candidate is an accepted declaration (fail closed).
     fn map_definition_to_validated_decl(
         &self,
         type_defs: Vec<crate::type_provider::protocol::TypeLocation>,
         parent_tsx_path: &str,
         prop_name: &str,
+        parent_usage_ranges: &[(Uri, Range)],
     ) -> Option<(Uri, Range)> {
         use crate::server::handler_guard::block_in_place_if_available;
 
@@ -447,35 +502,34 @@ impl VerterLanguageServer {
             block_in_place_if_available(|| self.documents.host().workspace_read().read_file(p))
         };
 
-        for loc in type_defs {
-            let mapped = merge::merge_definitions(
-                None,
-                vec![loc],
-                &ctx.tsx_path,
-                &ctx.tsx_line_index,
-                &ctx.mapper,
-                &ctx.carrier_line_index,
-                Some(&|ide_path: &str| self.external_ide_context(ide_path)),
-                // A sentinel document URI that no real target equals, so a same-file
-                // short-circuit never fires (this is a definition merge over a single
-                // foreign location, never the queried file's own surface).
-                &Self::definition_merge_sentinel_uri(),
-                &carrier_source_exists,
-                encoding.clone(),
-                &source_reader,
-            );
-            let Some(location) = first_location_of(mapped) else {
-                continue;
-            };
+        // ONE merge over the WHOLE location set (not per-location): its cross-candidate
+        // dedup + non-carrier preference apply, and the full mapped set is preserved so
+        // a leading non-declaration candidate cannot discard a later real declaration.
+        let mapped = merge::merge_definitions(
+            None,
+            type_defs,
+            &ctx.tsx_path,
+            &ctx.tsx_line_index,
+            &ctx.mapper,
+            &ctx.carrier_line_index,
+            Some(&|ide_path: &str| self.external_ide_context(ide_path)),
+            // A sentinel document URI that no real target equals, so a same-file
+            // short-circuit never fires (this is a definition merge over foreign
+            // locations, never the queried file's own surface).
+            &Self::definition_merge_sentinel_uri(),
+            &carrier_source_exists,
+            encoding.clone(),
+            &source_reader,
+        );
 
-            // TRIPWIRE: the resolved source range must spell EXACTLY the prop name —
-            // a name-equality VALIDATION of the structurally-resolved range, never a
-            // text search that drives the result. Fail closed on mismatch.
-            if self.resolved_range_spells(&location.uri, location.range, prop_name) {
-                return Some((location.uri, location.range));
-            }
-        }
-        None
+        // Consider ALL mapped candidates; accept one only when it is a DISTINCT
+        // location from the parent usage AND its resolved range spells the prop name.
+        select_validated_declaration(
+            all_locations_of(mapped),
+            parent_usage_ranges,
+            prop_name,
+            |uri, range, name| self.resolved_range_spells(uri, range, name),
+        )
     }
 
     /// A sentinel document URI for the single-location definition merge in
@@ -500,7 +554,12 @@ impl VerterLanguageServer {
     /// source-read authority) and slices the byte range the negotiated-encoding line
     /// index resolves. The correctness tripwire for the imported-type declaration
     /// hop — fail closed (`false`) on any read/convert/slice miss.
-    fn resolved_range_spells(&self, uri: &Uri, range: Range, expected_name: &str) -> bool {
+    pub(super) fn resolved_range_spells(
+        &self,
+        uri: &Uri,
+        range: Range,
+        expected_name: &str,
+    ) -> bool {
         use crate::server::handler_guard::block_in_place_if_available;
 
         let canonical = uri_to_canonical_id(uri);
@@ -520,5 +579,141 @@ impl VerterLanguageServer {
         source
             .get(start as usize..end as usize)
             .is_some_and(|slice| slice == expected_name)
+    }
+}
+
+#[cfg(test)]
+mod select_validated_declaration_tests {
+    use super::select_validated_declaration;
+    use tower_lsp_server::ls_types::{Location, Position, Range, Uri};
+
+    fn uri(s: &str) -> Uri {
+        s.parse().unwrap()
+    }
+
+    fn rng(line: u32, start_ch: u32, end_ch: u32) -> Range {
+        Range {
+            start: Position {
+                line,
+                character: start_ch,
+            },
+            end: Position {
+                line,
+                character: end_ch,
+            },
+        }
+    }
+
+    fn loc(u: &str, range: Range) -> Location {
+        Location { uri: uri(u), range }
+    }
+
+    /// A spelling check that accepts EVERY candidate (so the test isolates the
+    /// candidate-iteration + usage-rejection behavior, not the name tripwire).
+    fn always_spells(_uri: &Uri, _range: Range, _name: &str) -> bool {
+        true
+    }
+
+    /// The initiating parent usage: `App.vue` 3:9..3:12 (the `foo` prop usage on
+    /// `<Child foo=…>`). A provider that cannot reach the imported member can resolve
+    /// `get_definition` back to THIS occurrence — it is NOT a declaration.
+    fn parent_usage() -> (Uri, Range) {
+        (uri("file:///src/App.vue"), rng(3, 9, 12))
+    }
+
+    /// The REAL imported-type member declaration in a THIRD file.
+    fn third_file_member() -> Location {
+        loc("file:///src/importedProps.ts", rng(5, 11, 14))
+    }
+
+    #[test]
+    fn considers_all_candidates_accepts_later_real_declaration() {
+        // The provider returned TWO mapped candidates for the usage hop: the FIRST is
+        // the parent's own self-usage occurrence (NOT a declaration — must be
+        // rejected), the SECOND is the real third-file member declaration (a distinct
+        // location that spells the prop name — must be accepted).
+        //
+        // DISCRIMINATING: a first-candidate-only selector would inspect only the
+        // parent self-usage, reject it, and return None — under-resolving a
+        // genuinely-resolvable imported declaration. Considering ALL candidates
+        // accepts the later real declaration.
+        let parent = parent_usage();
+        let mapped = vec![
+            loc(parent.0.as_str(), parent.1), // parent self-usage — rejected
+            third_file_member(),              // real declaration — accepted
+        ];
+
+        let selected = select_validated_declaration(
+            mapped,
+            std::slice::from_ref(&parent),
+            "foo",
+            always_spells,
+        );
+
+        let third = third_file_member();
+        assert_eq!(
+            selected,
+            Some((third.uri, third.range)),
+            "considering all candidates must accept the later real third-file member \
+             declaration after rejecting the leading parent self-usage"
+        );
+    }
+
+    #[test]
+    fn all_candidates_are_parent_usage_locations_fails_closed_to_none() {
+        // EVERY mapped candidate coincides with the initiating parent usage (the
+        // provider could not reach the cross-file member and resolved only to the
+        // usage occurrences). None is a declaration → the selector must return None so
+        // the completeness gate fails closed (no usage-only partial).
+        //
+        // DISCRIMINATING: a selector that promoted a same-name usage location to a
+        // declaration would return Some(parent-usage) here and re-open the
+        // usage-only-partial leak.
+        let parent = parent_usage();
+        let mapped = vec![
+            loc(parent.0.as_str(), parent.1),
+            loc(parent.0.as_str(), parent.1),
+        ];
+
+        let selected = select_validated_declaration(
+            mapped,
+            std::slice::from_ref(&parent),
+            "foo",
+            always_spells,
+        );
+
+        assert!(
+            selected.is_none(),
+            "when every mapped candidate is the parent usage location the declaration \
+             must stay unresolved (None) — fail closed"
+        );
+    }
+
+    #[test]
+    fn candidate_not_spelling_prop_name_is_rejected() {
+        // A mapped candidate whose resolved range does NOT spell the prop name fails
+        // the tripwire and must be skipped; the later candidate that DOES spell it is
+        // accepted. Proves the name-equality VALIDATION still gates each candidate.
+        let parent = parent_usage();
+        // Spelling check: only the third-file member range spells `foo`.
+        let third = third_file_member();
+        let third_for_closure = third.clone();
+        let spells = move |u: &Uri, range: Range, name: &str| {
+            *u == third_for_closure.uri && range == third_for_closure.range && name == "foo"
+        };
+        let mapped = vec![
+            loc("file:///src/other.ts", rng(1, 0, 3)), // a same-position non-match — fails tripwire
+            third.clone(),                             // spells `foo` — accepted
+        ];
+
+        let selected =
+            select_validated_declaration(mapped, std::slice::from_ref(&parent), "foo", spells);
+
+        assert_eq!(
+            selected,
+            Some((third.uri, third.range)),
+            "a candidate that does not spell the prop name is skipped; the one that does \
+             is accepted"
+        );
     }
 }

@@ -1317,7 +1317,7 @@ fn build_foo_prop_snapshot() -> (
 }
 
 #[test]
-fn locate_prop_decl_range_returns_exact_api_range_and_roundtrips_to_vue() {
+fn locate_prop_decl_range_returns_exact_api_range_and_maps_back_to_vue() {
     use crate::type_provider::merge::api_surface_range_to_carrier_range;
     use tower_lsp_server::ls_types::PositionEncodingKind;
 

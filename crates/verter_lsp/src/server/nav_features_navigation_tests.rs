@@ -276,7 +276,7 @@ mod cross_file_rename_gate_tests {
         }
     }
 
-    // ── The load-bearing fail-closed discriminators (RED-proof targets) ─────────
+    // ── The load-bearing fail-closed discriminators ────────────────────────────
 
     #[test]
     fn confirmed_usage_only_merge_fails_closed_to_none() {
@@ -285,9 +285,9 @@ mod cross_file_rename_gate_tests {
         // provider did not enumerate it). The gate MUST fail closed → None, never the
         // usage-only partial.
         //
-        // DISCRIMINATING / RED-PROOF: revert the gate (make
-        // `gate_cross_file_child_prop_rename` always return `merged`) and this goes
-        // RED — it would return the usage-only edit instead of None.
+        // DISCRIMINATING: without the gate (make `gate_cross_file_child_prop_rename`
+        // always return `merged`) this would return the usage-only edit instead of
+        // None.
         let merged = edit_with(vec![(
             parent_uri(),
             vec![te(parent_usage_range(), "fooRenamed")],
@@ -311,8 +311,8 @@ mod cross_file_rename_gate_tests {
         // whose provider get_definition hop failed) and whose merged edit is
         // usage-only MUST fail closed → None. This is the EXACT case an
         // unresolved-declaration-does-not-gate policy would leak (returning the merged
-        // provider result untouched). DISCRIMINATING: against that leaky policy this is
-        // RED (leaky: Some(usage-only); gated: None).
+        // provider result untouched). DISCRIMINATING: against that leaky policy the
+        // outcomes diverge (leaky: Some(usage-only); gated: None).
         let merged = edit_with(vec![(
             parent_uri(),
             vec![te(parent_usage_range(), "fooRenamed")],
@@ -452,7 +452,7 @@ mod cross_file_rename_gate_tests {
     fn confirmed_wrong_span_same_start_at_decl_fails_closed() {
         // FULL-RANGE DISCRIMINATOR: an edit at the right declaration START but a WRONG
         // END (right anchor, wrong span) must NOT satisfy the declaration leg. Against
-        // a start-only check this is RED (start-only: passes; full-range: fails).
+        // a start-only check the outcomes diverge (start-only: passes; full-range: fails).
         let wrong_end = rng(5, 11, 99); // same start (5:11) as decl_range, different end
         let merged = edit_with(vec![
             (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),
