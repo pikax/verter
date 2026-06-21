@@ -15,29 +15,29 @@
 //! `IndexSignature` / `FunctionExpr` / function-parameter / bare-`TypeParam` /
 //! `TypeDeclBody` / `FunctionSignature` / enum-member-value / prepared-decl /
 //! prepared-member / prepared-wrapper-shape / prepared-projection /
-//! prepared-forward-payload owner of one).
-//! Every type body is a [`HotTypeRef`] or scalar metadata. The two interim
-//! rails are:
-//! (a) the ALLOWLIST guard `hot_prepared_carriers_own_no_typeexpr`
-//! (`tests/cases/handle_capable_consumer_guards.rs`) — it parses this file with
-//! `syn`, walks every carrier field's type tree, and asserts each leaf is a
-//! [`HotTypeRef`] handle, an allowed container thereof
-//! (`Option`/`Vec`/`Arc`/`Box`/map/tuple/slice), a nested `Hot*` carrier
-//! defined in this file, or an explicitly-allowlisted TypeExpr-free scalar; an
-//! unrecognized DIRECTLY-WRITTEN type reds. This is a best-effort SPELLING
-//! check, NOT a type-identity proof: it does NOT resolve `use … as
-//! <allowed-name>` aliases, `pub use` re-exports, or module-path shadowing, so
-//! a field deliberately typed through such an alias to an allowed spelling
-//! (`use verter_type_expr::TypeExpr as HotBody; … body: HotBody`, `use
-//! TypeExpr as Span`, or a re-exported `Hot*` struct owning a `TypeExpr`) can
-//! evade it. (b) the compiler `assert_not_impl_any!` next to [`HotTypeRef`]
-//! keeps the handle non-keyable (R6: no `Hash`/`Ord`/`PartialOrd`) — this one
-//! IS a true compiler proof (any file, any alias).
-//! The fully compiler-enforced `NoTypeExpr` marker trait — which the compiler
-//! checks by RESOLVING the actual field type, closing the
-//! alias/re-export/module-shadow residual the spelling-based allowlist cannot —
-//! is the planned durable structural close for the no-transitive-`TypeExpr`
-//! invariant; it is not in place yet.
+//! prepared-forward-payload owner of one). Every type body is a [`HotTypeRef`]
+//! handle or scalar metadata.
+//!
+//! This invariant is COMPILER-ENFORCED. Every carrier
+//! `#[derive(verter_no_typeexpr::NoTypeExpr)]`s — the derive emits the hidden
+//! witness field-recursively, with a `: NoTypeExpr` bound on every field — and
+//! the [`assert_impl_all!`](static_assertions::assert_impl_all) block below
+//! asserts each carrier (and the [`HotTypeRef`] handle) implements `NoTypeExpr`.
+//! A field that owns a `TypeExpr` — directly, through an aliased `use TypeExpr
+//! as Body`, or via a nested owner like `ValueRef` — makes that bound
+//! unsatisfiable, so the BUILD FAILS. Because the compiler resolves the actual
+//! field type (not its written spelling), there is no alias / re-export /
+//! module-shadow escape. Two NARROW source guards in
+//! `tests/cases/handle_capable_consumer_guards.rs` back this up without
+//! re-proving type meaning: a COVERAGE guard forces every `Hot*` carrier to opt
+//! into both the derive and the assert set, and a HAND-IMPL ban forbids any
+//! hand-written `NoTypeExpr`/`NoTypeExprWitness` impl save the single audited
+//! [`HotTypeRef`] witness. The `HotTypeRef` handle additionally stays non-keyable
+//! (R6: no `Hash`/`Ord`/`PartialOrd`) via the compiler `assert_not_impl_any!`
+//! next to its definition. The only remaining residual is deliberate witness
+//! forgery (a `use …NoTypeExprWitness as Alias; impl Alias for X`), which is a
+//! hostile act rather than drift and still cannot hide a `TypeExpr` in a derived
+//! carrier's field.
 //!
 //! These carriers are a FAITHFUL handle-native mirror of the lower-crate
 //! shapes: every scalar field present on the lower-crate `Prepared*` shape is
@@ -48,23 +48,47 @@
 //!
 //! The carriers are assembled FROM already-computed handles + scalar metadata
 //! via [`HotPreparedTypeDecl::from_parts`] / [`HotPreparedValueDecl::from_parts`]
-//! (mirroring the `OwnedEvalProgram::from_parts` Vec→Arc wrapping style). The
-//! population wiring that calls these from the prepared-decl producer, the
-//! reader migration, and the clone-path deletion land in a later atomic
-//! session; today these carriers are constructed only by the discriminating
-//! tests in `src/hot_prepared_tests.rs`.
+//! (mirroring the `OwnedEvalProgram::from_parts` Vec→Arc wrapping style).
 
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::HotTypeRef;
+use static_assertions::assert_impl_all;
+use verter_no_typeexpr::NoTypeExpr;
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::analysis::type_solver::prepared::{
     DeclProvenance, PreparedCacheDeps, PreparedCaseTransformKind, PreparedExternalDep,
     PreparedForwardingKind, PreparedSurfaceModifiers, PreparedWrapperKind,
 };
+
+// The compiler-enforced no-transitive-`TypeExpr` invariant. Every hot carrier
+// (and the `HotTypeRef` handle) MUST implement `NoTypeExpr`: a field that owns,
+// transitively, a `verter_type_expr::TypeExpr` (directly, through an aliased
+// `use TypeExpr as Body`, or via a nested owner like `ValueRef`) makes the
+// derived witness bound unsatisfiable, so the build FAILS HERE. This is the
+// structural close the launderable source-spelling scanner could not provide —
+// the compiler resolves the actual field type, not its written name. A new
+// `Hot*` carrier is forced into this list by the coverage guard
+// (`tests/cases/handle_capable_consumer_guards.rs`).
+assert_impl_all!(HotTypeRef: NoTypeExpr);
+assert_impl_all!(HotTypeParamDecl: NoTypeExpr);
+assert_impl_all!(HotPreparedMember: NoTypeExpr);
+assert_impl_all!(HotKeyFilterShape: NoTypeExpr);
+assert_impl_all!(HotKeyRemapShape: NoTypeExpr);
+assert_impl_all!(HotValueRuleShape: NoTypeExpr);
+assert_impl_all!(HotPreparedWrapperShape: NoTypeExpr);
+assert_impl_all!(HotPreparedForwardPayload: NoTypeExpr);
+assert_impl_all!(HotProjectionClass: NoTypeExpr);
+assert_impl_all!(HotPreparedClassifierMeta: NoTypeExpr);
+assert_impl_all!(HotPreparedTypeDecl: NoTypeExpr);
+assert_impl_all!(HotFunctionParam: NoTypeExpr);
+assert_impl_all!(HotFunctionSignature: NoTypeExpr);
+assert_impl_all!(HotEnumMemberValue: NoTypeExpr);
+assert_impl_all!(HotPreparedValueMember: NoTypeExpr);
+assert_impl_all!(HotPreparedValueDecl: NoTypeExpr);
 
 // ---------------------------------------------------------------------------
 // Hot generic-parameter declaration
@@ -73,10 +97,10 @@ use verter_semantic::analysis::type_solver::prepared::{
 /// A hot generic-parameter declaration: the constraint/default type bodies are
 /// [`HotTypeRef`] handles (the lower-crate `TypeParam` carries
 /// `Option<Arc<TypeExpr>>` for each), the name a scalar.
-// Scalar carrier fields are read by the reader migration (S4); the producer
-// flip populates them.
+// The scalar carrier fields carry handle-native facts consumers read on
+// demand; `#[allow(dead_code)]` until the populate/read wiring lands.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotTypeParamDecl {
     pub name: Arc<str>,
     pub constraint: Option<HotTypeRef>,
@@ -93,10 +117,10 @@ pub(crate) struct HotTypeParamDecl {
 /// file, which drives the macro-surface own-member overlay's span/JSDoc
 /// pairing). The lower-crate field is a `String`; the hot-carrier-appropriate
 /// shared form is `Arc<str>`.
-// Scalar metadata fields are read by the reader migration (S4); the producer
-// flip populates them.
+// The scalar metadata fields carry handle-native facts consumers read on
+// demand; `#[allow(dead_code)]` until the populate/read wiring lands.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotPreparedMember {
     pub ty: HotTypeRef,
     pub optional: bool,
@@ -127,9 +151,10 @@ pub(crate) struct HotPreparedMember {
 /// How a hot wrapper filters its source keyspace — the handle-native mirror of
 /// the lower-crate prepared key-filter shape. The literal arms keep their
 /// (interned) key names; the `Opaque` arm's symbolic key type becomes a handle.
-// Variants are produced by the producer flip (S4).
+// Variants carry handle-native payloads; `#[allow(dead_code)]` until the
+// populate wiring constructs them outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) enum HotKeyFilterShape {
     All,
     IncludeLiteral(Vec<Arc<str>>),
@@ -142,9 +167,10 @@ pub(crate) enum HotKeyFilterShape {
 /// lower-crate prepared key-remap shape. The scalar arms keep their data; the
 /// `CaseTransform` kind is reused verbatim (it owns no `TypeExpr`); the
 /// `Opaque` arm's symbolic name-type becomes a handle.
-// Variants are produced by the producer flip (S4).
+// Variants carry handle-native payloads; `#[allow(dead_code)]` until the
+// populate wiring constructs them outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) enum HotKeyRemapShape {
     Identity,
     Prefix(Arc<str>),
@@ -159,9 +185,10 @@ pub(crate) enum HotKeyRemapShape {
 /// How a hot wrapper transforms member values — the handle-native mirror of the
 /// lower-crate prepared value-rule shape. The `Transform` arm's symbolic
 /// transform body becomes a handle.
-// Variants are produced by the producer flip (S4).
+// Variants carry handle-native payloads; `#[allow(dead_code)]` until the
+// populate wiring constructs them outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) enum HotValueRuleShape {
     /// Value is `T[K]` — pass through unchanged.
     PassThrough,
@@ -174,9 +201,10 @@ pub(crate) enum HotValueRuleShape {
 /// fields (`kind`, `source_param_index`, `modifiers`) are reused verbatim (they
 /// own no `TypeExpr`); the key-filter / key-remap / value-rule sub-shapes carry
 /// their typed payloads as handles.
-// Scalar + sub-shape fields are read by the reader migration (S4).
+// Scalar + sub-shape fields are read on demand; `#[allow(dead_code)]` until
+// the populate wiring constructs this outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotPreparedWrapperShape {
     /// The lower scalar wrapper-kind discriminant — REUSED verbatim (owns no
     /// `TypeExpr`).
@@ -194,9 +222,10 @@ pub(crate) struct HotPreparedWrapperShape {
 /// the handle-native mirror of the lower-crate prepared forward payload. The
 /// `target_args` symbolic type arguments (a `Vec<TypeExpr>` on the lower
 /// payload) become a handle slice; `forwarding_kind` is reused verbatim.
-// Fields are read by the reader migration (S4).
+// Fields are read on demand; `#[allow(dead_code)]` until the populate wiring
+// constructs this outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotPreparedForwardPayload {
     pub target_name: Arc<str>,
     /// The forwarded symbolic type arguments, each as a handle (B2:
@@ -210,9 +239,10 @@ pub(crate) struct HotPreparedForwardPayload {
 /// handle-native mirror of the lower-crate `PreparedProjectionClass`. The
 /// `ForwardSubject` arm carries the handle-native forward payload; the other
 /// arms are pure discriminants.
-// Variants are produced by the producer flip (S4).
+// Variants carry handle-native payloads; `#[allow(dead_code)]` until the
+// populate wiring constructs them outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) enum HotProjectionClass {
     DirectMembers,
     Wrapper,
@@ -225,9 +255,10 @@ pub(crate) enum HotProjectionClass {
 /// `PreparedWrapperShape` + `PreparedProjectionClass`, with every typed payload
 /// carried as a handle (the B2 closure) and every scalar discriminant/modifier
 /// reused verbatim.
-// Fields are read by the reader migration (S4).
+// Fields are read on demand; `#[allow(dead_code)]` until the populate wiring
+// constructs this outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotPreparedClassifierMeta {
     pub wrapper_shape: HotPreparedWrapperShape,
     pub projection_class: HotProjectionClass,
@@ -245,10 +276,11 @@ pub(crate) struct HotPreparedClassifierMeta {
 /// for a merged interface) and [`lookup_body`](Self::lookup_body) (the legacy
 /// shallow-lookup / compat body surface, KEPT SEPARATE — it is not always
 /// identical to the semantic merge body).
-// The scalar identity/provenance/cache/dep fields are read by the reader
-// migration (S4); the producer flip populates them.
+// The scalar identity/provenance/cache/dep fields carry handle-native facts
+// consumers read on demand; `#[allow(dead_code)]` until the populate wiring
+// lands.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotPreparedTypeDecl {
     pub root_identity: ResolvedRootIdentity,
     pub exported_name: Option<String>,
@@ -272,9 +304,9 @@ pub(crate) struct HotPreparedTypeDecl {
     pub classifier: HotPreparedClassifierMeta,
 }
 
-// `from_parts` + the hot accessors are called by the discriminating tests
-// today and by the reader migration (the producer flip — S4); the lib-only
-// build has no production caller yet.
+// `from_parts` + the hot accessors are exercised by the discriminating tests;
+// the lib-only build has no production caller yet, so they are
+// `#[allow(dead_code)]`.
 #[allow(dead_code)]
 impl HotPreparedTypeDecl {
     /// Assemble a hot prepared type declaration from already-computed handles
@@ -361,9 +393,10 @@ impl HotPreparedTypeDecl {
 /// display string. `has_ts_annotation` is the OXC structural provenance the
 /// JSDoc-`@param` backfill reader consults (it owns no type identity but is a
 /// real scalar fact).
-// Scalar param-metadata fields are read by the reader migration (S4).
+// Scalar param-metadata fields are read on demand; `#[allow(dead_code)]` until
+// the populate wiring constructs this outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotFunctionParam {
     pub name: Option<Arc<str>>,
     /// The parameter type — a handle (the lower-crate `FunctionParam::ty` is a
@@ -383,9 +416,10 @@ pub(crate) struct HotFunctionParam {
 /// [`type_parameters`](Self::type_parameters), AND every
 /// [`parameter`](Self::parameters) type carry handles (the lower-crate
 /// `FunctionParam::ty` is a real `TypeExpr`).
-// `has_implementation_body` is read by the overload-visibility projection (S4).
+// `has_implementation_body` feeds the overload-visibility projection on demand;
+// `#[allow(dead_code)]` until that read wiring lands.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotFunctionSignature {
     pub parameters: Vec<HotFunctionParam>,
     pub return_type: Option<HotTypeRef>,
@@ -400,10 +434,10 @@ pub(crate) struct HotFunctionSignature {
 /// The hot analogue of the lower-crate `EnumMemberValue`. BOTH the lower-crate
 /// arms own a `TypeExpr` (the projected/folded literal type), so BOTH hot arms
 /// carry a [`HotTypeRef`] — there is no purely-scalar arm.
-// The `Deferred` arm is produced by the producer flip (S4) for unfoldable
-// members; the test exercises `Folded`.
+// The `Deferred` arm carries an unfoldable member's degraded domain handle; the
+// discriminating test exercises `Folded`, so the arm is `#[allow(dead_code)]`.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) enum HotEnumMemberValue {
     /// Statically folded to a literal — the literal type as a handle.
     Folded(HotTypeRef),
@@ -421,9 +455,10 @@ pub(crate) enum HotEnumMemberValue {
 /// optional/readonly/visibility/spans/declaration_origin). The value type is a
 /// [`HotTypeRef`] handle; `is_method` is a scalar. Do NOT add member metadata
 /// the lower value member does not own.
-// Scalar metadata fields are read by the reader migration (S4).
+// Scalar metadata fields are read on demand; `#[allow(dead_code)]` until the
+// populate wiring constructs this outside the discriminating tests.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotPreparedValueMember {
     pub ty: HotTypeRef,
     pub is_method: bool,
@@ -444,10 +479,10 @@ pub(crate) struct HotPreparedValueMember {
 /// index/call/construct signatures that a name-keyed map would drop. The
 /// separate [`member_index`](Self::member_index) (handle-valued) is the
 /// dotted-path fast-path lookup index, mirroring the lower-crate `member_index`.
-// The scalar identity/kind/cache/dep fields are read by the reader migration
-// (S4); the producer flip populates them.
+// The scalar identity/kind/cache/dep fields carry handle-native facts consumers
+// read on demand; `#[allow(dead_code)]` until the populate wiring lands.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub(crate) struct HotPreparedValueDecl {
     pub root_identity: ResolvedRootIdentity,
     pub exported_name: Option<String>,
@@ -469,9 +504,9 @@ pub(crate) struct HotPreparedValueDecl {
     pub cache_deps: PreparedCacheDeps,
 }
 
-// `from_parts` + the hot accessors are called by the discriminating tests
-// today and by the reader migration (the producer flip — S4); the lib-only
-// build has no production caller yet.
+// `from_parts` + the hot accessors are exercised by the discriminating tests;
+// the lib-only build has no production caller yet, so they are
+// `#[allow(dead_code)]`.
 #[allow(dead_code)]
 impl HotPreparedValueDecl {
     /// Assemble a hot prepared value declaration from already-computed handles

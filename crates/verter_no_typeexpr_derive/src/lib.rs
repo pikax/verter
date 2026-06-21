@@ -174,7 +174,10 @@ mod tests {
     #[test]
     fn generic_struct_carries_its_params_and_field_bound() {
         let out = expand_str("struct G<T> { inner: Vec<T> }");
-        assert!(out.contains("impl < T >"), "must carry generic params: {out}");
+        assert!(
+            out.contains("impl < T >"),
+            "must carry generic params: {out}"
+        );
         assert!(
             out.contains("Vec < T > : :: verter_no_typeexpr :: NoTypeExpr"),
             "the generic field type must be bounded: {out}"

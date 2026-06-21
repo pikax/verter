@@ -163,6 +163,18 @@ impl HotTypeRef {
 // source-text scan (it cannot be evaded by file location or import aliasing).
 assert_not_impl_any!(HotTypeRef: std::hash::Hash, std::cmp::Ord, std::cmp::PartialOrd);
 
+// HotTypeRef is the SOLE audited hand-written NoTypeExpr witness: it wraps a
+// SemanticNodeId arena ordinal that itself must NOT be NoTypeExpr (raw keyable
+// ids may never pass the hot-carrier bound). Deriving would force a witness on
+// SemanticNodeId; this audited impl asserts ONLY the handle is field-safe.
+impl verter_no_typeexpr::__private::NoTypeExprWitness for HotTypeRef {}
+
+// The raw arena ordinal MUST stay non-witness: if `SemanticNodeId` were
+// `NoTypeExpr`, a future carrier could carry a raw keyable id past the
+// hot-carrier field bound. `assert_not_impl_any!` fails to COMPILE if it ever
+// gains the impl — the compiler proof, any-file, any-alias.
+assert_not_impl_any!(SemanticNodeId: verter_no_typeexpr::NoTypeExpr);
+
 /// Canonicalize a node-id sequence into a true SET: sorted ascending and
 /// deduplicated. The content-free node-set cache-key axes
 /// ([`FlowNarrowingKey`], [`ContextualTypingKey`], [`InferableParamSetId`])

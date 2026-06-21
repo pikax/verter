@@ -4182,6 +4182,7 @@ dependencies = [
  "verter_audit",
  "verter_compiler",
  "verter_language",
+ "verter_no_typeexpr",
  "verter_parser",
  "verter_protocol",
  "verter_scheduler",
