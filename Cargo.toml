@@ -33,6 +33,8 @@ syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
+verter_no_typeexpr = { path = "crates/verter_no_typeexpr" }
+verter_no_typeexpr_derive = { path = "crates/verter_no_typeexpr_derive" }
 verter_type_expr = { path = "crates/verter_type_expr" }
 verter_type_expr_oxc = { path = "crates/verter_type_expr_oxc" }
 
