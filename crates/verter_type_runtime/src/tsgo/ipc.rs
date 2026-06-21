@@ -3794,8 +3794,7 @@ mod dto_path_canonicalization_tests {
         // Seed resolvable content keyed by the CANONICAL path so the (now fail-closed) rename
         // location survives; the assertion under test is the canonical path, not the raw URI.
         let content = "ab";
-        let content_for =
-            |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
         let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), &content_for).unwrap();
         assert_eq!(loc.path, "d:/proj/App.vue");
         assert_ne!(loc.path, "file:///D:/proj/App.vue");
@@ -3937,8 +3936,7 @@ mod dto_path_canonicalization_tests {
         // Seed resolvable content keyed by the CANONICAL path so the (now fail-closed) edit survives;
         // the assertion under test is that the stored path is canonical, not the raw `file://` URI.
         let content = "ab";
-        let content_for =
-            |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
         let edit =
             parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, &content_for).unwrap();
         assert_eq!(edit.path, "d:/proj/App.vue");
@@ -3994,8 +3992,7 @@ mod dto_path_canonicalization_tests {
             "newText": "boom"
         });
         let content = "short";
-        let content_for =
-            |p: &str| -> Option<&str> { (p == "d:/proj/oob.ts").then_some(content) };
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/oob.ts").then_some(content) };
         let edit = parse_text_edit_to_code_edit("file:///D:/proj/oob.ts", &te, &content_for);
         assert!(
             edit.is_none(),

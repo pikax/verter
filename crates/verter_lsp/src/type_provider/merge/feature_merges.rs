@@ -483,8 +483,7 @@ pub fn merge_code_actions(
                         external_resolver,
                     );
                     if let Some(range) = mapped {
-                        let carrier_path =
-                            normalize_carrier_path(edit_path, carrier_source_exists);
+                        let carrier_path = normalize_carrier_path(edit_path, carrier_source_exists);
                         if let Some(uri) = path_to_uri(carrier_path) {
                             changes.entry(uri).or_default().push(TextEdit {
                                 range,

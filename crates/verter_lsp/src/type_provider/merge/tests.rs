@@ -1630,7 +1630,8 @@ fn merge_code_actions_foreign_carrier_edit_maps_through_external_context() {
 
     // A second, distinct carrier whose own sourcemap maps TSX offset 6..9 to a DIFFERENT carrier
     // line than the current request's mapper. The foreign edit must land on the foreign line.
-    let foreign_carrier = "<template>\n  <span/>\n</template>\n\n<script setup>\n\n\nconst far = 1;\n</script>";
+    let foreign_carrier =
+        "<template>\n  <span/>\n</template>\n\n<script setup>\n\n\nconst far = 1;\n</script>";
     let foreign_tsx = "const far = 1;\n";
     let mut builder = oxc_sourcemap::SourceMapBuilder::default();
     let source_id = builder.set_source_and_content("Other.vue", foreign_carrier);
@@ -1674,7 +1675,11 @@ fn merge_code_actions_foreign_carrier_edit_maps_through_external_context() {
         PositionEncodingKind::UTF16,
         &no_source,
     );
-    assert_eq!(result.len(), 1, "the foreign edit maps through its own context");
+    assert_eq!(
+        result.len(),
+        1,
+        "the foreign edit maps through its own context"
+    );
     let CodeActionOrCommand::CodeAction(action) = &result[0] else {
         panic!("expected a CodeAction");
     };
