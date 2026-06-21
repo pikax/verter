@@ -7,6 +7,15 @@
 use std::fs;
 use std::path::PathBuf;
 
+// `IdentExt::unraw()` strips a leading `r#` from an identifier before any
+// name-equality / membership check in the single-producer (`lower.rs`) guard
+// cluster: rustc treats a raw identifier `r#Clone` as the name `Clone` (a raw
+// escape, valid for any non-reserved-keyword name), but `proc_macro2::Ident::
+// to_string()` renders it `"r#Clone"`, so a bare `.to_string()` compare would
+// MISS the raw spelling. Every bound-name / lowerer-name / derive-content match
+// `unraw()`s the ident first so a `r#`-spelled name cannot evade the check.
+use syn::ext::IdentExt;
+
 // Shared denylist consumed by both `audit_no_hot_loop_instrumentation`
 // (defined below) and the focused regression test in
 // `tests/cases/g_compile/compile_audit_no_hot_loop_instrumentation.rs`.
@@ -22784,8 +22793,12 @@ fn check_derive_contents_builtin(attr: &syn::Attribute, v: &mut Vec<String>) {
                     .join("::")
             ));
         } else {
+            // Compare on the `unraw()`d name so a raw `#[derive(r#Clone)]` (which
+            // rustc resolves as the built-in `Clone`) is correctly ACCEPTED rather
+            // than spuriously rejected; the display keeps the source spelling.
             let ident = meta.path.segments[0].ident.to_string();
-            if !LOWER_RS_BUILTIN_DERIVES.contains(&ident.as_str()) {
+            let ident_unraw = meta.path.segments[0].ident.unraw().to_string();
+            if !LOWER_RS_BUILTIN_DERIVES.contains(&ident_unraw.as_str()) {
                 v.push(format!(
                     "non-built-in derive `{ident}` in production `lower.rs` is forbidden — only the \
                      STD BUILT-IN derives {LOWER_RS_BUILTIN_DERIVES:?} are permitted (a custom \
@@ -23060,7 +23073,9 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
     /// derive `check_derive_contents_builtin`'s spelling-only scan would then
     /// wave through — REJECTED. A production GLOB (`use evil::*;`) could carry the
     /// same shadow invisibly — REJECTED (mirroring the sibling carrier guard's
-    /// EXACT-import requirement). The `within` wrapper keeps a `#[cfg(test)]`-
+    /// rename-recursion + glob rejection; this surface needs no exhaustive `use`
+    /// allowlist because a foreign non-derive `use evil::Foo;` is inert for the
+    /// producer vector). The `within` wrapper keeps a `#[cfg(test)]`-
     /// gated `use`'s attrs exempt from the production-attribute check and gates
     /// these shadow rejections to production (`cfg_test_depth == 0`).
     fn visit_item_use(&mut self, use_item: &'ast syn::ItemUse) {
@@ -23094,9 +23109,9 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
                 self.violations.push(
                     "a production GLOB `use …::*;` import in `lower.rs` is forbidden — a glob can \
                      bring a built-in-derive-name shadow (or any other binding) into scope WITHOUT \
-                     a visible leaf ident the `syn` scan can inspect; only EXACT named imports are \
-                     permitted (mirroring the sibling carrier guard's exact-import requirement). \
-                     The real `lower.rs` declares no glob import"
+                     a visible leaf ident the `syn` scan can inspect; a glob is rejected outright \
+                     (mirroring the sibling carrier guard's glob rejection — a glob is absent from \
+                     its `EXPECTED_USES`). The real `lower.rs` declares no glob import"
                         .to_string(),
                 );
             }
@@ -23237,8 +23252,15 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 /// private lowerer; the scan cannot RESOLVE the derive, so it rejects the
 /// source-visible shadowing `use` IMPORT instead (the std prelude already
 /// provides every built-in derive, so an explicit `use` of one can ONLY be a
-/// shadow), mirroring the sibling carrier guard's `check_use` / `use_tree_has_
-/// rename` exact-import requirement (`carrier_encapsulation_guards.rs`). The
+/// shadow), mirroring the sibling carrier guard's rename-recursion + glob
+/// rejection (`use_tree_has_rename` / no-glob, `carrier_encapsulation_guards.rs`).
+/// The `lower.rs` surface needs no exhaustive `use` allowlist because a foreign
+/// NON-derive `use` (`use evil::Foo;`) is INERT for the producer vector — it
+/// cannot reach the private lowerer without an additional construct (a macro,
+/// attribute, or derive-content) the macro / attribute / derive-content rails
+/// already reject; the carrier guard's STRICT EXACT 2-import `EXPECTED_USES`
+/// allowlist (which rejects even a foreign non-derive `use`) is its own concern,
+/// NOT what this `use` rejection mirrors. The
 /// cfg-test exemption suspends these `use` rejections inside a `#[cfg(test)]`-
 /// gated subtree too.
 ///
@@ -23266,8 +23288,13 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 /// [`use_tree_has_production_glob`] rejection of the source-visible shadowing
 /// `use` IMPORT (the scan cannot RESOLVE a derive, so it rejects the import; the
 /// std prelude already provides every built-in derive, so an explicit `use` of
-/// one can ONLY be a shadow), mirroring the sibling carrier guard's `check_use` /
-/// `use_tree_has_rename` exact-import requirement. A `#[path = "…"]` module
+/// one can ONLY be a shadow), mirroring the sibling carrier guard's
+/// rename-recursion + glob rejection (`use_tree_has_rename` / no-glob). The
+/// `lower.rs` surface needs no exhaustive `use` allowlist: a foreign non-derive
+/// `use evil::Foo;` is inert for the producer vector (it cannot reach the private
+/// lowerer without an additional macro / attribute / derive-content the other
+/// rails already reject), so this rejection does NOT replicate the carrier
+/// guard's STRICT EXACT 2-import allowlist. A `#[path = "…"]` module
 /// declared as a CHILD of `lower.rs` is a DESCENDANT: it CAN name the private fn
 /// via `super::lower_type_expr_structural`, so compiler privacy does NOT backstop
 /// a child `#[path]` mod — that case is CLOSED by this guard's rejection of every
@@ -23292,11 +23319,16 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
 ///   lint — the airtight backstop for the FOREIGN case, by construction).
 ///
 /// Both are compiler-privacy-backstopped or unmodelable by a single-file source
-/// scan, and the codebase's sibling producer-confinement guards accept the
-/// IDENTICAL residual — see `macro_hot_mirror_exposes_single_crate_visible_
-/// producer_entry`'s KNOWN RESIDUAL GAPS (the glob / external-reexport-outside-
-/// `src` / out-of-tree-`#[path]` tail it deliberately does NOT chase) and
-/// `carrier_module_has_no_public_type_args_surface`.
+/// scan. The DIRECT precedent for accepting this out-of-tree / foreign-name tail
+/// is `macro_hot_mirror_exposes_single_crate_visible_producer_entry`'s KNOWN
+/// RESIDUAL GAPS, which explicitly documents the same glob / external-reexport-
+/// outside-`src` / out-of-tree-`#[path]` tail it deliberately does NOT chase.
+/// `carrier_module_has_no_public_type_args_surface` accepts the SAME out-of-tree
+/// / foreign-name CLASS (it parses only its two files — `carrier.rs` + the head
+/// view — so it cannot see an out-of-tree re-export / shadow either), but it is a
+/// STRICT EXACT-SHAPE allowlist over a compiler-confined module, NOT a literal
+/// identical guard model — the shared property is the accepted out-of-tree class,
+/// not an identical residual.
 ///
 /// NOT residual (do NOT claim privacy backstops these — they are CLOSED here):
 /// the IN-FILE any-position macro / inline-mod / out-of-line-or-`#[path]`-child-
@@ -23852,7 +23884,10 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
     );
     // REJECT — a PLAIN `use evil::Clone;` (no rename): the LEAF ident binds the
     // name. The prelude already provides `Clone`, so an explicit `use …::Clone;`
-    // can ONLY be a shadow (rejected by the carrier guard's EXACT-import rule too).
+    // can ONLY be a shadow — rejected here by the derive-name-shadow rule (this
+    // guard rejects ONLY derive-name binds + globs, NOT every foreign `use`; the
+    // carrier guard would also reject this import, but via its separate STRICT
+    // EXACT 2-import `EXPECTED_USES` allowlist).
     let derive_plain_shadow = format!("{genuine}use evil::Clone;\n");
     assert!(
         !lower_rs_expansion_surface_violations(&derive_plain_shadow).is_empty(),
@@ -23871,14 +23906,77 @@ fn structural_lower_expansion_surface_classifier_discriminates() {
     );
     // REJECT — a production GLOB `use evil::*;`: the scan cannot see WHICH names a
     // glob brings in, so it could carry a built-in-derive-name shadow invisibly.
-    // A production glob is the bounded close (mirroring the carrier guard's
-    // exact-import requirement; the real `lower.rs` has none).
+    // A production glob is rejected outright (mirroring the carrier guard's glob
+    // rejection — a glob is absent from its `EXPECTED_USES`; the real `lower.rs`
+    // has none).
     let derive_glob_shadow = format!("{genuine}use evil::*;\n");
     assert!(
         !lower_rs_expansion_surface_violations(&derive_glob_shadow).is_empty(),
         "a production GLOB `use evil::*;` must RED — a glob can bring a built-in-derive-name shadow \
-         into scope without a visible leaf ident the `syn` scan can inspect; only EXACT named \
-         imports are permitted (the bounded close mirroring the carrier guard's exact-import rule)"
+         into scope without a visible leaf ident the `syn` scan can inspect; a glob is rejected \
+         outright (mirroring the carrier guard's glob rejection — a glob is absent from its \
+         `EXPECTED_USES`)"
+    );
+    // ── RAW-IDENTIFIER ROBUSTNESS (a `r#`-spelled built-in-derive name binds the
+    //    SAME Rust name, so it must red too) ───────────────────────────────────
+    // rustc treats `r#Clone` as the identifier `Clone` (a raw escape, since `Clone`
+    // is not a reserved keyword), so `use serde_derive::Serialize as r#Clone;`
+    // re-binds the name `Clone` to the imported proc-macro derive EXACTLY as the
+    // non-raw spelling does. But `proc_macro2::Ident::to_string()` renders it
+    // `"r#Clone"`, so a bare `.to_string()` membership check would MISS it. The
+    // bound-name extractor `unraw()`s every ident before the membership compare, so
+    // the raw spelling normalises to `Clone` and is caught.
+    //
+    // REJECT — a RAW rename target `as r#Clone;` (the raw spelling of the
+    // rustc-confirmed `as Clone;` shadow vector).
+    let derive_raw_rename_shadow = format!("{genuine}use serde_derive::Serialize as r#Clone;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&derive_raw_rename_shadow).is_empty(),
+        "a production `use serde_derive::Serialize as r#Clone;` must RED — rustc treats the raw \
+         identifier `r#Clone` as the name `Clone`, so it re-binds the built-in-derive name to an \
+         imported proc-macro derive exactly as `as Clone;` does; the bound-name extractor `unraw()`s \
+         the ident before the membership check, so the `r#` spelling cannot evade it"
+    );
+    // REJECT — a RAW PLAIN leaf `use evil::r#Clone;`: the leaf ident binds the name
+    // `Clone` (raw-escaped), shadowing the prelude built-in.
+    let derive_raw_plain_shadow = format!("{genuine}use evil::r#Clone;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&derive_raw_plain_shadow).is_empty(),
+        "a production `use evil::r#Clone;` must RED — the raw leaf ident `r#Clone` binds the name \
+         `Clone`, shadowing the prelude built-in; `unraw()` normalises `r#Clone` to `Clone` so the \
+         leaf-ident membership check catches the raw spelling"
+    );
+    // REJECT — a RAW GROUPED leaf `use evil::{Foo, r#Clone};`: the `r#Clone` leaf
+    // inside the group binds the name `Clone` (recursion through `UseTree::Group`,
+    // then `unraw()` before the membership check).
+    let derive_raw_grouped_shadow = format!("{genuine}use evil::{{Foo, r#Clone}};\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&derive_raw_grouped_shadow).is_empty(),
+        "a production grouped `use evil::{{Foo, r#Clone}};` must RED — the raw `r#Clone` leaf in the \
+         group binds the built-in-derive name `Clone`; the extractor recurses grouped trees and \
+         `unraw()`s each leaf before the membership check, so the raw spelling cannot evade it"
+    );
+    // REJECT — a RAW `use … as r#lower_type_expr_structural;` reexport binding: the
+    // raw rename target binds the lowerer's name (the occurrence rail's
+    // `use_tree_renames_to` `unraw()`s the rename target before comparing).
+    let raw_lowerer_alias = format!("{genuine}use foo::bar as r#lower_type_expr_structural;\n");
+    assert!(
+        !lower_rs_expansion_surface_violations(&raw_lowerer_alias).is_empty(),
+        "a production `use foo::bar as r#lower_type_expr_structural;` must RED — rustc treats \
+         `r#lower_type_expr_structural` as the name `lower_type_expr_structural`, minting a nameable \
+         alias of the private lowerer; `use_tree_renames_to` `unraw()`s the rename target so the raw \
+         spelling cannot evade the alias-reexport rejection"
+    );
+    // SOUNDNESS — a `use std::clone::Clone as MyClone;` whose rename TARGET is
+    // `MyClone` (NOT a built-in-derive name) must NOT red: `unraw()` does not change
+    // `MyClone`, so the membership check still sees a non-derive name. (Renaming
+    // the std `Clone` TO a non-derive name introduces no shadow under a derive name.)
+    let legit_rename_off_derive = format!("{genuine}use std::clone::Clone as MyClone;\n");
+    assert!(
+        lower_rs_expansion_surface_violations(&legit_rename_off_derive).is_empty(),
+        "a `use std::clone::Clone as MyClone;` must NOT red — the rename TARGET `MyClone` is not a \
+         built-in-derive name, so the bound-name membership check (post-`unraw()`) does not fire; \
+         `unraw()` does not alter a non-raw, non-derive target"
     );
     // SOUNDNESS — a LEGITIMATE non-shadowing import (`use std::cell::Cell;`, the
     // real `lower.rs` carries exactly this at :45) must NOT red: its leaf `Cell`
@@ -25775,7 +25873,9 @@ fn collect_sanctioned_occurrences(
     for item in items {
         match item {
             syn::Item::Fn(f) => {
-                if f.sig.ident == name {
+                // `unraw()` so a `fn r#lower_type_expr_structural` producer (which
+                // rustc names `lower_type_expr_structural`) cannot evade detection.
+                if f.sig.ident.unraw() == name {
                     out.push(SanctionedOccurrence {
                         rel: rel.to_string(),
                         kind: SanctionedOccurrenceKind::Free,
@@ -25792,7 +25892,9 @@ fn collect_sanctioned_occurrences(
                 for impl_item in &imp.items {
                     match impl_item {
                         syn::ImplItem::Fn(m) => {
-                            if m.sig.ident == name {
+                            // `unraw()` so a raw `fn r#<name>` associated producer
+                            // cannot evade detection via a `r#` spelling.
+                            if m.sig.ident.unraw() == name {
                                 out.push(SanctionedOccurrence {
                                     rel: rel.to_string(),
                                     kind,
@@ -25820,7 +25922,9 @@ fn collect_sanctioned_occurrences(
                 for trait_item in &tr.items {
                     match trait_item {
                         syn::TraitItem::Fn(m) => {
-                            if m.sig.ident == name {
+                            // `unraw()` so a raw `fn r#<name>` trait-item producer
+                            // cannot evade detection via a `r#` spelling.
+                            if m.sig.ident.unraw() == name {
                                 out.push(SanctionedOccurrence {
                                     rel: rel.to_string(),
                                     kind: SanctionedOccurrenceKind::TraitItem,
@@ -25908,7 +26012,9 @@ fn macro_tokens_mention(mac: &syn::Macro, name: &str) -> bool {
 fn token_stream_mentions_ident(tokens: proc_macro2::TokenStream, name: &str) -> bool {
     use proc_macro2::TokenTree;
     tokens.into_iter().any(|tt| match tt {
-        TokenTree::Ident(ident) => ident == name,
+        // `unraw()` so a `macro_rules!` body emitting `fn r#<name>` (which rustc
+        // names `<name>`) cannot evade the ident match via a `r#` spelling.
+        TokenTree::Ident(ident) => ident.unraw() == name,
         TokenTree::Literal(lit) => literal_mentions_name_as_word(&lit.to_string(), name),
         TokenTree::Group(group) => token_stream_mentions_ident(group.stream(), name),
         TokenTree::Punct(_) => false,
@@ -25957,7 +26063,10 @@ fn literal_mentions_name_as_word(rendered_literal: &str, name: &str) -> bool {
 /// helper needs no `use` at all, so any rename-to-the-name is suspect.)
 fn use_tree_renames_to(tree: &syn::UseTree, name: &str) -> bool {
     match tree {
-        syn::UseTree::Rename(rename) => rename.rename == name,
+        // `unraw()` the rename target so a raw `as r#lower_type_expr_structural;`
+        // (which rustc binds as `lower_type_expr_structural`) cannot evade the
+        // alias-reexport check via a `r#`-spelled target.
+        syn::UseTree::Rename(rename) => rename.rename.unraw() == name,
         syn::UseTree::Path(path) => use_tree_renames_to(&path.tree, name),
         syn::UseTree::Group(group) => group
             .items
@@ -25987,18 +26096,24 @@ fn use_tree_renames_to(tree: &syn::UseTree, name: &str) -> bool {
 /// an EXPLICIT `use …::Clone;` (renamed or not, from any path) can ONLY be a
 /// shadow — never legitimate. Recurses grouped / pathed trees exactly as
 /// [`use_tree_renames_to`] does (mirroring the sibling carrier guard's
-/// `use_tree_has_rename`, `carrier_encapsulation_guards.rs`), but extracts the
-/// BOUND NAME (rename target or leaf ident) rather than only detecting a rename.
+/// `use_tree_has_rename` RECURSION, `carrier_encapsulation_guards.rs`), but
+/// extracts the BOUND NAME (rename target or leaf ident) rather than only
+/// detecting a rename. The extracted name is `unraw()`d before the membership
+/// check so a raw `as r#Clone;` / `use evil::r#Clone;` (which rustc binds as
+/// `Clone`) cannot evade it.
 fn use_tree_binds_builtin_derive_name(tree: &syn::UseTree) -> bool {
     match tree {
-        // `use … as <D>;` — the RENAME TARGET binds the name.
+        // `use … as <D>;` — the RENAME TARGET binds the name. `unraw()` first so a
+        // raw `as r#Clone;` (which rustc binds as `Clone`) normalises before the
+        // membership check and cannot evade it.
         syn::UseTree::Rename(rename) => {
-            LOWER_RS_BUILTIN_DERIVES.contains(&rename.rename.to_string().as_str())
+            LOWER_RS_BUILTIN_DERIVES.contains(&rename.rename.unraw().to_string().as_str())
         }
         // `use a::b;` (no rename) — the LEAF ident binds the name. An explicit
         // `use …::Clone;` shadows the prelude built-in (which needs no `use`).
+        // `unraw()` first so a raw `use evil::r#Clone;` leaf normalises to `Clone`.
         syn::UseTree::Name(name) => {
-            LOWER_RS_BUILTIN_DERIVES.contains(&name.ident.to_string().as_str())
+            LOWER_RS_BUILTIN_DERIVES.contains(&name.ident.unraw().to_string().as_str())
         }
         syn::UseTree::Path(path) => use_tree_binds_builtin_derive_name(&path.tree),
         syn::UseTree::Group(group) => group.items.iter().any(use_tree_binds_builtin_derive_name),
@@ -26013,8 +26128,8 @@ fn use_tree_binds_builtin_derive_name(tree: &syn::UseTree) -> bool {
 /// recursing grouped / pathed trees. A glob could bring a built-in-derive-name
 /// shadow (or any other shadow) into scope WITHOUT a visible leaf ident the
 /// `syn` scan can inspect, so a PRODUCTION glob in `lower.rs` is the bounded
-/// close: reject it, mirroring the sibling carrier guard's EXACT-import
-/// requirement (`check_use` / `EXPECTED_USES`, which permits no glob). The real
+/// close: reject it, mirroring the sibling carrier guard's glob rejection (a glob
+/// is absent from its `EXPECTED_USES`, so `check_use` rejects it). The real
 /// `lower.rs` has no glob import.
 fn use_tree_has_production_glob(tree: &syn::UseTree) -> bool {
     match tree {
