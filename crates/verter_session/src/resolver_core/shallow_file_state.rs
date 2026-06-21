@@ -1012,6 +1012,38 @@ impl ShallowFileState {
         self.decl_bodies.value_decl(name)
     }
 
+    /// The per-contributor body surface for a file-scope TYPE symbol, as the
+    /// typeinfo/hover oracle's source walk consumes it — the single
+    /// output/compat body read on the shallow-state side.
+    ///
+    /// This is deliberately NARROW and PURPOSE-NAMED (a typeinfo-oracle
+    /// contributor read, not a general body accessor): it owns the one place the
+    /// source walk reads a TYPE declaration body's per-contributor `TypeExpr`
+    /// vector, so the body STORAGE can later change shape (a handle carrier) by
+    /// reworking THIS helper's internals without preserving a broad `TypeExpr`
+    /// body API. It returns `Some(contributors)` exactly as the inline
+    /// `type_decl(name)?.body.contributors().to_vec()` read did (a header miss
+    /// is `None`), so the oracle's admission verdict is byte-identical.
+    ///
+    /// TEMPORARY compat surface: it fences the typeinfo-oracle body read off
+    /// from the semantic readers (which still read the typed body directly). It
+    /// is anchored as a COMPAT site by the frozen body-reader inventory guard.
+    ///
+    /// `#[allow(dead_code)]`: the sole reach is the typeinfo/hover oracle's
+    /// source walk (`oracle_core::source_walk::walk`), whose outermost entry
+    /// (`oracle_core::driver::run_row`) is the beside-the-live-path equivalence
+    /// harness consumed by the parity guards — the same guard-only reach the
+    /// sibling oracle helpers in `oracle_core::admission` carry the allow for.
+    /// (The previous inline read went through the `pub` `type_decl`, which never
+    /// surfaced this latent visibility fact.)
+    #[allow(dead_code)]
+    pub(crate) fn compat_type_contributors_for_typeinfo(
+        &self,
+        name: &str,
+    ) -> Option<Vec<TypeExpr>> {
+        Some(self.type_decl(name)?.body.contributors().to_vec())
+    }
+
     /// The CENTRALIZED effective VALUE-symbol lookup — the single authority
     /// applying ambient-overlay precedence so per-symbol graph-native readers
     /// never special-case any ambient surface:

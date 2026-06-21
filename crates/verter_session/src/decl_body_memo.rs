@@ -391,6 +391,27 @@ impl DeclBodyMemo {
         result
     }
 
+    /// The fingerprint hash INPUT for a file-scope TYPE symbol's body — the
+    /// single output/compat body read on the memo side, used by the parse-time
+    /// fact emitter to compute a body fingerprint (`semantic_hash` /
+    /// `display_hash`) and nothing else.
+    ///
+    /// This is deliberately NARROW and PURPOSE-NAMED (a fingerprint hash input,
+    /// not a general body accessor): it owns the one place the body fact path
+    /// reads a TYPE declaration body as a `TypeExpr`, so the body STORAGE can
+    /// later change shape (a handle carrier) by reworking THIS helper's
+    /// internals without preserving a broad `TypeExpr` body API. It returns the
+    /// folded object view (`lookup_object`) exactly as the inline read did, so
+    /// the computed fingerprint is byte-identical.
+    ///
+    /// TEMPORARY compat surface: it exists only so the body-fact fingerprint
+    /// path is fenced off from the semantic readers (which still read the typed
+    /// body directly). It is anchored as a COMPAT site by the frozen
+    /// body-reader inventory guard.
+    pub(crate) fn compat_type_body_hash_input(&self, name: &str) -> Option<TypeExpr> {
+        Some(self.type_decl(name)?.body.lookup_object().into_owned())
+    }
+
     /// Demand the lowered body of one augmentation-scoped TYPE symbol.
     pub(crate) fn augmentation_type_decl(
         &self,
