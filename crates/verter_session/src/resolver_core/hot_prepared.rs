@@ -6,18 +6,29 @@
 //! type transitively owning a `TypeExpr`) is replaced here by a
 //! [`HotTypeRef`] handle over an interned `SemanticNodeId`, and every scalar
 //! fact (`ResolvedRootIdentity`, `TypeDeclKind`, `ValueDeclKind`, member
-//! visibility/spans, provenance, cache deps) is carried verbatim.
+//! visibility/spans/declaration-origin, provenance, cache deps, wrapper /
+//! projection classification discriminants + modifiers) is carried verbatim.
 //!
 //! INVARIANT (inviolable): NO field of any carrier in this module owns a
 //! transitive lower-crate typed-IR type — no `TypeExpr` (nor any
-//! `ObjectExpr` / bare-`TypeParam` / `TypeDeclBody` / `FunctionSignature` /
-//! enum-member-value / prepared-decl / prepared-member / prepared-wrapper /
-//! prepared-projection / prepared-forward owner of one).
+//! `ObjectExpr` / `ObjectMember` / `ObjectProperty` / `MethodSignature` /
+//! `IndexSignature` / `FunctionExpr` / function-parameter / bare-`TypeParam` /
+//! `TypeDeclBody` / `FunctionSignature` / enum-member-value / prepared-decl /
+//! prepared-member / prepared-wrapper-shape / prepared-projection /
+//! prepared-forward-payload owner of one).
 //! Every type body is a [`HotTypeRef`] or scalar metadata. The structural
 //! guard `hot_prepared_carriers_own_no_typeexpr`
 //! (`tests/cases/handle_capable_consumer_guards.rs`) enforces this by parsing
 //! this file with `syn` and rejecting any banned typed-IR identifier as a
-//! field-type path segment.
+//! field-type path segment, any field whose type segment ends in a known
+//! typed-IR owner, and any local type alias that launders a typed-IR type.
+//!
+//! These carriers are a FAITHFUL handle-native mirror of the lower-crate
+//! shapes: every scalar field present on the lower-crate `Prepared*` shape is
+//! present here, and every type-body position is a handle — no field is
+//! dropped (the param type, the object node, the member declaration origin,
+//! and the full wrapper/projection classification each round-trip), and no
+//! field is invented that the lower shape does not own.
 //!
 //! The carriers are assembled FROM already-computed handles + scalar metadata
 //! via [`HotPreparedTypeDecl::from_parts`] / [`HotPreparedValueDecl::from_parts`]
@@ -35,7 +46,8 @@ use crate::semantic_query::HotTypeRef;
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 use verter_semantic::analysis::type_solver::prepared::{
-    DeclProvenance, PreparedCacheDeps, PreparedExternalDep,
+    DeclProvenance, PreparedCacheDeps, PreparedCaseTransformKind, PreparedExternalDep,
+    PreparedForwardingKind, PreparedSurfaceModifiers, PreparedWrapperKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -61,7 +73,10 @@ pub(crate) struct HotTypeParamDecl {
 
 /// A hot prepared member: the member value is a [`HotTypeRef`] handle,
 /// everything else is scalar metadata carried verbatim from the lower-crate
-/// `PreparedMember`.
+/// `PreparedMember` — including `declaration_origin` (the member's defining
+/// file, which drives the macro-surface own-member overlay's span/JSDoc
+/// pairing). The lower-crate field is a `String`; the hot-carrier-appropriate
+/// shared form is `Arc<str>`.
 // Scalar metadata fields are read by the reader migration (S4); the producer
 // flip populates them.
 #[allow(dead_code)]
@@ -73,60 +88,133 @@ pub(crate) struct HotPreparedMember {
     pub is_method: bool,
     pub visibility: verter_type_expr::MemberVisibility,
     pub spans: verter_type_expr::MemberSpans,
+    /// The member's defining file — the `root_identity.canonical_id` of the
+    /// owning declaration, stamped at member-index build time. The macro-surface
+    /// overlay pairs the member's `spans` with this file. Mirrors the
+    /// lower-crate `PreparedMember::declaration_origin` (`String` there;
+    /// `Arc<str>` here).
+    pub declaration_origin: Arc<str>,
 }
 
 // ---------------------------------------------------------------------------
-// Scalar wrapper / projection classification
+// Hot wrapper / projection classification (full handle-native B2 closure)
 // ---------------------------------------------------------------------------
+//
+// The lower-crate `PreparedWrapperShape` / `PreparedProjectionClass` carry
+// payload-bearing sub-enums whose `Opaque`/`Transform`/`target_args` arms own a
+// `TypeExpr`. The hot mirror below carries the FULL classifier handle-native:
+// every scalar arm is reused verbatim from the lower crate (those enums own no
+// `TypeExpr`), and every typed payload arm becomes a [`HotTypeRef`] handle (or a
+// handle slice). No discriminant is dropped — this closes the B2 wrapper-payload
+// deferral handle-native.
 
-/// Scalar mirror of the lower-crate `PreparedWrapperKind` classification.
-///
-/// The lower-crate wrapper-shape additionally carries payload-bearing
-/// sub-enums (its key-filter / key-remap / value-rule arms each carry a
-/// `TypeExpr`/opaque payload) that are the deferred wrapper-payload closure
-/// (not handle-bearing yet). NONE of those payloads are carried here — this
-/// enum captures ONLY the scalar discriminant, so the hot carrier owns no
-/// transitive `TypeExpr`.
-// Discriminant variants are produced by the producer flip (S4).
+/// How a hot wrapper filters its source keyspace — the handle-native mirror of
+/// the lower-crate prepared key-filter shape. The literal arms keep their
+/// (interned) key names; the `Opaque` arm's symbolic key type becomes a handle.
+// Variants are produced by the producer flip (S4).
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HotWrapperKind {
-    /// Not a recognized structural wrapper pattern.
-    None,
-    /// `{ [K in keyof T]: T[K] }` — collapse to base subject.
+#[derive(Debug, Clone)]
+pub(crate) enum HotKeyFilterShape {
+    All,
+    IncludeLiteral(Vec<Arc<str>>),
+    ExcludeLiteral(Vec<Arc<str>>),
+    /// An undecidable key domain — the source key type as a handle.
+    Opaque(HotTypeRef),
+}
+
+/// How a hot wrapper remaps key names — the handle-native mirror of the
+/// lower-crate prepared key-remap shape. The scalar arms keep their data; the
+/// `CaseTransform` kind is reused verbatim (it owns no `TypeExpr`); the
+/// `Opaque` arm's symbolic name-type becomes a handle.
+// Variants are produced by the producer flip (S4).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) enum HotKeyRemapShape {
     Identity,
-    /// Only modifier changes (optional/readonly), no key/value transform.
-    PureOverlay,
-    /// `Pick`/`Omit`-style literal key filtering.
-    KeyFilter,
-    /// Template-literal or case transform on keys.
-    KeyRemap,
+    Prefix(Arc<str>),
+    Suffix(Arc<str>),
+    /// The lower scalar case-transform kind is REUSED verbatim — it owns no
+    /// `TypeExpr`.
+    CaseTransform(PreparedCaseTransformKind),
+    /// A non-literal name-type remap — the name-type as a handle.
+    Opaque(HotTypeRef),
 }
 
-/// Scalar mirror of the lower-crate projection-class classification: the
-/// `ForwardSubject` arm's forwarded symbolic type-argument payload (a
-/// `Vec<TypeExpr>` on the lower-crate forward payload) is the deferred
-/// wrapper-payload closure and is NOT carried — only the discriminant.
-// Discriminant variants are produced by the producer flip (S4).
+/// How a hot wrapper transforms member values — the handle-native mirror of the
+/// lower-crate prepared value-rule shape. The `Transform` arm's symbolic
+/// transform body becomes a handle.
+// Variants are produced by the producer flip (S4).
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HotProjectionKind {
+#[derive(Debug, Clone)]
+pub(crate) enum HotValueRuleShape {
+    /// Value is `T[K]` — pass through unchanged.
+    PassThrough,
+    /// Value involves a transform over `T[K]` — the transform body as a handle.
+    Transform(HotTypeRef),
+}
+
+/// Structural wrapper classification carried on a hot type carrier — the FULL
+/// handle-native mirror of the lower-crate `PreparedWrapperShape`. Scalar
+/// fields (`kind`, `source_param_index`, `modifiers`) are reused verbatim (they
+/// own no `TypeExpr`); the key-filter / key-remap / value-rule sub-shapes carry
+/// their typed payloads as handles.
+// Scalar + sub-shape fields are read by the reader migration (S4).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct HotPreparedWrapperShape {
+    /// The lower scalar wrapper-kind discriminant — REUSED verbatim (owns no
+    /// `TypeExpr`).
+    pub kind: PreparedWrapperKind,
+    pub source_param_index: Option<u16>,
+    pub key_filter: HotKeyFilterShape,
+    pub key_remap: HotKeyRemapShape,
+    pub value_rule: HotValueRuleShape,
+    /// The lower scalar surface modifiers — REUSED verbatim (owns no
+    /// `TypeExpr`).
+    pub modifiers: PreparedSurfaceModifiers,
+}
+
+/// Structured forwarding payload for [`HotProjectionClass::ForwardSubject`] —
+/// the handle-native mirror of the lower-crate prepared forward payload. The
+/// `target_args` symbolic type arguments (a `Vec<TypeExpr>` on the lower
+/// payload) become a handle slice; `forwarding_kind` is reused verbatim.
+// Fields are read by the reader migration (S4).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct HotPreparedForwardPayload {
+    pub target_name: Arc<str>,
+    /// The forwarded symbolic type arguments, each as a handle (B2:
+    /// `Vec<TypeExpr>` → handle slice).
+    pub target_args: Arc<[HotTypeRef]>,
+    /// The lower scalar forwarding kind — REUSED verbatim (owns no `TypeExpr`).
+    pub forwarding_kind: PreparedForwardingKind,
+}
+
+/// Projection-class classification carried on a hot type carrier — the FULL
+/// handle-native mirror of the lower-crate `PreparedProjectionClass`. The
+/// `ForwardSubject` arm carries the handle-native forward payload; the other
+/// arms are pure discriminants.
+// Variants are produced by the producer flip (S4).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) enum HotProjectionClass {
     DirectMembers,
     Wrapper,
-    ForwardSubject,
+    ForwardSubject(HotPreparedForwardPayload),
     Opaque,
 }
 
-/// Scalar wrapper/projection classification carried on a hot type carrier.
-/// Holds ONLY the discriminants — the `TypeExpr`/`Opaque` payloads of the
-/// lower-crate `PreparedWrapperShape` / `PreparedProjectionClass` are the
-/// deferred wrapper-payload closure, NOT carried here.
-// Scalar discriminant fields are read by the reader migration (S4).
+/// The full wrapper + projection classification carried on a hot type carrier.
+/// Holds the COMPLETE handle-native classifier — the lower-crate
+/// `PreparedWrapperShape` + `PreparedProjectionClass`, with every typed payload
+/// carried as a handle (the B2 closure) and every scalar discriminant/modifier
+/// reused verbatim.
+// Fields are read by the reader migration (S4).
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct HotPreparedClassifierMeta {
-    pub wrapper_kind: HotWrapperKind,
-    pub projection_kind: HotProjectionKind,
+    pub wrapper_shape: HotPreparedWrapperShape,
+    pub projection_class: HotProjectionClass,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,27 +337,36 @@ impl HotPreparedTypeDecl {
 // Hot function parameter / signature
 // ---------------------------------------------------------------------------
 
-/// A hot function parameter — a SCALAR mirror of the lower-crate
-/// `FunctionParam`. The param `type_annotation` STAYS a display string
-/// (`Option<Arc<str>>`), NOT a handle, because the lower-crate field is a
-/// display/IDE `Option<String>` (the typed-IR-rule's display-only passthrough),
-/// never a `TypeExpr`. So a `HotFunctionParam` owns NO handle at all.
+/// A hot function parameter — a FAITHFUL handle-native mirror of the lower-crate
+/// `verter_type_expr::FunctionParam` (`name: Option<String>`, `ty: TypeExpr`,
+/// `optional: bool`, `rest: bool`, `span: Option<Span>`, `has_ts_annotation:
+/// bool`). The param TYPE is the load-bearing field: it is a real `TypeExpr` on
+/// the lower carrier, so it is carried here as a [`HotTypeRef`] handle — NOT a
+/// display string. `has_ts_annotation` is the OXC structural provenance the
+/// JSDoc-`@param` backfill reader consults (it owns no type identity but is a
+/// real scalar fact).
 // Scalar param-metadata fields are read by the reader migration (S4).
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct HotFunctionParam {
-    pub name: Arc<str>,
-    pub type_annotation: Option<Arc<str>>,
-    pub is_optional: bool,
-    pub has_default: bool,
-    pub span: verter_span::Span,
+    pub name: Option<Arc<str>>,
+    /// The parameter type — a handle (the lower-crate `FunctionParam::ty` is a
+    /// real `TypeExpr`, so dropping it to a display string was a storage hole).
+    pub ty: HotTypeRef,
+    pub optional: bool,
+    pub rest: bool,
+    pub span: Option<verter_span::Span>,
+    /// Whether the parameter carried an explicit TS annotation at its
+    /// declaration site — the OXC structural fact the JSDoc backfill reader
+    /// consults. In-memory provenance, not part of type identity.
+    pub has_ts_annotation: bool,
 }
 
 /// A hot function signature — the analogue of the lower-crate
-/// `FunctionSignature`. ONLY [`return_type`](Self::return_type) and the
-/// generic [`type_parameters`](Self::type_parameters) carry handles; the
-/// [`parameters`](Self::parameters) stay scalar (the lower-crate
-/// `FunctionParam` owns no `TypeExpr`).
+/// `FunctionSignature`. The [`return_type`](Self::return_type), the generic
+/// [`type_parameters`](Self::type_parameters), AND every
+/// [`parameter`](Self::parameters) type carry handles (the lower-crate
+/// `FunctionParam::ty` is a real `TypeExpr`).
 // `has_implementation_body` is read by the overload-visibility projection (S4).
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -302,34 +399,37 @@ pub(crate) enum HotEnumMemberValue {
 // Hot prepared VALUE member
 // ---------------------------------------------------------------------------
 
-/// A hot prepared value member (for dotted `typeof` paths): the member value is
-/// a [`HotTypeRef`] handle, everything else scalar. Mirrors how the type
-/// carrier indexes object members with handle values.
+/// A hot prepared value member (for dotted `typeof` paths) — a FAITHFUL
+/// handle-native mirror of the lower-crate `PreparedValueMember`, which is
+/// SMALL: it has ONLY `ty: TypeExpr` + `is_method: bool` (NO
+/// optional/readonly/visibility/spans/declaration_origin). The value type is a
+/// [`HotTypeRef`] handle; `is_method` is a scalar. Do NOT add member metadata
+/// the lower value member does not own.
 // Scalar metadata fields are read by the reader migration (S4).
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct HotPreparedValueMember {
     pub ty: HotTypeRef,
-    pub optional: bool,
-    pub readonly: bool,
     pub is_method: bool,
-    pub visibility: verter_type_expr::MemberVisibility,
-    pub spans: verter_type_expr::MemberSpans,
 }
 
 // ---------------------------------------------------------------------------
 // Hot prepared VALUE declaration
 // ---------------------------------------------------------------------------
 
-/// Handle-native hot prepared VALUE declaration — the analogue of the
+/// Handle-native hot prepared VALUE declaration — a FAITHFUL analogue of the
 /// lower-crate `PreparedValueDecl` with every type body as a [`HotTypeRef`].
 ///
 /// The lower-crate `object_shape: Option<ObjectExpr>` (whose members own
-/// `ty: TypeExpr`) is NOT stored as a `HotObjectExpr`; instead its members are
-/// indexed in [`object_member_index`](Self::object_member_index) with handle
-/// values, mirroring how the type carrier uses `member_index`.
-// The scalar identity/kind/provenance/cache/dep fields are read by the reader
-// migration (S4); the producer flip populates them.
+/// `ty: TypeExpr`, AND which also carries ordered index/call/construct
+/// signatures) is carried as ONE [`HotTypeRef`] handle over the whole object
+/// node (`object_shape`) — the structural lowerer lowers `TypeExpr::Object` to a
+/// single `Object` node, so the handle preserves member ordering and the
+/// index/call/construct signatures that a name-keyed map would drop. The
+/// separate [`member_index`](Self::member_index) (handle-valued) is the
+/// dotted-path fast-path lookup index, mirroring the lower-crate `member_index`.
+// The scalar identity/kind/cache/dep fields are read by the reader migration
+// (S4); the producer flip populates them.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct HotPreparedValueDecl {
@@ -338,21 +438,24 @@ pub(crate) struct HotPreparedValueDecl {
     pub kind: ValueDeclKind,
     pub type_annotation: Option<HotTypeRef>,
     pub signatures: Arc<[HotFunctionSignature]>,
-    /// The hot form of the lower-crate `object_shape` members — each member's
-    /// value is a [`HotTypeRef`].
-    pub object_member_index: FxHashMap<Arc<str>, HotPreparedValueMember>,
+    /// The whole object node as ONE handle (the lower-crate
+    /// `object_shape: Option<ObjectExpr>`) — preserves member ordering and the
+    /// index/call/construct signatures a name-keyed map would drop.
+    pub object_shape: Option<HotTypeRef>,
+    /// The lower-crate `member_index` (handle-valued) — the dotted-path fast
+    /// lookup index, distinct from [`object_shape`](Self::object_shape).
+    pub member_index: FxHashMap<Arc<str>, HotPreparedValueMember>,
     /// The ordered enum member inventory; every member's value is a handle
     /// ([`HotEnumMemberValue`]). `Some` exactly when this value decl is an enum.
     pub enum_members: Option<Vec<(Arc<str>, HotEnumMemberValue)>>,
-    pub local_deps: Vec<String>,
+    pub external_deps: Vec<PreparedExternalDep>,
     pub name_resolution: FxHashMap<String, ResolvedRootIdentity>,
-    pub provenance: DeclProvenance,
     pub cache_deps: PreparedCacheDeps,
 }
 
-// `from_parts` + `type_annotation_handle` are called by the discriminating
-// tests today and by the reader migration (the producer flip — S4); the
-// lib-only build has no production caller yet.
+// `from_parts` + the hot accessors are called by the discriminating tests
+// today and by the reader migration (the producer flip — S4); the lib-only
+// build has no production caller yet.
 #[allow(dead_code)]
 impl HotPreparedValueDecl {
     /// Assemble a hot prepared value declaration from already-computed handles
@@ -366,11 +469,11 @@ impl HotPreparedValueDecl {
         kind: ValueDeclKind,
         type_annotation: Option<HotTypeRef>,
         signatures: Vec<HotFunctionSignature>,
-        object_member_index: FxHashMap<Arc<str>, HotPreparedValueMember>,
+        object_shape: Option<HotTypeRef>,
+        member_index: FxHashMap<Arc<str>, HotPreparedValueMember>,
         enum_members: Option<Vec<(Arc<str>, HotEnumMemberValue)>>,
-        local_deps: Vec<String>,
+        external_deps: Vec<PreparedExternalDep>,
         name_resolution: FxHashMap<String, ResolvedRootIdentity>,
-        provenance: DeclProvenance,
         cache_deps: PreparedCacheDeps,
     ) -> Self {
         Self {
@@ -379,11 +482,11 @@ impl HotPreparedValueDecl {
             kind,
             type_annotation,
             signatures: Arc::from(signatures),
-            object_member_index,
+            object_shape,
+            member_index,
             enum_members,
-            local_deps,
+            external_deps,
             name_resolution,
-            provenance,
             cache_deps,
         }
     }
@@ -392,5 +495,12 @@ impl HotPreparedValueDecl {
     #[must_use]
     pub(crate) fn type_annotation_handle(&self) -> Option<HotTypeRef> {
         self.type_annotation
+    }
+
+    /// The whole-object-shape body handle, or `None` when the value is not an
+    /// object/namespace.
+    #[must_use]
+    pub(crate) fn object_shape_handle(&self) -> Option<HotTypeRef> {
+        self.object_shape
     }
 }

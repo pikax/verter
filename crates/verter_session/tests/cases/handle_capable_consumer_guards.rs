@@ -983,38 +983,106 @@ fn structural_carrier_producer_guards_remain_registered() {
 /// so the `Hot*`-prefixed analogs (`HotTypeParamDecl` / `HotFunctionSignature`
 /// / `HotEnumMemberValue` / `HotPreparedMember` / …) are NOT matched — only
 /// the bare lower-crate name is banned. A hot carrier that re-grew a
-/// `TypeExpr` body (or any `Prepared*` / `ObjectExpr` / `TypeDeclBody`
-/// transitive owner) would carry one of these as a segment.
+/// `TypeExpr` body (or any `Prepared*` / `ObjectExpr` / `ObjectMember` /
+/// `ObjectProperty` / `MethodSignature` / `IndexSignature` / `FunctionExpr` /
+/// `FunctionParam` / `TypeDeclBody` transitive owner) would carry one of these
+/// as a segment.
+///
+/// This set is the COMPLETE roster of every lower-crate type that transitively
+/// owns a `TypeExpr` and could plausibly be named in a hot field — not a
+/// hand-picked subset. The original roster missed the `verter_type_expr`
+/// object/function owner types (`FunctionParam`, `FunctionExpr`,
+/// `IndexSignature`, `MethodSignature`, `ObjectProperty`, `ObjectMember`),
+/// which is exactly how the `HotFunctionParam.ty` storage hole (a real
+/// `verter_type_expr::FunctionParam.ty: TypeExpr`) slipped past the guard.
 const BANNED_TYPED_IR_SEGMENTS: &[&str] = &[
+    // Root typed-IR + lowering shapes.
     "TypeExpr",
     "ObjectExpr",
+    "ObjectMember",
+    "ObjectProperty",
+    "IndexSignature",
+    "MethodSignature",
+    "FunctionExpr",
+    "FunctionParam",
     "TypeParam",
     "TypeDeclBody",
     "FunctionSignature",
+    "EnumMemberValue",
+    // Prepared-decl shapes that own a `TypeExpr` (or own one transitively).
     "PreparedTypeDecl",
     "PreparedValueDecl",
     "PreparedMember",
     "PreparedValueMember",
     "PreparedWrapperShape",
+    "PreparedKeyFilterShape",
+    "PreparedKeyRemapShape",
+    "PreparedValueRuleShape",
     "PreparedProjectionClass",
     "PreparedForwardPayload",
-    "EnumMemberValue",
 ];
+
+/// Known typed-IR OWNER-type name SUFFIXES — a path segment whose identifier
+/// ENDS WITH one of these is treated as a typed-IR owner even if the bare name
+/// is not literally in [`BANNED_TYPED_IR_SEGMENTS`]. This is the
+/// belt-and-suspenders arm: a re-exported/aliased variant such as
+/// `MyModuleFunctionParam` or `SomePreparedWrapperShape` that ends in a known
+/// owner name cannot launder a `TypeExpr` past the exact-match list. The
+/// handle-native analogs are immune because they are `Hot*`-PREFIXED, not
+/// owner-SUFFIXED (`HotTypeRef` / `HotFunctionSignature` end in `Ref` /
+/// `Signature`, never in a banned owner suffix — see the negative self-test).
+const KNOWN_TYPEEXPR_OWNER_SUFFIXES: &[&str] = &[
+    "TypeExpr",
+    "ObjectExpr",
+    "ObjectMember",
+    "ObjectProperty",
+    "IndexSignature",
+    "MethodSignature",
+    "FunctionExpr",
+    "FunctionParam",
+    "PreparedWrapperShape",
+    "PreparedKeyFilterShape",
+    "PreparedKeyRemapShape",
+    "PreparedValueRuleShape",
+    "PreparedForwardPayload",
+    "PreparedTypeDecl",
+    "PreparedValueDecl",
+];
+
+/// Whether a path-segment identifier ends in a known typed-IR owner suffix
+/// WITHOUT being a sanctioned handle-native (`Hot*`) analog. The `Hot*` prefix
+/// is the explicit allow-form: a `Hot`-prefixed name is a handle-native mirror
+/// by construction, so it is never an owner even if it textually contains an
+/// owner substring. (None of the real `Hot*` carriers end in a banned owner
+/// suffix anyway; the prefix guard is defensive.)
+fn segment_is_owner_suffix(ident: &str) -> Option<&'static str> {
+    if ident.starts_with("Hot") {
+        return None;
+    }
+    KNOWN_TYPEEXPR_OWNER_SUFFIXES
+        .iter()
+        .copied()
+        .find(|suffix| ident.ends_with(suffix) && ident.len() > suffix.len())
+}
 
 /// Collect every banned BARE typed-IR identifier that appears as a path
 /// SEGMENT of any field type in any `struct`/`enum` item of the parsed
-/// source. Returns `"<type>.<field-or-variant>: <segment>"` entries. The
-/// scan walks `syn::Type` path segments (so a banned name nested inside
-/// `Option<…>` / `Vec<…>` / `Arc<[…]>` / `FxHashMap<_, …>` generic
-/// arguments is still caught), and matches a segment ONLY as a whole
-/// identifier — `HotTypeParamDecl` (segment `HotTypeParamDecl`) is never
-/// confused with the banned bare `TypeParam`.
+/// source, every field whose type segment ENDS in a known typed-IR owner
+/// suffix, AND every local `type X = …;` alias whose aliased type names a
+/// banned segment (so a field cannot launder `TypeExpr` through a module-local
+/// alias). Returns `"<owner>: <segment>"` entries. The scan walks `syn::Type`
+/// path segments (so a banned name nested inside `Option<…>` / `Vec<…>` /
+/// `Arc<[…]>` / `FxHashMap<_, …>` / a tuple `(…, …)` generic argument is still
+/// caught), and matches a bare segment ONLY as a whole identifier —
+/// `HotTypeParamDecl` (segment `HotTypeParamDecl`) is never confused with the
+/// banned bare `TypeParam`.
 fn banned_typed_ir_field_segments(src: &str) -> Vec<String> {
     use syn::visit::Visit;
 
     let file = syn::parse_file(src).expect("parse hot_prepared.rs as a syn::File");
 
-    /// Walks a single field type, recording any banned segment it finds.
+    /// Walks a single field type, recording any banned segment it finds —
+    /// both exact-match bare banned identifiers and owner-suffix matches.
     struct SegScan {
         owner: String,
         hits: Vec<String>,
@@ -1024,11 +1092,27 @@ fn banned_typed_ir_field_segments(src: &str) -> Vec<String> {
             let ident = seg.ident.to_string();
             if BANNED_TYPED_IR_SEGMENTS.contains(&ident.as_str()) {
                 self.hits.push(format!("{}: {ident}", self.owner));
+            } else if let Some(suffix) = segment_is_owner_suffix(&ident) {
+                self.hits.push(format!(
+                    "{}: {ident} (ends in typed-IR owner suffix `{suffix}`)",
+                    self.owner
+                ));
             }
             // Descend into generic arguments (`Option<TypeExpr>`,
-            // `Arc<[HotTypeRef]>`, `FxHashMap<K, PreparedMember>`, …).
+            // `Arc<[HotTypeRef]>`, `FxHashMap<K, PreparedMember>`, a tuple
+            // `(HotTypeRef, MethodSignature)`, …).
             syn::visit::visit_path_segment(self, seg);
         }
+    }
+
+    /// Scan a single `syn::Type` (a field type, or an alias RHS) under `owner`.
+    fn scan_ty(owner: String, ty: &syn::Type) -> Vec<String> {
+        let mut scan = SegScan {
+            owner,
+            hits: Vec::new(),
+        };
+        scan.visit_type(ty);
+        scan.hits
     }
 
     let mut hits = Vec::new();
@@ -1042,12 +1126,7 @@ fn banned_typed_ir_field_segments(src: &str) -> Vec<String> {
                         .as_ref()
                         .map(|id| id.to_string())
                         .unwrap_or_else(|| format!("#{i}"));
-                    let mut scan = SegScan {
-                        owner: format!("{type_name}.{field_label}"),
-                        hits: Vec::new(),
-                    };
-                    scan.visit_type(&field.ty);
-                    hits.extend(scan.hits);
+                    hits.extend(scan_ty(format!("{type_name}.{field_label}"), &field.ty));
                 }
             }
             syn::Item::Enum(e) => {
@@ -1059,14 +1138,17 @@ fn banned_typed_ir_field_segments(src: &str) -> Vec<String> {
                             .as_ref()
                             .map(|id| id.to_string())
                             .unwrap_or_else(|| format!("{}#{i}", variant.ident));
-                        let mut scan = SegScan {
-                            owner: format!("{type_name}::{field_label}"),
-                            hits: Vec::new(),
-                        };
-                        scan.visit_type(&field.ty);
-                        hits.extend(scan.hits);
+                        hits.extend(scan_ty(format!("{type_name}::{field_label}"), &field.ty));
                     }
                 }
+            }
+            // TYPE-ALIAS arm: a module-local `type X = …;` whose RHS names a
+            // banned/owner-suffix segment would let a field launder a
+            // `TypeExpr` through the alias (`type Body = TypeExpr; … field:
+            // Body`). The bare alias NAME (`X`) is fine — its RHS is scanned.
+            syn::Item::Type(t) => {
+                let alias_name = t.ident.to_string();
+                hits.extend(scan_ty(format!("type {alias_name} ="), &t.ty));
             }
             _ => {}
         }
@@ -1134,112 +1216,255 @@ enum HotBadEnum {
         "self-test: a banned enum-variant payload MUST be detected; got {planted_hits:?}"
     );
 
+    // POSITIVE (strengthened): the FOUR new evasion forms the original list
+    // missed — the exact class that let the `FunctionParam.ty: TypeExpr`
+    // storage hole through. A FULLY-QUALIFIED `verter_type_expr::FunctionParam`,
+    // a `Vec<FunctionExpr>`, a TUPLE field `(HotTypeRef, MethodSignature)`, and
+    // a module-local `type Foo = TypeExpr;` alias field MUST all be caught.
+    let planted_owners = "\
+struct HotBadOwners {
+    fq_param: verter_type_expr::FunctionParam,
+    exprs: Vec<FunctionExpr>,
+    tup: (HotTypeRef, verter_type_expr::MethodSignature),
+    idx: Option<IndexSignature>,
+}
+type Foo = TypeExpr;
+struct HotLaunders {
+    body: Foo,
+}
+";
+    let owner_hits = banned_typed_ir_field_segments(planted_owners);
+    assert!(
+        owner_hits
+            .iter()
+            .any(|h| h.contains("fq_param") && h.contains("FunctionParam")),
+        "self-test: a fully-qualified `verter_type_expr::FunctionParam` field MUST be detected \
+         (the closed [P0] storage-hole class); got {owner_hits:?}"
+    );
+    assert!(
+        owner_hits
+            .iter()
+            .any(|h| h.contains("exprs") && h.contains("FunctionExpr")),
+        "self-test: a `Vec<FunctionExpr>` field MUST be detected; got {owner_hits:?}"
+    );
+    assert!(
+        owner_hits
+            .iter()
+            .any(|h| h.contains("tup") && h.contains("MethodSignature")),
+        "self-test: a tuple field `(HotTypeRef, MethodSignature)` MUST be detected; got {owner_hits:?}"
+    );
+    assert!(
+        owner_hits
+            .iter()
+            .any(|h| h.contains("idx") && h.contains("IndexSignature")),
+        "self-test: an `Option<IndexSignature>` field MUST be detected; got {owner_hits:?}"
+    );
+    assert!(
+        owner_hits
+            .iter()
+            .any(|h| h.contains("type Foo") && h.contains("TypeExpr")),
+        "self-test: a local `type Foo = TypeExpr;` alias (a field could launder TypeExpr through \
+         it) MUST be detected on the alias RHS; got {owner_hits:?}"
+    );
+
+    // POSITIVE (owner SUFFIX): a re-exported/aliased owner-suffixed name
+    // (`MyFunctionParam`, `SomePreparedWrapperShape`) that is NOT literally in
+    // the exact-match list MUST still be caught by the suffix arm.
+    let planted_suffix = "\
+struct HotBadSuffix {
+    aliased: MyFunctionParam,
+    wrapped: SomePreparedWrapperShape,
+}
+";
+    let suffix_hits = banned_typed_ir_field_segments(planted_suffix);
+    assert!(
+        suffix_hits
+            .iter()
+            .any(|h| h.contains("aliased") && h.contains("owner suffix")),
+        "self-test: an owner-suffixed `MyFunctionParam` field MUST be caught by the suffix arm; \
+         got {suffix_hits:?}"
+    );
+    assert!(
+        suffix_hits
+            .iter()
+            .any(|h| h.contains("wrapped") && h.contains("owner suffix")),
+        "self-test: an owner-suffixed `SomePreparedWrapperShape` field MUST be caught by the \
+         suffix arm; got {suffix_hits:?}"
+    );
+
     // NEGATIVE: the handle-native analogs MUST pass — `HotTypeRef`,
-    // `HotTypeParamDecl`, `HotFunctionSignature`, `HotEnumMemberValue` are
-    // NOT the banned bare names, and scalar metadata is fine.
+    // `HotTypeParamDecl`, `HotFunctionSignature`, `HotEnumMemberValue`,
+    // `HotPreparedForwardPayload`, `HotKeyFilterShape` are NOT the banned bare
+    // names, are `Hot*`-PREFIXED (so the owner-suffix arm skips them), and
+    // scalar metadata + the reused scalar enums are fine.
     let good = "\
 struct HotGood {
     semantic_body: HotTypeRef,
     type_parameters: std::sync::Arc<[HotTypeParamDecl]>,
     signatures: std::sync::Arc<[HotFunctionSignature]>,
+    classifier_filter: HotKeyFilterShape,
+    forward: HotPreparedForwardPayload,
+    wrapper_kind: PreparedWrapperKind,
+    case_kind: PreparedCaseTransformKind,
+    forwarding: PreparedForwardingKind,
+    modifiers: PreparedSurfaceModifiers,
     visibility: verter_type_expr::MemberVisibility,
+    origin: std::sync::Arc<str>,
 }
 enum HotGoodEnum {
     Folded(HotTypeRef),
+    CaseTransform(PreparedCaseTransformKind),
 }
 ";
     let good_hits = banned_typed_ir_field_segments(good);
     assert!(
         good_hits.is_empty(),
         "self-test: the handle-native analogs (HotTypeRef / HotTypeParamDecl / \
-         HotFunctionSignature / HotEnumMemberValue) and scalar metadata MUST NOT trip the ban; \
-         got {good_hits:?}"
+         HotFunctionSignature / HotKeyFilterShape / HotPreparedForwardPayload), the REUSED scalar \
+         enums (PreparedWrapperKind / PreparedCaseTransformKind / PreparedForwardingKind / \
+         PreparedSurfaceModifiers — none own a TypeExpr), and scalar metadata MUST NOT trip the \
+         ban; got {good_hits:?}"
     );
 }
 
-/// Extract the `#[derive(...)]` trait list on the line(s) immediately above
-/// the `pub struct HotTypeRef(` definition in `semantic_query.rs`. Returns
-/// the comma-joined trait names. The scan finds the struct line, then walks
-/// upward over attribute lines to the nearest `#[derive(...)]`.
-fn hot_typeref_derive_list(src: &str) -> String {
-    let lines: Vec<&str> = src.lines().collect();
-    let struct_idx = lines
-        .iter()
-        .position(|l| l.trim_start().starts_with("pub struct HotTypeRef("))
-        .expect("semantic_query.rs must define `pub struct HotTypeRef(`");
-    // Walk upward to the nearest `#[derive(...)]` line (skipping doc/attr
-    // lines), bounded so a missing derive does not scan the whole file.
-    for i in (0..struct_idx).rev() {
-        let line = lines[i].trim();
-        if let Some(rest) = line.strip_prefix("#[derive(") {
-            let inner = rest.strip_suffix(")]").unwrap_or(rest);
-            return inner.to_string();
+// NOTE on the HotTypeRef DERIVE-vector R6 check: it is already covered
+// ROBUSTLY by `hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived` in
+// `tests/cases/architecture_guards.rs`, which extracts the FULL stacked-derive
+// vector via the shared `carrier_struct_derive_list` helper (unioning EVERY
+// `#[derive(...)]` line above the struct — a strictly more robust extractor
+// than a single line-walk) and rejects `Hash`/`Ord` whole-tokens. Duplicating
+// the derive-vector check here would be redundant, so this file ADDS ONLY the
+// coverage that guard does NOT have: the MANUAL-impl scan below. A hand-written
+// `impl Hash for HotTypeRef` / `impl Ord for HotTypeRef` / `impl PartialOrd for
+// HotTypeRef` would make the handle keyable WITHOUT touching the derive list,
+// bypassing the derive-vector guard entirely — both codex review legs flagged
+// this gap. The scan syn-parses `semantic_query.rs` and rejects any such impl.
+
+/// Collect every hand-written `impl … Hash/Ord/PartialOrd … for HotTypeRef`
+/// in `src` (a parsed Rust file). Returns one `"impl <Trait> for HotTypeRef"`
+/// entry per offending impl. A derived impl is an ATTRIBUTE (`#[derive(...)]`),
+/// never an `impl` item, so this scan sees ONLY manual impls — the coverage the
+/// derive-vector guard cannot reach. The trait path's LAST segment is matched
+/// whole (`Hash` / `Ord` / `PartialOrd`), so `std::hash::Hash`,
+/// `core::hash::Hash`, and a bare `Hash` are all caught, while an unrelated
+/// trait whose name merely contains the substring is not.
+fn manual_hash_or_ord_impls_for_hottyperef(src: &str) -> Vec<String> {
+    let file = syn::parse_file(src).expect("parse semantic_query.rs as a syn::File");
+
+    /// The self type of `impl ... for T` is `HotTypeRef` (last path segment).
+    fn self_ty_is_hottyperef(ty: &syn::Type) -> bool {
+        matches!(ty, syn::Type::Path(p)
+            if p.path.segments.last().map(|s| s.ident == "HotTypeRef").unwrap_or(false))
+    }
+
+    let mut hits = Vec::new();
+    for item in &file.items {
+        let syn::Item::Impl(imp) = item else {
+            continue;
+        };
+        // Only trait impls (`impl Trait for T`) — an inherent `impl HotTypeRef`
+        // (the `new`/`node` accessors) is fine.
+        let Some((_, trait_path, _)) = &imp.trait_ else {
+            continue;
+        };
+        if !self_ty_is_hottyperef(&imp.self_ty) {
+            continue;
         }
-        // Stop if we hit a non-attribute, non-doc, non-blank line — the
-        // derive (if any) must be in the contiguous attribute block.
-        if !line.is_empty() && !line.starts_with("#[") && !line.starts_with("//") {
-            break;
+        let last = match trait_path.segments.last() {
+            Some(seg) => seg.ident.to_string(),
+            None => continue,
+        };
+        // `Ord` / `PartialOrd` are both a total-/partial-order keyability rail;
+        // `Hash` is the hashing rail. Any of the three on `HotTypeRef` makes it
+        // map-keyable, which R6 forbids for a content/version-bearing ordinal.
+        if matches!(last.as_str(), "Hash" | "Ord" | "PartialOrd") {
+            hits.push(format!("impl {last} for HotTypeRef"));
         }
     }
-    panic!("no `#[derive(...)]` found immediately above `pub struct HotTypeRef(`");
-}
-
-/// True iff a derive trait list contains `Hash` or `Ord` as a WHOLE trait
-/// token (split on `,`, trimmed). Whole-token matching is the discriminating
-/// detail: `PartialOrd` / `PartialEq` must NOT register as a substring
-/// false-positive for `Ord`.
-fn derive_list_has_hash_or_ord(list: &str) -> bool {
-    list.split(',')
-        .map(str::trim)
-        .any(|t| t == "Hash" || t == "Ord")
+    hits
 }
 
 #[test]
-fn hot_typeref_has_no_hash_or_ord() {
+fn hot_typeref_has_no_manual_hash_or_ord_impl() {
     let src = read_rel("src/semantic_query.rs");
-    let derive_list = hot_typeref_derive_list(&src);
-    // Anti-vacuity: the real derive carries the EXPECTED handle traits, so a
-    // moved / renamed struct (whose derive we accidentally read) would fail
-    // this floor.
+    // Anti-vacuity: the real `struct HotTypeRef` and its inherent impl exist,
+    // so this guard is scanning the right file (a moved/renamed handle would
+    // make the floor below fail).
     assert!(
-        derive_list.contains("Copy") && derive_list.contains("PartialEq"),
-        "the HotTypeRef derive must carry the expected handle traits (Copy, PartialEq); \
-         got `{derive_list}` — the extractor may have read the wrong derive"
+        src.contains("struct HotTypeRef("),
+        "semantic_query.rs must define `struct HotTypeRef(` — the guard cannot be vacuous"
     );
     assert!(
-        !derive_list_has_hash_or_ord(&derive_list),
-        "R6: `HotTypeRef` must NOT derive `Hash` or `Ord` — a content/version-bearing arena \
-         ordinal must be non-keyable so it cannot be lifted into a `HashMap`/`BTreeMap` cache \
-         key. Found a forbidden trait in the derive list `{derive_list}`."
+        src.contains("impl HotTypeRef"),
+        "semantic_query.rs must define the inherent `impl HotTypeRef` (new/node) — anti-vacuity"
+    );
+
+    let hits = manual_hash_or_ord_impls_for_hottyperef(&src);
+    assert!(
+        hits.is_empty(),
+        "R6: `HotTypeRef` must NOT have a hand-written `impl Hash`/`impl Ord`/`impl PartialOrd` — \
+         a manual impl would make the content/version-bearing arena ordinal map-keyable WITHOUT a \
+         `#[derive(Hash/Ord)]` (bypassing the derive-vector guard). Found:\n{}",
+        hits.join("\n")
     );
 }
 
 #[test]
-fn hot_typeref_has_no_hash_or_ord_self_test_discriminates() {
-    // POSITIVE: a derive list containing `Hash` (or `Ord`) MUST be detected.
+fn hot_typeref_has_no_manual_hash_or_ord_impl_self_test_discriminates() {
+    // POSITIVE: every manual-impl form MUST be detected — bare `Hash`, the
+    // fully-qualified `std::hash::Hash` / `core::hash::Hash`, `Ord`, and
+    // `PartialOrd` (a partial-order rail is still keyable into a BTreeMap-style
+    // structure via the total-order it implies on a finite domain).
+    for (planted, needle) in [
+        (
+            "impl Hash for HotTypeRef { fn hash<H>(&self, _: &mut H) {} }",
+            "impl Hash for HotTypeRef",
+        ),
+        (
+            "impl std::hash::Hash for HotTypeRef { fn hash<H>(&self, _: &mut H) {} }",
+            "impl Hash for HotTypeRef",
+        ),
+        (
+            "impl core::hash::Hash for HotTypeRef { fn hash<H>(&self, _: &mut H) {} }",
+            "impl Hash for HotTypeRef",
+        ),
+        (
+            "impl Ord for HotTypeRef { fn cmp(&self, _: &Self) -> std::cmp::Ordering { todo!() } }",
+            "impl Ord for HotTypeRef",
+        ),
+        (
+            "impl PartialOrd for HotTypeRef { fn partial_cmp(&self, _: &Self) -> Option<std::cmp::Ordering> { None } }",
+            "impl PartialOrd for HotTypeRef",
+        ),
+    ] {
+        let hits = manual_hash_or_ord_impls_for_hottyperef(planted);
+        assert!(
+            hits.iter().any(|h| h == needle),
+            "self-test: a planted `{needle}` MUST be detected; got {hits:?}"
+        );
+    }
+
+    // NEGATIVE: the sanctioned inherent impl and unrelated trait impls MUST
+    // pass — an `impl HotTypeRef` (no trait), an `impl PartialEq for HotTypeRef`
+    // (equality is fine; it is the keying traits that are banned), and a
+    // Hash/Ord impl for a DIFFERENT type MUST NOT trip.
+    let good = "\
+impl HotTypeRef {
+    pub fn new(node: SemanticNodeId) -> Self { Self(node) }
+    pub fn node(self) -> SemanticNodeId { self.0 }
+}
+impl PartialEq for HotTypeRef {
+    fn eq(&self, other: &Self) -> bool { self.0 == other.0 }
+}
+impl Hash for SomeOtherType {
+    fn hash<H>(&self, _: &mut H) {}
+}
+";
+    let good_hits = manual_hash_or_ord_impls_for_hottyperef(good);
     assert!(
-        derive_list_has_hash_or_ord("Debug, Clone, Copy, PartialEq, Eq, Hash"),
-        "self-test: a derive list containing `Hash` MUST be detected"
-    );
-    assert!(
-        derive_list_has_hash_or_ord("Debug, Ord, PartialOrd"),
-        "self-test: a derive list containing `Ord` MUST be detected"
-    );
-    // NEGATIVE: the real handle derive (no Hash/Ord) MUST pass, and the
-    // `PartialOrd` / `PartialEq` whole-token boundary must NOT false-positive
-    // for `Ord` as a substring.
-    assert!(
-        !derive_list_has_hash_or_ord("Debug, Clone, Copy, PartialEq, Eq"),
-        "self-test: the real handle derive (no Hash/Ord) MUST pass"
-    );
-    assert!(
-        !derive_list_has_hash_or_ord("Debug, PartialOrd"),
-        "self-test: `PartialOrd` MUST NOT register as a substring false-positive for `Ord`"
-    );
-    assert!(
-        !derive_list_has_hash_or_ord("Debug, PartialEq"),
-        "self-test: `PartialEq` MUST NOT register as a substring false-positive for any banned \
-         token"
+        good_hits.is_empty(),
+        "self-test: the inherent `impl HotTypeRef`, an `impl PartialEq for HotTypeRef`, and a \
+         `Hash` impl for a DIFFERENT type MUST NOT trip the manual-impl ban; got {good_hits:?}"
     );
 }
 

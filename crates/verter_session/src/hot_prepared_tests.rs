@@ -8,6 +8,15 @@
 //! if `from_parts` dropped a field, swapped two handle fields, or an
 //! accessor returned the wrong member.
 //!
+//! The carriers are a FAITHFUL handle-native mirror of the lower-crate
+//! `Prepared*` shapes: every type-body position is a handle (the param
+//! `ty`, the value `object_shape`, the type member values, the signature
+//! return/type-param bodies, the enum member values, the wrapper-shape
+//! `Opaque`/`Transform`/`target_args` payloads), so these tests feed a
+//! DISTINCT real handle to each and assert it round-trips `!=` its peers —
+//! a producer that dropped a body to a display string (the closed
+//! `FunctionParam` TypeExpr hole) or collapsed two handle fields is caught.
+//!
 //! The handles are REAL: a small TS source is upserted into a standalone
 //! host and resolved through `resolve_named_symbol` (the same path the
 //! `*_equivalence_tests.rs` use), so the captured `SemanticNodeId`s are
@@ -22,15 +31,19 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::resolver_core::hot_prepared::{
-    HotEnumMemberValue, HotFunctionParam, HotFunctionSignature, HotPreparedClassifierMeta,
-    HotPreparedMember, HotPreparedTypeDecl, HotPreparedValueDecl, HotPreparedValueMember,
-    HotProjectionKind, HotTypeParamDecl, HotWrapperKind,
+    HotEnumMemberValue, HotFunctionParam, HotFunctionSignature, HotKeyFilterShape,
+    HotKeyRemapShape, HotPreparedClassifierMeta, HotPreparedForwardPayload, HotPreparedMember,
+    HotPreparedTypeDecl, HotPreparedValueDecl, HotPreparedValueMember, HotPreparedWrapperShape,
+    HotProjectionClass, HotTypeParamDecl, HotValueRuleShape,
 };
 use crate::semantic_query::{HotTypeRef, ProjectionMode, SemanticNodeData, SemanticNodeId};
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_semantic::analysis::type_solver::prepared::{
+    PreparedForwardingKind, PreparedSurfaceModifiers, PreparedWrapperKind,
+};
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -67,6 +80,9 @@ fn resolve(host: &VerterHost, canonical: &str, name: &str, mode: ProjectionMode)
 ///   — and its two distinct contributor nodes.
 /// - `object`: the resolved `Object` body for `interface O { m: number }`.
 /// - `alias`: the `DeclRef` carrier for `type A = O`.
+/// - `primitive`: the resolved body for `type P = number` (a fifth distinct
+///   handle so the param-`ty` and object-shape fields can be proven `!=`
+///   every other captured handle).
 struct Handles {
     host: Arc<VerterHost>,
     merged: HotTypeRef,
@@ -74,6 +90,7 @@ struct Handles {
     contributor_b: HotTypeRef,
     object: HotTypeRef,
     alias: HotTypeRef,
+    primitive: HotTypeRef,
 }
 
 fn build_handles() -> Handles {
@@ -84,7 +101,8 @@ fn build_handles() -> Handles {
         "export interface I { a: number }\n\
          export interface I { b: string }\n\
          export interface O { m: number }\n\
-         export type A = O;\n",
+         export type A = O;\n\
+         export type P = number;\n",
     );
 
     // Merged interface → MergedDecl carrier with two distinct contributors.
@@ -121,13 +139,56 @@ fn build_handles() -> Handles {
         "A must resolve to a DeclRef carrier"
     );
 
-    Handles {
+    // A fifth distinct handle (the `number` primitive body of `type P`).
+    let primitive_node = resolve(&host, "/h.ts", "P", ProjectionMode::Expanded);
+
+    let handles = Handles {
         merged: HotTypeRef::new(merged_node),
         contributor_a: HotTypeRef::new(contributor_a),
         contributor_b: HotTypeRef::new(contributor_b),
         object: HotTypeRef::new(object_node),
         alias: HotTypeRef::new(alias_node),
+        primitive: HotTypeRef::new(primitive_node),
         host,
+    };
+
+    // The primitive handle is DISTINCT from the others it is used to
+    // discriminate against (so the param-ty / object-shape `!=` assertions
+    // below are not vacuously true via aliasing).
+    assert_ne!(handles.primitive, handles.merged);
+    assert_ne!(handles.primitive, handles.alias);
+    assert_ne!(handles.primitive, handles.object);
+
+    handles
+}
+
+/// A scalar-faithful classifier whose typed payloads carry REAL handles — so a
+/// producer that dropped the wrapper `Opaque`/`Transform` payload or the
+/// forward `target_args` (the B2 closure) is caught. The `key_filter` carries
+/// `Opaque(filter_handle)`, the `value_rule` carries `Transform(value_handle)`,
+/// and the projection forwards `target_args = [arg_handle]`.
+fn classifier_with_payloads(
+    filter_handle: HotTypeRef,
+    value_handle: HotTypeRef,
+    arg_handle: HotTypeRef,
+) -> HotPreparedClassifierMeta {
+    HotPreparedClassifierMeta {
+        wrapper_shape: HotPreparedWrapperShape {
+            kind: PreparedWrapperKind::KeyFilter,
+            source_param_index: Some(0),
+            key_filter: HotKeyFilterShape::Opaque(filter_handle),
+            key_remap: HotKeyRemapShape::Identity,
+            value_rule: HotValueRuleShape::Transform(value_handle),
+            modifiers: PreparedSurfaceModifiers {
+                optional: Some(true),
+                readonly: None,
+            },
+        },
+        projection_class: HotProjectionClass::ForwardSubject(HotPreparedForwardPayload {
+            target_name: Arc::from("Target"),
+            target_args: Arc::from(vec![arg_handle]),
+            forwarding_kind: PreparedForwardingKind::AppliedAlias,
+        }),
     }
 }
 
@@ -139,7 +200,8 @@ fn build_handles() -> Handles {
 fn hot_prepared_type_decl_from_parts_round_trips_every_handle() {
     let h = build_handles();
 
-    // Build a member index with ONE member whose value is the object handle.
+    // Build a member index with ONE member whose value is the object handle,
+    // carrying a real declaration_origin.
     let mut member_index: FxHashMap<Arc<str>, HotPreparedMember> = FxHashMap::default();
     member_index.insert(
         Arc::from("the_member"),
@@ -150,6 +212,7 @@ fn hot_prepared_type_decl_from_parts_round_trips_every_handle() {
             is_method: false,
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: Arc::from("/decl_origin.ts"),
         },
     );
 
@@ -159,6 +222,11 @@ fn hot_prepared_type_decl_from_parts_round_trips_every_handle() {
         constraint: Some(h.alias),
         default: None,
     }];
+
+    // The full classifier carries three DISTINCT handle payloads (the B2
+    // closure): key_filter Opaque(merged), value_rule Transform(object),
+    // forward target_args [alias].
+    let classifier = classifier_with_payloads(h.merged, h.object, h.alias);
 
     let carrier = HotPreparedTypeDecl::from_parts(
         ResolvedRootIdentity::new("/h.ts", "Subject"),
@@ -177,10 +245,7 @@ fn hot_prepared_type_decl_from_parts_round_trips_every_handle() {
         FxHashMap::default(),
         Default::default(),
         Default::default(),
-        HotPreparedClassifierMeta {
-            wrapper_kind: HotWrapperKind::None,
-            projection_kind: HotProjectionKind::DirectMembers,
-        },
+        classifier,
     );
 
     // semantic_body round-trips AND is NOT lookup_body (the split is real).
@@ -220,6 +285,19 @@ fn hot_prepared_type_decl_from_parts_round_trips_every_handle() {
         None,
         "an absent member must return None"
     );
+    // The member's declaration_origin round-trips verbatim (FIX 4: it must
+    // be carried — it drives the macro-surface span/JSDoc overlay).
+    assert_eq!(
+        carrier
+            .member_index
+            .get("the_member")
+            .unwrap()
+            .declaration_origin
+            .as_ref(),
+        "/decl_origin.ts",
+        "the member declaration_origin must round-trip — a producer that \
+         dropped it would lose the overlay's span/JSDoc pairing file"
+    );
 
     // merged_contributors round-trip in order AND is_merged() is true.
     assert_eq!(
@@ -239,6 +317,48 @@ fn hot_prepared_type_decl_from_parts_round_trips_every_handle() {
         "the type-parameter constraint must round-trip to the alias handle"
     );
     assert_eq!(carrier.type_parameters[0].default, None);
+
+    // The FULL classifier round-trips every typed payload as a handle (FIX 5,
+    // the B2 closure). A producer that dropped any payload would be caught.
+    match &carrier.classifier.wrapper_shape.key_filter {
+        HotKeyFilterShape::Opaque(handle) => assert_eq!(
+            *handle, h.merged,
+            "the wrapper key_filter Opaque payload must round-trip to its handle"
+        ),
+        other => panic!("key_filter must stay Opaque(handle), got {other:?}"),
+    }
+    match &carrier.classifier.wrapper_shape.value_rule {
+        HotValueRuleShape::Transform(handle) => assert_eq!(
+            *handle, h.object,
+            "the wrapper value_rule Transform payload must round-trip to its handle"
+        ),
+        other => panic!("value_rule must stay Transform(handle), got {other:?}"),
+    }
+    assert_eq!(
+        carrier.classifier.wrapper_shape.kind,
+        PreparedWrapperKind::KeyFilter,
+        "the wrapper kind scalar discriminant must round-trip verbatim"
+    );
+    assert_eq!(
+        carrier.classifier.wrapper_shape.modifiers.optional,
+        Some(true),
+        "the wrapper modifiers scalar must round-trip verbatim"
+    );
+    match &carrier.classifier.projection_class {
+        HotProjectionClass::ForwardSubject(payload) => {
+            assert_eq!(payload.target_name.as_ref(), "Target");
+            assert_eq!(
+                payload.target_args.as_ref(),
+                &[h.alias],
+                "the forward target_args must round-trip the handle slice (B2 closure)"
+            );
+            assert_eq!(
+                payload.forwarding_kind,
+                PreparedForwardingKind::AppliedAlias
+            );
+        }
+        other => panic!("projection_class must stay ForwardSubject(payload), got {other:?}"),
+    }
 
     // The handles point to the EXPECTED node data via the live graph: the
     // semantic_body handle is a MergedDecl (the merged interface we fed in),
@@ -277,8 +397,15 @@ fn hot_prepared_type_decl_non_merged_reports_not_merged() {
         Default::default(),
         Default::default(),
         HotPreparedClassifierMeta {
-            wrapper_kind: HotWrapperKind::None,
-            projection_kind: HotProjectionKind::ForwardSubject,
+            wrapper_shape: HotPreparedWrapperShape {
+                kind: PreparedWrapperKind::None,
+                source_param_index: None,
+                key_filter: HotKeyFilterShape::All,
+                key_remap: HotKeyRemapShape::Identity,
+                value_rule: HotValueRuleShape::PassThrough,
+                modifiers: PreparedSurfaceModifiers::default(),
+            },
+            projection_class: HotProjectionClass::Opaque,
         },
     );
     assert!(
@@ -289,6 +416,16 @@ fn hot_prepared_type_decl_non_merged_reports_not_merged() {
         carrier.merged_contributors().is_empty(),
         "merged_contributors must be empty for a non-merged decl"
     );
+    // A scalar-only classifier (no typed payloads) stays scalar — no handle
+    // is fabricated into the All / PassThrough / Opaque arms.
+    assert!(matches!(
+        carrier.classifier.wrapper_shape.key_filter,
+        HotKeyFilterShape::All
+    ));
+    assert!(matches!(
+        carrier.classifier.projection_class,
+        HotProjectionClass::Opaque
+    ));
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -299,29 +436,29 @@ fn hot_prepared_type_decl_non_merged_reports_not_merged() {
 fn hot_prepared_value_decl_from_parts_round_trips_every_handle() {
     let h = build_handles();
 
-    // One object member whose value is the object handle.
-    let mut object_member_index: FxHashMap<Arc<str>, HotPreparedValueMember> = FxHashMap::default();
-    object_member_index.insert(
+    // One value member whose value is the object handle (SMALL faithful
+    // mirror: only `ty` + `is_method`).
+    let mut member_index: FxHashMap<Arc<str>, HotPreparedValueMember> = FxHashMap::default();
+    member_index.insert(
         Arc::from("field"),
         HotPreparedValueMember {
             ty: h.object,
-            optional: false,
-            readonly: false,
             is_method: false,
-            visibility: verter_type_expr::MemberVisibility::Public,
-            spans: verter_type_expr::MemberSpans::default(),
         },
     );
 
-    // One signature whose RETURN TYPE is a handle (the alias handle); a
-    // scalar param (no handle); one type-parameter with a default handle.
+    // One signature whose RETURN TYPE is the alias handle, whose PARAM TYPE is
+    // a DISTINCT handle (the closed FunctionParam TypeExpr hole — `ty` is now a
+    // handle, not a display string), and one type-parameter with a default
+    // handle.
     let signatures = vec![HotFunctionSignature {
         parameters: vec![HotFunctionParam {
-            name: Arc::from("p"),
-            type_annotation: Some(Arc::from("number")),
-            is_optional: false,
-            has_default: false,
-            span: verter_span::Span::default(),
+            name: Some(Arc::from("p")),
+            ty: h.primitive, // the param TYPE as a handle (FIX 1)
+            optional: false,
+            rest: false,
+            span: None,
+            has_ts_annotation: true,
         }],
         return_type: Some(h.alias),
         type_parameters: Arc::from(vec![HotTypeParamDecl {
@@ -344,11 +481,11 @@ fn hot_prepared_value_decl_from_parts_round_trips_every_handle() {
         ValueDeclKind::Const,
         Some(h.merged), // type_annotation handle
         signatures,
-        object_member_index,
+        Some(h.contributor_b), // object_shape: the WHOLE object node as one handle (FIX 3)
+        member_index,
         enum_members,
         Vec::new(),
         FxHashMap::default(),
-        Default::default(),
         Default::default(),
     );
 
@@ -357,6 +494,21 @@ fn hot_prepared_value_decl_from_parts_round_trips_every_handle() {
         carrier.type_annotation_handle(),
         Some(h.merged),
         "type_annotation must round-trip to the merged handle"
+    );
+
+    // object_shape round-trips as ONE whole-object handle, distinct from the
+    // type_annotation handle and from the member_index (FIX 3: it is the whole
+    // node, not a name-map).
+    assert_eq!(
+        carrier.object_shape_handle(),
+        Some(h.contributor_b),
+        "object_shape must round-trip the whole-object handle"
+    );
+    assert_ne!(
+        carrier.object_shape_handle(),
+        carrier.type_annotation_handle(),
+        "object_shape and type_annotation are DISTINCT handles — a producer \
+         that crossed them would be caught"
     );
 
     // The signature's return type is the alias handle (NOT collapsed to the
@@ -372,13 +524,28 @@ fn hot_prepared_value_decl_from_parts_round_trips_every_handle() {
         "the signature return type and the value type_annotation are DISTINCT \
          handles — a producer that crossed them would be caught"
     );
-    // The signature's scalar param stays a display string, never a handle.
+    // The signature's param TYPE round-trips as a handle (the closed
+    // FunctionParam TypeExpr hole) AND is distinct from the return type — a
+    // producer that dropped the param type (the [P0] storage hole) or aliased
+    // it to the return type would be caught here.
     assert_eq!(
-        carrier.signatures[0].parameters[0]
-            .type_annotation
-            .as_deref(),
-        Some("number"),
-        "the param type_annotation is a scalar display string, not a handle"
+        carrier.signatures[0].parameters[0].ty, h.primitive,
+        "the param TYPE must round-trip to its handle — it is a real TypeExpr \
+         on the lower carrier, not a display string"
+    );
+    assert_ne!(
+        carrier.signatures[0].parameters[0].ty,
+        carrier.signatures[0].return_type.unwrap(),
+        "the param type and the return type are DISTINCT handles"
+    );
+    assert_eq!(
+        carrier.signatures[0].parameters[0].name.as_deref(),
+        Some("p"),
+        "the param name round-trips"
+    );
+    assert!(
+        carrier.signatures[0].parameters[0].has_ts_annotation,
+        "the param has_ts_annotation provenance scalar round-trips"
     );
     // The signature type-parameter default handle round-trips.
     assert_eq!(
@@ -387,18 +554,22 @@ fn hot_prepared_value_decl_from_parts_round_trips_every_handle() {
         "the signature type-parameter default must round-trip to the object handle"
     );
 
-    // The object member handle round-trips; a missing member is None.
+    // The value member handle round-trips; a missing member is absent.
     let field = carrier
-        .object_member_index
+        .member_index
         .get("field")
-        .expect("the indexed object member must be present");
+        .expect("the indexed value member must be present");
     assert_eq!(
         field.ty, h.object,
-        "the object member value must round-trip to the object handle"
+        "the value member value must round-trip to the object handle"
     );
     assert!(
-        !carrier.object_member_index.contains_key("missing"),
-        "an absent object member must not be present"
+        !field.is_method,
+        "the value member is_method scalar round-trips"
+    );
+    assert!(
+        !carrier.member_index.contains_key("missing"),
+        "an absent value member must not be present"
     );
 
     // The enum member handle round-trips.
