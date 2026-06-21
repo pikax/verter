@@ -411,19 +411,32 @@ pub fn merge_signature_help(
 
 /// Convert TypeProvider code actions to LSP CodeActions.
 ///
-/// A carrier IDE edit maps its TSX byte offsets back to the carrier source through the sourcemap;
-/// every other edit's `start`/`end` are REAL byte offsets into its target file, so read that file's
+/// A carrier IDE edit maps its TSX byte offsets back to the carrier source through that file's
+/// CodeTransform sourcemap, split by whether the edit targets the file currently being queried:
+/// - The CURRENT request's TSX (`edit.path == current_tsx_path`) maps through the in-context mapper.
+/// - A FOREIGN carrier `.tsx` (a different component) maps through THAT file's own sourcemap via the
+///   `external_resolver`. FAIL CLOSED: a foreign edit is NEVER mapped through the current request's
+///   mapper — without a resolver (or on a resolver miss / map failure) it is DROPPED, because the
+///   offsets index the foreign TSX and the current sourcemap would point at an unrelated location.
+///
+/// Every other edit's `start`/`end` are REAL byte offsets into its target file, so read that file's
 /// own source through the host VFS (`source_reader`) and convert to a line:col `Range` in the
 /// negotiated `encoding`, exactly as the references / rename merges do. FAIL CLOSED: drop an edit
 /// whose source / offsets cannot be resolved (or whose URI is a carrier source no sourcemap
 /// bridges) rather than emit a `Range::default()` edit that would write at line 0 of the wrong
 /// file. An action with no surviving edit is dropped entirely.
 #[allow(clippy::mutable_key_type)] // Uri has interior mutability but is used as key by tower-lsp API
+#[expect(
+    clippy::too_many_arguments,
+    reason = "code-action merging needs the current TSX path, mapper, indexes, resolver, encoding, and VFS reader"
+)]
 pub fn merge_code_actions(
     type_actions: Vec<TypeCodeAction>,
+    current_tsx_path: &str,
     tsx_line_index: &LineIndex,
     mapper: &ProviderPositionMapper,
     carrier_line_index: &LineIndex,
+    external_resolver: Option<ExternalIdeResolver<'_>>,
     carrier_source_exists: &dyn Fn(&str) -> bool,
     negotiated_encoding: PositionEncodingKind,
     source_reader: ExternalSourceReader<'_>,
@@ -436,13 +449,31 @@ pub fn merge_code_actions(
 
             for edit in action.edits {
                 if is_carrier_ide_path(&edit.path) {
-                    if let Some(range) = tsx_range_to_carrier_range(
-                        edit.start,
-                        edit.end,
-                        tsx_line_index,
-                        mapper,
-                        carrier_line_index,
-                    ) {
+                    // Map the carrier-IDE offsets through the correct sourcemap, split by identity:
+                    // the CURRENT request's TSX uses the in-context mapper; a FOREIGN carrier `.tsx`
+                    // requires its own context via the external resolver and is DROPPED on a
+                    // miss/failure — never mapped through the current mapper.
+                    let mapped = if edit.path == current_tsx_path {
+                        tsx_range_to_carrier_range(
+                            edit.start,
+                            edit.end,
+                            tsx_line_index,
+                            mapper,
+                            carrier_line_index,
+                        )
+                    } else {
+                        external_resolver.and_then(|resolver| {
+                            let ctx = resolver(&edit.path)?;
+                            tsx_range_to_carrier_range(
+                                edit.start,
+                                edit.end,
+                                &ctx.tsx_line_index,
+                                &ctx.mapper,
+                                &ctx.carrier_line_index,
+                            )
+                        })
+                    };
+                    if let Some(range) = mapped {
                         let carrier_path =
                             normalize_carrier_path(&edit.path, carrier_source_exists);
                         if let Some(uri) = path_to_uri(carrier_path) {

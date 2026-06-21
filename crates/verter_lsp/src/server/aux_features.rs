@@ -488,9 +488,11 @@ pub(super) async fn handle_code_action(
                         let negotiated_encoding = server.position_encoding.read().clone();
                         let actions = merge::merge_code_actions(
                             type_actions,
+                            &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
+                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
                             &carrier_source_exists,
                             negotiated_encoding,
                             &|p: &str| {

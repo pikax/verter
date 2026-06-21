@@ -738,11 +738,14 @@ fn barrel_reexport_code_action_keeps_real_line() {
         LineIndex::new_utf16("x"),
         LineIndex::new_utf16("x"),
     );
+    let no_external: Option<ExternalIdeResolver> = None;
     let result = merge_code_actions(
         actions,
+        "/proj/App.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
+        no_external,
         &carrier_never,
         PositionEncodingKind::UTF16,
         &read_source,
@@ -780,11 +783,14 @@ fn external_code_action_with_unresolvable_source_is_dropped_not_zeroed() {
         LineIndex::new_utf16("x"),
     );
     let read_source = no_source_reader();
+    let no_external: Option<ExternalIdeResolver> = None;
     let result = merge_code_actions(
         actions,
+        "/proj/App.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
+        no_external,
         &carrier_never,
         PositionEncodingKind::UTF16,
         &read_source,

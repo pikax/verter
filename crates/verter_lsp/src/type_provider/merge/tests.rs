@@ -1256,11 +1256,14 @@ fn merge_code_actions_with_edits() {
         }],
     }];
 
+    let no_external: Option<ExternalIdeResolver> = None;
     let result = merge_code_actions(
         actions,
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
+        no_external,
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
@@ -1300,11 +1303,14 @@ fn merge_code_actions_remove_unused_deletion_maps_back_to_vue_source() {
         ],
     }];
 
+    let no_external: Option<ExternalIdeResolver> = None;
     let result = merge_code_actions(
         actions,
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
+        no_external,
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
@@ -1401,11 +1407,14 @@ fn merge_code_actions_external_edit_keeps_real_range_or_fails_closed() {
         }],
     }];
 
+    let no_external: Option<ExternalIdeResolver> = None;
     let result = merge_code_actions(
         actions,
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
+        no_external,
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &read_source,
@@ -1438,11 +1447,14 @@ fn merge_code_actions_external_edit_keeps_real_range_or_fails_closed() {
             new_text: "renamedHelper".to_string(),
         }],
     }];
+    let no_external: Option<ExternalIdeResolver> = None;
     let dropped = merge_code_actions(
         actions,
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
+        no_external,
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
@@ -1453,15 +1465,181 @@ fn merge_code_actions_external_edit_keeps_real_range_or_fails_closed() {
     );
 }
 
+/// A code-action edit targeting a FOREIGN carrier IDE `.tsx` (a different component than the one
+/// being queried) must FAIL CLOSED when no external resolver can supply that file's own sourcemap:
+/// the edit's offsets index the foreign file's TSX, so mapping them through the CURRENT request's
+/// mapper would corrupt an unrelated location. The pre-fix code mapped every `is_carrier_ide_path`
+/// edit through the current mapper unconditionally, so a foreign edit with offsets that happen to be
+/// mappable in the current sourcemap (6..9 → the current `.vue` `const msg`) produced a bogus carrier
+/// edit; the fix drops it.
+#[test]
+fn merge_code_actions_foreign_carrier_edit_fails_closed_without_resolver() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // Offsets 6..9 ARE mappable in the CURRENT mapper (they map to the current `.vue` `const msg`
+    // on line 5). The OLD code would have happily emitted a carrier edit for the FOREIGN file from
+    // those offsets — exactly the mis-map this asserts is gone.
+    let foreign = vec![TypeCodeAction {
+        title: "Fix foreign".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/other.vue.tsx".to_string(),
+            start: 6,
+            end: 9,
+            new_text: "renamed".to_string(),
+        }],
+    }];
+    let no_external: Option<ExternalIdeResolver> = None;
+    let dropped = merge_code_actions(
+        foreign,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    assert!(
+        dropped.is_empty(),
+        "a FOREIGN carrier edit with no resolver must be DROPPED, never mapped through the current \
+         request's sourcemap: {dropped:?}"
+    );
+
+    // Positive control: a SAME-FILE carrier edit (path == current_tsx_path) with the same mappable
+    // offsets still maps to the correct carrier range — proving the foreign-drop did not disable the
+    // same-file path.
+    let same_file = vec![TypeCodeAction {
+        title: "Fix self".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/test.vue.tsx".to_string(),
+            start: 6,
+            end: 9,
+            new_text: "renamed".to_string(),
+        }],
+    }];
+    let no_external: Option<ExternalIdeResolver> = None;
+    let kept = merge_code_actions(
+        same_file,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    assert_eq!(kept.len(), 1, "the same-file carrier edit must survive");
+    let CodeActionOrCommand::CodeAction(action) = &kept[0] else {
+        panic!("expected a CodeAction");
+    };
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+    let (change_uri, edits) = changes.iter().next().expect("one change set");
+    assert_eq!(
+        change_uri.as_str(),
+        "file:///test.vue",
+        "the same-file edit must be keyed by the .vue source URI, got {change_uri:?}"
+    );
+    assert_eq!(
+        edits[0].range.start,
+        Position {
+            line: 5,
+            character: 6,
+        },
+        "the same-file edit must map to the Vue `const msg` decl, got {:?}",
+        edits[0].range.start
+    );
+}
+
+/// When an external resolver DOES supply the foreign carrier file's own context, the foreign edit
+/// maps through THAT context's sourcemap — never the current request's.
+#[test]
+fn merge_code_actions_foreign_carrier_edit_maps_through_external_context() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // A second, distinct carrier whose own sourcemap maps TSX offset 6..9 to a DIFFERENT carrier
+    // line than the current request's mapper. The foreign edit must land on the foreign line.
+    let foreign_carrier = "<template>\n  <span/>\n</template>\n\n<script setup>\n\n\nconst far = 1;\n</script>";
+    let foreign_tsx = "const far = 1;\n";
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Other.vue", foreign_carrier);
+    // TSX line 0 → foreign carrier line 7 (NOT line 5 like the current mapper).
+    builder.add_token(0, 0, 7, 0, Some(source_id), None);
+    builder.add_token(0, 6, 7, 6, Some(source_id), None);
+    let foreign_json = builder.into_sourcemap().to_json_string();
+    let foreign_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&foreign_json).unwrap());
+    let foreign_carrier_li = LineIndex::new_utf16(foreign_carrier);
+    let foreign_tsx_li = LineIndex::new_utf16(foreign_tsx);
+
+    let resolver = |p: &str| -> Option<ExternalIdeContext> {
+        (p == "/other.vue.tsx").then(|| ExternalIdeContext {
+            tsx_line_index: foreign_tsx_li.clone(),
+            mapper: foreign_mapper.clone(),
+            carrier_line_index: foreign_carrier_li.clone(),
+            carrier_negotiated_line_index: None,
+        })
+    };
+    let ext: Option<ExternalIdeResolver> = Some(&resolver);
+
+    let actions = vec![TypeCodeAction {
+        title: "Fix foreign".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/other.vue.tsx".to_string(),
+            start: 6,
+            end: 9,
+            new_text: "renamed".to_string(),
+        }],
+    }];
+    let result = merge_code_actions(
+        actions,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        ext,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+    );
+    assert_eq!(result.len(), 1, "the foreign edit maps through its own context");
+    let CodeActionOrCommand::CodeAction(action) = &result[0] else {
+        panic!("expected a CodeAction");
+    };
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+    let (change_uri, edits) = changes.iter().next().expect("one change set");
+    assert_eq!(
+        change_uri.as_str(),
+        "file:///other.vue",
+        "the foreign edit must be keyed by the FOREIGN .vue URI, got {change_uri:?}"
+    );
+    assert_eq!(
+        edits[0].range.start,
+        Position {
+            line: 7,
+            character: 6,
+        },
+        "the foreign edit must map through the FOREIGN context (line 7), not the current (line 5): {:?}",
+        edits[0].range.start
+    );
+}
+
 /// @ai-generated — Empty actions returns empty vec
 #[test]
 fn merge_code_actions_empty() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let no_external: Option<ExternalIdeResolver> = None;
     let result = merge_code_actions(
         vec![],
+        "/test.vue.tsx",
         &tsx_li,
         &mapper,
         &carrier_li,
+        no_external,
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
