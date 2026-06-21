@@ -1101,7 +1101,7 @@ pub enum ReductionDemand {
 /// macro-root surface and a plain structural surface of the SAME node
 /// never collide on one memo slot. It is NOT an env-hash dimension (R21)
 /// — it is a query-identity dimension, like the projection mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, verter_no_typeexpr::NoTypeExpr)]
 pub enum SurfaceProvenanceContext {
     /// Plain structural lowering. Object members reached here carry
     /// `declared_in_macro_type_arg = false`. This is the default for
@@ -1141,7 +1141,7 @@ pub enum SurfaceProvenanceContext {
 /// `interface Props extends Base` arm is `Heritage` even though it is
 /// `Base`'s own-body member, because the consuming declaration's heritage-arm
 /// context flows into the carrier resolution.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub enum MemberMergeRole {
     /// Reached via an authored reference / synthesized construction — an
     /// authored intersection's reference arm (`type Props = Base & { … }`'s
