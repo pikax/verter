@@ -51,11 +51,612 @@ export const IS_WINDOWS = process.platform === "win32";
 export const IS_MAC = process.platform === "darwin";
 
 // ----------------------------------------------------------------------------------------------------
+// Platform-aware `pnpm install --frozen-lockfile` command resolution (returns `{ cmd, args }`, plus
+// `windowsVerbatimArguments: true` on the Windows arm, for `runContainedStep`). The launch uses the
+// RESOLVED `pnpmPath` (the path `resolvePnpm` already proved on
+// PATH in the preflight) as the SINGLE SOURCE OF TRUTH — never a bare `pnpm` token. A bare token is a
+// CWD-tool-source hazard on Windows: `cmd.exe` searches the CURRENT DIRECTORY first for a bare command,
+// so a bare `pnpm` could resolve a repo-local `pnpm.cmd`/`.bat`/`.exe` (or a different PATHEXT candidate)
+// than the resolver approved — letting the CWD control the installer and creating a preflight-vs-installer
+// asymmetry. Launching the resolved absolute path removes that bare-token CWD search.
+//
+// On POSIX the resolved `pnpmPath` is a directly-executable shim, so `spawn(pnpmPath, …, { shell:false })`
+// launches it with NO PATH re-search. On Windows `pnpmPath` is `pnpm.cmd` (a batch shim), and Node's
+// `child_process.spawn` with `shell:false` CANNOT launch a `.cmd`/`.bat` directly (documented Node
+// behavior — it errors with ENOENT / a spawn error). So on Windows we invoke the resolved path THROUGH
+// the command processor: `cmd.exe` is a real `.exe` that `spawn` launches directly with `shell:false`,
+// and crucially it stays the REAPABLE TREE ROOT — `runContainedStep`'s teardown keys on `child.pid` and
+// reaps the whole tree via `taskkill /PID <pid> /T /F`, so cmd.exe (not the .cmd shim) must be the
+// spawned process. We pass the classic `cmd /d /s /c "<quoted-command>"` form as ONE verbatim args
+// element (`""<pnpmPath>" install --frozen-lockfile"`) so a `.cmd` path containing spaces survives, and
+// the caller forwards `windowsVerbatimArguments: true` to `spawn` so Node does NOT re-quote the args.
+// The explicit cmd.exe command keeps the spawn `shell:false` and the containment model UNCHANGED (we do
+// NOT switch `runContainedStep` to `shell:true`). `windows` and `env` are parameterized so this is
+// unit-testable on a POSIX host without actually spawning. `--frozen-lockfile` is preserved on both
+// paths (the install never mutates the lockfile).
+//
+// The Windows command processor is PINNED to a VERIFIED ABSOLUTE executable — never a bare/relative
+// `cmd.exe` token (which `cmd.exe`'s own CWD-first search, or `spawn`'s lookup, could resolve to a repo-local
+// imposter). Resolution order: (1) read `ComSpec` CASE-INSENSITIVELY (Windows folds env-var names, so the
+// key may be `COMSPEC`/`ComSpec`/`comspec`) — use that value ONLY if it is ABSOLUTE and an existing file;
+// (2) else read `SystemRoot` CASE-INSENSITIVELY and form `<SystemRoot>\System32\cmd.exe` — use it if it is
+// ABSOLUTE and an existing file; (3) else SETUP-FAIL — return `{ setupFail: true, detail }` so the caller
+// FAILS LOUD (the production `runInstall` closure turns this into a `runContainedStep`-shaped `spawnError`
+// result, which `preflightFreshnessTooling` already maps to action "setup-fail" ⇒ EXIT_USAGE) rather than
+// launching a bare `cmd.exe`. The is-file presence predicate is INJECTED (`isFileFn`, default
+// `defaultIsFile`, mirroring the Rust `Path::is_file()`) so the self-test drives a fake fs with NO real
+// filesystem access — the same injection pattern `resolveExecutableShim` / `resolveLocalBinShim` use. The
+// `<SystemRoot>\System32\cmd.exe` path is built with explicit `\` separators ON PURPOSE: it is a Windows
+// path STRING (data), not a host path join, so it stays correct when the Windows branch runs on a POSIX
+// self-test host. The POSIX branch is UNCHANGED — the resolved `pnpmPath` is directly executable.
+// ----------------------------------------------------------------------------------------------------
+export function pnpmInstallCommand(
+  pnpmPath,
+  windows = IS_WINDOWS,
+  env = process.env,
+  isFileFn = defaultIsFile,
+) {
+  if (windows) {
+    const cmdProcessor = resolveWindowsCommandProcessor(env, isFileFn);
+    if (cmdProcessor === null) {
+      return {
+        setupFail: true,
+        detail:
+          `no absolute Windows command processor could be resolved: neither a case-insensitive \`ComSpec\` ` +
+          `that is absolute and an existing file, nor an absolute existing \`<SystemRoot>\\System32\\cmd.exe\` ` +
+          `(\`SystemRoot\` also read case-insensitively). Refusing to launch a bare/relative \`cmd.exe\` ` +
+          `(a CWD-search hazard). Set a valid \`ComSpec\` or \`SystemRoot\` and re-run the gate.`,
+      };
+    }
+    return {
+      cmd: cmdProcessor,
+      args: ["/d", "/s", "/c", `""${pnpmPath}" install --frozen-lockfile"`],
+      windowsVerbatimArguments: true,
+    };
+  }
+  return { cmd: pnpmPath, args: ["install", "--frozen-lockfile"] };
+}
+
+// Resolve the Windows command processor to a VERIFIED ABSOLUTE executable, or null when none is available.
+// Reads `ComSpec` then `SystemRoot` CASE-INSENSITIVELY (Windows folds env-var names case-insensitively, so
+// the gate must find the value under ANY casing the way the OS would). A candidate is accepted ONLY when it
+// is a fully-qualified absolute Windows path AND `isFileFn` reports it as an existing file — a relative
+// `cmd.exe`, a `%SystemRoot%`-derived path that does not exist, or a missing/empty value all fall through.
+// `isFileFn` is injected (default `defaultIsFile`, mirroring the Rust `Path::is_file()`) so the self-test
+// can drive a fake fs.
+function resolveWindowsCommandProcessor(env, isFileFn) {
+  const comSpec = readEnvCaseInsensitive(env, "COMSPEC");
+  if (comSpec && isAbsoluteWindowsPath(comSpec) && isFileFn(comSpec)) return comSpec;
+  const systemRoot = readEnvCaseInsensitive(env, "SYSTEMROOT");
+  if (systemRoot) {
+    // Build the canonical `<SystemRoot>\System32\cmd.exe` with explicit `\` separators — a Windows path
+    // STRING (data), not a host path join, so it stays correct when this runs on a POSIX self-test host.
+    const candidate = `${systemRoot}\\System32\\cmd.exe`;
+    if (isAbsoluteWindowsPath(candidate) && isFileFn(candidate)) return candidate;
+  }
+  return null;
+}
+
+// Read an env value by a CASE-INSENSITIVE key match (`wantUpper` is the already-upper-cased name). Returns
+// the first string value whose key folds to `wantUpper`, else undefined. Windows folds env-var names
+// case-insensitively, so `ComSpec` may be stored as `COMSPEC`/`comspec`/`ComSpec`.
+function readEnvCaseInsensitive(env, wantUpper) {
+  for (const k of Object.keys(env)) {
+    if (k.toUpperCase() === wantUpper && typeof env[k] === "string") return env[k];
+  }
+  return undefined;
+}
+
+// Pure SYNTACTIC Windows-absolute classification (no filesystem IO, platform-independent so it is correct on
+// a POSIX self-test host): a drive-ROOTED `C:\x` / `C:/x`, a UNC `\\server\share`, or a device `\\?\…` /
+// `\\.\…` path. A drive-RELATIVE `C:foo` (drive + colon WITHOUT a separator) and a root-relative `\x` / `/x`
+// are NOT absolute.
+function isAbsoluteWindowsPath(p) {
+  if (/^[\\/]{2}/.test(p)) return true; // UNC / device (`\\?\` / `\\.\` subsumed)
+  return /^[A-Za-z]:[\\/]/.test(p); // drive-rooted (drive-relative `C:foo` excluded)
+}
+
+// ----------------------------------------------------------------------------------------------------
+// Freshness-tooling shim resolution (platform-aware) — mirrors the Rust freshness test's
+// `resolve_executable_shim` / `locate_buf_binary` / `locate_oxfmt_binary`
+// (crates/verter_protocol/tests/cases/typeinfo_proto_ts_freshness.rs). The two byte-equality freshness
+// tests regenerate the committed TS proto bindings through the workspace `buf` + `oxfmt` binaries; those
+// binaries are resolved FIRST under `node_modules/.bin`, then PATH. In a fresh `git worktree` nobody runs
+// `pnpm install`, so `node_modules` is absent and `oxfmt` (a Node devDependency that typically is NOT on
+// PATH, so a fresh worktree without `pnpm install` lacks it — though the resolver, like the Rust test's
+// `locate_oxfmt_binary` PATH fallback, DOES fall back to PATH if it happens to be present there) is
+// missing. With the tooling absent the buf-absent pair SKIPS-and-PASSES (no FAIL line),
+// so the gate self-ensures the tooling here precisely so the byte-pin RUNS GENUINELY — it must NOT blanket-
+// swallow the pair as "env-only tolerated", because that would also mask a fixable missing `pnpm install` OR
+// a GENUINE drift (tools present, bindings stale, the test RUNS and FAILS). It tolerates the pair ONLY when
+// the tools are GENUINELY absent (install could not run at all). The is-file presence predicate is injected
+// so the self-test can drive a fake filesystem; production passes the live `defaultIsFile` (mirroring the
+// Rust `Path::is_file()`, so a directory at a shim path does NOT count as the tool being present).
+//
+// POSIX: the extensionless `node_modules/.bin/<tool>` shim is directly executable — return it if it
+// exists. Windows: `CreateProcess` cannot launch the extensionless POSIX shell script, so try the runnable
+// `.CMD`/`.cmd`/`.exe`/`.bat` forms (this exact order, matching the Rust resolver) and return the first
+// that exists. Returns the resolved path string, or `null` when none exists.
+//
+// PRESENCE PREDICATE: the Rust freshness test decides a shim is present with `Path::is_file()`, so these
+// resolvers mirror that with an IS-FILE check (`defaultIsFile`), NOT a bare `existsSync` — a corrupt
+// DIRECTORY at a shim path (e.g. `node_modules/.bin/buf/`) must NOT count as the tool being present
+// (which would wrongly DISABLE install/tolerance and diverge from the Rust predicate). `isFileFn` is
+// injected so the self-test can drive a fake fs; production passes the live `defaultIsFile`. For a real
+// file shim the result is identical to the old `existsSync` check — the only behavior change is that a
+// directory at the shim path now resolves to `null`.
+// ----------------------------------------------------------------------------------------------------
+export const WINDOWS_SHIM_EXTS = ["CMD", "cmd", "exe", "bat"];
+
+// Default IS-FILE predicate mirroring the Rust `Path::is_file()`: a path counts as present only when it
+// is a regular file (a directory, a missing path, or an stat error all return false).
+export function defaultIsFile(p) {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// The LITERAL PATH-list delimiter selected SOLELY by the injected `windows` flag — `;` for Windows, `:`
+// for POSIX — and NOT the ambient `node:path.delimiter` (which is the HOST's delimiter, i.e. `;` on a
+// Windows host and `:` on POSIX). Reading the host `delimiter` would make a `windows:false` self-test on a
+// Windows host split a POSIX PATH on `;` (a false test-harness failure for a Windows contributor) and
+// vice-versa. This helper makes the PATH-splitting helpers (`resolvePathShim`, `sanitizePathValue`) truly
+// platform-PARAMETERIZED — the `windows` flag fully determines the delimiter, host-independent — which is
+// the stated intent of that flag. Single source of truth for both loci (no duplicated `windows ? ";" : …`).
+export function pathDelimiterFor(windows) {
+  return windows ? ";" : ":";
+}
+
+// Concatenate a PATH component `dir` with a bare `toolName` WITHOUT any normalization — the JS mirror of the
+// Rust freshness test's `std::path::Path::join(dir, tool)` / `PathBuf::push`, which are PURELY LEXICAL: they
+// do NOT collapse `..`/`.` and do NOT resolve symlinks. Deliberately NOT `node:path.join`/`normalize`/
+// `resolve` — those NORMALIZE (`/tmp/link/../bin` => `/tmp/bin`), so against a symlinked-or-`..`-bearing
+// absolute component the JS candidate would address a DIFFERENT file than the Rust child (a residual
+// preflight-vs-child disagreement that could silently tolerate a real stale-binding regression). Returns
+// `dir + sep + toolName` where `sep` is the platform separator selected by the injected `windows` flag
+// (`\` on Windows, else `/`), UNLESS `dir` already ends with a platform separator — in which case `toolName`
+// is appended directly, with no doubled separator. The trailing-separator test is platform-ACCURATE to match
+// Rust's `Path::join`: on Windows a trailing `/` OR `\` suppresses the inserted separator (both are path
+// separators), but on POSIX ONLY a trailing `/` does — a trailing `\` on POSIX is an ORDINARY filename byte,
+// so the `/` IS inserted (`/tmp/abs\` + `buf` => `/tmp/abs\/buf`), mirroring POSIX `Path::join`. Pure string
+// concatenation, byte-preserving on `dir`. An EMPTY `dir` (`""`) returns `toolName` UNCHANGED (no leading
+// separator), mirroring Rust's `Path::new("").join(tool)` / `PathBuf::from("").push(tool)`, both of which
+// yield exactly `tool` (the relative file itself) — see the `"".join("buf") == "buf"` note on
+// `sanitizePathValue`. In production an empty PATH entry never reaches this helper: the resolver
+// (`resolvePathShim`) drops it via `if (!dir) continue` and `sanitizePathValue` rejects empties UPSTREAM, so
+// this short-circuit is a contract-completeness/footgun-closure (a true byte-for-byte mirror at the empty
+// edge), not a live production code path.
+export function appendPathComponentRaw(dir, toolName, windows) {
+  if (dir === "") return toolName;
+  const sep = windows ? "\\" : "/";
+  const endsWithSep = windows ? dir.endsWith("/") || dir.endsWith("\\") : dir.endsWith("/");
+  return endsWithSep ? `${dir}${toolName}` : `${dir}${sep}${toolName}`;
+}
+
+// Resolve a single base path (an extensionless shim path, e.g. `<dir>/buf`) to a runnable form, applying
+// the platform-aware suffix handling. `windows` is parameterized (defaulting to the live platform) so the
+// Windows branch is unit-testable on a POSIX host. `isFileFn` is the is-file presence predicate (default
+// `defaultIsFile`). Returns the resolved path, or null.
+export function resolveExecutableShim(basePath, isFileFn = defaultIsFile, windows = IS_WINDOWS) {
+  if (windows) {
+    for (const ext of WINDOWS_SHIM_EXTS) {
+      const candidate = `${basePath}.${ext}`;
+      if (isFileFn(candidate)) return candidate;
+    }
+    return null;
+  }
+  return isFileFn(basePath) ? basePath : null;
+}
+
+// Resolve a tool's LOCAL `node_modules/.bin` shim (the version-locked devDependency form the freshness
+// test prefers). `repoRoot` is the workspace root; `toolName` is the bare tool (`buf` / `oxfmt`). Returns
+// the runnable shim path, or null when no local shim exists. Mirrors the `node_modules/.bin/<tool>`
+// preference in the Rust `locate_*_binary` helpers.
+export function resolveLocalBinShim(
+  repoRoot,
+  toolName,
+  isFileFn = defaultIsFile,
+  windows = IS_WINDOWS,
+) {
+  const base = join(repoRoot, "node_modules", ".bin", toolName);
+  return resolveExecutableShim(base, isFileFn, windows);
+}
+
+// Find the actual env key that NAMES the PATH variable, matching how the Rust freshness test reads it.
+// Rust's `std::env::var_os("PATH")` is CASE-SENSITIVE on POSIX (it reads `PATH` and never `Path`) but the
+// Windows OS folds env-var names case-INSENSITIVELY, so `var_os("PATH")` there resolves a PATH var stored
+// under ANY casing (`PATH`/`Path`/`PaTh`/`path`). The gate's JS therefore must read AND sanitize the SAME
+// key the Rust side reads, or the preflight verdict and the executed test disagree on a non-canonical
+// casing. Returns the env key string, or null when no PATH var is present.
+//   - POSIX: `"PATH"` iff `typeof env.PATH === "string"` (case-EXACT — a `Path` key is a DIFFERENT,
+//     non-PATH var Rust never reads, so it is not the PATH key on POSIX).
+//   - Windows: the case-INSENSITIVE PATH key. DETERMINISTIC tie-break when multiple casings coexist
+//     (pathological): prefer an exact `PATH`, then `Path`, then the FIRST remaining `k` with
+//     `k.toUpperCase() === "PATH"` and a string value (stable insertion-order scan).
+export function findPathEnvKey(env, windows) {
+  if (!windows) {
+    return typeof env.PATH === "string" ? "PATH" : null;
+  }
+  if (typeof env.PATH === "string") return "PATH";
+  if (typeof env.Path === "string") return "Path";
+  for (const k of Object.keys(env)) {
+    if (k.toUpperCase() === "PATH" && typeof env[k] === "string") return k;
+  }
+  return null;
+}
+
+// Resolve a tool from PATH (the `which <tool>` fallback the Rust helpers use after the local shim miss).
+// Splits the PATH var on the LITERAL platform delimiter selected by the injected `windows` flag
+// (`pathDelimiterFor(windows)` — `;` for Windows, `:` for POSIX), NOT the ambient host `node:path.delimiter`,
+// so the delimiter is host-INDEPENDENT: a `windows:true` self-test on a POSIX host genuinely exercises
+// `;`-separated multi-entry Windows PATH resolution, and a `windows:false` resolve on a Windows host still
+// splits on `:`. This matches `sanitizePathValue`, which splits on the same `pathDelimiterFor(windows)`. The
+// per-directory candidate is then built by `appendPathComponentRaw` — a NON-NORMALIZING concatenation that
+// mirrors the Rust child's purely-lexical `dir.join(tool)` (no `..`/`.` collapse, no symlink resolution), so
+// an absolute component containing `..`/`.` or a symlink resolves IDENTICALLY on both sides — and the same
+// suffix handling is applied per directory. Returns the first runnable path, or null. `env` and the
+// platform are injected for the self-test's fake env. This
+// resolver itself skips EMPTY PATH components only (`if (!dir) continue`). The cwd-relative stripping is
+// NOT done here — it is applied UPSTREAM by `buildCargoEnv` / `sanitizePathValue` to the env handed to this
+// resolver, so in the production gate (which always passes the sanitized `buildCargoEnv` env) the resolver
+// only ever sees CWD-INDEPENDENT ABSOLUTE PATH components: no empty, no dot-only, no non-dot relative, no
+// `..`-relative, and no Windows drive-relative / root-relative entry survives the sanitizer. Calling
+// `resolvePathShim` directly on a raw `{ PATH: "." }` returns the tool (the resolver does not itself filter
+// relative entries); only the upstream sanitizer drops them. Together they make the preflight verdict and
+// the executed Rust freshness test resolve from the SAME absolute-only PATH — the CLOSED invariant: gate
+// PATH is cwd-independent/absolute-only for both the preflight resolver and the test children, so a real
+// stale-binding regression still FAILS (both sides resolve `buf` identically) with no cwd-relative
+// disagreement.
+export function resolvePathShim(
+  toolName,
+  env = process.env,
+  isFileFn = defaultIsFile,
+  windows = IS_WINDOWS,
+) {
+  // Read PATH from the SAME key the Rust freshness test reads via `std::env::var_os("PATH")`. On POSIX that
+  // is CASE-SENSITIVE — it reads `PATH` and never `Path` — so `findPathEnvKey(env, false)` returns `"PATH"`
+  // only: a `Path`-only env (no `PATH`) yields NO PATH, matching Rust's `var_os("PATH") => None`, so the JS
+  // resolver and the Rust test AGREE (a POSIX `Path` fallback would resolve a tool JS-side that Rust skips —
+  // a fail-open asymmetry). On Windows env-var names fold case-INSENSITIVELY, so `var_os("PATH")` resolves a
+  // PATH var stored under ANY casing (`PATH`/`Path`/`PaTh`/`path`); `findPathEnvKey(env, true)` returns that
+  // actual case-insensitively-matched key so the resolver reads exactly what Rust reads. `??` (not `||`) so
+  // a present `""` at that key is NOT treated as "fall back" — a present empty PATH stays empty.
+  const pathKey = findPathEnvKey(env, windows);
+  const pathVar = (pathKey === null ? undefined : env[pathKey]) ?? "";
+  if (!pathVar) return null;
+  // Split on the LITERAL platform delimiter selected by the `windows` flag (`pathDelimiterFor(windows)` —
+  // `;` on Windows, `:` on POSIX), host-INDEPENDENT (NOT the ambient `node:path.delimiter`), so a
+  // `windows:true` resolve splits a `;`-separated PATH correctly even on a POSIX host and a `windows:false`
+  // resolve splits on `:` even on a Windows host (matching `sanitizePathValue`, which splits on the same
+  // `pathDelimiterFor(windows)`).
+  const pathDelim = pathDelimiterFor(windows);
+  for (const dir of pathVar.split(pathDelim)) {
+    // Skips EMPTY components only. The cwd-relative stripping lives UPSTREAM in `sanitizePathValue` (applied
+    // by `buildCargoEnv` to the env this resolver consumes), so the production gate only ever hands this loop
+    // CWD-INDEPENDENT ABSOLUTE components (no dot-only, non-dot relative, `..`-relative, or Windows
+    // drive-relative / root-relative entry survives); calling the resolver directly on a raw `{ PATH: "." }`
+    // does NOT itself filter the `.`. Together they make the preflight and the executed Rust test resolve
+    // `buf` from the SAME absolute-only PATH — the closed cwd-independent invariant, so a real regression
+    // still FAILS with no preflight-vs-test disagreement.
+    if (!dir) continue;
+    // Build the candidate by RAW non-normalizing concatenation (`appendPathComponentRaw`), mirroring the Rust
+    // child's lexical `dir.join(tool)` — NOT `node:path.join`, which would collapse `..`/`.` and make the JS
+    // candidate address a different file than the Rust child for a symlinked/`..`-bearing absolute component.
+    const resolved = resolveExecutableShim(
+      appendPathComponentRaw(dir, toolName, windows),
+      isFileFn,
+      windows,
+    );
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// The freshness tools the byte-equality tests need. Both are ENSURED (present / installed) before the
+// archive build; `FRESHNESS_TOOLS` is the "ensure both" set used for the both-present short-circuit and the
+// post-install re-resolve. It is NOT the tolerance gate — see `BUF_TOOL` below.
+export const FRESHNESS_TOOLS = ["buf", "oxfmt"];
+
+// The SKIP-DETERMINING tool. The Rust freshness test (`regenerate_gen_tree_via_buf` in
+// crates/verter_protocol/tests/cases/typeinfo_proto_ts_freshness.rs) skips GRACEFULLY iff `buf` is
+// unavailable — `let buf_bin = locate_buf_binary(root)?;` early-returns `None`. If `buf` IS present it RUNS
+// `buf generate` + the byte-compare; `oxfmt` is CONDITIONAL there (`if let Some(oxfmt_bin) =
+// locate_oxfmt_binary(root)`), so a MISSING `oxfmt` only skips the format step — the test STILL byte-compares
+// and can FAIL. Therefore the byte-pin TOLERANCE keys on `buf` SPECIFICALLY (mirrors the Rust
+// `locate_buf_binary(root)?` early-return), NOT on "both tools": tolerance is allowed ONLY when `buf` is not
+// resolvable. `oxfmt` is a REQUIRED-WHEN-buf-PRESENT canonical tool — a missing `oxfmt` with `buf` available
+// is a LOUD setup-fail (it would otherwise run a degraded, un-oxfmt'd byte-compare that can false-positive),
+// never tolerate and never a degraded run.
+export const BUF_TOOL = "buf";
+
+// The installer the freshness tools come from. "pnpm genuinely absent" is a POSITIVE, platform-aware
+// resolver fact (resolved via PATH — with the WINDOWS_SHIM_EXTS suffix set on Windows — via `resolvePnpm`),
+// determined BEFORE the install. The RESOLVED path that probe returns is then the exact binary
+// `pnpmInstallCommand` launches (POSIX: directly; Windows: that resolved `.cmd` path quoted under
+// `cmd.exe /d /s /c`), so the probe and the launch run the SAME binary — NOT a bare `pnpm` token re-searched
+// at launch time. Absence is NOT inferred from the install's `spawnError`: after the Windows install was
+// wrapped as `cmd.exe /d /s /c "<resolved-pnpm>" install …` (Node's `spawn(shell:false)` cannot launch a
+// `.cmd` shim directly), the install's `spawnError` means "cmd.exe failed to spawn", NOT "pnpm absent", so it
+// can no longer stand in for pnpm-absence.
+export const PNPM_TOOL = "pnpm";
+
+// Resolve `pnpm` as a POSITIVE fact — via PATH ONLY (with the WINDOWS_SHIM_EXTS suffix handling on Windows).
+// This is PATH-only ON PURPOSE: pnpm is the bootstrap INSTALL DRIVER, not a version-locked freshness shim, so
+// a repo-local `node_modules/.bin/pnpm` must NOT become an approved installer. The RESOLVED path this returns
+// is the single source of truth the launcher uses: `pnpmInstallCommand(pnpmPath, …)` runs THAT exact binary —
+// directly on POSIX (`{ cmd: pnpmPath, … }`) and as that quoted resolved `.cmd` path under `cmd.exe /d /s /c`
+// on Windows — so the probe and the launch are the SAME binary, never a bare `pnpm` re-searched at launch (on
+// Windows a bare token would let cmd.exe search the CWD first — a CWD-tool-source hazard). Probing a local-only
+// shim the launcher never invokes would treat pnpm as "positively resolved" while the PATH launch fails →
+// setup-fail, the probe contradicting the launch. pnpm is conventionally a global/PATH tool; resolving it via
+// PATH keeps the probe and the launch consistent. (buf/oxfmt differ: the Rust freshness test prefers their
+// version-locked `node_modules/.bin` shim and runs THAT directly, so their resolution legitimately checks
+// node_modules first — pnpm is the install DRIVER, not a freshness shim.) Uses the SAME injected
+// `env`/`isFileFn`/`windows` so the self-test can drive a fake PATH with `windows:true`. Returns the resolved
+// path, or null when pnpm is not on PATH (i.e. not resolvable the way the launcher runs it). (No `repoRoot`
+// param: pnpm is resolved via PATH ONLY — it never consults `node_modules/.bin`, so a workspace root would be
+// unused.)
+export function resolvePnpm(env, isFileFn = defaultIsFile, windows = IS_WINDOWS) {
+  return resolvePathShim(PNPM_TOOL, env, isFileFn, windows);
+}
+
+// ----------------------------------------------------------------------------------------------------
+// Freshness-tooling preflight — the verdict-gating authority. Run AFTER the gate mutex is held and BEFORE
+// the archive build. It decides whether the typeinfo freshness-test tolerance is ALLOWED for this run.
+//
+// BUF-ABSENCE-ONLY tolerance (the codex ruling). The byte-pin tolerance is allowed ONLY when `buf` is NOT
+// resolvable — exactly the condition under which the Rust freshness test SKIPS. `regenerate_gen_tree_via_buf`
+// (crates/verter_protocol/tests/cases/typeinfo_proto_ts_freshness.rs) early-returns `None` when
+// `locate_buf_binary(root)?` cannot find `buf`; with `buf` PRESENT it runs `buf generate` + the byte-compare.
+// `oxfmt` is CONDITIONAL in that test (`if let Some(oxfmt_bin) = locate_oxfmt_binary(root)`) — a MISSING
+// `oxfmt` only skips the format step, so the test STILL byte-compares and CAN FAIL. Therefore `oxfmt` is a
+// REQUIRED-WHEN-buf-PRESENT canonical tool: a missing `oxfmt` with `buf` available is a LOUD `setup-fail`,
+// never `tolerate` and never a degraded run (it would otherwise run an un-oxfmt'd byte-compare that can
+// false-positive). The skip-determining tool is `BUF_TOOL` — the tolerance gate keys on `buf` SPECIFICALLY,
+// resolved local + PATH, NOT on "both tools".
+//
+// POSITIVE-PNPM-PROBE model (preserved). Whether to ATTEMPT the install is decided by a POSITIVE,
+// platform-aware `pnpm` resolver fact determined BEFORE the install — `pnpm` is resolved via PATH (with the
+// WINDOWS_SHIM_EXTS suffix set on Windows; via `resolvePnpm`). The RESOLVED path is then the exact binary
+// `pnpmInstallCommand` launches (POSIX: directly; Windows: that resolved `.cmd` path quoted under
+// `cmd.exe /d /s /c`) — a local `node_modules/.bin/pnpm` shim is NOT the launch target, and the resolved
+// path (not a bare `pnpm` token) removes any launch-time re-search. Absence is NOT inferred from the
+// install's `spawnError`. This is load-bearing on Windows: the production install is wrapped as
+// `cmd.exe /d /s /c "<resolved-pnpm>" install …` (Node's `spawn(shell:false)` cannot launch a `.cmd` shim
+// directly), so the install's `spawnError` means "cmd.exe failed to spawn", NOT "pnpm absent".
+// After a POSITIVE pnpm probe, `spawnError` from the install is NO LONGER a tolerance signal — it means a
+// launcher / race / permission / cmd failure, i.e. `setup-fail`.
+//
+// Branch table (the contract):
+//   * BOTH local `node_modules/.bin` shims present up front → tolerance DISABLED (action "already-present";
+//     `runInstall` is NOT called, pnpm is NOT probed) — the tools exist, so a freshness FAIL is a real
+//     regression.
+//   * a local shim is missing → resolve `pnpm` via PATH (platform-aware) as a POSITIVE fact (PATH-only —
+//     the resolved path is what the launcher runs; a local `node_modules/.bin/pnpm` shim does NOT count):
+//       - pnpm NOT resolvable: re-resolve `buf` and `oxfmt` SEPARATELY (local + PATH — they may be on PATH
+//         without a local install). The install is NOT run (`runInstall` is NOT called):
+//           · `buf` NOT resolvable                  → tolerance ENABLED (action "tolerate-genuinely-absent");
+//             the Rust test would SKIP, so the exact freshness pair is tolerated — REGARDLESS of `oxfmt`.
+//           · `buf` resolvable + `oxfmt` resolvable → tolerance DISABLED (action "path-fallback").
+//           · `buf` resolvable + `oxfmt` MISSING    → action "setup-fail" (tolerance OFF). The Rust test would
+//             RUN but not canonically format — FAIL LOUD (ensure `oxfmt`), do NOT tolerate, do NOT run a
+//             degraded un-oxfmt'd byte-compare.
+//       - pnpm IS resolvable: run the injected `runInstall()` (production: the platform-aware
+//         `pnpmInstallCommand` inside the contained-step / timeout / stall machinery). Strict PRECEDENCE
+//         (a later branch never overrides an earlier one):
+//           · watchdog reason (TIMEOUT/STALL)       → action "watchdog" (PROPAGATED via `mapStepReason`,
+//             never tolerated).
+//           · install spawnError                    → action "setup-fail" (tolerance OFF). After a positive
+//             pnpm probe, spawnError is a launcher/race/permission/cmd failure, NOT proven pnpm absence.
+//           · install LAUNCHED, exited NON-ZERO     → action "setup-fail" (tolerance OFF) — a deterministic
+//             install failure (canonical case: a frozen-lockfile mismatch), checked REGARDLESS of whether
+//             buf/oxfmt are independently resolvable on PATH (silently proceeding on a PATH fallback past a
+//             frozen-lockfile mismatch is the bypass the codex ruling forbids).
+//           · install exited ZERO → RE-RESOLVE `buf`/`oxfmt` local + PATH:
+//               - both now resolvable               → tolerance DISABLED (action "installed" | "path-fallback").
+//               - `buf` MISSING                     → action "setup-fail" (an exit-0 install that did not
+//                 produce `buf` is a deterministic setup failure).
+//               - `buf` present + `oxfmt` MISSING   → action "setup-fail" (an exit-0 install that produced
+//                 `buf` but not `oxfmt` is a deterministic setup failure — `oxfmt` is required when buf runs).
+//
+// `runInstall` is injected (the self-test substitutes a fake; production passes a closure that calls
+// `runContainedStep` with the platform-aware `pnpmInstallCommand`). It returns the `runContainedStep` shape
+// ({ code, reason, spawnError, ... }). The is-file presence predicate (the `existsSyncFn` opts key — an
+// IS-FILE check, default `defaultIsFile`), `env`, and `windows` are injected so the self-test can drive a
+// fake PATH/fs with `windows:true`; the pnpm/buf/oxfmt probes use the SAME injected `env`/`isFileFn`/`windows`.
+// Returns `{ freshnessToleranceAllowed, action, detail, installRes }`.
+// ----------------------------------------------------------------------------------------------------
+export async function preflightFreshnessTooling(opts) {
+  const {
+    repoRoot,
+    env = process.env,
+    runInstall,
+    // The shim PRESENCE predicate (default `defaultIsFile`, mirroring the Rust `Path::is_file()`). The
+    // self-test injects a fake via `existsSyncFn`; that injected predicate is treated as an IS-FILE check
+    // (a fake that returns true only for the intended FILE paths resolves identically — only a directory
+    // at a shim path now fails to count as present, matching Rust).
+    existsSyncFn: isFileFn = defaultIsFile,
+    windows = IS_WINDOWS,
+  } = opts;
+
+  const resolveAll = () =>
+    FRESHNESS_TOOLS.map((t) => ({
+      tool: t,
+      local: resolveLocalBinShim(repoRoot, t, isFileFn, windows),
+      path: resolvePathShim(t, env, isFileFn, windows),
+    }));
+  // Resolve a single tool local-then-PATH (the same precedence the Rust `locate_*_binary` helpers use). The
+  // tolerance gate consults `buf` through this; `oxfmt` is a required-when-buf-present tool consulted the
+  // same way.
+  const resolveTool = (t) =>
+    resolveLocalBinShim(repoRoot, t, isFileFn, windows) ||
+    resolvePathShim(t, env, isFileFn, windows);
+
+  // Step 1–2: both LOCAL shims present up front ⇒ tolerance disabled, no install.
+  const beforeLocal = FRESHNESS_TOOLS.map((t) =>
+    resolveLocalBinShim(repoRoot, t, isFileFn, windows),
+  );
+  if (beforeLocal.every((p) => p)) {
+    return {
+      freshnessToleranceAllowed: false,
+      action: "already-present",
+      detail: `both freshness tools resolved in node_modules/.bin (${beforeLocal.join(", ")})`,
+      installRes: null,
+    };
+  }
+
+  const missingBefore = FRESHNESS_TOOLS.filter(
+    (t) => !resolveLocalBinShim(repoRoot, t, isFileFn, windows),
+  );
+
+  // Step 3 (POSITIVE pnpm probe — gates whether to ATTEMPT the install). Before attempting any install,
+  // resolve `pnpm` as a POSITIVE, platform-aware RESOLVER fact via PATH (with the WINDOWS_SHIM_EXTS suffix set
+  // on Windows) — PATH-only. The resolved path is the exact binary `pnpmInstallCommand` then launches (POSIX:
+  // directly; Windows: that resolved `.cmd` path quoted under `cmd.exe /d /s /c`); a local
+  // `node_modules/.bin/pnpm` shim the launcher never invokes does NOT count. "pnpm not resolvable" is THIS
+  // probe failing — NOT the install's spawnError (which on Windows is a cmd.exe-wrapper failure, not
+  // pnpm-absence).
+  const pnpmPath = resolvePnpm(env, isFileFn, windows);
+
+  if (!pnpmPath) {
+    // pnpm is genuinely unresolvable ⇒ the install CANNOT run. Decide on `buf` SPECIFICALLY (the
+    // skip-determining tool): the Rust byte-pin test SKIPS iff `buf` is unavailable, so tolerance is allowed
+    // ONLY when `buf` is not resolvable — REGARDLESS of `oxfmt`. With `buf` present, `oxfmt` is required:
+    // missing `oxfmt` is a LOUD setup-fail (a degraded un-oxfmt'd byte-compare can false-positive), never
+    // tolerate. Do NOT call `runInstall`. Resolve both tools local + PATH.
+    const bufResolved = resolveTool(BUF_TOOL);
+    const oxfmtResolved = resolveTool("oxfmt");
+    if (!bufResolved) {
+      return {
+        freshnessToleranceAllowed: true,
+        action: "tolerate-genuinely-absent",
+        detail:
+          `pnpm is not resolvable (not on PATH — the way \`pnpmInstallCommand\` launches it) and \`buf\` is not resolvable — ` +
+          `exactly the condition under which the Rust byte-pin test SKIPS. Tolerating the exact freshness ` +
+          `pair (the install was NOT attempted; \`oxfmt\` resolvability is irrelevant when \`buf\` is absent).`,
+        installRes: null,
+      };
+    }
+    if (oxfmtResolved) {
+      return {
+        freshnessToleranceAllowed: false,
+        action: "path-fallback",
+        detail:
+          `pnpm is not resolvable (not on PATH — the way \`pnpmInstallCommand\` launches it) but both freshness tools resolve on ` +
+          `PATH: buf=${bufResolved}, oxfmt=${oxfmtResolved} — tolerance DISABLED (the tools exist, so a ` +
+          `freshness FAIL is a real regression).`,
+        installRes: null,
+      };
+    }
+    return {
+      freshnessToleranceAllowed: false,
+      action: "setup-fail",
+      detail:
+        `pnpm is not resolvable but \`buf\` IS resolvable (${bufResolved}) while \`oxfmt\` is MISSING — the ` +
+        `Rust byte-pin test would RUN but the regenerated bindings would not be canonically formatted, a ` +
+        `degraded un-oxfmt'd byte-compare that can false-positive. FAILING LOUD as setup; \`oxfmt\` is a ` +
+        `required canonical-run tool. Ensure \`oxfmt\` (run \`pnpm install --frozen-lockfile\` from the repo ` +
+        `root) and re-run the gate. Tolerance is NEVER granted on \`oxfmt\` absence.`,
+      installRes: null,
+    };
+  }
+
+  // Step 4: pnpm IS resolvable ⇒ attempt the injected install (production runs the platform-aware
+  // `pnpmInstallCommand` inside the contained-step machinery). Pass the RESOLVED `pnpmPath` so the
+  // launcher runs THAT exact binary (no bare-`pnpm` re-search, no Windows CWD search) — it is the single
+  // source of truth for both the probe and the launch.
+  const installRes = await runInstall({ pnpmPath });
+
+  // A watchdog kill (TIMEOUT/STALL) from the install step is PROPAGATED, never tolerated.
+  if (installRes && installRes.reason) {
+    return {
+      freshnessToleranceAllowed: false,
+      action: "watchdog",
+      detail: `pnpm install ${installRes.reason} while ensuring freshness tooling`,
+      installRes,
+    };
+  }
+
+  // A spawnError now means a LAUNCHER / race / permission / cmd failure — NOT proven pnpm absence (pnpm was
+  // POSITIVELY resolved in step 3, so spawnError is no longer a tolerance signal). FAIL LOUD as setup.
+  if (installRes && installRes.spawnError) {
+    return {
+      freshnessToleranceAllowed: false,
+      action: "setup-fail",
+      detail:
+        `pnpm install FAILED to launch (spawnError) even though pnpm was resolved at ${pnpmPath} — a ` +
+        `launcher / race / permission / cmd failure, NOT proven pnpm absence (after a positive pnpm probe ` +
+        `spawnError is no longer a tolerance signal). FAILING LOUD as setup. Re-run the gate.`,
+      installRes,
+    };
+  }
+
+  // A pnpm that LAUNCHED and exited NON-ZERO is a deterministic install FAILURE — the canonical case is a
+  // frozen-lockfile mismatch. This takes PRECEDENCE over the resolve-based branch below: it FAILS LOUD as
+  // setup (the caller maps action "setup-fail" → EXIT_USAGE 127) REGARDLESS of whether `buf`/`oxfmt` happen
+  // to be resolvable on PATH afterward. A launched non-zero exit cannot be reliably told apart from a
+  // deterministic breakage, and silently proceeding because the tools are INDEPENDENTLY on PATH would let a
+  // frozen-lockfile mismatch slip past the gate — exactly the bypass the codex ruling forbids.
+  if (installRes && installRes.code !== 0) {
+    return {
+      freshnessToleranceAllowed: false,
+      action: "setup-fail",
+      detail:
+        `pnpm install LAUNCHED but exited non-zero (exit ${installRes.code}) while ensuring freshness ` +
+        `tooling — a deterministic install failure (e.g. a frozen-lockfile mismatch). FAILING LOUD as ` +
+        `setup; the freshness tolerance is NEVER granted on a launched non-zero install (even if buf/oxfmt ` +
+        `are resolvable on PATH). Run \`pnpm install --frozen-lockfile\` from the repo root and re-run the gate.`,
+      installRes,
+    };
+  }
+
+  // Step 5: the install LAUNCHED and exited ZERO — re-resolve LOCAL + PATH after the install attempt. An
+  // exit-0 install that did not produce `buf` (or produced `buf` but not the required `oxfmt`) is a
+  // deterministic setup failure — NEVER tolerated (an exit-0 install is not a genuinely-tooling-less runner).
+  const after = resolveAll();
+  const allResolved = after.every((r) => r.local || r.path);
+  const usedPathFallback = allResolved && after.some((r) => !r.local && r.path);
+
+  if (allResolved) {
+    return {
+      freshnessToleranceAllowed: false,
+      action: usedPathFallback ? "path-fallback" : "installed",
+      detail:
+        `freshness tooling available after install` +
+        (usedPathFallback ? " (one or both via PATH fallback)" : "") +
+        `: ${after.map((r) => `${r.tool}=${r.local || r.path}`).join(", ")}`,
+      installRes,
+    };
+  }
+
+  // pnpm launched, exit-0, but a tool is still missing ⇒ a deterministic setup failure. FAIL LOUD; never
+  // PASS-WITH-TOLERATED. Distinguish `buf` missing (the test would skip if pnpm-less, but an exit-0 install
+  // is not that case) from `oxfmt` missing (the required canonical formatter) for a precise message.
+  const stillMissing = after.filter((r) => !r.local && !r.path).map((r) => r.tool);
+  return {
+    freshnessToleranceAllowed: false,
+    action: "setup-fail",
+    detail:
+      `pnpm install ran (exit ${installRes ? installRes.code : "?"}) but the freshness tools are still ` +
+      `missing (${stillMissing.join(", ")}) — a deterministic setup failure (e.g. frozen-lockfile ` +
+      `mismatch). An exit-0 install that did not produce ${stillMissing.includes(BUF_TOOL) ? "`buf`" : "the required `oxfmt`"} is a setup ` +
+      `failure, never tolerated. Run \`pnpm install --frozen-lockfile\` from the repo root and re-run the gate.`,
+    installRes,
+  };
+}
+
+// ----------------------------------------------------------------------------------------------------
 // Tolerated-failure allowlist — EXACT nextest test names (the env-only typeinfo freshness pair). A test
-// whose EXACT name is in this set is tolerated; ANY other failure fails the gate. Matched against the
-// EXACT name (the final whitespace token of a `FAIL [   …s] <binary> <test::path::name>` line), NOT a
-// substring of the line — so a real regression in a differently-named test that merely CONTAINS one of
-// these tokens still FAILS, and a name equal to an allowlisted one PLUS a suffix still FAILS.
+// whose EXACT name is in this set is tolerated ONLY when the freshness-tooling preflight ALLOWS it (the
+// tools are genuinely absent); when the tools are present or were installed, a FAIL of one of these names
+// is a HARD regression. The consultation of this set is GATED by the `freshnessToleranceAllowed` flag the
+// preflight produces (see `preflightFreshnessTooling`) — the classifiers below take that flag and default
+// it to `false` (fail-closed: tolerance off unless explicitly allowed). Matched against the EXACT name
+// (the final whitespace token of a `FAIL [   …s] <binary> <test::path::name>` line), NOT a substring of
+// the line — so a real regression in a differently-named test that merely CONTAINS one of these tokens
+// still FAILS, and a name equal to an allowlisted one PLUS a suffix still FAILS.
 // ----------------------------------------------------------------------------------------------------
 export const TOLERATED_TEST_NAMES = new Set([
   // Post-consolidation, both env-only freshness tests live in the single `verter_protocol::main`
@@ -870,6 +1471,7 @@ export async function runContainedStep(opts) {
     targetDir,
     killGraceMs = 5000,
     captureStdoutSeparately = false,
+    windowsVerbatimArguments = false,
   } = opts;
 
   const child = spawn(cmd, args, {
@@ -878,6 +1480,9 @@ export async function runContainedStep(opts) {
     shell: false,
     detached: !IS_WINDOWS, // POSIX: new process group (setsid). Windows: taskkill /T is the tree primitive.
     windowsHide: true,
+    // Forwarded for the `cmd /d /s /c "<quoted>"` pnpm-install launch (the args carry one pre-quoted
+    // verbatim element); default false leaves every other step's normal Node arg-quoting untouched.
+    windowsVerbatimArguments,
     stdio: ["ignore", "pipe", "pipe"],
   });
   // Publish the live child as the active step so the signal teardown can reap its WHOLE tree (not just the
@@ -1113,9 +1718,14 @@ export function extractNextestFailedNames(text) {
 //                  summary `failed` count exceeds the accounted `FAIL` names (an unaccounted failure
 //                  class), OR >=1 parsed `FAIL` name is not allowlisted.
 //   "tolerated"  — >=1 `FAIL` line, EVERY parsed `FAIL` name is an EXACT allowlisted name, NO non-`FAIL`
-//                  failure status line, and the summary count does not exceed the accounted names.
+//                  failure status line, and the summary count does not exceed the accounted names —
+//                  AND `freshnessToleranceAllowed === true` (the freshness-tooling preflight permitted it).
 //   "none"       — no failure status lines parsed AND the summary reports zero failures.
-export function classifyNextestFailures(text) {
+//
+// `freshnessToleranceAllowed` gates the allowlist consultation (see `TOLERATED_TEST_NAMES`). It defaults to
+// `false` (fail-closed): when the freshness tools are present or were installed, an allowlisted `FAIL` name
+// is treated as a regression, NOT tolerated — so a stale-binding break is caught instead of swallowed.
+export function classifyNextestFailures(text, freshnessToleranceAllowed = false) {
   const failNames = extractNextestFailedNames(text);
   const allFailureNames = extractNextestFailureStatusNames(text);
   // A non-`FAIL` failure status (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) is present whenever the broader scan
@@ -1126,7 +1736,8 @@ export function classifyNextestFailures(text) {
   if (nonFailFailures > 0 || unaccounted > 0) return "regression";
   if (failNames.length === 0) return "none";
   for (const nm of failNames) {
-    if (!TOLERATED_TEST_NAMES.has(nm)) return "regression";
+    // An allowlisted name is tolerated ONLY when the preflight allowed it; otherwise it is a regression.
+    if (!(freshnessToleranceAllowed && TOLERATED_TEST_NAMES.has(nm))) return "regression";
   }
   return "tolerated";
 }
@@ -1140,13 +1751,23 @@ export function classifyNextestFailures(text) {
 // unaccounted failure; trip a hard failure when the run exited non-zero AND (there is such a shortfall OR
 // no `FAIL` name parsed at all). The tolerated env pair has summary.failed == the two accounted `FAIL`
 // names, so unaccounted == 0 and this never fires for it.
-export function analyzeNextestSurface(text, code) {
+//
+// `freshnessToleranceAllowed` gates the allowlist consultation (default `false`, fail-closed): when the
+// freshness tools are present or were installed, an allowlisted `FAIL` name is pushed to `failures` (a hard
+// regression) instead of counted tolerated. The crash and the non-zero-exit summary-accounting tripwire
+// (the missing-summary / count-mismatch hard-fail path below) are INDEPENDENT of this flag — a tolerated
+// allowlisted name never lowers them. Note the deliberate exit-code precondition the summary-accounting
+// tripwire carries (and that the (xiv) self-test locks in): it gates a NON-ZERO nextest exit only — a
+// clean exit-0 run is never forced to FAIL by the summary requirement, so a code-0 tolerated `FAIL` log
+// with no/contradictory summary stays tolerated. A crash (non-`FAIL` status line) is always hard
+// regardless of exit code or flag.
+export function analyzeNextestSurface(text, code, freshnessToleranceAllowed = false) {
   const failures = [];
   let toleratedCount = 0;
   const failNames = [...new Set(extractNextestFailedNames(text))];
   const summary = parseNextestSummary(text);
   for (const nm of failNames) {
-    if (TOLERATED_TEST_NAMES.has(nm)) toleratedCount++;
+    if (freshnessToleranceAllowed && TOLERATED_TEST_NAMES.has(nm)) toleratedCount++;
     else failures.push({ surface: "nextest", name: nm });
   }
   const unaccounted = summary.failed - failNames.length;
@@ -1223,11 +1844,18 @@ export function parseLibtestSummary(text) {
 //   - EVERY parsed FAILED name is an EXACT allowlisted name (bare or suite-qualified).
 // Any deviation — a non-101/signal exit, a missing summary, a count mismatch, or a non-allowlisted name —
 // is a HARD FAILURE. A clean run (code 0, zero FAILED names, summary `ok`/absent) is a pass.
-export function analyzeLibtestSurface(text, code, binaryId) {
+//
+// `freshnessToleranceAllowed` gates the allowlist consultation (default `false`, fail-closed): when it is
+// false, `isTolerated` returns false for EVERY name, so the `tolerated` verdict path is unreachable and an
+// allowlisted FAILED name becomes a hard `failures` entry. The crash / non-101-exit / missing-summary /
+// count-mismatch hard-fail accounting is UNAFFECTED by the flag — those are always hard.
+export function analyzeLibtestSurface(text, code, binaryId, freshnessToleranceAllowed = false) {
   const failNames = extractLibtestFailedNames(text);
   const summary = parseLibtestSummary(text);
   const qualify = (nm) => `${String(binaryId || "").replace(/^verter_session::?/, "")}::${nm}`;
-  const isTolerated = (nm) => TOLERATED_TEST_NAMES.has(nm) || TOLERATED_TEST_NAMES.has(qualify(nm));
+  const isTolerated = (nm) =>
+    freshnessToleranceAllowed &&
+    (TOLERATED_TEST_NAMES.has(nm) || TOLERATED_TEST_NAMES.has(qualify(nm)));
 
   // Clean pass: exited 0 with no parsed FAILED lines. (A non-zero exit with zero FAILED names is a
   // crash/abort and falls through to the hard-fail accounting below.)
@@ -1389,9 +2017,112 @@ export function defaultLockDir(repoRealpath) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// Build the cargo env: scrub user target overrides, force the runner-owned dir + non-TTY output.
+// SCOPE (authoritative). The gate sanitizes a PATH-style value to its CWD-INDEPENDENT ABSOLUTE components
+// ONLY — every component that is not a fully-qualified, cwd-independent absolute path is DROPPED — and
+// deletes PATH entirely when no absolute component remains. The freshness preflight resolver AND the
+// executed cargo/nextest/libtest test children both consume this SAME sanitized PATH view, so the preflight
+// verdict and the test execution AGREE on tool resolvability with NO cwd-relative disagreement: the
+// preflight can never allow tolerance because it skipped a cwd-relative component the Rust freshness test
+// would have used to run `buf`, and the test child can never resolve a tool from a cwd-relative entry the
+// preflight never saw. This is the CLOSED invariant — absolute-only is the bounded fix (no filesystem IO, no
+// symlink-equivalence normalization, no absolutize-against-base): a real stale-binding regression still
+// FAILS because both sides resolve `buf` identically from the cwd-independent absolute PATH.
+//
+// Sanitize a PATH-style value to its cwd-independent absolute components. POSIX shell / the Rust
+// `std::env::split_paths`-based lookup treat an EMPTY path component (from a leading/trailing/doubled
+// delimiter — `:/bin`, `/bin:`, `/bin::/usr/bin`) and a bare `.` as the current working directory, and a
+// non-dot relative entry (`bin`, `tools/x`), a `..`-relative entry, and a Windows drive-relative `C:foo` /
+// root-relative `\x` likewise resolve against a CURRENT directory (or current drive) — so any of them lets
+// the repo/CWD control tool resolution. The gate must NOT let that happen: the verdict preflight's JS
+// resolver (`resolvePathShim`) and the EXECUTED tests (`std::env::split_paths(PATH) + dir.join(tool)`, where
+// `join("", tool) === tool` and a relative `dir.join(tool)` is itself cwd-relative) must resolve from the
+// SAME absolute-only PATH. Sanitizing the cargo env PATH here to its absolute components makes both sides
+// obey the identical rule — closing the empty-PATH fail-open AND every cwd-relative resolution divergence in
+// the test run itself.
+//
+// We KEEP a component ONLY if `isCwdIndependentAbsolute(component, windows)` (a leading-`/` absolute path on
+// POSIX, INCLUDING the bare root `/`; a drive-ROOTED `C:\x` / `C:/x`, a UNC `\\server\share`, or a device
+// `\\?\…` / `\\.\…` path on Windows) and DROP everything else: empty entries, the syntactic CWD forms
+// `.` / `./` / `.\` (and `./.` etc.), non-dot relative dirs (`bin`, `tools/x`), `..`-relative entries, the
+// Windows drive-RELATIVE `C:foo`, and the Windows root-relative `\x` / `/x` (these resolve against the
+// CURRENT drive, so they are NOT cwd-independent — dropped, not "proven safe"). A value with NO absolute
+// component sanitizes to `""`; the CALLER (`buildCargoEnv`) must then DELETE the env key rather than assign
+// `""` — because Rust's `var_os("PATH")?` treats a PRESENT `""` as `split_paths("") == [""]` (an empty
+// PathBuf ⇒ a CWD source via `"".join(tool) == tool`), so only removing the key removes the CWD source; an
+// assigned `""` would leave it live. An all-relative PATH therefore sanitizes to `""` and the key is deleted
+// — that is correct and intended.
 // ----------------------------------------------------------------------------------------------------
-export function buildCargoEnv(baseEnv, runnerTarget) {
+export function sanitizePathValue(pathValue, windows = IS_WINDOWS) {
+  // The LITERAL platform delimiter selected by the `windows` flag (`pathDelimiterFor(windows)` — `;` on
+  // Windows, `:` on POSIX), host-INDEPENDENT (NOT the ambient `node:path.delimiter`), so a `windows:false`
+  // sanitize splits a POSIX PATH on `:` even on a Windows host (and `windows:true` on `;` even on POSIX) —
+  // matching `resolvePathShim`, which splits on the same `pathDelimiterFor(windows)`.
+  const delim = pathDelimiterFor(windows);
+  return pathValue
+    .split(delim)
+    .filter((dir) => isCwdIndependentAbsolute(dir, windows))
+    .join(delim);
+}
+
+// A PATH component is KEPT iff it is a fully-qualified, CWD-INDEPENDENT ABSOLUTE path; every other shape is
+// dropped. This is a PURE SYNTACTIC classification — no filesystem IO, no absolutize-against-base, no symlink
+// normalization — and it is platform-PARAMETERIZED (the caller's `windows` flag, NOT the ambient
+// `node:path.isAbsolute`) so a Windows-mode self-test on a POSIX host classifies Windows path shapes
+// correctly. KEEP / DROP:
+//   - DROP empty `""` (a leading/trailing/doubled delimiter ⇒ an implicit-CWD source under
+//     `std::env::split_paths`).
+//   - POSIX: KEEP a leading-`/` absolute path (`/abs/bin`), INCLUDING the bare root `/` (an explicit
+//     directory). DROP everything without a leading `/` — dot-only (`.`, `./`, `./.`), non-dot relative
+//     (`bin`, `tools/x`), and `..`-relative (`..`, `../tools`) are all CWD-dependent.
+//   - WINDOWS: KEEP a drive-ROOTED absolute path (`C:\x` / `C:/x`), a UNC path (`\\server\share`), and a
+//     device path (`\\?\…` / `\\.\…`). DROP a drive-RELATIVE `C:foo` (drive + colon WITHOUT a following
+//     separator — it resolves against that drive's CURRENT directory), a root-relative `\x` / `/x` (it
+//     resolves against the CURRENT drive — drive-current-directory dependent, NOT cwd-independent, so it is
+//     dropped, not "proven safe"), and any non-rooted relative form (`tools\x`, `..\x`, `.`).
+function isCwdIndependentAbsolute(dir, windows) {
+  if (dir === "") return false; // empty component => implicit-CWD source
+  if (windows) {
+    // UNC (`\\server\share`) and device (`\\?\…` / `\\.\…`) absolute paths — accept either separator on the
+    // leading pair. (`\\?\` / `\\.\` are subsumed by the leading double-separator check.)
+    if (/^[\\/]{2}/.test(dir)) return true;
+    // Drive-ROOTED absolute `C:\x` / `C:/x` (a drive letter + colon + a separator). A drive-RELATIVE `C:foo`
+    // (no separator after the colon) is cwd-of-drive dependent => NOT matched, so it is dropped.
+    if (/^[A-Za-z]:[\\/]/.test(dir)) return true;
+    // A bare root-relative `\x` / `/x` (single leading separator, NOT a drive root, NOT UNC) resolves
+    // against the CURRENT drive => drive-current-directory dependent => DROP.
+    return false;
+  }
+  // POSIX: only a leading `/` is absolute (the bare root `/` included). Everything else is cwd-dependent.
+  return dir.startsWith("/");
+}
+
+// ----------------------------------------------------------------------------------------------------
+// Build the cargo env: scrub user target overrides, force the runner-owned dir + non-TTY output, and
+// sanitize the PATH var to its CWD-INDEPENDENT ABSOLUTE components ONLY so neither the preflight resolver NOR
+// the executed cargo/nextest/libtest tests can source a tool from any cwd-relative PATH entry (empty,
+// dot-only, non-dot relative, `..`-relative, or Windows drive-relative / root-relative) — the CLOSED
+// invariant that the preflight verdict and the test execution AGREE on tool resolvability (see the SCOPE
+// note on `sanitizePathValue`). `windows` (defaulting to the live platform) selects how the PATH var is
+// identified AND how duplicate
+// case-variants are handled: case-EXACT `PATH` on POSIX vs the case-INSENSITIVE PATH key on Windows — the
+// production gate.mjs call uses the default (real platform); the self-test passes `true` to exercise the
+// Windows key handling on a POSIX host.
+//
+// WINDOWS CASE-VARIANT COLLAPSE (load-bearing): Windows folds env-var names case-INSENSITIVELY, so a child
+// cargo/nextest process that inherits the returned env sees ONE effective PATH even if the object carries
+// several PATH-ish keys (`PATH` ALONGSIDE `Path`/`PaTh`) holding DIFFERENT values. Sanitizing only the one
+// `findPathEnvKey` result would leave the other case-variants live, and the child could observe a DIFFERENT
+// effective PATH than the JS preflight sanitized/read (the preflight could conclude `buf` absent ⇒ tolerance
+// ON while the Rust child resolves+runs `buf` from the unsanitized other-cased variant). So on Windows we:
+// (1) collect EVERY key whose `toUpperCase() === "PATH"`; (2) pick the EFFECTIVE value with the SAME policy
+// as `findPathEnvKey` (PATH > Path > any-other-case); (3) sanitize THAT value; (4) DELETE every PATH-ish
+// case-variant; (5) write back exactly ONE canonical `PATH` key with the sanitized value — UNLESS the
+// sanitized value is empty, in which case write NOTHING (the same delete-on-empty invariant, so Rust's
+// `var_os("PATH")?` early-returns None). On POSIX there is NO collapse: `var_os("PATH")` is case-EXACT, so a
+// `Path` is a DIFFERENT var Rust never reads and MUST be left untouched — the POSIX branch sanitizes exactly
+// the single `findPathEnvKey(env, false)` key (`PATH` only) and never touches a `Path`.
+// ----------------------------------------------------------------------------------------------------
+export function buildCargoEnv(baseEnv, runnerTarget, windows = IS_WINDOWS) {
   const env = { ...baseEnv };
   delete env.CARGO_TARGET_DIR;
   delete env.CARGO_BUILD_TARGET_DIR;
@@ -1401,6 +2132,39 @@ export function buildCargoEnv(baseEnv, runnerTarget) {
   env.CARGO_TERM_COLOR = "never";
   env.CARGO_TERM_PROGRESS_WHEN = "never";
   env.NEXTEST_HIDE_PROGRESS_BAR = "1";
+  // Sanitize the PATH var to its CWD-INDEPENDENT ABSOLUTE components so the executed tests obey the SAME
+  // no-CWD-tool-source rule the verdict preflight resolver uses (closes every cwd-relative fail-open, not just
+  // the empty/CWD-buf one). On both platforms the sanitized value is computed from the PATH var the Rust
+  // freshness test reads via `var_os("PATH")` — identified by `findPathEnvKey` (PATH > Path > any-other-case
+  // on Windows; case-EXACT `PATH` on POSIX). When sanitization yields a NON-empty value it is written back;
+  // when it yields the EMPTY STRING (a PATH with NO absolute component — e.g. ":" / "." / ":." / "./:." or an
+  // all-relative "bin:tools") the PATH key is DELETED instead of assigning "". This is load-bearing:
+  // Rust's `std::env::var_os("PATH")?` early-returns `None` ONLY when the key is ABSENT — a PRESENT empty
+  // value (`Some("")`) is NOT None, so it reaches `std::env::split_paths("")`, which yields ONE empty PathBuf,
+  // and `"".join("buf") == "buf"` (relative ⇒ CWD) resolves a CWD `buf` that RUNS. Assigning "" would leave
+  // the CWD source live; deleting the key is the only form that removes it.
+  if (windows) {
+    // Windows env names fold case-INSENSITIVELY, so the inherited child sees ONE effective PATH even with
+    // several PATH-ish keys. Collect EVERY case-variant, pick the effective value with the SAME policy as
+    // `findPathEnvKey` (reuse it), sanitize THAT, DELETE every variant, then write back exactly ONE canonical
+    // `PATH` key with the sanitized value (or NOTHING on empty). This prevents an unsanitized other-cased
+    // variant from surviving as an executable-child PATH source the preflight never saw.
+    const pathishKeys = Object.keys(env).filter((k) => k.toUpperCase() === "PATH");
+    const effectiveKey = findPathEnvKey(env, true);
+    const sanitized = effectiveKey !== null ? sanitizePathValue(env[effectiveKey], true) : null;
+    for (const k of pathishKeys) delete env[k];
+    if (sanitized !== null && sanitized !== "") env.PATH = sanitized;
+  } else {
+    // POSIX: `var_os("PATH")` is case-EXACT, so ONLY the exact `PATH` is the var Rust reads — a `Path` is a
+    // DIFFERENT var that must be LEFT UNTOUCHED. Sanitize exactly that single key (and only if present);
+    // never collapse case-variants here (that would wrongly delete a legitimate POSIX `Path`).
+    const pathKey = findPathEnvKey(env, false);
+    if (pathKey !== null) {
+      const sanitized = sanitizePathValue(env[pathKey], false);
+      if (sanitized === "") delete env[pathKey];
+      else env[pathKey] = sanitized;
+    }
+  }
   return env;
 }
 
