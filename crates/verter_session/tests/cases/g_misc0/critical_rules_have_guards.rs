@@ -204,6 +204,30 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "materialization_cache_key_is_content_free_subject_keyed",
             "materialize_structure_db_is_keyed_on_canonical_subject_not_runtime_key",
             "materialization_cache_key_is_content_free_and_env_discriminating",
+            // Scoped cache-key-hygiene over the shape/materialize
+            // derived-`Hash` keys (`ShapeCacheKey` + `ShapeSubject` +
+            // `ShapeDemand`; `MaterializationCacheKey`): NONE of the
+            // forbidden content/version markers, and a `SemanticNodeId`
+            // ONLY in the two sanctioned positions
+            // (`MaterializationCacheKey.normalized_type_args` +
+            // the sealed `MemberShapeNodeSubject` newtype) — the allow-list
+            // is EXACT, the scope is shape/materialize keys only (a blanket
+            // ban would be unsound). RECORDED SOURCE SCANNER (per the binding
+            // neutral design ruling: a recorded scanner, not structural
+            // enforcement); the predicate + the closed-inventory +
+            // member-arm field-pinning each carry their own discriminator
+            // self-test (registered so the anti-stub proofs cannot be
+            // deleted without the registry noticing). The newtype is pinned
+            // GLOBALLY to one occurrence, the visibility-token strip is
+            // exact, the variant inventory survives attributed arms, and the
+            // exact per-body field inventory each carry a discriminator too.
+            "shape_materialize_key_hygiene_predicate_discriminates",
+            "shape_subject_closed_inventory_self_test",
+            "member_arm_sealed_newtype_is_field_pinned_self_test",
+            "member_shape_node_subject_global_single_occurrence_self_test",
+            "strip_visibility_only_strips_the_pub_token_self_test",
+            "exact_field_inventory_discriminates_self_test",
+            "no_unsanctioned_semantic_node_id_in_shape_or_materialize_key",
         ],
     ),
     (
@@ -729,11 +753,44 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         "Synthetic Carrier Typed-IR Rule",
         &[
             // Pins R22 carrier-verdict + carrier-provenance substrate
-            // deletion. The typed-IR
-            // `TypeExpr::SyntheticSlotBinding` variant is the sole
-            // carrier identity at the projector / registry / reducer
+            // deletion — the retired-symbol absence scanner. The
+            // typed-IR `TypeExpr::SyntheticSlotBinding` variant is the
+            // sole carrier identity at the projector / registry / reducer
             // surface; re-introducing the R22 substrate is forbidden.
+            // Lives at
+            // `crates/verter_session/tests/cases/g_misc2/no_carrier_verdict_db.rs`.
             "no_carrier_verdict_db",
+            // Bans a hand-rolled `SemanticNodeId(<ident>.value_node)`
+            // ordinal cache-key construction in production source — the
+            // bounded residual SYNTACTIC supplement to the structural
+            // confinement (sealed `NonSyntheticTypeExpr` + module-private
+            // `ShapeSubject`/`ShapeCacheKey` construction + sealed
+            // `MemberShapeNodeSubject`). The `value_node` arena ordinal is
+            // value-side provenance, never a cache key. Lives at
+            // `crates/verter_session/tests/cases/g_misc2/synthetic_carrier_explicit_deepen_routes_through_shape_cache_key.rs`.
+            "synthetic_carrier_explicit_deepen_routes_through_shape_cache_key",
+            // The discriminator self-test for the value_node scanner above:
+            // proves the STREAM scan catches every
+            // `SemanticNodeId(<ident>.value_node)` construction (including a
+            // MULTI-LINE split) and false-positives on none. Registered so
+            // the anti-stub proof cannot be deleted without the registry
+            // noticing.
+            "synthetic_carrier_explicit_deepen_guard_self_test",
+            // Discriminating self-tests for the hard-failing production-
+            // source traversal both scanners share: the top-level crate /
+            // `src` classification panics on a non-`NotFound` metadata IO
+            // error instead of collapsing it to a silent skip (the
+            // `Path::is_dir()` fail-open class). Each proves the panic on a
+            // `NotADirectory` traversal while a `NotFound` path remains a
+            // legitimate non-panicking skip. The two scanner files each carry
+            // their OWN uniquely-named copy (the retired-symbol scanner in
+            // `no_carrier_verdict_db.rs` and the synthetic-deepen scanner in
+            // `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key.rs`),
+            // and BOTH are registered so deleting EITHER file's copy dangles
+            // its registry entry and is caught — a single shared name would let
+            // one copy silently satisfy the registry for both.
+            "retired_symbol_scanner_classified_as_dir_hard_fails_on_metadata_error_self_test",
+            "synthetic_deepen_scanner_classified_as_dir_hard_fails_on_metadata_error_self_test",
             // Pins the legitimate explicit-deepen cache route through
             // `ShapeCacheKey::synthetic_binding_whole(SyntheticBindingId::
             // from_carrier_key(&carrier), mode)`, rooting on the
@@ -776,7 +833,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // every LSP provider-sync file and FAILS if any function OTHER THAN
             // the approved leaf close-dispatch primitives contains an inline
             // provider-close loop (close-before-sync), which would close the live
-            // editor TSX on an owner change or lose the prior path on a failed
+            // editor TSX on an owner change or lose the previous path on a failed
             // sync. A second guard (`vue_sync_functions_never_delegate_raw_stale_close`)
             // closes the delegated-close evasion: a `.vue`-syncing function that
             // hands the RAW `transition.stale_paths` to a close helper before

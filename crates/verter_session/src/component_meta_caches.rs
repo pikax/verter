@@ -1761,6 +1761,34 @@ impl ShapeCacheDb {
             .get(&key)
             .map(|entry| entry.value.type_expr.clone())
     }
+
+    /// Test-observable: does the TypeExpr shape route produce a SOUND cache
+    /// key for `expr`, or is the subject UNCACHED?
+    ///
+    /// Returns `true` when `ShapeCacheKey::type_expr_whole_with_context`
+    /// classifies `expr` to `Some(key)` (a sound, keyable subject — a
+    /// carrier-free `TypeExpr` subject, or a bare top-level carrier
+    /// redirected to the content-free `SyntheticBinding` identity), and
+    /// `false` when it returns `None` (an unkeyable composite that NESTS a
+    /// synthetic carrier — `NonSyntheticTypeExpr::new` fails, so the subject
+    /// keys NO slot and the caller cache-bypasses). This is the SHAPE-route
+    /// analog of `MaterializationCacheKey`'s root-less-anonymous-subject
+    /// `None` (which already keys no DB slot): an unsound/unkeyable subject
+    /// yields `None` (uncached), never a forged key. Read-only — it does NOT
+    /// touch the cache.
+    #[cfg(any(test, debug_assertions))]
+    pub fn type_expr_shape_route_keys_subject_for_test(
+        scope: Arc<str>,
+        expr: Arc<TypeExpr>,
+        mode: ProjectionMode,
+    ) -> bool {
+        ShapeCacheKey::type_expr_whole_with_context(
+            scope,
+            expr,
+            crate::semantic_query::ProjectionReductionContext::published(mode),
+        )
+        .is_some()
+    }
 }
 
 impl Default for ShapeCacheDb {
