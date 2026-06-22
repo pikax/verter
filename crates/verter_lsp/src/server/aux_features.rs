@@ -486,6 +486,29 @@ pub(super) async fn handle_code_action(
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let negotiated_encoding = server.position_encoding.read().clone();
+                        // For the add-import prelude re-anchor: a provider `addMissingImport`
+                        // quickfix inserts a brand-new import at the synthetic TSX helper-preamble,
+                        // which the strict mapper drops; `merge_code_actions` re-anchors that
+                        // CURRENT-file insertion at the SFC's `<script setup>` import site through
+                        // the shared completion re-anchor. It needs the carrier source and the
+                        // SFC-absolute top-level import spans (exactly the completion-resolve
+                        // inputs). Empty/absent when the carrier document is not open — then a
+                        // preamble insertion has no anchor and stays dropped (fail-closed).
+                        let carrier_source: String = server
+                            .documents
+                            .get(uri)
+                            .map(|doc| doc.source.to_string())
+                            .unwrap_or_default();
+                        let user_import_spans: Vec<(u32, u32)> = server
+                            .documents
+                            .get_analysis(uri)
+                            .map(|a| {
+                                a.imports
+                                    .iter()
+                                    .map(|imp| (imp.span.start, imp.span.end))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let actions = merge::merge_code_actions(
                             type_actions,
                             &ctx.tsx_path,
@@ -500,6 +523,8 @@ pub(super) async fn handle_code_action(
                                     server.documents.host().workspace_read().read_file(p)
                                 })
                             },
+                            &carrier_source,
+                            &user_import_spans,
                         );
                         all_actions.extend(actions);
                     }

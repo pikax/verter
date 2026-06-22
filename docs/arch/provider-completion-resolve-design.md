@@ -167,6 +167,49 @@ resolve (`tp.supports_completion_resolve()`), computed in the initialize handler
 A session with no provider, or a provider without resolve support, advertises
 `resolve_provider: false` rather than a dishonest `true`.
 
+### Shared prelude re-anchor: code-action `addMissingImport` reuses the same machinery
+
+The SAME carrier re-anchor that places a completion-resolve auto-import also places
+a code-action `addMissingImport` quickfix. A provider's `addMissingImport` fix
+(errorCode 2304) inserts a brand-new `import …` line at the top of the generated
+TSX, which lands in Verter's synthetic helper-import preamble — the strict
+`ProviderPositionMapper` returns `None` for that unmapped region, so the edit was
+historically DROPPED by `merge_code_actions` (the action then had no surviving edit
+and was filtered out). `merge_code_actions` now re-anchors such a CURRENT-file
+preamble insertion at the SFC's `<script setup>` import site through the SAME
+primitive the completion path uses:
+
+- `auto_import::reanchor_preamble_import_edit(edit, tsx_li, mapper, carrier_source,
+  carrier_li, user_import_spans)` — the single per-edit re-anchor entry point. It
+  composes `is_preamble_import_insertion` (now `pub(crate)`) → `resolve_script_import_anchor`
+  → `ScriptImportInsertionAnchor::build_edit`. There is ONE re-anchor implementation:
+  the completion translator (`translate_completion_import_edits`) keeps its own
+  multi-edit coalescing but classifies each edit with the SAME
+  `is_preamble_import_insertion` predicate and anchors with the SAME
+  `resolve_script_import_anchor` / `build_edit`.
+
+Fail-closed, identical to the completion path: a non-preamble miss, a `SelfFile`
+projection (no `helper_preamble_end` boundary), or an unresolvable carrier anchor
+all return `None` and the edit is dropped — never line-0'd. The re-anchor fires
+ONLY for the CURRENT request's TSX (`canonicalize_path_cow(edit_path) ==
+canonicalize_path_cow(current_tsx_path)`): a FOREIGN carrier `.tsx` preamble
+insertion has no in-context `<script setup>` anchor and stays dropped (re-anchoring
+it would splice an import into the wrong `.vue`). The merge call site threads the
+carrier source + SFC-absolute import spans (the same inputs the completion-resolve
+path reads) into `merge_code_actions`.
+
+NOTE (test reality): the hermetic e2e harness's `getCodeFixes` does not surface an
+`addMissingImport` for a carrier (or any in-memory / inferred-project) file on
+EITHER backend (no import-fix project index; `@verter/types` absent from the
+fixture's `node_modules`) — confirmed by probing the provider directly for
+`ref`→`vue` AND the configured sibling `formatCount`→`./utils`, both empty. The
+merge-layer re-anchor is therefore proven by the hermetic unit tests
+(`type_provider::merge::tests::merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup`
+plus its past-preamble and foreign-carrier negative siblings); the real-provider
+`vue_add_missing_import_lands_in_source_via_prelude_reanchor` test is a fail-loud
+CANARY for that harness limitation (it flips to a real end-to-end landing assert
+when a provider returns the add-import here).
+
 ## Tests
 
 The coverage is layered. Pure unit / mock tests run hermetically on every gate;

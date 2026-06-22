@@ -193,7 +193,7 @@ impl std::error::Error for AutoImportEditMappingError {}
 /// `<script setup>`) and when user imports precede the helper preamble (a companion `<script>`),
 /// the two cases a "before the first mapped run" heuristic gets wrong. With no boundary metadata
 /// the edit cannot be proven to be in the preamble, so it is rejected — never re-anchored on a guess.
-fn is_preamble_import_insertion(
+pub(crate) fn is_preamble_import_insertion(
     edit: &ProviderImportEdit,
     tsx_li: &LineIndex,
     mapper: &ProviderPositionMapper,
@@ -215,6 +215,40 @@ fn is_preamble_import_insertion(
         // map, or an older artifact). Reject rather than re-anchor on a guess.
         None => false,
     }
+}
+
+/// Re-anchor a SINGLE provider edit that inserts a brand-new import at the synthetic helper-import
+/// preamble onto the carrier `<script setup>` import site — the shared per-edit re-anchor used by the
+/// code-action merge ([`crate::type_provider::merge::merge_code_actions`]).
+///
+/// It composes the SAME three primitives the completion-resolve translator
+/// ([`translate_completion_import_edits`]) uses, so there is ONE re-anchor implementation:
+/// 1. [`is_preamble_import_insertion`] — the edit must be a zero-width insertion at/before the typed
+///    helper-preamble-end boundary (a `SelfFile` projection has no boundary ⇒ `false`, fail-closed);
+/// 2. [`resolve_script_import_anchor`] — the SFC's `<script setup>` import insertion anchor from its
+///    own block/import facts (`carrier_source` + the SFC-absolute `user_import_spans`);
+/// 3. [`ScriptImportInsertionAnchor::build_edit`] — the zero-width carrier [`TextEdit`] carrying the
+///    provider's import text.
+///
+/// Returns `None` (caller DROPS, fail-closed) when the edit is NOT a preamble insertion, or the
+/// anchor offset is not a valid carrier position. Unlike the completion translator this is per-edit
+/// (the code-action path applies one quickfix edit at a time); the completion path keeps its own
+/// coalescing of multiple imports into one block. The caller MUST only invoke this for the CURRENT
+/// request's TSX — `tsx_li` / `mapper` / `carrier_source` describe the queried file, so a foreign
+/// carrier `.tsx` edit must be screened out by the caller before reaching here.
+pub(crate) fn reanchor_preamble_import_edit(
+    edit: &ProviderImportEdit,
+    tsx_li: &LineIndex,
+    mapper: &ProviderPositionMapper,
+    carrier_source: &str,
+    carrier_li: &LineIndex,
+    user_import_spans: &[(u32, u32)],
+) -> Option<TextEdit> {
+    if !is_preamble_import_insertion(edit, tsx_li, mapper) {
+        return None;
+    }
+    let anchor = resolve_script_import_anchor(carrier_source, user_import_spans);
+    anchor.build_edit(std::slice::from_ref(&edit.new_text), carrier_li)
 }
 
 /// Translate a TypeProvider's completion-resolve `additionalTextEdits` (generated-TSX byte

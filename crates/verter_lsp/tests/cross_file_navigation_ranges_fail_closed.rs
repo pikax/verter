@@ -765,6 +765,8 @@ fn barrel_reexport_code_action_keeps_real_line() {
         &carrier_never,
         PositionEncodingKind::UTF16,
         &read_source,
+        "",
+        &[],
     );
     assert_eq!(result.len(), 1, "the barrel code action survives");
     let CodeActionOrCommand::CodeAction(action) = &result[0] else {
@@ -810,6 +812,8 @@ fn external_code_action_with_unresolvable_source_is_dropped_not_zeroed() {
         &carrier_never,
         PositionEncodingKind::UTF16,
         &read_source,
+        "",
+        &[],
     );
     assert!(
         result.is_empty(),

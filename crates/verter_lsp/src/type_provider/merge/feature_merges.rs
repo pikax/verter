@@ -446,6 +446,16 @@ pub fn merge_signature_help(
 ///   mapper — without a resolver (or on a resolver miss / map failure) it is DROPPED, because the
 ///   offsets index the foreign TSX and the current sourcemap would point at an unrelated location.
 ///
+/// A provider `addMissingImport` quickfix inserts a brand-new `import …` line at the TOP of the
+/// generated TSX, which in Verter's projection lands inside the synthetic, unmapped helper-import
+/// preamble — so the strict mapper returns `None` and the edit would be DROPPED. Such a CURRENT-file
+/// preamble insertion is re-anchored at the carrier's `<script setup>` import insertion site through
+/// the SAME proven mechanism the completion auto-import path uses
+/// ([`crate::type_provider::auto_import::reanchor_preamble_import_edit`]) — `carrier_source` and
+/// `user_import_spans` (the SFC-absolute top-level import spans) drive that anchor. A FOREIGN
+/// carrier `.tsx` preamble insertion is NOT re-anchored (its `<script setup>` is not in-context) and
+/// stays dropped; a `SelfFile` projection has no preamble boundary, so it fails closed too.
+///
 /// Every other edit's `start`/`end` are REAL byte offsets into its target file, so read that file's
 /// own source through the host VFS (`source_reader`) and convert to a line:col `Range` in the
 /// negotiated `encoding`, exactly as the references / rename merges do. FAIL CLOSED: drop an edit
@@ -455,7 +465,7 @@ pub fn merge_signature_help(
 #[allow(clippy::mutable_key_type)] // Uri has interior mutability but is used as key by tower-lsp API
 #[expect(
     clippy::too_many_arguments,
-    reason = "code-action merging needs the current TSX path, mapper, indexes, resolver, encoding, and VFS reader"
+    reason = "code-action merging needs the current TSX path, mapper, indexes, resolver, encoding, VFS reader, plus the carrier source + import spans for the add-import prelude re-anchor"
 )]
 pub fn merge_code_actions(
     type_actions: Vec<TypeCodeAction>,
@@ -467,6 +477,8 @@ pub fn merge_code_actions(
     carrier_source_exists: &dyn Fn(&str) -> bool,
     negotiated_encoding: PositionEncodingKind,
     source_reader: ExternalSourceReader<'_>,
+    carrier_source: &str,
+    user_import_spans: &[(u32, u32)],
 ) -> Vec<CodeActionOrCommand> {
     type_actions
         .into_iter()
@@ -504,7 +516,46 @@ pub fn merge_code_actions(
                                 new_text: edit.new_text,
                             });
                         }
+                        continue;
                     }
+
+                    // Strict-mapper MISS. A provider `addMissingImport` quickfix inserts a brand-new
+                    // import at the synthetic helper-import preamble (offset 0), which the strict
+                    // mapper legitimately drops. Before dropping, attempt the SAME prelude re-anchor
+                    // the completion auto-import path uses — but ONLY for the CURRENT request's TSX:
+                    // `carrier_source` / `user_import_spans` / the in-context mapper describe the
+                    // queried file, so a FOREIGN carrier `.tsx` preamble insertion has no in-context
+                    // `<script setup>` anchor and MUST stay dropped (re-anchoring it would splice an
+                    // import into the wrong `.vue`). `reanchor_preamble_import_edit` itself
+                    // fail-closes for a non-preamble miss and for a `SelfFile` projection (no
+                    // boundary), so every other miss falls through to the drop below.
+                    let is_current_file = verter_span::path::canonicalize_path_cow(edit_path)
+                        == verter_span::path::canonicalize_path_cow(current_tsx_path);
+                    if is_current_file {
+                        let provider_edit = crate::type_provider::auto_import::ProviderImportEdit {
+                            start: edit.start,
+                            end: edit.end,
+                            new_text: edit.new_text.clone(),
+                        };
+                        if let Some(reanchored) =
+                            crate::type_provider::auto_import::reanchor_preamble_import_edit(
+                                &provider_edit,
+                                tsx_line_index,
+                                mapper,
+                                carrier_source,
+                                carrier_line_index,
+                                user_import_spans,
+                            )
+                        {
+                            let carrier_path =
+                                normalize_carrier_path(edit_path, carrier_source_exists);
+                            if let Some(uri) = path_to_uri(carrier_path) {
+                                changes.entry(uri).or_default().push(reanchored);
+                            }
+                        }
+                    }
+                    // FAIL CLOSED: any unmapped carrier-IDE edit that is not a re-anchorable
+                    // current-file preamble insertion is dropped — never line-0'd.
                     continue;
                 }
 

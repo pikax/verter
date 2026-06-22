@@ -123,6 +123,19 @@ fn ts6133(range: Range, name: &str) -> Diagnostic {
     }
 }
 
+/// A published TS2304 diagnostic over `range` (the "Cannot find name" the editor
+/// sends on CTRL+. over an unresolved identifier — the precondition for the
+/// `addMissingImport` quick-fix: `code: String("2304")`).
+fn ts2304(range: Range, name: &str) -> Diagnostic {
+    Diagnostic {
+        range,
+        code: Some(NumberOrString::String("2304".to_string())),
+        source: Some("ts".to_string()),
+        message: format!("Cannot find name '{name}'."),
+        ..Default::default()
+    }
+}
+
 /// Position `a <= b` in (line, character) lexicographic order.
 fn pos_le(a: Position, b: Position) -> bool {
     (a.line, a.character) <= (b.line, b.character)
@@ -386,6 +399,132 @@ const usedSvelte = 2
              prelude's overloaded rune `declare function` signatures, so the combined \
              remove-all companion cannot be surfaced for the .svelte carrier today \
              (upstream TypeScript limitation; the Vue carrier proves the path)."
+        );
+    }
+);
+
+// ---------------------------------------------------------------------------
+// Vue: add-missing-import quick-fix LANDS in the .vue source (prelude re-anchor)
+// ---------------------------------------------------------------------------
+
+/// Does any returned action insert a brand-new `import { <symbol> } from "vue"`
+/// statement into the carrier `uri` SOURCE at a SANE position?
+///
+/// The provider's `addMissingImport` quick-fix inserts the new import at the top
+/// of the generated TSX, which lands in Verter's synthetic helper-import preamble;
+/// the merge layer must RE-ANCHOR it at the SFC's `<script setup>` import site
+/// (never drop it, never line-0 it). The gates:
+/// 1. an action whose workspace edit is keyed by the carrier `.vue` URI (never a
+///    generated `.tsx`);
+/// 2. an INSERTION (zero-width range) whose text imports `symbol` from `"vue"`;
+/// 3. the insertion range is NOT `Range::default()` — i.e. it did NOT collapse to
+///    line 0 char 0 (the `<script setup>` tag occupies line 0, so the real anchor
+///    is the script CONTENT, strictly below it).
+fn has_add_missing_vue_import(actions: &CodeActionResponse, uri: &Uri, symbol: &str) -> bool {
+    assert!(
+        !uri.as_str().ends_with(".tsx"),
+        "the carrier uri under test must be the .vue source, not a .tsx: {uri:?}"
+    );
+    actions.iter().any(|a| {
+        let CodeActionOrCommand::CodeAction(ca) = a else {
+            return false;
+        };
+        let Some(edit) = ca.edit.as_ref() else {
+            return false;
+        };
+        let Some(changes) = edit.changes.as_ref() else {
+            return false;
+        };
+        changes.iter().any(|(edit_uri, edits)| {
+            edit_uri == uri
+                && !edit_uri.as_str().ends_with(".tsx")
+                && edits.iter().any(|e| {
+                    // A zero-width insertion (start == end) of an `import { symbol } …`
+                    // line that references the `vue` module, NOT collapsed to (0,0).
+                    e.range.start == e.range.end
+                        && e.range != Range::default()
+                        && e.new_text.contains("import")
+                        && e.new_text.contains(symbol)
+                        && (e.new_text.contains("from \"vue\"")
+                            || e.new_text.contains("from 'vue'"))
+                })
+        })
+    })
+}
+
+real_provider_test!(
+    vue_add_missing_import_lands_in_source_via_prelude_reanchor,
+    fixture = "single-project",
+    async fn run(session) {
+        // A `<script setup>` that references `ref` with NO existing `vue` import. Because
+        // no `import … from "vue"` statement exists to extend, the provider's
+        // `addMissingImport` quick-fix would insert a BRAND-NEW import line at the top of
+        // the generated TSX — which lands in Verter's synthetic helper-import preamble.
+        // The merge layer re-anchors that prelude insertion at the `<script setup>`
+        // import site so the import LANDS in the .vue source (historically dropped).
+        let content = "\
+<script setup lang=\"ts\">
+const base = ref(1)
+</script>
+<template>
+  <div>{{ base }}</div>
+</template>
+";
+        let uri = session
+            .open_virtual("src/AddImportQuickFixCase.vue", content)
+            .await;
+        session.server().test_ensure_synced(&uri).await;
+
+        // The unresolved identifier `ref` (the 2304 site). CTRL+. lands on it.
+        let ref_start = carrier_position(session, &uri, "ref(1)", 0);
+        let ref_end = carrier_position(session, &uri, "ref(1)", "ref".len());
+        let range = Range {
+            start: ref_start,
+            end: ref_end,
+        };
+
+        // Warm the project, then request code actions at the unresolved `ref` with the
+        // published 2304 in `context.diagnostics` (the wired errorCodes path that drives
+        // the provider's `getCodeFixes`). If the provider returns an `addMissingImport`,
+        // it MUST land in the `.vue` SOURCE at the re-anchored `<script setup>` site.
+        let mut landed = false;
+        for attempt in 0..8 {
+            let actions = code_action(session, &uri, range, vec![ts2304(range, "ref")]).await;
+            if let Some(actions) = actions {
+                if has_add_missing_vue_import(&actions, &uri, "ref") {
+                    landed = true;
+                    break;
+                }
+            }
+            if attempt < 7 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        }
+
+        // CANARY (harness limitation): in this hermetic e2e harness NEITHER provider
+        // returns an `addMissingImport` code action for a carrier (or any in-memory /
+        // inferred-project) file — `getCodeFixes` produces no add-import even though the
+        // 2304 is correctly detected (confirmed by probing the provider directly for
+        // `ref`→`vue` AND for the configured-project sibling `formatCount`→`./utils`,
+        // both empty). The harness project model + the missing `@verter/types` package
+        // mean the provider's import-fix index is unavailable here. This is INDEPENDENT
+        // of the merge-layer prelude re-anchor under test, which is fully exercised by
+        // the hermetic unit tests in `type_provider::merge::tests`
+        // (`merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup`
+        // and its two negative siblings).
+        //
+        // The canary FAILS LOUD the moment a provider DOES return the add-import here
+        // (harness gains an import-fix-capable project, or `@verter/types` is vendored):
+        // at that point `landed` becomes true and this assertion flips, promoting the
+        // line-asserting `has_add_missing_vue_import` check above into the real
+        // end-to-end gate (delete the canary, assert `landed`).
+        canary_assert_known_limitation!(
+            !landed,
+            "the provider's getCodeFixes does not surface an addMissingImport in this \
+             hermetic harness (no import-fix project index / missing @verter/types); the \
+             merge-layer prelude re-anchor is proven by the hermetic merge unit tests. \
+             When a provider returns the add-import here, promote this to a real assert \
+             that the import LANDED in the .vue (has_add_missing_vue_import)."
         );
     }
 );
