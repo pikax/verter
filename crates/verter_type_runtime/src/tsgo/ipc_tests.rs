@@ -1779,7 +1779,7 @@ fn parse_lsp_related_never_stores_packed_position_anti_bogus_link() {
 /// declaration" link landing at the end of the file.
 ///
 /// Pre-fix (fail-open `position_to_offset`): line 99 clamps to `content.len()` (15),
-/// so `related_information` is NON-empty with start == end == 14 — this assertion
+/// so `related_information` is NON-empty with start == end == 15 — this assertion
 /// fires. Post-fix (`position_to_offset_checked`): the entry is dropped, the list is
 /// empty, and the PRIMARY diagnostic still survives.
 #[test]
