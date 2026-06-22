@@ -27,19 +27,25 @@ use super::VerterLanguageServer;
 ///
 /// The auto-import re-anchor maps provider edits back through a Vue `<script setup>` carrier — it
 /// reverse-maps a carrier IDE TSX path to its `.vue` source and re-anchors the import at the SFC's
-/// `<script setup>` insertion site. It is meaningful ONLY for a carrier-IDE projection.
+/// `<script setup>` insertion site. It is meaningful ONLY for a Vue carrier-IDE projection: the
+/// re-anchor decision is routed through the typed carrier-kind authority
+/// ([`carrier_kind_for_language`](crate::features::auto_close_tag::carrier_kind_for_language)) so
+/// only a `CarrierKind::Vue` carrier continues.
 ///
 /// Three outcomes:
 /// * `Ok(Some(edits))` — the provider path is a Vue carrier and the edits were placed in its
 ///   carrier source. Called only once the provider has returned a NON-EMPTY edit set, so a carrier
 ///   that cannot place those edits is a hard rejection (`Err`), never a successful item with the
 ///   import silently dropped.
-/// * `Ok(None)` — the provider path is NOT a resolvable Vue carrier (a self-file rune module such
-///   as a Svelte `.svelte.ts` / `.svelte.js`, or any non-carrier projection). The carrier
-///   re-anchor does not apply; fail closed by leaving the item unchanged rather than synthesizing
-///   a Vue `<script setup>` block into a non-Vue source. (Self-file auto-import edit placement is a
-///   separate capability, not handled by this carrier re-anchor.) `Ok(None)` is reserved for THIS
-///   no-carrier / self-file case — a real carrier that cannot place the edits is an `Err`.
+/// * `Ok(None)` — the carrier re-anchor does not apply. This covers (a) a path that reverse-maps to
+///   neither a carrier nor itself (no resolvable source); (b) a self-file rune module (a Svelte
+///   `.svelte.ts` / `.svelte.js`, whose path reverse-maps to itself); and (c) a real, non-self-file
+///   carrier of a NON-Vue framework (a Svelte `.svelte` component) — gated out by the typed
+///   carrier-kind authority, because the `<script setup>` re-anchor is Vue-SFC-specific. In every
+///   case fail closed by leaving the item unchanged rather than synthesizing a Vue `<script setup>`
+///   block into a non-Vue source. (Self-file auto-import edit placement is a separate capability,
+///   not handled by this carrier re-anchor.) A Vue carrier that cannot place the edits is an `Err`,
+///   not `Ok(None)`.
 /// * `Err(reason)` — a genuine carrier-resolve failure for a path that DID reverse-map to a Vue
 ///   carrier: missing IDE context / open document, or an edit that cannot be placed. The caller
 ///   turns the reason into a structured resolve error rather than dropping the import edits.
@@ -61,7 +67,28 @@ pub(super) fn resolve_provider_auto_import_edits(
     if server.is_self_file_projection(&carrier_uri) {
         return Ok(None);
     }
-    // The path reverse-mapped to a REAL `.vue` carrier (not self-file), so a
+    // The carrier `<script setup>` import re-anchor is a Vue-SFC-specific construct. A real,
+    // non-self-file carrier of another framework (a Svelte `.svelte` component) reverse-maps to its
+    // carrier source and is NOT self-file, so it slips past the self-file gate above; driving the
+    // Vue-specific `resolve_script_import_anchor` over it would synthesize a bogus Vue
+    // `<script setup>` block into the non-Vue source. Route the re-anchor decision through the SAME
+    // typed carrier-kind authority the code-action preamble path uses
+    // (`resolve_carrier_preamble_import_anchor`): classify the carrier URI to a `FileLanguage` via
+    // the shared carrier classifier, then map it to a `CarrierKind` through the fail-closed,
+    // descriptor-identity `carrier_kind_for_language`. ONLY a `Some(CarrierKind::Vue)` continues; a
+    // Svelte / non-carrier classification — and any future markup carrier without its own arm —
+    // fails closed here (`Ok(None)`), never falling through into Vue `<script setup>` synthesis.
+    let is_vue_carrier =
+        crate::server::carrier_language_for(carrier_uri.as_str()).is_some_and(|language| {
+            matches!(
+                crate::features::auto_close_tag::carrier_kind_for_language(&language),
+                Some(crate::features::auto_close_tag::CarrierKind::Vue)
+            )
+        });
+    if !is_vue_carrier {
+        return Ok(None);
+    }
+    // The path reverse-mapped to a REAL Vue `.vue` carrier (not self-file), so a
     // missing IDE context is a genuine carrier-resolve FAILURE, not a no-carrier
     // case. Fail with a structured `Err` so the caller reports it — never an
     // `Ok(None)` success, which would silently drop the provider's non-empty

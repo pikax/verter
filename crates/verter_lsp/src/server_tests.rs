@@ -10669,6 +10669,117 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
     drain.abort();
 }
 
+/// A real `.svelte` carrier (NOT a `.svelte.ts` rune module) is a carrier-IDE
+/// projection that reverse-maps to its `.svelte` source and is NOT a self-file
+/// projection — so it slips past BOTH the no-carrier and the self-file gates on
+/// completion-resolve. The carrier `<script setup>` import re-anchor is a
+/// Vue-SFC-specific construct: a `.svelte` source has no Vue `<script setup>`,
+/// so driving `resolve_script_import_anchor` over it would synthesize a bogus
+/// Vue `<script setup>` block INTO the `.svelte` file. The resolve must instead
+/// fail closed through the typed carrier-kind authority (a non-Vue carrier is
+/// not re-anchorable), leaving the completion item unchanged — symmetric with
+/// the code-action `resolve_carrier_preamble_import_anchor` Vue gate.
+///
+/// Discriminating: the `.svelte` carrier reverse-map IS present, the projection
+/// is NOT self-file, and the provider-edit set is NON-EMPTY (the only case the
+/// carrier re-anchor runs for). The pre-gate code never returned `Ok(None)` for
+/// this real non-self-file carrier — it either errored on a missing IDE context
+/// or synthesized a `CreateScriptSetup` Vue block over the `.svelte` source.
+/// This asserts `Ok(None)` AND that no produced edit text contains a
+/// `<script setup>`, so it FAILS before the gate and PASSES once a non-Vue
+/// carrier fails closed.
+#[tokio::test]
+async fn non_vue_carrier_auto_import_resolve_fails_closed_no_script_setup_synthesis() {
+    use crate::type_provider::auto_import::ProviderImportEdit;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // A real `.svelte` carrier with NO `<script setup>` (Svelte uses a plain
+    // `<script>`). It is owned and open, so `Comp.svelte.tsx` reverse-maps to
+    // the `.svelte` source, and it projects through a carrier IDE TSX — not a
+    // self-file rune-module buffer.
+    let svelte_uri = open_test_svelte(
+        server,
+        "/workspace/Comp.svelte",
+        "<script lang=\"ts\">\nlet x = 1;\n</script>\n<p>{x}</p>",
+    );
+    server.ensure_current_file_synced(&svelte_uri).await;
+    let tsx_path = "/workspace/Comp.svelte.tsx";
+
+    // Precondition 1: the `.svelte` carrier reverse-map IS present.
+    assert_eq!(
+        server.carrier_uri_from_ide_path(tsx_path).as_ref(),
+        Some(&svelte_uri),
+        "precondition: the `.svelte.tsx` IDE path reverse-maps to the open `.svelte` carrier URI"
+    );
+    // Precondition 2: a `.svelte` carrier is NOT a self-file projection — so the
+    // existing self-file `Ok(None)` gate is NOT what would fire here.
+    assert!(
+        !server.is_self_file_projection(&svelte_uri),
+        "precondition: a `.svelte` carrier is a carrier-IDE projection, not self-file"
+    );
+
+    // A NON-EMPTY auto-import edit set — the only case the carrier re-anchor runs
+    // for. The bytes are a faithful new-import insertion as a provider would emit.
+    let provider_edits = vec![ProviderImportEdit {
+        start: 0,
+        end: 0,
+        new_text: "import { foo } from './foo';\n".to_string(),
+    }];
+    let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
+        server,
+        tsx_path,
+        &provider_edits,
+    );
+    // Negative assertion FIRST, so it stays load-bearing: whatever the resolve
+    // produced, no edit may carry a synthesized Vue `<script setup>` block into
+    // the `.svelte` source. Pre-gate, the resolve returned exactly such an edit
+    // (`Ok(Some([<script setup ...>]))`), so this fires before the gate lands.
+    if let Ok(Some(edits)) = &resolved {
+        assert!(
+            !edits.iter().any(|e| e.new_text.contains("<script setup")),
+            "a `.svelte` carrier resolve must never synthesize a Vue `<script setup>` block; \
+             got {edits:?}"
+        );
+    }
+    // Stronger property: a non-Vue carrier fails closed entirely (no edits, no
+    // error), leaving the completion item unchanged — symmetric with the
+    // code-action `resolve_carrier_preamble_import_anchor` Vue gate.
+    assert_eq!(
+        resolved,
+        Ok(None),
+        "a non-Vue (`.svelte`) carrier auto-import resolve fails closed via the typed \
+         carrier-kind authority: no edits, no error, no synthesized Vue block; got {resolved:?}"
+    );
+
+    drain.abort();
+}
+
 /// Build the LSP completion item a tsserver-family provider's resolve handle
 /// becomes after `merge_completions`: the provider-NEUTRAL `verter_resolve`
 /// envelope with a `TsserverEntry` resolve key.
