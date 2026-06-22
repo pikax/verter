@@ -10,8 +10,8 @@
 //! `HTMLElementTagNameMap`, captured as [`HTML_TAG_UNIVERSE`]) plus explicit corpora
 //! for Svelte specials (`slot` / `svelte:*`), the full Svelte `RESERVED_WORDS`,
 //! hyphenated/custom tags, and special-content tags. The expected SUPPORTED set is
-//! EXACTLY `{a, button, div, h1, input, p}`; EVERY other tag compiles fail-closed
-//! with NO `Main` module. (Hermetic: the tag universe is committed, so the gate runs
+//! EXACTLY `{a, button, div, h1, input, p, video}`; EVERY other tag compiles
+//! fail-closed with NO `Main` module. (Hermetic: the tag universe is committed, so the gate runs
 //! with no `node` / no `node_modules` at test runtime; the
 //! [`html_tag_universe_is_complete`] freshness check — feature-gated behind a live
 //! `node_modules` read — keeps the committed list honest.)
@@ -19,9 +19,11 @@
 //! ## Attr matrix
 //! Crosses the allowed elements with every allowed attr (golden-compared: the attr
 //! MUST appear in the emitted `from_html` skeleton exactly as the allowlist
-//! specifies) and with the forbidden attrs (`autofocus` / `muted` / `defaultValue` /
-//! `defaultChecked` / `dir` / `style` / `value` / `checked` / `is` / `loading` /
-//! `selected` / an arbitrary unknown name), asserting each fails BEFORE emission.
+//! specifies) and with the still-forbidden attrs (`defaultValue` / `defaultChecked` /
+//! `dir` / static `style` / `value` / `checked` / `is` / `loading` / `selected` /
+//! an arbitrary unknown name), asserting each fails BEFORE emission. (Dynamic attrs,
+//! boolean DOM props, `autofocus`, `muted` on ANY element, and `class` / `style` are
+//! SUPPORTED and have positive rows.)
 //!
 //! The skeleton-presence assertion is the SERIALIZER-CONTRACT gate: an accepted
 //! static attr can NEVER be silently dropped (the root-cause of the `defaultValue`
@@ -51,8 +53,9 @@ fn emits_main(source: &str) -> bool {
 
 /// The EXACT supported element set (the finite client-core allowlist). Any change to
 /// this set is a deliberate enum + golden change, asserted by
-/// [`element_matrix_supports_exactly_the_six_core_tags`].
-const SUPPORTED_ELEMENTS: &[&str] = &["a", "button", "div", "h1", "input", "p"];
+/// [`element_matrix_supports_exactly_the_seven_core_tags`]. `video` joined the set in
+/// the media host for the `muted` DOM-property write.
+const SUPPORTED_ELEMENTS: &[&str] = &["a", "button", "div", "h1", "input", "p", "video"];
 
 /// The full HTML tag universe (the TS DOM lib `HTMLElementTagNameMap`,
 /// svelte/TS-pinned). COMMITTED so the matrix is hermetic. Every tag NOT in
@@ -280,8 +283,8 @@ fn skeleton_clones_tag(source: &str, tag: &str) -> bool {
 }
 
 #[test]
-fn element_matrix_supports_exactly_the_six_core_tags() {
-    // The POSITIVE half: EXACTLY the six allowlist tags emit a `Main` that CLONES the
+fn element_matrix_supports_exactly_the_seven_core_tags() {
+    // The POSITIVE half: EXACTLY the seven allowlist tags emit a `Main` that CLONES the
     // tag as an intrinsic element; the count and membership are both pinned (a shrink
     // OR a widen fails here). The Svelte-special-parse tags (`script` / `style` / …)
     // are excluded from the positive set — they never lower to an intrinsic element
@@ -300,15 +303,15 @@ fn element_matrix_supports_exactly_the_six_core_tags() {
     expected.sort_unstable();
     assert_eq!(
         supported, expected,
-        "the element allowlist must support EXACTLY {{a, button, div, h1, input, p}} — \
+        "the element allowlist must support EXACTLY {{a, button, div, h1, input, p, video}} — \
          a tag cloned into a Main outside that set is a leak; a tag in the set failing to \
          emit is an over-reach"
     );
     // Belt-and-suspenders on the cardinality (the convergence count gate).
     assert_eq!(
         supported.len(),
-        6,
-        "exactly six elements are in the client-core allowlist"
+        7,
+        "exactly seven elements are in the client-core allowlist"
     );
 }
 
@@ -581,9 +584,13 @@ fn attr_matrix_forbidden_attrs_fail_before_emission_on_allowed_elements() {
     // the attr gate — fails closed BEFORE emission (no `Main`). `is` is the exception:
     // it is rejected at the element gate (a customized built-in), which is still a
     // fail-closed refusal.
+    //
+    // Note: `autofocus` (a non-static property → `$.autofocus`) and `muted` on ANY
+    // element (`is_dom_property('muted')` is element-agnostic, so `<div muted>` →
+    // `div.muted = true` exactly like `<video muted>`) are now SUPPORTED and have
+    // dedicated positive cases; a STATIC `style` / `dir` (no `style:` / no reflection
+    // support) stay forbidden.
     let forbidden: &[(&str, &str)] = &[
-        ("autofocus", "<input autofocus />"),
-        ("muted_on_div", "<div muted></div>"),
         ("default_value", "<input defaultValue=\"x\" />"),
         ("default_checked", "<input defaultChecked />"),
         ("dir", "<div dir=\"ltr\">d</div>"),
@@ -682,6 +689,55 @@ const ACCEPTED_DIRECTIVE_ROWS: &[AcceptedDirectiveRow] = &[
         label: "reactive_interpolation",
         source: "<script>let c = $state(0);</script>\n<p>{c}</p>\n<button onclick={() => c++}>x</button>\n",
         op_token: "$.set_text(",
+    },
+    // ── dynamic attributes + boolean DOM props + class/style ──────────
+    AcceptedDirectiveRow {
+        // A dynamic attribute → `$.set_attribute`.
+        label: "dynamic_attr",
+        source: "<script>let id = $state('x');</script>\n<button onclick={() => id += '!'} id={id}></button>\n",
+        op_token: "$.set_attribute(",
+    },
+    AcceptedDirectiveRow {
+        // A boolean DOM property → a direct property write.
+        label: "boolean_property_disabled",
+        source: "<script>let v = $state(false);</script>\n<button onclick={() => v = !v} disabled={v}></button>\n",
+        op_token: ".disabled = $.get(v)",
+    },
+    AcceptedDirectiveRow {
+        // `muted` on the media host → a property write.
+        label: "muted_on_video",
+        source: "<script>let v = $state(false);</script>\n<video onclick={() => v = !v} muted={v}></video>\n",
+        op_token: ".muted = $.get(v)",
+    },
+    AcceptedDirectiveRow {
+        // `autofocus` → the init-only `$.autofocus` helper.
+        label: "autofocus_dynamic",
+        source: "<script>let v = $state(true);</script>\n<input onclick={() => v = !v} autofocus={v}>\n",
+        op_token: "$.autofocus(",
+    },
+    AcceptedDirectiveRow {
+        // `class={…}` → `$.set_class` (with `$.clsx`).
+        label: "dynamic_class",
+        source: "<script>let c = $state('a');</script>\n<button onclick={() => c += '!'} class={c}></button>\n",
+        op_token: "$.set_class(",
+    },
+    AcceptedDirectiveRow {
+        // `style={…}` → `$.set_style`.
+        label: "dynamic_style",
+        source: "<script>let s = $state('color:red');</script>\n<button onclick={() => s = 'color:blue'} style={s}></button>\n",
+        op_token: "$.set_style(",
+    },
+    AcceptedDirectiveRow {
+        // A `class:` directive → the merged `$.set_class`.
+        label: "class_directive",
+        source: "<script>let on = $state(false);</script>\n<button onclick={() => on = !on} class:foo={on}></button>\n",
+        op_token: "$.set_class(",
+    },
+    AcceptedDirectiveRow {
+        // A `style:` directive → the merged `$.set_style`.
+        label: "style_directive",
+        source: "<script>let color = $state('red');</script>\n<button onclick={() => color = 'blue'} style:color={color}></button>\n",
+        op_token: "$.set_style(",
     },
 ];
 
@@ -920,4 +976,145 @@ fn html_tag_universe_is_complete() {
             "the supported element {el} must be a real HTML tag"
         );
     }
+}
+
+// ── Freshness: the DOM attribute/property tables stay pinned to svelte ───────────
+
+/// The committed `DOM_BOOLEAN_ATTRIBUTES` (svelte@5.56.3 `src/utils.js`), mirrored
+/// here so the freshness check is a self-contained boundary (the production copy in
+/// `client_allowlist.rs` is module-private). The production `is_dom_property` is
+/// exercised against the same membership by the in-crate unit tests.
+const DOM_BOOLEAN_ATTRIBUTES: &[&str] = &[
+    "allowfullscreen",
+    "async",
+    "autofocus",
+    "autoplay",
+    "checked",
+    "controls",
+    "default",
+    "disabled",
+    "formnovalidate",
+    "indeterminate",
+    "inert",
+    "ismap",
+    "loop",
+    "multiple",
+    "muted",
+    "nomodule",
+    "novalidate",
+    "open",
+    "playsinline",
+    "readonly",
+    "required",
+    "reversed",
+    "seamless",
+    "selected",
+    "webkitdirectory",
+    "defer",
+    "disablepictureinpicture",
+    "disableremoteplayback",
+];
+
+/// The committed `ATTRIBUTE_ALIASES` VALUES (the camelCase property names) from
+/// svelte@5.56.3 `src/utils.js` (`class` is intentionally absent).
+const ATTRIBUTE_ALIAS_VALUES: &[&str] = &[
+    "formNoValidate",
+    "isMap",
+    "noModule",
+    "playsInline",
+    "readOnly",
+    "defaultValue",
+    "defaultChecked",
+    "srcObject",
+    "noValidate",
+    "allowFullscreen",
+    "disablePictureInPicture",
+    "disableRemotePlayback",
+];
+
+/// Read the live `svelte/src/utils.js`, if a pinned `svelte` is installed under
+/// `node_modules`. Returns `None` (so the freshness check is SKIPPED, keeping the
+/// default run hermetic) when no `svelte` source is present.
+fn live_svelte_utils() -> Option<String> {
+    use std::path::PathBuf;
+    let utils = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../node_modules/.pnpm/svelte@5.56.3/node_modules/svelte/src/utils.js");
+    std::fs::read_to_string(utils).ok()
+}
+
+/// Pull every single-quoted string literal from a body slice, in order, SKIPPING
+/// `//` line comments (the official `ATTRIBUTE_ALIASES` body has a commented-out
+/// `class: 'className'` note that must NOT be read as a real entry).
+fn extract_quoted(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let code = match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        let mut chars = code.chars();
+        while let Some(c) = chars.next() {
+            if c == '\'' {
+                let mut s = String::new();
+                for d in chars.by_ref() {
+                    if d == '\'' {
+                        break;
+                    }
+                    s.push(d);
+                }
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn dom_property_tables_match_pinned_svelte() {
+    // FRESHNESS: when the pinned `svelte` source is present, the committed DOM
+    // attribute/property tables (mirrored above, and TRANSCRIBED into
+    // `client_allowlist.rs`) must EQUAL the live `svelte/src/utils.js` tables — a
+    // `svelte` bump that changes them cannot silently desync the property-vs-attribute
+    // decision. SKIPPED (hermetic) when no `node_modules` is present.
+    let Some(src) = live_svelte_utils() else {
+        eprintln!(
+            "dom_property_tables_match_pinned_svelte: no pinned svelte — skipping (hermetic)"
+        );
+        return;
+    };
+    // The `DOM_BOOLEAN_ATTRIBUTES` array body.
+    let bool_start = src
+        .find("const DOM_BOOLEAN_ATTRIBUTES = [")
+        .expect("svelte DOM_BOOLEAN_ATTRIBUTES")
+        + "const DOM_BOOLEAN_ATTRIBUTES = [".len();
+    let bool_end = src[bool_start..].find(']').map(|i| bool_start + i).unwrap();
+    let live_booleans = extract_quoted(&src[bool_start..bool_end]);
+    assert_eq!(
+        live_booleans,
+        DOM_BOOLEAN_ATTRIBUTES
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        "DOM_BOOLEAN_ATTRIBUTES desynced from pinned svelte — regenerate the committed \
+         tables in client_allowlist.rs AND this mirror"
+    );
+    // The `ATTRIBUTE_ALIASES` object body — the quoted VALUES (the camelCase props).
+    let alias_start = src
+        .find("const ATTRIBUTE_ALIASES = {")
+        .expect("svelte ATTRIBUTE_ALIASES")
+        + "const ATTRIBUTE_ALIASES = {".len();
+    let alias_end = src[alias_start..]
+        .find('}')
+        .map(|i| alias_start + i)
+        .unwrap();
+    let live_alias_values = extract_quoted(&src[alias_start..alias_end]);
+    assert_eq!(
+        live_alias_values,
+        ATTRIBUTE_ALIAS_VALUES
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        "ATTRIBUTE_ALIASES values desynced from pinned svelte — regenerate the committed \
+         tables in client_allowlist.rs AND this mirror"
+    );
 }

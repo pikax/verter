@@ -745,6 +745,27 @@ fn props_no_default_reads_off_props_member() {
     );
 }
 #[test]
+fn prop_method_call_in_attr_value_is_a_read_not_a_written_prop() {
+    // A METHOD CALL on a prop in a template VALUE (`id={p.toString()}`) is a READ of the
+    // prop receiver, NOT a write — official `svelte@5.56.3` compiles it to a plain
+    // `$$props.p.toString()` read inside a `$.template_effect`, with `$.push`/`$.pop` for
+    // context. A method call must NOT be misclassified as a `DeepMutate` write (which
+    // would refuse it as a "written prop"). DISCRIMINATING: RED against the pre-fix
+    // classifier that treated `obj.method()` as a deep-mutation write.
+    let src = "<script>let { p } = $props();</script>\n<div id={p.toString()}></div>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$$props.p.toString()"),
+        "a prop method call reads off $$props (not refused as a written prop):\n{js}"
+    );
+    // The value `has_call` ⇒ it is memoized into the deps-array effect form.
+    assert!(
+        js.contains("$.template_effect("),
+        "a prop method-call attr value memoizes into a template_effect:\n{js}"
+    );
+}
+
+#[test]
 fn props_alias_no_default_reads_source_key_off_props() {
     // F6: `let { foo: bar } = $props()` (no default) reads `$$props.foo` (the SOURCE
     // key) — NOT `$$props.bar`. Verified against svelte@5.56.3. THE discriminating
@@ -1041,20 +1062,36 @@ fn legacy_on_modifier_event_fails_closed_to_5d() {
 }
 
 #[test]
-fn dynamic_attribute_fails_closed_to_5a() {
-    assert_fail_closed(
-        "<script>let id = $state('x');</script>\n<div id={id}></div>\n",
-        "5a",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { .. }),
+fn dynamic_attribute_now_emits_set_attribute() {
+    // a dynamic attribute (`id={id}`) now EMITS `$.set_attribute` (was a
+    // 5a refusal previously). The reactive handler keeps `id` a real signal.
+    let js = emit(
+        "<script>let id = $state('x');</script>\n<div onclick={() => id += '!'} id={id}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => $.set_attribute(div, 'id', $.get(id)))"
+        )),
+        "a dynamic attribute must now emit set_attribute:\n{js}"
     );
 }
 
 #[test]
-fn class_directive_fails_closed_to_5a() {
-    assert_fail_closed(
-        "<script>let on = $state(true);</script>\n<div class:active={on}></div>\n",
-        "5a",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "class:active"),
+fn class_directive_now_emits_set_class() {
+    // a `class:` directive now EMITS the merged `$.set_class` (was a 5a
+    // refusal previously).
+    let js = emit(
+        "<script>let on = $state(true);</script>\n<div onclick={() => on = !on} class:active={on}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.set_class(div, 1, '', null, classes, { active: $.get(on) })"
+        )),
+        "a class: directive must now emit the merged set_class:\n{js}"
     );
 }
 
@@ -1916,6 +1953,59 @@ fn hello_input_module_matches_the_committed_jsdom_smoke_fixture() {
     );
 }
 
+/// Assert a committed jsdom-smoke `.mjs` fixture stays equivalent (modulo cosmetics)
+/// to Verter's emitted module for `source`, so the happy-dom behavioral smoke can
+/// never drift from `compile_client`.
+fn assert_jsdom_fixture_in_sync(source: &str, fixture_name: &str) {
+    let js = emit(source, "App.svelte");
+    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/core/test/fixtures/svelte")
+        .join(fixture_name);
+    let committed = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("read smoke fixture {}: {e}", fixture_path.display()));
+    assert_eq!(
+        normalize_js_cosmetics(&js),
+        normalize_js_cosmetics(&committed),
+        "the emitted module diverged STRUCTURALLY from the committed jsdom-smoke fixture \
+         {fixture_name}; regenerate it from `compile_client` and re-run oxfmt"
+    );
+}
+
+#[test]
+fn attr_class_style_module_matches_the_committed_jsdom_smoke_fixture() {
+    // The dynamic-attribute / class / style behavioral fixture (a dynamic attr + dynamic class + a static-base
+    // style with a `style:` directive, all reactive in ONE combined effect) stays
+    // equivalent to `compile_client`'s output.
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet id = $state('a');\n\tlet cls = $state('box');\n\tlet color = $state('red');\n</script>\n\n<button onclick={() => { id += '!'; cls += ' on'; color = 'blue'; }} id={id} class={cls} style=\"font-weight:bold\" style:color={color}>go</button>\n",
+        "attr_class_style.client.mjs",
+    );
+}
+
+#[test]
+fn boolean_props_module_matches_the_committed_jsdom_smoke_fixture() {
+    // The boolean-DOM-property behavioral fixture (`readonly={off}` → `input.readOnly =
+    // $.get(off)`, toggled by a SEPARATE button so the disabled/readonly state never
+    // blocks the toggle click) stays equivalent to `compile_client`'s output.
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet off = $state(false);\n</script>\n\n<input readonly={off} />\n<button onclick={() => off = !off}>toggle</button>\n",
+        "boolean_props.client.mjs",
+    );
+}
+
+#[test]
+fn mixed_class_call_module_matches_the_committed_jsdom_smoke_fixture() {
+    // The mixed-class-with-a-call behavioral fixture (`class="a{String(c)}b"`) — the
+    // base memoizes the EXPRESSION PART (the `String(c)` call → a `$0` dep, the
+    // `` `a${$0 ?? ''}b` `` template in the body), and on a delegated click the class
+    // re-renders. Stays equivalent to `compile_client`'s output, so the jsdom smoke
+    // can never drift from the per-part memoization codegen.
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet c = $state('x');\n</script>\n\n<button onclick={() => c += '!'} class=\"a{String(c)}b\">go</button>\n",
+        "mixed_class_call.client.mjs",
+    );
+}
+
 // ── Additional surface gates (R1, R4, R5, R7, R8) ──────────────────────────────
 
 #[test]
@@ -2486,5 +2576,534 @@ fn normalize_js_cosmetics(code: &str) -> String {
         out.push(ch);
         i += 1;
     }
-    out.replace(",)", ")").replace(",]", "]").replace(",}", "}")
+    let collapsed = out.replace(",)", ")").replace(",]", "]").replace(",}", "}");
+    // oxfmt wraps a single-EXPRESSION arrow body that is an assignment in parentheses
+    // (`() => (x = y)`); the emitter (and official svelte) emit the bare `() => x = y`.
+    // The parens are cosmetic, so strip a paren group that WRAPS an arrow body
+    // (`=>(EXPR)` → `=>EXPR`) before comparing — this keeps the fixture oxfmt-clean
+    // AND lockstep-matching without forcing the emitter to parenthesize.
+    strip_redundant_arrow_parens(&collapsed)
+}
+
+/// Strip a single redundant paren group that WRAPS an arrow-function body: every
+/// `=>(…)` whose `(` is the immediate arrow body and whose matching `)` ends the body
+/// (the next char is a statement/expression terminator `;` `}` `)` `]` `,` or EOF) is
+/// reduced to `=>…`. Operates on the already-normalized (whitespace-stripped) token
+/// stream, so the `(` after `=>` is the body opener. A NON-wrapping paren (a call
+/// `f()`, a grouped sub-expression that is not the whole body) is left intact.
+fn strip_redundant_arrow_parens(s: &str) -> String {
+    let bytes: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Detect `=>(` at this position.
+        if i + 2 < bytes.len() && bytes[i] == '=' && bytes[i + 1] == '>' && bytes[i + 2] == '(' {
+            // Find the matching `)` for the `(` at i+2 (paren-balanced).
+            let mut depth = 0;
+            let mut j = i + 2;
+            let mut close = None;
+            while j < bytes.len() {
+                match bytes[j] {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if let Some(c) = close {
+                // The paren wraps the whole arrow body iff the char after `)` is a body
+                // terminator (or EOF). A `(` that is part of a larger expression
+                // (`=>(a)+b`) is NOT a wrapping body paren.
+                let after = bytes.get(c + 1).copied();
+                let is_body_wrap = matches!(after, None | Some(';' | '}' | ')' | ']' | ','));
+                if is_body_wrap {
+                    out.push_str("=>");
+                    out.extend(&bytes[(i + 3)..c]); // the inner body, sans parens
+                    i = c + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+// ── dynamic attributes + boolean DOM props + class/style ─────────────
+//
+// Every form is pinned BYTE-FAITHFULLY (modulo cosmetics) to svelte@5.56.3 client
+// output via the live-compiler probe. Each test is discriminating with a negative
+// assertion (the misform that must be ABSENT). The cross-cut: a reactive dynamic
+// attr/class/style joins the SAME combined `$.template_effect` as reactive text, in
+// source/DOM-walk order; a NON-reactive one is a plain init statement.
+//
+// The event handlers are the supported inline-arrow `$state`-write shape
+// (`onclick={() => v = !v}`) — a named-function handler is the 5d wrapper surface.
+
+/// Normalize an EXPECTED emitted-JS substring the same way [`normalize_js_cosmetics`]
+/// normalizes the emitter output (whitespace stripped, JS string-literal quotes
+/// unified to `"`), so a 5a assertion is written in NATURAL spaced single-quote form
+/// and compared against the equally-normalized emitter output.
+fn nc(expected: &str) -> String {
+    normalize_js_cosmetics(expected)
+}
+
+#[test]
+fn dynamic_attr_reactive_emits_set_attribute_in_template_effect() {
+    let src = "<script>let id = $state('x');</script>\n<button onclick={() => id += '!'} id={id}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    // The exact official form. `nc` normalizes the expected form identically (strips
+    // whitespace, unifies JS string-literal quotes to `"`), so it is written naturally.
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => $.set_attribute(button, 'id', $.get(id)))"
+        )),
+        "reactive dynamic attr must be a set_attribute in a template_effect:\n{js}"
+    );
+    // NEGATIVE: never a boolean 4th-arg misform, never a property write for `id`.
+    assert!(
+        !n.contains(&nc("$.set_attribute(button, 'id', $.get(id), true)")),
+        "no hydration-suppression 4th arg for a plain attr:\n{js}"
+    );
+    assert!(
+        !n.contains("button.id="),
+        "`id` is NOT a DOM property — must use set_attribute, not a property write:\n{js}"
+    );
+}
+
+// NOTE: a NON-REACTIVE dynamic attribute / class / style value (the official
+// `state.init` half of the `has_state ? update : init` split) is NOT exercisable in
+// the §1.2-class supported subset: every template-readable local is a `$state`
+// signal, a `$props()` read (also reactive in the output), or a `bind:this` ref — a
+// plain non-rune `let v = 'x'` fails closed at the instance-script-item gate ("plain
+// let", 5s). The non-reactive INIT path is still implemented (and is exercised by the
+// init-only `$.autofocus` cases below); a non-reactive `$.set_attribute` /
+// `$.set_class` / `$.set_style` init becomes testable once plain-local support lands.
+
+#[test]
+fn mixed_reactive_attr_emits_template_literal_in_effect() {
+    // A reactive mixed value (`id="pre-{v}-post"`, v=$state) →
+    // `` $.set_attribute(div, 'id', `pre-${$.get(v) ?? ''}-post`) `` in the effect.
+    let src = "<script>let v = $state('x');</script>\n<div onclick={() => v += '!'} id=\"pre-{v}-post\"></div>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => $.set_attribute(div, 'id', `pre-${$.get(v) ?? ''}-post`))"
+        )),
+        "a reactive mixed attr must be a template-literal set_attribute in the effect:\n{js}"
+    );
+}
+
+#[test]
+fn boolean_dom_property_disabled_emits_direct_property_write() {
+    // `disabled={v}` → `button.disabled = $.get(v)` (is_dom_property), NOT
+    // `$.set_attribute(..., true)`.
+    let src = "<script>let v = $state(false);</script>\n<button onclick={() => v = !v} disabled={v}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.template_effect(() => button.disabled = $.get(v))")),
+        "a boolean DOM property must be a direct property write:\n{js}"
+    );
+    // NEGATIVE: the forbidden boolean set_attribute signature is ABSENT.
+    assert!(
+        !n.contains(&nc("$.set_attribute(button, 'disabled'")),
+        "a DOM-boolean property must NOT use set_attribute:\n{js}"
+    );
+}
+
+#[test]
+fn boolean_dom_property_readonly_aliases_to_readonly_property() {
+    // `readonly={v}` → `input.readOnly = $.get(v)` (normalize_attribute alias).
+    let src =
+        "<script>let v = $state(false);</script>\n<input onclick={() => v = !v} readonly={v}>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.template_effect(() => input.readOnly = $.get(v))")),
+        "`readonly` must alias to the `readOnly` property write:\n{js}"
+    );
+    assert!(
+        !n.contains("input.readonly=") && !n.contains(&nc("$.set_attribute(input, 'readonly'")),
+        "must use the camelCase `readOnly` property, not the attribute / lowercase:\n{js}"
+    );
+}
+
+#[test]
+fn contenteditable_dynamic_uses_set_attribute_not_property() {
+    // `contenteditable={v}` is NOT a DOM property → `$.set_attribute(div, 'contenteditable', …)`.
+    let src = "<script>let v = $state('true');</script>\n<div onclick={() => v = 'false'} contenteditable={v}></div>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => $.set_attribute(div, 'contenteditable', $.get(v)))"
+        )),
+        "`contenteditable` must use set_attribute:\n{js}"
+    );
+    assert!(
+        !n.contains("div.contenteditable="),
+        "`contenteditable` is NOT a DOM property:\n{js}"
+    );
+}
+
+#[test]
+fn hidden_dynamic_uses_set_attribute_not_property() {
+    // `hidden={v}` is NOT in DOM_PROPERTIES → `$.set_attribute(button, 'hidden', …)`.
+    let src = "<script>let v = $state(false);</script>\n<button onclick={() => v = !v} hidden={v}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => $.set_attribute(button, 'hidden', $.get(v)))"
+        )),
+        "`hidden` must use set_attribute:\n{js}"
+    );
+    assert!(
+        !n.contains("button.hidden="),
+        "`hidden` is NOT a DOM property:\n{js}"
+    );
+}
+
+#[test]
+fn muted_dynamic_on_video_emits_property_write() {
+    // `muted={v}` on `<video>` → `video.muted = $.get(v)` (special-cased property).
+    let src = "<script>let v = $state(false);</script>\n<video onclick={() => v = !v} muted={v}></video>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.template_effect(() => video.muted = $.get(v))")),
+        "`muted` must be a property write:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("$.set_attribute(video, 'muted'")),
+        "`muted` must NOT use set_attribute:\n{js}"
+    );
+}
+
+#[test]
+fn autofocus_dynamic_emits_init_only_autofocus_helper() {
+    // `autofocus={v}` → init-only `$.autofocus(input, $.get(v))` — NOT a template_effect.
+    let src =
+        "<script>let v = $state(true);</script>\n<input onclick={() => v = !v} autofocus={v}>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.autofocus(input, $.get(v))")),
+        "`autofocus={{v}}` must emit the init-only autofocus helper:\n{js}"
+    );
+    // NEGATIVE: autofocus is NOT wrapped in a template_effect and is NOT a property.
+    assert!(
+        !n.contains(&nc("template_effect(() => $.autofocus")) && !n.contains("input.autofocus="),
+        "`autofocus` is init-only, not reactive / not a property:\n{js}"
+    );
+}
+
+#[test]
+fn autofocus_static_valueless_emits_autofocus_true() {
+    // A static valueless `autofocus` → `$.autofocus(input, true)` init, and is NOT
+    // baked into the from_html skeleton.
+    let src = "<script>let c = $state(0);</script>\n<input autofocus>\n<button onclick={() => c++}>{c}</button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.autofocus(input, true)")),
+        "a static valueless autofocus must emit `$.autofocus(input, true)`:\n{js}"
+    );
+    // NEGATIVE: autofocus is never in the cloned skeleton.
+    assert!(
+        !js.contains("$.from_html(`<input autofocus"),
+        "autofocus must NOT be baked into the from_html skeleton:\n{js}"
+    );
+}
+
+#[test]
+fn class_expression_wraps_in_clsx_and_set_class() {
+    // `class={c}` → `$.set_class(button, 1, $.clsx($.get(c)))`.
+    let src = "<script>let c = $state('a');</script>\n<button onclick={() => c += '!'} class={c}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => $.set_class(button, 1, $.clsx($.get(c))))"
+        )),
+        "`class={{c}}` must be set_class with clsx:\n{js}"
+    );
+    // NEGATIVE: class is NOT a baked static attr here.
+    assert!(
+        !n.contains(&nc("$.set_attribute(button, 'class'")),
+        "a dynamic class must NOT use set_attribute:\n{js}"
+    );
+}
+
+#[test]
+fn class_base_with_reactive_directive_uses_accumulator() {
+    // `class="base" class:foo={on}` (reactive directive) → the `let classes;`
+    // accumulator + `$.set_class(button, 1, 'base', null, classes, { foo: $.get(on) })`.
+    let src = "<script>let on = $state(false);</script>\n<button onclick={() => on = !on} class=\"base\" class:foo={on}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("let classes;")),
+        "a reactive class directive needs the accumulator:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "classes = $.set_class(button, 1, 'base', null, classes, { foo: $.get(on) })"
+        )),
+        "the merged set_class shape (base/null/classes/directives) is wrong:\n{js}"
+    );
+    // NEGATIVE: the static base `class="base"` is pulled OUT of the skeleton.
+    assert!(
+        !js.contains("$.from_html(`<button class=\"base\""),
+        "a class with a directive must pull the base class OUT of the skeleton:\n{js}"
+    );
+}
+
+#[test]
+fn class_directive_only_emits_empty_base_and_null_hash() {
+    // `class:foo={on}` (no base) → `$.set_class(div, 1, '', null, classes, { foo: … })`.
+    let src = "<script>let on = $state(false);</script>\n<div onclick={() => on = !on} class:foo={on}></div>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "classes = $.set_class(div, 1, '', null, classes, { foo: $.get(on) })"
+        )),
+        "a directive-only class must emit base '' and css_hash null:\n{js}"
+    );
+}
+
+#[test]
+fn style_expression_emits_set_style() {
+    // `style={s}` → `$.set_style(button, $.get(s))`.
+    let src = "<script>let s = $state('color:red');</script>\n<button onclick={() => s = 'color:blue'} style={s}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => $.set_style(button, $.get(s)))"
+        )),
+        "`style={{s}}` must be set_style:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("$.set_attribute(button, 'style'")),
+        "a dynamic style must NOT use set_attribute:\n{js}"
+    );
+}
+
+#[test]
+fn style_base_with_directive_merges_into_set_style() {
+    // `style="font-weight:bold" style:color={color}` → one merged set_style with the
+    // base value + the directive object, using the `let styles;` accumulator.
+    let src = "<script>let color = $state('red');</script>\n<button onclick={() => color = 'blue'} style=\"font-weight:bold\" style:color={color}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("let styles;")),
+        "a reactive style directive needs the accumulator:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "styles = $.set_style(button, 'font-weight:bold', styles, { color: $.get(color) })"
+        )),
+        "the merged set_style shape (base/styles/directives) is wrong:\n{js}"
+    );
+    assert!(
+        !js.contains("$.from_html(`<button style=\"font-weight:bold\""),
+        "a style with a directive must pull the base style OUT of the skeleton:\n{js}"
+    );
+}
+
+#[test]
+fn style_custom_property_quotes_the_key() {
+    // `style:--x={x}` (no base) → `$.set_style(button, '', styles, { '--x': $.get(x) })`.
+    let src = "<script>let x = $state('1');</script>\n<button onclick={() => x += '1'} style:--x={x}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "styles = $.set_style(button, '', styles, { '--x': $.get(x) })"
+        )),
+        "a custom property must quote the `--x` key and use an empty base:\n{js}"
+    );
+}
+
+#[test]
+fn style_important_modifier_wraps_in_normal_important_array() {
+    // `style="display:block" style:--x={x} style:color|important={color}` → the 4th arg
+    // is a `[normal, important]` array.
+    let src = "<script>let x = $state('1'); let color = $state('red');</script>\n<button onclick={() => { x += '1'; color = 'blue'; }} style=\"display:block\" style:--x={x} style:color|important={color}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "styles = $.set_style(button, 'display:block', styles, [{ '--x': $.get(x) }, { color: $.get(color) }])"
+        )),
+        "the |important modifier must split into a [normal, important] array:\n{js}"
+    );
+}
+
+#[test]
+fn combined_reactive_attr_class_style_share_one_template_effect() {
+    // All three reactive → ONE combined `$.template_effect` with the set_attribute /
+    // set_class / set_style in source order.
+    let src = "<script>let id=$state('a'); let c=$state('b'); let s=$state('c');</script>\n<button onclick={() => { id+='!'; c+='!'; s+='!'; }} id={id} class={c} style={s}></button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    // The single combined block in source order.
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => { $.set_attribute(button, 'id', $.get(id)); $.set_class(button, 1, $.clsx($.get(c))); $.set_style(button, $.get(s)); })"
+        )),
+        "reactive attr/class/style must share ONE template_effect in source order:\n{js}"
+    );
+    // NEGATIVE: there is exactly ONE template_effect (no per-attribute effects).
+    assert_eq!(
+        n.matches("template_effect").count(),
+        1,
+        "reactive attr/class/style must NOT emit separate template_effects:\n{js}"
+    );
+}
+
+#[test]
+fn reactive_attr_and_reactive_text_share_one_template_effect() {
+    // The cross-cut: a reactive attr and reactive text on the same region share ONE
+    // combined `$.template_effect`, in DOM-walk order (attr first, then text).
+    let src = "<script>let id=$state('a'); let t=$state('hi');</script>\n<button onclick={() => { id+='!'; t+='!'; }} id={id}>{t}</button>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => { $.set_attribute(button, 'id', $.get(id)); $.set_text(text, $.get(t)); })"
+        )),
+        "a reactive attr and reactive text must share ONE template_effect:\n{js}"
+    );
+    assert_eq!(
+        n.matches("template_effect").count(),
+        1,
+        "attr + text must NOT emit two template_effects:\n{js}"
+    );
+}
+
+// ── the dynamic-attribute / class / style surface negative boundary: deferred surfaces STILL refuse ─────────────────
+
+#[test]
+fn plain_value_attr_still_refuses_to_5c() {
+    // `value={v}` (a plain form-control setter) is 5c, NOT 5a — it must still refuse
+    // (through the 5c-owning form-control / bindings channel).
+    assert_fail_closed(
+        "<script>let v = $state('x');</script>\n<input onclick={() => v += '!'} value={v}>\n",
+        "5c",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn plain_checked_attr_still_refuses_to_5c() {
+    assert_fail_closed(
+        "<script>let v = $state(false);</script>\n<input onclick={() => v = !v} checked={v}>\n",
+        "5c",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "checked"),
+    );
+}
+
+#[test]
+fn dynamic_dir_attr_still_refuses() {
+    // `dir={d}` is the special reflected-attr quirk (`el.dir = el.dir`) — DEFERRED, so
+    // it must still fail closed rather than mis-emit a plain set_attribute.
+    assert_fail_closed(
+        "<script>let d = $state('ltr');</script>\n<div onclick={() => d = 'rtl'} dir={d}>x</div>\n",
+        "5a",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "dir"),
+    );
+}
+
+#[test]
+fn dynamic_muted_on_non_media_element_emits_property_write() {
+    // `muted` is a DOM property on ANY element — official `is_dom_property('muted')`
+    // is element-agnostic (`muted` ∈ `DOM_BOOLEAN_ATTRIBUTES` → `DOM_PROPERTIES`, no
+    // host check) — so `<div muted={v}>` emits `div.muted = $.get(v)` exactly like a
+    // `<video>` host (NOT a refusal, NOT a `$.set_attribute`).
+    let src =
+        "<script>let v = $state(false);</script>\n<div onclick={() => v = !v} muted={v}></div>\n";
+    let js = emit(src, "App.svelte");
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.template_effect(() => div.muted = $.get(v))")),
+        "`muted` on a `<div>` must be a property write:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("$.set_attribute(div, 'muted'")),
+        "`muted` must NOT use set_attribute:\n{js}"
+    );
+}
+
+// (Spread `{...rest}` (5b) and `{@html}` (5b) refusals are covered by the existing
+// `spread_fails_closed_to_5b` / `html_tag_fails_closed_to_5b` gates — the
+// dynamic-attribute / class / style widening did NOT touch them, so they stay refused
+// with no new test needed.)
+
+#[test]
+fn prop_bind_value_still_refuses_to_5c() {
+    // `bind:value` to a prop is 5c (the prop-bind path) — a regression-safety negative.
+    assert_fail_closed(
+        "<script>let { v } = $props();</script>\n<input bind:value={v}>\n",
+        "5c",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn no_dynamic_attr_emits_the_boolean_set_attribute_misform() {
+    // A global discriminating negative: NO 5a form ever emits the forbidden boolean
+    // `$.set_attribute(el, name, value, true)` 4th-arg signature (the 4th arg is
+    // hydration-warning suppression, never emitted in normal output).
+    for src in [
+        "<script>let v=$state(false);</script>\n<button onclick={() => v = !v} disabled={v}></button>\n",
+        "<script>let v=$state(false);</script>\n<button onclick={() => v = !v} hidden={v}></button>\n",
+        "<script>let v=$state('x');</script>\n<button onclick={() => v += '!'} id={v}></button>\n",
+    ] {
+        let js = emit(src, "App.svelte");
+        // No `$.set_attribute(..., true)` 4th-arg signature.
+        assert!(
+            !normalize_js_cosmetics(&js).contains(",true))") || !js.contains("$.set_attribute"),
+            "no set_attribute boolean 4th-arg misform:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn class_and_style_shorthand_directives_synthesize_the_implied_identifier() {
+    // A SHORTHAND `class:active` / `style:color` (no `={…}`) synthesizes the implied
+    // same-named identifier as the condition / value, so the merged call carries
+    // `{ active: $.get(active) }` / `{ color: $.get(color) }`.
+    let class_js = emit(
+        "<script>let active = $state(false);</script>\n<div onclick={() => active = !active} class:active></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        normalize_js_cosmetics(&class_js).contains(&nc(
+            "$.set_class(div, 1, '', null, classes, { active: $.get(active) })"
+        )),
+        "a `class:active` shorthand must synthesize the `active` condition:\n{class_js}"
+    );
+    let style_js = emit(
+        "<script>let color = $state('red');</script>\n<div onclick={() => color = 'blue'} style:color></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        normalize_js_cosmetics(&style_js)
+            .contains(&nc("$.set_style(div, '', styles, { color: $.get(color) })")),
+        "a `style:color` shorthand must synthesize the `color` value:\n{style_js}"
+    );
 }

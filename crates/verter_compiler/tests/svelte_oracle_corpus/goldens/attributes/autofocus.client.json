@@ -1,0 +1,98 @@
+{
+  "slug": "attributes/autofocus.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "autofocus",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "autofocus",
+    "sibling",
+    "autofocus",
+    "get",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "set",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "autofocus",
+    "child",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "reset",
+    "set",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "autofocus": 2,
+    "sibling": 2,
+    "get": 3,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 2,
+    "set": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/> <input/> <button> </button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/> <input/> <button> </button>`, 1); export default function autofocus($$anchor) {let c = $.state(0); let on = $.state(true); var fragment = root(); var input = $.first_child(fragment); $.autofocus(input, true); var input_1 = $.sibling(input, 2); $.autofocus(input_1, $.get(on)); var button = $.sibling(input_1, 2); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(c))); $.delegated('click', input_1, () => $.set(on, !$.get(on))); $.delegated('click', button, () => $.update(c)); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

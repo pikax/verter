@@ -56,7 +56,7 @@
       "flag": "3"
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<my-widget></my-widget> <video></video> <button is=\"my-button\">go</button>`, 3); export default function custom_element_import_node($$anchor) { var fragment = root(); var my_widget = $.first_child(fragment); $.set_custom_element_data(my_widget, 'label', 'x'); var button = $.sibling(my_widget, 4); $.append($$anchor, fragment); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<my-widget></my-widget> <video></video> <button is=\"my-button\">go</button>`, 3); export default function custom_element_import_node($$anchor) {var fragment = root(); var my_widget = $.first_child(fragment); $.set_custom_element_data(my_widget, 'label', 'x'); var button = $.sibling(my_widget, 4); $.append($$anchor, fragment);}",
   "css": {
     "present": false,
     "hash": null,

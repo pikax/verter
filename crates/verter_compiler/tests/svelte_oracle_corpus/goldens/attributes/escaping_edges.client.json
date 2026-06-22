@@ -1,0 +1,81 @@
+{
+  "slug": "attributes/escaping_edges.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "escaping_edges",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "template_effect",
+    "set_class",
+    "get",
+    "set_style",
+    "get",
+    "delegated",
+    "set",
+    "get",
+    "set",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "set",
+    "set_class",
+    "set_style",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "template_effect": 1,
+    "set_class": 1,
+    "get": 3,
+    "set_style": 1,
+    "delegated": 1,
+    "set": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>go</button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>go</button>`); export default function escaping_edges($$anchor) {let c = $.state('x'); let s = $.state('red'); var button = root(); let styles; $.template_effect(() => {$.set_class(button, 1, `a&b-$${$.get(c) ?? ''}-end`); styles = $.set_style(button, 'q:\\'\"\\'', styles, {color: $.get(s)});}); $.delegated('click', button, () => {$.set(c, $.get(c) + '!'); $.set(s, 'blue');}); $.append($$anchor, button);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

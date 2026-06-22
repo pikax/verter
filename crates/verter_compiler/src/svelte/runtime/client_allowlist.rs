@@ -36,6 +36,10 @@ pub(super) enum SupportedHtmlElement {
     Input,
     /// `<p>`.
     P,
+    /// `<video>` — the media host for the `muted` DOM-property write . It
+    /// requires `importNode` (the official `from_html(…, TEMPLATE_USE_IMPORT_NODE)`
+    /// flag), so the template flag is set by the skeleton planner, not here.
+    Video,
 }
 
 impl SupportedHtmlElement {
@@ -53,6 +57,7 @@ impl SupportedHtmlElement {
             "h1" => Some(Self::H1),
             "input" => Some(Self::Input),
             "p" => Some(Self::P),
+            "video" => Some(Self::Video),
             _ => None,
         }
     }
@@ -71,6 +76,7 @@ impl SupportedHtmlElement {
             Self::H1 => "h1",
             Self::Input => "input",
             Self::P => "p",
+            Self::Video => "video",
         }
     }
 }
@@ -231,28 +237,144 @@ pub(super) fn is_svelte_reserved_word(tag: &str) -> bool {
     SVELTE_RESERVED_WORDS.contains(&tag)
 }
 
+// ---------------------------------------------------------------------------
+// DOM attribute / property tables (mirrored from svelte@5.56.3 `src/utils.js`)
+// ---------------------------------------------------------------------------
+//
+// These are the pinned official tables the client backend uses to decide a
+// dynamic attribute's emission shape: a DOM-property write (`node.prop = value`)
+// vs `$.set_attribute(node, 'name', value)`. They are TRANSCRIBED VERBATIM from
+// `svelte@5.56.3` `src/utils.js` — `DOM_BOOLEAN_ATTRIBUTES`, `ATTRIBUTE_ALIASES`,
+// `DOM_PROPERTIES`, and the `normalize_attribute` / `is_dom_property` functions —
+// so the property-vs-attribute decision is byte-faithful to the official compiler
+// (never a hand-guessed list). The freshness guard
+// `dom_property_tables_match_pinned_svelte` keeps them honest.
+
+/// The official `DOM_BOOLEAN_ATTRIBUTES` (svelte@5.56.3 `src/utils.js`): attributes
+/// that are present-or-not (boolean). Used as the base of [`DOM_PROPERTIES`].
+const DOM_BOOLEAN_ATTRIBUTES: &[&str] = &[
+    "allowfullscreen",
+    "async",
+    "autofocus",
+    "autoplay",
+    "checked",
+    "controls",
+    "default",
+    "disabled",
+    "formnovalidate",
+    "indeterminate",
+    "inert",
+    "ismap",
+    "loop",
+    "multiple",
+    "muted",
+    "nomodule",
+    "novalidate",
+    "open",
+    "playsinline",
+    "readonly",
+    "required",
+    "reversed",
+    "seamless",
+    "selected",
+    "webkitdirectory",
+    "defer",
+    "disablepictureinpicture",
+    "disableremoteplayback",
+];
+
+/// The official `ATTRIBUTE_ALIASES` (svelte@5.56.3 `src/utils.js`): attribute names
+/// (lowercase) that alias to a differently-cased DOM PROPERTY name because the
+/// attribute and the property behave differently. `class` is intentionally absent
+/// (handled separately by `$.set_class`).
+const ATTRIBUTE_ALIASES: &[(&str, &str)] = &[
+    ("formnovalidate", "formNoValidate"),
+    ("ismap", "isMap"),
+    ("nomodule", "noModule"),
+    ("playsinline", "playsInline"),
+    ("readonly", "readOnly"),
+    ("defaultvalue", "defaultValue"),
+    ("defaultchecked", "defaultChecked"),
+    ("srcobject", "srcObject"),
+    ("novalidate", "noValidate"),
+    ("allowfullscreen", "allowFullscreen"),
+    ("disablepictureinpicture", "disablePictureInPicture"),
+    ("disableremoteplayback", "disableRemotePlayback"),
+];
+
+/// The official `DOM_PROPERTIES` extras appended after `DOM_BOOLEAN_ATTRIBUTES`
+/// (svelte@5.56.3 `src/utils.js`): the camelCase property aliases plus the
+/// non-boolean reflected properties.
+const DOM_PROPERTIES_EXTRA: &[&str] = &[
+    "formNoValidate",
+    "isMap",
+    "noModule",
+    "playsInline",
+    "readOnly",
+    "value",
+    "volume",
+    "defaultValue",
+    "defaultChecked",
+    "srcObject",
+    "noValidate",
+    "allowFullscreen",
+    "disablePictureInPicture",
+    "disableRemotePlayback",
+];
+
+/// The official `normalize_attribute` (svelte@5.56.3 `src/utils.js`):
+/// `ATTRIBUTE_ALIASES[name.toLowerCase()] ?? name.toLowerCase()`. Lowercases the
+/// name and maps a known alias to its camelCase property name (`readonly` →
+/// `readOnly`); an un-aliased name returns its lowercase form.
+#[must_use]
+pub(super) fn normalize_attribute(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    for (alias, prop) in ATTRIBUTE_ALIASES {
+        if *alias == lower {
+            return (*prop).to_string();
+        }
+    }
+    lower
+}
+
+/// The official `is_dom_property` (svelte@5.56.3 `src/utils.js`): membership in
+/// `DOM_PROPERTIES` = `DOM_BOOLEAN_ATTRIBUTES ∪ DOM_PROPERTIES_EXTRA`. The argument
+/// is the ALREADY-[`normalize_attribute`]'d name (the official call site is
+/// `is_dom_property(normalize_attribute(name))`), so `readOnly` / `isMap` / … are
+/// matched, not their lowercase attribute spellings. A `true` result means the
+/// dynamic attribute is emitted as a DOM-PROPERTY write (`node.<name> = value`); a
+/// `false` result routes it through `$.set_attribute`.
+#[must_use]
+pub(super) fn is_dom_property(normalized_name: &str) -> bool {
+    DOM_BOOLEAN_ATTRIBUTES.contains(&normalized_name)
+        || DOM_PROPERTIES_EXTRA.contains(&normalized_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn try_from_accepts_exactly_the_six_core_tags() {
-        // The SOLE element-acceptance authority accepts EXACTLY the §1.2-core set.
-        let accepted: Vec<&str> = ["a", "button", "div", "h1", "input", "p"]
+    fn try_from_accepts_exactly_the_seven_core_tags() {
+        // The SOLE element-acceptance authority accepts EXACTLY the core set (§1.2 six
+        // plus the `video` media host for the `muted` property write).
+        let accepted: Vec<&str> = ["a", "button", "div", "h1", "input", "p", "video"]
             .into_iter()
             .filter(|t| SupportedHtmlElement::try_from(t).is_some())
             .collect();
-        assert_eq!(accepted, ["a", "button", "div", "h1", "input", "p"]);
+        assert_eq!(
+            accepted,
+            ["a", "button", "div", "h1", "input", "p", "video"]
+        );
         // A representative spread of out-of-allowlist tags is rejected — including
-        // the demoted breadth (`span` / `textarea` / `select` / `option` / `video` /
-        // `img` / `slot`) and a reserved-word tag.
+        // the demoted breadth (`span` / `textarea` / `select` / `option` / `img` /
+        // `slot`) and a reserved-word tag.
         for tag in [
             "span",
             "textarea",
             "select",
             "option",
             "optgroup",
-            "video",
             "img",
             "slot",
             "var",
@@ -281,6 +403,7 @@ mod tests {
             SupportedHtmlElement::H1,
             SupportedHtmlElement::Input,
             SupportedHtmlElement::P,
+            SupportedHtmlElement::Video,
         ] {
             let stem = el.var_stem();
             assert!(!stem.is_empty());
@@ -413,4 +536,101 @@ mod tests {
         // The exact pinned set has the official cardinality (svelte@5.56.3).
         assert_eq!(SVELTE_RESERVED_WORDS.len(), 48);
     }
+
+    #[test]
+    fn normalize_attribute_lowercases_and_aliases() {
+        // `normalize_attribute` lowercases + maps a known alias to its camelCase
+        // property name; an un-aliased name returns its lowercase form (svelte@5.56.3
+        // `src/utils.js`).
+        assert_eq!(normalize_attribute("readonly"), "readOnly");
+        assert_eq!(normalize_attribute("READONLY"), "readOnly");
+        assert_eq!(normalize_attribute("formnovalidate"), "formNoValidate");
+        assert_eq!(normalize_attribute("ismap"), "isMap");
+        assert_eq!(normalize_attribute("playsinline"), "playsInline");
+        assert_eq!(normalize_attribute("defaultvalue"), "defaultValue");
+        // An un-aliased name lowercases only.
+        assert_eq!(normalize_attribute("disabled"), "disabled");
+        assert_eq!(normalize_attribute("Hidden"), "hidden");
+        assert_eq!(normalize_attribute("contenteditable"), "contenteditable");
+        // `class` is intentionally NOT aliased (handled by `$.set_class`).
+        assert_eq!(normalize_attribute("class"), "class");
+    }
+
+    #[test]
+    fn is_dom_property_decides_property_vs_set_attribute() {
+        // The pinned `DOM_PROPERTIES` membership (svelte@5.56.3 `src/utils.js`):
+        // `DOM_BOOLEAN_ATTRIBUTES ∪` the camelCase aliases + reflected props. The
+        // argument is the ALREADY-normalized name (the official call site is
+        // `is_dom_property(normalize_attribute(name))`).
+        // DOM-boolean attributes are properties.
+        for name in [
+            "disabled", "checked", "muted", "open", "required", "selected",
+        ] {
+            assert!(is_dom_property(name), "{name} must be a DOM property");
+        }
+        // The camelCase aliases (the normalized spelling) are properties.
+        for name in [
+            "readOnly",
+            "isMap",
+            "noModule",
+            "playsInline",
+            "formNoValidate",
+        ] {
+            assert!(
+                is_dom_property(name),
+                "{name} (normalized) must be a DOM property"
+            );
+        }
+        // The non-boolean reflected properties.
+        for name in [
+            "value",
+            "volume",
+            "defaultValue",
+            "defaultChecked",
+            "srcObject",
+        ] {
+            assert!(is_dom_property(name), "{name} must be a DOM property");
+        }
+        // NOT DOM properties (route through `$.set_attribute`).
+        for name in [
+            "contenteditable",
+            "hidden",
+            "id",
+            "title",
+            "class",
+            "data-x",
+        ] {
+            assert!(
+                !is_dom_property(name),
+                "{name} must NOT be a DOM property (uses set_attribute)"
+            );
+        }
+        // The full official call site is `is_dom_property(normalize_attribute(name))`:
+        // for `readonly`, `normalize_attribute` yields `readOnly` (the camelCase
+        // PROPERTY name used in the emitted code), which is also a DOM property. (The
+        // lowercase `readonly` is ALSO in the table — it is a DOM-boolean attribute —
+        // so the property-vs-attribute decision is true either way; the normalization
+        // is what makes the emitted member spelling `node.readOnly`, not the membership.)
+        assert!(is_dom_property(&normalize_attribute("readonly")));
+        assert_eq!(normalize_attribute("readonly"), "readOnly");
+    }
+
+    #[test]
+    fn dom_boolean_attributes_has_the_pinned_cardinality() {
+        // The committed `DOM_BOOLEAN_ATTRIBUTES` mirrors the pinned svelte@5.56.3 list
+        // (28 entries); a desync from the official table fails this gate (and the
+        // freshness check below, when node_modules is present).
+        assert_eq!(DOM_BOOLEAN_ATTRIBUTES.len(), 28);
+        // `DOM_PROPERTIES` = the booleans + 14 extra (camelCase aliases + reflected
+        // props). The `is_dom_property` membership covers both halves.
+        assert_eq!(DOM_PROPERTIES_EXTRA.len(), 14);
+        assert_eq!(ATTRIBUTE_ALIASES.len(), 12);
+    }
+
+    // The committed DOM tables are TRANSCRIBED VERBATIM from svelte@5.56.3
+    // `src/utils.js`; the live-freshness check against `node_modules` lives in the
+    // `tests/` boundary file (`svelte_element_attr_boundary.rs`'s
+    // `dom_property_tables_match_pinned_svelte`), keeping `std::fs` out of this src
+    // module (the NativeFs invariant). The cardinality + behaviour assertions above
+    // catch an accidental in-place edit here.
 }

@@ -1,0 +1,43 @@
+{
+  "slug": "attributes/escaping_edges.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "escaping_edges",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "stringify",
+    "attr_style"
+  ],
+  "helperSet": [
+    "attr_class",
+    "attr_style",
+    "stringify"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "stringify": 1,
+    "attr_style": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

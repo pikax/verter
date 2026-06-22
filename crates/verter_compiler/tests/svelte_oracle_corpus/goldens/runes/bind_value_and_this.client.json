@@ -74,7 +74,7 @@
       "flag": "1"
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/><div></div> `, 1); export default function bind_value_and_this($$anchor) { let v = $.state(''); let el; var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var div = $.sibling(input); $.bind_this(div, ($$value) => el = $$value, () => el); var text = $.sibling(div, 1, true); $.template_effect(() => $.set_text(text, $.get(v))); $.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value)); $.append($$anchor, fragment); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/><div></div> `, 1); export default function bind_value_and_this($$anchor) {let v = $.state(''); let el; var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var div = $.sibling(input); $.bind_this(div, ($$value) => el = $$value, () => el); var text = $.sibling(div, 1, true); $.template_effect(() => $.set_text(text, $.get(v))); $.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value)); $.append($$anchor, fragment);}",
   "css": {
     "present": false,
     "hash": null,

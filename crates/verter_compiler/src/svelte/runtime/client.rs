@@ -25,11 +25,19 @@
 //! [`UnsupportedSvelteRuntimeSurface`] carrying its owning vertical — never a
 //! silent empty module, never a panic.
 
-use super::client_plan::{ClientBindTarget, ClientModulePlan, ClientNode, ClientRuntimeOp};
+use super::client_effect::{emit_text_effect, Memoizer};
+use super::client_plan::{
+    AttrValue, AttrValuePart, ClientBindTarget, ClientDynAttrEmit, ClientModulePlan, ClientNode,
+    ClientRuntimeOp,
+};
+use super::client_walk::{
+    any_item_needs_name, first_descent, input_needs_remove_defaults, item_needs_name,
+    sibling_descent, WalkBase,
+};
 use super::entity_decode::decode_text_entities;
 use super::helpers::{ImportPlan, RuntimeImport};
 use super::html::{StaticTemplatePlan, TemplateFactory};
-use super::ir::{AttrIr, IrNode, NodeId, SvelteRuntimeIr, TemplateScopeId};
+use super::ir::{IrNode, NodeId, SvelteRuntimeIr, TemplateScopeId};
 use super::topology::ClientTopologyPlan;
 use super::whitespace::{
     clean_nodes, cleaned_text_run_parts, CleanContext, CleanItem, RunTextPart,
@@ -83,6 +91,25 @@ struct ClientEmitter<'a> {
     /// The emitted var name reaching each interpolation's text node (populated by
     /// the walk, read by the reactive-text op emission).
     interp_var: rustc_hash::FxHashMap<NodeId, String>,
+    /// The allocated class/style accumulator name per `(node, kind)` — the
+    /// `let <name>;` is emitted INLINE in the walk right after the node's var
+    /// (matching the official per-element `init` placement), and the same name is
+    /// read by the post-walk `$.template_effect` for the `prev` arg + the `<name> =`
+    /// assignment. The key carries the [`AccKind`] so a single element bearing BOTH a
+    /// reactive class op AND a reactive style op keeps each op's accumulator
+    /// independent (a directive-less class op adjacent to a directive-bearing style op
+    /// must NOT borrow the style accumulator). Populated by the walk's inline-init
+    /// emission, read by the reactive class/style op.
+    acc_name: rustc_hash::FxHashMap<(NodeId, AccKind), String>,
+}
+
+/// Which coalesced reactive op an accumulator belongs to. A node has at most one
+/// class op and one style op, so `(node, Class)` / `(node, Style)` are distinct
+/// accumulator slots — the discriminant the per-node accumulator map keys on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AccKind {
+    Class,
+    Style,
 }
 
 impl<'a> ClientEmitter<'a> {
@@ -114,6 +141,7 @@ impl<'a> ClientEmitter<'a> {
             used,
             node_var: rustc_hash::FxHashMap::default(),
             interp_var: rustc_hash::FxHashMap::default(),
+            acc_name: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -334,12 +362,16 @@ impl<'a> ClientEmitter<'a> {
             let IrNode::Element(el) = self.ir().node(only) else {
                 return;
             };
-            // The clone-root element's own input cleanup + `bind:this` are emitted
-            // right after the clone frame named it (mirroring the chained path's
-            // per-node setup + the official single-root order).
+            // The clone-root element's own input cleanup, INIT-domain attribute ops,
+            // and `bind:this` are emitted right after the clone frame named it. The
+            // official per-element order (`RegularElement.js`) is: `remove_input_defaults`
+            // → the init-domain writes (`$.autofocus` / `$.set_class` / `$.set_attribute`
+            // / the reactive accumulator decls) → `$.bind_this` LAST (a render-side
+            // binding emitted after the element's own inits).
             if input_needs_remove_defaults(el) {
                 out.push_str(&format!("\t$.remove_input_defaults({region_var});\n"));
             }
+            self.emit_node_inline_inits(out, only);
             self.emit_inline_bind_this(out, only);
             let child_items = clean_nodes(self.ir(), &el.children, child_ctx);
             self.emit_walk_over_items(out, &child_items, WalkBase::Element(region_var), child_ctx);
@@ -432,9 +464,17 @@ impl<'a> ClientEmitter<'a> {
                             if input_needs_remove_defaults(el) {
                                 out.push_str(&format!("\t$.remove_input_defaults({var});\n"));
                             }
+                            // The element's INIT-domain attribute ops (non-reactive
+                            // attr/property writes, `$.autofocus`, non-reactive
+                            // class/style, and the reactive class/style `let <acc>;`
+                            // decl) emit at THIS walk position — the official
+                            // per-element `init` placement — after the input cleanup
+                            // and BEFORE the next sibling.
+                            self.emit_node_inline_inits(out, *node);
                             // `bind:this` is a RENDER-side binding emitted inline,
-                            // right after the node is named (and after the input
-                            // cleanup), BEFORE the next sibling — matching official.
+                            // right after the node's own inits (matching the official
+                            // per-element order where `bind_this` follows the element's
+                            // init-domain writes), BEFORE the next sibling.
                             self.emit_inline_bind_this(out, *node);
                             let child_ctx = ctx.for_children_of(tag);
                             let child_items = clean_nodes(self.ir(), &el.children, child_ctx);
@@ -516,48 +556,101 @@ impl<'a> ClientEmitter<'a> {
         )
     }
 
-    /// Emit the reactive ops for a region (the grouped `$.template_effect` of all
-    /// reactive-text writes, then the binds + events in source order). Every op is
-    /// the NARROW [`ClientRuntimeOp`] vocabulary — no broad `RuntimeOp` is matched.
+    /// Emit the POST-WALK reactive ops for a region: the single combined
+    /// `$.template_effect` (the reactive text plus the reactive dynamic attr / class /
+    /// style, in source order), then the binds + events. The NON-REACTIVE attribute
+    /// inits (autofocus, non-reactive attr/property/class/style) and the reactive
+    /// class/style `let <acc>;` accumulator declarations are emitted INLINE during the
+    /// walk ([`Self::emit_node_inline_inits`]) at each element's `init` position —
+    /// matching official — so this stage does NOT emit them. Every op is the NARROW
+    /// [`ClientRuntimeOp`] vocabulary — no broad `RuntimeOp` is matched.
     fn emit_ops(&mut self, out: &mut String, scope_id: TemplateScopeId) {
         let _ = scope_id;
 
-        // (a) Group all reactive-text writes into ONE `$.template_effect`. Multiple
-        // interpolations that share ONE DOM text node (a mixed run like
-        // `{box.a} {box.b}`) collapse to a SINGLE `$.set_text` over the whole-run
-        // template — dedup the per-interp ops by their shared text-node var (the
-        // official `flush_sequence` one-text-node-per-run behavior).
-        //
-        // A reactive-text chunk that `has_call` is MEMOIZED through the official
-        // deps-array form: the (already-rewritten) call expression is hoisted into a
-        // `$N` placeholder and a `() => <expr>` dep, collected on ONE memoizer
-        // SHARED across the whole effect (`$0, $1, …` assigned in order). A bare
-        // read stays inline. When any chunk is memoized, the effect takes the
-        // `($0, …) => <body>, [() => dep0, …]` shape.
+        // The single combined `$.template_effect` — ALL reactive updates in source
+        // order: reactive text (one `$.set_text` per text-node run, the official
+        // `flush_sequence` dedup), then the reactive dynamic attr / class / style
+        // writes. A reactive-text chunk that `has_call` is MEMOIZED through the shared
+        // deps-array form (`$0, $1, …`); a bare read stays inline. A reactive
+        // class/style op reads the accumulator name allocated for its node during the
+        // walk (`self.acc_name[node]`), so the `prev` arg + `<acc> =` assignment match
+        // the inline-declared `let <acc>;`.
         let mut memoizer = Memoizer::default();
-        let mut text_writes = Vec::new();
+        let mut update_bodies: Vec<String> = Vec::new();
         let mut seen_text_vars = rustc_hash::FxHashSet::default();
         for op in &self.plan.ops {
-            if let ClientRuntimeOp::ReactiveText { target, .. } = op {
-                let node = NodeId(target.0);
-                let var = self
-                    .interp_var
-                    .get(&node)
-                    .cloned()
-                    .unwrap_or_else(|| "text".to_string());
-                if !seen_text_vars.insert(var) {
-                    // Another interpolation in the same text run already emitted the
-                    // whole-run `$.set_text` — skip the duplicate.
-                    continue;
+            match op {
+                ClientRuntimeOp::ReactiveText { target, .. } => {
+                    let node = NodeId(target.0);
+                    let var = self
+                        .interp_var
+                        .get(&node)
+                        .cloned()
+                        .unwrap_or_else(|| "text".to_string());
+                    if !seen_text_vars.insert(var) {
+                        continue;
+                    }
+                    let body = self.emit_set_text(node, &mut memoizer);
+                    update_bodies.push(body);
                 }
-                let body = self.emit_set_text(node, &mut memoizer);
-                text_writes.push(body);
+                ClientRuntimeOp::ReactiveAttr {
+                    emit,
+                    reactive: true,
+                    target,
+                } => {
+                    update_bodies.push(self.emit_reactive_attr(
+                        NodeId(target.0),
+                        emit,
+                        &mut Some(&mut memoizer),
+                    ));
+                }
+                ClientRuntimeOp::SetClass {
+                    target,
+                    value,
+                    css_hash,
+                    directives,
+                    directives_has_call,
+                    reactive: true,
+                    ..
+                } => {
+                    let node = NodeId(target.0);
+                    let acc = self.acc_name.get(&(node, AccKind::Class)).cloned();
+                    update_bodies.push(self.emit_set_class(
+                        node,
+                        value,
+                        css_hash.as_deref(),
+                        directives.as_deref(),
+                        *directives_has_call,
+                        acc.as_deref(),
+                        &mut Some(&mut memoizer),
+                    ));
+                }
+                ClientRuntimeOp::SetStyle {
+                    target,
+                    value,
+                    directives,
+                    directives_has_call,
+                    reactive: true,
+                    ..
+                } => {
+                    let node = NodeId(target.0);
+                    let acc = self.acc_name.get(&(node, AccKind::Style)).cloned();
+                    update_bodies.push(self.emit_set_style(
+                        node,
+                        value,
+                        directives.as_deref(),
+                        *directives_has_call,
+                        acc.as_deref(),
+                        &mut Some(&mut memoizer),
+                    ));
+                }
+                _ => {}
             }
         }
         let deps = memoizer.into_deps();
-        emit_text_effect(out, &text_writes, &deps);
+        emit_text_effect(out, &update_bodies, &deps);
 
-        // (b) The POST-walk binds + events in source order — every op a NARROW
+        // (d) The POST-walk binds + events in source order — every op a NARROW
         // `ClientRuntimeOp` (already-rewritten getter / setter / handler bodies). A
         // `bind:this` is NOT emitted here: it is a render-side binding emitted INLINE
         // during the walk (see `emit_inline_bind_this`), BEFORE this grouped text
@@ -584,10 +677,197 @@ impl<'a> ClientEmitter<'a> {
                     handler,
                     ..
                 } => self.emit_event(out, NodeId(target.0), event_type, handler),
-                // The reactive-text ops were grouped above.
-                ClientRuntimeOp::ReactiveText { .. } => {}
+                // The reactive-text / reactive-attr / class / style ops were grouped
+                // above; the non-reactive attr inits were emitted in (b).
+                ClientRuntimeOp::ReactiveText { .. }
+                | ClientRuntimeOp::ReactiveAttr { .. }
+                | ClientRuntimeOp::SetClass { .. }
+                | ClientRuntimeOp::SetStyle { .. } => {}
             }
         }
+    }
+
+    /// Emit a dynamic plain-attribute write body (`$.set_attribute(node, 'name',
+    /// value)` / `node.<prop> = value` / `$.autofocus(node, value)`), resolving the
+    /// node var and building the structured value.
+    ///
+    /// `memoizer` is `Some` on the REACTIVE (in-effect) path: a `has_call` expression
+    /// part is hoisted into a `$N` deps-array slot (the official `build_template_chunk`
+    /// rule). It is `None` on the INIT path (`$.autofocus` / a non-reactive write),
+    /// where the value is read once and is emitted INLINE with no memoization.
+    fn emit_reactive_attr(
+        &self,
+        target: NodeId,
+        emit: &ClientDynAttrEmit,
+        memoizer: &mut Option<&mut Memoizer>,
+    ) -> String {
+        let var = self.dom_var(target);
+        match emit {
+            ClientDynAttrEmit::SetAttribute { name, value } => {
+                let v = self.build_attr_value(value, memoizer);
+                format!("$.set_attribute({var}, '{name}', {v})")
+            }
+            ClientDynAttrEmit::Property { prop, value } => {
+                let v = self.build_attr_value(value, memoizer);
+                format!("{var}.{prop} = {v}")
+            }
+            ClientDynAttrEmit::Autofocus { value } => {
+                // Autofocus is init-only — its value is a pre-flattened string (never
+                // memoized).
+                format!("$.autofocus({var}, {value})")
+            }
+        }
+    }
+
+    /// Build the emitted value expression for a structured [`AttrValue`], routing each
+    /// expression part through `memoizer` (when `Some`) so a `has_call` value lands in
+    /// the official deps-array form. A `Single` value emits its bare (possibly `$N`)
+    /// expression; a `Mixed` value builds the `` `lit${expr ?? ''}lit` `` template with
+    /// each expr resolved; a `Const` emits verbatim.
+    fn build_attr_value(&self, value: &AttrValue, memoizer: &mut Option<&mut Memoizer>) -> String {
+        match value {
+            AttrValue::Const(text) => text.clone(),
+            AttrValue::Single {
+                rewritten,
+                has_call,
+            } => match memoizer {
+                Some(m) => m.add(rewritten.clone(), *has_call),
+                None => rewritten.clone(),
+            },
+            AttrValue::Mixed(parts) => {
+                let mut tmpl = String::from("`");
+                for part in parts {
+                    match part {
+                        AttrValuePart::Literal(text) => {
+                            tmpl.push_str(&super::client_codegen_helpers::escape_template_text(
+                                text,
+                            ));
+                        }
+                        AttrValuePart::Expr {
+                            rewritten,
+                            has_call,
+                            coalesce,
+                        } => {
+                            let v = match memoizer {
+                                Some(m) => m.add(rewritten.clone(), *has_call),
+                                None => rewritten.clone(),
+                            };
+                            // The `?? ''` coercion the plan computed (official
+                            // `build_template_chunk`): a provably-defined part is RAW, an
+                            // undecided part gets `?? ''` (parenthesized for a `&&`/`||`
+                            // operand). A memoized part is the `$N` identifier slot `v`.
+                            use super::reactive_fold::NullishCoalesce;
+                            match coalesce {
+                                NullishCoalesce::None => tmpl.push_str(&format!("${{{v}}}")),
+                                NullishCoalesce::Bare => {
+                                    tmpl.push_str(&format!("${{{v} ?? ''}}"));
+                                }
+                                NullishCoalesce::Parenthesized => {
+                                    tmpl.push_str(&format!("${{({v}) ?? ''}}"));
+                                }
+                            }
+                        }
+                    }
+                }
+                tmpl.push('`');
+                tmpl
+            }
+        }
+    }
+
+    /// Memoize a class/style ARGUMENT (the base `value` or the `next` directives
+    /// object/array) when it `has_call` and the op is reactive (`memoizer` is `Some`) —
+    /// the official `build_set_class` / `build_set_style` rule. On the init path
+    /// (`memoizer` is `None`) the argument is emitted inline. A non-`has_call` argument
+    /// always stays inline.
+    fn memoize_arg(
+        &self,
+        arg: &str,
+        has_call: bool,
+        memoizer: &mut Option<&mut Memoizer>,
+    ) -> String {
+        match memoizer {
+            Some(m) => m.add(arg.to_string(), has_call),
+            None => arg.to_string(),
+        }
+    }
+
+    /// Assemble the coalesced `$.set_class(node, 1, value, css_hash, prev, next)` call
+    /// body from the structured op pieces, with the real DOM var + accumulator name.
+    /// `prev` is the accumulator name (reactive directives), `{}` (non-reactive
+    /// directives), or absent (no directives); a reactive directive call prefixes the
+    /// `<acc> = ` assignment. The base `value` is routed through `build_attr_value` (so
+    /// a mixed base memoizes each EXPRESSION PART, a `$.clsx(...)` base memoizes the
+    /// whole wrap — the official `build_set_class`); the directives object is memoized
+    /// as a whole through `memoizer` when it `has_call`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_set_class(
+        &self,
+        target: NodeId,
+        value: &AttrValue,
+        css_hash: Option<&str>,
+        directives: Option<&str>,
+        directives_has_call: bool,
+        acc: Option<&str>,
+        memoizer: &mut Option<&mut Memoizer>,
+    ) -> String {
+        let var = self.dom_var(target);
+        let value = self.build_attr_value(value, memoizer);
+        // `prev`: the accumulator name (reactive) or `{}` (non-reactive); present only
+        // when there are directives (the same condition that produced `css_hash`).
+        let prev = directives.map(|_| acc.map(str::to_string).unwrap_or_else(|| "{}".to_string()));
+        let next = directives.map(|d| self.memoize_arg(d, directives_has_call, memoizer));
+        let args = super::client_codegen_helpers::trim_trailing_none(vec![
+            Some(var),
+            Some("1".to_string()),
+            Some(value),
+            css_hash.map(str::to_string),
+            prev,
+            next,
+        ]);
+        let call = format!("$.set_class({})", args.join(", "));
+        match acc {
+            Some(name) => format!("{name} = {call}"),
+            None => call,
+        }
+    }
+
+    /// Assemble the coalesced `$.set_style(node, value, prev, next)` call body from the
+    /// structured op pieces (see [`Self::emit_set_class`]).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_set_style(
+        &self,
+        target: NodeId,
+        value: &AttrValue,
+        directives: Option<&str>,
+        directives_has_call: bool,
+        acc: Option<&str>,
+        memoizer: &mut Option<&mut Memoizer>,
+    ) -> String {
+        let var = self.dom_var(target);
+        let value = self.build_attr_value(value, memoizer);
+        let prev = directives.map(|_| acc.map(str::to_string).unwrap_or_else(|| "{}".to_string()));
+        let next = directives.map(|d| self.memoize_arg(d, directives_has_call, memoizer));
+        let args = super::client_codegen_helpers::trim_trailing_none(vec![
+            Some(var),
+            Some(value),
+            prev,
+            next,
+        ]);
+        let call = format!("$.set_style({})", args.join(", "));
+        match acc {
+            Some(name) => format!("{name} = {call}"),
+            None => call,
+        }
+    }
+
+    /// The emitted DOM-variable name reaching a node (from the walk's `node_var` map),
+    /// or the `node` fallback (unreachable on the accept path).
+    fn dom_var(&self, target: NodeId) -> String {
+        self.node_var
+            .get(&target)
+            .cloned()
+            .unwrap_or_else(|| "node".to_string())
     }
 
     /// Emit the `$.set_text(...)` call body for the reactive-text node `target`.
@@ -801,13 +1081,14 @@ impl<'a> ClientEmitter<'a> {
     }
 
     /// Emit any `bind:this` op targeting `node` INLINE during the walk, right after
-    /// the node has been named (and after `$.remove_input_defaults`). The official
-    /// compiler emits `$.bind_this(node, …)` as a RENDER-side binding interleaved
-    /// into element setup — BEFORE the next sibling walk and BEFORE the grouped
-    /// `$.template_effect` for sibling reactive text — whereas `$.bind_value` /
-    /// delegated events are emitted post-walk (after the text effect). Emitting
-    /// `bind:this` here, and SKIPPING the `This` arm in [`Self::emit_ops`], matches
-    /// that order byte-for-byte.
+    /// the node's own init-domain writes (and after `$.remove_input_defaults`). The
+    /// official compiler emits `$.bind_this(node, …)` as a RENDER-side binding
+    /// interleaved into element setup — AFTER the element's init-domain attribute
+    /// writes (`$.autofocus` / `$.set_class` / `$.set_attribute` / accumulator decls),
+    /// BEFORE the next sibling walk and BEFORE the grouped `$.template_effect` for
+    /// sibling reactive text — whereas `$.bind_value` / delegated events are emitted
+    /// post-walk (after the text effect). Emitting `bind:this` here, and SKIPPING the
+    /// `This` arm in [`Self::emit_ops`], matches that order byte-for-byte.
     fn emit_inline_bind_this(&mut self, out: &mut String, node: NodeId) {
         // The plan ops are cloned out so the `&self` borrow does not conflict with
         // the `&mut self` `emit_bind` call (the op set is small — one pass).
@@ -828,6 +1109,119 @@ impl<'a> ClientEmitter<'a> {
             .collect();
         for (getter, setter) in binds {
             self.emit_bind(out, node, ClientBindTarget::This, &getter, &setter);
+        }
+    }
+
+    /// Emit a node's INIT-domain attribute ops INLINE during the walk, right after
+    /// the node has been named (and after `$.remove_input_defaults`), BEFORE its
+    /// `bind:this`, in source order. This is the official per-element `init` placement
+    /// (`RegularElement.js`): the non-reactive dynamic-attr / property writes, the
+    /// init-only `$.autofocus`, and the non-reactive `$.set_class` / `$.set_style`
+    /// are emitted at the element's WALK position — NOT collected post-walk. A
+    /// REACTIVE class/style op contributes ONLY its `let <acc>;` accumulator
+    /// declaration here (the reactive `$.set_class` / `$.set_style` body itself joins
+    /// the post-walk `$.template_effect`); the allocated name is recorded in
+    /// [`Self::acc_name`] for that effect to read. A reactive `ReactiveAttr`
+    /// (a stateful property write like `video.muted = $.get(v)`) contributes nothing
+    /// here — it joins the effect.
+    ///
+    /// Iterating `self.plan.ops` (source order) and filtering to `node` keeps a
+    /// single element's multiple init ops in source order, and across elements the
+    /// walk visits nodes in DOM order, so the accumulator names allocate
+    /// `classes`, `classes_1`, … in the official order.
+    fn emit_node_inline_inits(&mut self, out: &mut String, node: NodeId) {
+        // The op set is cloned out (small) so the `&self` read does not conflict with
+        // the `&mut self` accumulator allocation. Each entry is the already-assembled
+        // init statement, OR the directive pieces a reactive class/style op needs so
+        // its `let <acc>;` decl + name allocation happen here in walk order.
+        enum InlineInit {
+            /// A ready-to-emit init statement (`$.set_attribute(...)`, `node.p = v`,
+            /// `$.autofocus(...)`, a non-reactive `$.set_class` / `$.set_style`).
+            Stmt(String),
+            /// A reactive class/style op needs a `let <acc>;` accumulator declared at
+            /// this walk position; the stem is allocated to a collision-free name and
+            /// recorded under the op's [`AccKind`] slot.
+            Accumulator(&'static str, AccKind),
+        }
+        let inits: Vec<InlineInit> = self
+            .plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                // A non-reactive plain-attribute / property / autofocus init. The
+                // value is read once (no effect), so it is emitted INLINE with NO
+                // memoizer — even a `has_call` constant value stays inline.
+                ClientRuntimeOp::ReactiveAttr {
+                    emit,
+                    reactive: false,
+                    target,
+                } if NodeId(target.0) == node => Some(InlineInit::Stmt(
+                    self.emit_reactive_attr(node, emit, &mut None),
+                )),
+                // A reactive class op declares its `classes` accumulator here.
+                ClientRuntimeOp::SetClass {
+                    accumulator_stem: Some(stem),
+                    reactive: true,
+                    target,
+                    ..
+                } if NodeId(target.0) == node => {
+                    Some(InlineInit::Accumulator(stem, AccKind::Class))
+                }
+                // A reactive style op declares its `styles` accumulator here.
+                ClientRuntimeOp::SetStyle {
+                    accumulator_stem: Some(stem),
+                    reactive: true,
+                    target,
+                    ..
+                } if NodeId(target.0) == node => {
+                    Some(InlineInit::Accumulator(stem, AccKind::Style))
+                }
+                // A NON-reactive class/style init statement — emitted inline (no
+                // effect), so its arguments are never memoized (`memoizer` is `None`).
+                ClientRuntimeOp::SetClass {
+                    target,
+                    value,
+                    css_hash,
+                    directives,
+                    directives_has_call,
+                    reactive: false,
+                    ..
+                } if NodeId(target.0) == node => Some(InlineInit::Stmt(self.emit_set_class(
+                    node,
+                    value,
+                    css_hash.as_deref(),
+                    directives.as_deref(),
+                    *directives_has_call,
+                    None,
+                    &mut None,
+                ))),
+                ClientRuntimeOp::SetStyle {
+                    target,
+                    value,
+                    directives,
+                    directives_has_call,
+                    reactive: false,
+                    ..
+                } if NodeId(target.0) == node => Some(InlineInit::Stmt(self.emit_set_style(
+                    node,
+                    value,
+                    directives.as_deref(),
+                    *directives_has_call,
+                    None,
+                    &mut None,
+                ))),
+                _ => None,
+            })
+            .collect();
+        for init in inits {
+            match init {
+                InlineInit::Stmt(stmt) => out.push_str(&format!("\t{stmt};\n")),
+                InlineInit::Accumulator(stem, kind) => {
+                    let name = self.alloc_name(stem);
+                    out.push_str(&format!("\tlet {name};\n"));
+                    self.acc_name.insert((node, kind), name);
+                }
+            }
         }
     }
 
@@ -891,203 +1285,6 @@ enum RunPart {
     Interp(NodeId),
 }
 
-/// The official `Memoizer` for a `$.template_effect` group — it hoists each
-/// `has_call` reactive-text chunk into a `$N` placeholder and a `() => <expr>`
-/// dependency, SHARED across the whole effect so the placeholders are numbered
-/// `$0, $1, …` in collection order. A non-call chunk is returned inline (no
-/// memoization). Mirrors `phases/3-transform/client/visitors/shared/utils.js`'s
-/// `Memoizer` (the synchronous-deps half — async/`has_await` text is fail-closed
-/// at 5j and never reaches here).
-#[derive(Default)]
-struct Memoizer {
-    /// The collected `() => <expr>` dependency bodies, in placeholder order.
-    deps: Vec<String>,
-}
-
-impl Memoizer {
-    /// Route a rewritten chunk through the memoizer: a `has_call` chunk is hoisted
-    /// (its rewritten expression becomes the next `() => <expr>` dep and a `$N`
-    /// placeholder is returned); a non-call chunk is returned inline unchanged.
-    fn add(&mut self, rewritten: String, has_call: bool) -> String {
-        if !has_call {
-            return rewritten;
-        }
-        let placeholder = format!("${}", self.deps.len());
-        self.deps.push(rewritten);
-        placeholder
-    }
-
-    /// The collected dependency bodies (`[expr0, expr1, …]`), consuming the
-    /// memoizer.
-    fn into_deps(self) -> Vec<String> {
-        self.deps
-    }
-}
-
-/// Emit the grouped reactive-text `$.template_effect`, choosing the official shape:
-///
-/// - NO writes → nothing.
-/// - No memoized deps, one write → the inline `$.template_effect(() => <write>)`.
-/// - No memoized deps, many writes → the block `$.template_effect(() => { … })`.
-/// - Any memoized deps → the deps-array form `$.template_effect(($0, …) => <body>,
-///   [() => dep0, …])` (the parameter list is `$0 … $N-1`; the body is the single
-///   write or a block of writes; the deps array is the second argument).
-fn emit_text_effect(out: &mut String, text_writes: &[String], deps: &[String]) {
-    if text_writes.is_empty() {
-        return;
-    }
-    if deps.is_empty() {
-        // The non-memoized shapes (unchanged from the §1.2 / bare-read path).
-        if text_writes.len() == 1 {
-            out.push_str(&format!("\t$.template_effect(() => {});\n", text_writes[0]));
-        } else {
-            out.push_str("\t$.template_effect(() => {\n");
-            for body in text_writes {
-                out.push_str(&format!("\t\t{body};\n"));
-            }
-            out.push_str("\t});\n");
-        }
-        return;
-    }
-    // The MEMOIZED deps-array form. The arrow params are `$0 … $N-1`.
-    let params = (0..deps.len())
-        .map(|i| format!("${i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let deps_array = deps
-        .iter()
-        .map(|d| format!("() => {d}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if text_writes.len() == 1 {
-        out.push_str(&format!(
-            "\t$.template_effect(({params}) => {}, [{deps_array}]);\n",
-            text_writes[0]
-        ));
-    } else {
-        out.push_str(&format!("\t$.template_effect(({params}) => {{\n"));
-        for body in text_writes {
-            out.push_str(&format!("\t\t{body};\n"));
-        }
-        out.push_str(&format!("\t}}, [{deps_array}]);\n"));
-    }
-}
-
-/// The base a walk descent starts from.
-#[derive(Debug, Clone, Copy)]
-enum WalkBase<'n> {
-    /// The cloned multi-root fragment (descend via `$.first_child`).
-    Fragment(&'n str),
-    /// A named element (descend into its children via `$.child`).
-    Element(&'n str),
-}
-
-/// The first descent expression from a base to cleaned-sequence position `idx`.
-///
-/// When the descended-to position is a pure-interp TEXT node (`is_text`), the
-/// official trailing `true` boolean is emitted on the helper that LANDS on the
-/// text node — `$.child(node, true)` / `$.first_child(frag, true)`.
-///
-/// The `$.sibling` step that advances PAST the first child applies the same
-/// offset-omission rule [`sibling_descent`] does: `$.sibling(node, 1)` collapses to
-/// `$.sibling(node)` (the `count` default is `1`) — UNLESS `is_text`, which forces
-/// the explicit offset so the trailing `true` boolean stays positioned (the
-/// oracle's `$.sibling($.child(div), 1, true)` form). A higher offset stays
-/// explicit.
-fn first_descent(base: WalkBase, idx: usize, is_text: bool) -> String {
-    let text_arg = if is_text { ", true" } else { "" };
-    match base {
-        WalkBase::Fragment(name) => {
-            if idx == 0 {
-                format!("$.first_child({name}{text_arg})")
-            } else {
-                // `$.sibling($.first_child(fragment)[, idx][, true])` — descend then
-                // advance; the offset is omitted at `idx == 1` (non-text), explicit
-                // otherwise (or when the text flag must trail it).
-                let inner = format!("$.first_child({name})");
-                sibling_descent(&inner, idx, is_text)
-            }
-        }
-        WalkBase::Element(name) => {
-            if idx == 0 {
-                format!("$.child({name}{text_arg})")
-            } else {
-                let inner = format!("$.child({name})");
-                sibling_descent(&inner, idx, is_text)
-            }
-        }
-    }
-}
-
-/// A `$.sibling(prev[, delta][, true])` descent (delta omitted when 1 UNLESS the
-/// landed-on node is a pure-interp text — official forces the explicit offset when
-/// `is_text`, e.g. `$.sibling(prev, 1, true)`).
-fn sibling_descent(prev: &str, delta: usize, is_text: bool) -> String {
-    if is_text {
-        // `is_text` forces the explicit offset, then the trailing `true`.
-        format!("$.sibling({prev}, {delta}, true)")
-    } else if delta == 1 {
-        format!("$.sibling({prev})")
-    } else {
-        format!("$.sibling({prev}, {delta})")
-    }
-}
-
-/// Whether a cleaned DOM position needs a named walk var (it is dynamic, or hosts
-/// a dynamic descendant).
-fn item_needs_name(ir: &SvelteRuntimeIr, item: &CleanItem) -> bool {
-    match item {
-        CleanItem::TextRun { interps, .. } => !interps.is_empty(),
-        CleanItem::Node(node) => node_or_descendant_dynamic(ir, *node),
-    }
-}
-
-/// Whether any cleaned position in the sequence needs a named walk var (so a
-/// `$.reset(parent)` is emitted after the parent's children).
-fn any_item_needs_name(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> bool {
-    items.iter().any(|item| item_needs_name(ir, item))
-}
-
-/// Whether a node is dynamic or hosts a dynamic descendant.
-fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
-    match ir.node(node_id) {
-        IrNode::Interpolation { .. } => true,
-        IrNode::Element(el) => {
-            el.attrs.iter().any(|a| !matches!(a, AttrIr::Static { .. }))
-                || el
-                    .children
-                    .iter()
-                    .any(|&c| node_or_descendant_dynamic(ir, c))
-        }
-        _ => false,
-    }
-}
-
-/// Whether an `<input>` element needs `$.remove_input_defaults` — the official
-/// `RegularElement.js` rule: an `<input>` with a `value` / `checked` / `group`
-/// binding (or `files`) and NO static `defaultValue` / `defaultChecked`
-/// attribute. (The non-spread `bind:value` branch is handled; the rule keys on
-/// the typed `AttrIr`, never a source scan.)
-fn input_needs_remove_defaults(el: &super::ir::ElementIr) -> bool {
-    if el.tag != "input" {
-        return false;
-    }
-    let has_value_bind = el.attrs.iter().any(|a| {
-        matches!(a, AttrIr::Bind { target, .. }
-            if matches!(target.as_str(), "value" | "checked" | "group" | "files"))
-    });
-    if !has_value_bind {
-        return false;
-    }
-    // A static `defaultValue` / `defaultChecked` attribute suppresses the helper
-    // (the default is set explicitly).
-    let has_static_default = el.attrs.iter().any(|a| {
-        matches!(a, AttrIr::Static { name, .. }
-            if matches!(name.as_str(), "defaultValue" | "defaultChecked"))
-    });
-    !has_static_default
-}
-
 /// Emit the module imports from the import plan, interleaving the `<script module>`
 /// user imports in the official slot.
 ///
@@ -1118,6 +1315,12 @@ fn emit_imports(out: &mut String, imports: &ImportPlan) {
 
 /// Emit the root template-factory hoist (`var root = $.from_html(...)`), returning
 /// whether the region mounts a multi-root FRAGMENT (vs a single clone-root element).
+///
+/// The fragment decision is the `TEMPLATE_FRAGMENT` bit ONLY — a flag carrying just
+/// `TEMPLATE_USE_IMPORT_NODE` (a lone `<video>`/custom-element template, flag `2`)
+/// is still a SINGLE clone-root element: `$.from_html` returns the element, so the
+/// walk must take the single-element path (`var video = root();`), NOT the fragment
+/// path (`$.first_child(root())` → null on a single element).
 fn emit_root_hoist(out: &mut String, root_var: &str, factory: Option<&TemplateFactory>) -> bool {
     match factory {
         Some(TemplateFactory::FromHtml {
@@ -1131,7 +1334,7 @@ fn emit_root_hoist(out: &mut String, root_var: &str, factory: Option<&TemplateFa
                         "var {root_var} = $.from_html(`{escaped}`, {});\n",
                         flag.literal()
                     ));
-                    true
+                    flag.is_fragment()
                 }
                 None => {
                     out.push_str(&format!("var {root_var} = $.from_html(`{escaped}`);\n"));

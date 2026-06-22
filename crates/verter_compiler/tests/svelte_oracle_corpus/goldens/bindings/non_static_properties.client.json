@@ -58,7 +58,7 @@
       "flag": "3"
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<video></video> <input/> <input/> <input/>`, 3); export default function non_static_properties($$anchor) { var fragment = root(); var video = $.first_child(fragment); video.muted = true; var input = $.sibling(video, 2); $.autofocus(input, true); var input_1 = $.sibling(input, 2); input_1.defaultValue = 'seed'; var input_2 = $.sibling(input_1, 2); input_2.defaultChecked = true; $.append($$anchor, fragment); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<video></video> <input/> <input/> <input/>`, 3); export default function non_static_properties($$anchor) {var fragment = root(); var video = $.first_child(fragment); video.muted = true; var input = $.sibling(video, 2); $.autofocus(input, true); var input_1 = $.sibling(input, 2); input_1.defaultValue = 'seed'; var input_2 = $.sibling(input_1, 2); input_2.defaultChecked = true; $.append($$anchor, fragment);}",
   "css": {
     "present": false,
     "hash": null,

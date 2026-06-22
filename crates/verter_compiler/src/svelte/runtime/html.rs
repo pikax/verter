@@ -469,6 +469,12 @@ fn is_sole_controlled(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> bool {
 /// for this serializer — the static default is preserved here, and the
 /// bind-aware stripping is owned by the bindings layer.
 fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) {
+    // The official `RegularElement.js` rule: a static `class` / `style` stays baked
+    // into the skeleton ONLY when the element carries NO `class:` / `style:`
+    // directive — a directive pulls the attribute OUT into the merged `$.set_class`
+    // / `$.set_style` (the base value becomes the call's `value` arg). Scan once.
+    let has_class_directive = attrs.iter().any(|a| matches!(a, AttrIr::Class { .. }));
+    let has_style_directive = attrs.iter().any(|a| matches!(a, AttrIr::Style { .. }));
     for attr in attrs {
         if let AttrIr::Static { name, value } = attr {
             // A "cannot be set statically" attribute (`autofocus` / `muted` /
@@ -477,6 +483,13 @@ fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) 
             // `NonStaticProperty` op the ops pass emits). The official
             // `cannot_be_set_statically` exclusion.
             if cannot_be_set_statically(name) {
+                continue;
+            }
+            // A static `class` / `style` whose element ALSO carries a `class:` /
+            // `style:` directive is pulled OUT of the skeleton (its value becomes the
+            // base arg to the merged `$.set_class` / `$.set_style`).
+            if (name == "class" && has_class_directive) || (name == "style" && has_style_directive)
+            {
                 continue;
             }
             // A CUSTOM element's attributes are set via PROPERTIES at runtime, so
@@ -571,6 +584,20 @@ pub(super) fn cannot_be_set_statically(name: &str) -> bool {
         name,
         "autofocus" | "muted" | "defaultValue" | "defaultChecked"
     )
+}
+
+/// Whether an attribute is a DYNAMIC surface the DOM walk must reach (so its host
+/// element needs a named walk var) — anything other than a plain baked static
+/// attribute. A reactive `Dynamic` / `Mixed`, a `class:` / `style:` / `bind:` /
+/// `use:` / transition / event directive, a spread, OR a `cannot_be_set_statically`
+/// STATIC attribute (`autofocus` / `muted` / `defaultValue` / `defaultChecked`, which
+/// is applied at runtime via `$.autofocus` / a property write, NOT baked) all count.
+/// A plain baked `Static` attribute does NOT.
+pub(super) fn attr_is_dynamic_surface(attr: &AttrIr) -> bool {
+    match attr {
+        AttrIr::Static { name, .. } => cannot_be_set_statically(name),
+        _ => true,
+    }
 }
 
 /// The HTML void-element set (self-closing in the static skeleton).
@@ -1082,7 +1109,7 @@ fn element_hosts_dynamic_descendant(ir: &SvelteRuntimeIr, node_id: NodeId) -> bo
 fn node_needs_path(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
     match ir.node(node_id) {
         IrNode::Interpolation { .. } | IrNode::Block(_) => true,
-        IrNode::Element(el) => el.attrs.iter().any(|a| !matches!(a, AttrIr::Static { .. })),
+        IrNode::Element(el) => el.attrs.iter().any(attr_is_dynamic_surface),
         // A raw `{@html}` tag is a dynamic node the DOM walk must reach.
         IrNode::Tag(crate::svelte::runtime::ir::TagIr::Html { .. }) => true,
         _ => false,

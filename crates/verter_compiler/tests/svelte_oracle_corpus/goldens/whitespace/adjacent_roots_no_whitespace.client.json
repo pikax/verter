@@ -50,7 +50,7 @@
       "flag": "1"
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<a href=\"/a\">A</a><b>B</b>`, 1); export default function adjacent_roots_no_whitespace($$anchor) { var fragment = root(); $.next(); $.append($$anchor, fragment); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<a href=\"/a\">A</a><b>B</b>`, 1); export default function adjacent_roots_no_whitespace($$anchor) {var fragment = root(); $.next(); $.append($$anchor, fragment);}",
   "css": {
     "present": false,
     "hash": null,

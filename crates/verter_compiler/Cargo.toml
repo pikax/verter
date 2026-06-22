@@ -37,6 +37,15 @@ verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
 hotpath = { version = "0.16", optional = true }
 bitflags = "2.11"
 memchr = "2.8.0"
+# Arbitrary-precision integers for the Svelte client const-fold evaluator's BigInt
+# values (a faithful port of official `scope.evaluate`, where `NUMBER` includes
+# BigInt). Already a transitive dep via `oxc_ecmascript`; pinned directly here so
+# the fold evaluator can name the type.
+num-bigint = "0.4"
+# IEEE-754 half-precision for the const-fold evaluator's `Math.f16round` global —
+# an EXACT round-to-nearest-even f64→f16→f64 round-trip matching JS. Already a
+# transitive dev-dep via criterion; pinned directly so the fold matches official.
+half = "2"
 rustc-hash = { workspace = true }
 smallvec = "1.15"
 lazy_static = "1.5.0"

@@ -77,7 +77,7 @@
       "flag": "1"
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p> <button>x</button>`, 1); export default function is_text_flag($$anchor) { let count = $.state(0); var fragment = root(); var p = $.first_child(fragment); var text = $.child(p, true); $.reset(p); var button = $.sibling(p, 2); $.template_effect(() => $.set_text(text, $.get(count))); $.delegated('click', button, () => $.update(count)); $.append($$anchor, fragment); } $.delegate(['click']);",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p> <button>x</button>`, 1); export default function is_text_flag($$anchor) {let count = $.state(0); var fragment = root(); var p = $.first_child(fragment); var text = $.child(p, true); $.reset(p); var button = $.sibling(p, 2); $.template_effect(() => $.set_text(text, $.get(count))); $.delegated('click', button, () => $.update(count)); $.append($$anchor, fragment);} $.delegate(['click']);",
   "css": {
     "present": false,
     "hash": null,

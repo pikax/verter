@@ -51,7 +51,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function pointer_capture_events($$anchor) { let h = () => {}; var div = root(); $.event('gotpointercapture', div, h); $.event('gotpointercapture', div, h, true); $.append($$anchor, div); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function pointer_capture_events($$anchor) {let h = () => {}; var div = root(); $.event('gotpointercapture', div, h); $.event('gotpointercapture', div, h, true); $.append($$anchor, div);}",
   "css": {
     "present": false,
     "hash": null,

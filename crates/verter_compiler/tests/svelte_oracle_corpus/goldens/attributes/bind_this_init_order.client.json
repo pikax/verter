@@ -1,0 +1,60 @@
+{
+  "slug": "attributes/bind_this_init_order.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_this_init_order",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "autofocus",
+    "set_class",
+    "bind_this",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "autofocus",
+    "bind_this",
+    "from_html",
+    "set_class"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "autofocus": 1,
+    "set_class": 1,
+    "bind_this": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/>`); export default function bind_this_init_order($$anchor) {let el; let c = false; var input = root(); $.autofocus(input, true); $.set_class(input, 1, '', null, {}, {x: c}); $.bind_this(input, ($$value) => el = $$value, () => el); $.append($$anchor, input);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

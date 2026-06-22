@@ -66,11 +66,12 @@ describe("VerterHost", () => {
     expect(ide!.code).toBeTruthy();
   });
 
-  it("ensureIdeCompiled populates CachedTsx for a Main-less Svelte carrier; getVirtualFile(Main) stays absent", () => {
+  it("ensureIdeCompiled populates CachedTsx for a Main-less Svelte carrier; getVirtualFile(Main) is an explicit refusal", () => {
     // The Main-less Svelte carrier: `ensureIdeCompiled` succeeds with a
-    // `CachedTsx` (Svelte-specific TSX), `getIde` reads it, and
-    // `getVirtualFile(Main)` reports no runtime Main (Svelte runtime is a later
-    // block). Discriminating: a Vue-only path would have routed `.svelte`
+    // `CachedTsx` (Svelte-specific TSX), `getIde` reads it, and a runtime
+    // `getVirtualFile(Main)` request is an EXPLICIT refusal (this carrier's
+    // `<script lang="ts">` is fail-closed by the Svelte runtime backend), NOT a
+    // silent null. Discriminating: a Vue-only path would have routed `.svelte`
     // through the Vue SFC compiler and either errored or produced Vue TSX.
     const host = new VerterHost();
     host.upsert({
@@ -90,14 +91,19 @@ describe("VerterHost", () => {
     expect(ide!.code).toContain("@jsxImportSource @verter/svelte-jsx");
     expect(ide!.code).not.toContain("_sfc_main");
 
-    // No runtime Main virtual node yet for the Main-less carrier — the binding
-    // maps the missing node to null.
-    const mainFile = host.getVirtualFile({
-      canonicalId: "Counter.svelte",
-      nodeKind: { kind: "main" },
-      compileProfile: profile,
-    });
-    expect(mainFile).toBeNull();
+    // The runtime Main request on this `<script lang="ts">` carrier is an EXPLICIT
+    // refusal, NOT a null missing node: the Svelte runtime backend fails closed on a
+    // TypeScript script (`svelte-runtime-unsupported-typescript`), and the host
+    // surfaces that as a `RuntimeSurfaceRefused` error (mirroring the Rust contract
+    // `runtime_main_request_on_a_refused_svelte_component_is_an_explicit_refusal_yet_ide_resolves`).
+    // A host that mapped the refusal to `null` would contradict that contract.
+    expect(() =>
+      host.getVirtualFile({
+        canonicalId: "Counter.svelte",
+        nodeKind: { kind: "main" },
+        compileProfile: profile,
+      }),
+    ).toThrow(/svelte-runtime-unsupported-typescript/);
   });
 
   it("should accept Buffer as source in upsert", () => {

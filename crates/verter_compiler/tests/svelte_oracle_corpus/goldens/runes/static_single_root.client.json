@@ -42,7 +42,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>a</p>`); export default function static_single_root($$anchor) { let c = 0; var p = root(); $.append($$anchor, p); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>a</p>`); export default function static_single_root($$anchor) {let c = 0; var p = root(); $.append($$anchor, p);}",
   "css": {
     "present": false,
     "hash": null,

@@ -1,0 +1,46 @@
+{
+  "slug": "attributes/combined_effect.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "combined_effect",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "attr_class",
+    "clsx",
+    "attr_style"
+  ],
+  "helperSet": [
+    "attr",
+    "attr_class",
+    "attr_style",
+    "clsx"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "attr_class": 1,
+    "clsx": 1,
+    "attr_style": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

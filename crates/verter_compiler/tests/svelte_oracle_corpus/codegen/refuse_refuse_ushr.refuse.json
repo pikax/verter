@@ -1,0 +1,8 @@
+{
+  "slug": "refuse_refuse_ushr",
+  "bucket": "refuse",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "officialRejected": true,
+  "officialErrorSummary": "BigInts have no unsigned right shift, use >> instead"
+}

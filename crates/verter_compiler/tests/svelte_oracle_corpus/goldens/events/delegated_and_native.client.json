@@ -87,7 +87,7 @@
       "flag": "1"
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button> <div>hover</div> <input/>`, 1); export default function delegated_and_native($$anchor) { let count = $.state(0); var fragment = root(); var button = $.first_child(fragment); var text = $.child(button); $.reset(button); var div = $.sibling(button, 2); var input = $.sibling(div, 2); $.template_effect(() => $.set_text(text, `click ${$.get(count) ?? ''}`)); $.delegated('click', button, () => $.update(count)); $.event('mouseenter', div, () => {}); $.event('mouseleave', div, () => {}); $.delegated('input', input, (e) => $.set(count, e.currentTarget.value.length, true)); $.append($$anchor, fragment); } $.delegate(['click', 'input']);",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button> <div>hover</div> <input/>`, 1); export default function delegated_and_native($$anchor) {let count = $.state(0); var fragment = root(); var button = $.first_child(fragment); var text = $.child(button); $.reset(button); var div = $.sibling(button, 2); var input = $.sibling(div, 2); $.template_effect(() => $.set_text(text, `click ${$.get(count) ?? ''}`)); $.delegated('click', button, () => $.update(count)); $.event('mouseenter', div, () => {}); $.event('mouseleave', div, () => {}); $.delegated('input', input, (e) => $.set(count, e.currentTarget.value.length, true)); $.append($$anchor, fragment);} $.delegate(['click', 'input']);",
   "css": {
     "present": false,
     "hash": null,

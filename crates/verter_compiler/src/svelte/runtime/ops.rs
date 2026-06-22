@@ -167,7 +167,11 @@ fn collect_attr_ops(
                     attr: AttrOp {
                         name: name.clone(),
                         expr: *expr,
-                        kind: AttrOpKind::Plain,
+                        // A `class={…}` / `style={…}` PLAIN attribute is the class /
+                        // style surface (`$.set_class` / `$.set_style`), not a generic
+                        // attribute — the op kind keys on the name (structural, never a
+                        // text heuristic).
+                        kind: attr_op_kind_for_name(name),
                     },
                 },
             ),

@@ -19,190 +19,32 @@ use oxc_allocator::Allocator;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::SupportedHtmlElement;
-use super::client_shapes::{ClientBindShape, ClientEventHandlerShape, ClientInterpolationShape};
+use super::client_codegen_helpers::{
+    escape_template_text, is_signal_kind, js_single_quoted, object_key, op_target_node,
+    style_object,
+};
+use super::client_shapes::{
+    ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape, ClientInterpolationShape,
+};
 use super::client_surface::ClassifiedClientSurface;
+use super::entity_decode::decode_attr_entities;
 use super::expr::{BindingRuntimeKind, ScopeId};
 use super::expr_emit;
 use super::expr_rewrite::{self, PropReads, ProxyInitMap};
 use super::ir::{
-    AttrIr, BindOp, EventOp, EventTarget, ExprId, IrNode, NodeId, RuntimeOp, SvelteRuntimeIr,
+    AttrIr, AttrOpKind, BindOp, EventOp, EventTarget, ExprId, IrNode, MixedAttrPart, NodeId,
+    NonStaticPropertyKind, NonStaticPropertyValue, RuntimeOp, SvelteRuntimeIr,
 };
 use verter_span::Span;
 
-/// A node in the NARROW client node arena — the closed template-node vocabulary
-/// the emitter walks. Every supported [`IrNode`] projects to exactly one of these;
-/// the broad-IR variants (component / block / tag / non-options special) never
-/// reach the plan (they were refused by the classifier).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ClientNode {
-    /// A literal text run.
-    Text {
-        /// The source span.
-        span: Span,
-        /// The text content.
-        text: String,
-    },
-    /// An HTML comment.
-    Comment {
-        /// The source span.
-        span: Span,
-        /// The comment text.
-        text: String,
-    },
-    /// A reactive escaped interpolation (`{expr}`). The reactivity decision was
-    /// made at build time (a non-reactive interpolation fails closed before the
-    /// plan is built), so every `ReactiveText` node in the plan IS reactive.
-    ReactiveText {
-        /// The source span.
-        span: Span,
-        /// The interpolated expression id (into the IR expression arena; the plan
-        /// reads it back through the build-time analysis for the op rewrite).
-        expr: ExprId,
-    },
-    /// An intrinsic element. The element is a TYPED [`SupportedHtmlElement`] fact (the
-    /// classifier's `try_from` proof), so the emitter reads the DOM var stem from
-    /// [`SupportedHtmlElement::var_stem`] — never the raw tag string. The `tag` is
-    /// retained for the template SERIALIZATION + the whitespace-context namespace
-    /// decision (`for_children_of`), which are HTML-tag concerns, not var stems.
-    Element {
-        /// The typed accepted element (the SOLE source of the DOM var stem).
-        element: SupportedHtmlElement,
-        /// The tag name (for serialization + child-namespace context only).
-        tag: String,
-        /// The full open-tag source span.
-        span: Span,
-        /// The narrow attributes.
-        attrs: Vec<ClientAttr>,
-        /// The child node ids (into the plan's narrow node arena).
-        children: Vec<ClientNodeId>,
-    },
-    /// The `<svelte:options>` compile-option marker — consumed, renders nothing
-    /// (carried so the node arena mirrors the IR node-id space; the walk skips it).
-    OptionsMarker {
-        /// The source span.
-        span: Span,
-    },
-}
-
-/// A node id into the plan's narrow node arena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct ClientNodeId(pub(super) u32);
-
-/// A narrow supported attribute on a [`ClientNode::Element`]. The bind / event
-/// REWRITES live on the [`ClientRuntimeOp`]s (the emitter sequences ops, not
-/// element attrs); the element attr records the supported KIND so the narrow node
-/// tree is a faithful structural mirror. The static attribute carries its literal
-/// (folded into the template HTML by the planner).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ClientAttr {
-    /// A truly-static attribute (folded into the static template HTML).
-    Static {
-        /// The attribute name.
-        name: String,
-        /// The literal value (`None` for a valueless boolean attribute).
-        value: Option<String>,
-    },
-    /// `bind:value` on an `<input>` (or element `bind:this`) — the getter/setter
-    /// rewrite is on the corresponding [`ClientRuntimeOp::Bind`].
-    Bind {
-        /// The bind target (`value` / `this`).
-        target: ClientBindTarget,
-    },
-    /// A modern delegated DOM event — the handler rewrite is on the corresponding
-    /// [`ClientRuntimeOp::Event`].
-    DelegatedEvent {
-        /// The normalized event type (`click`, …).
-        event_type: String,
-    },
-}
-
-/// The supported bind target kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ClientBindTarget {
-    /// `bind:value`.
-    Value,
-    /// `bind:this`.
-    This,
-}
-
-/// A narrow supported script item — a single emitted component-FUNCTION-BODY
-/// statement (already lowered to its final client JS text). The supported instance
-/// script is the strict finite [`SupportedInstanceScriptItem`](super::client_shapes::SupportedInstanceScriptItem)
-/// allowlist; a `<script module>` / instance `import` / `export` is fail-closed
-/// upstream (the script-hoisting deferral), so the closed body vocabulary is a single
-/// `BodyStatement` variant — the plan carries the emitted string, the emitter only
-/// sequences it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ClientScriptItem {
-    /// An emitted component-FUNCTION-BODY statement (a supported `$state` declaration
-    /// or a `bind:this` clone-root local) — already lowered to its final client JS
-    /// text.
-    BodyStatement {
-        /// The emitted statement.
-        code: String,
-    },
-}
-
-impl ClientScriptItem {
-    /// The emitted statement text for this script item.
-    pub(super) fn code(&self) -> &str {
-        match self {
-            Self::BodyStatement { code } => code,
-        }
-    }
-}
-
-/// A narrow supported reactive runtime op — the closed op vocabulary the emitter
-/// consumes. Every supported [`RuntimeOp`] projects to one of these (with its
-/// expressions already rewritten); the broad-op variants never reach the plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ClientRuntimeOp {
-    /// Reactive text content for an interpolation's text node. The interpolated
-    /// expression was REWRITTEN at build time (the fallible rewrite — an `await` /
-    /// destructuring write inside an interpolation fails closed BEFORE the plan is
-    /// built), so the emit-time memoizer consumes the already-rewritten text.
-    ReactiveText {
-        /// The target node id (into the plan node arena).
-        target: ClientNodeId,
-        /// The interpolated expression id (the emit-time text-run partition reads it
-        /// back through the build analysis for the mixed-run template assembly).
-        expr: ExprId,
-        /// The already-rewritten expression text (the value the memoizer routes
-        /// inline or hoists into a `$N` placeholder).
-        rewritten: String,
-        /// Whether the expression `has_call` (drives the memoizer deps-array form).
-        has_call: bool,
-    },
-    /// A `bind:value` / `bind:this` op.
-    Bind {
-        /// The target node id.
-        target: ClientNodeId,
-        /// The bind target kind.
-        bind_target: ClientBindTarget,
-        /// The accepted bind SHAPE fact (from the default-deny classifier) — the
-        /// typed sub-shape the op was admitted as, carried so the op is a typed
-        /// classification, not just a rewritten string pair.
-        shape: ClientBindShape,
-        /// The rewritten getter body.
-        getter: String,
-        /// The rewritten setter body.
-        setter: String,
-    },
-    /// A delegated event registration.
-    Event {
-        /// The target node id.
-        target: ClientNodeId,
-        /// The normalized event type.
-        event_type: String,
-        /// The accepted handler SHAPE fact (from the default-deny classifier) — the
-        /// typed sub-shape (arrow / function-expr / local-fn-ident) the handler was
-        /// admitted as, carried so the emitter consumes a typed shape, not just a
-        /// rewritten string.
-        shape: ClientEventHandlerShape,
-        /// The rewritten handler body.
-        handler: String,
-    },
-}
+// The narrow client-plan VOCABULARY (the closed node / attribute / op / value type set
+// the emitter consumes) lives in the sibling `client_plan_types` module; this builder
+// projects the broad IR onto it. Re-exported so existing consumers (`super::client`, …)
+// keep importing the vocabulary as `super::client_plan::<Type>`.
+pub(super) use super::client_plan_types::{
+    AttrValue, AttrValuePart, ClientAttr, ClientBindTarget, ClientDynAttrEmit, ClientNode,
+    ClientNodeId, ClientRuntimeOp, ClientScriptItem,
+};
 
 /// The narrow client module plan — the SOLE emitter input.
 pub(super) struct ClientModulePlan<'a> {
@@ -303,6 +145,43 @@ impl<'a> SupportedClientIr<'a> {
             element_facts: classified.element_facts.clone(),
             script_items: classified.script_items.clone(),
         };
+
+        // Divergence guard: the op projection re-derives a plain dynamic attribute's
+        // emission shape through the shared `classify_dynamic_attr_shape` (the SAME
+        // function the classifier used to ACCEPT it). Assert the recorded
+        // `SetAttribute` / `DomProperty` shapes still re-derive to the same FAMILY, so a
+        // future table edit that desynced acceptance from emission fails closed here
+        // rather than silently mis-emitting (a property write as a `set_attribute`, or
+        // vice versa). `Class` / `Style` / `Autofocus` shapes carry no re-derivable
+        // name and are trusted as recorded.
+        for (_node, _idx, shape) in &classified.dynamic_attr_shapes {
+            let recorded_name = match shape {
+                ClientDynamicAttrShape::SetAttribute { name }
+                | ClientDynamicAttrShape::DomProperty { prop: name } => name,
+                _ => continue,
+            };
+            // Re-classify the recorded (already-normalized) name; it must land in the
+            // SAME family. (A normalized name round-trips: `normalize_attribute` of an
+            // already-normalized name is idempotent.)
+            let re =
+                super::client_shapes::classify_dynamic_attr_shape(recorded_name, Span::new(0, 0));
+            let same_family = matches!(
+                (shape, &re),
+                (
+                    ClientDynamicAttrShape::SetAttribute { .. },
+                    Ok(ClientDynamicAttrShape::SetAttribute { .. })
+                ) | (
+                    ClientDynamicAttrShape::DomProperty { .. },
+                    Ok(ClientDynamicAttrShape::DomProperty { .. })
+                )
+            );
+            if !same_family {
+                return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                    name: recorded_name.clone(),
+                    span: Span::new(0, 0),
+                });
+            }
+        }
 
         // (1) The component-body statements from the TYPED instance-script item
         // allowlist (a `<script module>` / instance import is fail-closed upstream, so
@@ -494,8 +373,19 @@ impl<'a> SupportedClientIr<'a> {
                     event_type: event_type.clone(),
                 })
             }
+            // A dynamic attribute / `class={…}` / `style={…}` / `class:` / `style:`
+            // directive — the emission lives on the corresponding op; the
+            // element attr records the supported KIND only. (The classifier already
+            // accepted these, recording the per-attribute dynamic-attr shape.)
+            AttrIr::Dynamic { .. }
+            | AttrIr::Mixed { .. }
+            | AttrIr::Class { .. }
+            | AttrIr::Style { .. } => Ok(ClientAttr::Dynamic),
             // Any other attribute kind was refused by the classifier — defensive.
-            _ => Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+            AttrIr::Spread { .. }
+            | AttrIr::Use { .. }
+            | AttrIr::Transition { .. }
+            | AttrIr::Let { .. } => Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
                 name: "unsupported-attr".to_string(),
                 span: Span::new(0, 0),
             }),
@@ -523,6 +413,20 @@ impl<'a> SupportedClientIr<'a> {
                 Some(ClientNode::OptionsMarker { .. })
             )
         };
+        // The first `class` / `style` op for a target builds the WHOLE coalesced
+        // `$.set_class` / `$.set_style` call (reading the element's class/style attrs);
+        // subsequent class/style ops for the same target are skipped (one merged call
+        // per element, official `RegularElement.js`). These sets track which targets
+        // have already emitted their coalesced class/style op.
+        let mut class_done: rustc_hash::FxHashSet<NodeId> = rustc_hash::FxHashSet::default();
+        let mut style_done: rustc_hash::FxHashSet<NodeId> = rustc_hash::FxHashSet::default();
+        // A `Mixed` plain attribute (`id="a{x}b{y}"`) lowers to ONE `ReactiveAttr`
+        // op PER expression part in the IR, but the official compiler builds ONE
+        // `$.set_attribute` over the WHOLE concatenated value. Dedup by `(target,
+        // name)` so the first op for a plain attribute builds the full value and the
+        // rest are folded into it.
+        let mut plain_attr_done: rustc_hash::FxHashSet<(NodeId, String)> =
+            rustc_hash::FxHashSet::default();
         let mut ops = Vec::new();
         for &op_id in &scope.local_ops {
             // Skip any op targeting the options marker (a dead compile-option attr).
@@ -561,9 +465,44 @@ impl<'a> SupportedClientIr<'a> {
                     let op = self.project_event_op(*target, event, scope_lexical)?;
                     ops.push(op);
                 }
+                // A dynamic attribute / class / style write .
+                RuntimeOp::ReactiveAttr { target, attr } => match attr.kind {
+                    AttrOpKind::Plain => {
+                        // The first op for this `(target, name)` builds the WHOLE
+                        // attribute value (the full `Dynamic` / `Mixed` concatenation);
+                        // a Mixed attribute's later per-part ops are folded into it.
+                        if plain_attr_done.insert((*target, attr.name.clone())) {
+                            let op = self.project_reactive_attr_op(*target, &attr.name)?;
+                            ops.push(op);
+                        }
+                    }
+                    AttrOpKind::Class => {
+                        // The first class op for this element materializes the WHOLE
+                        // coalesced `$.set_class`; later class ops are folded into it.
+                        if class_done.insert(*target) {
+                            let op = self.project_set_class_op(*target)?;
+                            ops.push(op);
+                        }
+                    }
+                    AttrOpKind::Style => {
+                        if style_done.insert(*target) {
+                            let op = self.project_set_style_op(*target)?;
+                            ops.push(op);
+                        }
+                    }
+                },
+                // A "cannot be set statically" attribute init (`autofocus` /
+                // media `muted`) — the §1.2-class non-static-property surface (5a).
+                RuntimeOp::NonStaticProperty { target, property } => {
+                    let op = self.project_non_static_property_op(*target, property)?;
+                    ops.push(op);
+                }
                 // A broad op the supported surface never produces — defensive
                 // refusal (never silently dropped).
-                _ => {
+                RuntimeOp::SpreadAttrs { .. }
+                | RuntimeOp::Attachment { .. }
+                | RuntimeOp::Action { .. }
+                | RuntimeOp::Transition { .. } => {
                     return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
                         name: "unsupported-op".to_string(),
                         span: Span::new(0, 0),
@@ -713,6 +652,592 @@ impl<'a> SupportedClientIr<'a> {
         Ok((getter, setter))
     }
 
+    /// Whether a template expression references a reactive SIGNAL (the official
+    /// `metadata.expression.has_state`). A dynamic attribute / class / style value
+    /// with state joins the combined `$.template_effect`; a stateless value is a
+    /// one-shot init (`RegularElement.js`'s `has_state ? update : init`).
+    fn expr_has_state(&self, expr_id: ExprId) -> bool {
+        let analyzed = self.ir.analysis.expressions.get(expr_id);
+        // Official `has_state` is set by a reactive signal/prop reference OR by a MEMBER
+        // access rooted at any declared binding (`MemberExpression.js`'s `!is_pure(node)`
+        // rule — a member on a demoted `$state` / plain local is impure ⇒ has_state, so
+        // `{d.x}` joins the `$.template_effect` even though `d` is not a live signal).
+        super::reactive_analysis::expr_references_signal(
+            analyzed.source,
+            analyzed.scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+        ) || super::reactive_analysis::expr_member_roots_at_binding(
+            analyzed.source,
+            analyzed.scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+        )
+    }
+
+    /// Whether a template expression `has_call` (the official
+    /// `metadata.expression.has_call`) — the same predicate the reactive-text memoizer
+    /// uses. A dynamic attribute / property value that `has_call` is MEMOIZED into the
+    /// `$.template_effect(($N) => …, [() => expr])` deps-array form (the official
+    /// `build_template_chunk` memoize rule), so the call runs once per dep change.
+    fn expr_has_call(&self, expr_id: ExprId) -> bool {
+        let analyzed = self.ir.analysis.expressions.get(expr_id);
+        super::reactive_analysis::expr_has_call(
+            analyzed.source,
+            analyzed.scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+            &self.declared_roots,
+        )
+    }
+
+    /// Build the STRUCTURED dynamic-attribute value for the attribute named `name` on
+    /// element `el` — a [`AttrValue::Single`] for a `Dynamic` single expression, or a
+    /// [`AttrValue::Mixed`] for a `Mixed` literal+expr value — plus its `has_state`
+    /// (whether the value joins the combined effect). Each expression carries its
+    /// `has_call` fact so the emitter memoizes it (the official deps-array rule); the
+    /// literal chunks of a mixed value are entity-decoded at IR-lowering time.
+    fn attr_value_for(
+        &self,
+        el: &super::ir::ElementIr,
+        name: &str,
+    ) -> Result<(AttrValue, bool), UnsupportedSvelteRuntimeSurface> {
+        for attr in &el.attrs {
+            match attr {
+                AttrIr::Dynamic { name: n, expr } if n == name => {
+                    let rewritten =
+                        self.rewrite(*expr, self.ir.analysis.expressions.get(*expr).scope)?;
+                    let has_state = self.expr_has_state(*expr);
+                    let has_call = self.expr_has_call(*expr);
+                    return Ok((
+                        AttrValue::Single {
+                            rewritten,
+                            has_call,
+                        },
+                        has_state,
+                    ));
+                }
+                AttrIr::Mixed { name: n, parts } if n == name => {
+                    return self.mixed_attr_value(parts);
+                }
+                _ => {}
+            }
+        }
+        Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+            name: name.to_string(),
+            span: Span::new(0, 0),
+        })
+    }
+
+    /// Build the value of a `Mixed` (quoted) attribute, mirroring official's
+    /// `build_attribute_value`. The chunk count decides the path EXACTLY as official's
+    /// `value.length` does:
+    ///
+    /// - ONE chunk (`id="{d}"` / `class="{d}"`) routes the SINGLE-expression path — a raw
+    ///   `build_expression` value ([`AttrValue::Single`], no evaluate-fold, no `?? ''`
+    ///   wrap), with `has_state` the expression's own. (A lone literal chunk — a quoted
+    ///   value with no interpolation cannot reach here as `Mixed`, but is handled as a
+    ///   `Const` defensively.) Official's `value.length === 1` branch does NOT call
+    ///   `build_template_chunk`, so it never evaluate-folds.
+    /// - MULTI chunk (`id="a {d} b"`) routes `build_template_chunk` — each interpolation is
+    ///   evaluate-folded when statically KNOWN (`scope.evaluate`), else kept as a live
+    ///   `` ${expr ?? ''} `` part; an all-literal result collapses to a single `Const`.
+    ///
+    /// Returns the structured value + whether ANY surviving (un-folded) part references
+    /// state.
+    fn mixed_attr_value(
+        &self,
+        parts: &[MixedAttrPart],
+    ) -> Result<(AttrValue, bool), UnsupportedSvelteRuntimeSurface> {
+        // SINGLE-chunk quoted value — the official `value.length === 1` branch: the raw
+        // single expression, NOT evaluate-folded and NOT `?? ''`-wrapped.
+        if parts.len() == 1 {
+            return match &parts[0] {
+                MixedAttrPart::Literal(text) => {
+                    Ok((AttrValue::Const(js_single_quoted(text)), false))
+                }
+                MixedAttrPart::Expr(e) => {
+                    let analyzed = self.ir.analysis.expressions.get(*e);
+                    let rewritten = self.rewrite(*e, analyzed.scope)?;
+                    let has_state = self.expr_has_state(*e);
+                    Ok((
+                        AttrValue::Single {
+                            rewritten,
+                            has_call: self.expr_has_call(*e),
+                        },
+                        has_state,
+                    ))
+                }
+            };
+        }
+
+        // MULTI-chunk value — the official `build_template_chunk` evaluate-fold path.
+        let mut value_parts = Vec::with_capacity(parts.len());
+        let mut has_state = false;
+        for part in parts {
+            match part {
+                MixedAttrPart::Literal(text) => {
+                    value_parts.push(AttrValuePart::Literal(text.clone()));
+                }
+                MixedAttrPart::Expr(e) => {
+                    let analyzed = self.ir.analysis.expressions.get(*e);
+                    let has_call = self.expr_has_call(*e);
+                    // Official `build_template_chunk` constant-folds a KNOWN interpolation
+                    // into the cooked literal text (`id="a {d + 1} b"` over a demoted
+                    // `$state(5)` → `'a 6 b'`) via `scope.evaluate` — but it evaluates the
+                    // chunk AFTER memoization (`shared/utils.js`: `memoize(...)` then
+                    // `scope.evaluate(value)`). A `has_call` chunk is replaced by a synthetic
+                    // `$N` slot BEFORE the evaluate, and `evaluate($N)` resolves to no binding
+                    // ⇒ UNKNOWN ⇒ never folds (so `String(d)` over a demoted `$state` stays a
+                    // live `String(d)` effect, NOT a folded literal). Only a NON-`has_call`
+                    // chunk can fold; an unknown chunk stays live either way.
+                    //
+                    // The const-fold tri-state contract: `Fold` → the cooked literal;
+                    // `Live` (a plain not-foldable chunk OR a ledgered live-fallback) → the
+                    // live `?? ''` path; `Refuse` → a deterministic compile refusal (a
+                    // compile-time JS throw official also compile-fails — never emit live
+                    // code that would crash at runtime).
+                    if !has_call {
+                        match super::reactive_fold::mixed_chunk_fold(
+                            analyzed.source,
+                            analyzed.scope,
+                            &self.ir.analysis.bindings,
+                            &self.ir.analysis.scopes,
+                            self.ir.analysis.scripts.instance_source,
+                        ) {
+                            super::reactive_fold::ChunkFold::Fold(folded) => {
+                                value_parts.push(AttrValuePart::Literal(folded));
+                                continue;
+                            }
+                            // Both a plain not-foldable chunk and a ledgered live-fallback
+                            // emit the live expression (below); the ledger reason is recorded
+                            // in the checked-in `LiveFallbackReason` table.
+                            super::reactive_fold::ChunkFold::Live { .. } => {}
+                            super::reactive_fold::ChunkFold::Refuse(reason) => {
+                                // The span is unused on the accept-path refusal (matching
+                                // the other 5a `mixed_attr_value` refusals); the `ExprId`
+                                // arena does not carry a source span.
+                                return Err(UnsupportedSvelteRuntimeSurface::ConstFoldThrow {
+                                    reason: reason.label(),
+                                    span: Span::new(0, 0),
+                                });
+                            }
+                        }
+                    }
+                    let rewritten = self.rewrite(*e, analyzed.scope)?;
+                    has_state |= self.expr_has_state(*e);
+                    // The `?? ''` coercion for this LIVE part — official's
+                    // `build_template_chunk` `is_defined`/precedence rule. A memoized part
+                    // (`has_call`) is a `$N` identifier slot, so the paren decision
+                    // collapses; a provably-defined part is emitted RAW (no `?? ''`).
+                    let coalesce = super::reactive_fold::mixed_chunk_nullish_wrap(
+                        analyzed.source,
+                        analyzed.scope,
+                        &self.ir.analysis.bindings,
+                        &self.ir.analysis.scopes,
+                        self.ir.analysis.scripts.instance_source,
+                        has_call,
+                    );
+                    value_parts.push(AttrValuePart::Expr {
+                        rewritten,
+                        has_call,
+                        coalesce,
+                    });
+                }
+            }
+        }
+        // If EVERY part is a literal (every interpolation folded to a known constant),
+        // the value is a single STRING literal — official `build_template_chunk` emits
+        // `b.literal(cooked)` (`'a 6 b'`) when `expressions.length === 0`, NOT a template
+        // literal. Concatenate the cooked text and emit a single-quoted `Const`.
+        if value_parts
+            .iter()
+            .all(|p| matches!(p, AttrValuePart::Literal(_)))
+        {
+            let cooked: String = value_parts
+                .iter()
+                .map(|p| match p {
+                    AttrValuePart::Literal(t) => t.as_str(),
+                    AttrValuePart::Expr { .. } => "",
+                })
+                .collect();
+            return Ok((AttrValue::Const(js_single_quoted(&cooked)), has_state));
+        }
+        Ok((AttrValue::Mixed(value_parts), has_state))
+    }
+
+    /// The IR element node for a target [`NodeId`] (a non-element target is a
+    /// classifier/plan divergence — fail closed defensively).
+    fn element_for(
+        &self,
+        target: NodeId,
+    ) -> Result<&super::ir::ElementIr, UnsupportedSvelteRuntimeSurface> {
+        match self.ir.node(target) {
+            IrNode::Element(el) => Ok(el),
+            _ => Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                name: "non-element-attr-target".to_string(),
+                span: Span::new(0, 0),
+            }),
+        }
+    }
+
+    /// Project a dynamic PLAIN attribute (`AttrIr::Dynamic` / `AttrIr::Mixed`,
+    /// `AttrOpKind::Plain`) into its narrow [`ClientRuntimeOp::ReactiveAttr`]. The
+    /// emission shape is re-derived from the (deterministic) name classifier — a DOM
+    /// property write vs `$.set_attribute`. The value is the WHOLE attribute value
+    /// (read from the element's `Dynamic` / `Mixed` attr, not the single op expr) —
+    /// a `Dynamic` single expression or a `Mixed` `` `lit${expr ?? ''}lit` ``
+    /// template literal. `has_state` is the official `metadata.expression.has_state`.
+    fn project_reactive_attr_op(
+        &self,
+        target: NodeId,
+        name: &str,
+    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
+        let el = self.element_for(target)?;
+        // The element's `Dynamic` / `Mixed` attribute under this name → its STRUCTURED
+        // value (each expression carrying its `has_call` fact for the emit-time
+        // memoizer) + `has_state`.
+        let (value, has_state) = self.attr_value_for(el, name)?;
+        // The write is REACTIVE when it references state OR `has_call` (a `has_call`
+        // value is memoized into a `$N` placeholder that only the effect can bind — the
+        // official `Memoizer.add` rule, which forces even a pure `String(plain_let)`
+        // into the render `$.template_effect`).
+        let reactive = has_state || value.has_call();
+        // Re-derive the emission shape from the name (deterministic, matches the
+        // classifier's recorded fact). The span is unused on the accept path.
+        let shape = super::client_shapes::classify_dynamic_attr_shape(name, Span::new(0, 0))?;
+        let emit = match shape {
+            ClientDynamicAttrShape::SetAttribute { name } => {
+                ClientDynAttrEmit::SetAttribute { name, value }
+            }
+            ClientDynamicAttrShape::DomProperty { prop } => {
+                ClientDynAttrEmit::Property { prop, value }
+            }
+            // A PLAIN-kind op is never `autofocus` (autofocus is a `NonStaticProperty`
+            // op, projected by `project_non_static_property_op`) — defensively refuse
+            // rather than mis-emit it as a reactive write.
+            ClientDynamicAttrShape::Autofocus
+            // Class / style never reach here (they are `AttrOpKind::Class` / `Style`).
+            | ClientDynamicAttrShape::Class
+            | ClientDynamicAttrShape::Style => {
+                return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                    name: name.to_string(),
+                    span: Span::new(0, 0),
+                });
+            }
+        };
+        Ok(ClientRuntimeOp::ReactiveAttr {
+            target: ClientNodeId(target.0),
+            emit,
+            reactive,
+        })
+    }
+
+    /// Project a `NonStaticProperty` op (`autofocus` / media `muted`, static or
+    /// dynamic) into its narrow [`ClientRuntimeOp::ReactiveAttr`]. `autofocus` →
+    /// init-only `$.autofocus(node, value)`; a DOM property (`muted`) → `node.<name> =
+    /// value`. The init value is `true` (a valueless attr), a literal, or the rewritten
+    /// expression.
+    fn project_non_static_property_op(
+        &self,
+        target: NodeId,
+        property: &super::ir::NonStaticPropertyOp,
+    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
+        // The STRUCTURED value + whether it is reactive. A `Mixed` value retains its
+        // FULL ordered literal+expr run; each expression carries `has_call` for the
+        // emit-time memoizer.
+        let (value, has_state) = self.non_static_property_value(&property.value)?;
+        // `autofocus` is init-only regardless of state; a property write (`muted`)
+        // joins the effect when its value is stateful OR `has_call` (the official rule
+        // — a `has_call` value is memoized and can only live in the effect).
+        let init_only = matches!(property.kind, NonStaticPropertyKind::Autofocus);
+        let reactive = (has_state || value.has_call()) && !init_only;
+        let emit = match property.kind {
+            // `autofocus` is ALWAYS init-only `$.autofocus(node, value)` — even a
+            // dynamic value (`autofocus={v}`) is read once at init, so it is NEVER
+            // memoized; flatten the structured value to a plain emit string.
+            NonStaticPropertyKind::Autofocus => ClientDynAttrEmit::Autofocus {
+                value: self.flatten_init_attr_value(&value),
+            },
+            // A DOM property write (`video.muted = value`) — carries the structured
+            // value so a `has_call` reactive value memoizes at emit time.
+            NonStaticPropertyKind::DomProperty => ClientDynAttrEmit::Property {
+                prop: super::client_allowlist::normalize_attribute(&property.name),
+                value,
+            },
+        };
+        Ok(ClientRuntimeOp::ReactiveAttr {
+            target: ClientNodeId(target.0),
+            emit,
+            reactive,
+        })
+    }
+
+    /// Build the STRUCTURED value of a non-static-property op (`autofocus` / `muted`),
+    /// plus its `has_state`. A `Boolean` valueless attr is the constant `true`; a
+    /// static literal is a quoted constant; a single `Expr` carries its `has_call`; a
+    /// `Mixed` value retains its full literal+expr run (each expr with `has_call`).
+    fn non_static_property_value(
+        &self,
+        value: &NonStaticPropertyValue,
+    ) -> Result<(AttrValue, bool), UnsupportedSvelteRuntimeSurface> {
+        match value {
+            NonStaticPropertyValue::Boolean => Ok((AttrValue::Const("true".to_string()), false)),
+            NonStaticPropertyValue::Literal(text) => {
+                Ok((AttrValue::Const(js_single_quoted(text)), false))
+            }
+            NonStaticPropertyValue::Expr(expr) => {
+                let rewritten =
+                    self.rewrite(*expr, self.ir.analysis.expressions.get(*expr).scope)?;
+                Ok((
+                    AttrValue::Single {
+                        rewritten,
+                        has_call: self.expr_has_call(*expr),
+                    },
+                    self.expr_has_state(*expr),
+                ))
+            }
+            NonStaticPropertyValue::Mixed(parts) => self.mixed_attr_value(parts),
+        }
+    }
+
+    /// Flatten a structured [`AttrValue`] for an INIT-only (`$.autofocus`) emit, where
+    /// no effect-side memoizer runs. A `Single` value emits its bare expression; a
+    /// `Const` emits verbatim; a `Mixed` value builds the `` `lit${expr ?? ''}lit` ``
+    /// template inline (no memoization, since an init-only value is read once).
+    fn flatten_init_attr_value(&self, value: &AttrValue) -> String {
+        match value {
+            AttrValue::Const(text) => text.clone(),
+            AttrValue::Single { rewritten, .. } => rewritten.clone(),
+            AttrValue::Mixed(parts) => {
+                let mut tmpl = String::from("`");
+                for part in parts {
+                    match part {
+                        AttrValuePart::Literal(text) => tmpl.push_str(&escape_template_text(text)),
+                        AttrValuePart::Expr { rewritten, .. } => {
+                            tmpl.push_str(&format!("${{{rewritten} ?? ''}}"));
+                        }
+                    }
+                }
+                tmpl.push('`');
+                tmpl
+            }
+        }
+    }
+
+    /// Project the coalesced `$.set_class(node, is_html, value, css_hash, prev, next)`
+    /// op for an element. Merges the `class={…}` base attribute (if any) with EVERY
+    /// `class:` directive into ONE call, matching the official `build_set_class`. The
+    /// supported surface is HTML-only (`is_html = 1`); scoped CSS is refused upstream
+    /// (5l), so `css_hash` is `null` only when directives are present (the official
+    /// `!css_hash && next` rule), else absent. Produces the SEMANTIC pieces; the
+    /// emitter assembles the final call with the real DOM var + accumulator name.
+    fn project_set_class_op(
+        &self,
+        target: NodeId,
+    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
+        let el = self.element_for(target)?;
+        // The base `class` attribute (a `Static` / `Dynamic` / `Mixed` named `class`),
+        // and every `class:` directive, in source order.
+        let mut base_value: Option<AttrValue> = None;
+        let mut base_has_state = false;
+        let mut directives: Vec<(String, String)> = Vec::new();
+        let mut dir_has_state = false;
+        let mut directives_has_call = false;
+        for attr in &el.attrs {
+            match attr {
+                AttrIr::Static { name, value } if name == "class" => {
+                    // A static `class` consumed as the `$.set_class` BASE value is a
+                    // runtime JS-STRING argument (NOT a baked skeleton attr), so its
+                    // HTML entities DECODE — the same `decode_attr_entities` the mixed
+                    // literal chunks already use (`class="a&amp;b"` → base `'a&b'`).
+                    let lit = value.as_ref().map(|v| v.value.as_str()).unwrap_or("");
+                    base_value = Some(AttrValue::Const(js_single_quoted(&decode_attr_entities(
+                        lit,
+                    ))));
+                }
+                AttrIr::Dynamic { name, expr } if name == "class" => {
+                    let v = self.rewrite(*expr, self.ir.analysis.expressions.get(*expr).scope)?;
+                    // Official `Attribute.js` sets `needs_clsx` for a single-expression
+                    // `class={…}` UNLESS the value is a `Literal` / `TemplateLiteral` /
+                    // `BinaryExpression`: a `class={a + b}` string-concatenation, a
+                    // `class={'x'}` literal, and a `` class={`a${b}`} `` template emit the
+                    // value RAW (no `$.clsx` wrap); every other shape IS wrapped. When
+                    // wrapped, the whole `$.clsx(expr)` wrap is the base value — a
+                    // `has_call` base memoizes the WHOLE wrap (`[() => $.clsx(call)]`, the
+                    // official `build_set_class`).
+                    let analyzed = self.ir.analysis.expressions.get(*expr);
+                    let rewritten =
+                        if super::reactive_analysis::class_value_needs_clsx(analyzed.source) {
+                            format!("$.clsx({v})")
+                        } else {
+                            v
+                        };
+                    base_value = Some(AttrValue::Single {
+                        rewritten,
+                        has_call: self.expr_has_call(*expr),
+                    });
+                    base_has_state |= self.expr_has_state(*expr);
+                }
+                AttrIr::Mixed { name, parts } if name == "class" => {
+                    // A MIXED-string class (`class="a {x} b"`) is already a string
+                    // template — official `needs_clsx` is FALSE for it, so it is NOT
+                    // wrapped in `$.clsx` (verified against svelte@5.56.3). The
+                    // structured value memoizes each EXPRESSION PART at emit time, not
+                    // the whole rendered template.
+                    let (mixed, st) = self.mixed_attr_value(parts)?;
+                    base_value = Some(mixed);
+                    base_has_state |= st;
+                }
+                AttrIr::Class { name, condition } => {
+                    let cond = match condition {
+                        Some(e) => {
+                            dir_has_state |= self.expr_has_state(*e);
+                            directives_has_call |= self.expr_has_call(*e);
+                            self.rewrite(*e, self.ir.analysis.expressions.get(*e).scope)?
+                        }
+                        // A value-less shorthand `class:foo` with no synthesized
+                        // condition is a defensive empty (lowering always synthesizes
+                        // one) — skip it.
+                        None => continue,
+                    };
+                    directives.push((object_key(name), cond));
+                }
+                _ => {}
+            }
+        }
+        let has_directives = !directives.is_empty();
+        // The `value` arg: the structured base value, or `''` when only directives are
+        // present.
+        let value = base_value.unwrap_or_else(|| AttrValue::Const("''".to_string()));
+        let directives_has_call = directives_has_call && has_directives;
+        // The op is REACTIVE when any contributor references state OR `has_call` (the
+        // base or any directive) — the official rule that forces the effect +
+        // memoization (and the accumulator) even over a pure-call/plain-let surface.
+        let reactive = base_has_state || dir_has_state || value.has_call() || directives_has_call;
+        // css_hash: `null` when directives are present (scoped CSS is refused upstream,
+        // so there is never a real hash); absent otherwise.
+        let css_hash = has_directives.then(|| "null".to_string());
+        // The directives object `{ foo: cond, ... }`; absent when no directives.
+        let directives_obj = has_directives.then(|| {
+            let entries = directives
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ {entries} }}")
+        });
+        // The reactive-directive path needs the `let classes;` accumulator (used for
+        // BOTH the `prev` arg and the `<name> =` assignment); a non-reactive directive
+        // path passes `{}` as `prev` (no accumulator).
+        let accumulator_stem = (has_directives && reactive).then_some("classes");
+        Ok(ClientRuntimeOp::SetClass {
+            target: ClientNodeId(target.0),
+            value,
+            css_hash,
+            directives: directives_obj,
+            directives_has_call,
+            reactive,
+            accumulator_stem,
+        })
+    }
+
+    /// Project the coalesced `$.set_style(node, value, prev, next)` op for an element
+    /// . Merges the `style={…}` base attribute (if any) with EVERY `style:`
+    /// directive into ONE call, matching the official `build_set_style`. The
+    /// `|important` directives split into the `[normal, important]` array `next`;
+    /// custom / hyphenated property keys are quoted.
+    fn project_set_style_op(
+        &self,
+        target: NodeId,
+    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
+        let el = self.element_for(target)?;
+        let mut base_value: Option<AttrValue> = None;
+        let mut base_has_state = false;
+        // Normal + important directive entries (key already quoted as needed).
+        let mut normal: Vec<(String, String)> = Vec::new();
+        let mut important: Vec<(String, String)> = Vec::new();
+        let mut dir_has_state = false;
+        let mut directives_has_call = false;
+        for attr in &el.attrs {
+            match attr {
+                AttrIr::Static { name, value } if name == "style" => {
+                    // A static `style` consumed as the `$.set_style` BASE value is a
+                    // runtime JS-STRING argument (NOT a baked skeleton attr), so its
+                    // HTML entities DECODE (`style="q:'&quot;'"` → base `'q:\'"\''`).
+                    let lit = value.as_ref().map(|v| v.value.as_str()).unwrap_or("");
+                    base_value = Some(AttrValue::Const(js_single_quoted(&decode_attr_entities(
+                        lit,
+                    ))));
+                }
+                AttrIr::Dynamic { name, expr } if name == "style" => {
+                    let v = self.rewrite(*expr, self.ir.analysis.expressions.get(*expr).scope)?;
+                    // The whole dynamic expression is the base value; a `has_call` base
+                    // memoizes the whole expression.
+                    base_value = Some(AttrValue::Single {
+                        rewritten: v,
+                        has_call: self.expr_has_call(*expr),
+                    });
+                    base_has_state |= self.expr_has_state(*expr);
+                }
+                AttrIr::Mixed { name, parts } if name == "style" => {
+                    // The structured mixed value memoizes each EXPRESSION PART at emit
+                    // time, not the whole rendered template.
+                    let (mixed, st) = self.mixed_attr_value(parts)?;
+                    base_value = Some(mixed);
+                    base_has_state |= st;
+                }
+                AttrIr::Style {
+                    property,
+                    value,
+                    important: is_important,
+                } => {
+                    let v = match value {
+                        Some(e) => {
+                            dir_has_state |= self.expr_has_state(*e);
+                            directives_has_call |= self.expr_has_call(*e);
+                            self.rewrite(*e, self.ir.analysis.expressions.get(*e).scope)?
+                        }
+                        None => continue,
+                    };
+                    let entry = (object_key(property), v);
+                    if *is_important {
+                        important.push(entry);
+                    } else {
+                        normal.push(entry);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let has_directives = !normal.is_empty() || !important.is_empty();
+        // The `value` arg: the structured base value, or `''` when only directives are
+        // present (the official `build_set_style` passes an empty-string base then).
+        let value = base_value.unwrap_or_else(|| AttrValue::Const("''".to_string()));
+        let directives_has_call = directives_has_call && has_directives;
+        // The op is REACTIVE when any contributor references state OR `has_call`.
+        let reactive = base_has_state || dir_has_state || value.has_call() || directives_has_call;
+        // The directives object, or the `[normal, important]` array when any
+        // `|important` directive is present (the official `build_style_directives_object`).
+        let directives_obj = has_directives.then(|| {
+            let normal_obj = style_object(&normal);
+            if important.is_empty() {
+                normal_obj
+            } else {
+                format!("[{}, {}]", normal_obj, style_object(&important))
+            }
+        });
+        let accumulator_stem = (has_directives && reactive).then_some("styles");
+        Ok(ClientRuntimeOp::SetStyle {
+            target: ClientNodeId(target.0),
+            value,
+            directives: directives_obj,
+            directives_has_call,
+            reactive,
+            accumulator_stem,
+        })
+    }
+
     /// Rewrite one template expression to its emitted client form through the
     /// FALLIBLE rewriter, threading the per-instance proxy-init map (so a
     /// template-side reassignment matches the official `should_proxy(rhs)`).
@@ -751,37 +1276,4 @@ impl<'a> SupportedClientIr<'a> {
             &template_expr_sources,
         )
     }
-}
-
-/// The DOM-node target of a runtime op (for the dead-options-attr skip). A
-/// global-target event (`<svelte:window>` etc.) has no DOM node target — `None`
-/// (such ops belong to a refused special surface anyway).
-fn op_target_node(op: &RuntimeOp) -> Option<NodeId> {
-    match op {
-        RuntimeOp::ReactiveText { target, .. }
-        | RuntimeOp::ReactiveAttr { target, .. }
-        | RuntimeOp::SpreadAttrs { target, .. }
-        | RuntimeOp::Binding { target, .. }
-        | RuntimeOp::Attachment { target, .. }
-        | RuntimeOp::Action { target, .. }
-        | RuntimeOp::Transition { target, .. }
-        | RuntimeOp::NonStaticProperty { target, .. } => Some(*target),
-        RuntimeOp::Event { target, .. } => match target {
-            EventTarget::Node(node) => Some(*node),
-            _ => None,
-        },
-    }
-}
-
-/// Whether a binding kind is a reactive SIGNAL (read via `$.get`).
-fn is_signal_kind(kind: BindingRuntimeKind) -> bool {
-    matches!(
-        kind,
-        BindingRuntimeKind::StateSignal { .. }
-            | BindingRuntimeKind::StateProxy
-            | BindingRuntimeKind::Derived
-            | BindingRuntimeKind::EachSignal
-            | BindingRuntimeKind::AwaitSignal
-            | BindingRuntimeKind::LegacyConstDerived
-    )
 }

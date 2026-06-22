@@ -1,0 +1,40 @@
+{
+  "slug": "attributes/reactive_multi_directive.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "reactive_multi_directive",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "attr_style"
+  ],
+  "helperSet": [
+    "attr_class",
+    "attr_style"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "attr_style": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

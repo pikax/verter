@@ -15,7 +15,7 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrowFunctionExpression, BlockStatement, CallExpression, CatchClause, Expression,
+    ArrowFunctionExpression, BlockStatement, CallExpression, CatchClause, ChainElement, Expression,
     ForInStatement, ForOfStatement, ForStatement, Function, Program, Statement,
     VariableDeclarationKind,
 };
@@ -25,7 +25,7 @@ use oxc_span::SourceType;
 use super::expr::{
     arrow_scope_names, block_scope_names, collect_direct_decls, collect_pattern_names,
     collect_var_hoists, for_left_names, function_scope_names, is_effect_callee, is_props_callee,
-    reparse_module, BindingTable, ScopeGraph, ScopeId, ShadowStack,
+    reparse_module, BindingRuntimeKind, BindingTable, ScopeGraph, ScopeId, ShadowStack,
 };
 use super::expr_rewrite::is_signal_kind;
 
@@ -37,15 +37,30 @@ use super::expr_rewrite::is_signal_kind;
 /// drives the MEMOIZED `$.template_effect(($0) => …, [() => expr])` deps-array form
 /// (vs the inline `$.set_text(text, expr)`).
 ///
-/// Mirrors `phases/2-analyze/visitors/CallExpression.js`: a call sets `has_call`
-/// iff its callee is NOT statically pure (`is_pure(callee)`) OR the expression
-/// carries a stateful dependency. `is_pure(callee)` is true only when the callee's
+/// Mirrors `phases/2-analyze/visitors/CallExpression.js`: at EACH call, in SOURCE
+/// (AST-visit) order, a call sets `has_call` iff its callee is NOT statically pure
+/// (`is_pure(callee)`) OR a dependency was ALREADY accumulated by that point —
+/// `!is_pure(node.callee) || context.state.expression.dependencies.size > 0`. The
+/// `dependencies` set is SHARED across the whole template expression and grows as
+/// the visit walks it: each `Identifier` resolving to a binding (reactive or not)
+/// adds a dependency at its visit point, and the call's check runs AFTER its own
+/// callee + arguments are visited (`context.next()` precedes the check), so the
+/// call's own callee/argument bindings count too. A call appearing BEFORE any
+/// dependency in source order (e.g. `globalThis?.foo?.() + v`) is therefore NOT
+/// `has_call` even though `v` is referenced later; the same call AFTER a dependency
+/// (`v + globalThis?.foo?.()`) IS. `is_pure(callee)` is true only when the callee's
 /// leftmost identifier resolves to a GLOBAL (no binding) — a callee rooted at a
-/// declared binding (a local function, an import) is impure. A
-/// TaggedTemplateExpression is always `has_call`. A bare signal read / member access
-/// with NO call is NOT `has_call` (it stays the inline `$.set_text` form). The scan
-/// does NOT descend into nested function bodies (a handler arrow inside an
-/// interpolation is not the evaluated reactive value).
+/// declared binding (a local function, an import) is impure.
+///
+/// A `NewExpression` does NOT itself set `has_call` (official `NewExpression.js`
+/// only sets `needs_context`); it contributes only through its inner identifiers'
+/// dependencies. A `TaggedTemplateExpression` sets `has_call` only when its tag is
+/// impure (official `TaggedTemplateExpression.js`: `!is_pure(node.tag)`). A bare
+/// signal read / member access with NO call is NOT `has_call` (it stays the inline
+/// `$.set_text` form). The scan does NOT descend into nested function bodies — a
+/// handler arrow inside an interpolation is not the evaluated reactive value, and
+/// official sets `expression: null` there so neither its identifiers nor its calls
+/// participate.
 #[must_use]
 pub fn expr_has_call(
     source: &str,
@@ -67,16 +82,83 @@ pub fn expr_has_call(
         Expression::ParenthesizedExpression(p) => &p.expression,
         other => other,
     };
-    // Whether the expression references ANY reactive signal (the `deps > 0`
-    // approximation: a stateful dependency forces memoization of a call chunk).
-    let references_signal = expr_references_signal(source, scope, bindings, scopes);
     let mut scan = HasCallScan {
         declared_roots,
-        references_signal,
+        bindings,
+        scopes,
+        scope,
+        deps: 0,
         found: false,
     };
     scan.visit_expr(inner);
     scan.found
+}
+
+// ---------------------------------------------------------------------------
+// `needs_clsx` — the `class={…}` `$.clsx(…)` wrap predicate
+// ---------------------------------------------------------------------------
+
+/// Whether a single-expression `class={expr}` base value needs the `$.clsx(expr)`
+/// wrap — the official `phases/2-analyze/visitors/Attribute.js` `needs_clsx` rule.
+///
+/// Official sets `node.metadata.needs_clsx = true` for a `class={…}` attribute whose
+/// value expression is NOT a `Literal`, NOT a `TemplateLiteral`, and NOT a
+/// `BinaryExpression`:
+///
+/// ```js
+/// if (
+///   node.name === 'class' &&
+///   !Array.isArray(node.value) &&
+///   node.value !== true &&
+///   node.value.expression.type !== 'Literal' &&
+///   node.value.expression.type !== 'TemplateLiteral' &&
+///   node.value.expression.type !== 'BinaryExpression'
+/// ) { node.metadata.needs_clsx = true; }
+/// ```
+///
+/// So `class={a + b}` (a `BinaryExpression`, e.g. string concatenation), `class={'x'}`
+/// (a `Literal`), and `` class={`a${b}`} `` (a `TemplateLiteral`) emit the value WITHOUT
+/// the `$.clsx` wrap; an `Identifier` / `CallExpression` / `ConditionalExpression` /
+/// `LogicalExpression` / `ObjectExpression` / `ArrayExpression` / `MemberExpression`
+/// (and every other shape) IS wrapped. A `Mixed`-string class (`class="a {x} b"`) is
+/// lowered to a TemplateLiteral upstream, so it is handled by its own (non-clsx) path
+/// and never reaches this predicate.
+///
+/// Typed-IR only: re-parses the borrowed expression source through OXC (the same
+/// reparse the `has_call` / `has_state` analyses use) and inspects the TOP-LEVEL
+/// expression KIND — no string sniffing. A parse failure conservatively returns
+/// `true` (the wrap is the default for an arbitrary expression).
+#[must_use]
+pub fn class_value_needs_clsx(source: &str) -> bool {
+    let alloc = Allocator::default();
+    let wrapped = format!("({source})");
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return true;
+    }
+    let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
+        return true;
+    };
+    // Unwrap the synthetic outer parentheses added by the `({source})` wrapper. An
+    // AUTHOR-written outer parenthesization (`class={(a)}`) survives as a nested
+    // `ParenthesizedExpression`, which official treats by its OWN node type
+    // (`ParenthesizedExpression` is none of Literal/TemplateLiteral/BinaryExpression),
+    // so it IS wrapped — matching the single unwrap here.
+    let inner = match &stmt.expression {
+        Expression::ParenthesizedExpression(p) => &p.expression,
+        other => other,
+    };
+    !matches!(
+        inner,
+        Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::TemplateLiteral(_)
+            | Expression::BinaryExpression(_)
+    )
 }
 
 /// Collect the COMPONENT-DECLARED root names — every top-level declaration name in
@@ -125,11 +207,20 @@ fn collect_program_top_level_names(program: &Program<'_>, out: &mut rustc_hash::
     }
 }
 
-/// Whether a reactive-text expression references any reactive SIGNAL binding (a
-/// read resolving to a signal at `scope`). Drives the `deps > 0` half of the
-/// `has_call` rule. Reuses the shared free-reference collector + the scope
-/// resolver, so a shadowing local is not counted.
-fn expr_references_signal(
+/// Whether a template expression references any reactive STATE binding — a read
+/// resolving (scope-awarely) to either a reactive `$state` signal OR a `$props()`
+/// prop at `scope`. This is the official `metadata.expression.has_state` signal: a
+/// dynamic attribute / class / style value with `has_state` joins the combined
+/// `$.template_effect`; a value with no reactive read is a one-shot init (the
+/// `has_state ? update : init` split in `RegularElement.js`). A PROP read counts as
+/// state because props are reactive (`$$props.x` can change), matching the
+/// text-interpolation reactivity classifier (`NoDefaultPropRead` is reactive) and
+/// official. It also drives the `deps > 0` half of the reactive-text `has_call`
+/// memoize rule. Reuses the shared free-reference collector + the scope resolver, so
+/// a shadowing local is not counted; a prop is NOT a signal (it emits `$$props.x`,
+/// not `$.get`), so [`is_signal_kind`] stays prop-free.
+#[must_use]
+pub(super) fn expr_references_signal(
     source: &str,
     scope: ScopeId,
     bindings: &BindingTable,
@@ -141,17 +232,268 @@ fn expr_references_signal(
     refs.iter().any(|r| {
         bindings
             .resolve_kind(scopes, scope, &r.name)
-            .is_some_and(is_signal_kind)
+            .is_some_and(|k| is_signal_kind(k) || k == BindingRuntimeKind::Prop)
     })
 }
 
-/// A scan for an impure / stateful CALL inside a reactive-text expression. Does NOT
-/// descend into nested function bodies (their calls are not part of the evaluated
-/// reactive value).
+/// Whether a template expression contains a MEMBER access whose leftmost identifier
+/// resolves (scope-awarely) to a declared binding — the official
+/// `phases/2-analyze/visitors/MemberExpression.js` `has_state ||= !is_pure(node)` rule.
+///
+/// `is_pure(member)` walks a member chain to its leftmost identifier and is pure ONLY
+/// when that root resolves to a GLOBAL (no binding); a root that is a declared binding
+/// (a signal, a prop, a DEMOTED `$state`, a plain local) makes the member impure, which
+/// official records as `has_state`. So `{d.x}` / `{d?.x}` over a demoted `let d = $state(0)`
+/// (lowered to `let d = 0`) is a reactive value (joins the `$.template_effect`), even
+/// though `d` itself is not a live signal — official wraps `$.set_attribute(div, 'id',
+/// d.x)` in a `template_effect`. A member rooted at a GLOBAL (`Math.PI`, `globalThis.x`)
+/// is pure → NOT has_state. This is the member half of `has_state` that the signal/prop
+/// reference scan ([`expr_references_signal`]) alone misses (a member rooted at a signal
+/// or prop is ALREADY has_state via that scan; this adds the demoted/plain-binding root).
+///
+/// Optional members (`d?.x`) and private/computed members are all member accesses for
+/// this rule. A bare identifier read (`{d}`, no member) is NOT covered here — official's
+/// IDENTIFIER rule gates it on `!is_known`, and a demoted constant `d = 0` is known, so a
+/// bare `{d}` stays a non-reactive inline write (the existing signal/prop scan correctly
+/// leaves it alone). Typed-IR only: re-parses the borrowed expression source through OXC
+/// (the same reparse the other analyses use) and walks the member chain.
+#[must_use]
+pub(super) fn expr_member_roots_at_binding(
+    source: &str,
+    scope: ScopeId,
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+) -> bool {
+    let alloc = Allocator::default();
+    let wrapped = format!("({source})");
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return false;
+    }
+    let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
+        return false;
+    };
+    let mut scan = MemberRootScan {
+        bindings,
+        scopes,
+        scope,
+        found: false,
+    };
+    scan.visit_expr(&stmt.expression);
+    scan.found
+}
+
+/// Walks an expression tree for a MEMBER access whose leftmost identifier resolves to a
+/// declared binding (the `!is_pure(member)` `has_state` member rule). Does NOT descend
+/// into nested function bodies (official sets `expression: null` there).
+struct MemberRootScan<'a> {
+    bindings: &'a BindingTable,
+    scopes: &'a ScopeGraph,
+    scope: ScopeId,
+    found: bool,
+}
+
+impl MemberRootScan<'_> {
+    /// Whether a member chain's leftmost identifier resolves to a declared binding (a
+    /// non-global root). Mirrors `is_pure`'s leftmost-walk: a `Foo.bar.baz` roots at
+    /// `Foo`; a binding root ⇒ impure ⇒ has_state.
+    fn member_root_is_binding(&self, object: &Expression<'_>) -> bool {
+        let mut node = object;
+        loop {
+            match node {
+                Expression::StaticMemberExpression(m) => node = &m.object,
+                Expression::ComputedMemberExpression(m) => node = &m.object,
+                Expression::PrivateFieldExpression(m) => node = &m.object,
+                Expression::ParenthesizedExpression(p) => node = &p.expression,
+                Expression::TSNonNullExpression(e) => node = &e.expression,
+                Expression::Identifier(id) => {
+                    return self
+                        .bindings
+                        .resolve_kind(self.scopes, self.scope, id.name.as_str())
+                        .is_some();
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &Expression<'_>) {
+        if self.found {
+            return;
+        }
+        match expr {
+            Expression::StaticMemberExpression(m) => {
+                if self.member_root_is_binding(&m.object) {
+                    self.found = true;
+                    return;
+                }
+                self.visit_expr(&m.object);
+            }
+            Expression::ComputedMemberExpression(m) => {
+                if self.member_root_is_binding(&m.object) {
+                    self.found = true;
+                    return;
+                }
+                self.visit_expr(&m.object);
+                self.visit_expr(&m.expression);
+            }
+            Expression::PrivateFieldExpression(m) => {
+                if self.member_root_is_binding(&m.object) {
+                    self.found = true;
+                    return;
+                }
+                self.visit_expr(&m.object);
+            }
+            Expression::ChainExpression(chain) => self.visit_chain_element(&chain.expression),
+            Expression::CallExpression(call) => {
+                self.visit_expr(&call.callee);
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        self.visit_expr(e);
+                    } else if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
+                        self.visit_expr(&s.argument);
+                    }
+                }
+            }
+            Expression::NewExpression(n) => {
+                self.visit_expr(&n.callee);
+                for arg in &n.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        self.visit_expr(e);
+                    } else if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
+                        self.visit_expr(&s.argument);
+                    }
+                }
+            }
+            Expression::ParenthesizedExpression(p) => self.visit_expr(&p.expression),
+            Expression::BinaryExpression(b) => {
+                self.visit_expr(&b.left);
+                self.visit_expr(&b.right);
+            }
+            Expression::LogicalExpression(l) => {
+                self.visit_expr(&l.left);
+                self.visit_expr(&l.right);
+            }
+            Expression::ConditionalExpression(c) => {
+                self.visit_expr(&c.test);
+                self.visit_expr(&c.consequent);
+                self.visit_expr(&c.alternate);
+            }
+            Expression::SequenceExpression(s) => {
+                for e in &s.expressions {
+                    self.visit_expr(e);
+                }
+            }
+            Expression::UnaryExpression(u) => self.visit_expr(&u.argument),
+            Expression::AwaitExpression(a) => self.visit_expr(&a.argument),
+            Expression::TemplateLiteral(t) => {
+                for e in &t.expressions {
+                    self.visit_expr(e);
+                }
+            }
+            Expression::TaggedTemplateExpression(t) => {
+                self.visit_expr(&t.tag);
+                for e in &t.quasi.expressions {
+                    self.visit_expr(e);
+                }
+            }
+            Expression::ArrayExpression(arr) => {
+                for el in &arr.elements {
+                    if let oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) = el {
+                        self.visit_expr(&s.argument);
+                    } else if let Some(e) = el.as_expression() {
+                        self.visit_expr(e);
+                    }
+                }
+            }
+            Expression::ObjectExpression(obj) => {
+                for prop in &obj.properties {
+                    match prop {
+                        oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
+                            if p.computed {
+                                if let Some(key) = p.key.as_expression() {
+                                    self.visit_expr(key);
+                                }
+                            }
+                            self.visit_expr(&p.value);
+                        }
+                        oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
+                            self.visit_expr(&s.argument);
+                        }
+                    }
+                }
+            }
+            Expression::TSAsExpression(e) => self.visit_expr(&e.expression),
+            Expression::TSSatisfiesExpression(e) => self.visit_expr(&e.expression),
+            Expression::TSNonNullExpression(e) => self.visit_expr(&e.expression),
+            // A bare identifier / literal carries no member; nested function bodies are
+            // not descended (official sets `expression: null` there).
+            _ => {}
+        }
+    }
+
+    fn visit_chain_element(&mut self, element: &ChainElement<'_>) {
+        if self.found {
+            return;
+        }
+        match element {
+            ChainElement::CallExpression(call) => {
+                self.visit_expr(&call.callee);
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        self.visit_expr(e);
+                    } else if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
+                        self.visit_expr(&s.argument);
+                    }
+                }
+            }
+            ChainElement::TSNonNullExpression(e) => self.visit_expr(&e.expression),
+            ChainElement::StaticMemberExpression(m) => {
+                if self.member_root_is_binding(&m.object) {
+                    self.found = true;
+                    return;
+                }
+                self.visit_expr(&m.object);
+            }
+            ChainElement::ComputedMemberExpression(m) => {
+                if self.member_root_is_binding(&m.object) {
+                    self.found = true;
+                    return;
+                }
+                self.visit_expr(&m.object);
+                self.visit_expr(&m.expression);
+            }
+            ChainElement::PrivateFieldExpression(m) => {
+                if self.member_root_is_binding(&m.object) {
+                    self.found = true;
+                    return;
+                }
+                self.visit_expr(&m.object);
+            }
+        }
+    }
+}
+
+/// A SOURCE-ORDER scan for an impure / stateful CALL inside a reactive-text
+/// expression. It mirrors the official analyze-pass traversal: `dependencies` grows
+/// as identifiers are visited (in AST-visit order), and each call's `has_call` check
+/// runs AFTER its own children are visited, against the dependencies accumulated SO
+/// FAR. Does NOT descend into nested function bodies (official sets `expression:
+/// null` there, so their identifiers/calls do not participate).
 struct HasCallScan<'a> {
     /// The component-declared root names (`is_pure` scope-resolution input).
     declared_roots: &'a rustc_hash::FxHashSet<String>,
-    references_signal: bool,
+    /// The binding table + scope graph + expression scope — the scope-aware
+    /// resolution input for the per-identifier dependency accumulation (an identifier
+    /// resolving to a binding row at `scope` is a dependency).
+    bindings: &'a BindingTable,
+    scopes: &'a ScopeGraph,
+    scope: ScopeId,
+    /// The dependency count accumulated SO FAR, in source/visit order — the official
+    /// `context.state.expression.dependencies.size`. Every referenced binding (a
+    /// local, a prop, a signal, a demoted `$state`, an import, a module/local
+    /// function) contributes one, at its visit point.
+    deps: usize,
     found: bool,
 }
 
@@ -186,21 +528,38 @@ impl HasCallScan<'_> {
             return;
         }
         match expr {
-            // A call sets has_call iff impure callee OR a stateful dependency.
-            Expression::CallExpression(call) => {
-                if !self.callee_is_pure(&call.callee) || self.references_signal {
+            // An identifier in reference position: if it resolves (scope-awarely) to a
+            // binding, it is a dependency (official `Identifier.js`:
+            // `expression.dependencies.add(binding)` for EVERY resolved binding,
+            // reactive or not). Accumulated at THIS visit point so a later call sees it.
+            Expression::Identifier(id) => self.count_reference(id.name.as_str()),
+            // A call: descend the callee + arguments FIRST (so their identifier
+            // dependencies accumulate, matching official's `context.next()` preceding
+            // the deps check), THEN apply the call rule against the deps-so-far.
+            Expression::CallExpression(call) => self.visit_call(call),
+            // An optional chain (`foo?.()`, `obj?.method(x)`, `a().b?.c()`). In OXC an
+            // optional CALL is an `Expression::ChainExpression` wrapping
+            // `ChainElement::CallExpression` — the bare-`CallExpression` arm never sees
+            // it. Official `CallExpression.js` fires for an optional call exactly as for
+            // a plain one (`is_pure(callee)` recurses on the callee regardless of
+            // optionality), so the optional call carries the SAME source-order
+            // `has_call` rule. A plain optional MEMBER (`c?.x`) is NOT a call and must
+            // not trigger — the member arm only descends into the chain base.
+            Expression::ChainExpression(chain) => self.visit_chain_element(&chain.expression),
+            // A tagged template sets has_call only when its TAG is impure (official
+            // `TaggedTemplateExpression.js`: `!is_pure(node.tag)`). A pure-global tag
+            // (`String.raw`…) does not. The template's own `${…}` interpolations are
+            // descended for nested calls regardless. (`is_pure` ignores deps-so-far
+            // here — the tagged-template rule is tag-purity only.)
+            Expression::TaggedTemplateExpression(t) => {
+                if !self.callee_is_pure(&t.tag) {
                     self.found = true;
                     return;
                 }
-                self.visit_expr(&call.callee);
-                for arg in &call.arguments {
-                    if let Some(e) = arg.as_expression() {
-                        self.visit_expr(e);
-                    }
+                for e in &t.quasi.expressions {
+                    self.visit_expr(e);
                 }
             }
-            // A tagged template is always has_call.
-            Expression::TaggedTemplateExpression(_) => self.found = true,
             Expression::ParenthesizedExpression(p) => self.visit_expr(&p.expression),
             Expression::BinaryExpression(b) => {
                 self.visit_expr(&b.left);
@@ -229,18 +588,40 @@ impl HasCallScan<'_> {
             }
             Expression::ArrayExpression(arr) => {
                 for el in &arr.elements {
-                    if let Some(e) = el.as_expression() {
+                    // An array SPREAD element (`[...x]`) unconditionally sets `has_call`
+                    // (official `SpreadElement.js`); a plain element is descended.
+                    if let oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) = el {
+                        self.visit_spread(&s.argument);
+                    } else if let Some(e) = el.as_expression() {
                         self.visit_expr(e);
                     }
                 }
             }
             Expression::ObjectExpression(obj) => {
                 for prop in &obj.properties {
-                    if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop {
-                        self.visit_expr(&p.value);
+                    match prop {
+                        oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
+                            // A COMPUTED key (`{ [v]: 1 }`) is an evaluated reference; a
+                            // plain/literal key is not. The value is always visited.
+                            if p.computed {
+                                if let Some(key) = p.key.as_expression() {
+                                    self.visit_expr(key);
+                                }
+                            }
+                            self.visit_expr(&p.value);
+                        }
+                        // An object SPREAD property (`{...x}`) unconditionally sets
+                        // `has_call` (official `SpreadElement.js`).
+                        oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
+                            self.visit_spread(&s.argument);
+                        }
                     }
                 }
             }
+            // A member access: descend the object (and a computed key) so its
+            // identifier dependencies accumulate. A static `.prop` name is NOT a
+            // reference. The member itself is not a call (official `MemberExpression.js`
+            // never sets `has_call`).
             Expression::StaticMemberExpression(m) => self.visit_expr(&m.object),
             Expression::ComputedMemberExpression(m) => {
                 self.visit_expr(&m.object);
@@ -249,17 +630,107 @@ impl HasCallScan<'_> {
             Expression::TSAsExpression(e) => self.visit_expr(&e.expression),
             Expression::TSSatisfiesExpression(e) => self.visit_expr(&e.expression),
             Expression::TSNonNullExpression(e) => self.visit_expr(&e.expression),
-            // A `new X()` is a constructor call (impure unless the constructor roots
-            // at a global) — matches `is_pure` (a NewExpression is not in the pure
-            // set, so it triggers has_call when stateful or non-global).
-            Expression::NewExpression(n)
-                if !self.callee_is_pure(&n.callee) || self.references_signal =>
-            {
-                self.found = true;
+            // A `new X()` does NOT itself set has_call (official `NewExpression.js`
+            // only sets `needs_context`). Descend its callee + arguments so their
+            // identifier dependencies accumulate (a `new Foo()` makes `Foo` a dep,
+            // which a SUBSEQUENT call observes), and so a call nested in an argument is
+            // still found.
+            Expression::NewExpression(n) => {
+                self.visit_expr(&n.callee);
+                for arg in &n.arguments {
+                    self.visit_argument(arg);
+                }
             }
-            // A nested function body is NOT descended (its calls are not the
-            // reactive value). Literals / identifiers carry no call.
+            // A nested function body is NOT descended (official sets `expression: null`
+            // there, so its identifiers/calls do not participate). Literals carry no
+            // dependency.
             _ => {}
+        }
+    }
+
+    /// Count a referenced identifier as a dependency if it resolves (scope-awarely) to
+    /// a binding row at the expression scope — the official `Identifier.js`
+    /// `dependencies.add(binding)` for EVERY resolved binding (a local, a prop, a
+    /// signal, a demoted `$state`, an import, a module/local function), reactive or
+    /// not. A free name (a global like `Boolean` / `Math`) resolves to `None` and is
+    /// not a dependency.
+    fn count_reference(&mut self, name: &str) {
+        if self
+            .bindings
+            .resolve_kind(self.scopes, self.scope, name)
+            .is_some()
+        {
+            self.deps += 1;
+        }
+    }
+
+    /// Apply the official `CallExpression` `has_call` rule to a call node, in SOURCE
+    /// order (shared by the plain-call arm and the optional-chain-wrapped call). The
+    /// callee + arguments are visited FIRST so their identifier dependencies
+    /// accumulate (mirroring official's `context.next()` preceding the deps check) —
+    /// the call's OWN callee/argument bindings count too. THEN the call sets has_call
+    /// iff its callee is NOT statically pure OR a dependency has accumulated so far
+    /// (`!is_pure(callee) || dependencies.size > 0`). Descending first also finds a
+    /// nested impure call inside the callee or an argument.
+    fn visit_call(&mut self, call: &CallExpression<'_>) {
+        self.visit_expr(&call.callee);
+        for arg in &call.arguments {
+            self.visit_argument(arg);
+        }
+        if self.found {
+            return;
+        }
+        if !self.callee_is_pure(&call.callee) || self.deps > 0 {
+            self.found = true;
+        }
+    }
+
+    /// Visit a call/new ARGUMENT — a plain expression OR a spread (`...x`). A spread
+    /// element UNCONDITIONALLY sets `has_call` (official `SpreadElement.js`: `has_call =
+    /// true; has_state = true` for ANY spread — "treat e.g. `[...x]` the same as
+    /// `[...x.values()]`"), so a spread-call (`String(...arr)`, even over a pure global
+    /// like `String(...globalThis.items)`) memoizes. Its inner expression is still
+    /// descended so a nested impure call / dependency in the spread argument also
+    /// participates.
+    fn visit_argument(&mut self, arg: &oxc_ast::ast::Argument<'_>) {
+        match arg {
+            oxc_ast::ast::Argument::SpreadElement(s) => self.visit_spread(&s.argument),
+            other => {
+                if let Some(e) = other.as_expression() {
+                    self.visit_expr(e);
+                }
+            }
+        }
+    }
+
+    /// Visit a SPREAD element's inner expression and mark `has_call`. Official's
+    /// `SpreadElement` visitor sets `has_call = true` (and `has_state = true`) for EVERY
+    /// spread, regardless of what it spreads — a spread is treated as an implicit
+    /// iterator call. Shared by the call/new-argument, array-element, and object-property
+    /// spread positions.
+    fn visit_spread(&mut self, argument: &Expression<'_>) {
+        self.visit_expr(argument);
+        self.found = true;
+    }
+
+    /// Scan one element of an optional chain. An optional CALL
+    /// (`ChainElement::CallExpression`) carries the full call rule; a `!` assertion
+    /// descends to its inner expression; a member element is NOT a call but its
+    /// object is descended so a call nested in the chain base (`a().b?.c`) is still
+    /// found.
+    fn visit_chain_element(&mut self, element: &ChainElement<'_>) {
+        if self.found {
+            return;
+        }
+        match element {
+            ChainElement::CallExpression(call) => self.visit_call(call),
+            ChainElement::TSNonNullExpression(e) => self.visit_expr(&e.expression),
+            ChainElement::StaticMemberExpression(m) => self.visit_expr(&m.object),
+            ChainElement::ComputedMemberExpression(m) => {
+                self.visit_expr(&m.object);
+                self.visit_expr(&m.expression);
+            }
+            ChainElement::PrivateFieldExpression(m) => self.visit_expr(&m.object),
         }
     }
 }
@@ -551,3 +1022,7 @@ fn is_rune_call(call: &CallExpression<'_>) -> bool {
         "$state" | "$derived" | "$props" | "$effect" | "$bindable" | "$inspect" | "$host"
     )
 }
+
+#[cfg(test)]
+#[path = "reactive_analysis_tests.rs"]
+mod tests;

@@ -39,7 +39,7 @@
   "helperCounts": {},
   "delegatedEvents": [],
   "templates": [],
-  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; export default function standalone_child($$anchor) { Child($$anchor, { label: 'hi' }); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; export default function standalone_child($$anchor) {Child($$anchor, {label: 'hi'});}",
   "css": {
     "present": false,
     "hash": null,

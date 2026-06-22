@@ -55,7 +55,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); export default function props_readonly($$anchor, $$props) { var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $$props.label)); $.append($$anchor, p); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); export default function props_readonly($$anchor, $$props) {var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $$props.label)); $.append($$anchor, p);}",
   "css": {
     "present": false,
     "hash": null,

@@ -24,8 +24,8 @@ use oxc_allocator::Allocator;
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::{is_svelte_reserved_word, SupportedHtmlElement, SupportedStaticAttr};
 use super::client_shapes::{
-    self, ClientBindShape, ClientEventHandlerShape, ClientInterpolationShape, ClientPropsUsage,
-    SupportedInstanceScriptItem,
+    self, ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape,
+    ClientInterpolationShape, ClientPropsUsage, SupportedInstanceScriptItem,
 };
 use super::expr::{BindingRuntimeKind, ExprRefKind};
 use super::expr_emit::{self, PropsShape, StateDeclShape};
@@ -67,6 +67,12 @@ pub(super) struct ClassifiedClientSurface {
     /// the interpolation is a bare signal / no-default-prop read (the §1.2-class
     /// reactive-text surface), carried so the plan reads a typed classification.
     pub(super) interp_shapes: Vec<(NodeId, ClientInterpolationShape)>,
+    /// The accepted dynamic-attribute / class / style shape per (node, attribute
+    /// index) — the FACT a reactive-attribute / `$.set_class` / `$.set_style` /
+    /// `$.autofocus` op consumes. The attribute index is the position of
+    /// the attribute in the element's `AttrIr` list, so a per-attribute op maps back
+    /// to its accepted emission shape. The plan coalesces the class/style entries.
+    pub(super) dynamic_attr_shapes: Vec<(NodeId, usize, ClientDynamicAttrShape)>,
     /// The read-only `$props()` usage fact (no prop write / bind reached the
     /// classifier).
     pub(super) props_usage: ClientPropsUsage,
@@ -174,6 +180,7 @@ impl ClientSyntaxSurface {
             event_shapes: facts.event_shapes,
             bind_shapes: facts.bind_shapes,
             interp_shapes: facts.interp_shapes,
+            dynamic_attr_shapes: facts.dynamic_attr_shapes,
             props_usage,
             script_items,
         })
@@ -237,6 +244,8 @@ struct SurfaceFacts {
     bind_shapes: Vec<(NodeId, ClientBindShape)>,
     /// The accepted interpolation shape per interpolation node.
     interp_shapes: Vec<(NodeId, ClientInterpolationShape)>,
+    /// The accepted dynamic-attr / class / style shape per (node, attribute index).
+    dynamic_attr_shapes: Vec<(NodeId, usize, ClientDynamicAttrShape)>,
 }
 
 /// The default-deny classifier handle (a zero-size type the entry method hangs
@@ -770,8 +779,8 @@ fn classify_node(
             // allowlist (the typed `SupportedHtmlElement` is the per-tag key). A custom
             // element already failed closed at step (2), so the attr walk sees only an
             // allowlisted element.
-            for attr in &el.attrs {
-                classify_attr(ir, node_id, element, attr, el.span, facts)?;
+            for (attr_idx, attr) in el.attrs.iter().enumerate() {
+                classify_attr(ir, node_id, attr_idx, element, attr, el.span, facts)?;
             }
             let child_namespace = determine_namespace_for_children(element_namespace, &el.tag);
             for &child in &el.children {
@@ -910,16 +919,56 @@ fn special_label(kind: SpecialKind) -> &'static str {
     }
 }
 
+/// The accepted dynamic-attr shape for a STATIC non-static-property attribute
+/// (`autofocus` / `muted`), or `None` for any other static attribute (which the
+/// caller routes to the strict static-attr allowlist).
+///
+/// `autofocus` (valueless or valued) is the init-only `$.autofocus` surface on ANY
+/// element. A valueless / valued `muted` is a DOM-PROPERTY write on ANY element —
+/// official `is_dom_property('muted')` is element-agnostic (`muted` is in
+/// `DOM_BOOLEAN_ATTRIBUTES` → `DOM_PROPERTIES` with no host check), so `<div muted>`
+/// emits `div.muted = true` exactly like `<video muted>`. `defaultValue` /
+/// `defaultChecked` are the form-default family (5c) and are NOT accepted here (they
+/// fall through to the static-attr allowlist, which refuses them).
+fn static_non_static_property_shape(name: &str) -> Option<ClientDynamicAttrShape> {
+    match name {
+        "autofocus" => Some(ClientDynamicAttrShape::Autofocus),
+        "muted" => Some(ClientDynamicAttrShape::DomProperty {
+            prop: "muted".to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether the element at `node_id` carries any `class:` directive (so a static
+/// `class` on it is the base value of the merged `$.set_class`, not a baked attr).
+fn element_has_class_directive(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
+    matches!(ir.node(node_id), IrNode::Element(el)
+        if el.attrs.iter().any(|a| matches!(a, AttrIr::Class { .. })))
+}
+
+/// Whether the element at `node_id` carries any `style:` directive (so a static
+/// `style` on it is the base value of the merged `$.set_style`, not a baked attr).
+fn element_has_style_directive(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
+    matches!(ir.node(node_id), IrNode::Element(el)
+        if el.attrs.iter().any(|a| matches!(a, AttrIr::Style { .. })))
+}
+
 /// Classify one attribute / directive into the narrow supported vocabulary,
-/// ACCUMULATING the accepted bind / event SHAPE fact, or REFUSE. The supported
-/// surface: a directly-serializable static attribute, a delegated `onclick` with a
-/// §1.2-class `$state`-write arrow handler, `bind:value` on an `<input>` to a
+/// ACCUMULATING the accepted bind / event / dynamic-attribute SHAPE fact, or REFUSE.
+/// The supported surface: a directly-serializable static attribute, a static
+/// non-static-property (`autofocus` / media `muted`), a DYNAMIC attribute / `class={…}`
+/// / `style={…}` / `class:` / `style:` directive , a delegated `onclick`
+/// with a §1.2-class `$state`-write arrow handler, `bind:value` on an `<input>` to a
 /// reactive `$state` ident, and intrinsic-element `bind:this` to a non-prop
 /// identifier. There is NO wildcard accept arm — every `AttrIr` variant is matched
-/// explicitly.
+/// explicitly. `attr_idx` is the attribute's position in the element's `AttrIr` list,
+/// recorded with the accepted dynamic-attr shape so the plan maps each op back to its
+/// emission decision.
 fn classify_attr(
     ir: &SvelteRuntimeIr,
     node_id: NodeId,
+    attr_idx: usize,
     element: SupportedHtmlElement,
     attr: &AttrIr,
     el_span: Span,
@@ -930,14 +979,46 @@ fn classify_attr(
     let tag = element.var_stem();
     match attr {
         AttrIr::Static { name, value } => {
-            // The STRICT FINITE static-attr allowlist is the SOLE acceptance authority:
-            // `SupportedStaticAttr::classify` accepts ONLY the enumerated `(name,
-            // element, value)` shapes (global `id`/`title`/`role`/non-empty
-            // `class`/`data-*`/`aria-*`; per-tag `a:href`, `button:type/disabled`,
-            // `input:type/disabled`). EVERY other name (`is`, `defaultValue`,
-            // `defaultChecked`, `autofocus`, `muted`, `dir`, `style`, input
-            // `value`/`checked`, …) fails closed BEFORE emission (5a) — so an accepted
-            // attr can NEVER be the one the serializer would silently drop.
+            // (a) A static `autofocus` / media `muted` is a NON-STATIC-PROPERTY
+            // (`cannot_be_set_statically`) applied at runtime via `$.autofocus` / a
+            // property write — NOT a baked skeleton attr. Accept it ,
+            // recording the dynamic-attr shape so the plan emits the `NonStaticProperty`
+            // op. `defaultValue` / `defaultChecked` are the form-default family (5c) and
+            // are NOT accepted here — they fall through to the static-attr allowlist,
+            // which refuses them.
+            if let Some(shape) = static_non_static_property_shape(name) {
+                facts
+                    .borrow_mut()
+                    .dynamic_attr_shapes
+                    .push((node_id, attr_idx, shape));
+                return Ok(());
+            }
+            // (a2) A static `class` / `style` whose element ALSO carries a `class:` /
+            // `style:` directive is the BASE value of the merged `$.set_class` /
+            // `$.set_style` (it is pulled OUT of the skeleton). Accept it as the
+            // Class / Style surface — the plan reads the static base when coalescing.
+            // (Without this, a static `style="x"` would fail the static-attr allowlist
+            // even though the `style:` directive makes the whole element a 5a surface.)
+            if (name == "class" && element_has_class_directive(ir, node_id))
+                || (name == "style" && element_has_style_directive(ir, node_id))
+            {
+                let shape = if name == "class" {
+                    ClientDynamicAttrShape::Class
+                } else {
+                    ClientDynamicAttrShape::Style
+                };
+                facts
+                    .borrow_mut()
+                    .dynamic_attr_shapes
+                    .push((node_id, attr_idx, shape));
+                return Ok(());
+            }
+            // (b) The STRICT FINITE static-attr allowlist is the SOLE acceptance
+            // authority for a baked static attr: `SupportedStaticAttr::classify`
+            // accepts ONLY the enumerated `(name, element, value)` shapes. EVERY other
+            // name (`is`, `defaultValue`, `defaultChecked`, `dir`, `style`, input
+            // `value`/`checked`, …) fails closed BEFORE emission — so an accepted attr
+            // can NEVER be the one the serializer would silently drop.
             let literal = value.as_ref().map(|v| v.value.as_str());
             if SupportedStaticAttr::classify(name, element, literal).is_none() {
                 return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
@@ -948,19 +1029,58 @@ fn classify_attr(
             Ok(())
         }
         AttrIr::Dynamic { name, .. } | AttrIr::Mixed { name, .. } => {
-            Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-                name: name.clone(),
-                span: el_span,
-            })
+            // A dynamic / mixed `class` / `style` PLAIN attribute (`class={c}` /
+            // `class="a {b}"` / `style={s}`) is the class / style surface (`$.set_class`
+            // / `$.set_style`), NOT a generic attribute — route it to the Class / Style
+            // shape so the plan coalesces it. (The directive forms reach the
+            // `AttrIr::Class` / `AttrIr::Style` arms below.)
+            if name == "class" {
+                facts.borrow_mut().dynamic_attr_shapes.push((
+                    node_id,
+                    attr_idx,
+                    ClientDynamicAttrShape::Class,
+                ));
+                return Ok(());
+            }
+            if name == "style" {
+                facts.borrow_mut().dynamic_attr_shapes.push((
+                    node_id,
+                    attr_idx,
+                    ClientDynamicAttrShape::Style,
+                ));
+                return Ok(());
+            }
+            // A DYNAMIC attribute (`id={x}` / `id="a{x}"`) is the dynamic-attribute / class / style surface:
+            // classify its emission shape (a DOM-property write, `$.set_attribute`,
+            // `$.autofocus`), refusing the form-control setters (5c) and the `dir`
+            // reflected-attr quirk. `muted` is a DOM property on ANY element (official
+            // `is_dom_property('muted')` is element-agnostic), so `<div muted={x}>`
+            // emits `div.muted = $.get(x)` exactly like a `<video>` host.
+            let shape = client_shapes::classify_dynamic_attr_shape(name, el_span)?;
+            facts
+                .borrow_mut()
+                .dynamic_attr_shapes
+                .push((node_id, attr_idx, shape));
+            Ok(())
         }
-        AttrIr::Class { name, .. } => Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-            name: format!("class:{name}"),
-            span: el_span,
-        }),
-        AttrIr::Style { property, .. } => Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-            name: format!("style:{property}"),
-            span: el_span,
-        }),
+        AttrIr::Class { .. } => {
+            // A `class={…}` attribute or `class:` directive → `$.set_class` .
+            facts.borrow_mut().dynamic_attr_shapes.push((
+                node_id,
+                attr_idx,
+                ClientDynamicAttrShape::Class,
+            ));
+            Ok(())
+        }
+        AttrIr::Style { .. } => {
+            // A `style={…}` attribute or `style:` directive → `$.set_style` .
+            facts.borrow_mut().dynamic_attr_shapes.push((
+                node_id,
+                attr_idx,
+                ClientDynamicAttrShape::Style,
+            ));
+            Ok(())
+        }
         AttrIr::Spread { .. } => {
             Err(UnsupportedSvelteRuntimeSurface::SpreadOrHtml { span: el_span })
         }

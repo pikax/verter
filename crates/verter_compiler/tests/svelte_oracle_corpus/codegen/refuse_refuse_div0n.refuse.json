@@ -1,0 +1,8 @@
+{
+  "slug": "refuse_refuse_div0n",
+  "bucket": "refuse",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "officialRejected": true,
+  "officialErrorSummary": "Division by zero"
+}

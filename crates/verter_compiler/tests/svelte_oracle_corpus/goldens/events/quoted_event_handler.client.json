@@ -55,7 +55,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>y</button>`); export default function quoted_event_handler($$anchor) { let go = () => {}; var button = root(); $.delegated('click', button, () => go()); $.append($$anchor, button); } $.delegate(['click']);",
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>y</button>`); export default function quoted_event_handler($$anchor) {let go = () => {}; var button = root(); $.delegated('click', button, () => go()); $.append($$anchor, button);} $.delegate(['click']);",
   "css": {
     "present": false,
     "hash": null,

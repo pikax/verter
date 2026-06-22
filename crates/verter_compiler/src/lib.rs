@@ -24,6 +24,7 @@ pub mod code_transform;
 pub(crate) mod code_transform;
 
 pub mod css;
+pub mod js_number;
 pub mod strip_types;
 
 pub mod compile;

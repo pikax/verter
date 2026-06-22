@@ -488,6 +488,132 @@ fn is_signal_binding(kind: BindingRuntimeKind) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic attribute / class / style shape
+// ---------------------------------------------------------------------------
+
+/// The accepted emission shape of a supported dynamic attribute / `class` / `style`
+/// surface . The classifier records this typed fact per accepted attribute
+/// so the plan/emitter reads a proven emission decision, never re-derives it from a
+/// raw name. Every shape mirrors a pinned `svelte@5.56.3` client form.
+///
+/// The DOM-property-vs-`set_attribute` decision is the official
+/// `is_dom_property(normalize_attribute(name))` rule (the pinned tables in
+/// [`super::client_allowlist`]); the `class` / `style` / `autofocus` arms are the
+/// official special cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ClientDynamicAttrShape {
+    /// A generic dynamic attribute → `$.set_attribute(node, 'name', value)` (the
+    /// name is NOT a DOM property). E.g. `hidden={x}`, `contenteditable={x}`,
+    /// `data-id={x}`, `aria-label={x}`, `id={x}`.
+    SetAttribute {
+        /// The (HTML-lowercased) attribute name the official skeleton serializer
+        /// emits.
+        name: String,
+    },
+    /// A dynamic DOM-property attribute → `node.<prop> = value` (the official
+    /// `is_dom_property` rule). `prop` is the normalized property name
+    /// (`disabled` → `disabled`, `readonly` → `readOnly`, `muted` → `muted`).
+    DomProperty {
+        /// The DOM property name to assign (already `normalize_attribute`'d).
+        prop: String,
+    },
+    /// An `autofocus` attribute → init-only `$.autofocus(node, value)`. Both the
+    /// static valueless (`$.autofocus(node, true)`) and dynamic
+    /// (`$.autofocus(node, $.get(v))`) forms map here.
+    Autofocus,
+    /// A `class={…}` attribute or a `class:` directive — coalesced into one
+    /// `$.set_class` by the plan.
+    Class,
+    /// A `style={…}` attribute or a `style:` directive — coalesced into one
+    /// `$.set_style` by the plan.
+    Style,
+}
+
+/// The dynamic-attribute names the client backend DEFERS to a later vertical (so the
+/// generic open-set arm does not silently mis-emit them). Form-control value/checked
+/// setters (`$.set_value` / `$.set_checked` / `$.set_selected` / `$.set_default_*`)
+/// are the bindings-breadth surface (5c); `defaultValue` / `defaultChecked` are the
+/// non-static-property form-default family (also 5c). The decision keys on the
+/// NORMALIZED name so `defaultvalue` / `defaultValue` both match.
+fn dynamic_attr_deferred_to_5c(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "value" | "checked" | "selected" | "defaultValue" | "defaultChecked"
+    )
+}
+
+/// Classify a supported dynamic PLAIN attribute (`AttrIr::Dynamic` / `AttrIr::Mixed`)
+/// or a non-static-property attribute (`autofocus` / `muted` / …) into its accepted
+/// [`ClientDynamicAttrShape`], or fail closed.
+///
+/// The classifier order mirrors the official `RegularElement.js` attribute dispatch:
+///
+/// 1. A `value` / `checked` / `selected` / `defaultValue` / `defaultChecked` name is
+///    the form-control setter family (5c) — fail closed FIRST (so a `value={v}`
+///    reports the form-control deferral, not the generic accept).
+/// 2. An `is` attribute is the customized-built-in surface (5h) — but it is already
+///    refused at the element gate, so it never reaches here.
+/// 3. `autofocus` → [`ClientDynamicAttrShape::Autofocus`].
+/// 4. `dir` is the special reflected-attr arm (`el.dir = el.dir`) — DEFERRED (a
+///    follow-up), fail closed so the generic arm does not mis-emit it without the
+///    reflection write.
+/// 5. `is_dom_property(normalize_attribute(name))` → [`ClientDynamicAttrShape::DomProperty`]
+///    (`muted` is a DOM property on ANY element — `is_dom_property` is element-agnostic).
+/// 6. everything else → the generic [`ClientDynamicAttrShape::SetAttribute`].
+///
+/// `name` is the raw attribute name. `is_html` is always true for the supported
+/// surface (an SVG/MathML element fails closed at the element gate).
+pub(super) fn classify_dynamic_attr_shape(
+    name: &str,
+    el_span: Span,
+) -> Result<ClientDynamicAttrShape, UnsupportedSvelteRuntimeSurface> {
+    let refuse_dynamic = || UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+        name: name.to_string(),
+        span: el_span,
+    };
+    // The official `get_attribute_name` for an HTML element is `normalize_attribute`
+    // — lowercase + the alias map (`readonly` → `readOnly`). The supported surface is
+    // HTML-only (an SVG/MathML element fails closed at the element gate), so the
+    // normalized name is the property/attribute name the official compiler dispatches
+    // on.
+    let normalized = super::client_allowlist::normalize_attribute(name);
+    // (1) The form-control setter family (`value` / `checked` / `selected` /
+    // `defaultValue` / `defaultChecked`) is the bindings-breadth surface (5c) — it
+    // emits the dedicated `$.set_value` / `$.set_checked` / `$.set_selected` /
+    // `$.set_default_*` form helpers, alongside `bind:value` / `bind:checked`. Refuse
+    // it through the 5c-owning `Binding` channel (the form-control attribute IS the
+    // target a `bind:` would write), so the diagnostic carries the right owning block.
+    if dynamic_attr_deferred_to_5c(&normalized) {
+        return Err(UnsupportedSvelteRuntimeSurface::Binding {
+            target: normalized,
+            span: el_span,
+        });
+    }
+    // (3) `autofocus` → the init-only helper.
+    if normalized == "autofocus" {
+        return Ok(ClientDynamicAttrShape::Autofocus);
+    }
+    // (4) `dir` is the special reflected-attr arm — DEFERRED.
+    // TODO(follow-up): emit the official `dir` reflected-attr arm (`el.dir = el.dir`
+    // pushed into the combined effect, on top of the static-bake / `$.set_attribute`)
+    // — the Firefox `dir="auto"` direction fix (`RegularElement.js`'s
+    // `if (lookup.has('dir'))`). Until then a `dir` attribute fails closed so the
+    // generic arm never mis-emits it without the reflection write.
+    if normalized == "dir" {
+        return Err(refuse_dynamic());
+    }
+    // (5) A DOM property → a direct property write.
+    if super::client_allowlist::is_dom_property(&normalized) {
+        return Ok(ClientDynamicAttrShape::DomProperty { prop: normalized });
+    }
+    // (6) The generic open-set arm → `$.set_attribute`. The emitted attribute name is
+    // the HTML-lowercased form (the official `template.js` serializer lowercases an
+    // HTML attribute name; `set_attribute` receives the normalized name, which for a
+    // non-DOM-property non-alias attribute is its lowercase spelling).
+    Ok(ClientDynamicAttrShape::SetAttribute { name: normalized })
+}
+
+// ---------------------------------------------------------------------------
 // $props() usage shape (read-only vs written/bound)
 // ---------------------------------------------------------------------------
 

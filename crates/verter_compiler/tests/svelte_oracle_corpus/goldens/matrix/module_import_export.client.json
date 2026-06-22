@@ -81,7 +81,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import { base } from \"./base.js\"; import * as $ from 'svelte/internal/client'; export const VERSION = 1; var root = $.from_html(`<button> </button>`); export default function module_import_export($$anchor) { let count = $.state($.proxy(base)); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(count))); $.delegated('click', button, () => $.update(count)); $.append($$anchor, button); } $.delegate(['click']);",
+  "clientModule": "import 'svelte/internal/disclose-version'; import {base} from \"./base.js\"; import * as $ from 'svelte/internal/client'; export const VERSION = 1; var root = $.from_html(`<button> </button>`); export default function module_import_export($$anchor) {let count = $.state($.proxy(base)); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(count))); $.delegated('click', button, () => $.update(count)); $.append($$anchor, button);} $.delegate(['click']);",
   "css": {
     "present": false,
     "hash": null,

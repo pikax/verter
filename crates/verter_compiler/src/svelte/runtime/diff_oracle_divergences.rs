@@ -7,9 +7,17 @@
 //
 //   - `5m` namespace-root-helper layer — namespace-aware root-helper selection
 //     ($.from_svg / $.from_mathml for an SVG/MathML root).
-//   - `5a` typed-setter / class-style-merge / option-value layer — typed
-//     set_class/set_style/set_value slots; class:/style: directive merge with the
-//     class/style attribute; <option>/<datalist> value property-vs-attribute.
+//   - `5a` class-style-merge / option-value layer — the class:/style: directive
+//     merge with the class/style attribute into one set_class/set_style attr-part
+//     (the IR-topology coalesce); <option>/<datalist> value property-vs-attribute.
+//     (the client backend emits dynamic attrs + class/style + boolean
+//     DOM props; the remaining 5a rows are the IR slot/attr-part TOPOLOGY coalesce —
+//     the client emitter already produces the correct merged $.set_class/$.set_style.)
+//   - `5c` form-control setter layer — a `value`/`checked` dynamic attribute's typed
+//     form-control setter ($.set_value / $.set_checked / $.set_selected /
+//     $.set_default_*) slot, alongside bind:value/bind:checked. (Split out of the
+//     former 5a typed-setter layer: the value sub-case is a form-control / bindings
+//     surface, not a 5a class/style surface.)
 //   - `5f` special-element / region / slot emission layer — the <svelte:element>
 //     $.element wrapper topology; the window/body/document/head region
 //     comment-anchor SHAPE; the standalone <Component>/{@render} slot text mount.
@@ -23,7 +31,7 @@
 // Included by `diff_oracle_tests.rs` via `include!`.
 
 #[rustfmt::skip]
-const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
+const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 122] = [
     DivergenceRow {
         fixture: "generated/001_root_component.svelte",
         axis: DiffAxis::HelperSet,
@@ -123,13 +131,13 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/034_attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
         fixture: "generated/035_attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
@@ -327,13 +335,13 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/070_pair_root_element__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
         fixture: "generated/071_pair_root_element__attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
@@ -405,7 +413,7 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/077_pair_root_svg__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
@@ -423,7 +431,7 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/078_pair_root_svg__attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
@@ -507,7 +515,7 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/084_pair_root_mathml__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
@@ -525,7 +533,7 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/085_pair_root_mathml__attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
@@ -549,13 +557,13 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/091_pair_root_if_block__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"block\": 1, \"value\": 1} != Verter {\"attribute\": 1, \"block\": 1}",
     },
     DivergenceRow {
         fixture: "generated/092_pair_root_if_block__attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"block\": 1, \"value\": 1} != Verter {\"attribute\": 1, \"block\": 1}",
     },
     DivergenceRow {
@@ -567,13 +575,13 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/098_pair_root_each_block__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"block\": 1, \"value\": 1} != Verter {\"attribute\": 1, \"block\": 1}",
     },
     DivergenceRow {
         fixture: "generated/099_pair_root_each_block__attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"block\": 1, \"value\": 1} != Verter {\"attribute\": 1, \"block\": 1}",
     },
     DivergenceRow {
@@ -585,13 +593,13 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/105_pair_root_key_block__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"block\": 1, \"value\": 1} != Verter {\"attribute\": 1, \"block\": 1}",
     },
     DivergenceRow {
         fixture: "generated/106_pair_root_key_block__attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"block\": 1, \"value\": 1} != Verter {\"attribute\": 1, \"block\": 1}",
     },
     DivergenceRow {
@@ -603,7 +611,7 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/110_pair_text_dynamic__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"text\": 1, \"value\": 1} != Verter {\"attribute\": 1, \"text\": 1}",
     },
     DivergenceRow {
@@ -615,7 +623,7 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/113_pair_text_mixed__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"text\": 1, \"value\": 1} != Verter {\"attribute\": 1, \"text\": 1}",
     },
     DivergenceRow {
@@ -627,7 +635,7 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
     DivergenceRow {
         fixture: "generated/116_pair_text_named_entity__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
+        root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
@@ -636,12 +644,10 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 123] = [
         root_cause: "Y14 -> 5a (class/style-merge layer): a class:/style: directive is merged with the element's class/style attribute into ONE setter (and the style:|important array-wrapped value shape) — the 5a class/style-merge layer owns it",
         summary: "official attr-parts [CandAttrPart { helper: \"set_class\", attr: \"class\", chunks: [\"expr\", \"expr\", \"directive\"] }] != Verter [CandAttrPart { helper: \"set_class\", attr: \"class\", chunks: [\"directive\"] }]",
     },
-    DivergenceRow {
-        fixture: "generated/117_pair_attr_static__dir_class_unquoted.svelte",
-        axis: DiffAxis::StaticHtml,
-        root_cause: "Y14 -> 5a (class/style-merge layer): a class:/style: directive is merged with the element's class/style attribute into ONE setter (and the style:|important array-wrapped value shape) — the 5a class/style-merge layer owns it",
-        summary: "official static-html [\"<div>hi</div>\"] != Verter [\"<div class=\\\"box\\\">hi</div>\"]",
-    },
+    // NOTE: the 117 `StaticHtml` divergence (a static `class="box"` baked into the
+    // skeleton when a `class:` directive is present) is FIXED — the static
+    // base is now pulled OUT of the `from_html` skeleton into the merged `$.set_class`
+    // base arg, matching official. The row is removed (no longer divergent).
     DivergenceRow {
         fixture: "generated/118_pair_attr_static__dir_style_unquoted.svelte",
         axis: DiffAxis::AttrParts,

@@ -90,7 +90,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import { writable } from 'svelte/store'; var root = $.from_html(`<button> </button>`); export default function store_auto_subscribe($$anchor, $$props) { $.push($$props, false); const $count = () => $.store_get(count, '$count', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const count = writable(0); function inc() { count.update((n) => n + 1); } $.init(); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $count())); $.delegated('click', button, inc); $.append($$anchor, button); $.pop(); $$cleanup(); } $.delegate(['click']);",
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<button> </button>`); export default function store_auto_subscribe($$anchor, $$props) {$.push($$props, false); const $count = () => $.store_get(count, '$count', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const count = writable(0); function inc() {count.update((n) => n + 1);} $.init(); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $count())); $.delegated('click', button, inc); $.append($$anchor, button); $.pop(); $$cleanup();} $.delegate(['click']);",
   "css": {
     "present": false,
     "hash": null,

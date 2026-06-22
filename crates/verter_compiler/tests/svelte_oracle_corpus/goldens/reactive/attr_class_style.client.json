@@ -54,7 +54,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>dynamic attrs</div>`); export default function attr_class_style($$anchor) { let active = false; let color = 'red'; let id = 'main'; var div = root(); $.set_attribute(div, 'id', id); $.set_class(div, 1, '', null, {}, { active }); let styles; $.template_effect(() => styles = $.set_style(div, '', styles, { color })); $.append($$anchor, div); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>dynamic attrs</div>`); export default function attr_class_style($$anchor) {let active = false; let color = 'red'; let id = 'main'; var div = root(); $.set_attribute(div, 'id', id); $.set_class(div, 1, '', null, {}, {active}); let styles; $.template_effect(() => styles = $.set_style(div, '', styles, {color})); $.append($$anchor, div);}",
   "css": {
     "present": false,
     "hash": null,

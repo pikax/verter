@@ -1,0 +1,83 @@
+{
+  "slug": "attributes/boolean_property.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "boolean_property",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "get",
+    "get",
+    "delegated",
+    "set",
+    "get",
+    "delegated",
+    "set",
+    "get",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "set",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "get": 4,
+    "delegated": 2,
+    "set": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button></button> <input/>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button></button> <input/>`, 1); export default function boolean_property($$anchor) {let disabled = $.state(false); let readonly = $.state(false); var fragment = root(); var button = $.first_child(fragment); var input = $.sibling(button, 2); $.template_effect(() => {button.disabled = $.get(disabled); input.readOnly = $.get(readonly);}); $.delegated('click', button, () => $.set(disabled, !$.get(disabled))); $.delegated('click', input, () => $.set(readonly, !$.get(readonly))); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

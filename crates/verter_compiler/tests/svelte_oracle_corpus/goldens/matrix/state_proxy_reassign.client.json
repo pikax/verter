@@ -74,7 +74,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function state_proxy_reassign($$anchor) { let o = $.state($.proxy({ x: 0 })); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(o).x)); $.delegated('click', button, () => $.set(o, { x: 1 }, true)); $.append($$anchor, button); } $.delegate(['click']);",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function state_proxy_reassign($$anchor) {let o = $.state($.proxy({x: 0})); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(o).x)); $.delegated('click', button, () => $.set(o, {x: 1}, true)); $.append($$anchor, button);} $.delegate(['click']);",
   "css": {
     "present": false,
     "hash": null,

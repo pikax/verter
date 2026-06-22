@@ -1,0 +1,86 @@
+{
+  "slug": "attributes/set_attribute_props.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "set_attribute_props",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "set_attribute",
+    "get",
+    "set_attribute",
+    "get",
+    "delegated",
+    "set",
+    "delegated",
+    "set",
+    "get",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "set",
+    "set_attribute",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_attribute": 2,
+    "get": 3,
+    "delegated": 2,
+    "set": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div> <button></button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div> <button></button>`, 1); export default function set_attribute_props($$anchor) {let editable = $.state('true'); let hidden = $.state(false); var fragment = root(); var div = $.first_child(fragment); var button = $.sibling(div, 2); $.template_effect(() => {$.set_attribute(div, 'contenteditable', $.get(editable)); $.set_attribute(button, 'hidden', $.get(hidden));}); $.delegated('click', div, () => $.set(editable, 'false')); $.delegated('click', button, () => $.set(hidden, !$.get(hidden))); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

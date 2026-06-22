@@ -446,30 +446,23 @@ const FAIL_MATRIX: &[FailRow] = &[
         block: "5q",
         code: "svelte-runtime-unsupported-root-text-region",
     },
-    // ── template / attrs (5a / 5b) ───────────────────────────────────────────
+    // ── template / attrs (5b) ────────────────────────────────────────────────
+    //
+    // The client backend NOW SUPPORTS dynamic attributes, mixed attributes, boolean DOM props,
+    // `class={…}` / `class:`, and `style={…}` / `style:` — those rows were removed
+    // from this fail matrix (they emit a `Main`, asserted by the positive cases in
+    // `svelte_element_attr_boundary.rs`). What stays fail-closed here is the form-
+    // control setter family (`value` / `checked` → 5c) and the spread / `{@html}`
+    // surfaces (5b), plus the `dir` reflected-attr quirk (deferred).
     FailRow {
-        name: "dynamic_attr",
-        source: "<script>let id = $state('x');</script>\n<div id={id}></div>\n",
-        block: "5a",
-        code: "svelte-runtime-unsupported-dynamic-attribute",
-    },
-    FailRow {
-        name: "mixed_attr",
-        source: "<script>let id = $state('x');</script>\n<div id=\"a-{id}\"></div>\n",
-        block: "5a",
-        code: "svelte-runtime-unsupported-dynamic-attribute",
-    },
-    FailRow {
-        name: "class_directive",
-        source: "<script>let on = $state(true);</script>\n<div class:active={on}></div>\n",
-        block: "5a",
-        code: "svelte-runtime-unsupported-dynamic-attribute",
-    },
-    FailRow {
-        name: "style_directive",
-        source: "<script>let c = $state('red');</script>\n<div style:color={c}></div>\n",
-        block: "5a",
-        code: "svelte-runtime-unsupported-dynamic-attribute",
+        // `value={v}` (a form-control setter) is the bindings-breadth surface (5c) —
+        // it emits `$.set_value`, not a generic attribute. Refused through the 5c
+        // form-control / bindings channel. (The `dir` reflected-attr deferral has its
+        // own `dir_attr` row further down.)
+        name: "form_control_value_attr",
+        source: "<script>let v = $state('x');</script>\n<input onclick={() => v += '!'} value={v}>\n",
+        block: "5c",
+        code: "svelte-runtime-unsupported-binding",
     },
     FailRow {
         // A spread attribute (5b); `rest` is a plain-local object (not object-state) so
@@ -551,12 +544,10 @@ const FAIL_MATRIX: &[FailRow] = &[
         block: "5a",
         code: "svelte-runtime-unsupported-element",
     },
-    FailRow {
-        name: "video_element",
-        source: "<script>let c = $state(0);</script>\n<video muted></video>\n<button onclick={() => c++}>{c}</button>\n",
-        block: "5a",
-        code: "svelte-runtime-unsupported-element",
-    },
+    // (`<video>` joined the element allowlist as the `muted` media host,
+    // so it is no longer a fail-closed element — a `<video muted>` emits the
+    // `video.muted = true` property write. Its support is asserted by the positive
+    // element/attr boundary cases.)
     FailRow {
         name: "textarea_dynamic_content_element",
         source: "<script>let c = $state(0);</script>\n<textarea>{c}</textarea><button onclick={() => c++}>x</button>\n",
@@ -591,12 +582,10 @@ const FAIL_MATRIX: &[FailRow] = &[
         block: "5a",
         code: "svelte-runtime-unsupported-dynamic-attribute",
     },
-    FailRow {
-        name: "autofocus_attr",
-        source: "<script>let c = $state(0);</script>\n<input autofocus />\n<button onclick={() => c++}>{c}</button>\n",
-        block: "5a",
-        code: "svelte-runtime-unsupported-dynamic-attribute",
-    },
+    // (`autofocus` is a NON-STATIC-PROPERTY supported — `$.autofocus(input,
+    // true)` for a static valueless form, `$.autofocus(input, $.get(v))` for a dynamic
+    // one — so it is no longer fail-closed. Its support is asserted by the positive
+    // boundary cases.)
     FailRow {
         name: "dir_attr",
         source: "<script>let c = $state(0);</script>\n<div dir=\"ltr\"><button onclick={() => c++}>{c}</button></div>\n",
@@ -1482,8 +1471,13 @@ fn generated_static_attr_shapes_land_on_boundary() {
         ),
         ("input_type", "<input type=\"text\" />", Expected::Supported),
         ("input_disabled", "<input disabled />", Expected::Supported),
-        // ── forbidden static attrs on an ALLOWLISTED host (fail closed, 5a) ──────
-        ("autofocus", "<input autofocus />", Expected::FailClosed),
+        // A static valueless `autofocus` is a NON-STATIC-PROPERTY — it
+        // emits the init-only `$.autofocus(input, true)`, NOT a baked skeleton attr.
+        ("autofocus", "<input autofocus />", Expected::Supported),
+        // ── forbidden static attrs on an ALLOWLISTED host (fail closed) ──────────
+        // `dir` (the reflected-attr quirk) and a STATIC `style` (no `style:` directive)
+        // stay refused; `muted` on a NON-media element is refused (not tested here —
+        // the hosts are non-media).
         ("dir", "<div dir=\"ltr\">d</div>", Expected::FailClosed),
         (
             "style",
@@ -1735,8 +1729,10 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // autoclose (×2, 5x).
     assert_eq!(
         FAIL_MATRIX.len(),
-        120,
-        "the fail matrix must enumerate all 120 documented unsupported-feature \
-         fail-closed sub-shapes"
+        115,
+        "the fail matrix must enumerate all 115 documented unsupported-feature \
+         fail-closed sub-shapes (the dynamic-attribute / class / style surface removed the dynamic-attr / mixed-attr /
+         class:/style: / autofocus / <video muted> rows now SUPPORTED, and added the
+         form-control `value` row refused to 5c)"
     );
 }

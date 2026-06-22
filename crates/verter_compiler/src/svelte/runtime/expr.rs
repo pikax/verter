@@ -1497,22 +1497,17 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
     }
 
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        // A mutating method call on a binding (`items.push(…)`) is a DEEP MUTATION
-        // reference fact (neutral — not a runes `$state` signal determinant).
-        let callee_obj = match &it.callee {
-            Expression::StaticMemberExpression(m) => Some(&m.object),
-            Expression::ComputedMemberExpression(m) => Some(&m.object),
-            _ => None,
-        };
-        if let Some(Expression::Identifier(obj)) = callee_obj {
-            let name = obj.name.as_str();
-            if !self.is_local(name) {
-                self.refs.push(ExprReference {
-                    name: name.to_string(),
-                    kind: ExprRefKind::DeepMutate,
-                });
-            }
-        }
+        // A method call on a binding (`obj.method(…)`) is a READ of the receiver, NOT a
+        // write — even a genuinely-mutating method (`arr.push(…)`) is, statically, a read
+        // (the mutation happens at runtime through the value/proxy). Official `svelte`
+        // never classifies a `CallExpression` as a write: a `$props()` prop method-call
+        // (`{p.toString()}`) compiles to a plain `$$props.p.toString()` READ, and a
+        // `$state` lowering is driven by `should_proxy(init)` + reassignment ALONE (a
+        // method call is irrelevant — see `classify_state_lowering`). So a method call
+        // contributes only its receiver's READ reference (collected by the member-walk),
+        // never a `DeepMutate` write fact; an OVER-classification here was wrongly
+        // refusing a prop method-call in a template value as a "written prop". The
+        // receiver's read + any computed-key / argument reads are collected by descending.
         walk::walk_call_expression(self, it);
     }
 

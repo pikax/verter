@@ -71,7 +71,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function template_literal_handler($$anchor) { let msg = $.state(\"a\"); let n = 0; var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(msg))); $.delegated('click', button, () => { $.set(msg, `v${n}`); }); $.append($$anchor, button); } $.delegate(['click']);",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function template_literal_handler($$anchor) {let msg = $.state(\"a\"); let n = 0; var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(msg))); $.delegated('click', button, () => {$.set(msg, `v${n}`);}); $.append($$anchor, button);} $.delegate(['click']);",
   "css": {
     "present": false,
     "hash": null,

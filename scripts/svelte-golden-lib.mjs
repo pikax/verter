@@ -478,9 +478,19 @@ export function normalizeModuleForComparison(code) {
         continue;
       }
     }
-    // Whitespace OUTSIDE a literal — collapse a run to a single space.
+    // Whitespace OUTSIDE a literal — collapse a run to a single space, but
+    // SUPPRESS a space that HUGS a bracket: right after an opener (`(` `[` `{`) or
+    // right before a closer (`)` `]` `}`). This makes the official multi-line call
+    // wrap (`$.template_effect(\n\t($0) => …\n)` → `$.template_effect( ($0) => … )`)
+    // byte-comparable with a single-line form. Symmetric and cosmetic-only — a token
+    // difference INSIDE the brackets still fails; literals are copied verbatim above.
     if (/\s/.test(ch)) {
       while (i < n && /\s/.test(masked[i])) i += 1;
+      const prevCh = out.length > 0 ? out[out.length - 1] : "";
+      const nextCh = i < n ? masked[i] : "";
+      const prevIsOpener = prevCh === "(" || prevCh === "[" || prevCh === "{";
+      const nextIsCloser = nextCh === ")" || nextCh === "]" || nextCh === "}";
+      if (prevIsOpener || nextIsCloser) continue;
       out += " ";
       continue;
     }

@@ -57,7 +57,7 @@
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/>`); export default function bind_value_plain_ident($$anchor) { let draft = $.state(\"\"); var input = root(); $.remove_input_defaults(input); $.bind_value(input, () => $.get(draft), ($$value) => $.set(draft, $$value)); $.append($$anchor, input); }",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/>`); export default function bind_value_plain_ident($$anchor) {let draft = $.state(\"\"); var input = root(); $.remove_input_defaults(input); $.bind_value(input, () => $.get(draft), ($$value) => $.set(draft, $$value)); $.append($$anchor, input);}",
   "css": {
     "present": false,
     "hash": null,

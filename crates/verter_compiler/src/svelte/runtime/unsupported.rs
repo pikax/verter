@@ -252,6 +252,28 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span (the auto-closed `<p>`'s open tag).
         span: Span,
     },
+    /// A constant-foldable mixed-attribute interpolation whose Svelte `Evaluation`
+    /// would call a native JS operation that THROWS at compile time (the official
+    /// compiler compile-FAILS the component) — OR whose throw status Verter cannot
+    /// prove non-throwing. The const-fold tri-state contract's `Refuse` arm: a
+    /// DETERMINISTIC compile refusal, NEVER emitted as live code (emitting the live
+    /// expression would convert the official compiler's compile-failure into a
+    /// runtime crash). This is the EAGER `Evaluation` semantics — a throw in a
+    /// non-selected logical operand / conditional branch (`false && (1n / 0n)`)
+    /// still refuses, because official evaluates both before selecting (5a). Cases:
+    /// mixing BigInt with a Number in arithmetic / bitwise (`2 + 1n`), BigInt
+    /// division / remainder by `0n`, BigInt `>>>`, unary `+` on BigInt, a negative
+    /// BigInt exponent, `in` / `instanceof` with a known primitive RHS, and a
+    /// foldable global throwing under known args (`Math.clz32(1n)`,
+    /// `String.fromCodePoint(-1 | 1.5 | 0x110000)`).
+    ConstFoldThrow {
+        /// A short, deterministic reason label (NOT V8's error text) — the throwing
+        /// construct (`bigint mixed with number in arithmetic`, `bigint division by
+        /// zero`, …).
+        reason: &'static str,
+        /// The source span of the interpolation expression.
+        span: Span,
+    },
     /// SSR (`generate: 'server'`) — the server backend is not yet implemented
     /// (owning vertical 8).
     ServerGenerate {
@@ -297,6 +319,9 @@ impl UnsupportedSvelteRuntimeSurface {
             // The `<p>` implicit-autoclose DOM re-parenting is the close-tag-structure
             // completion vertical (5x).
             Self::ParagraphAutoclose { .. } => "5x",
+            // A const-fold compile-time throw is a 5a mixed-attribute surface (the
+            // const-fold tri-state `Refuse` arm).
+            Self::ConstFoldThrow { .. } => "5a",
             Self::ServerGenerate { .. } => "8",
         }
     }
@@ -330,6 +355,7 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::InstanceScriptItem { .. } => "svelte-runtime-unsupported-instance-script-item",
             Self::MagicIdentifier { .. } => "svelte-runtime-unsupported-magic-identifier",
             Self::ParagraphAutoclose { .. } => "svelte-runtime-unsupported-paragraph-autoclose",
+            Self::ConstFoldThrow { .. } => "svelte-runtime-unsupported-const-fold-throw",
             Self::ServerGenerate { .. } => "svelte-runtime-unsupported-server-generate",
         }
     }
@@ -416,6 +442,11 @@ impl UnsupportedSvelteRuntimeSurface {
                  official compiler auto-closes the `<p>` and re-parents the block as a \
                  sibling; modeling that DOM re-parenting is outside the §1.2 core)"
             ),
+            Self::ConstFoldThrow { reason, .. } => format!(
+                "a constant-foldable interpolation whose evaluation throws at compile \
+                 time ({reason}); the official compiler compile-fails the component, so \
+                 Verter refuses rather than emitting live code that would crash at runtime"
+            ),
             Self::ServerGenerate { .. } => {
                 "server-side rendering (`generate: 'server'`)".to_string()
             }
@@ -455,6 +486,7 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::InstanceScriptItem { span, .. }
             | Self::MagicIdentifier { span, .. }
             | Self::ParagraphAutoclose { span, .. }
+            | Self::ConstFoldThrow { span, .. }
             | Self::ServerGenerate { span } => *span,
         }
     }
