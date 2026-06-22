@@ -821,11 +821,18 @@ fn parse_lsp_diagnostic(
 /// Parse one LSP `relatedInformation` entry into a [`DiagnosticRelatedInfo`].
 ///
 /// The entry shape is `{ location: { uri, range: { start, end } }, message }`.
-/// The range's byte offsets are computed with `primary_content` ONLY when the
-/// related `location.uri` resolves to the SAME file that content belongs to
-/// (`primary_file`); otherwise the parser has no content for the related file and
-/// emits the packed `(line<<16)|col` fallback. Returns `None` (skip this entry,
-/// never fabricate) when the message, location, uri, or range fields are missing.
+/// [`DiagnosticRelatedInfo::start`]/[`DiagnosticRelatedInfo::end`] are REAL byte
+/// offsets in `path` — never a packed `(line<<16)|character` position. A real
+/// offset is available ONLY when the related `location.uri` resolves to the SAME
+/// canonical file the parser holds content for (`primary_file` / `primary_content`);
+/// both sides are canonicalized before the equality (`primary_file` upstream,
+/// `path` via [`uri_to_file_path`]) so a same file spelled differently still
+/// matches.
+///
+/// Returns `None` (skip this entry, never fabricate, never store a packed value)
+/// when the message/location/uri/range fields are missing, OR when the related span
+/// is cross-file (no content for it) — fail-closed: a dropped secondary link beats
+/// a bogus one.
 fn parse_lsp_related_info(
     ri: &serde_json::Value,
     primary_content: Option<&str>,
@@ -842,19 +849,14 @@ fn parse_lsp_related_info(
     let end_line = end.get("line")?.as_u64()? as u32;
     let end_char = end.get("character")?.as_u64()? as u32;
 
-    // Use real byte offsets only when the related span is in the same file the
-    // parser holds content for; otherwise the packed fallback (merge fails closed).
+    // A real byte offset exists only for a same-file related span (the parser holds
+    // that file's content). A cross-file span has no content here, so there is no
+    // real offset — DROP it rather than store a packed position the merge would
+    // mis-read as a byte offset. Both paths are already canonicalized.
     let same_file = primary_file == Some(path.as_str());
-    let (start_byte, end_byte) = match (same_file, primary_content) {
-        (true, Some(c)) => (
-            position_to_offset(c, start_line, start_char),
-            position_to_offset(c, end_line, end_char),
-        ),
-        _ => (
-            pack_position(start_line, start_char),
-            pack_position(end_line, end_char),
-        ),
-    };
+    let content = primary_content.filter(|_| same_file)?;
+    let start_byte = position_to_offset(content, start_line, start_char);
+    let end_byte = position_to_offset(content, end_line, end_char);
 
     Some(DiagnosticRelatedInfo {
         path,

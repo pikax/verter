@@ -1369,6 +1369,233 @@ fn merge_diagnostics_primary_survives_all_unmappable_related() {
     );
 }
 
+/// A related span in a real `.ts` file (NOT a carrier IDE file) carries REAL byte
+/// offsets into that file's own source (the parser only emits a related entry when
+/// it has a real offset). The merge reads that source through the external-source
+/// reader and converts the offsets to a real `Range` in the `.ts` file, emitting
+/// its own file URI — mirroring how `merge_definitions` resolves an external
+/// definition target.
+#[test]
+fn merge_diagnostics_maps_cross_file_related_through_external_source() {
+    use crate::type_provider::protocol::DiagnosticRelatedInfo;
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let current_tsx_path = "App.vue.tsx";
+    // A real `.ts` related target with its own content; byte offsets 6..9 index
+    // "dup" on line 1 (after "const " on line 0). The reader hands back that exact
+    // source for the offset→line:col conversion.
+    let ts_source = "type Other = 1;\nconst dup = 2;\n";
+    let (ts_path, ts_reader) = ext_source(".ts", ts_source);
+    // "dup" on line 1 begins at byte 16+6 = 22, spans 3 → 22..25.
+    let dup_start = ts_source.find("dup").unwrap() as u32;
+
+    let types = vec![TypeDiagnostic {
+        message: "Duplicate identifier 'dup'.".to_string(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 6,
+        end: 9,
+        code: Some("2300".to_string()),
+        tags: Vec::new(),
+        related_information: vec![DiagnosticRelatedInfo {
+            path: ts_path.clone(),
+            start: dup_start,
+            end: dup_start + 3,
+            message: "'dup' was also declared here.".to_string(),
+        }],
+    }];
+
+    let result = merge_diagnostics(
+        vec![],
+        types,
+        current_tsx_path,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &ts_reader,
+    );
+
+    assert_eq!(
+        result.len(),
+        1,
+        "the primary diagnostic survives: {result:?}"
+    );
+    let related = result[0]
+        .related_information
+        .as_ref()
+        .expect("the cross-file related span resolves through the external source reader");
+    assert_eq!(
+        related.len(),
+        1,
+        "exactly the cross-file related span survives: {related:?}"
+    );
+    let entry = &related[0];
+    assert!(
+        entry.location.uri.as_str().ends_with("external.ts"),
+        "the related location keeps the real `.ts` file URI, got: {}",
+        entry.location.uri.as_str()
+    );
+    assert_eq!(
+        entry.location.range.start,
+        Position {
+            line: 1,
+            character: 6
+        },
+        "the real byte offset converts to the `.ts` source line:col (line 1 col 6), got: {:?}",
+        entry.location.range
+    );
+}
+
+/// P2-B: a related span in a FOREIGN carrier `.tsx` (another component's generated
+/// file, NOT the current request's TSX) must NOT be mapped through the current
+/// request's mapper. With no external resolver it DROPS fail-closed (the current
+/// mapper describes a different file; reusing it would land on the wrong token).
+///
+/// Discriminating: if `resolve_related_location` classified "any carrier IDE
+/// `.tsx`" as the current file and reused the current mapper, the foreign span at
+/// TSX offset 6..9 would map to carrier line 5 (the current file's mapping) and
+/// publish a bogus link. The correct behavior drops it.
+#[test]
+fn merge_diagnostics_foreign_carrier_related_drops_without_external_resolver() {
+    use crate::type_provider::protocol::DiagnosticRelatedInfo;
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let current_tsx_path = "App.vue.tsx";
+    let types = vec![TypeDiagnostic {
+        message: "Duplicate identifier 'msg'.".to_string(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 6,
+        end: 9,
+        code: Some("2300".to_string()),
+        tags: Vec::new(),
+        // The related span lives in a DIFFERENT carrier's generated TSX.
+        related_information: vec![DiagnosticRelatedInfo {
+            path: "Other.vue.tsx".to_string(),
+            start: 6,
+            end: 9,
+            message: "'msg' was also declared here.".to_string(),
+        }],
+    }];
+
+    let result = merge_diagnostics(
+        vec![],
+        types,
+        current_tsx_path,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None, // no external resolver → foreign carrier cannot map
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
+
+    assert_eq!(
+        result.len(),
+        1,
+        "the primary diagnostic survives: {result:?}"
+    );
+    assert!(
+        result[0].related_information.is_none(),
+        "a foreign-carrier related span with no external resolver drops fail-closed \
+         (never mapped through the current file's mapper), got: {:?}",
+        result[0].related_information
+    );
+}
+
+/// P2-B positive: with an external resolver supplying the FOREIGN carrier's own
+/// context, the foreign related span maps through THAT context's sourcemap (not the
+/// current request's) and publishes the foreign carrier URI.
+#[test]
+fn merge_diagnostics_foreign_carrier_related_maps_through_external_context() {
+    use crate::type_provider::protocol::DiagnosticRelatedInfo;
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+
+    // A foreign carrier whose own sourcemap maps TSX offset 6..9 to carrier line 7
+    // (NOT line 5 like the current request's mapper).
+    let foreign_carrier =
+        "<template>\n  <span/>\n</template>\n\n<script setup>\n\n\nconst far = 1;\n</script>";
+    let foreign_tsx = "const far = 1;\n";
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Other.vue", foreign_carrier);
+    builder.add_token(0, 0, 7, 0, Some(source_id), None);
+    builder.add_token(0, 6, 7, 6, Some(source_id), None);
+    let foreign_json = builder.into_sourcemap().to_json_string();
+    let foreign_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&foreign_json).unwrap());
+    let foreign_carrier_li = LineIndex::new_utf16(foreign_carrier);
+    let foreign_tsx_li = LineIndex::new_utf16(foreign_tsx);
+
+    let resolver = |p: &str| -> Option<ExternalIdeContext> {
+        (p == "/other.vue.tsx").then(|| ExternalIdeContext {
+            tsx_line_index: foreign_tsx_li.clone(),
+            mapper: foreign_mapper.clone(),
+            carrier_line_index: foreign_carrier_li.clone(),
+            carrier_negotiated_line_index: None,
+        })
+    };
+    let ext: Option<ExternalIdeResolver> = Some(&resolver);
+
+    let types = vec![TypeDiagnostic {
+        message: "Duplicate identifier 'far'.".to_string(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 6,
+        end: 9,
+        code: Some("2300".to_string()),
+        tags: Vec::new(),
+        related_information: vec![DiagnosticRelatedInfo {
+            path: "/other.vue.tsx".to_string(),
+            start: 6,
+            end: 9,
+            message: "'far' was also declared here.".to_string(),
+        }],
+    }];
+
+    let result = merge_diagnostics(
+        vec![],
+        types,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        ext,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
+
+    assert_eq!(
+        result.len(),
+        1,
+        "the primary diagnostic survives: {result:?}"
+    );
+    let related = result[0]
+        .related_information
+        .as_ref()
+        .expect("the foreign-carrier related span maps through its own context");
+    assert_eq!(
+        related.len(),
+        1,
+        "the foreign related span survives: {related:?}"
+    );
+    let entry = &related[0];
+    assert_eq!(
+        entry.location.uri.as_str(),
+        "file:///other.vue",
+        "the foreign related span maps to the FOREIGN .vue URI, got: {}",
+        entry.location.uri.as_str()
+    );
+    assert_eq!(
+        entry.location.range.start,
+        Position { line: 7, character: 6 },
+        "the foreign related span maps through the FOREIGN context (line 7), not the current (line 5): {:?}",
+        entry.location.range
+    );
+}
+
 // ── Definition merge tests ─────────────────────────────────────
 
 fn test_doc_uri() -> Uri {

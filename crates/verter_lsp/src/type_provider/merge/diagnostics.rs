@@ -110,10 +110,12 @@ pub fn merge_diagnostics(
 ///
 /// Each related span's `(path, start, end)` routes through the SAME 3-way
 /// classification [`super::merge_definitions`] uses for a navigation target:
-/// - the CURRENT generated TSX (or any carrier IDE `.tsx`/`.jsx`) maps through
-///   that file's own CodeTransform sourcemap via [`resolve_carrier_ide_range_strict`]
-///   (the in-context mapper for the current file, the external resolver for a
-///   foreign component) and emits the carrier-source URI;
+/// - a carrier IDE `.tsx`/`.jsx` maps through that file's own CodeTransform
+///   sourcemap via [`resolve_carrier_ide_range_strict`], which distinguishes the
+///   CURRENT request's TSX (`path` canonically equal to `current_tsx_path` → the
+///   in-context mapper) from a FOREIGN carrier (another component's generated file
+///   → the external resolver, or DROP when none) — never the current mapper for a
+///   foreign file — and emits the carrier-source URI;
 /// - any other (real `.ts`/etc.) file reads its own source through the VFS via
 ///   [`resolve_external_target_range`] and emits a real range + its file URI.
 ///
@@ -202,10 +204,11 @@ fn resolve_related_location(
     }
 
     // Every other target: when carrier-suffix normalization is a no-op the path IS
-    // the file the byte offsets index (`.ts`/`.d.ts`/`.js`/…). Read that source
-    // through the VFS and convert the offsets to a real range. Fail closed when the
-    // source can't be read (the packed-position fallback the parser emits for a
-    // cross-file related span past EOF lands here and drops, never a line-0 link).
+    // the file the byte offsets index (`.ts`/`.d.ts`/`.js`/…). The parser only emits
+    // a related entry with a REAL byte offset (a cross-file span with no content is
+    // dropped at parse time — never a packed position), so read that source through
+    // the VFS and convert the real offsets to a range. Fail closed when the source
+    // can't be read (drop, never a line-0 link).
     let normalized = normalize_carrier_path(&ri.path, carrier_source_exists);
     if normalized == ri.path {
         let uri = path_to_uri(normalized)?;

@@ -1680,6 +1680,97 @@ fn parse_lsp_diagnostic_without_related_information_is_empty() {
     );
 }
 
+/// A TSGO diagnostic whose `relatedInformation` points at a DIFFERENT file than
+/// the one the parser holds content for must DROP that span fail-closed — never
+/// store a packed `(line<<16)|character` value in the byte-offset fields.
+///
+/// Pre-fix the non-same-file branch stored `pack_position(99, 4)` in `start`/`end`,
+/// so the related list was non-empty with a packed value; this fails against that
+/// code and passes once cross-file-without-content drops.
+#[test]
+fn parse_lsp_diagnostic_drops_cross_file_related_without_content() {
+    let content = "const x = 1;\n";
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 6 },
+            "end": { "line": 0, "character": 7 }
+        },
+        "severity": 1,
+        "code": 2322,
+        "message": "Type error referencing another file.",
+        "relatedInformation": [
+            {
+                "location": {
+                    "uri": "file:///proj/b.ts",
+                    "range": {
+                        "start": { "line": 99, "character": 4 },
+                        "end": { "line": 99, "character": 8 }
+                    }
+                },
+                "message": "the expected type comes from here."
+            }
+        ]
+    });
+    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/a.ts")).unwrap();
+    assert!(
+        diag.related_information.is_empty(),
+        "a cross-file related span with no content for the related file must be \
+         dropped, not stored as a packed position, got: {:?}",
+        diag.related_information
+    );
+}
+
+/// ANTI-BOGUS-LINK: a related span at line 99 col 4 into a SMALL related file must
+/// NOT survive as a packed value. Pre-fix `pack_position(99, 4) = 6488068` was
+/// stored in `start`/`end`; the merge then treats it as a BYTE OFFSET — for any
+/// target ≥ 6488068 bytes the packed value lands IN range → a WRONG link. The fix
+/// makes it impossible: no `DiagnosticRelatedInfo` ever carries a packed position.
+#[test]
+fn parse_lsp_related_never_stores_packed_position_anti_bogus_link() {
+    let content = "let a = 1;\n";
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 4 },
+            "end": { "line": 0, "character": 5 }
+        },
+        "severity": 1,
+        "code": 2322,
+        "message": "primary",
+        "relatedInformation": [
+            {
+                "location": {
+                    "uri": "file:///proj/b.ts",
+                    "range": {
+                        "start": { "line": 99, "character": 4 },
+                        "end": { "line": 99, "character": 8 }
+                    }
+                },
+                "message": "cross-file related (no content)."
+            }
+        ]
+    });
+    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/a.ts")).unwrap();
+    let packed = (99u32 << 16) | (4u32 & 0xFFFF);
+    assert_eq!(
+        packed, 6_488_068,
+        "sanity: packed encoding of (line 99, char 4)"
+    );
+    for ri in &diag.related_information {
+        assert_ne!(
+            ri.start, packed,
+            "a related entry must never carry a packed position in its byte-offset start"
+        );
+        assert!(
+            (ri.start as usize) <= content.len() && (ri.end as usize) <= content.len(),
+            "a surviving related entry's offsets must be real offsets in the file the \
+             parser had content for (len {}), got start={} end={}",
+            content.len(),
+            ri.start,
+            ri.end,
+        );
+    }
+}
+
 /// @ai-generated — parse_signature_help parses a SignatureHelp response
 #[test]
 fn test_parse_signature_help_fn() {

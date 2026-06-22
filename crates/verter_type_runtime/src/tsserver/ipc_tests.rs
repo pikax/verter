@@ -244,6 +244,107 @@ fn parse_tsserver_diagnostic_without_related_information_is_empty() {
 }
 
 #[test]
+fn parse_tsserver_diagnostic_drops_cross_file_related_without_content() {
+    // The diagnostic is in `/proj/a.ts` (the file the parser holds content for),
+    // but its `relatedInformation` span points at a DIFFERENT file (`/proj/b.ts`)
+    // whose content the parser does NOT have. There is no real byte offset for
+    // that span, so it MUST be dropped fail-closed — never stored as a packed
+    // `(line<<16)|col` value in the byte-offset `start`/`end` fields.
+    //
+    // Pre-fix the non-same-file branch stored `(99<<16)|4 = 6488068` in
+    // `start`/`end`, so `related_information` was NON-empty with a packed value —
+    // this assertion fails against that code and passes once cross-file-without-
+    // content drops.
+    let content = "const x = 1;\n";
+    let diag = serde_json::json!({
+        "start": { "line": 1, "offset": 7 },
+        "end": { "line": 1, "offset": 8 },
+        "text": "Type error referencing another file.",
+        "code": 2322,
+        "category": "error",
+        "relatedInformation": [
+            {
+                "message": "the expected type comes from here.",
+                "category": "message",
+                "code": 2322,
+                "span": {
+                    "start": { "line": 100, "offset": 5 },
+                    "end": { "line": 100, "offset": 9 },
+                    "file": "/proj/b.ts"
+                }
+            }
+        ]
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/a.ts")).unwrap();
+    assert!(
+        parsed.related_information.is_empty(),
+        "a cross-file related span with no content for the related file must be \
+         dropped, not stored as a packed position, got: {:?}",
+        parsed.related_information
+    );
+}
+
+#[test]
+fn parse_tsserver_related_never_stores_packed_position_anti_bogus_link() {
+    // ANTI-BOGUS-LINK: a related span at line 100 col 5 into a SMALL related file
+    // (`/proj/b.ts`) must NOT survive as a packed value. Pre-fix it stored
+    // `(99<<16)|4 = 6488068` in `start`/`end`; the merge then treats that as a
+    // BYTE OFFSET into `/proj/b.ts` — for any target whose length exceeds 6488068
+    // bytes the packed value lands IN range → a WRONG "see declaration" link.
+    //
+    // The fix makes it IMPOSSIBLE: no `DiagnosticRelatedInfo` ever carries a
+    // packed position. We assert that directly — every surviving related entry's
+    // byte offsets are real offsets within the file the parser actually had
+    // content for; a cross-file span with no content yields NO entry at all.
+    //
+    // Pre-fix proof: the parser emitted one entry with `start == 6488068`, which
+    // is the packed encoding of (line 100, col 5) — this loop's assertion fires.
+    let content = "let a = 1;\n";
+    let diag = serde_json::json!({
+        "start": { "line": 1, "offset": 5 },
+        "end": { "line": 1, "offset": 6 },
+        "text": "primary",
+        "code": 2322,
+        "category": "error",
+        "relatedInformation": [
+            {
+                "message": "cross-file related (no content).",
+                "category": "message",
+                "code": 2322,
+                "span": {
+                    "start": { "line": 100, "offset": 5 },
+                    "end": { "line": 100, "offset": 9 },
+                    "file": "/proj/b.ts"
+                }
+            }
+        ]
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/a.ts")).unwrap();
+    // The exact packed value the pre-fix code would have stored for line 100 col 5.
+    let packed = ((100u32 - 1) << 16) | ((5u32 - 1) & 0xFFFF);
+    assert_eq!(
+        packed, 6_488_068,
+        "sanity: packed encoding of (line 100, col 5)"
+    );
+    for ri in &parsed.related_information {
+        assert_ne!(
+            ri.start, packed,
+            "a related entry must never carry a packed position in its byte-offset start"
+        );
+        assert!(
+            (ri.start as usize) <= content.len() && (ri.end as usize) <= content.len(),
+            "a surviving related entry's offsets must be real offsets in the file the \
+             parser had content for (len {}), got start={} end={}",
+            content.len(),
+            ri.start,
+            ri.end,
+        );
+    }
+}
+
+#[test]
 fn test_parse_tsserver_completion() {
     let item = serde_json::json!({
         "name": "myFunction",
