@@ -28,9 +28,11 @@ jobs:
         # three host OSes. The run step uses `shell: bash` so the same script
         # works under Git-bash on the Windows runner.
         os: [ubuntu-latest, macos-latest, windows-latest]
-        # v0.12.0 is not released; the realistic matrix is the current stable
-        # plus nightly.
-        neovim: [v0.11.0, nightly]
+        # Three points of coverage: v0.11.0 is the supported floor (the config
+        # layer needs `vim.lsp.config` / `vim.lsp.enable`, first available in
+        # 0.11), v0.12.3 is the current stable release, and nightly catches
+        # upstream LSP-client changes before they ship.
+        neovim: [v0.11.0, v0.12.3, nightly]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
