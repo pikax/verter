@@ -1031,14 +1031,9 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
             2 => Some(CompletionInsertTextFormat::Snippet),
             _ => None,
         });
-    let commit_characters = item
-        .get("commitCharacters")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| c.as_str().map(String::from))
-                .collect::<Vec<_>>()
-        });
+    // Strict, fail-closed, shared with the tsserver provider: a malformed or
+    // empty `commitCharacters` array yields `None` rather than `Some(vec![])`.
+    let commit_characters = parse_commit_characters(item.get("commitCharacters"));
     let filter_text = item
         .get("filterText")
         .and_then(|v| v.as_str())
@@ -1651,10 +1646,13 @@ pub(crate) fn rewrite_vue_imports_for_tsgo(content: &str, _path: &str) -> String
 /// Completion fidelity: the parser DOES read `insertTextFormat` (snippet vs
 /// plain), `commitCharacters`, `filterText`, `preselect`, and `labelDetails`, so
 /// the matching client capabilities (`snippetSupport`, `commitCharactersSupport`,
-/// `labelDetailsSupport`) ARE advertised below — a server only emits those item
-/// fields when the client claims support for them. The resolve handlers fold back
-/// `labelDetails` and `command` in addition to `detail`/`documentation`/
-/// `additionalTextEdits`, so `resolveSupport.properties` lists all five.
+/// `preselectSupport`, `labelDetailsSupport`) ARE advertised below — a server
+/// only emits those item fields when the client claims support for them
+/// (`filterText` needs no capability flag). The resolve handlers fold back the
+/// STANDARD resolve property `labelDetails` in addition to `detail`/
+/// `documentation`/`additionalTextEdits`, so `resolveSupport.properties` lists
+/// those four. `command` is NOT a standard resolve property and is NOT advertised
+/// (it is still folded opportunistically if the server returns one).
 ///
 /// Intentionally NOT advertised (no handler fulfills them — over-claim would be a
 /// silent no-op or worse): `documentSymbol`, `foldingRange`, `callHierarchy`,
@@ -1699,24 +1697,30 @@ fn build_client_capabilities() -> serde_json::Value {
                 },
                 "completionItem": {
                     // A server only attaches these item fields when the client
-                    // advertises support; the completion parser reads each one
-                    // (`insertTextFormat`/`commitCharacters`/`labelDetails`), so
-                    // claim them here. `filterText`/`preselect` need no capability
-                    // flag — a server may always send them.
+                    // advertises support; the completion parser reads each one,
+                    // so claim them here. `snippetSupport` gates `insertTextFormat`,
+                    // `commitCharactersSupport` gates `commitCharacters`,
+                    // `preselectSupport` gates `preselect`, `labelDetailsSupport`
+                    // gates `labelDetails`. `filterText` needs no capability flag —
+                    // a server may always send it.
                     "snippetSupport": true,
                     "commitCharactersSupport": true,
+                    "preselectSupport": true,
                     "labelDetailsSupport": true,
-                    // Only these properties are folded back by this provider's
-                    // resolve handlers; listing any other invites discarded work.
-                    // (`data` rides every resolve round-trip transparently per the
-                    // LSP spec — there is no `dataSupport` capability to advertise.)
+                    // Only the STANDARD resolve properties this provider folds back
+                    // are listed; listing any other invites discarded work.
+                    // `labelDetails` IS a standard resolve property; `command` is
+                    // NOT — advertising resolve-support for it would over-claim, so
+                    // it is omitted (resolve_completion still folds a `command`
+                    // opportunistically if the server happens to return one). `data`
+                    // rides every resolve round-trip transparently per the LSP spec
+                    // — there is no `dataSupport` capability to advertise.
                     "resolveSupport": {
                         "properties": [
                             "documentation",
                             "detail",
                             "additionalTextEdits",
-                            "labelDetails",
-                            "command"
+                            "labelDetails"
                         ]
                     }
                 }
@@ -2883,8 +2887,12 @@ impl TypeProvider for TsgoTypeProvider {
                 .filter_map(|edit| parse_additional_text_edit(edit, content_snapshot.as_deref()))
                 .collect();
 
-            // The resolve response may also carry the lazy detail/documentation,
-            // refined `labelDetails`, and a post-accept `command` — fold them all.
+            // The resolve response may also carry the lazy detail/documentation
+            // and a refined `labelDetails` (a STANDARD resolve property we
+            // advertise). A post-accept `command` is folded OPPORTUNISTICALLY: we
+            // do NOT advertise resolve-support for `command` (it is not a standard
+            // resolve property), but if the server returns one anyway, passing it
+            // through is harmless — fold them all.
             let (detail, documentation) = extract_resolve_detail_and_documentation(&result);
             let label_details = result.get("labelDetails").and_then(parse_label_details);
             let command = parse_lsp_command(result.get("command"));

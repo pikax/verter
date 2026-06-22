@@ -2276,15 +2276,10 @@ pub fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion>
         Some(true) => Some(CompletionInsertTextFormat::Snippet),
         _ => None,
     };
-    // tsserver may carry `commitCharacters` on an entry; parse if present.
-    let commit_characters = item
-        .get("commitCharacters")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| c.as_str().map(String::from))
-                .collect::<Vec<_>>()
-        });
+    // tsserver may carry `commitCharacters` on an entry; parse if present via the
+    // SAME strict, fail-closed helper the TSGO provider uses (empty/malformed →
+    // `None`, never `Some(vec![])`).
+    let commit_characters = parse_commit_characters(item.get("commitCharacters"));
     let filter_text = item
         .get("filterText")
         .and_then(|v| v.as_str())
@@ -2783,32 +2778,17 @@ pub fn completion_entry_details_to_resolve_result(
     let resolved_detail = (!display.is_empty()).then_some(display);
     let resolved_documentation = tsserver_completion_documentation(detail);
 
-    // An auto-import entry's details carry the originating module: newer tsserver
-    // returns `sourceDisplay` (a display-parts array), older returns a plain
-    // `source` string. Surface it as the label's right-aligned `description` so
-    // the resolved item shows where the symbol comes from. tsserver completion
-    // details have no `command` — always `None` (fail-closed, never fabricated).
-    let import_source = {
-        let from_display = tsserver_display_parts_text(detail.get("sourceDisplay"));
-        if !from_display.is_empty() {
-            Some(from_display)
-        } else {
-            detail
-                .get("source")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-        }
-    };
-    let label_details = import_source.map(|description| CompletionLabelDetails {
-        detail: None,
-        description: Some(description),
-    });
+    // tsserver's `completionEntryDetails` response carries NO `labelDetails` wire
+    // field — `sourceDisplay`/`source` are the originating MODULE specifier, a
+    // DIFFERENT LSP slot than `CompletionItemLabelDetails.description`. Reusing
+    // them here would fabricate a label-details signal the wire never sent, so the
+    // carrier stays `None` (fail-closed — parse only what the wire genuinely
+    // carries as that field). tsserver completion details also carry no `command`
+    // — always `None`.
 
     if additional_text_edits.is_empty()
         && resolved_detail.is_none()
         && resolved_documentation.is_none()
-        && label_details.is_none()
     {
         return None;
     }
@@ -2817,7 +2797,7 @@ pub fn completion_entry_details_to_resolve_result(
         additional_text_edits,
         detail: resolved_detail,
         documentation: resolved_documentation,
-        label_details,
+        label_details: None,
         command: None,
     })
 }

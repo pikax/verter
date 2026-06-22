@@ -128,6 +128,44 @@ pub struct CompletionLabelDetails {
     pub description: Option<String>,
 }
 
+/// Parse an LSP `CompletionItem.commitCharacters`-shaped JSON value into the
+/// neutral [`Completion::commit_characters`] carrier — the SINGLE shared parse
+/// used by BOTH provider families (TSGO and tsserver) so the fail-closed
+/// semantics cannot drift between them.
+///
+/// Strict and fail-closed:
+/// * the value is absent or not an array → `None` (no signal);
+/// * the array exists but ANY element is not a string → `None` (a malformed
+///   `commitCharacters` carries no trustworthy signal, so it is dropped whole
+///   rather than silently keeping only the well-formed elements);
+/// * the array is empty (or yields an empty vec) → `None` (an explicit empty
+///   set is "no commit characters", which is the same observable signal as the
+///   field being absent — never `Some(vec![])`).
+///
+/// Otherwise returns `Some(chars)` with the strings in wire order. Allocates the
+/// result vector only for a genuine non-empty, all-string array.
+pub fn parse_commit_characters(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    let arr = value?.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut chars = Vec::with_capacity(arr.len());
+    for element in arr {
+        // Any non-string element makes the whole array untrustworthy: bail to
+        // `None` rather than dropping the malformed element and keeping the rest.
+        let s = element.as_str()?;
+        chars.push(s.to_string());
+    }
+    // Defensive: a non-empty array can only yield an empty vec via the
+    // early-return above, but normalize the empty result to `None` regardless so
+    // the carrier never surfaces `Some(vec![])`.
+    if chars.is_empty() {
+        None
+    } else {
+        Some(chars)
+    }
+}
+
 /// Provider-pure lazy-resolve key carried on a [`Completion`].
 ///
 /// A type provider attaches the variant it can later re-issue a resolve with.
@@ -550,5 +588,54 @@ mod tests {
         // Round-trips back to the same value.
         let back: CompletionResolveData = serde_json::from_value(json).unwrap();
         assert_eq!(back, local);
+    }
+
+    /// The shared `parse_commit_characters` helper is strict and fail-closed for
+    /// BOTH provider families. Discriminating against the pre-fix per-provider
+    /// `filter_map(...).collect()`: that yielded `Some(vec![])` on an empty array
+    /// and silently dropped non-string elements (returning the survivors); this
+    /// helper returns `None` for every no-trustworthy-signal case.
+    #[test]
+    fn parse_commit_characters_is_strict_and_fail_closed() {
+        // A genuine non-empty all-string array → the strings in wire order.
+        let ok = serde_json::json!([".", ";", ","]);
+        assert_eq!(
+            parse_commit_characters(Some(&ok)),
+            Some(vec![".".to_string(), ";".to_string(), ",".to_string()]),
+            "a non-empty all-string array parses to the strings in order"
+        );
+
+        // Absent → None.
+        assert_eq!(
+            parse_commit_characters(None),
+            None,
+            "absent commitCharacters carries no signal"
+        );
+
+        // Present but not an array → None (fail-closed, not a panic).
+        let not_array = serde_json::json!("oops");
+        assert_eq!(
+            parse_commit_characters(Some(&not_array)),
+            None,
+            "a non-array commitCharacters is malformed → None"
+        );
+
+        // Empty array → None (NOT Some(vec![])). This is the core regression: the
+        // pre-fix code returned Some(empty) here.
+        let empty = serde_json::json!([]);
+        assert_eq!(
+            parse_commit_characters(Some(&empty)),
+            None,
+            "an empty array is 'no commit characters' → None, never Some(vec![])"
+        );
+
+        // Any non-string element makes the whole array untrustworthy → None. The
+        // pre-fix filter_map would have silently kept ["."] and dropped the 42.
+        let malformed = serde_json::json!([".", 42, ";"]);
+        assert_eq!(
+            parse_commit_characters(Some(&malformed)),
+            None,
+            "a non-string element drops the WHOLE array → None (no partial signal)"
+        );
     }
 }

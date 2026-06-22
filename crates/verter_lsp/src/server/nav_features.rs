@@ -28,7 +28,7 @@ use crate::type_provider::protocol::CompletionResolveData;
 
 use super::handler_guard::HandlerGuard;
 use super::nav_features_completion_resolve::{
-    completion_resolve_error, resolve_provider_auto_import_edits,
+    completion_resolve_error, merge_resolved_label_details, resolve_provider_auto_import_edits,
 };
 use super::nav_features_hover_provenance::enrich_hover_with_provenance;
 use super::server_utils::*;
@@ -856,11 +856,16 @@ pub(super) async fn handle_completion_resolve(
                             // the list-time value untouched. The
                             // CompletionResolveResult contract carries these, so
                             // dropping them would make the contract dishonest.
+                            //
+                            // MERGE sub-field by sub-field rather than overwriting
+                            // the whole `CompletionItemLabelDetails`: a resolve may
+                            // refine ONE sub-field (e.g. the import `description`)
+                            // while the LIST already carried the other (the inline
+                            // signature `detail`). A whole-struct overwrite would
+                            // drop the list-time sub-field the resolve didn't re-send.
                             if let Some(ld) = resolve_result.label_details.clone() {
-                                item.label_details = Some(CompletionItemLabelDetails {
-                                    detail: ld.detail,
-                                    description: ld.description,
-                                });
+                                item.label_details =
+                                    Some(merge_resolved_label_details(item.label_details, ld));
                             }
                             if let Some(cmd) = resolve_result.command.clone() {
                                 item.command = Some(Command {

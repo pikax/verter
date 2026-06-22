@@ -305,12 +305,12 @@ fn client_capabilities_advertise_diagnostic_tag_support() {
 ///
 /// tgo consumes the resolve round-trip at two sites — `get_completion_details`
 /// folds back `detail` + `documentation`; `resolve_completion` folds back
-/// `additionalTextEdits` (the auto-import edits) plus the refined `labelDetails`
-/// and a post-accept `command` when present. Per the LSP spec, a server only
-/// computes a resolve property lazily when the client lists it in
-/// `resolveSupport.properties`; with empty capabilities tgo silently drops
-/// `additionalTextEdits`, so completion-driven auto-import never applies its
-/// import edit.
+/// `additionalTextEdits` (the auto-import edits) plus the refined `labelDetails`.
+/// Per the LSP spec, a server only computes a resolve property lazily when the
+/// client lists it in `resolveSupport.properties`; with empty capabilities tgo
+/// silently drops `additionalTextEdits`, so completion-driven auto-import never
+/// applies its import edit. `command` is NOT a standard resolve property and is
+/// NOT advertised here (resolve_completion still folds it opportunistically).
 ///
 /// `completionItem.data` is NOT gated on any advertised capability — it is a
 /// spec-transparent passthrough the client echoes back verbatim, and there is no
@@ -337,18 +337,19 @@ fn client_capabilities_advertise_completion_item_resolve_support() {
     let props: std::collections::BTreeSet<&str> =
         properties.iter().filter_map(|p| p.as_str()).collect();
 
-    // EXACTLY the properties tgo's resolve handlers actually fold back — no more.
-    // `documentation` + `detail` from get_completion_details; `additionalTextEdits`
-    // from resolve_completion (auto-import); `labelDetails` + `command` from
-    // resolve_completion's enrichment (folded onto the item by the LSP layer).
-    // Advertising a property tgo does not consume would invite the server to
-    // compute work the client discards.
+    // EXACTLY the STANDARD resolve properties tgo's resolve handlers fold back —
+    // no more. `documentation` + `detail` from get_completion_details;
+    // `additionalTextEdits` from resolve_completion (auto-import); `labelDetails`
+    // from resolve_completion's enrichment (folded onto the item by the LSP
+    // layer). `command` is deliberately EXCLUDED — it is not a standard resolve
+    // property, so we never claim resolve-support for it (resolve_completion still
+    // folds it opportunistically). Advertising a property tgo does not need would
+    // invite the server to compute work the client discards.
     let expected: std::collections::BTreeSet<&str> = [
         "documentation",
         "detail",
         "additionalTextEdits",
         "labelDetails",
-        "command",
     ]
     .into_iter()
     .collect();
@@ -357,6 +358,13 @@ fn client_capabilities_advertise_completion_item_resolve_support() {
         "resolveSupport.properties must be EXACTLY the folded-back set {expected:?}, got {props:?}"
     );
 
+    // Negative — do NOT over-claim `command`: it is NOT a standard completion
+    // resolve property, so advertising resolve-support for it would over-claim.
+    assert!(
+        !props.contains("command"),
+        "must NOT advertise `command` resolve-support — it is not a standard \
+         resolve property (it is folded opportunistically, never claimed)"
+    );
     // Negative — do NOT over-claim properties tgo has no handler for. `textEdit`
     // resolve is never folded (only additionalTextEdits), so it must be absent.
     assert!(
@@ -459,7 +467,8 @@ fn client_capabilities_advertise_completion_item_kind_value_set() {
 /// not an insert/replace pair) and `dataSupport` (not a real LSP capability;
 /// `data` is a spec-transparent resolve passthrough) — while asserting the
 /// shapes the parser DOES read are advertised (`snippetSupport`,
-/// `commitCharactersSupport`, `labelDetailsSupport`).
+/// `commitCharactersSupport`, `preselectSupport`, `labelDetailsSupport`), and
+/// that `command` is NOT claimed as a resolve property.
 #[test]
 fn client_capabilities_do_not_overclaim_unhandled_features() {
     let caps = build_client_capabilities();
@@ -505,11 +514,12 @@ fn client_capabilities_do_not_overclaim_unhandled_features() {
     // Positive: shapes the parser NOW reads MUST be advertised — a server only
     // emits these item fields when the client claims support. `snippetSupport`
     // gates `insertTextFormat`, `commitCharactersSupport` gates `commitCharacters`,
-    // `labelDetailsSupport` gates `labelDetails`; the completion parser reads all
-    // three (`parse_completion_item`).
+    // `preselectSupport` gates `preselect`, `labelDetailsSupport` gates
+    // `labelDetails`; the completion parser reads all four (`parse_completion_item`).
     for advertised in [
         "snippetSupport",
         "commitCharactersSupport",
+        "preselectSupport",
         "labelDetailsSupport",
     ] {
         assert_eq!(
@@ -519,6 +529,20 @@ fn client_capabilities_do_not_overclaim_unhandled_features() {
              parser reads the field it gates"
         );
     }
+
+    // Negative — `command` is NOT a standard completion resolve property, so the
+    // resolveSupport advertisement must NOT list it (it is folded opportunistically
+    // by resolve_completion, never claimed as resolve-support).
+    let resolve_props: std::collections::BTreeSet<&str> = completion_item["resolveSupport"]
+        ["properties"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|p| p.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        !resolve_props.contains("command"),
+        "must NOT advertise `command` in resolveSupport.properties — it is not a \
+         standard resolve property"
+    );
 }
 
 #[test]
@@ -1107,6 +1131,157 @@ fn parse_completion_item_uses_insert_text_when_no_text_edit() {
     assert_eq!(
         item.text_edit_new_text, None,
         "no textEdit ⇒ no edit payload carried"
+    );
+}
+
+// ── P3-a: parser-level wire-fixture coverage for the additive carrier fields ──
+
+/// `insertTextFormat: 2` (LSP Snippet) maps to the neutral `Snippet` carrier;
+/// `1` (PlainText) maps to `PlainText`; absent → `None` (no snippet signal).
+/// Discriminating: a parser that dropped the `insertTextFormat` read (or mapped
+/// the wrong integer) fails each arm.
+#[test]
+fn parse_completion_item_maps_insert_text_format() {
+    let snippet = serde_json::json!({
+        "label": "forEach",
+        "kind": 2,
+        "insertTextFormat": 2
+    });
+    assert_eq!(
+        parse_completion_item(&snippet, None)
+            .unwrap()
+            .insert_text_format,
+        Some(CompletionInsertTextFormat::Snippet),
+        "insertTextFormat: 2 must map to the Snippet carrier"
+    );
+
+    let plain = serde_json::json!({
+        "label": "value",
+        "kind": 6,
+        "insertTextFormat": 1
+    });
+    assert_eq!(
+        parse_completion_item(&plain, None)
+            .unwrap()
+            .insert_text_format,
+        Some(CompletionInsertTextFormat::PlainText),
+        "insertTextFormat: 1 must map to the PlainText carrier"
+    );
+
+    let absent = serde_json::json!({ "label": "x", "kind": 6 });
+    assert_eq!(
+        parse_completion_item(&absent, None)
+            .unwrap()
+            .insert_text_format,
+        None,
+        "absent insertTextFormat carries no snippet signal → None"
+    );
+
+    // An out-of-range integer is not a known format → None (fail-closed).
+    let unknown = serde_json::json!({ "label": "y", "kind": 6, "insertTextFormat": 99 });
+    assert_eq!(
+        parse_completion_item(&unknown, None)
+            .unwrap()
+            .insert_text_format,
+        None,
+        "an unknown insertTextFormat integer is treated as no signal → None"
+    );
+}
+
+/// A `labelDetails: { detail, description }` wire object parses into a populated
+/// `CompletionLabelDetails`; an empty `{}` carries no signal → `None`.
+/// Discriminating: a parser that dropped the `labelDetails` read fails the
+/// populated arm; one that minted an empty carrier from `{}` fails the empty arm.
+#[test]
+fn parse_completion_item_parses_label_details() {
+    let with_details = serde_json::json!({
+        "label": "createApp",
+        "kind": 3,
+        "labelDetails": { "detail": "(rootComponent)", "description": "vue" }
+    });
+    let parsed = parse_completion_item(&with_details, None)
+        .unwrap()
+        .label_details
+        .expect("a populated labelDetails object must parse to Some");
+    assert_eq!(parsed.detail.as_deref(), Some("(rootComponent)"));
+    assert_eq!(parsed.description.as_deref(), Some("vue"));
+
+    // Only `description` present → the other sub-field stays None.
+    let desc_only = serde_json::json!({
+        "label": "ref",
+        "kind": 3,
+        "labelDetails": { "description": "vue" }
+    });
+    let parsed = parse_completion_item(&desc_only, None)
+        .unwrap()
+        .label_details
+        .expect("a partial labelDetails (description only) still parses to Some");
+    assert_eq!(parsed.detail, None);
+    assert_eq!(parsed.description.as_deref(), Some("vue"));
+
+    // An empty `{}` carries no signal — must NOT mint an empty carrier.
+    let empty = serde_json::json!({
+        "label": "z",
+        "kind": 6,
+        "labelDetails": {}
+    });
+    assert_eq!(
+        parse_completion_item(&empty, None).unwrap().label_details,
+        None,
+        "an empty labelDetails object carries no signal → None"
+    );
+
+    // Absent → None.
+    let absent = serde_json::json!({ "label": "w", "kind": 6 });
+    assert_eq!(
+        parse_completion_item(&absent, None).unwrap().label_details,
+        None,
+        "absent labelDetails → None"
+    );
+}
+
+/// `commitCharacters` parses through the shared strict helper at the tgo parse
+/// boundary: a non-empty all-string array yields `Some(..)`; an empty array
+/// yields `None` (NOT `Some(vec![])`); a malformed element drops the whole array.
+/// Discriminating against the pre-fix `filter_map(...).collect()` which returned
+/// `Some(vec![])` for `[]` and silently kept the survivors of a malformed array.
+#[test]
+fn parse_completion_item_commit_characters_are_strict() {
+    let ok = serde_json::json!({
+        "label": "a",
+        "kind": 5,
+        "commitCharacters": [".", ";"]
+    });
+    assert_eq!(
+        parse_completion_item(&ok, None).unwrap().commit_characters,
+        Some(vec![".".to_string(), ";".to_string()]),
+        "a non-empty all-string commitCharacters array parses verbatim"
+    );
+
+    let empty = serde_json::json!({
+        "label": "b",
+        "kind": 5,
+        "commitCharacters": []
+    });
+    assert_eq!(
+        parse_completion_item(&empty, None)
+            .unwrap()
+            .commit_characters,
+        None,
+        "an empty commitCharacters array → None (never Some(vec![]))"
+    );
+
+    let malformed = serde_json::json!({
+        "label": "c",
+        "kind": 5,
+        "commitCharacters": [".", 7]
+    });
+    assert_eq!(
+        parse_completion_item(&malformed, None)
+            .unwrap()
+            .commit_characters,
+        None,
+        "a non-string element drops the whole commitCharacters array → None"
     );
 }
 
@@ -3184,6 +3359,96 @@ async fn get_completion_details_enriches_full_small_list() {
         detailed.iter().all(|c| c.detail.is_some()),
         "every item in a small list must be enriched"
     );
+
+    drop(provider);
+}
+
+/// Answer one `completionItem/resolve` request with a response carrying ONLY
+/// `labelDetails` (no `additionalTextEdits`, no `detail`, no `documentation`, no
+/// `command`). Used to prove the resolve restructure returns `Some` when the only
+/// enrichment is a non-edit field.
+async fn spawn_label_details_only_responder(
+    mut stdin_rx: mpsc::Receiver<StdinMessage>,
+    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+) {
+    while let Some(msg) = stdin_rx.recv().await {
+        let StdinMessage::Frame(bytes) = msg else {
+            break;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let Some(body_start) = text.find("\r\n\r\n") else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text[body_start + 4..]) else {
+            continue;
+        };
+        if json.get("method").and_then(|v| v.as_str()) == Some("completionItem/resolve") {
+            if let Some(id) = json.get("id").and_then(|v| v.as_i64()) {
+                if let Some(tx) = pending.lock().await.remove(&id) {
+                    let _ = tx.send(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        // ONLY labelDetails — no edits / detail / documentation / command.
+                        "result": {
+                            "label": "createApp",
+                            "labelDetails": { "detail": "(rootComponent)", "description": "vue" }
+                        },
+                    }));
+                }
+            }
+        }
+    }
+}
+
+/// The tgo `resolve_completion` restructure returns `Some` when a
+/// `completionItem/resolve` response carries ONLY enrichment (here `labelDetails`)
+/// and NO `additionalTextEdits`. Guards the restructure that stopped returning
+/// `None` on an empty edit set — a regression to "edits required" would drop the
+/// label-details enrichment and return `None`.
+#[tokio::test]
+async fn resolve_completion_returns_some_when_only_label_details_present() {
+    let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
+    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+    tokio::spawn(spawn_label_details_only_responder(
+        stdin_rx,
+        Arc::clone(&pending),
+    ));
+    let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
+    let provider = TsgoTypeProvider {
+        transport,
+        child,
+        versions: Arc::new(Mutex::new(HashMap::new())),
+        contents: Arc::new(Mutex::new(HashMap::new())),
+        diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let handle = CompletionResolveData::Lsp {
+        label: "createApp".to_string(),
+        data: serde_json::json!({ "label": "createApp" }),
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        provider.resolve_completion("/proj/file.tsx", handle),
+    )
+    .await
+    .expect("resolve must not hang")
+    .expect("resolve must succeed")
+    .expect("a label-details-only resolve must return Some, not None");
+
+    assert!(
+        result.additional_text_edits.is_empty(),
+        "this resolve carried no edits"
+    );
+    let ld = result
+        .label_details
+        .expect("the resolve's labelDetails must be folded into the result");
+    assert_eq!(ld.detail.as_deref(), Some("(rootComponent)"));
+    assert_eq!(ld.description.as_deref(), Some("vue"));
+    assert_eq!(result.detail, None, "no detail was returned");
+    assert_eq!(result.command, None, "no command was returned");
 
     drop(provider);
 }

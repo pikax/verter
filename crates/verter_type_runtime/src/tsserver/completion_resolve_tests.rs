@@ -330,3 +330,81 @@ fn entry_details_drop_cross_file_edits() {
         "a detail with only cross-file edits and no detail/docs yields no resolve result"
     );
 }
+
+/// FAIL-CLOSED: tsserver's `completionEntryDetails` carries NO `labelDetails`
+/// wire field. `sourceDisplay`/`source` are the originating MODULE specifier — a
+/// DIFFERENT field than the LSP `CompletionItemLabelDetails.description` slot the
+/// neutral carrier mirrors. The mapper MUST NOT fabricate `label_details` from
+/// them; it stays `None`.
+///
+/// Discriminating: against the pre-fix code (which set
+/// `label_details = Some(CompletionLabelDetails{ description: Some("vue"), .. })`
+/// from `sourceDisplay`/`source`) this assertion FAILS; post-fix it passes.
+#[test]
+fn entry_details_do_not_fabricate_label_details_from_source() {
+    let generated = "/project/src/App.vue.tsx";
+    // An auto-import detail carrying BOTH the newer `sourceDisplay` (a display-
+    // parts array) and the older plain `source` string for the originating
+    // module, plus a real same-file import code action so the result is `Some`
+    // (proving the label_details stays `None` even on a populated result, not
+    // merely because the function early-returned `None`).
+    let detail = serde_json::json!({
+        "name": "computed",
+        "kind": "function",
+        "source": "vue",
+        "sourceDisplay": [ { "text": "vue", "kind": "text" } ],
+        "displayParts": [
+            { "text": "function", "kind": "keyword" },
+            { "text": " ", "kind": "space" },
+            { "text": "computed", "kind": "functionName" }
+        ],
+        "codeActions": [
+            {
+                "description": "Add import from \"vue\"",
+                "changes": [
+                    {
+                        "fileName": generated,
+                        "textChanges": [
+                            {
+                                "start": { "line": 1, "offset": 1 },
+                                "end": { "line": 1, "offset": 1 },
+                                "newText": "import { computed } from \"vue\";\n"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    let mut cache = HashMap::new();
+    cache.insert(
+        generated.to_string(),
+        Arc::from("const x = 1;\nexport default {};\n"),
+    );
+
+    let result = completion_entry_details_to_resolve_result(&detail, generated, &cache)
+        .expect("an auto-import entry detail yields a resolve result");
+
+    // The result is populated (edits + detail) — proving we reached the Some
+    // branch — yet label_details is fail-closed None.
+    assert_eq!(
+        result.additional_text_edits.len(),
+        1,
+        "the same-file import insertion still becomes a ResolvedTextEdit"
+    );
+    assert_eq!(
+        result.detail.as_deref(),
+        Some("function computed"),
+        "displayParts still folds into the resolved detail"
+    );
+    assert_eq!(
+        result.label_details, None,
+        "tsserver completionEntryDetails carries no labelDetails field — \
+         sourceDisplay/source must NOT be fabricated into label_details.description"
+    );
+    assert_eq!(
+        result.command, None,
+        "tsserver completion details carry no command — always None"
+    );
+}

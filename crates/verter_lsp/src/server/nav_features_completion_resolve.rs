@@ -112,3 +112,103 @@ pub(super) fn completion_resolve_error(reason: &str) -> tower_lsp_server::jsonrp
         data: None,
     }
 }
+
+/// Merge a resolve-supplied [`CompletionLabelDetails`](crate::type_provider::protocol::CompletionLabelDetails)
+/// onto the item's list-time label details, SUB-FIELD by sub-field.
+///
+/// `completionItem/resolve` enrichment is additive: a resolve may refine ONE
+/// label-detail sub-field (e.g. fill in the right-aligned import `description`)
+/// while the completion LIST already carried the other (e.g. the inline signature
+/// `detail`). Overwriting the whole `CompletionItemLabelDetails` would drop the
+/// list-time sub-field the resolve did not re-send. So per sub-field: take the
+/// resolve's value when it is `Some`, otherwise KEEP the existing list-time value.
+///
+/// `existing` is the item's current label details (`None` when the list carried
+/// none — then the merged result is just the resolve's sub-fields).
+pub(super) fn merge_resolved_label_details(
+    existing: Option<CompletionItemLabelDetails>,
+    resolved: crate::type_provider::protocol::CompletionLabelDetails,
+) -> CompletionItemLabelDetails {
+    let (existing_detail, existing_description) = match existing {
+        Some(ld) => (ld.detail, ld.description),
+        None => (None, None),
+    };
+    CompletionItemLabelDetails {
+        // Resolve-supplied sub-field wins; an absent resolve sub-field preserves
+        // the list-time value.
+        detail: resolved.detail.or(existing_detail),
+        description: resolved.description.or(existing_description),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::type_provider::protocol;
+
+    /// A resolve that supplies ONLY `description` must merge onto a list-time
+    /// label-details carrying ONLY `detail` — the result keeps BOTH. Discriminating
+    /// against the pre-fix overwrite (which replaced the whole struct and dropped
+    /// the list-time `detail`).
+    #[test]
+    fn merge_resolved_label_details_preserves_list_time_subfield() {
+        let existing = Some(CompletionItemLabelDetails {
+            detail: Some("(app: App)".to_string()),
+            description: None,
+        });
+        let resolved = protocol::CompletionLabelDetails {
+            detail: None,
+            description: Some("vue".to_string()),
+        };
+
+        let merged = merge_resolved_label_details(existing, resolved);
+        assert_eq!(
+            merged.detail.as_deref(),
+            Some("(app: App)"),
+            "the list-time `detail` must survive a resolve that only refined `description`"
+        );
+        assert_eq!(
+            merged.description.as_deref(),
+            Some("vue"),
+            "the resolve-supplied `description` must be folded in"
+        );
+    }
+
+    /// A resolve sub-field wins over the list-time value when BOTH are present.
+    #[test]
+    fn merge_resolved_label_details_resolve_subfield_wins() {
+        let existing = Some(CompletionItemLabelDetails {
+            detail: Some("(stale)".to_string()),
+            description: Some("stale-src".to_string()),
+        });
+        let resolved = protocol::CompletionLabelDetails {
+            detail: Some("(refined)".to_string()),
+            description: None,
+        };
+
+        let merged = merge_resolved_label_details(existing, resolved);
+        assert_eq!(
+            merged.detail.as_deref(),
+            Some("(refined)"),
+            "the resolve-supplied `detail` wins over the list-time one"
+        );
+        assert_eq!(
+            merged.description.as_deref(),
+            Some("stale-src"),
+            "the un-refined `description` keeps the list-time value"
+        );
+    }
+
+    /// When the item had NO list-time label details, the merge is just the
+    /// resolve's sub-fields.
+    #[test]
+    fn merge_resolved_label_details_sets_when_item_had_none() {
+        let resolved = protocol::CompletionLabelDetails {
+            detail: Some("(d)".to_string()),
+            description: Some("src".to_string()),
+        };
+        let merged = merge_resolved_label_details(None, resolved);
+        assert_eq!(merged.detail.as_deref(), Some("(d)"));
+        assert_eq!(merged.description.as_deref(), Some("src"));
+    }
+}
