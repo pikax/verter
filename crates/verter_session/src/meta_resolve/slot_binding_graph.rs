@@ -1282,12 +1282,18 @@ pub(crate) fn publish_merged_bindings(
     // JS compat `compatSlotBindingTypeText`, audit footprint miner)
     // pre-empt on the variant identity directly — no sidecar table or
     // verdict cache exists. A consumer that needs to deepen the
-    // carrier into its underlying member shape routes through
-    // `ShapeCacheKey::semantic_node_whole(scope, SemanticNodeId(key.value_node), mode)`
-    // — the same identity used by any regular member-shape route, and
-    // the only legitimate explicit-deepen path (enforced by the
+    // carrier into its underlying member shape routes through the
+    // content-free synthetic-binding identity
+    // `ShapeCacheKey::synthetic_binding_whole(
+    //     SyntheticBindingId::from_carrier_key(&carrier), mode)`
+    // — the `value_node` arena ordinal is value-side provenance only
+    // (re-attached at the compat boundary via
+    // `SemanticNodeData::SyntheticBinding`'s `to_carrier_key`/`raise`),
+    // never part of the cache identity. This is the only legitimate
+    // explicit-deepen path (enforced by the
     // `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
-    // architecture guard).
+    // architecture guard, which bans any `SemanticNodeId(_.value_node)`
+    // ordinal cache key).
     for (key, gb) in graph_native.iter() {
         let (slot_name, binding_name) = key.clone();
         let field_name = format!("{}.{}", slot_name, binding_name);

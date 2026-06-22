@@ -15858,7 +15858,7 @@ mod single_resolution_engine_guards {
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            431,
+            438,
             "fn read_surface_members(",
         ),
         (
@@ -21046,6 +21046,149 @@ fn synthetic_binding_identity_is_content_free() {
     assert!(
         carrier_guard_struct_body(synthetic, "X").contains("value_node"),
         "scanner self-test: a value_node field must be detected"
+    );
+}
+
+/// Extract the field list of an `enum` variant declared as
+/// `Variant { field: Ty, ... }` from `src`. Returns the text between the
+/// variant's `{` and its matching `}` with `//` line comments stripped.
+/// Used to assert a struct-like enum variant's field list is content-free.
+fn enum_variant_struct_body(src: &str, variant: &str) -> String {
+    let needle = format!("{variant} {{");
+    let start = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("guard must find enum variant `{variant} {{`"));
+    let body_start = start + needle.len();
+    let mut depth = 0usize;
+    let mut end = body_start;
+    for (offset, ch) in src[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                if depth == 0 {
+                    end = body_start + offset;
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    src[body_start..end]
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// R6 content-free synthetic-deepening CACHE identity. The explicit-deepen
+/// route roots on the content-free `SyntheticBindingId` via
+/// `ShapeCacheKey::synthetic_binding_whole`, NOT on a `value_node` arena
+/// ordinal. Three structural pins:
+///   (a) the `ShapeSubject::SyntheticBinding` variant carries ONLY
+///       `id: SyntheticBindingId` — no `value_node`, no `SemanticNodeId`;
+///   (b) the `synthetic_binding_whole` constructor builds
+///       `ShapeSubject::SyntheticBinding { id }`;
+///   (c) the `NonSyntheticTypeExpr` seal exists — a `ShapeSubject::TypeExpr`
+///       cannot be built from a synthetic-carrying `TypeExpr`, so a nested
+///       carrier can never fold its `value_node` into the `TypeExpr`-subject
+///       structural hash.
+#[test]
+fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
+    let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
+
+    // (a) The `ShapeSubject::SyntheticBinding` variant body is content-free.
+    let variant_body = enum_variant_struct_body(&src, "SyntheticBinding");
+    // Anti-vacuity: the extractor found the real variant (its `id` field).
+    assert!(
+        variant_body.contains("id"),
+        "guard must extract the real ShapeSubject::SyntheticBinding variant body"
+    );
+    assert!(
+        variant_body.contains("SyntheticBindingId"),
+        "the ShapeSubject::SyntheticBinding variant must key on the content-free \
+         `SyntheticBindingId`"
+    );
+    for forbidden in ["value_node", "whole_hash", "content_hash"] {
+        assert!(
+            !variant_body.contains(forbidden),
+            "ShapeSubject::SyntheticBinding must be content-free (R6) — found \
+             `{forbidden}` in its field list. The arena ordinal is value-side \
+             provenance on the SemanticNodeData::SyntheticBinding carrier, never \
+             on the cache subject."
+        );
+    }
+    // The variant must not carry a `SemanticNodeId` (the retired ordinal key).
+    // Match at an identifier boundary so a substring of another identifier does
+    // not false-positive.
+    assert!(
+        !variant_body
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "SemanticNodeId"),
+        "ShapeSubject::SyntheticBinding must NOT carry a `SemanticNodeId` — the \
+         synthetic-deepen identity is the content-free `SyntheticBindingId`, not \
+         an arena ordinal."
+    );
+
+    // (b) The `synthetic_binding_whole` constructor builds the variant.
+    assert!(
+        src.contains("fn synthetic_binding_whole"),
+        "the content-free synthetic-deepen key constructor \
+         `ShapeCacheKey::synthetic_binding_whole` must exist"
+    );
+    // Whitespace-collapsed so the construction-presence check matches BOTH
+    // the bare `{ id }` form and the sealed multi-line form
+    // (`ShapeSubject::SyntheticBinding {\n    id,\n    _seal: ConstructionSeal,\n}`)
+    // rustfmt produces once the module-private construction-seal marker
+    // field is added. The forbidden-token teeth in (a) still pin the
+    // variant to the content-free `id` — the seal adds no payload.
+    let src_ws_collapsed = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        src_ws_collapsed.contains("ShapeSubject::SyntheticBinding { id }")
+            || src_ws_collapsed.contains("ShapeSubject::SyntheticBinding { id,"),
+        "the synthetic-binding constructor(s) must build \
+         `ShapeSubject::SyntheticBinding {{ id, .. }}` (the content-free `id` \
+         is the cache key; a module-private `_seal` may follow)"
+    );
+
+    // (c) The `NonSyntheticTypeExpr` seal exists and its only constructor is
+    // fallible (returns `Option`), so a synthetic-carrying `TypeExpr` can never
+    // become a `ShapeSubject::TypeExpr` structural-hash subject.
+    assert!(
+        src.contains("struct NonSyntheticTypeExpr"),
+        "the `NonSyntheticTypeExpr` seal (the structural confinement that keeps a \
+         `SyntheticSlotBinding`-carrying `TypeExpr` out of the `ShapeSubject::\
+         TypeExpr` hash) must exist"
+    );
+    assert!(
+        src.contains("fn new")
+            && src.contains("NonSyntheticTypeExpr")
+            && src.contains("type_expr_contains_synthetic_slot_binding"),
+        "the `NonSyntheticTypeExpr` constructor must reject a synthetic-carrying \
+         `TypeExpr` via the shared depth-safe \
+         `type_expr_contains_synthetic_slot_binding` walker"
+    );
+
+    // Self-discrimination: the variant extractor detects a planted
+    // `value_node` field — RED if a bare ordinal is re-introduced on the
+    // cache subject.
+    let synthetic = "enum E { SyntheticBinding { id: SyntheticBindingId, value_node: u64 }, }";
+    assert!(
+        enum_variant_struct_body(synthetic, "SyntheticBinding").contains("value_node"),
+        "scanner self-test: a planted `value_node` field on the variant must be \
+         detected"
+    );
+    // And the boundary-aware `SemanticNodeId` detector trips on a planted ordinal.
+    let synthetic_node = "enum E { SyntheticBinding { node: SemanticNodeId }, }";
+    assert!(
+        enum_variant_struct_body(synthetic_node, "SyntheticBinding")
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "SemanticNodeId"),
+        "scanner self-test: a planted `SemanticNodeId` field on the variant must \
+         be detected"
     );
 }
 

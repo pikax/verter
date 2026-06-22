@@ -410,15 +410,22 @@ pub(crate) fn peek_member_shape_known(
             // cache identity. A bare `published(mode)` key would miss a
             // `StructuralTransit(Navigate)`-published entry (or, worse,
             // hit a published entry storing a transit-lowered value).
-            let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
+            // A composite expression that NESTS a synthetic carrier has
+            // no sound content-free cache key — bypass the cache (no warm
+            // hit available) and report a miss so the caller cold-computes.
+            // A bare carrier / carrier-free expression yields a key
+            // normally.
+            crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
                 Arc::<str>::from(scope_canonical_id),
                 Arc::new(expr.clone()),
                 super::materialize::type_expr_materialize_reduction_context(expr, mode),
-            );
-            ctx.project_type_store()
-                .shape_cache_db()
-                .peek(&key, ctx)
-                .map(PeekedShape::Cached)
+            )
+            .and_then(|key| {
+                ctx.project_type_store()
+                    .shape_cache_db()
+                    .peek(&key, ctx)
+                    .map(PeekedShape::Cached)
+            })
         }
     }
 }
@@ -1236,13 +1243,16 @@ fn admit_type_expr_shape_if_possible(
     };
     // Admit into the SAME slot identity the whole-expression
     // materialiser + `peek_member_shape_known` use — keyed by the exact
-    // reduction context, not a bare `published(mode)`.
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
+    // reduction context, not a bare `published(mode)`. A composite
+    // expression that NESTS a synthetic carrier has no sound content-free
+    // cache key — skip the admit (the value still flowed to the caller).
+    if let Some(key) = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
         Arc::<str>::from(scope_canonical_id),
         Arc::new(expr.clone()),
         super::materialize::type_expr_materialize_reduction_context(expr, mode),
-    );
-    let _ = admit_member_shape_if_possible(ctx, &key, value);
+    ) {
+        let _ = admit_member_shape_if_possible(ctx, &key, value);
+    }
 }
 
 /// Universal-caching admission for the projector pipeline. Computes
@@ -1274,7 +1284,7 @@ fn admit_member_shape_if_possible(
     if crate::cache_runtime::refuse_result_cache_admission_if_partial(value.result_is_partial) {
         return value;
     }
-    let scope = key.subject.scope_canonical().clone();
+    let scope = key.scope_canonical().clone();
     let Some(observed_scope) = ctx.observe_materialize_scope(scope.as_ref()) else {
         return value;
     };

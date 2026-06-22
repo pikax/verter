@@ -428,7 +428,9 @@ fn no_carrier_verdict_db_self_test() {
 
 // ---------------------------------------------------------------------
 // Architecture guard: explicit deepening of a `SyntheticSlotBinding`
-// carrier MUST route through `ShapeCacheKey::semantic_node_whole`.
+// carrier roots on the content-free `SyntheticBindingId` cache identity —
+// a `SemanticNodeId(<ident>.value_node)` cache-key construction is a
+// FORBIDDEN ordinal bypass.
 //
 // Contract (per `[[component-meta-shallow-by-default-rule]]` and the
 // `TypeExpr::SyntheticSlotBinding` rustdoc):
@@ -436,48 +438,63 @@ fn no_carrier_verdict_db_self_test() {
 //   reducers, and the registry all refuse to resolve its `binding_name`
 //   through `TypeRegistry`. The ONLY legitimate way to deepen a carrier
 //   into its underlying member shape is to construct a
-//   `ShapeCacheKey::semantic_node_whole(scope, SemanticNodeId(key.value_node), mode)`
-//   key and consult `ShapeCacheDb` — the same identity used for any
-//   regular member-shape route.
+//   `ShapeCacheKey::synthetic_binding_whole(
+//        SyntheticBindingId::from_carrier_key(&carrier), mode)`
+//   key and consult `ShapeCacheDb`. The cache identity is the
+//   content-free `SyntheticBindingId`
+//   (`scope_canonical_id, surface_kind, slot_name, binding_name`); the
+//   carrier's `value_node` arena ordinal is value-side PROVENANCE only —
+//   it round-trips through `SemanticNodeData::SyntheticBinding` at the
+//   compat materialisation boundary and NEVER enters the cache key.
 //
-//   A consumer that wants to drill down by directly reading
-//   `SyntheticCarrierKey::value_node` and wrapping it in a fresh
-//   `SemanticNodeId(...)` is BYPASSING the cache route. That is the
-//   defect class this guard prevents: such a consumer would (a) miss
-//   the shared `ShapeCacheDb` warm-hit path, (b) escape the
-//   cache's self-root + dep-signature validation, and (c) drift from
-//   the rest of the projector / member-shape pipeline.
+//   A consumer that drills down by reading `SyntheticCarrierKey::\
+//   value_node` and wrapping it in a fresh `SemanticNodeId(...)` to key
+//   the cache is committing an ordinal bypass. That is the defect class
+//   this guard prevents: the `value_node` ordinal is a store/generation-
+//   relative arena index, NOT a content-free identity, so keying on it
+//   (a) splits the cache per provenance ordinal (same-identity carriers
+//   miss each other), (b) re-introduces the R6 violation the
+//   content-free `SyntheticBindingId` was built to remove. There is no
+//   longer any legitimate `SemanticNodeId(carrier.value_node)`
+//   cache-key construction — the previous "cache-route" exemption is
+//   removed.
+//
+//   STRUCTURAL CONFINEMENT IS PRIMARY. The first line of defense is the
+//   sealed `NonSyntheticTypeExpr` newtype + the module-private
+//   `ShapeSubject` / `ShapeCacheKey.subject` construction in
+//   `component_meta_caches.rs`: a `SyntheticSlotBinding`-carrying
+//   `TypeExpr` cannot become a `ShapeSubject::TypeExpr` structural-hash
+//   subject (its `value_node` can never fold into the hash), a bare
+//   carrier redirects to the content-free `ShapeSubject::SyntheticBinding`,
+//   and a nested carrier is uncached. THIS scanner is the bounded
+//   residual SYNTACTIC supplement to that structural mechanism — it
+//   catches a hand-rolled `SemanticNodeId(_.value_node)` ordinal-key
+//   construction that never goes through the sealed constructors at all.
+//
+//   The regular `ShapeSubject::SemanticNode` route
+//   (`member_shape_peek_or_compute`) passes a `SemanticNodeId`
+//   PARAMETER directly (NOT `SemanticNodeId(x.value_node)`), so it is
+//   structurally unmatched by the scanner and unaffected.
 //
 //   Currently zero workspace consumers exercise the explicit-deepen
 //   route — the carrier is always shallow in every projector,
 //   reducer, registry, and graph-builder site. The
 //   `tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs` integration
-//   test exercises the cache-key identity round-trip via the
+//   test exercises the content-free cache-key identity via the
 //   `ShapeCacheDb::insert_synthetic_carrier_deep_for_test` /
 //   `get_synthetic_carrier_deep_for_test` `#[cfg(any(test,
 //   debug_assertions))]` helpers, proving the route is well-defined
 //   for any future consumer that needs it.
-//
-//   Narrowing rule (what this guard considers a true bypass):
-//     A line that constructs `SemanticNodeId(<ident>.value_node)` is
-//     flagged ONLY when no preceding line within a small upstream
-//     window (`UPSTREAM_CACHE_ROUTE_WINDOW`) calls
-//     `ShapeCacheKey::semantic_node_whole(` (or the
-//     `_with_context` variant). When the upstream call is present,
-//     the deref is the legitimate cache-route argument site (e.g. an
-//     argument expression broken across lines by rustfmt) and is
-//     exempt — the consumer IS using the cache route, just split
-//     across lines.
 
 /// Identifier-boundary token-stream check: does `line` contain the
 /// regex `SemanticNodeId\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*value_node`?
 ///
 /// This is the canonical shape of "construct a `SemanticNodeId` from
-/// the `value_node` field of some struct value". It catches the
-/// suspicious pattern without depending on the binding's name. False
-/// positives are possible only if some future unrelated type also
-/// names a field `value_node` — in that case the false-positive site
-/// must be explicitly allowlisted below.
+/// the `value_node` field of some struct value" — a forbidden ordinal
+/// cache-key construction. It catches the suspicious pattern without
+/// depending on the binding's name. False positives are possible only if
+/// some future unrelated type also names a field `value_node` — in that
+/// case the false-positive site must be explicitly allowlisted below.
 fn line_constructs_semantic_node_id_from_value_node(line: &str) -> bool {
     let bytes = line.as_bytes();
     let needle = b"SemanticNodeId";
@@ -558,44 +575,58 @@ fn line_constructs_semantic_node_id_from_value_node(line: &str) -> bool {
     false
 }
 
-/// Lines of upstream context the narrowing rule scans for a
-/// `ShapeCacheKey::semantic_node_whole(` opening before flagging a
-/// `SemanticNodeId(<ident>.value_node)` line as a bypass. Five lines
-/// covers the rustfmt-broken legitimate call shape:
-///
-/// ```ignore
-/// let key = ShapeCacheKey::semantic_node_whole(           // -2
-///     carrier.scope_canonical_id.clone(),                  // -1
-///     crate::semantic_query::SemanticNodeId(carrier.value_node), //  0  ← deref
-///     mode,
-/// );
-/// ```
-const UPSTREAM_CACHE_ROUTE_WINDOW: usize = 5;
-const CACHE_ROUTE_NEEDLE: &str = "ShapeCacheKey::semantic_node_whole";
+/// Structural-confinement-vs-scanner record. The PRIMARY confinement for
+/// the synthetic-deepen identity is structural: the sealed
+/// `NonSyntheticTypeExpr` newtype + module-private `ShapeSubject` /
+/// `ShapeCacheKey.subject` construction in `component_meta_caches.rs` keep
+/// a `value_node`-bearing carrier out of every cache key by construction.
+/// This grep scanner is the BOUNDED residual SYNTACTIC supplement: it
+/// catches a hand-rolled `SemanticNodeId(_.value_node)` ordinal-key
+/// construction that bypasses the sealed constructors entirely. The
+/// previous "legitimate cache-route" exemption (an upstream
+/// `ShapeCacheKey::semantic_node_whole(` window) is REMOVED — there is no
+/// legitimate `SemanticNodeId(carrier.value_node)` cache-key construction
+/// anymore, because the content-free `SyntheticBindingId` is the identity.
+const SYNTHETIC_DEEPEN_CONFINEMENT: ConfinementRecord = ConfinementRecord {
+    primary_mechanism: "structural",
+    scanner_role: "residual-syntactic-supplement",
+};
 
-/// True if any of the `UPSTREAM_CACHE_ROUTE_WINDOW` lines preceding
-/// `idx` contains the cache-route call opener. The check is a plain
-/// substring scan on the preprocessed lines (comments + inline
-/// `#[cfg(test)] mod` blocks already stripped by the caller). The
-/// `_with_context` variant is matched too because its name is a
-/// strict superstring of the bare needle.
-fn upstream_uses_cache_route(lines: &[&str], idx: usize) -> bool {
-    let start = idx.saturating_sub(UPSTREAM_CACHE_ROUTE_WINDOW);
-    lines[start..idx]
-        .iter()
-        .any(|l| l.contains(CACHE_ROUTE_NEEDLE))
+/// A small record documenting that the structural confinement is primary
+/// and this scanner is the residual supplement (Structural-Confinement-
+/// First). Carried as a const so a future edit that demotes the
+/// structural mechanism has to consciously rewrite this record.
+struct ConfinementRecord {
+    primary_mechanism: &'static str,
+    scanner_role: &'static str,
 }
 
-/// The architecture guard test: no production source file may
-/// construct a `SemanticNodeId` from any struct's `value_node` field
-/// EXCEPT when the construction is inside the argument list of a
-/// `ShapeCacheKey::semantic_node_whole(...)` (or
-/// `_with_context(...)`) call. The cache-route call is the only
-/// permitted way to express a synthetic-carrier-derived semantic-node
-/// identity; rustfmt may split the call's argument across lines, so
-/// the upstream-window check accepts the legitimate split shape.
+/// The architecture guard test: no production source file may construct a
+/// `SemanticNodeId` from any struct's `value_node` field — the scanner's
+/// syntactic predicate bans EVERY such construction outright (it does not
+/// try to prove cache-key-ness from text). The architectural target it
+/// enforces: the synthetic-deepen identity is the content-free
+/// `SyntheticBindingId` via `ShapeCacheKey::synthetic_binding_whole`, and
+/// the `value_node` arena ordinal is value-side provenance only, so a
+/// `SemanticNodeId(_.value_node)` construction would be an ordinal
+/// cache-key bypass. There is no exemption.
 #[test]
 fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
+    // Structural-Confinement-First: this scanner is the bounded residual
+    // supplement to the sealed `NonSyntheticTypeExpr` + private
+    // `ShapeSubject` construction, which is the PRIMARY mechanism.
+    assert_eq!(
+        SYNTHETIC_DEEPEN_CONFINEMENT.primary_mechanism, "structural",
+        "the synthetic-deepen confinement's PRIMARY mechanism must remain \
+         structural (the sealed `NonSyntheticTypeExpr` + private `ShapeSubject` \
+         construction); this scanner is only the residual supplement"
+    );
+    assert_eq!(
+        SYNTHETIC_DEEPEN_CONFINEMENT.scanner_role, "residual-syntactic-supplement",
+        "this scanner must remain the residual syntactic supplement, never the \
+         primary confinement"
+    );
+
     let files = collect_production_sources();
 
     let mut violations: Vec<(PathBuf, Vec<usize>)> = Vec::new();
@@ -604,22 +635,15 @@ fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
             continue;
         };
         let processed = preprocess(&text);
-        let processed_lines: Vec<&str> = processed.lines().collect();
-        let violation_lines: Vec<usize> = processed_lines
-            .iter()
+        let violation_lines: Vec<usize> = processed
+            .lines()
             .enumerate()
             .filter_map(|(i, l)| {
-                if !line_constructs_semantic_node_id_from_value_node(l) {
-                    return None;
+                if line_constructs_semantic_node_id_from_value_node(l) {
+                    Some(i + 1)
+                } else {
+                    None
                 }
-                // Narrowing: if the upstream window of this line
-                // contains the cache-route call opener, the deref is
-                // the legitimate cache-route argument (split across
-                // lines by rustfmt). Exempt it.
-                if upstream_uses_cache_route(&processed_lines, i) {
-                    return None;
-                }
-                Some(i + 1)
             })
             .collect();
         if !violation_lines.is_empty() {
@@ -630,32 +654,37 @@ fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
     assert!(
         violations.is_empty(),
         "Architecture rule violation: production source constructs a \
-         `SemanticNodeId` directly from a struct's `value_node` field \
-         outside the legitimate cache-route call. The synthetic-carrier \
-         explicit-deepen route MUST go through \
-         `ShapeCacheKey::semantic_node_whole(scope, node, mode)` (and \
-         its `_with_context` variant). Direct `SemanticNodeId(_.value_node)` \
-         construction outside that call bypasses the shared \
-         `ShapeCacheDb` warm-hit path AND escapes self-root + \
-         dep-signature validation. See \
+         `SemanticNodeId` directly from a struct's `value_node` field. The \
+         synthetic-carrier explicit-deepen route MUST root on the content-free \
+         `SyntheticBindingId` via \
+         `ShapeCacheKey::synthetic_binding_whole(\
+         SyntheticBindingId::from_carrier_key(&carrier), mode)`. The \
+         `value_node` arena ordinal is value-side provenance (re-attached at \
+         the compat boundary via `to_carrier_key`/`raise`), NEVER a cache key. \
+         A `SemanticNodeId(_.value_node)` construction is a forbidden ordinal \
+         bypass: it splits the cache per provenance ordinal and re-introduces \
+         the R6 violation the content-free identity removed. The regular \
+         `ShapeSubject::SemanticNode` route passes a `SemanticNodeId` parameter \
+         directly and is unaffected. See \
          `[[component-meta-shallow-by-default-rule]]` in \
          `.claude/skills/component-meta/SKILL.md`.\n\nViolations:\n{violations:#?}"
     );
 }
 
-/// Self-test for the explicit-deepen guard: the per-line scanner
-/// catches the forbidden shape AND the narrowed end-to-end guard
-/// (upstream-window check) discriminates legitimate cache-route
-/// argument sites from bare bypasses.
+/// Self-test for the explicit-deepen guard: the per-line scanner catches
+/// every `SemanticNodeId(<ident>.value_node)` ordinal-key construction —
+/// including the shapes that were previously exempt as "legitimate
+/// cache-route" split calls (the exemption is removed) — while the
+/// genuinely-legit shapes (`SemanticNodeId(0)`,
+/// `SemanticNodeId(member.id_field)`, `value_node:` field decls,
+/// serialization) stay non-matching.
 #[test]
 fn synthetic_carrier_explicit_deepen_guard_self_test() {
     // -----------------------------------------------------------------
-    // Part 1 — per-line scanner: forbidden shapes match, legitimate
-    // shapes do not. (No upstream context yet — that lives in Part 2.)
+    // Forbidden shapes — every `SemanticNodeId(_.value_node)`
+    // construction matches. There is no exemption.
     // -----------------------------------------------------------------
 
-    // The forbidden shape — constructs `SemanticNodeId` from any
-    // struct's `value_node` field.
     let violation_a = "let id = SemanticNodeId(key.value_node);";
     let violation_b = "    SemanticNodeId(carrier.value_node)";
     let violation_c = "SemanticNodeId ( binding . value_node ) // whitespace tolerance";
@@ -663,7 +692,7 @@ fn synthetic_carrier_explicit_deepen_guard_self_test() {
     assert!(
         line_constructs_semantic_node_id_from_value_node(violation_a),
         "self-test: scanner missed `SemanticNodeId(key.value_node);` — \
-         the canonical shape of a forbidden direct construction"
+         the canonical shape of a forbidden ordinal-key construction"
     );
     assert!(
         line_constructs_semantic_node_id_from_value_node(violation_b),
@@ -674,9 +703,27 @@ fn synthetic_carrier_explicit_deepen_guard_self_test() {
         "self-test: scanner missed whitespace-tolerant `SemanticNodeId ( binding . value_node )`"
     );
 
-    // Per-line legitimate shapes — must NOT trip the scanner.
-    let legit_cache_route_pre_bound =
-        "let key = ShapeCacheKey::semantic_node_whole(scope, member_value, mode);";
+    // The PREVIOUSLY-exempt cache-route split shapes are now ALSO
+    // violations — the `value_node` ordinal is provenance, never a cache
+    // key, so even a `ShapeCacheKey::semantic_node_whole(... \
+    // SemanticNodeId(carrier.value_node) ...)` construction is a forbidden
+    // bypass. The deref line is flagged regardless of any upstream
+    // cache-route call.
+    let formerly_exempt_split_call =
+        "    crate::semantic_query::SemanticNodeId(carrier.value_node),";
+    assert!(
+        line_constructs_semantic_node_id_from_value_node(formerly_exempt_split_call),
+        "self-test: scanner must now flag the formerly-exempt split-call deref — \
+         the `SemanticNodeId(carrier.value_node)` cache-route exemption is removed"
+    );
+
+    // -----------------------------------------------------------------
+    // Genuinely-legit shapes — must NOT trip the scanner.
+    // -----------------------------------------------------------------
+
+    // The content-free route does NOT construct a `SemanticNodeId` at all.
+    let legit_content_free_route =
+        "let key = ShapeCacheKey::synthetic_binding_whole(SyntheticBindingId::from_carrier_key(&carrier), mode);";
     let legit_field_decl = "pub value_node: u64,";
     let legit_struct_constr =
         "SyntheticCarrierKey { scope_canonical_id: s, surface_kind: k, slot_name: n, binding_name: b, value_node: 7 }";
@@ -684,114 +731,23 @@ fn synthetic_carrier_explicit_deepen_guard_self_test() {
     let legit_semantic_node_id_from_const = "let id = SemanticNodeId(0);";
     let legit_semantic_node_id_from_field_no_value_node =
         "let id = SemanticNodeId(member.id_field);";
+    // The regular `SemanticNode` route passes a `SemanticNodeId`
+    // PARAMETER directly (not `SemanticNodeId(_.value_node)`) — unaffected.
+    let legit_regular_member_route =
+        "let key = ShapeCacheKey::semantic_node_whole(scope, member_value, mode);";
 
     for legit in [
-        legit_cache_route_pre_bound,
+        legit_content_free_route,
         legit_field_decl,
         legit_struct_constr,
         legit_serialize,
         legit_semantic_node_id_from_const,
         legit_semantic_node_id_from_field_no_value_node,
+        legit_regular_member_route,
     ] {
         assert!(
             !line_constructs_semantic_node_id_from_value_node(legit),
             "self-test: scanner false-positives on a legitimate line: `{legit}`"
         );
     }
-
-    // -----------------------------------------------------------------
-    // Part 2 — narrowing: the per-line scanner DOES match the deref
-    // shape, but the upstream-window check exempts it when the
-    // legitimate cache-route call opener appears in the upstream
-    // window. This is the rustfmt-broken legitimate shape that would
-    // otherwise be flagged.
-    // -----------------------------------------------------------------
-
-    let legit_split_call: &[&str] = &[
-        "let key = ShapeCacheKey::semantic_node_whole(",
-        "    carrier.scope_canonical_id.clone(),",
-        "    crate::semantic_query::SemanticNodeId(carrier.value_node),",
-        "    mode,",
-        ");",
-    ];
-    // The deref line on its own DOES match the per-line scanner.
-    assert!(
-        line_constructs_semantic_node_id_from_value_node(legit_split_call[2]),
-        "self-test: per-line scanner missed the deref inside the \
-         rustfmt-broken legitimate call"
-    );
-    // But the upstream-window check exempts it.
-    assert!(
-        upstream_uses_cache_route(legit_split_call, 2),
-        "self-test: upstream-window check failed to find \
-         `ShapeCacheKey::semantic_node_whole(` 2 lines upstream of the \
-         deref. The legitimate cache-route argument shape would be \
-         false-flagged."
-    );
-
-    // The `_with_context` variant must also be recognised as legit
-    // because its name is a strict superstring of the bare needle.
-    let legit_split_call_with_ctx: &[&str] = &[
-        "let key = ShapeCacheKey::semantic_node_whole_with_context(",
-        "    carrier.scope_canonical_id.clone(),",
-        "    crate::semantic_query::SemanticNodeId(carrier.value_node),",
-        "    terminal_context,",
-        ");",
-    ];
-    assert!(
-        upstream_uses_cache_route(legit_split_call_with_ctx, 2),
-        "self-test: upstream-window check failed to recognise \
-         `_with_context` variant of the cache-route call"
-    );
-
-    // -----------------------------------------------------------------
-    // Part 3 — narrowing discriminates: a bare bypass (no cache-route
-    // call in the upstream window) IS flagged. This is the defect
-    // class the guard exists to prevent.
-    // -----------------------------------------------------------------
-
-    let bypass_bare: &[&str] = &[
-        "fn deepen_directly(carrier: &SyntheticCarrierKey) {",
-        "    let n = SemanticNodeId(carrier.value_node);",
-        "    do_something_else(n);",
-        "}",
-    ];
-    // The deref line matches the per-line scanner.
-    assert!(
-        line_constructs_semantic_node_id_from_value_node(bypass_bare[1]),
-        "self-test: per-line scanner missed the bare bypass deref"
-    );
-    // And the upstream-window check does NOT exempt it (no cache-route
-    // call opener in upstream).
-    assert!(
-        !upstream_uses_cache_route(bypass_bare, 1),
-        "self-test: upstream-window check false-positively found a \
-         cache-route call in upstream context of a bare bypass — the \
-         guard would silently permit the defect class it exists to \
-         prevent"
-    );
-
-    // A bypass that happens to mention the cache-route name in an
-    // unrelated string literal further upstream than the window is
-    // STILL flagged — the window must be bounded.
-    let bypass_distant_mention: &[&str] = &[
-        "// older code referenced ShapeCacheKey::semantic_node_whole here",
-        "fn pad1() {}",
-        "fn pad2() {}",
-        "fn pad3() {}",
-        "fn pad4() {}",
-        "fn pad5() {}",
-        "fn deepen_directly(carrier: &SyntheticCarrierKey) {",
-        "    let n = SemanticNodeId(carrier.value_node);",
-        "}",
-    ];
-    assert!(
-        line_constructs_semantic_node_id_from_value_node(bypass_distant_mention[7]),
-        "self-test: per-line scanner missed the deref in the distant-mention bypass"
-    );
-    assert!(
-        !upstream_uses_cache_route(bypass_distant_mention, 7),
-        "self-test: upstream window must be bounded; the cache-route \
-         mention 7 lines back must NOT exempt the bypass"
-    );
 }

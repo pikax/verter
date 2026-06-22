@@ -171,6 +171,20 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // poisoned a published consumer with a transit-lowered value.
     let reduction_context = type_expr_materialize_reduction_context(expr, mode);
 
+    // Classify the shape-cache key ONCE per materialization pass and reuse
+    // the SAME `Option<ShapeCacheKey>` for both the peek (below) and the
+    // admit (further down). The classifier runs the depth-safe synthetic-
+    // carrier walker (`NonSyntheticTypeExpr::new`) per build, so building
+    // it separately for the peek and the admit double-walked every
+    // carrier-free expression. `None` (a composite NESTING a synthetic
+    // carrier — no sound content-free key) still bypasses BOTH the peek
+    // and the admit; the value is computed and returned either way.
+    let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
+        std::sync::Arc::<str>::from(scope_canonical_id),
+        std::sync::Arc::new(expr.clone()),
+        reduction_context,
+    );
+
     // Peek the universal ShapeCacheDb (TypeExpr subject,
     // whole-subject demand under the exact reduction context).
     {
@@ -180,16 +194,18 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let ctx = query_engine.ctx();
-        let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
-            std::sync::Arc::<str>::from(scope_canonical_id),
-            std::sync::Arc::new(expr.clone()),
-            reduction_context,
-        );
-        let host_db = ctx.project_type_store().shape_cache_db();
-        if let Some(cached) = host_db.peek(&cache_key, ctx) {
-            crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return cached;
+        // A composite expression that NESTS a synthetic carrier has no
+        // sound content-free cache key — bypass the cache (skip peek; the
+        // admit path below is likewise skipped) and fall through to the
+        // full cold compute. A bare carrier / carrier-free expression
+        // yields a key normally.
+        if let Some(cache_key) = &cache_key {
+            let host_db = ctx.project_type_store().shape_cache_db();
+            if let Some(cached) = host_db.peek(cache_key, ctx) {
+                crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return cached;
+            }
         }
     }
 
@@ -404,23 +420,26 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            let cache_key =
-                crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
-                    std::sync::Arc::<str>::from(scope_canonical_id),
-                    std::sync::Arc::new(expr.clone()),
-                    reduction_context,
-                );
-            let host_db = ctx.project_type_store().shape_cache_db();
-            let captured_value = materialized.clone();
-            // The SINGLE tear-free scope observation taken above is threaded
-            // into the write-through. The signature builder is
-            // provenance-pure: it roots the keyed scope on the observation's
-            // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
-            // on a re-read of current content. The lowering `NodeScopeId`
-            // was built from the SAME observation's `whole_hash`, so the
-            // memo value and its fact signature root on one identical scope
-            // hash — no torn read.
-            let _ = host_db.get_or_compute(&cache_key, ctx, move || {
+            // A composite expression that NESTS a synthetic carrier has
+            // no sound content-free cache key — skip the cache admit
+            // entirely (the freshly-computed `materialized` value still
+            // flows to the caller below). A bare carrier / carrier-free
+            // expression yields a key normally. The SAME `cache_key` the
+            // peek classified at function entry is reused here — the
+            // classifier (and its synthetic-carrier walk) runs once per
+            // materialization pass, not once per peek and once per admit.
+            if let Some(cache_key) = &cache_key {
+                let host_db = ctx.project_type_store().shape_cache_db();
+                let captured_value = materialized.clone();
+                // The SINGLE tear-free scope observation taken above is threaded
+                // into the write-through. The signature builder is
+                // provenance-pure: it roots the keyed scope on the observation's
+                // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
+                // on a re-read of current content. The lowering `NodeScopeId`
+                // was built from the SAME observation's `whole_hash`, so the
+                // memo value and its fact signature root on one identical scope
+                // hash — no torn read.
+                let _ = host_db.get_or_compute(cache_key, ctx, move || {
             // The keyed scope canonical is the entry's self-root, rooted
             // on the observed materialisation-time content version;
             // every canonical the materialisation walk observed (carried
@@ -451,6 +470,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
                 crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
             }
         });
+            }
         }
     }
 

@@ -565,6 +565,218 @@ fn member_shape_cache_db_untracked_self_root_rejects_warm_entry() {
     );
 }
 
+/// Universal `ShapeCacheDb` (SyntheticBinding subject) validates the
+/// keyed scope canonical's self-root strictly through the SAME
+/// fact-signature rail as the `TypeExpr` and `SemanticNode` subjects.
+///
+/// The synthetic-binding subject is the content-free
+/// [`crate::semantic_query::SyntheticBindingId`] identity — the cache key
+/// carries no `value_node` ordinal. Correctness of a single-entry cache
+/// under a content-free key holds ONLY through the rail: a warm entry
+/// whose self-root names an untracked / changed keyed canonical must be
+/// recomputed cold, never stale-served.
+///
+/// Discriminating property: the prime attempt's materialized expression
+/// carries the marker `"stale"`; the recompute carries `"recomputed"`. A
+/// lazy validator admits the stale expression and the second
+/// `get_or_compute` returns it; the strict validator rejects admission
+/// for an untracked keyed canonical, so the second call's cold closure
+/// runs and the recomputed value surfaces.
+///
+/// Mirrors `member_shape_cache_db_untracked_self_root_rejects_warm_entry`
+/// exactly — every subject shares the
+/// `cooperative_get_or_insert_with_post_publish` + fact-signature
+/// self-root contract.
+#[test]
+fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
+    use crate::semantic_query::{ProjectionMode, SyntheticBindingId};
+    use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
+
+    let host = host_with_unrelated_file();
+    let c = "/self_root_qdb/synthetic_binding_never_loaded.ts";
+    assert_untracked(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().shape_cache_db();
+
+    // Content-free synthetic-binding identity rooted on the untracked
+    // keyed canonical. The `value_node` is value-side provenance only —
+    // the identity drops it, so the key roots on `c` via
+    // `scope_canonical_id`.
+    let carrier = SyntheticCarrierKey {
+        scope_canonical_id: Arc::<str>::from(c),
+        surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+        slot_name: Some(Arc::from("default")),
+        binding_name: Arc::from("items"),
+        value_node: 7,
+    };
+    let key = crate::component_meta_caches::ShapeCacheKey::synthetic_binding_whole(
+        SyntheticBindingId::from_carrier_key(&carrier),
+        ProjectionMode::Expanded,
+    );
+
+    let _ = db.get_or_compute(&key, ctx, || {
+        Some((
+            materialized("stale", empty_dep_signature()),
+            planted_self_root(c),
+        ))
+    });
+
+    let mut cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx, || {
+            cold_ran = true;
+            Some((
+                materialized("recomputed", empty_dep_signature()),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm path produces a value");
+
+    assert!(
+        cold_ran,
+        "ShapeCacheDb (SyntheticBinding subject) MUST NOT serve a warm entry \
+         whose self-root names an untracked keyed canonical",
+    );
+    assert!(
+        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        "the rejected entry must not bubble its stale materialized expression",
+    );
+
+    // A second carrier with a DIFFERENT `value_node` but the same
+    // content-free identity keys the SAME slot — the rail-validated entry
+    // does not split per provenance ordinal.
+    let carrier_other_node = SyntheticCarrierKey {
+        value_node: 99,
+        ..carrier.clone()
+    };
+    let key_other_node = crate::component_meta_caches::ShapeCacheKey::synthetic_binding_whole(
+        SyntheticBindingId::from_carrier_key(&carrier_other_node),
+        ProjectionMode::Expanded,
+    );
+    assert_eq!(
+        key, key_other_node,
+        "two carriers differing only in `value_node` must produce the SAME \
+         content-free cache key — the ordinal is provenance, not identity",
+    );
+}
+
+/// BEHAVIORAL proof of the `ShapeCacheKey::type_expr_whole_with_context`
+/// synthetic-carrier classifier (the runtime complement to the SYNTACTIC
+/// architecture guard `synthetic_binding_cache_subject_is_content_free_\
+/// and_carrier_sealed`). Drives the real classifier over three shapes and
+/// asserts the three classification outcomes through observable behavior
+/// (public `ShapeCacheKey` equality + an observable `ShapeCacheDb`
+/// redirect), never by reading the module-private `subject` field or by
+/// matching on source text:
+///
+///   1. A BARE top-level `TypeExpr::SyntheticSlotBinding(carrier)`
+///      redirects to the content-free `SyntheticBinding` identity — its
+///      classified key is BYTE-EQUAL to the key the explicit
+///      `synthetic_binding_whole` constructor builds, AND a deep entry
+///      inserted under that carrier identity is reachable.
+///   2. A carrier-FREE expression (`Literal`) classifies to a `TypeExpr`
+///      subject — `Some(key)`.
+///   3. A NESTED carrier (`Parenthesized(SyntheticSlotBinding(carrier))`)
+///      has no sound content-free key — `None`. THIS is the discriminating
+///      case: a top-level-only classifier (one that checks only the root
+///      node for the carrier) would build a `TypeExpr` subject and return
+///      `Some`, flipping this assertion RED.
+#[test]
+fn type_expr_whole_classifies_synthetic_carrier_confinement() {
+    use crate::component_meta_caches::{ShapeCacheDb, ShapeCacheKey};
+    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SyntheticBindingId};
+    use verter_type_expr::{
+        LiteralValue, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
+    };
+
+    let scope = "/self_root_qdb/classify_carrier_owner.vue";
+    let mode = ProjectionMode::Shallow;
+    let ctx_published = ProjectionReductionContext::published(mode);
+
+    let carrier = SyntheticCarrierKey {
+        scope_canonical_id: Arc::<str>::from(scope),
+        surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+        slot_name: Some(Arc::from("default")),
+        binding_name: Arc::from("items"),
+        value_node: 11,
+    };
+
+    // (1) BARE carrier → redirect to the content-free `SyntheticBinding`
+    // identity. The classified key MUST equal the key the explicit
+    // `synthetic_binding_whole` constructor builds for the same carrier —
+    // proving the redirect via the public derived `PartialEq` (no
+    // private-field access).
+    let bare_expr = Arc::new(TypeExpr::SyntheticSlotBinding(Arc::new(carrier.clone())));
+    let bare_key = ShapeCacheKey::type_expr_whole_with_context(
+        Arc::<str>::from(scope),
+        Arc::clone(&bare_expr),
+        ctx_published,
+    )
+    .expect("a BARE synthetic carrier must classify to Some (the SyntheticBinding redirect)");
+    let explicit_synthetic_key = ShapeCacheKey::synthetic_binding_whole(
+        SyntheticBindingId::from_carrier_key(&carrier),
+        mode,
+    );
+    assert_eq!(
+        bare_key, explicit_synthetic_key,
+        "a BARE `TypeExpr::SyntheticSlotBinding(carrier)` must classify to the \
+         SAME key as `synthetic_binding_whole(from_carrier_key(carrier))` — the \
+         bare carrier redirects to the content-free `SyntheticBinding` identity, \
+         it does NOT fold its `value_node` into a `TypeExpr`-subject hash",
+    );
+
+    // Observable redirect through `ShapeCacheDb`: a deep entry inserted
+    // under the carrier's content-free identity is reachable via the same
+    // identity. (The key built from the bare carrier above is `==` that
+    // identity, so the bare-carrier route would hit this entry.)
+    let db = ShapeCacheDb::new();
+    let deep = TypeExpr::Literal(LiteralValue::String("CLASSIFY_DEEP".to_string()));
+    db.insert_synthetic_carrier_deep_for_test(&carrier, mode, deep.clone());
+    let hit = db
+        .get_synthetic_carrier_deep_for_test(&carrier, mode)
+        .expect("the deep entry inserted under the carrier identity must be reachable");
+    assert_eq!(
+        hit, deep,
+        "the carrier identity redirect must return the materialised deep type",
+    );
+
+    // (2) carrier-FREE expression → a `TypeExpr` subject (`Some`).
+    let free_expr = Arc::new(TypeExpr::Literal(LiteralValue::Number(42.0)));
+    let free_key = ShapeCacheKey::type_expr_whole_with_context(
+        Arc::<str>::from(scope),
+        free_expr,
+        ctx_published,
+    );
+    assert!(
+        free_key.is_some(),
+        "a carrier-FREE expression must classify to Some (a `TypeExpr` subject)",
+    );
+    // And it must NOT collapse onto the synthetic-binding identity.
+    assert_ne!(
+        free_key.as_ref(),
+        Some(&explicit_synthetic_key),
+        "a carrier-free expression must NOT key on the `SyntheticBinding` identity",
+    );
+
+    // (3) NESTED carrier → no sound content-free key (`None`). The
+    // discriminating case: descends past the root, so a top-level-only
+    // classifier would wrongly return `Some(TypeExpr {..})`.
+    let nested_expr = Arc::new(TypeExpr::Parenthesized(Arc::new(
+        TypeExpr::SyntheticSlotBinding(Arc::new(carrier.clone())),
+    )));
+    let nested_key = ShapeCacheKey::type_expr_whole_with_context(
+        Arc::<str>::from(scope),
+        nested_expr,
+        ctx_published,
+    );
+    assert!(
+        nested_key.is_none(),
+        "a NESTED `TypeExpr::SyntheticSlotBinding` (under `Parenthesized`) has no \
+         sound content-free cache key — the classifier MUST return None, never a \
+         `TypeExpr`-subject key that would fold the carrier's `value_node`",
+    );
+}
+
 /// `MaterializeMemoDb`'s producer records a dependency `FileWholeHash`
 /// for every canonical the materialization walk observed. A content
 /// edit to an observed dependency invalidates the memo even though the
