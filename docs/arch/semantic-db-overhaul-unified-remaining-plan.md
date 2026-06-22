@@ -1438,6 +1438,62 @@ not relitigate them block-by-block, and do not silently treat them as defects:
    — session/review capacity follows it; carving U8 forward around the sidecar is
    rejected.
 
+### 2.4 Post-Stage-10 roadmap extension (PARSELOWER Stages 11 candidate + 12 adopted)
+
+These extend the LOCKED `parselower-design.md` Stage-1–10 `TypeExpr`-removal
+design at the **roadmap level only** — `parselower-design.md` itself is NOT
+modified by this record; Stages 11–12 are master-plan roadmap extensions beyond
+that locked design. Owner-directed, recorded 2026-06-22.
+
+1. **Stage 11 — CANDIDATE (deferred question, NOT yet adopted).** The `TypeExpr`
+   end-state question: stop at Stage 10, or add a QUARANTINE stage that renames
+   the surviving syntactic-only `TypeExpr` surfaces (those that legitimately
+   survive Stage 10 — syntactic / output / diagnostic only) to an explicitly
+   syntactic type (e.g. `TypeSyntax`) plus hard guards: no syntax-walk for
+   semantic decisions, no hot-path materialization, no cache-owned broad syntax
+   bodies. Goal = ZERO `TypeExpr` as semantic AUTHORITY, not zero syntax
+   representation. This end-state question is DEFERRED and is codex-architect-ruled
+   ONLY AFTER STAGE 10 LANDS — the surviving-`TypeExpr` census is only real once
+   Stage 10 has actually landed. Owner-pinned sequence: Stage 9 lands cleanly →
+   Stage 10 DESIGN finalised (the deferred codex-architect pass closing the 2 open
+   re-confirm findings [P1]/[P2] + owner ratification, just before Stage-10
+   implementation) → Stage 10 IMPLEMENTED + LANDS → THEN the Stage-11 end-state
+   question is looked at + finalised. When opened, the codex-architect ruling
+   tests as HYPOTHESES (neutral / best-on-merits) that the GOOD Stage 11 is the
+   structural quarantine/rename/guard, and the BAD Stage 11 is total `TypeExpr`
+   eradication / "`HotTypeRef` everywhere" forced into lower graph-free crates /
+   persisted DTOs / protocol data, which hurts correctness + perf.
+2. **Stage 12 — ADOPTED (owner-directed 2026-06-22).** Profile-gated performance
+   compaction: remove residual clone/serde/tree-walk costs, shrink DTOs/artifacts,
+   optimize fact/locator paths — ONLY where profiling proves a real hotspot
+   (measured-hotspot-driven; "only if profiling proves it"). It may legitimately
+   be EMPTY (no proven hotspot ⇒ no-op = success). Sequenced STRICTLY AFTER Stage
+   11 — both SCOPED and DONE only after Stage 11 (owner-directed): even Stage 12's
+   detailed scoping/design waits until Stage 11 is in, so it optimizes the
+   quarantined, final architecture and never a moving target. (No post-Stage-10
+   fallback.) Binding conditions carried to the codex ruling: (a) strictly POST
+   architecture-final (optimize a stable architecture, never a moving target);
+   (b) consumes the end-to-end benchmark / interim post-Stage-11 profiling as its
+   hotspot input; (c) every change stays under the FULL correctness gate + cache
+   invariants (R6/R21, fact-validation) + the Stage-11 structural guards — NO
+   "optimization" that reintroduces broad-structure caching, hot-path
+   materialization, or weakens an invariant; (d) a defined "proves it" THRESHOLD
+   so it is a real gate, not unbounded micro-opt. ADOPTED at the roadmap level now;
+   the DETAILED Stage-12 design (which hotspots, exact changes, the "proves it"
+   threshold methodology) is codex-architect-ruled when it becomes LIVE (with real
+   profiling data) post-architecture-final.
+3. **Informational end-to-end benchmark.** A PRE-Stage-6 baseline (the meaningful
+   baseline just before the behaviour-changing structural flips begin — Stages
+   1–5A are non-breaking/dormant, so pre-Stage-6 is a recoverable git point) vs
+   the FULLY-COMPLETED final state (post-Stage-12, the truly-final state) measured
+   on the **nuxt-ui** repo, FIRST-PASS + COLD. Measured ONCE at the end (the
+   whole-migration delta, NOT an isolated per-stage increment). Results STORED
+   DURABLY in a stable, owner-checkable location (NOT `/tmp`, which gets wiped) for
+   owner review. It is INFORMATIONAL, NOT a gate / deal-breaker: Stage 11 and the
+   migration stand on ARCHITECTURAL merits, so a modest or neutral number does NOT
+   veto. (nuxt-ui = external corpus — fine for a bench, not for default-gated unit
+   tests.)
+
 ---
 
 ## 3. Cross-track dependency map
