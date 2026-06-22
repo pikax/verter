@@ -274,3 +274,195 @@ fn control_word_only_prefix_has_no_double_left_angle_today() {
         "control should never double `<`: {applied:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Broader coverage: the `<`-prefixed snippet class has 9 members, and the
+// original repro only guarded 3 (`script setup` / `template` / `style`). The
+// tests below extend the guard across the rest of the class — every snippet
+// `sfc_root_completions` produces begins with `<`, so every one must absorb a
+// typed leading `<` via a `<`-anchored `text_edit` and never double it.
+// ---------------------------------------------------------------------------
+
+/// `<script` selecting the plain "script" item (distinct from "script setup").
+#[test]
+fn script_completion_does_not_double_left_angle() {
+    let source = "<script";
+    let cursor = source.len();
+    let items = root_items_at(source, cursor);
+    let item = find_item(&items, "script");
+
+    assert_eq!(
+        item.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "tag completion should remain a snippet"
+    );
+    assert!(
+        item.text_edit.is_some(),
+        "REPRO: `script` ships no `<`-anchored text_edit → `<<script`"
+    );
+    let applied = apply_item(source, cursor, item);
+    assert!(
+        !applied.contains("<<script"),
+        "double `<` reproduced for plain <script>: {applied:?}"
+    );
+    assert!(
+        applied.starts_with("<script"),
+        "expected single `<script ...>`, got {applied:?}"
+    );
+}
+
+/// `<style` selecting "style scoped" — the snippet is `<style scoped>...`.
+#[test]
+fn style_scoped_completion_does_not_double_left_angle() {
+    let source = "<style";
+    let cursor = source.len();
+    let items = root_items_at(source, cursor);
+    let item = find_item(&items, "style scoped");
+
+    assert_eq!(
+        item.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "tag completion should remain a snippet"
+    );
+    assert!(
+        item.text_edit.is_some(),
+        "REPRO: `style scoped` ships no `<`-anchored text_edit → `<<style`"
+    );
+    let applied = apply_item(source, cursor, item);
+    assert!(
+        !applied.contains("<<style"),
+        "double `<` reproduced for <style scoped>: {applied:?}"
+    );
+    assert!(
+        applied.starts_with("<style scoped>"),
+        "expected single `<style scoped>`, got {applied:?}"
+    );
+}
+
+/// SCAFFOLD on an empty doc — proves the no-typed-`<` walk-back branch yields a
+/// single `<` for a multi-line scaffold. Scaffolds are only offered when
+/// `source.trim().is_empty()`, so there is intentionally NO typed `<` to absorb;
+/// the snippet's own `<` must be the only one.
+#[test]
+fn vue_ts_scaffold_on_empty_doc_has_single_left_angle() {
+    // Whitespace-only doc → `trim().is_empty()` true → scaffolds offered, and no
+    // typed `<` exists for the walk-back to find.
+    let source = "  ";
+    let cursor = source.len(); // 2
+    let items = root_items_at(source, cursor);
+    let item = find_item(&items, "vue-ts");
+
+    assert_eq!(
+        item.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "scaffold completion should remain a snippet"
+    );
+    let applied = apply_item(source, cursor, item);
+    assert!(
+        !applied.contains("<<"),
+        "scaffold must never double `<`: {applied:?}"
+    );
+    assert!(
+        applied
+            .trim_start()
+            .starts_with("<script setup lang=\"ts\">"),
+        "expected the TS scaffold to start with a single `<script setup lang=\\\"ts\\\">`, got {applied:?}"
+    );
+}
+
+/// `<i18n` — the tag word contains a digit (`i18n`); proves the walk-back
+/// includes ASCII alphanumerics, not just letters.
+#[test]
+fn i18n_completion_does_not_double_left_angle() {
+    let source = "<i18n";
+    let cursor = source.len();
+    let items = root_items_at(source, cursor);
+    let item = find_item(&items, "i18n");
+
+    assert_eq!(
+        item.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "custom-block completion should remain a snippet"
+    );
+    assert!(
+        item.text_edit.is_some(),
+        "REPRO: `i18n` ships no `<`-anchored text_edit → `<<i18n`"
+    );
+    let applied = apply_item(source, cursor, item);
+    assert!(
+        !applied.contains("<<i18n"),
+        "double `<` reproduced for <i18n>: {applied:?}"
+    );
+    assert!(
+        applied.starts_with("<i18n"),
+        "expected single `<i18n ...>`, got {applied:?}"
+    );
+}
+
+/// EDGE: partial `<scr` (cursor mid-word) selecting "script setup" — proves the
+/// walk-back climbs out of the middle of the partial tag word and over the `<`.
+#[test]
+fn partial_prefix_completion_does_not_double_left_angle() {
+    let source = "<scr";
+    let cursor = source.len(); // 4
+    let items = root_items_at(source, cursor);
+    let item = find_item(&items, "script setup");
+
+    assert!(
+        item.text_edit.is_some(),
+        "REPRO: partial `<scr` ships no `<`-anchored text_edit → `<<script`"
+    );
+    let applied = apply_item(source, cursor, item);
+    assert!(
+        !applied.contains("<<"),
+        "double `<` reproduced for partial `<scr`: {applied:?}"
+    );
+    assert!(
+        applied.starts_with("<script setup"),
+        "expected single `<script setup ...>`, got {applied:?}"
+    );
+}
+
+/// EDGE: a lone typed `<` (cursor right after it). `"<".trim()` == `"<"` is
+/// NON-empty, so scaffolds are NOT offered, but block snippets ARE. Selecting
+/// "script setup" must absorb the typed `<` at offset 0 (range start == 0).
+#[test]
+fn lone_left_angle_completion_does_not_double_left_angle() {
+    let source = "<";
+    let cursor = source.len(); // 1
+    let items = root_items_at(source, cursor);
+    let item = find_item(&items, "script setup");
+
+    assert!(
+        item.text_edit.is_some(),
+        "REPRO: lone `<` ships no `<`-anchored text_edit → `<<script`"
+    );
+    let applied = apply_item(source, cursor, item);
+    assert!(
+        !applied.contains("<<"),
+        "double `<` reproduced for lone `<`: {applied:?}"
+    );
+    assert!(
+        applied.starts_with("<script setup"),
+        "expected single `<script setup ...>`, got {applied:?}"
+    );
+}
+
+/// EDGE: trailing space `<script ` (cursor after the space). The char before the
+/// cursor is whitespace (a word boundary), so the walk-back stops immediately
+/// and finds no `<` adjacent to the (empty) word → the snippet is inserted at the
+/// cursor. The exact output for this unusual trigger is intentionally NOT
+/// over-constrained; the ONLY invariant is that it must never produce `<<script`.
+#[test]
+fn trailing_space_completion_never_doubles_left_angle() {
+    let source = "<script ";
+    let cursor = source.len(); // 8
+    let items = root_items_at(source, cursor);
+    let item = find_item(&items, "script setup");
+
+    let applied = apply_item(source, cursor, item);
+    assert!(
+        !applied.contains("<<script"),
+        "trailing-space trigger must never double `<`: {applied:?}"
+    );
+}
