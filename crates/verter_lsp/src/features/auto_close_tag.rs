@@ -21,14 +21,15 @@ pub enum CarrierKind {
     Svelte,
 }
 
-/// Map a resolved [`FileLanguage`] to its markup [`CarrierKind`], fail-closed.
+/// Map a resolved [`verter_session::FileLanguage`] to its markup [`CarrierKind`], fail-closed.
 ///
 /// This is the SHARED, framework-NEUTRAL carrier-kind classifier the markup
 /// routing layers consult (the on-type auto-close gate and the add-import
 /// carrier-preamble re-anchor). It keys off DESCRIPTOR IDENTITY, not a Vue-only
 /// predicate or a `!is_svelte()` fallback: it confirms the language is a
 /// registered framework CARRIER row (its adapter id AND carrier language match a
-/// `built_in_descriptors()` row), then maps the row's wire [`FrameworkTag`] to a
+/// `built_in_descriptors()` row), then maps the row's wire
+/// [`FrameworkTag`](verter_protocol::typeinfo::graph::FrameworkTag) to a
 /// `CarrierKind`.
 ///
 /// FAIL-CLOSED: a non-carrier `FileLanguage` (plain script / template row) and
