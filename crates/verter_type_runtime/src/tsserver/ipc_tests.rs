@@ -88,7 +88,7 @@ fn test_parse_tsserver_diagnostic() {
         "category": "error"
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content)).unwrap();
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
     assert_eq!(
         parsed.message,
         "Type 'number' is not assignable to type 'string'."
@@ -122,7 +122,7 @@ fn parse_tsserver_diagnostic_reads_reports_unnecessary_tag() {
         "reportsUnnecessary": true
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content)).unwrap();
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
     assert_eq!(parsed.code, Some("6133".to_string()));
     assert_eq!(
         parsed.tags,
@@ -146,7 +146,7 @@ fn parse_tsserver_diagnostic_reads_reports_deprecated_tag() {
         "reportsDeprecated": true
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content)).unwrap();
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
     assert_eq!(
         parsed.tags,
         vec![TypeDiagnosticTag::Deprecated],
@@ -168,11 +168,78 @@ fn parse_tsserver_diagnostic_without_tag_flags_stays_untagged() {
         "category": "suggestion"
     });
 
-    let parsed = parse_tsserver_diagnostic(&diag, Some(content)).unwrap();
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), None).unwrap();
     assert!(
         parsed.tags.is_empty(),
         "no boolean flags ⇒ no tags, got: {:?}",
         parsed.tags
+    );
+}
+
+#[test]
+fn parse_tsserver_diagnostic_reads_same_file_related_information() {
+    // A duplicate-identifier diagnostic (TS2300) carries a `relatedInformation`
+    // span pointing at the OTHER declaration ("also declared here") in the SAME
+    // file. The parser must read it into `related_information` with a real byte
+    // offset (same-file conversion via `content`) and the related message.
+    // Pre-fix `related_information` did not exist; this fails to compile / is empty.
+    let content = "const dup = 1;\nconst dup = 2;\n";
+    let diag = serde_json::json!({
+        "start": { "line": 2, "offset": 7 },
+        "end": { "line": 2, "offset": 10 },
+        "text": "Cannot redeclare block-scoped variable 'dup'.",
+        "code": 2451,
+        "category": "error",
+        "relatedInformation": [
+            {
+                "message": "'dup' was also declared here.",
+                "category": "message",
+                "code": 2451,
+                "span": {
+                    "start": { "line": 1, "offset": 7 },
+                    "end": { "line": 1, "offset": 10 },
+                    "file": "/proj/dup.ts"
+                }
+            }
+        ]
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    assert_eq!(
+        parsed.related_information.len(),
+        1,
+        "the relatedInformation span must be parsed, got: {:?}",
+        parsed.related_information
+    );
+    let ri = &parsed.related_information[0];
+    assert_eq!(ri.message, "'dup' was also declared here.");
+    assert_eq!(ri.path, "/proj/dup.ts");
+    // First `dup` decl: line 1, offset 7 → col index 6 → byte 6; spans 3 chars.
+    assert_eq!(
+        ri.start, 6,
+        "same-file related span resolves to a real byte offset"
+    );
+    assert_eq!(ri.end, 9);
+}
+
+#[test]
+fn parse_tsserver_diagnostic_without_related_information_is_empty() {
+    // Control: a diagnostic with no `relatedInformation` yields an empty list
+    // (the parser never fabricates related spans).
+    let content = "const x = 1;\n";
+    let diag = serde_json::json!({
+        "start": { "line": 1, "offset": 7 },
+        "end": { "line": 1, "offset": 8 },
+        "text": "some error",
+        "code": 1234,
+        "category": "error"
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/x.ts")).unwrap();
+    assert!(
+        parsed.related_information.is_empty(),
+        "absent relatedInformation ⇒ empty list, got: {:?}",
+        parsed.related_information
     );
 }
 
@@ -1039,6 +1106,7 @@ fn diag(message: &str, severity: TypeDiagnosticSeverity, start: u32, end: u32) -
         end,
         code: None,
         tags: Vec::new(),
+        related_information: Vec::new(),
     }
 }
 
@@ -1056,6 +1124,7 @@ fn diag_with_code(
         end,
         code: Some(code.to_string()),
         tags: Vec::new(),
+        related_information: Vec::new(),
     }
 }
 
@@ -1208,6 +1277,7 @@ fn diag_with_tags(
         end,
         code: Some(code.to_string()),
         tags,
+        related_information: Vec::new(),
     }
 }
 

@@ -300,6 +300,37 @@ fn client_capabilities_advertise_diagnostic_tag_support() {
 }
 
 /// The tgo `initialize` client capabilities must advertise
+/// `publishDiagnostics.relatedInformation: true` (the spec-defined gate for the
+/// secondary "see declaration here" spans). An LSP server only attaches
+/// `Diagnostic.relatedInformation` when the client declares support; with it
+/// absent tgo silently strips the related spans `parse_lsp_diagnostic` reads, so
+/// the `.vue` `<script>` block loses the clickable related links a `.ts` file has.
+///
+/// The pull-channel `diagnostic.relatedInformation` is a NON-SPEC field (LSP
+/// 3.17's `DiagnosticClientCapabilities` has no such member) retained as a
+/// private-extension hint alongside the tag flag.
+///
+/// Discriminating: the pre-K4 capabilities advertised only `tagSupport` on each
+/// channel, with no `relatedInformation` key — this asserts the K4 addition.
+#[test]
+fn client_capabilities_advertise_diagnostic_related_information() {
+    let caps = build_client_capabilities();
+    let td = &caps["textDocument"];
+
+    assert_eq!(
+        td["publishDiagnostics"]["relatedInformation"],
+        serde_json::json!(true),
+        "publishDiagnostics.relatedInformation must be advertised so tgo includes \
+         the related spans (without it tgo strips them)"
+    );
+    assert_eq!(
+        td["diagnostic"]["relatedInformation"],
+        serde_json::json!(true),
+        "diagnostic.relatedInformation (pull-channel private-extension hint) must be advertised"
+    );
+}
+
+/// The tgo `initialize` client capabilities must advertise
 /// `textDocument.completion.completionItem.resolveSupport` listing EXACTLY the
 /// properties tgo's `completionItem/resolve` handlers fold back.
 ///
@@ -1468,7 +1499,7 @@ fn test_parse_lsp_diagnostic() {
         "code": 2322,
         "message": "Type error"
     });
-    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    let diag = parse_lsp_diagnostic(&json, None, None).unwrap();
     assert_eq!(diag.message, "Type error");
     assert!(matches!(diag.severity, TypeDiagnosticSeverity::Error));
     assert_eq!(diag.code.as_deref(), Some("2322"));
@@ -1497,7 +1528,7 @@ fn parse_lsp_diagnostic_maps_native_unnecessary_tag() {
         "message": "'unused' is declared but its value is never read.",
         "tags": [1]
     });
-    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    let diag = parse_lsp_diagnostic(&json, None, None).unwrap();
     assert_eq!(diag.code.as_deref(), Some("6133"));
     assert_eq!(
         diag.tags,
@@ -1519,7 +1550,7 @@ fn parse_lsp_diagnostic_maps_deprecated_and_ignores_unknown_tags() {
         "message": "'oldApi' is deprecated.",
         "tags": [2, 99]
     });
-    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    let diag = parse_lsp_diagnostic(&json, None, None).unwrap();
     assert_eq!(
         diag.tags,
         vec![TypeDiagnosticTag::Deprecated],
@@ -1543,7 +1574,7 @@ fn parse_lsp_diagnostic_maps_both_unnecessary_and_deprecated_tags() {
         "message": "'oldUnused' is declared but its value is never read.",
         "tags": [1, 2]
     });
-    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    let diag = parse_lsp_diagnostic(&json, None, None).unwrap();
     assert_eq!(
         diag.tags,
         vec![
@@ -1567,11 +1598,85 @@ fn parse_lsp_diagnostic_without_tags_field_stays_untagged() {
         "code": 2322,
         "message": "Type error"
     });
-    let diag = parse_lsp_diagnostic(&json, None).unwrap();
+    let diag = parse_lsp_diagnostic(&json, None, None).unwrap();
     assert!(
         diag.tags.is_empty(),
         "absent `tags` ⇒ no carrier tags, got: {:?}",
         diag.tags
+    );
+}
+
+/// A TSGO (LSP) diagnostic with `relatedInformation` carries each secondary span
+/// into the carrier `related_information`: a same-file related `location` resolves
+/// to a real byte offset (via the file content) and the related message survives.
+/// Pre-fix `related_information` did not exist; this fails to compile / is empty.
+#[test]
+fn parse_lsp_diagnostic_reads_same_file_related_information() {
+    let content = "const dup = 1;\nconst dup = 2;\n";
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 1, "character": 6 },
+            "end": { "line": 1, "character": 9 }
+        },
+        "severity": 1,
+        "code": 2451,
+        "message": "Cannot redeclare block-scoped variable 'dup'.",
+        "relatedInformation": [
+            {
+                "location": {
+                    "uri": "file:///proj/dup.ts",
+                    "range": {
+                        "start": { "line": 0, "character": 6 },
+                        "end": { "line": 0, "character": 9 }
+                    }
+                },
+                "message": "'dup' was also declared here."
+            }
+        ]
+    });
+    // The primary file path (canonicalized inside the parser) matches the related
+    // location URI's path, so the related span resolves to a real byte offset.
+    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/dup.ts")).unwrap();
+    assert_eq!(
+        diag.related_information.len(),
+        1,
+        "the LSP relatedInformation span must be parsed, got: {:?}",
+        diag.related_information
+    );
+    let ri = &diag.related_information[0];
+    assert_eq!(ri.message, "'dup' was also declared here.");
+    assert!(
+        ri.path.ends_with("/proj/dup.ts"),
+        "the related path comes from location.uri, got: {}",
+        ri.path
+    );
+    // First `dup` on line 0 starts at character 6 → byte offset 6, spans 3 chars.
+    assert_eq!(
+        ri.start, 6,
+        "same-file related span resolves to a real byte offset"
+    );
+    assert_eq!(ri.end, 9);
+}
+
+/// Control: a TSGO diagnostic with no `relatedInformation` yields an empty list
+/// (the parser never fabricates related spans).
+#[test]
+fn parse_lsp_diagnostic_without_related_information_is_empty() {
+    let content = "const x = 1;\n";
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 6 },
+            "end": { "line": 0, "character": 7 }
+        },
+        "severity": 1,
+        "code": 1234,
+        "message": "some error"
+    });
+    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/x.ts")).unwrap();
+    assert!(
+        diag.related_information.is_empty(),
+        "absent relatedInformation ⇒ empty list, got: {:?}",
+        diag.related_information
     );
 }
 

@@ -496,7 +496,13 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                 body.as_array()
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|d| parse_tsserver_diagnostic(d, content.as_deref()))
+                            .filter_map(|d| {
+                                parse_tsserver_diagnostic(
+                                    d,
+                                    content.as_deref(),
+                                    Some(file.as_str()),
+                                )
+                            })
                             .collect()
                     })
                     .unwrap_or_default()

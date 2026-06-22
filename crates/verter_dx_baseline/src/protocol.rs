@@ -1012,6 +1012,7 @@ mod tests {
             end: 1,
             code: Some("2304".to_string()),
             tags: Vec::new(),
+            related_information: Vec::new(),
         };
         let nd: NormalizedDiagnostic = (&diag).into();
         assert_eq!(nd.severity, "error");
@@ -1033,6 +1034,7 @@ mod tests {
             end: 9,
             code: Some("6133".to_string()),
             tags: vec![rt::TypeDiagnosticTag::Unnecessary],
+            related_information: Vec::new(),
         };
         let nd: NormalizedDiagnostic = (&unused).into();
         assert_eq!(
@@ -1057,6 +1059,7 @@ mod tests {
                 rt::TypeDiagnosticTag::Unnecessary,
                 rt::TypeDiagnosticTag::Deprecated,
             ],
+            related_information: Vec::new(),
         };
         let nd: NormalizedDiagnostic = (&both).into();
         assert_eq!(

@@ -380,3 +380,90 @@ return {};
         );
     }
 );
+
+// ---------------------------------------------------------------------------
+// K4: a diagnostic's `relatedInformation` ("see declaration here") survives the
+// provider parse (both backends)
+// ---------------------------------------------------------------------------
+//
+// An interface with a duplicate member of a CONFLICTING type
+// (`x: number; x: string`) produces TS2717 ("Subsequent property declarations
+// must have the same type") carrying a `relatedInformation` span that points at
+// the OTHER `x` declaration in the SAME file ("'x' was also declared here").
+//
+// Per-backend wire reality (both verified to emit the related span):
+//  - tsserver always includes the `relatedInformation` array (each span has its
+//    own `file`) on its diagnostic response — no client-capability gate.
+//  - TSGO (LSP) only attaches `Diagnostic.relatedInformation` when the client
+//    advertises `publishDiagnostics.relatedInformation` (the same silent-degrade
+//    class as the tag/completion capabilities) — now advertised in
+//    `build_client_capabilities`. WITHOUT that capability tgo strips the related
+//    spans entirely (the pre-fix tree), so this test is discriminating: pre-fix
+//    the carrier `related_information` was always empty under both backends (no
+//    parser read it; tgo additionally never sent it).
+//
+// The related span resolves to a REAL same-file byte offset on the SECOND `x`
+// (not a [0,0] degenerate / line-0 packed fallback). Vacuous-skip aware: the
+// generated test returns early when the backend binary is unavailable; when
+// present the assertions are fail-closed.
+
+real_provider_test!(
+    diagnostics_carry_related_information_for_duplicate_member,
+    fixture = "single-project",
+    async fn run(session) {
+        // `x` declared twice with conflicting types → TS2717 with a related span
+        // pointing back at the first `x` declaration in the same file.
+        let source = "interface Dup {\n  x: number;\n  x: string;\n}\nexport type { Dup };\n";
+        let path = session
+            .open_in_provider("src/__diag_related_dupmember.tsx", source)
+            .await;
+
+        let diags = diagnostics_until_nonempty(session, &path).await;
+
+        // Identify the diagnostic carrying related information by its presence
+        // (the exact code is TS2717 on both backends, but key on the related span
+        // so the test stays robust to per-backend code drift).
+        let with_related = diags
+            .iter()
+            .find(|d| !d.related_information.is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "the duplicate-member diagnostic must carry a relatedInformation \
+                     span (K4); got: {diags:?}"
+                )
+            });
+
+        let ri = &with_related.related_information[0];
+        assert!(
+            !ri.message.is_empty(),
+            "the related span must carry its message, got: {ri:?}"
+        );
+        // The related path is the same opened file (each provider spells it its
+        // own way — match on the file basename to stay portable).
+        assert!(
+            ri.path.contains("__diag_related_dupmember"),
+            "the same-file related span must point at the opened file, got path: {}",
+            ri.path
+        );
+        // Real byte offset, never the [0,0] degenerate / line-0 packed fallback.
+        assert_ne!(
+            (ri.start, ri.end),
+            (0, 0),
+            "the same-file related span must resolve to a real byte range, got: {ri:?}"
+        );
+        assert!(
+            ri.end > ri.start,
+            "the related span must be a non-empty range, got: {ri:?}"
+        );
+        // The related byte range must slice one of the `x` member identifiers in
+        // the source (it points at the OTHER `x` declaration) — proving the
+        // same-file conversion produced a genuine offset, not a sentinel.
+        let span = source.get(ri.start as usize..ri.end as usize);
+        assert_eq!(
+            span,
+            Some("x"),
+            "the related byte range must slice the `x` member identifier, got: {span:?} \
+             from {ri:?}"
+        );
+    }
+);

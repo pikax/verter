@@ -352,6 +352,40 @@ pub struct TypeDiagnostic {
     /// Both are normalized into this carrier so the LSP merge can re-emit them
     /// as `DiagnosticTag`s. Empty when the diagnostic carries no tags.
     pub tags: Vec<TypeDiagnosticTag>,
+    /// Secondary "see declaration here" spans the editor renders as clickable
+    /// links under the primary diagnostic (e.g. the duplicate-identifier "also
+    /// declared here" span, or "the expected type comes from property 'X'").
+    /// tsserver carries these as a `relatedInformation` array (each span has its
+    /// own `file`); TSGO carries the native LSP `relatedInformation`
+    /// (`location.uri` + `location.range`). Both are normalized onto this carrier
+    /// so the LSP merge can map each related span back to the carrier source.
+    /// Empty when the diagnostic carries no related information; the
+    /// `skip_serializing_if` keeps the no-related case zero-cost on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_information: Vec<DiagnosticRelatedInfo>,
+}
+
+/// A single secondary "related information" span attached to a [`TypeDiagnostic`]
+/// — the provider-neutral mirror of LSP `DiagnosticRelatedInformation`.
+///
+/// `path` / `start` / `end` are in the PROVIDER domain: `path` is the related
+/// span's own file (the generated file, a carrier `.tsx`/`.ts`, or a real
+/// `.ts`/other file) and `start`/`end` are byte offsets in THAT file (a packed
+/// `(line<<16)|col` fallback when the parser had no content for the file, mirroring
+/// the primary span's no-content behaviour). The LSP merge maps `(path, start,
+/// end)` back to a carrier-source `Location` through the SAME cross-file/carrier
+/// mappers references/rename/code-actions use, and drops the entry fail-closed
+/// when it cannot be mapped (never a line-0 link).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticRelatedInfo {
+    /// Target file path of the related span (provider-domain path).
+    pub path: String,
+    /// Byte offset of the related span's start in `path`.
+    pub start: u32,
+    /// Byte offset of the related span's end in `path`.
+    pub end: u32,
+    /// The related-span message (e.g. "'x' was also declared here.").
+    pub message: String,
 }
 
 /// Editor-facing diagnostic tag, mirroring the LSP `DiagnosticTag` taxonomy.

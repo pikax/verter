@@ -678,12 +678,19 @@ async fn read_loop(
                             })
                         };
                         if content.is_some() {
+                            let diag_file = uri_to_file_path(raw_uri);
                             let diags = params
                                 .get("diagnostics")
                                 .and_then(|v| v.as_array())
                                 .map(|arr| {
                                     arr.iter()
-                                        .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
+                                        .filter_map(|d| {
+                                            parse_lsp_diagnostic(
+                                                d,
+                                                content.as_deref(),
+                                                Some(diag_file.as_str()),
+                                            )
+                                        })
                                         .collect::<Vec<_>>()
                                 })
                                 .unwrap_or_default();
@@ -724,7 +731,11 @@ async fn read_loop(
 /// works for diagnostics on line 0.
 ///
 /// `position_to_offset` interprets `character` as UTF-16 code units (LSP default).
-fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<TypeDiagnostic> {
+fn parse_lsp_diagnostic(
+    d: &serde_json::Value,
+    content: Option<&str>,
+    file_path: Option<&str>,
+) -> Option<TypeDiagnostic> {
     let range = d.get("range")?;
     let start = range.get("start")?;
     let end = range.get("end")?;
@@ -779,6 +790,23 @@ fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<
         )
     };
 
+    // LSP `relatedInformation` carries the secondary "see declaration here" spans
+    // (each `{ location: { uri, range }, message }`). Resolve each related range
+    // to a byte offset the SAME way the primary range does: with the file's
+    // content when the related `location.uri` is the SAME file the parser holds
+    // content for (`file_path`), else the packed-position fallback (the cross-file
+    // merge then fails closed on an unmappable packed span — never a wrong link).
+    let primary_file = file_path.map(verter_span::path::canonicalize_path);
+    let related_information = d
+        .get("relatedInformation")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|ri| parse_lsp_related_info(ri, content, primary_file.as_deref()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     Some(TypeDiagnostic {
         message,
         severity,
@@ -786,6 +814,53 @@ fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<
         end: end_offset,
         code,
         tags,
+        related_information,
+    })
+}
+
+/// Parse one LSP `relatedInformation` entry into a [`DiagnosticRelatedInfo`].
+///
+/// The entry shape is `{ location: { uri, range: { start, end } }, message }`.
+/// The range's byte offsets are computed with `primary_content` ONLY when the
+/// related `location.uri` resolves to the SAME file that content belongs to
+/// (`primary_file`); otherwise the parser has no content for the related file and
+/// emits the packed `(line<<16)|col` fallback. Returns `None` (skip this entry,
+/// never fabricate) when the message, location, uri, or range fields are missing.
+fn parse_lsp_related_info(
+    ri: &serde_json::Value,
+    primary_content: Option<&str>,
+    primary_file: Option<&str>,
+) -> Option<DiagnosticRelatedInfo> {
+    let message = ri.get("message")?.as_str()?.to_string();
+    let location = ri.get("location")?;
+    let path = uri_to_file_path(location.get("uri")?.as_str()?);
+    let range = location.get("range")?;
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let start_line = start.get("line")?.as_u64()? as u32;
+    let start_char = start.get("character")?.as_u64()? as u32;
+    let end_line = end.get("line")?.as_u64()? as u32;
+    let end_char = end.get("character")?.as_u64()? as u32;
+
+    // Use real byte offsets only when the related span is in the same file the
+    // parser holds content for; otherwise the packed fallback (merge fails closed).
+    let same_file = primary_file == Some(path.as_str());
+    let (start_byte, end_byte) = match (same_file, primary_content) {
+        (true, Some(c)) => (
+            position_to_offset(c, start_line, start_char),
+            position_to_offset(c, end_line, end_char),
+        ),
+        _ => (
+            pack_position(start_line, start_char),
+            pack_position(end_line, end_char),
+        ),
+    };
+
+    Some(DiagnosticRelatedInfo {
+        path,
+        start: start_byte,
+        end: end_byte,
+        message,
     })
 }
 
@@ -1666,15 +1741,27 @@ fn build_client_capabilities() -> serde_json::Value {
         "textDocument": {
             // PUSH channel: `publishDiagnostics.tagSupport` IS the spec-defined
             // diagnostic-tag capability (`PublishDiagnosticsClientCapabilities`).
+            // `relatedInformation: true` is the spec-defined gate for the secondary
+            // "see declaration here" spans (`PublishDiagnosticsClientCapabilities.
+            // relatedInformation`): a server only attaches `Diagnostic.
+            // relatedInformation` when the client advertises it, so without this tgo
+            // silently strips the related spans `parse_lsp_diagnostic` is ready to
+            // consume (the same silent-degradation class as the tag/completion gates).
             "publishDiagnostics": {
-                "tagSupport": { "valueSet": [1, 2] }
+                "tagSupport": { "valueSet": [1, 2] },
+                "relatedInformation": true
             },
             // PULL channel: `diagnostic.tagSupport` is NOT defined by LSP 3.17
             // (`DiagnosticClientCapabilities` has no `tagSupport`). It is a NON-SPEC
             // field retained for compatibility — tgo may read it as a private
             // extension to gate pull-diagnostic tags — and is intentionally kept.
+            // `diagnostic.relatedInformation` is likewise NOT an LSP 3.17 field
+            // (`DiagnosticClientCapabilities` has no `relatedInformation` member); it
+            // is retained alongside the tag flag as a private-extension hint so tgo
+            // may gate pull-channel related spans the same way as the push channel.
             "diagnostic": {
-                "tagSupport": { "valueSet": [1, 2] }
+                "tagSupport": { "valueSet": [1, 2] },
+                "relatedInformation": true
             },
             "completion": {
                 // `get_completions` ALWAYS sends `CompletionParams.context` (the
@@ -2353,7 +2440,13 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|v| v.as_array())
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
+                                .filter_map(|d| {
+                                    parse_lsp_diagnostic(
+                                        d,
+                                        content.as_deref(),
+                                        Some(path_owned.as_str()),
+                                    )
+                                })
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
@@ -3015,7 +3108,9 @@ impl TypeProvider for TsgoTypeProvider {
                     let content = contents_cache.lock().await.get(&path_owned).cloned();
                     Ok(items
                         .iter()
-                        .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
+                        .filter_map(|d| {
+                            parse_lsp_diagnostic(d, content.as_deref(), Some(path_owned.as_str()))
+                        })
                         .collect())
                 }
                 Err(_) => {

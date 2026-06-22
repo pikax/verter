@@ -527,11 +527,33 @@ async fn rune_module_diagnostics(
 
     let encoding = deps.position_encoding.read().clone();
     let provider_li = LineIndex::new(&provider_content, encoding.clone());
-    let source_li = LineIndex::new(&source, encoding);
+    let source_li = LineIndex::new(&source, encoding.clone());
+    let encoding_for_related = encoding;
 
     match tp.get_diagnostics(canonical_id).await {
         Ok(type_diags) => {
-            merge::merge_diagnostics(verter_diags, type_diags, &provider_li, &mapper, &source_li)
+            // Related-span map-back: a same-file related span maps through the
+            // in-context mapper; a real `.ts` related span reads its own source via
+            // the VFS reader. A FOREIGN carrier `.tsx` related span needs the
+            // server-side external resolver (unavailable on this background path)
+            // and drops fail-closed (`external_resolver: None`).
+            let carrier_source_exists = |p: &str| deps.documents.host().get_source(p).is_some();
+            merge::merge_diagnostics(
+                verter_diags,
+                type_diags,
+                canonical_id,
+                &provider_li,
+                &mapper,
+                &source_li,
+                None,
+                &carrier_source_exists,
+                encoding_for_related,
+                &|p: &str| {
+                    crate::server::block_in_place_guarded(|| {
+                        deps.documents.host().workspace_read().read_file(p)
+                    })
+                },
+            )
         }
         Err(error) => {
             tracing::warn!(
@@ -668,7 +690,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
 
             match (tp.get_diagnostics(&tsx_path).await, mapper, carrier_source) {
                 (Ok(type_diags), Some(mapper), Some(carrier_src)) => {
-                    let carrier_li = LineIndex::new(&carrier_src, encoding);
+                    let carrier_li = LineIndex::new(&carrier_src, encoding.clone());
                     let mapper =
                         crate::documents::provider_projection::ProviderPositionMapper::source_map(
                             mapper,
@@ -679,12 +701,28 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
                         type_diags.len(),
                         canonical_id
                     );
+                    // Related-span map-back: same-file related spans map through the
+                    // in-context mapper; real `.ts` related spans read their own
+                    // source via the VFS reader. A FOREIGN carrier `.tsx` related
+                    // span needs the server-side external resolver (unavailable on
+                    // this background path) → drops fail-closed (`None`).
+                    let carrier_source_exists =
+                        |p: &str| deps.documents.host().get_source(p).is_some();
                     merge::merge_diagnostics(
                         verter_diags,
                         type_diags,
+                        &tsx_path,
                         &tsx_li,
                         &mapper,
                         &carrier_li,
+                        None,
+                        &carrier_source_exists,
+                        encoding,
+                        &|p: &str| {
+                            crate::server::block_in_place_guarded(|| {
+                                deps.documents.host().workspace_read().read_file(p)
+                            })
+                        },
                     )
                 }
                 (Err(e), _, _) => {
@@ -1214,6 +1252,7 @@ mod tests {
                 end: (provider_bad + 3) as u32,
                 code: Some("2322".to_string()),
                 tags: Vec::new(),
+                related_information: Vec::new(),
             }],
         );
 

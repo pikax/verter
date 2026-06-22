@@ -1024,9 +1024,21 @@ fn merge_diagnostics_combines_both() {
         end: 9,
         code: Some("2322".to_string()),
         tags: Vec::new(),
+        related_information: Vec::new(),
     }];
 
-    let result = merge_diagnostics(verter, types, &tsx_li, &mapper, &carrier_li);
+    let result = merge_diagnostics(
+        verter,
+        types,
+        "App.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
     assert_eq!(result.len(), 2);
     assert_eq!(result[0].source.as_deref(), Some("verter"));
     assert_eq!(result[1].source.as_deref(), Some("ts"));
@@ -1055,6 +1067,7 @@ fn merge_diagnostics_propagates_unnecessary_and_deprecated_tags() {
             end: 9,
             code: Some("6133".to_string()),
             tags: vec![TypeDiagnosticTag::Unnecessary],
+            related_information: Vec::new(),
         },
         TypeDiagnostic {
             message: "'msg' is deprecated.".to_string(),
@@ -1063,10 +1076,22 @@ fn merge_diagnostics_propagates_unnecessary_and_deprecated_tags() {
             end: 9,
             code: Some("6385".to_string()),
             tags: vec![TypeDiagnosticTag::Deprecated],
+            related_information: Vec::new(),
         },
     ];
 
-    let result = merge_diagnostics(vec![], types, &tsx_li, &mapper, &carrier_li);
+    let result = merge_diagnostics(
+        vec![],
+        types,
+        "App.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
     assert_eq!(
         result.len(),
         2,
@@ -1105,9 +1130,21 @@ fn merge_diagnostics_propagates_both_tags_on_single_diagnostic() {
             TypeDiagnosticTag::Unnecessary,
             TypeDiagnosticTag::Deprecated,
         ],
+        related_information: Vec::new(),
     }];
 
-    let result = merge_diagnostics(vec![], types, &tsx_li, &mapper, &carrier_li);
+    let result = merge_diagnostics(
+        vec![],
+        types,
+        "App.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
     assert_eq!(
         result.len(),
         1,
@@ -1132,9 +1169,21 @@ fn merge_diagnostics_tagless_input_yields_no_tags() {
         end: 9,
         code: Some("2322".to_string()),
         tags: Vec::new(),
+        related_information: Vec::new(),
     }];
 
-    let result = merge_diagnostics(vec![], types, &tsx_li, &mapper, &carrier_li);
+    let result = merge_diagnostics(
+        vec![],
+        types,
+        "App.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
     assert_eq!(result.len(), 1);
     assert_eq!(
         result[0].tags, None,
@@ -1155,10 +1204,169 @@ fn merge_diagnostics_filters_unmapped() {
         end: 110,
         code: None,
         tags: Vec::new(),
+        related_information: Vec::new(),
     }];
 
-    let result = merge_diagnostics(verter, types, &tsx_li, &mapper, &carrier_li);
+    let result = merge_diagnostics(
+        verter,
+        types,
+        "App.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
     assert!(result.is_empty(), "unmapped diagnostics should be filtered");
+}
+
+/// A diagnostic's `relatedInformation` secondary spans (the "see declaration
+/// here" links TS attaches, e.g. the duplicate-identifier "also declared here"
+/// span) survive the merge: each related span is mapped back to a carrier
+/// `Location` through the SAME current-file mapper the primary diagnostic uses.
+///
+/// Discriminating on three fronts:
+/// - the MAPPABLE related entry (current-TSX offsets that map to the carrier
+///   "msg") is published with a real carrier range (line 5, NOT `Range::default`)
+///   and the carrier URI;
+/// - the UNMAPPABLE related entry (offsets past the TSX) is DROPPED fail-closed
+///   (never a line-0 link), so exactly ONE related entry survives;
+/// - the primary diagnostic itself survives regardless.
+///
+/// Pre-fix this does not compile (`TypeDiagnostic` has no `related_information`
+/// field and `merge_diagnostics` does not map it), and behaviourally the old
+/// `..Default::default()` left `related_information: None` — so the assertions
+/// fail against the pre-fix tree.
+#[test]
+fn merge_diagnostics_maps_related_information_fail_closed() {
+    use crate::type_provider::protocol::DiagnosticRelatedInfo;
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    // The current generated TSX path: its carrier stem (`App.vue`) is a carrier,
+    // so `is_carrier_ide_path` routes a related span in THIS file through the
+    // in-context mapper (the same-file branch of `resolve_carrier_ide_range_strict`).
+    let current_tsx_path = "App.vue.tsx";
+    let types = vec![TypeDiagnostic {
+        message: "Duplicate identifier 'msg'.".to_string(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 6, // TSX offset for "msg" (maps to carrier line 5)
+        end: 9,
+        code: Some("2300".to_string()),
+        tags: Vec::new(),
+        related_information: vec![
+            // MAPPABLE: a same-file related span over "msg" → carrier line 5.
+            DiagnosticRelatedInfo {
+                path: current_tsx_path.to_string(),
+                start: 6,
+                end: 9,
+                message: "'msg' was also declared here.".to_string(),
+            },
+            // UNMAPPABLE: offsets past the TSX source → dropped fail-closed.
+            DiagnosticRelatedInfo {
+                path: current_tsx_path.to_string(),
+                start: 1000,
+                end: 1010,
+                message: "unmappable related span".to_string(),
+            },
+        ],
+    }];
+
+    let result = merge_diagnostics(
+        vec![],
+        types,
+        current_tsx_path,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
+
+    assert_eq!(
+        result.len(),
+        1,
+        "the primary diagnostic must survive: {result:?}"
+    );
+    let related = result[0]
+        .related_information
+        .as_ref()
+        .expect("the mappable related span must publish a related_information list");
+    assert_eq!(
+        related.len(),
+        1,
+        "exactly the mappable related span survives; the unmappable one is dropped fail-closed, got: {related:?}"
+    );
+    let entry = &related[0];
+    assert_eq!(entry.message, "'msg' was also declared here.");
+    assert!(
+        entry.location.uri.as_str().ends_with("App.vue"),
+        "the related location maps back onto the carrier URI, got: {}",
+        entry.location.uri.as_str()
+    );
+    assert_eq!(
+        entry.location.range.start.line, 5,
+        "the related span maps to the carrier script line (5), not a line-0 default, got: {:?}",
+        entry.location.range
+    );
+    assert_ne!(
+        entry.location.range,
+        Range::default(),
+        "a mapped related range must never collapse to Range::default()"
+    );
+}
+
+/// NEGATIVE / fail-closed: a primary diagnostic whose related spans are ALL
+/// unmappable still publishes — the primary is never dropped because a secondary
+/// link failed to map — and its `related_information` is `None` (no degenerate
+/// line-0 link sneaks through).
+#[test]
+fn merge_diagnostics_primary_survives_all_unmappable_related() {
+    use crate::type_provider::protocol::DiagnosticRelatedInfo;
+
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let current_tsx_path = "App.vue.tsx";
+    let types = vec![TypeDiagnostic {
+        message: "Type 'number' is not assignable to type 'string'".to_string(),
+        severity: TypeDiagnosticSeverity::Error,
+        start: 6,
+        end: 9,
+        code: Some("2322".to_string()),
+        tags: Vec::new(),
+        related_information: vec![DiagnosticRelatedInfo {
+            path: current_tsx_path.to_string(),
+            start: 1000,
+            end: 1010,
+            message: "the expected type comes from here".to_string(),
+        }],
+    }];
+
+    let result = merge_diagnostics(
+        vec![],
+        types,
+        current_tsx_path,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_external_source,
+    );
+
+    assert_eq!(
+        result.len(),
+        1,
+        "the primary diagnostic must publish even when every related span is unmappable: {result:?}"
+    );
+    assert!(
+        result[0].related_information.is_none(),
+        "an all-unmappable related set yields no related_information (never a line-0 link), got: {:?}",
+        result[0].related_information
+    );
 }
 
 // ── Definition merge tests ─────────────────────────────────────

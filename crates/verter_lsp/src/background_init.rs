@@ -439,16 +439,36 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
                         match (type_diags, mapper, vue_source) {
                             (Some(type_diags), Some(mapper), Some(vue_src)) => {
                                 let vue_li = crate::documents::line_index::LineIndex::new(
-                                    &vue_src, encoding,
+                                    &vue_src,
+                                    encoding.clone(),
                                 );
                                 let mapper =
                                     crate::documents::provider_projection::ProviderPositionMapper::source_map(mapper);
+                                // `type_diags` is Some only when `tsx_path` was Some,
+                                // so the current-TSX path is present here. Related-span
+                                // map-back: same-file related spans map through the
+                                // in-context mapper, real `.ts` related spans read via
+                                // the VFS reader; a FOREIGN carrier `.tsx` related span
+                                // needs the server external resolver (unavailable on
+                                // this background path) → drops fail-closed (`None`).
+                                let current_tsx_path = tsx_path.as_deref().unwrap_or("");
+                                let carrier_source_exists =
+                                    |p: &str| documents.host().get_source(p).is_some();
                                 crate::type_provider::merge::merge_diagnostics(
                                     verter_diags,
                                     type_diags,
+                                    current_tsx_path,
                                     &tsx_li,
                                     &mapper,
                                     &vue_li,
+                                    None,
+                                    &carrier_source_exists,
+                                    encoding,
+                                    &|p: &str| {
+                                        crate::server::block_in_place_guarded(|| {
+                                            documents.host().workspace_read().read_file(p)
+                                        })
+                                    },
                                 )
                             }
                             _ => verter_diags,
@@ -525,16 +545,36 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
                     match (type_diags, mapper, vue_source) {
                         (Some(type_diags), Some(mapper), Some(vue_src)) => {
-                            let vue_li =
-                                crate::documents::line_index::LineIndex::new(&vue_src, encoding);
+                            let vue_li = crate::documents::line_index::LineIndex::new(
+                                &vue_src,
+                                encoding.clone(),
+                            );
                             let mapper =
                                 crate::documents::provider_projection::ProviderPositionMapper::source_map(mapper);
+                            // `type_diags` is Some only when `tsx_path` was Some.
+                            // Related-span map-back: same-file related spans map
+                            // through the in-context mapper, real `.ts` related spans
+                            // read via the VFS reader; a FOREIGN carrier `.tsx` related
+                            // span needs the server external resolver (unavailable on
+                            // this background path) → drops fail-closed (`None`).
+                            let current_tsx_path = tsx_path.as_deref().unwrap_or("");
+                            let carrier_source_exists =
+                                |p: &str| documents.host().get_source(p).is_some();
                             crate::type_provider::merge::merge_diagnostics(
                                 verter_diags,
                                 type_diags,
+                                current_tsx_path,
                                 &tsx_li,
                                 &mapper,
                                 &vue_li,
+                                None,
+                                &carrier_source_exists,
+                                encoding,
+                                &|p: &str| {
+                                    crate::server::block_in_place_guarded(|| {
+                                        documents.host().workspace_read().read_file(p)
+                                    })
+                                },
                             )
                         }
                         _ => verter_diags,

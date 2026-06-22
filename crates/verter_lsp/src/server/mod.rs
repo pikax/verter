@@ -42,6 +42,11 @@ use crate::type_provider::merge;
 mod handler_guard;
 #[allow(unused_imports)]
 use self::handler_guard::{block_in_place_if_available, ACTIVE_HANDLERS};
+// Re-export the runtime-flavor-guarded blocking helper so sibling top-level
+// modules (e.g. the background `sync_coordinator` / `background_init` diagnostic
+// publish paths) can route VFS source reads through the same guard the server
+// handlers use, instead of an unguarded `tokio::task::block_in_place`.
+pub(crate) use self::handler_guard::block_in_place_if_available as block_in_place_guarded;
 
 // Provider-sync state CRUD + context helpers. Inherent-impl
 // extension methods on `VerterLanguageServer` covering MRU bookkeeping,

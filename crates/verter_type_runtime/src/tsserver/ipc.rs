@@ -367,7 +367,13 @@ async fn handle_message(
                         .and_then(|v| v.as_array())
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|d| parse_tsserver_diagnostic(d, content.as_deref()))
+                                .filter_map(|d| {
+                                    parse_tsserver_diagnostic(
+                                        d,
+                                        content.as_deref(),
+                                        Some(file.as_str()),
+                                    )
+                                })
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
@@ -391,6 +397,7 @@ async fn handle_message(
 pub fn parse_tsserver_diagnostic(
     d: &serde_json::Value,
     content: Option<&str>,
+    file_path: Option<&str>,
 ) -> Option<TypeDiagnostic> {
     let text = d.get("text")?.as_str()?.to_string();
     let start = d.get("start")?;
@@ -445,6 +452,24 @@ pub fn parse_tsserver_diagnostic(
         ((sl << 16) | (so & 0xFFFF), (el << 16) | (eo & 0xFFFF))
     };
 
+    // `relatedInformation` carries the secondary "see declaration here" spans
+    // (e.g. duplicate-identifier "also declared here"). Each entry has its own
+    // `span` with the related file's own `file`. Convert its 1-based line/offset
+    // to a byte offset the SAME way the primary span does: with the file's
+    // content when it is the SAME file the parser was given content for
+    // (`file_path`), else the packed-position fallback (the cross-file merge then
+    // fails closed on an unmappable packed span — never a wrong link).
+    let primary_file = file_path.map(verter_span::path::canonicalize_path);
+    let related_information = d
+        .get("relatedInformation")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|ri| parse_tsserver_related_info(ri, content, primary_file.as_deref()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     Some(TypeDiagnostic {
         message: text,
         severity,
@@ -452,6 +477,55 @@ pub fn parse_tsserver_diagnostic(
         end: eo,
         code,
         tags,
+        related_information,
+    })
+}
+
+/// Parse one tsserver `relatedInformation` entry into a [`DiagnosticRelatedInfo`].
+///
+/// The entry shape is `{ message, span: { start:{line,offset}, end:{line,offset},
+/// file } }`. The span's byte offsets are computed with `primary_content` ONLY when
+/// the related `file` is the SAME file that content belongs to (`primary_file`);
+/// otherwise the parser has no content for the related file and emits the packed
+/// `(line<<16)|col` fallback the primary span uses without content. Returns `None`
+/// (skip this entry, never fabricate) when the message or span fields are missing.
+fn parse_tsserver_related_info(
+    ri: &serde_json::Value,
+    primary_content: Option<&str>,
+    primary_file: Option<&str>,
+) -> Option<DiagnosticRelatedInfo> {
+    let message = ri.get("message")?.as_str()?.to_string();
+    let span = ri.get("span")?;
+    let start = span.get("start")?;
+    let end = span.get("end")?;
+    let start_line = start.get("line")?.as_u64()? as u32;
+    let start_offset = start.get("offset")?.as_u64()? as u32;
+    let end_line = end.get("line")?.as_u64()? as u32;
+    let end_offset = end.get("offset")?.as_u64()? as u32;
+    let file = verter_span::path::canonicalize_path(span.get("file")?.as_str()?);
+
+    // Use real byte offsets only when the related span is in the same file the
+    // parser holds content for; otherwise the packed fallback (merge fails closed).
+    let same_file = primary_file == Some(file.as_str());
+    let (start_byte, end_byte) = match (same_file, primary_content) {
+        (true, Some(c)) => (
+            tsserver_pos_to_byte_offset(c, start_line, start_offset),
+            tsserver_pos_to_byte_offset(c, end_line, end_offset),
+        ),
+        _ => {
+            let sl = start_line.saturating_sub(1);
+            let so = start_offset.saturating_sub(1);
+            let el = end_line.saturating_sub(1);
+            let eo = end_offset.saturating_sub(1);
+            ((sl << 16) | (so & 0xFFFF), (el << 16) | (eo & 0xFFFF))
+        }
+    };
+
+    Some(DiagnosticRelatedInfo {
+        path: file,
+        start: start_byte,
+        end: end_byte,
+        message,
     })
 }
 
@@ -522,11 +596,12 @@ pub fn merge_diagnostic_sets(
 fn parse_tsserver_diagnostics_body(
     body: &serde_json::Value,
     content: Option<&str>,
+    file_path: Option<&str>,
 ) -> Vec<TypeDiagnostic> {
     body.as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|d| parse_tsserver_diagnostic(d, content))
+                .filter_map(|d| parse_tsserver_diagnostic(d, content, file_path))
                 .collect()
         })
         .unwrap_or_default()
@@ -1382,8 +1457,11 @@ impl TypeProvider for TsserverTypeProvider {
 
             match semantic_result {
                 Ok(semantic_body) => {
-                    let semantic =
-                        parse_tsserver_diagnostics_body(&semantic_body, content.as_deref());
+                    let semantic = parse_tsserver_diagnostics_body(
+                        &semantic_body,
+                        content.as_deref(),
+                        Some(file.as_str()),
+                    );
 
                     let syntactic = transport
                         .request(
@@ -1392,7 +1470,13 @@ impl TypeProvider for TsserverTypeProvider {
                         )
                         .await
                         .ok()
-                        .map(|body| parse_tsserver_diagnostics_body(&body, content.as_deref()))
+                        .map(|body| {
+                            parse_tsserver_diagnostics_body(
+                                &body,
+                                content.as_deref(),
+                                Some(file.as_str()),
+                            )
+                        })
                         .unwrap_or_default();
 
                     let suggestion = transport
@@ -1402,7 +1486,13 @@ impl TypeProvider for TsserverTypeProvider {
                         )
                         .await
                         .ok()
-                        .map(|body| parse_tsserver_diagnostics_body(&body, content.as_deref()))
+                        .map(|body| {
+                            parse_tsserver_diagnostics_body(
+                                &body,
+                                content.as_deref(),
+                                Some(file.as_str()),
+                            )
+                        })
                         .unwrap_or_default();
 
                     let diags = merge_diagnostic_sets(semantic, syntactic, suggestion);

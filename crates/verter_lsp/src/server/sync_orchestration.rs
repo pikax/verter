@@ -46,12 +46,28 @@ impl VerterLanguageServer {
                                 type_diags.len(),
                                 uri.as_str()
                             );
+                            // Related-span map-back uses the same cross-file/carrier
+                            // resolver inputs the code-action/definition merges use:
+                            // the external resolver bridges a FOREIGN carrier `.tsx`
+                            // related span, the VFS source reader a real `.ts` one.
+                            let carrier_source_exists =
+                                |p: &str| self.documents.host().get_source(p).is_some();
+                            let negotiated_encoding = self.position_encoding.read().clone();
                             merge::merge_diagnostics(
                                 verter_diags,
                                 type_diags,
+                                &tsx_path,
                                 &tsx_li,
                                 &mapper,
                                 &carrier_li,
+                                Some(&|ide_path: &str| self.external_ide_context(ide_path)),
+                                &carrier_source_exists,
+                                negotiated_encoding,
+                                &|p: &str| {
+                                    block_in_place_if_available(|| {
+                                        self.documents.host().workspace_read().read_file(p)
+                                    })
+                                },
                             )
                         }
                         (Err(e), _) => {
