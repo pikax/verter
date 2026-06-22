@@ -179,7 +179,12 @@ pub fn project_svelte_ide(
         }
     };
     let prelude = render_prelude(namespace, legacy_mode);
-    ct.prepend(&prelude);
+    // Prepend the prelude as the unmapped intro AND register it as the helper-import preamble so the
+    // source map publishes the `x_verter_helper_preamble_end` boundary (the Vue carrier-IDE contract,
+    // now matched for Svelte). The prelude STAYS the intro — the `@jsxImportSource` pragma must lead
+    // the output bytes, ahead of any trailing-`<script>` MOVE to offset 0 — so the boundary rides the
+    // intro-capture path of `generate_map_with_preamble`. The emitted TSX bytes are unchanged.
+    ct.prepend_helper_preamble_content(&prelude);
 
     // 3) The render scope function wrapping the template. With trailing/
     //    interleaved scripts MOVED above the render fn, the markup is contiguous
@@ -241,7 +246,9 @@ pub fn project_svelte_ide(
             file: None,
             include_content: true,
         };
-        ct.generate_map_json(opts)
+        // The preamble-aware variant injects the `x_verter_helper_preamble_end` boundary recorded by
+        // `prepend_helper_preamble_content` above; the boundary is the only addition to the map JSON.
+        ct.generate_map_json_with_preamble(opts)
     };
 
     SvelteIdeProjection {

@@ -420,13 +420,24 @@ pub(crate) fn reanchor_preamble_import_edits(
 /// Translate a TypeProvider's completion-resolve `additionalTextEdits` (generated-TSX byte
 /// offsets) into carrier-source [`TextEdit`]s, with no silent drops.
 ///
-/// Two routes, plus a rejection:
-/// * an edit whose generated range round-trips through the strict [`ProviderPositionMapper`]
+/// Each edit is CLASSIFIED before the strict route, symmetric to the current-file add-import
+/// code-action guard ([`crate::type_provider::merge::merge_code_actions`]): a preamble import
+/// insertion is diverted to the re-anchor BEFORE any strict-mapped range is accepted, because a
+/// preamble insertion can strict-map to the carrier `(0,0)` file top (ABOVE `<script setup>`, an
+/// invalid import location) and must never be accepted there. Two routes, plus a rejection:
+/// * an edit provably a zero-width auto-import insertion in Verter's synthetic, unmapped
+///   helper-import preamble — either the typed-boundary classifier ([`is_preamble_import_insertion`])
+///   OR the absent-boundary zero-width case (a carrier-IDE map that publishes no
+///   `x_verter_helper_preamble_end` boundary cannot prove the edit is NOT a preamble insertion) — is
+///   DIVERTED to the shared re-anchor and NEVER strict-accepted at `(0,0)`. The re-anchor places it
+///   at the `<script setup>` [`ScriptImportInsertionAnchor`] WHEN one is available; with NO usable
+///   anchor it FAILS CLOSED ([`AutoImportEditMappingError::NoInsertionAnchor`] for a classified
+///   preamble insertion, or [`AutoImportEditMappingError::UnmappableEdit`] for the absent-boundary
+///   case, where no boundary means the edit cannot be proven a preamble insertion). It is all-or-
+///   nothing — never spliced at `(0,0)` and never silently dropped;
+/// * any OTHER edit whose generated range round-trips through the strict [`ProviderPositionMapper`]
 ///   targets real mapped user source (e.g. an `AddToExisting` import extending the user's own
-///   import statement) and is applied verbatim at its mapped carrier range;
-/// * an edit that does NOT round-trip is re-anchored at the Vue [`ScriptImportInsertionAnchor`]
-///   ONLY when it is provably a zero-width auto-import insertion in Verter's synthetic,
-///   unmapped helper-import preamble ([`is_preamble_import_insertion`]);
+///   import statement PAST the preamble boundary) and is applied verbatim at its mapped carrier range;
 /// * any other mapper miss — a replacement of synthetic code, a zero-width edit in a
 ///   non-preamble synthetic region, or an out-of-range offset — yields
 ///   [`AutoImportEditMappingError::UnmappableEdit`] and rejects the whole resolve.
@@ -435,7 +446,7 @@ pub(crate) fn reanchor_preamble_import_edits(
 /// zero-width inserts and synthesizing at most one `<script setup>` block). All-or-nothing: if
 /// any edit must be re-anchored but no anchor is available, the whole resolve fails.
 ///
-/// The classify → anchor → build step for the missed edits routes through the SINGLE shared
+/// The classify → anchor → build step for the diverted/missed edits routes through the SINGLE shared
 /// [`reanchor_preamble_import_edits`] (the same primitive the code-action merge calls); this
 /// translator only adds the strict-mapper verbatim route on top and turns the shared outcome's
 /// failure fields into structured errors.
@@ -450,9 +461,31 @@ pub fn translate_completion_import_edits(
     let mut missed: Vec<BorrowedImportEdit<'_>> = Vec::new();
 
     for edit in edits {
+        // CLASSIFY BEFORE STRICT-ACCEPT (symmetric to the current-file code-action guard in
+        // `merge::feature_merges::merge_code_actions`): a preamble import insertion can STRICT-MAP to
+        // the carrier `(0,0)` file top (ABOVE `<script setup>`, an invalid import location), so it
+        // must NEVER be strict-accepted. Route it to the shared re-anchor, which places it at the
+        // `<script setup>` anchor or fails closed via the all-or-nothing `NoInsertionAnchor` /
+        // `UnmappableEdit` path. Two structural discriminators, both STRUCTURE only (geometry + the
+        // typed `x_verter_helper_preamble_end` boundary), never `new_text` and never the `(0,0)`
+        // value: (1) the with-boundary classifier; (2) the absent-boundary zero-width fuse (no
+        // boundary ⇒ cannot prove the edit is NOT a preamble insertion, and a real Verter carrier-IDE
+        // projection always publishes the boundary).
+        if is_preamble_import_insertion(edit.start, edit.end, tsx_li, mapper)
+            || (edit.start == edit.end && mapper.helper_preamble_end().is_none())
+        {
+            missed.push(BorrowedImportEdit {
+                start: edit.start,
+                end: edit.end,
+                new_text: &edit.new_text,
+            });
+            continue;
+        }
         match merge::tsx_range_to_carrier_range(edit.start, edit.end, tsx_li, mapper, carrier_li) {
             // Round-trips through the strict mapper ⇒ targets real mapped user source; apply
-            // verbatim at its mapped carrier range (the mapper is never bypassed for these).
+            // verbatim at its mapped carrier range (the mapper is never bypassed for these). A
+            // genuine `AddToExisting` edit extends the user's own import run PAST the preamble
+            // boundary, so it is NOT diverted above and takes this verbatim route.
             Some(range) => result.push(TextEdit {
                 range,
                 new_text: edit.new_text.clone(),

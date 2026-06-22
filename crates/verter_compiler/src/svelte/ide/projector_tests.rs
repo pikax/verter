@@ -2850,3 +2850,100 @@ fn unused_top_level_let_is_not_value_read_kept_alive() {
         "an unused `foo` must not be referenced by the render body: {body}"
     );
 }
+
+// The Svelte IDE projector publishes the typed `x_verter_helper_preamble_end`
+// source-map boundary — the SAME contract Vue's IDE projection already meets.
+// The Svelte prelude is the module INTRO (the `@jsxImportSource` pragma must be
+// the leading output bytes), so the boundary is captured on the intro block of
+// the shared `generate_map_with_preamble` walk. This is the producer half of the
+// LSP fail-closed auto-import preamble classifier: without the boundary a legit
+// `.svelte` zero-width auto-import strict-mapping near the carrier top is
+// over-dropped by the absent-boundary fuse.
+//
+// DISCRIMINATING: against the pre-change projector (which generated the map via
+// `generate_map_json` and never registered the prelude as the helper preamble),
+// assertions (b)/(c) FAIL — the member is absent. With the producer fix the
+// projector routes through `generate_map_json_with_preamble` over a
+// preamble-registered intro, so the member is present at the exact post-prelude
+// generated position.
+#[test]
+fn svelte_ide_projection_publishes_helper_preamble_end_boundary() {
+    let source = "<script lang=\"ts\">let a = 1;</script>\n<div>{a}</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+
+    // The component prelude in Html namespace + legacy mode (this source uses NO
+    // rune, so it is legacy). This is the exact INTRO the projector prepends.
+    let prelude = super::prelude::render_prelude(super::prelude::SvelteJsxNamespace::Html, true);
+
+    // (a) Byte-unchanged TSX: the projected code leads with the prelude verbatim
+    // and equals the prelude concatenated with the rest the projector produced.
+    // Compare the `.code` against itself reconstructed (prelude + suffix) — the
+    // producer change adds ONLY source-map metadata, never a TSX byte.
+    assert!(
+        projection.code.starts_with(&prelude),
+        "the projected TSX must lead with the unmapped prelude verbatim: {:?}",
+        &projection.code[..projection.code.len().min(prelude.len() + 40)]
+    );
+    let suffix = &projection.code[prelude.len()..];
+    let reconstructed = format!("{prelude}{suffix}");
+    assert_eq!(
+        projection.code, reconstructed,
+        "the projected TSX bytes must be exactly prelude ++ projection suffix (byte-unchanged)"
+    );
+    // The boundary recording must NOT double-prepend the prelude: the pragma line appears EXACTLY
+    // once (a stray second intro insertion would duplicate it). This pins that
+    // `prepend_helper_preamble_content` adds only metadata, never a second TSX copy of the prelude.
+    assert_eq!(
+        projection
+            .code
+            .matches("/** @jsxImportSource @verter/svelte-jsx */")
+            .count(),
+        1,
+        "the prelude pragma must appear exactly once (no double-prepend): {}",
+        projection.code
+    );
+    // The render scope still wraps the template (the projection is intact).
+    assert!(
+        projection.code.contains("function __verter_render()"),
+        "the render scope function must still be emitted: {}",
+        projection.code
+    );
+
+    // (b) The map now carries the typed preamble-end boundary member (ABSENT
+    // pre-fix because the projector used `generate_map_json`).
+    assert!(
+        projection
+            .source_map
+            .contains("x_verter_helper_preamble_end"),
+        "the Svelte IDE source map must publish the x_verter_helper_preamble_end boundary: {}",
+        projection.source_map
+    );
+
+    // (c) The boundary VALUE is exact: the generated position immediately after
+    // the rendered prelude. The prelude is pure insertion (the intro), so its end
+    // is line == the count of `\n` in the prelude, column 0 (every prelude
+    // fragment ends with `\n`, so the last line is empty).
+    let prelude_newlines = prelude.matches('\n').count() as u64;
+    assert!(
+        prelude.ends_with('\n'),
+        "the prelude is expected to end with a newline (boundary column 0)"
+    );
+    let map: serde_json::Value =
+        serde_json::from_str(&projection.source_map).expect("the source map is valid JSON");
+    let boundary = map
+        .get("x_verter_helper_preamble_end")
+        .expect("the boundary member is present");
+    assert_eq!(
+        boundary.get("line").and_then(serde_json::Value::as_u64),
+        Some(prelude_newlines),
+        "the boundary line must be the count of prelude newlines, got {boundary:?}"
+    );
+    assert_eq!(
+        boundary
+            .get("character")
+            .and_then(serde_json::Value::as_u64),
+        Some(0),
+        "the boundary column must be 0 (the prelude ends with a newline), got {boundary:?}"
+    );
+}

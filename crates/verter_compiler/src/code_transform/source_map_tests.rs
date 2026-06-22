@@ -220,6 +220,131 @@ fn generate_map_json_with_preamble_omits_member_without_preamble() {
     );
 }
 
+/// `prepend_helper_preamble_content` prepends the preamble as the module INTRO (output offset 0) AND
+/// records it, so `generate_map_with_preamble` reports the boundary at the post-intro position via
+/// the intro-capture path — NOT the inserted-chunk path. This is the producer mechanism the Svelte
+/// IDE projector uses (its `@jsxImportSource`-led prelude must stay the leading intro bytes).
+///
+/// DISCRIMINATING: the recorded preamble pointer is the STORED `intro` (which `prepend` re-allocated),
+/// NOT the `content` argument — so the boundary is found by `self.intro()` pointer identity. Recording
+/// the argument pointer would mismatch and surface as `None`.
+#[test]
+fn prepend_helper_preamble_content_publishes_boundary_via_intro() {
+    let alloc = Allocator::default();
+    let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
+    ct.prepend_helper_preamble_content("import x;\nimport y;\n");
+
+    // The preamble is the leading intro bytes — the build output starts with it (byte-exact).
+    assert!(
+        ct.build_string()
+            .starts_with("import x;\nimport y;\nconst a = 1;\n"),
+        "the preamble is the leading intro content"
+    );
+
+    let (_, end) = ct.generate_map_with_preamble(
+        SourceMapOptions::new()
+            .with_source("C.svelte")
+            .include_content(true),
+    );
+    assert_eq!(
+        end,
+        Some((2, 0)),
+        "the boundary is the start of the line after the two-line intro preamble"
+    );
+
+    // The JSON variant injects the member at the same position.
+    let json = ct.generate_map_json_with_preamble(
+        SourceMapOptions::new()
+            .with_source("C.svelte")
+            .include_content(true),
+    );
+    assert!(
+        json.contains(r#""x_verter_helper_preamble_end":{"line":2,"character":0}"#),
+        "the intro preamble publishes the boundary member at the post-intro position: {json}"
+    );
+}
+
+/// A SINGLE-LINE intro preamble (no trailing-newline run beyond the one) reports the boundary at the
+/// end of that line — pins that the boundary tracks the intro's own geometry, not a fixed offset.
+#[test]
+fn prepend_helper_preamble_content_single_line_boundary() {
+    let alloc = Allocator::default();
+    let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
+    ct.prepend_helper_preamble_content("import x;\n");
+
+    let (_, end) = ct.generate_map_with_preamble(SourceMapOptions::new().with_source("C.svelte"));
+    assert_eq!(
+        end,
+        Some((1, 0)),
+        "a one-line `import x;\\n` intro boundary is the start of line 1"
+    );
+}
+
+/// RELEASE fail-closed symmetry: the empty-intro single-prepend contract is a `debug_assert!`, which
+/// is compiled OUT in release builds. If a release caller violates it (a NON-EMPTY existing intro),
+/// `prepend` re-allocates the intro as `content + old_intro`; recording THAT combined pointer would
+/// make `generate_map_with_preamble` publish the boundary at the position AFTER the WHOLE combined
+/// intro — a WRONG boundary the LSP consumer would trust. The runtime guard makes release degrade to
+/// boundary-ABSENT (the safe pre-fix state consumers already handle fail-closed) instead.
+///
+/// This test runs ONLY in release builds (in debug the contract-violating call trips the
+/// `debug_assert!` and panics — characterized by the sibling `#[should_panic]` test). It is
+/// DISCRIMINATING: against the pre-fix method (which always records `self.intro`) the combined intro
+/// pointer-matches and the boundary IS published, so the no-boundary assertions FAIL.
+#[cfg(not(debug_assertions))]
+#[test]
+fn prepend_helper_preamble_content_failcloses_on_nonempty_intro_in_release() {
+    let alloc = Allocator::default();
+    let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
+    // Establish a NON-EMPTY intro first, violating the single-prepend empty-intro contract.
+    ct.prepend("EXISTING\n");
+    // The contract-violating call: in release the debug_assert is gone, so this returns. The runtime
+    // guard must decline to record the (now combined) intro as the helper preamble.
+    ct.prepend_helper_preamble_content("PREAMBLE\n");
+
+    // `prepend` output/behaviour is unchanged: both prepends land, preamble leads (it was prepended last).
+    assert!(
+        ct.build_string()
+            .starts_with("PREAMBLE\nEXISTING\nconst a = 1;\n"),
+        "both prepends land in order; prepend behaviour is unchanged by the fail-closed guard"
+    );
+
+    let (_, end) = ct.generate_map_with_preamble(
+        SourceMapOptions::new()
+            .with_source("C.svelte")
+            .include_content(true),
+    );
+    assert_eq!(
+        end, None,
+        "fail-closed: a non-empty intro records NO preamble ⇒ no boundary (never a wrong one)"
+    );
+
+    let json = ct.generate_map_json_with_preamble(
+        SourceMapOptions::new()
+            .with_source("C.svelte")
+            .include_content(true),
+    );
+    assert!(
+        !json.contains("x_verter_helper_preamble_end"),
+        "fail-closed: no boundary member is emitted when the intro was not empty: {json}"
+    );
+}
+
+/// DEBUG profile half of the fail-closed pair: in test/CI (debug-assertions ON) the empty-intro
+/// contract violation is caught LOUDLY by the retained `debug_assert!` — it panics rather than
+/// silently degrading. Together with the release sibling above this fully characterizes the fix on
+/// BOTH build profiles (debug: panics; release: fail-closed boundary-absent).
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "single-prepend contract")]
+fn prepend_helper_preamble_content_panics_on_nonempty_intro_in_debug() {
+    let alloc = Allocator::default();
+    let mut ct = CodeTransform::new("const a = 1;\n", &alloc);
+    ct.prepend("EXISTING\n");
+    // Non-empty intro ⇒ debug_assert! fires.
+    ct.prepend_helper_preamble_content("PREAMBLE\n");
+}
+
 #[test]
 fn test_source_map_generation() {
     let allocator = Allocator::default();

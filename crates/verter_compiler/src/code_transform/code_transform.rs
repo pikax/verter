@@ -274,6 +274,41 @@ impl<'a> CodeTransform<'a> {
         self
     }
 
+    /// Prepend `content` as the unmapped intro (output offset 0) AND record it as the
+    /// helper-import preamble, so source-map generation publishes the
+    /// `x_verter_helper_preamble_end` boundary at the generated position immediately after the
+    /// intro (see [`generate_map_with_preamble`](Self::generate_map_with_preamble)).
+    ///
+    /// This is the single-prepend, empty-intro contract: the boundary "end of intro" equals "end
+    /// of helper preamble" ONLY when the intro IS exactly the preamble, so an EMPTY intro is
+    /// required (debug-asserted). It records the STORED intro pointer — NOT the `content` argument
+    /// — because [`prepend`](Self::prepend) re-allocates the intro as `alloc_str(content + old_intro)`,
+    /// so the bump-allocated `&'a str` source-map generation reads via `self.intro()` is a fresh
+    /// pointer that pointer-matches the recorded preamble only when read back from the field. The
+    /// Svelte IDE projector uses this to keep its `@jsxImportSource`-led prelude as the leading
+    /// output bytes while still publishing the typed preamble-end boundary.
+    pub fn prepend_helper_preamble_content(&mut self, content: &str) -> &mut Self {
+        // The boundary "end of intro" equals "end of helper preamble" ONLY when the intro IS exactly
+        // the preamble — i.e. the intro was empty before this prepend. The debug-assert catches a
+        // contract violation loudly in test/CI builds; the runtime check makes release builds FAIL
+        // CLOSED (degrade to boundary-absent, which `generate_map_with_preamble`'s consumers already
+        // handle) rather than record a combined `content + old_intro` pointer that would publish a
+        // WRONG boundary after the whole combined intro.
+        let intro_was_empty = self.intro.is_empty();
+        debug_assert!(
+            intro_was_empty,
+            "prepend_helper_preamble_content requires an empty intro (single-prepend contract)"
+        );
+        self.prepend(content);
+        if intro_was_empty {
+            // The intro now IS exactly `content` (a fresh bump alloc; old intro empty). Record that
+            // STORED pointer — NOT the `content` argument — because `prepend` re-allocated it, and
+            // `generate_map_with_preamble` matches the preamble by `self.intro()` pointer identity.
+            self.set_helper_preamble_content(self.intro);
+        }
+        self
+    }
+
     /// Append content to the very end
     pub fn append(&mut self, content: &str) -> &mut Self {
         self.record_audit_op();

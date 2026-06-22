@@ -125,17 +125,29 @@ pub(crate) fn resolve_carrier_ide_range_strict(
     // (the foreign file top, ABOVE its `<script setup>`) — the same geometry that makes the
     // current-file preamble bug real. A foreign preamble insertion is never placeable from its
     // strict range, and there is NO foreign `<script setup>` anchor in this merge (the re-anchor
-    // describes the CURRENT request only), so classify it via the FOREIGN context's own typed
-    // helper-preamble boundary and DROP it. The discriminator is STRUCTURE only (zero-width
-    // geometry + the foreign `x_verter_helper_preamble_end` boundary); a non-preamble foreign edit
-    // (non-zero-width, past the boundary, or a foreign map with no boundary metadata) is unaffected
-    // and keeps its strict path.
+    // describes the CURRENT request only), so it must DROP. Two structural discriminators, mirroring
+    // the current-file code-action guard (`feature_merges::merge_code_actions`):
+    //
+    // 1. The foreign context publishes the typed `x_verter_helper_preamble_end` boundary ⇒ classify
+    //    via [`is_preamble_import_insertion`] (zero-width geometry at/before the boundary) and drop.
+    // 2. The foreign map carries NO boundary AND the edit is zero-width ⇒ fail closed. A real Verter
+    //    foreign carrier-IDE projection always publishes the boundary, so its absence is a stale /
+    //    non-Verter artifact; a zero-width insertion that strict-maps to the foreign `(0,0)` would
+    //    otherwise be accepted at the foreign file top. The classifier returns `false` with no
+    //    boundary (it cannot prove the preamble), so this explicit absent-boundary drop is required.
+    //
+    // Both are STRUCTURE only (geometry + the foreign boundary), never `new_text` and never the
+    // produced `(0,0)` value. A non-zero-width foreign edit (a rename replacement, a remove-unused
+    // deletion, an ordinary replacement) is unaffected by either branch and keeps its strict path.
     if crate::type_provider::auto_import::is_preamble_import_insertion(
         start,
         end,
         &ctx.tsx_line_index,
         &ctx.mapper,
     ) {
+        return None;
+    }
+    if start == end && ctx.mapper.helper_preamble_end().is_none() {
         return None;
     }
     tsx_range_to_carrier_range(

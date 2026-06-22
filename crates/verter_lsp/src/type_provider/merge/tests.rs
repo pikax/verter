@@ -11,7 +11,9 @@ use std::sync::Arc;
 use tower_lsp_server::ls_types::*;
 use verter_span::TsPosition;
 
-use super::definition::{is_carrier_ide_path, normalize_carrier_path, path_to_uri};
+use super::definition::{
+    is_carrier_ide_path, normalize_carrier_path, path_to_uri, resolve_carrier_ide_range_strict,
+};
 use super::hover::{extract_hover_text, replace_kind_prefix, strip_leading_code_block};
 use super::*;
 use crate::documents::line_index::LineIndex;
@@ -3029,6 +3031,455 @@ fn merge_code_actions_foreign_preamble_insertion_that_strict_maps_to_foreign_fil
         "a FOREIGN carrier preamble add-import whose foreign source map strict-maps to the foreign \
          file top (0,0) must be DROPPED — never emitted at the foreign .vue top, never diverted onto \
          the current carrier: {dropped:?}"
+    );
+}
+
+/// DIRECT unit on the lowest-shared-owner [`resolve_carrier_ide_range_strict`] foreign branch: a
+/// FOREIGN carrier `.tsx` zero-width preamble insertion whose foreign source map STRICT-MAPS the
+/// foreign preamble offset to the foreign carrier `(0,0)` (the foreign file top, ABOVE its
+/// `<script setup>`) but publishes NO `x_verter_helper_preamble_end` boundary must be DROPPED
+/// (`None`) — never returned as `Some((0,0)..(0,0))`.
+///
+/// This is the absent-boundary gap the boundary-present foreign-drop test
+/// (`merge_code_actions_foreign_preamble_insertion_that_strict_maps_to_foreign_file_top_is_dropped`)
+/// cannot cover: there the foreign map publishes the boundary, so `is_preamble_import_insertion`
+/// classifies the insertion and drops it. Here the foreign map carries the `(0,0)` token but NO
+/// boundary, so the classifier returns `false` (no boundary ⇒ cannot prove preamble), control would
+/// fall through to the strict map, and the strict `(0,0)` would be accepted at the foreign file top.
+/// The absent-boundary zero-width fail-closed drop (symmetric to the current-file code-action guard)
+/// is what makes this `None`.
+#[test]
+fn resolve_carrier_ide_range_strict_foreign_preamble_insertion_without_boundary_is_dropped() {
+    // The CURRENT request context is an ordinary `<script setup>` carrier (boundary present); it is
+    // never consulted for the foreign edit beyond identity disambiguation.
+    let (_current_carrier, current_carrier_li, current_tsx_li, current_mapper) =
+        make_strict_mapped_preamble_fixture();
+
+    // A FOREIGN `.tsx` whose source map STRICT-MAPS foreign offset 0 to foreign-carrier `(0,0)` (the
+    // file top) but publishes NO `x_verter_helper_preamble_end` boundary — the absent-boundary case.
+    let foreign_carrier = "<script setup lang=\"ts\">\n\nconst far = 1;\n</script>\n<template>\n  <div>{{ far }}</div>\n</template>\n";
+    let foreign_tsx =
+        "import { defineComponent } from 'vue';\nconst far = 1;\nexport default {};\n";
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Other.vue", foreign_carrier);
+    // foreign-TSX line 0 col 0 → foreign-carrier line 0 col 0 (the file top): the offset-0 add-import
+    // insertion strict-maps to foreign-`(0,0)`. Map the user line too so the mapper is realistic.
+    builder.add_token(0, 0, 0, 0, Some(source_id), None);
+    builder.add_token(1, 0, 2, 0, Some(source_id), None);
+    builder.add_token(1, 6, 2, 6, Some(source_id), None);
+    // NOTE: deliberately NO `x_verter_helper_preamble_end` member — the absent-boundary geometry.
+    let foreign_json = builder.into_sourcemap().to_json_string();
+    let foreign_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&foreign_json).unwrap());
+    let foreign_carrier_li = LineIndex::new_utf16(foreign_carrier);
+    let foreign_tsx_li = LineIndex::new_utf16(foreign_tsx);
+
+    // Discriminating preconditions: the foreign map has NO boundary, yet offset 0 STRICT-MAPS to the
+    // foreign file top — so the classifier alone cannot drop it; the absent-boundary zero-width fuse
+    // is the only thing standing between the import and the foreign `(0,0)`.
+    assert!(
+        foreign_mapper.helper_preamble_end().is_none(),
+        "fixture precondition: the foreign map must publish NO helper-preamble-end boundary"
+    );
+    assert!(
+        !crate::type_provider::auto_import::is_preamble_import_insertion(
+            0,
+            0,
+            &foreign_tsx_li,
+            &foreign_mapper
+        ),
+        "fixture precondition: with no boundary the preamble classifier returns false (cannot prove)"
+    );
+    assert_eq!(
+        tsx_range_to_carrier_range(0, 0, &foreign_tsx_li, &foreign_mapper, &foreign_carrier_li),
+        Some(Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
+        }),
+        "fixture precondition: the foreign preamble offset 0 must STRICT-MAP to the foreign carrier \
+         (0,0) — the dangerous file-top geometry the absent-boundary drop must refuse"
+    );
+
+    let resolver = |p: &str| -> Option<ExternalIdeContext> {
+        (p == "/other.vue.tsx").then(|| ExternalIdeContext {
+            tsx_line_index: foreign_tsx_li.clone(),
+            mapper: foreign_mapper.clone(),
+            carrier_line_index: foreign_carrier_li.clone(),
+            carrier_negotiated_line_index: None,
+        })
+    };
+    let ext: Option<ExternalIdeResolver> = Some(&resolver);
+
+    let resolved = resolve_carrier_ide_range_strict(
+        "/other.vue.tsx",
+        0,
+        0,
+        "/test.vue.tsx",
+        &current_tsx_li,
+        &current_mapper,
+        &current_carrier_li,
+        ext,
+    );
+    assert!(
+        resolved.is_none(),
+        "a foreign zero-width preamble insertion that strict-maps to the foreign file top with NO \
+         helper-preamble-end boundary must be DROPPED (fail-closed), never returned as the foreign \
+         (0,0): {resolved:?}"
+    );
+}
+
+/// NEGATIVE companion to the absent-boundary foreign drop: a foreign NON-zero-width edit (a rename
+/// replacement) that strict-maps to a real foreign-carrier range STILL maps to `Some(_)` — the
+/// absent-boundary fuse is zero-width-only and must not over-drop ordinary replacements.
+#[test]
+fn resolve_carrier_ide_range_strict_foreign_non_zero_width_edit_without_boundary_still_maps() {
+    let (_current_carrier, current_carrier_li, current_tsx_li, current_mapper) =
+        make_strict_mapped_preamble_fixture();
+
+    // A FOREIGN `.tsx` with NO boundary whose user line (TSX line 1) maps to foreign-carrier line 2.
+    let foreign_carrier = "<script setup lang=\"ts\">\n\nconst far = 1;\n</script>\n<template>\n  <div>{{ far }}</div>\n</template>\n";
+    let foreign_tsx =
+        "import { defineComponent } from 'vue';\nconst far = 1;\nexport default {};\n";
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Other.vue", foreign_carrier);
+    builder.add_token(1, 0, 2, 0, Some(source_id), None);
+    builder.add_token(1, 6, 2, 6, Some(source_id), None);
+    // Again deliberately NO boundary member.
+    let foreign_json = builder.into_sourcemap().to_json_string();
+    let foreign_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&foreign_json).unwrap());
+    let foreign_carrier_li = LineIndex::new_utf16(foreign_carrier);
+    let foreign_tsx_li = LineIndex::new_utf16(foreign_tsx);
+
+    // The replacement covers `const ` → `const far` on the user line: a NON-zero-width range that
+    // strict-maps to a real foreign-carrier range (NOT the file top, NOT zero-width).
+    let start = foreign_tsx_li
+        .position_to_offset(&Position {
+            line: 1,
+            character: 0,
+        })
+        .expect("a valid foreign-TSX offset");
+    let end = foreign_tsx_li
+        .position_to_offset(&Position {
+            line: 1,
+            character: 6,
+        })
+        .expect("a valid foreign-TSX offset");
+    assert_ne!(start, end, "fixture precondition: a NON-zero-width edit");
+    assert!(
+        foreign_mapper.helper_preamble_end().is_none(),
+        "fixture precondition: the foreign map publishes NO boundary (same as the drop fixture)"
+    );
+
+    let resolver = |p: &str| -> Option<ExternalIdeContext> {
+        (p == "/other.vue.tsx").then(|| ExternalIdeContext {
+            tsx_line_index: foreign_tsx_li.clone(),
+            mapper: foreign_mapper.clone(),
+            carrier_line_index: foreign_carrier_li.clone(),
+            carrier_negotiated_line_index: None,
+        })
+    };
+    let ext: Option<ExternalIdeResolver> = Some(&resolver);
+
+    let resolved = resolve_carrier_ide_range_strict(
+        "/other.vue.tsx",
+        start,
+        end,
+        "/test.vue.tsx",
+        &current_tsx_li,
+        &current_mapper,
+        &current_carrier_li,
+        ext,
+    );
+    assert!(
+        resolved.is_some(),
+        "a foreign NON-zero-width replacement that strict-maps to a real foreign-carrier range must \
+         STILL map (the absent-boundary fuse is zero-width-only): {resolved:?}"
+    );
+}
+
+/// WI-2 (Svelte regression coverage, D1 foreign branch): a FOREIGN `.svelte` carrier whose source map
+/// PUBLISHES the `x_verter_helper_preamble_end` boundary (the geometry the Svelte IDE projector now
+/// produces) — a genuine `AddToExisting` zero-width insertion PAST that boundary maps through
+/// [`resolve_carrier_ide_range_strict`] VERBATIM (NOT dropped). The foreign drop branches
+/// (`is_preamble_import_insertion` and the absent-boundary fuse) target ONLY a preamble insertion or a
+/// boundary-LESS zero-width edit; a Svelte edit past the present boundary keeps the strict path. This
+/// is the case the absent-boundary fuse over-dropped before the producer fix published the boundary.
+///
+/// DISCRIMINATING (contrasting RED witness inline): with the boundary FLIPPED to absent (the
+/// pre-producer-fix Svelte map), the SAME zero-width edit is over-dropped by the absent-boundary fuse.
+/// The assertions pin both directions, so the boundary's presence is load-bearing.
+#[test]
+fn resolve_carrier_ide_range_strict_foreign_svelte_add_to_existing_past_boundary_maps_verbatim() {
+    let (_current_carrier, current_carrier_li, current_tsx_li, current_mapper) =
+        make_strict_mapped_preamble_fixture();
+
+    // A FOREIGN `.svelte` whose map publishes the boundary at foreign-TSX line 1 col 0 (right after a
+    // single-line prelude on line 0), and whose user import line (line 1) maps to the carrier body.
+    let foreign_carrier =
+        "<script lang=\"ts\">\nimport { onMount } from 'svelte';\n</script>\n<div>hi</div>\n";
+    let foreign_tsx =
+        "/** @jsxImportSource @verter/svelte-jsx */\nimport { onMount } from 'svelte';\n";
+    let build_foreign = |with_boundary: bool| -> ProviderPositionMapper {
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let source_id = builder.set_source_and_content("Other.svelte", foreign_carrier);
+        builder.add_token(1, 0, 1, 0, Some(source_id), None);
+        builder.add_token(1, 6, 1, 6, Some(source_id), None);
+        let base_json = builder.into_sourcemap().to_json_string();
+        if with_boundary {
+            let mut value: serde_json::Value = serde_json::from_str(&base_json).unwrap();
+            value["x_verter_helper_preamble_end"] =
+                serde_json::json!({ "line": 1, "character": 0 });
+            let json = serde_json::to_string(&value).unwrap();
+            ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap())
+        } else {
+            ProviderPositionMapper::source_map(PositionMapper::from_json(&base_json).unwrap())
+        }
+    };
+    let foreign_carrier_li = LineIndex::new_utf16(foreign_carrier);
+    let foreign_tsx_li = LineIndex::new_utf16(foreign_tsx);
+
+    // The AddToExisting zero-width insertion at foreign-TSX line 1 col 6 — a mapped position PAST the
+    // boundary (line 1 col 0).
+    let at = foreign_tsx_li
+        .position_to_offset(&Position {
+            line: 1,
+            character: 6,
+        })
+        .expect("a valid foreign Svelte TSX offset past the boundary");
+
+    // BOUNDARY PRESENT: the edit is NOT a preamble insertion (past the boundary) and the absent-
+    // boundary fuse does not fire (boundary present), so it maps through verbatim.
+    let present_mapper = build_foreign(true);
+    assert!(
+        !crate::type_provider::auto_import::is_preamble_import_insertion(
+            at,
+            at,
+            &foreign_tsx_li,
+            &present_mapper
+        ),
+        "fixture precondition: the AddToExisting position is PAST the foreign Svelte boundary"
+    );
+    let resolver_present = |p: &str| -> Option<ExternalIdeContext> {
+        (p == "/other.svelte.tsx").then(|| ExternalIdeContext {
+            tsx_line_index: foreign_tsx_li.clone(),
+            mapper: present_mapper.clone(),
+            carrier_line_index: foreign_carrier_li.clone(),
+            carrier_negotiated_line_index: None,
+        })
+    };
+    let ext_present: Option<ExternalIdeResolver> = Some(&resolver_present);
+    let resolved = resolve_carrier_ide_range_strict(
+        "/other.svelte.tsx",
+        at,
+        at,
+        "/test.vue.tsx",
+        &current_tsx_li,
+        &current_mapper,
+        &current_carrier_li,
+        ext_present,
+    );
+    assert_eq!(
+        resolved,
+        Some(Range {
+            start: Position {
+                line: 1,
+                character: 6,
+            },
+            end: Position {
+                line: 1,
+                character: 6,
+            },
+        }),
+        "a foreign Svelte AddToExisting edit PAST the present boundary must map VERBATIM to its \
+         strict-mapped carrier range, never be dropped: {resolved:?}"
+    );
+
+    // CONTRASTING RED WITNESS: the SAME edit through a boundary-LESS foreign map (the pre-producer-fix
+    // Svelte shape) is DROPPED by the absent-boundary zero-width fuse — exactly the over-drop the
+    // producer fix removes.
+    let absent_mapper = build_foreign(false);
+    assert!(
+        absent_mapper.helper_preamble_end().is_none(),
+        "the boundary-less foreign map publishes no boundary"
+    );
+    let resolver_absent = |p: &str| -> Option<ExternalIdeContext> {
+        (p == "/other.svelte.tsx").then(|| ExternalIdeContext {
+            tsx_line_index: foreign_tsx_li.clone(),
+            mapper: absent_mapper.clone(),
+            carrier_line_index: foreign_carrier_li.clone(),
+            carrier_negotiated_line_index: None,
+        })
+    };
+    let ext_absent: Option<ExternalIdeResolver> = Some(&resolver_absent);
+    let resolved_absent = resolve_carrier_ide_range_strict(
+        "/other.svelte.tsx",
+        at,
+        at,
+        "/test.vue.tsx",
+        &current_tsx_li,
+        &current_mapper,
+        &current_carrier_li,
+        ext_absent,
+    );
+    assert!(
+        resolved_absent.is_none(),
+        "WITHOUT the boundary the SAME foreign Svelte zero-width edit is over-dropped — the \
+         regression the producer fix removes; got {resolved_absent:?}"
+    );
+}
+
+/// WI-2 (Svelte regression coverage, D1 current-file branch via [`merge_code_actions`]): a CURRENT-file
+/// `.svelte` carrier `AddToExisting` zero-width insertion PAST the published boundary is ACCEPTED
+/// VERBATIM at its strict-mapped carrier range — NOT diverted to the preamble re-anchor (which is
+/// Vue-SFC-only and would drop for Svelte), NOT dropped. The PRESENT boundary keeps the edit on the
+/// strict verbatim route (the absent-boundary fuse would otherwise drop it).
+#[test]
+fn merge_code_actions_current_file_svelte_add_to_existing_past_boundary_is_accepted_verbatim() {
+    // A `.svelte` current-file carrier with the boundary present; the user import line maps to the body.
+    let carrier_source =
+        "<script lang=\"ts\">\nimport { onMount } from 'svelte';\n</script>\n<div>hi</div>\n"
+            .to_string();
+    let tsx_source =
+        "/** @jsxImportSource @verter/svelte-jsx */\nimport { onMount } from 'svelte';\n";
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("App.svelte", &carrier_source);
+    builder.add_token(1, 0, 1, 0, Some(source_id), None);
+    builder.add_token(1, 6, 1, 6, Some(source_id), None);
+    let base_json = builder.into_sourcemap().to_json_string();
+    let mut value: serde_json::Value = serde_json::from_str(&base_json).unwrap();
+    value["x_verter_helper_preamble_end"] = serde_json::json!({ "line": 1, "character": 0 });
+    let json = serde_json::to_string(&value).unwrap();
+    let mapper = ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
+    let carrier_li = LineIndex::new_utf16(&carrier_source);
+    let tsx_li = LineIndex::new_utf16(tsx_source);
+
+    let at = tsx_li
+        .position_to_offset(&Position {
+            line: 1,
+            character: 6,
+        })
+        .expect("a valid mapped TSX offset past the Svelte boundary");
+    // Precondition: PAST the boundary (not a preamble insertion), and it strict-maps to real source.
+    assert!(
+        !crate::type_provider::auto_import::is_preamble_import_insertion(at, at, &tsx_li, &mapper),
+        "fixture precondition: the current-file Svelte AddToExisting position is past the boundary"
+    );
+    let mapped = tsx_range_to_carrier_range(at, at, &tsx_li, &mapper, &carrier_li)
+        .expect("the AddToExisting position strict-maps to real Svelte carrier source");
+
+    let actions = vec![TypeCodeAction {
+        title: "Update import from 'svelte'".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/app.svelte.tsx".to_string(),
+            start: at,
+            end: at,
+            new_text: ", onDestroy".to_string(),
+        }],
+    }];
+
+    let no_external: Option<ExternalIdeResolver> = None;
+    // A Svelte carrier resolves to NO Vue preamble anchor (the re-anchor is Vue-SFC-only). The edit
+    // must still be ACCEPTED via the strict verbatim route — it is past the boundary, so it never
+    // reaches the (absent) re-anchor.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/app.svelte.tsx",
+            &carrier_source,
+            &[],
+        );
+    assert!(
+        preamble_reanchor.is_none(),
+        "a Svelte carrier supplies no Vue preamble re-anchor (Vue-SFC-only)"
+    );
+
+    let result = merge_code_actions(
+        actions,
+        "/app.svelte.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        preamble_reanchor.as_ref(),
+    );
+
+    assert_eq!(
+        result.len(),
+        1,
+        "the current-file Svelte AddToExisting action must survive via the strict verbatim route: {result:?}"
+    );
+    let CodeActionOrCommand::CodeAction(action) = &result[0] else {
+        panic!("expected a CodeAction");
+    };
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+    let (change_uri, edits) = changes.iter().next().expect("one change set");
+    // The verbatim edit keys the `.svelte` SOURCE URI (never the generated `.tsx`).
+    assert!(
+        change_uri.as_str().ends_with("/app.svelte"),
+        "the AddToExisting edit must key the .svelte source URI, got {change_uri:?}"
+    );
+    assert!(
+        !change_uri.as_str().ends_with(".tsx"),
+        "the edit must NOT target the generated .tsx, got {change_uri:?}"
+    );
+    assert_eq!(edits.len(), 1, "exactly one verbatim edit");
+    assert_eq!(
+        edits[0].range, mapped,
+        "the Svelte AddToExisting edit maps verbatim to its strict-mapped carrier range (not the \
+         file top, not dropped): {:?}",
+        edits[0].range
+    );
+    assert_eq!(
+        edits[0].new_text, ", onDestroy",
+        "the AddToExisting edit text is carried verbatim"
+    );
+
+    // CONTRASTING RED WITNESS (the over-drop the producer fix removes): the SAME current-file action
+    // through a boundary-LESS Svelte map (the pre-producer-fix shape) is DROPPED by the absent-boundary
+    // zero-width fuse — so the merge yields NO action. The boundary's presence is what flips this edit
+    // from dropped to accepted.
+    let no_boundary_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&base_json).unwrap());
+    assert!(
+        no_boundary_mapper.helper_preamble_end().is_none(),
+        "the boundary-less Svelte map publishes no boundary"
+    );
+    let red_actions = vec![TypeCodeAction {
+        title: "Update import from 'svelte'".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/app.svelte.tsx".to_string(),
+            start: at,
+            end: at,
+            new_text: ", onDestroy".to_string(),
+        }],
+    }];
+    let red_result = merge_code_actions(
+        red_actions,
+        "/app.svelte.tsx",
+        &tsx_li,
+        &no_boundary_mapper,
+        &carrier_li,
+        None,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        None,
+    );
+    assert!(
+        red_result.is_empty(),
+        "WITHOUT the boundary the SAME current-file Svelte zero-width edit is over-dropped (no \
+         action) — the regression the producer fix removes; got {red_result:?}"
     );
 }
 

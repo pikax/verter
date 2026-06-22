@@ -200,9 +200,14 @@ path uses:
   but absent). BOTH callers route their classify → anchor → build through this one
   function, so there is genuinely ONE place that does "preamble-insertion → carrier
   import anchor → edit":
-  - `translate_completion_import_edits` (completion resolve) adds only the
-    strict-mapper verbatim route on top, then turns the outcome's two failure fields
-    into `AutoImportEditMappingError::{UnmappableEdit, NoInsertionAnchor}`
+  - `translate_completion_import_edits` (completion resolve) CLASSIFIES each edit
+    before the strict route — symmetric to `merge_code_actions`: a preamble import
+    insertion (the `is_preamble_import_insertion` boundary classifier OR the
+    absent-boundary zero-width case) is diverted to the shared re-anchor BEFORE any
+    strict-mapped range is accepted, because a preamble insertion can strict-map to the
+    carrier `(0,0)` file top and must never be accepted there. Only a non-preamble edit
+    takes the strict-mapper verbatim route on top. It then turns the outcome's two
+    failure fields into `AutoImportEditMappingError::{UnmappableEdit, NoInsertionAnchor}`
     (all-or-nothing). It coalesces multiple imports — that coalescing lives INSIDE the
     shared function.
   - `merge_code_actions` (code action) COLLECTS every current-file preamble insertion
@@ -242,24 +247,60 @@ current mapper: it takes the ordinary foreign external-resolver strict path thro
 `resolve_carrier_ide_range_strict`. There the foreign source map can STRICT-MAP the
 foreign preamble offset to the foreign carrier `(0,0)` (the foreign file top, ABOVE its
 `<script setup>`) — the same geometry that makes the current-file preamble bug real. So
-the foreign branch classifies the insertion via the FOREIGN context's OWN typed
-`helper_preamble_end` boundary (`is_preamble_import_insertion` against
-`ctx.tsx_line_index` / `ctx.mapper`) and DROPS it before the foreign
-`tsx_range_to_carrier_range`. A foreign add-import therefore can never strict-map to the
-foreign file top and be emitted there, because no foreign `<script setup>` anchor exists
-in this merge (the re-anchor describes the CURRENT request only); only a non-preamble
-foreign edit (non-zero-width, past the boundary, or a foreign map with no boundary
-metadata) keeps the strict path. The foreign insertion is never diverted onto the
+the foreign branch drops the insertion before the foreign `tsx_range_to_carrier_range`
+via TWO structural discriminators (symmetric to the current-file code-action guard):
+(1) the FOREIGN context's OWN typed `helper_preamble_end` boundary
+(`is_preamble_import_insertion` against `ctx.tsx_line_index` / `ctx.mapper`) when the
+foreign map publishes the boundary; (2) the absent-boundary zero-width case — a
+zero-width foreign edit on a foreign map with NO `helper_preamble_end` boundary cannot
+be proven a non-preamble edit (a real Verter foreign carrier-IDE projection — Vue OR
+Svelte — always publishes the boundary, so its absence is a stale / non-Verter
+artifact), so it is dropped rather than accept a strict map that could land at the
+foreign file top. A
+foreign add-import therefore can never strict-map to the foreign file top and be emitted
+there, because no foreign `<script setup>` anchor exists in this merge (the re-anchor
+describes the CURRENT request only); only a NON-zero-width foreign edit (a rename
+replacement, a remove-unused deletion, an ordinary replacement) keeps the strict path —
+the absent-boundary fuse is zero-width-only. The foreign insertion is never diverted onto the
 current request's `<script setup>` anchor either (which would splice the import into the
 wrong `.vue`). One additional fail-closed guard covers stale metadata: a current-file
 zero-width carrier-IDE insertion whose `SourceMap` projection carries NO
 `x_verter_helper_preamble_end` boundary cannot be PROVEN a non-preamble edit (the
 boundary is the only structural signal separating an import insertion at the file top
 from a genuine mapped insertion), so it is dropped rather than accept a strict map that
-could land at the file top. A real Verter carrier-IDE projection always publishes the
-boundary, so this guard only fires on stale / non-Verter artifacts. The merge call site
+could land at the file top. EVERY real Verter carrier-IDE projection — Vue AND Svelte —
+publishes the boundary (see "Carrier boundary symmetry" below), so this guard only fires
+on stale / non-Verter artifacts. The merge call site
 threads the carrier source + SFC-absolute import spans (the same inputs the
 completion-resolve path reads) into `merge_code_actions`.
+
+### Carrier boundary symmetry (Vue and Svelte)
+
+The `x_verter_helper_preamble_end` source-map boundary is a contract met by EVERY
+Verter carrier-IDE projection, not a Vue-only signal:
+
+- **Vue** publishes it from the synthetic helper-import preamble, which is an
+  `Inserted` chunk in the IDE `CodeTransform`.
+- **Svelte** publishes it from its IDE projector's ambient prelude. That prelude is the
+  module INTRO (the `@jsxImportSource @verter/svelte-jsx` pragma must be the leading
+  output bytes, ahead of any trailing-`<script>` MOVE to offset 0), so the boundary is
+  captured on the intro arm of the shared `generate_map_with_preamble` walk —
+  `CodeTransform::prepend_helper_preamble_content` records the stored intro pointer and
+  `project_svelte_ide` generates the map via `generate_map_json_with_preamble`. The
+  emitted Svelte TSX bytes are unchanged; only the source-map metadata gains the boundary.
+
+Because both carriers publish the boundary, the absent-boundary zero-width fuse (in both
+the completion-resolve translator and the code-action merge, current-file AND foreign
+branches) is a genuine fail-closed LAST RESORT: a missing boundary means a stale or
+non-Verter source map, never a legitimate carrier projection. A `.svelte` zero-width
+auto-import that strict-maps near the carrier top is no longer over-dropped — its map
+carries the boundary, so a genuine `AddToExisting` insertion PAST the boundary takes the
+strict verbatim route exactly as the Vue equivalent does.
+
+The `SelfFile` rune-module projection (`.svelte.ts`/`.svelte.js`) is the one carrier-IDE
+mapper that returns `None` for the boundary by design — it has no synthetic helper
+preamble — so a non-round-tripping edit there is rejected rather than re-anchored on a
+guess. This is intentional fail-closed behavior, not a missing-contract case.
 
 NOTE (test reality): the hermetic e2e harness's `getCodeFixes` does not surface an
 `addMissingImport` for a carrier (or any in-memory / inferred-project) file on
