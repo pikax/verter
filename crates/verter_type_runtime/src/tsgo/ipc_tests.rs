@@ -1591,7 +1591,81 @@ fn test_parse_signature_help_fn() {
     assert_eq!(sig.signatures.len(), 1);
     assert_eq!(sig.signatures[0].label, "fn(x: number): void");
     assert_eq!(sig.signatures[0].parameters.len(), 1);
+    // A JSON-string parameter label parses to the `Simple` carrier form.
+    assert_eq!(
+        sig.signatures[0].parameters[0].label,
+        ParameterLabelKind::Simple("x".to_string())
+    );
     assert_eq!(sig.active_signature, Some(0));
+}
+
+/// tgo (LSP) may send a parameter `label` as a `[start, end)` offset pair into the
+/// signature label AND a per-signature `activeParameter`; both are parsed.
+///
+/// Discriminates against the pre-K2 tgo parser, which only read `label.as_str()`
+/// (dropping any array-form param entirely via `filter_map`) and never read
+/// per-signature `activeParameter`.
+#[test]
+fn parse_signature_help_parses_offset_label_and_per_sig_active_param() {
+    let json = serde_json::json!({
+        "signatures": [{
+            "label": "greet(name: string, times: number): void",
+            "parameters": [
+                { "label": [6, 18] },
+                { "label": [20, 33] }
+            ],
+            "activeParameter": 1
+        }],
+        "activeSignature": 0,
+        "activeParameter": 1
+    });
+    let sig = parse_signature_help(&json);
+    assert_eq!(sig.signatures.len(), 1);
+    let s0 = &sig.signatures[0];
+    assert_eq!(s0.parameters.len(), 2);
+    assert_eq!(s0.parameters[0].label, ParameterLabelKind::Offsets(6, 18));
+    assert_eq!(s0.parameters[1].label, ParameterLabelKind::Offsets(20, 33));
+    assert_eq!(
+        s0.active_parameter,
+        Some(1),
+        "per-signature activeParameter must be parsed from the LSP wire"
+    );
+    assert_eq!(sig.active_signature, Some(0));
+    assert_eq!(sig.active_parameter, Some(1));
+}
+
+/// `parse_lsp_parameter_label` fail-closes: a non-string / non-2-int-array shape
+/// yields `None` (the parameter is dropped, NEVER given fabricated offsets).
+#[test]
+fn parse_lsp_parameter_label_fails_closed_on_bad_shapes() {
+    // Valid: string.
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!("x: number")),
+        Some(ParameterLabelKind::Simple("x: number".to_string()))
+    );
+    // Valid: 2-element int array.
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([3, 9])),
+        Some(ParameterLabelKind::Offsets(3, 9))
+    );
+    // Invalid shapes → None (fail-closed, no fabricated offsets).
+    assert_eq!(parse_lsp_parameter_label(&serde_json::json!([3])), None);
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([3, 9, 12])),
+        None
+    );
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!(["a", "b"])),
+        None
+    );
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!({ "x": 1 })),
+        None
+    );
+    assert_eq!(parse_lsp_parameter_label(&serde_json::json!(7)), None);
+    assert_eq!(parse_lsp_parameter_label(&serde_json::json!(null)), None);
+    // A negative offset is not a u64 → fail-closed.
+    assert_eq!(parse_lsp_parameter_label(&serde_json::json!([-1, 9])), None);
 }
 
 /// @ai-generated — decode_semantic_tokens decodes delta-encoded tokens

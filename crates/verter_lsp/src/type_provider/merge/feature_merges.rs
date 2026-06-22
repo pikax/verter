@@ -402,7 +402,18 @@ pub fn merge_signature_help(
                     s.parameters
                         .into_iter()
                         .map(|p| ParameterInformation {
-                            label: ParameterLabel::Simple(p.label),
+                            // Map the carrier's two label forms onto LSP's:
+                            // `Simple` → literal string; `Offsets` →
+                            // `LabelOffsets` so the client bolds the exact param
+                            // span within the rendered signature label.
+                            label: match p.label {
+                                protocol::ParameterLabelKind::Simple(text) => {
+                                    ParameterLabel::Simple(text)
+                                }
+                                protocol::ParameterLabelKind::Offsets(start, end) => {
+                                    ParameterLabel::LabelOffsets([start, end])
+                                }
+                            },
                             documentation: p.documentation.map(|d| {
                                 Documentation::MarkupContent(MarkupContent {
                                     kind: MarkupKind::Markdown,
@@ -412,7 +423,10 @@ pub fn merge_signature_help(
                         })
                         .collect(),
                 ),
-                active_parameter: None,
+                // Per-signature active parameter (mirrors LSP
+                // `SignatureInformation.activeParameter`); takes precedence over
+                // the top-level value in clients when present.
+                active_parameter: s.active_parameter,
             })
             .collect(),
         active_signature: sig.active_signature,

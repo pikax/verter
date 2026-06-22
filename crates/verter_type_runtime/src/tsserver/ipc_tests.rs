@@ -1647,3 +1647,77 @@ fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
+
+/// `assemble_signature_label` joins parts EXACTLY like the rendered label and
+/// reports each parameter's contiguous `[start, end)` slice of it.
+#[test]
+fn assemble_signature_label_offsets_index_the_label_slices() {
+    let prefix = "greet(";
+    let params = vec!["name: string".to_string(), "times: number".to_string()];
+    let separator = ", ";
+    let suffix = "): void";
+    let assembled = assemble_signature_label(prefix, &params, separator, suffix);
+
+    assert_eq!(assembled.label, "greet(name: string, times: number): void");
+    assert_eq!(assembled.param_offsets.len(), 2);
+    // Each offset pair must slice EXACTLY the parameter text out of the label,
+    // measured in UTF-16 code units.
+    let label_u16: Vec<u16> = assembled.label.encode_utf16().collect();
+    for (i, &(start, end)) in assembled.param_offsets.iter().enumerate() {
+        assert!(start < end, "param {i} span must be non-empty");
+        assert!(end as usize <= label_u16.len(), "param {i} span in bounds");
+        let slice = String::from_utf16(&label_u16[start as usize..end as usize]).unwrap();
+        assert_eq!(slice, params[i], "offsets must slice the exact param text");
+    }
+    // Concretely: "name: string" is [6, 18) in the assembled label.
+    assert_eq!(assembled.param_offsets[0], (6, 18));
+}
+
+/// Offsets are UTF-16 code units, NOT bytes and NOT `char`s.
+///
+/// A multi-byte BMP character (`é` = 2 UTF-8 bytes, 1 UTF-16 unit) and an astral
+/// character (`𝕏` = 4 UTF-8 bytes, 2 UTF-16 units, 1 `char`) in the prefix and a
+/// parameter must shift the offsets by the UTF-16 count. A byte- or char-based
+/// implementation would compute different numbers here, so this test discriminates
+/// the encoding.
+#[test]
+fn assemble_signature_label_offsets_are_utf16_not_bytes_or_chars() {
+    // prefix "é𝕏(" : 'é'=1 u16, '𝕏'=2 u16, '('=1 u16 → 4 UTF-16 units
+    //               but 2 + 4 + 1 = 7 UTF-8 bytes, and 3 chars.
+    let prefix = "é𝕏(";
+    let params = vec!["a: 𝕏".to_string(), "b: number".to_string()];
+    let separator = ", ";
+    let suffix = ")";
+    let assembled = assemble_signature_label(prefix, &params, separator, suffix);
+
+    // First param starts right after the 4-UTF-16-unit prefix.
+    assert_eq!(
+        assembled.param_offsets[0].0, 4,
+        "start = UTF-16 len of prefix"
+    );
+    // "a: 𝕏" = 'a'(1) ' '(1)? actually "a: " is 'a',':',' ' = 3 u16, plus '𝕏'=2 → 5 u16.
+    assert_eq!(assembled.param_offsets[0], (4, 9));
+    // Second param: after first (5) + separator ", " (2) → starts at 11.
+    assert_eq!(assembled.param_offsets[1].0, 11);
+
+    // Cross-check: every offset still slices the exact text in UTF-16 space.
+    let label_u16: Vec<u16> = assembled.label.encode_utf16().collect();
+    for (i, &(start, end)) in assembled.param_offsets.iter().enumerate() {
+        let slice = String::from_utf16(&label_u16[start as usize..end as usize]).unwrap();
+        assert_eq!(slice, params[i]);
+    }
+
+    // Negative: a byte-based computation would place param[0] start at the UTF-8
+    // byte length of the prefix (7), which is WRONG. Assert we are NOT doing that.
+    assert_ne!(
+        assembled.param_offsets[0].0,
+        prefix.len() as u32,
+        "offsets must be UTF-16 units, never UTF-8 byte offsets"
+    );
+    // And NOT char counts (prefix is 3 chars).
+    assert_ne!(
+        assembled.param_offsets[0].0,
+        prefix.chars().count() as u32,
+        "offsets must be UTF-16 units, never char counts"
+    );
+}

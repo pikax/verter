@@ -39,3 +39,4 @@ mod hover;
 mod multi_fixture;
 mod references;
 mod rename;
+mod signature_help;

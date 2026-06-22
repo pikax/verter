@@ -16,12 +16,13 @@ use tokio::sync::{Mutex, OnceCell};
 
 use crate::server::{TsQuery, TsQueryParams};
 use crate::tsserver::ipc::{
-    build_completion_entry_details_request, build_entry_names_entry, byte_offset_to_tsserver_pos,
-    combined_code_fix_args, completion_entry_details_to_resolve_result, concat_display_parts,
-    dedup_error_codes, enrich_completion_with_entry_details, format_quickinfo_hover,
-    merge_diagnostic_sets, parse_tsserver_code_action, parse_tsserver_combined_code_fix,
-    parse_tsserver_completion, parse_tsserver_diagnostic, parse_tsserver_location,
-    parse_tsserver_rename_span, stamp_tsserver_completion_offset,
+    assemble_signature_label, build_completion_entry_details_request, build_entry_names_entry,
+    byte_offset_to_tsserver_pos, combined_code_fix_args,
+    completion_entry_details_to_resolve_result, concat_display_parts, dedup_error_codes,
+    enrich_completion_with_entry_details, format_quickinfo_hover, merge_diagnostic_sets,
+    parse_tsserver_code_action, parse_tsserver_combined_code_fix, parse_tsserver_completion,
+    parse_tsserver_diagnostic, parse_tsserver_location, parse_tsserver_rename_span,
+    stamp_tsserver_completion_offset,
 };
 use crate::type_provider::protocol::*;
 use crate::type_provider::traits::{ProviderFuture, TypeProvider};
@@ -783,9 +784,23 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                         return Ok(None);
                     };
 
+                    // tsserver gives a single top-level active param
+                    // (`argumentIndex`) + active signature (`selectedItemIndex`),
+                    // not per-overload values; read both up front so each signature
+                    // can stamp the active param onto the SELECTED overload only.
+                    let active_sig = body
+                        .get("selectedItemIndex")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as u32);
+                    let active_param = body
+                        .get("argumentIndex")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as u32);
+
                     let signatures: Vec<SignatureInfo> = items
                         .iter()
-                        .map(|item| {
+                        .enumerate()
+                        .map(|(sig_idx, item)| {
                             let prefix = item
                                 .get("prefixDisplayParts")
                                 .and_then(|v| v.as_array())
@@ -802,13 +817,16 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                                 .map(|parts| concat_display_parts(parts))
                                 .unwrap_or_else(|| ", ".to_string());
 
-                            let params: Vec<ParameterInfo> = item
+                            // Collect each parameter's display text + docs first; the
+                            // text is exactly what occupies the param's slot in the
+                            // assembled label, so offsets computed from it are exact.
+                            let param_parts: Vec<(String, Option<String>)> = item
                                 .get("parameters")
                                 .and_then(|v| v.as_array())
                                 .map(|ps| {
                                     ps.iter()
                                         .map(|p| {
-                                            let label = p
+                                            let text = p
                                                 .get("displayParts")
                                                 .and_then(|v| v.as_array())
                                                 .map(|parts| concat_display_parts(parts))
@@ -817,28 +835,49 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                                                 .get("documentation")
                                                 .and_then(|v| v.as_array())
                                                 .map(|parts| concat_display_parts(parts));
-                                            ParameterInfo {
-                                                label,
-                                                documentation: doc,
-                                            }
+                                            (text, doc)
                                         })
                                         .collect()
                                 })
                                 .unwrap_or_default();
 
                             let param_labels: Vec<String> =
-                                params.iter().map(|p| p.label.clone()).collect();
-                            let label =
-                                format!("{prefix}{}{suffix}", param_labels.join(&separator));
+                                param_parts.iter().map(|(t, _)| t.clone()).collect();
+                            // Assemble label + per-param UTF-16 offset spans together
+                            // (LSP offsets are UTF-16 code units); offsets let the
+                            // client bold the exact active-parameter span.
+                            let assembled = assemble_signature_label(
+                                &prefix,
+                                &param_labels,
+                                &separator,
+                                &suffix,
+                            );
+                            let params: Vec<ParameterInfo> = param_parts
+                                .into_iter()
+                                .zip(assembled.param_offsets.iter())
+                                .map(|((_, doc), &(start, end))| ParameterInfo {
+                                    label: ParameterLabelKind::Offsets(start, end),
+                                    documentation: doc,
+                                })
+                                .collect();
                             let doc = item
                                 .get("documentation")
                                 .and_then(|v| v.as_array())
                                 .map(|parts| concat_display_parts(parts));
 
+                            // Stamp top-level active param onto the selected overload
+                            // only; tsserver gives no per-overload active params.
+                            let sig_active_param = if active_sig == Some(sig_idx as u32) {
+                                active_param
+                            } else {
+                                None
+                            };
+
                             SignatureInfo {
-                                label,
+                                label: assembled.label,
                                 documentation: doc,
                                 parameters: params,
+                                active_parameter: sig_active_param,
                             }
                         })
                         .collect();
@@ -846,15 +885,6 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                     if signatures.is_empty() {
                         return Ok(None);
                     }
-
-                    let active_sig = body
-                        .get("selectedItemIndex")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as u32);
-                    let active_param = body
-                        .get("argumentIndex")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as u32);
 
                     Ok(Some(SignatureHelp {
                         signatures,

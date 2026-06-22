@@ -652,6 +652,29 @@ impl RealProviderTestSession {
         }
     }
 
+    /// Get signature help at a position (raw LSP `SignatureHelp`).
+    pub(crate) async fn signature_help(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> Option<SignatureHelp> {
+        let params = SignatureHelpParams {
+            context: None,
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        };
+        match self.server().signature_help(params).await {
+            Ok(help) => help,
+            Err(e) => {
+                eprintln!("signature_help error: {e}");
+                None
+            }
+        }
+    }
+
     /// Get go-to-definition locations at a position.
     pub(crate) async fn definitions(
         &self,

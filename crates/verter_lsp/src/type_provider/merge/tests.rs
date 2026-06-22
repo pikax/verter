@@ -1485,9 +1485,10 @@ fn merge_signature_help_present() {
             label: "fn(x: number): void".to_string(),
             documentation: Some("A test function".to_string()),
             parameters: vec![protocol::ParameterInfo {
-                label: "x".to_string(),
+                label: protocol::ParameterLabelKind::Simple("x".to_string()),
                 documentation: Some("The number param".to_string()),
             }],
+            active_parameter: None,
         }],
         active_signature: Some(0),
         active_parameter: Some(0),
@@ -1505,6 +1506,91 @@ fn merge_signature_help_present() {
 #[test]
 fn merge_signature_help_none() {
     assert!(merge_signature_help(None).is_none());
+}
+
+/// Per-signature active parameter and the offset-form parameter label survive
+/// the carrier → LSP conversion.
+///
+/// Discriminates against the pre-K2 merge, which (a) hard-coded per-signature
+/// `active_parameter: None` and (b) only ever emitted `ParameterLabel::Simple`
+/// (the `ParameterLabelKind::Offsets` carrier form and the `SignatureInfo`
+/// `active_parameter` field did not exist). Both assertions below fail on the
+/// pre-fix tree.
+#[test]
+fn merge_signature_help_carries_active_param_and_offset_label() {
+    use tower_lsp_server::ls_types::ParameterLabel;
+
+    let sig = protocol::SignatureHelp {
+        signatures: vec![protocol::SignatureInfo {
+            label: "greet(name: string, times: number): void".to_string(),
+            documentation: None,
+            parameters: vec![
+                protocol::ParameterInfo {
+                    // "name: string" spans UTF-16 [6, 18) of the label above.
+                    label: protocol::ParameterLabelKind::Offsets(6, 18),
+                    documentation: None,
+                },
+                protocol::ParameterInfo {
+                    label: protocol::ParameterLabelKind::Offsets(20, 33),
+                    documentation: None,
+                },
+            ],
+            active_parameter: Some(1),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(1),
+    };
+
+    let help = merge_signature_help(Some(sig)).expect("present");
+    assert_eq!(help.signatures.len(), 1);
+    let s0 = &help.signatures[0];
+    // (b) per-signature active parameter is carried (was hard-coded None pre-fix).
+    assert_eq!(
+        s0.active_parameter,
+        Some(1),
+        "per-signature active_parameter must be carried through the merge"
+    );
+    let params = s0.parameters.as_ref().expect("parameters present");
+    assert_eq!(params.len(), 2);
+    // (a) offset-form labels map to LabelOffsets (was always Simple pre-fix).
+    assert_eq!(
+        params[0].label,
+        ParameterLabel::LabelOffsets([6, 18]),
+        "Offsets(6,18) must map to ParameterLabel::LabelOffsets([6,18])"
+    );
+    assert_eq!(params[1].label, ParameterLabel::LabelOffsets([20, 33]));
+    // top-level signals stay as-is.
+    assert_eq!(help.active_signature, Some(0));
+    assert_eq!(help.active_parameter, Some(1));
+}
+
+/// A `Simple` carrier label still maps to `ParameterLabel::Simple` (fail-closed
+/// passthrough form — e.g. a tgo provider that sends string labels).
+#[test]
+fn merge_signature_help_simple_label_passthrough() {
+    use tower_lsp_server::ls_types::ParameterLabel;
+
+    let sig = protocol::SignatureHelp {
+        signatures: vec![protocol::SignatureInfo {
+            label: "fn(x: number): void".to_string(),
+            documentation: None,
+            parameters: vec![protocol::ParameterInfo {
+                label: protocol::ParameterLabelKind::Simple("x: number".to_string()),
+                documentation: None,
+            }],
+            active_parameter: None,
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(0),
+    };
+
+    let help = merge_signature_help(Some(sig)).expect("present");
+    let params = help.signatures[0].parameters.as_ref().expect("params");
+    assert_eq!(
+        params[0].label,
+        ParameterLabel::Simple("x: number".to_string())
+    );
+    assert_eq!(help.signatures[0].active_parameter, None);
 }
 
 // ── Code actions merge tests ──────────────────────────────────────

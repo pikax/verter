@@ -3146,6 +3146,27 @@ fn parse_rename_edit<'a>(
     Some(RenameLocation { path, start, end })
 }
 
+/// Parse an LSP `ParameterInformation.label`, which is EITHER a JSON string OR a
+/// two-element array of unsigned integers (`[start, end)` UTF-16 offsets into the
+/// enclosing signature label).
+///
+/// Fail-closed: returns `None` for any other shape (an array of the wrong arity,
+/// non-integer elements, an object, …) so the parameter is dropped rather than
+/// rendered with a fabricated label or wrong offsets.
+fn parse_lsp_parameter_label(value: &serde_json::Value) -> Option<ParameterLabelKind> {
+    if let Some(s) = value.as_str() {
+        return Some(ParameterLabelKind::Simple(s.to_string()));
+    }
+    if let Some(arr) = value.as_array() {
+        if arr.len() == 2 {
+            let start = arr[0].as_u64()?;
+            let end = arr[1].as_u64()?;
+            return Some(ParameterLabelKind::Offsets(start as u32, end as u32));
+        }
+    }
+    None
+}
+
 /// Parse a SignatureHelp from a JSON response.
 fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
     let signatures = result
@@ -3163,7 +3184,12 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
                             params
                                 .iter()
                                 .filter_map(|p| {
-                                    let plabel = p.get("label")?.as_str()?.to_string();
+                                    // LSP `ParameterInformation.label` is EITHER a
+                                    // string OR a `[start, end)` UTF-16 offset pair
+                                    // into the signature label. Parse whichever the
+                                    // server sent; fail-closed (skip) on neither —
+                                    // never fabricate offsets.
+                                    let plabel = parse_lsp_parameter_label(p.get("label")?)?;
                                     let pdoc =
                                         p.get("documentation").and_then(extract_markup_string);
                                     Some(ParameterInfo {
@@ -3174,10 +3200,17 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    // LSP `SignatureInformation.activeParameter` (optional,
+                    // per-signature). Carried when present; `None` otherwise.
+                    let active_parameter = sig
+                        .get("activeParameter")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
                     Some(SignatureInfo {
                         label,
                         documentation,
                         parameters,
+                        active_parameter,
                     })
                 })
                 .collect()

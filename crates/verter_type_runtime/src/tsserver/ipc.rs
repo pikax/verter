@@ -1655,9 +1655,23 @@ impl TypeProvider for TsserverTypeProvider {
                         return Ok(None);
                     };
 
+                    // tsserver gives a single top-level active param
+                    // (`argumentIndex`) and active signature (`selectedItemIndex`),
+                    // not per-overload values. Read both up front so each signature
+                    // can stamp the active param onto the SELECTED overload only.
+                    let active_sig = body
+                        .get("selectedItemIndex")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as u32);
+                    let active_param = body
+                        .get("argumentIndex")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as u32);
+
                     let signatures: Vec<SignatureInfo> = items
                         .iter()
-                        .map(|item| {
+                        .enumerate()
+                        .map(|(sig_idx, item)| {
                             let prefix = item
                                 .get("prefixDisplayParts")
                                 .and_then(|v| v.as_array())
@@ -1674,13 +1688,17 @@ impl TypeProvider for TsserverTypeProvider {
                                 .map(|parts| concat_display_parts(parts))
                                 .unwrap_or_else(|| ", ".to_string());
 
-                            let params: Vec<ParameterInfo> = item
+                            // Collect each parameter's display text + docs first;
+                            // the text is exactly what occupies the param's slot in
+                            // the assembled label, so offsets computed from these
+                            // texts are exact.
+                            let param_parts: Vec<(String, Option<String>)> = item
                                 .get("parameters")
                                 .and_then(|v| v.as_array())
                                 .map(|ps| {
                                     ps.iter()
                                         .map(|p| {
-                                            let label = p
+                                            let text = p
                                                 .get("displayParts")
                                                 .and_then(|v| v.as_array())
                                                 .map(|parts| concat_display_parts(parts))
@@ -1689,28 +1707,53 @@ impl TypeProvider for TsserverTypeProvider {
                                                 .get("documentation")
                                                 .and_then(|v| v.as_array())
                                                 .map(|parts| concat_display_parts(parts));
-                                            ParameterInfo {
-                                                label,
-                                                documentation: doc,
-                                            }
+                                            (text, doc)
                                         })
                                         .collect()
                                 })
                                 .unwrap_or_default();
 
                             let param_labels: Vec<String> =
-                                params.iter().map(|p| p.label.clone()).collect();
-                            let label =
-                                format!("{prefix}{}{suffix}", param_labels.join(&separator));
+                                param_parts.iter().map(|(t, _)| t.clone()).collect();
+                            // Assemble the label and per-param UTF-16 offset spans
+                            // together so the offsets stay consistent with the label
+                            // bytes. Offsets (vs. plain `Simple`) let the client bold
+                            // the exact active-parameter span; this is strictly
+                            // richer and is computed from the wire display parts.
+                            let assembled = assemble_signature_label(
+                                &prefix,
+                                &param_labels,
+                                &separator,
+                                &suffix,
+                            );
+                            let params: Vec<ParameterInfo> = param_parts
+                                .into_iter()
+                                .zip(assembled.param_offsets.iter())
+                                .map(|((_, doc), &(start, end))| ParameterInfo {
+                                    label: ParameterLabelKind::Offsets(start, end),
+                                    documentation: doc,
+                                })
+                                .collect();
                             let doc = item
                                 .get("documentation")
                                 .and_then(|v| v.as_array())
                                 .map(|parts| concat_display_parts(parts));
 
+                            // Stamp the top-level active param onto the selected
+                            // overload only; tsserver does not give per-overload
+                            // active params, so the param index only meaningfully
+                            // applies to the active signature.
+                            let sig_active_param = if active_sig == Some(sig_idx as u32) {
+                                active_param
+                            } else {
+                                None
+                            };
+
                             SignatureInfo {
-                                label,
+                                label: assembled.label,
                                 documentation: doc,
                                 parameters: params,
+                                active_parameter: sig_active_param,
                             }
                         })
                         .collect();
@@ -1718,15 +1761,6 @@ impl TypeProvider for TsserverTypeProvider {
                     if signatures.is_empty() {
                         return Ok(None);
                     }
-
-                    let active_sig = body
-                        .get("selectedItemIndex")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as u32);
-                    let active_param = body
-                        .get("argumentIndex")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as u32);
 
                     Ok(Some(SignatureHelp {
                         signatures,
@@ -2809,6 +2843,58 @@ pub fn concat_display_parts(parts: &[serde_json::Value]) -> String {
         .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// The assembled signature label plus each parameter's UTF-16 offset span within
+/// it, returned together so the offsets stay consistent with the exact label they
+/// were measured against.
+pub struct AssembledSignatureLabel {
+    /// The full signature label: `{prefix}{params joined by separator}{suffix}`.
+    pub label: String,
+    /// Per-parameter `[start, end)` offset, in parameter order, in **UTF-16 code
+    /// units** relative to `label` (the LSP `ParameterInformation.label` offset
+    /// encoding). Same length as the input `param_labels`.
+    pub param_offsets: Vec<(u32, u32)>,
+}
+
+/// Assemble a tsserver signature label from its display-part segments and compute
+/// each parameter's `[start, end)` span within the assembled label.
+///
+/// The label is `{prefix}{param_labels joined by separator}{suffix}` — identical
+/// to how tsserver's own client renders it — and each parameter occupies a
+/// contiguous run, so its span is exact (this is data assembly over
+/// provider-supplied parts, not semantic inference).
+///
+/// IMPORTANT (encoding): LSP parameter-label offsets are **UTF-16 code units**, so
+/// every running length is measured with `encode_utf16().count()`, never bytes and
+/// never `char`s — otherwise a multi-byte / astral character in a type name would
+/// misalign the bold span.
+pub fn assemble_signature_label(
+    prefix: &str,
+    param_labels: &[String],
+    separator: &str,
+    suffix: &str,
+) -> AssembledSignatureLabel {
+    let label = format!("{prefix}{}{suffix}", param_labels.join(separator));
+
+    let separator_u16 = separator.encode_utf16().count() as u32;
+    let mut cursor = prefix.encode_utf16().count() as u32;
+    let mut param_offsets = Vec::with_capacity(param_labels.len());
+    for (i, p) in param_labels.iter().enumerate() {
+        if i > 0 {
+            cursor += separator_u16;
+        }
+        let len = p.encode_utf16().count() as u32;
+        let start = cursor;
+        let end = cursor + len;
+        param_offsets.push((start, end));
+        cursor = end;
+    }
+
+    AssembledSignatureLabel {
+        label,
+        param_offsets,
+    }
 }
 
 /// Format tsserver quickinfo into hover markdown.

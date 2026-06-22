@@ -403,12 +403,38 @@ pub struct SignatureInfo {
     pub label: String,
     pub documentation: Option<String>,
     pub parameters: Vec<ParameterInfo>,
+    /// Per-signature active-parameter index, mirroring LSP
+    /// `SignatureInformation.activeParameter`. When present it takes precedence
+    /// over the top-level [`SignatureHelp::active_parameter`] in LSP clients, so
+    /// it carries the active param for THIS overload specifically. `None` when
+    /// the provider does not supply a per-signature value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_parameter: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterInfo {
-    pub label: String,
+    pub label: ParameterLabelKind,
     pub documentation: Option<String>,
+}
+
+/// A signature-help parameter's label, mirroring the two forms of LSP
+/// `ParameterInformation.label`.
+///
+/// LSP allows a parameter label to be either a literal string OR a
+/// `[start, end)` offset pair indexing INTO the enclosing signature `label`.
+/// The offset form lets the client bold the exact parameter span within the
+/// rendered signature; it is strictly richer than the literal form.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum ParameterLabelKind {
+    /// A literal label string (rendered as-is).
+    Simple(String),
+    /// `[start, end)` offset pair INTO the enclosing signature `label`, per the
+    /// LSP `ParameterInformation.label` offset form. Offsets are UTF-16 code
+    /// units (LSP wire encoding) — preserve exactly what the provider sent / was
+    /// computed against the UTF-16 label; do not recompute encoding downstream.
+    Offsets(u32, u32),
 }
 
 /// A code action from the type provider.
