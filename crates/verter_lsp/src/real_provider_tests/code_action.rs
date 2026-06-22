@@ -420,11 +420,24 @@ const usedSvelte = 2
 /// 3. the insertion range is NOT `Range::default()` — i.e. it did NOT collapse to
 ///    line 0 char 0 (the `<script setup>` tag occupies line 0, so the real anchor
 ///    is the script CONTENT, strictly below it).
-fn has_add_missing_vue_import(actions: &CodeActionResponse, uri: &Uri, symbol: &str) -> bool {
+fn has_add_missing_vue_import(
+    actions: &CodeActionResponse,
+    uri: &Uri,
+    symbol: &str,
+    carrier_source: &str,
+    carrier_li: &crate::documents::line_index::LineIndex,
+) -> bool {
     assert!(
         !uri.as_str().ends_with(".tsx"),
         "the carrier uri under test must be the .vue source, not a .tsx: {uri:?}"
     );
+    // The `<script setup>` content range (typed `scan_sfc_blocks` classification, no string
+    // sniffing) — the in-source region the re-anchored import MUST land inside.
+    let setup_content = crate::documents::sfc_scanner::scan_sfc_blocks(carrier_source)
+        .into_iter()
+        .find(|b| b.is_setup())
+        .map(|b| b.content_range())
+        .expect("the canary fixture has a `<script setup>` block");
     actions.iter().any(|a| {
         let CodeActionOrCommand::CodeAction(ca) = a else {
             return false;
@@ -440,9 +453,15 @@ fn has_add_missing_vue_import(actions: &CodeActionResponse, uri: &Uri, symbol: &
                 && !edit_uri.as_str().ends_with(".tsx")
                 && edits.iter().any(|e| {
                     // A zero-width insertion (start == end) of an `import { symbol } …`
-                    // line that references the `vue` module, NOT collapsed to (0,0).
+                    // line that references the `vue` module, NOT collapsed to (0,0), AND landing
+                    // INSIDE the `<script setup>` content range (the re-anchor target) — never the
+                    // file top, never `<template>` or below `</script>`.
+                    let in_script_setup = carrier_li
+                        .position_to_offset(&e.range.start)
+                        .is_some_and(|off| off >= setup_content.0 && off <= setup_content.1);
                     e.range.start == e.range.end
                         && e.range != Range::default()
+                        && in_script_setup
                         && e.new_text.contains("import")
                         && e.new_text.contains(symbol)
                         && (e.new_text.contains("from \"vue\"")
@@ -509,6 +528,17 @@ const base = ref(1)
         //     re-anchored `<script setup>` site.
         // Probing both lets the canary distinguish "provider emitted nothing" (harness limitation)
         // from "provider emitted but the merge dropped/mis-placed it" (a real merge regression).
+        // Snapshot the carrier source + line index once so the landing check can assert the
+        // re-anchored import lands INSIDE the `<script setup>` content range, not merely "not (0,0)".
+        let (carrier_source, carrier_li) = {
+            let doc = session
+                .server()
+                .test_documents()
+                .get(&uri)
+                .expect("document should be open");
+            (doc.source.clone(), doc.line_index.clone())
+        };
+
         let mut provider_emitted = false;
         let mut landed = false;
         for attempt in 0..8 {
@@ -521,7 +551,7 @@ const base = ref(1)
             }
             let actions = code_action(session, &uri, range, vec![ts2304(range, "ref")]).await;
             if let Some(actions) = actions {
-                if has_add_missing_vue_import(&actions, &uri, "ref") {
+                if has_add_missing_vue_import(&actions, &uri, "ref", &carrier_source, &carrier_li) {
                     landed = true;
                 }
             }

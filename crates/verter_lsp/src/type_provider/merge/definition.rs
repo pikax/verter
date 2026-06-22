@@ -120,6 +120,24 @@ pub(crate) fn resolve_carrier_ide_range_strict(
     // sourcemap (via the external resolver) can map the offsets — fail closed otherwise.
     let resolver = external_resolver?;
     let ctx = resolver(path)?;
+    // A foreign `addMissingImport` insertion sits in the foreign TSX's synthetic helper-import
+    // preamble. The foreign source map can STRICT-MAP that offset to the foreign carrier `(0,0)`
+    // (the foreign file top, ABOVE its `<script setup>`) — the same geometry that makes the
+    // current-file preamble bug real. A foreign preamble insertion is never placeable from its
+    // strict range, and there is NO foreign `<script setup>` anchor in this merge (the re-anchor
+    // describes the CURRENT request only), so classify it via the FOREIGN context's own typed
+    // helper-preamble boundary and DROP it. The discriminator is STRUCTURE only (zero-width
+    // geometry + the foreign `x_verter_helper_preamble_end` boundary); a non-preamble foreign edit
+    // (non-zero-width, past the boundary, or a foreign map with no boundary metadata) is unaffected
+    // and keeps its strict path.
+    if crate::type_provider::auto_import::is_preamble_import_insertion(
+        start,
+        end,
+        &ctx.tsx_line_index,
+        &ctx.mapper,
+    ) {
+        return None;
+    }
     tsx_range_to_carrier_range(
         start,
         end,

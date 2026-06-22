@@ -446,19 +446,28 @@ pub fn merge_signature_help(
 ///   mapper — without a resolver (or on a resolver miss / map failure) it is DROPPED, because the
 ///   offsets index the foreign TSX and the current sourcemap would point at an unrelated location.
 ///
-/// A provider `addMissingImport` quickfix inserts a brand-new `import …` line at the TOP of the
-/// generated TSX, which in Verter's projection lands inside the synthetic, unmapped helper-import
-/// preamble — so the strict mapper returns `None` and the edit would be DROPPED. Such a CURRENT-file
-/// preamble insertion is re-anchored at the carrier's `<script setup>` import insertion site through
-/// the SAME shared re-anchor the completion auto-import path uses
-/// ([`crate::type_provider::auto_import::reanchor_preamble_import_edits`]). This layer is
-/// carrier-NEUTRAL: the caller resolves the carrier import anchor (the USE-SITE-AWARE,
-/// Vue-carrier-keyed [`crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor`])
-/// and passes it in as the precomputed `preamble_reanchor`. When it is `Some` and a CURRENT-file
-/// preamble insertion is detected, the edit is re-anchored at that anchor; when it is `None`, the
-/// insertion is DROPPED fail-closed. A FOREIGN carrier `.tsx` preamble insertion is NEVER re-anchored
-/// (the precomputed anchor describes the CURRENT request's carrier, not the foreign one), so it stays
-/// dropped; a `SelfFile` projection has no preamble boundary, so it fails closed too.
+/// A provider `addMissingImport` quickfix inserts a brand-new `import …` line at the HEAD of the
+/// generated TSX, inside the synthetic helper-import preamble. That insertion offset can EITHER miss
+/// the strict mapper OR strict-map to the carrier file top `(0,0)` — a position ABOVE `<script setup>`
+/// that is an invalid import location. So the strict-mapped range is NOT trustworthy for a preamble
+/// insertion: a CURRENT-file edit is first classified via the typed helper-preamble-end boundary
+/// ([`crate::type_provider::auto_import::is_preamble_import_insertion`] — STRUCTURE only: geometry plus
+/// the `x_verter_helper_preamble_end` source-map member, never `new_text`, never the produced `(0,0)`
+/// value) and, when it is a preamble insertion, DIVERTED to the re-anchor BEFORE any strict range is
+/// accepted. All such current-file preamble insertions are coalesced and re-anchored ONCE (in input
+/// order) into a SINGLE `<script setup>` block through the SAME shared re-anchor the completion
+/// auto-import path uses ([`crate::type_provider::auto_import::reanchor_preamble_import_edits`]) — never
+/// N overlapping zero-width inserts. This layer is carrier-NEUTRAL: the caller resolves the carrier
+/// import anchor (the USE-SITE-AWARE, Vue-carrier-keyed
+/// [`crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor`]) and passes it in as
+/// the precomputed `preamble_reanchor`. When it is `Some` the coalesced imports are re-anchored at that
+/// anchor; when it is `None` (a Svelte / non-Vue / no-`<script setup>` / mixed-script carrier) they are
+/// DROPPED fail-closed. A FOREIGN carrier `.tsx` preamble insertion is NEVER classified through the
+/// current mapper (whose boundary describes the CURRENT request only) — it takes the foreign
+/// external-resolver strict path and stays dropped on a resolver miss. Fail-closed for stale metadata:
+/// a current-file zero-width carrier-IDE insertion whose `SourceMap` projection carries NO preamble
+/// boundary cannot be proven a non-preamble edit, so it is dropped rather than accept a strict map that
+/// could land at the file top.
 ///
 /// Every other edit's `start`/`end` are REAL byte offsets into its target file, so read that file's
 /// own source through the host VFS (`source_reader`) and convert to a line:col `Range` in the
@@ -489,6 +498,14 @@ pub fn merge_code_actions(
             let mut changes: std::collections::HashMap<Uri, Vec<TextEdit>> =
                 std::collections::HashMap::new();
 
+            // CURRENT-file preamble import insertions an `addMissingImport` quickfix produces are
+            // collected here and re-anchored ONCE after the edit loop, so N imports coalesce into a
+            // SINGLE `<script setup>` block instead of N overlapping zero-width inserts. The owned
+            // `new_text` is MOVED out of the consumed edit (no clone); the borrowed slice the shared
+            // re-anchor needs is built from these owned strings after the loop. All entries target the
+            // current request's carrier, so the re-anchored block keys the one current carrier URI.
+            let mut preamble_imports: Vec<(u32, u32, String)> = Vec::new();
+
             for edit in action.edits {
                 // Canonicalize the edit path once and carry it through every downstream
                 // step (identity, carrier-suffix strip, URI emission, source read) so the
@@ -497,10 +514,54 @@ pub fn merge_code_actions(
                 let edit_path = edit_path.as_ref();
 
                 if is_carrier_ide_path(edit_path) {
+                    // Same-file identity via the single canonical path owner (backslash→slash,
+                    // drive-letter case, `\\?\` extended prefix folded) — never a raw `==`. Only the
+                    // CURRENT request's TSX is described by the in-context `mapper` / `tsx_line_index`
+                    // / `preamble_reanchor`; a FOREIGN carrier `.tsx` has its own context (resolved
+                    // via the external resolver) and is never classified through the current mapper.
+                    let is_current_file = verter_span::path::canonicalize_path_cow(edit_path)
+                        == verter_span::path::canonicalize_path_cow(current_tsx_path);
+
+                    if is_current_file {
+                        // A provider `addMissingImport` quickfix inserts a brand-new import at the
+                        // synthetic helper-import preamble (the head of the generated TSX). That
+                        // insertion offset can EITHER miss the strict mapper OR strict-map to the
+                        // carrier file top `(0,0)` (ABOVE `<script setup>`, an invalid import
+                        // location) — both are wrong placements. Classify the insertion via the typed
+                        // helper-preamble-end boundary BEFORE accepting any strict-mapped range, and
+                        // divert it to the re-anchor. The discriminator is STRUCTURE only (geometry +
+                        // the `x_verter_helper_preamble_end` boundary), never `new_text` and never the
+                        // produced `(0,0)` value.
+                        if crate::type_provider::auto_import::is_preamble_import_insertion(
+                            edit.start,
+                            edit.end,
+                            tsx_line_index,
+                            mapper,
+                        ) {
+                            preamble_imports.push((edit.start, edit.end, edit.new_text));
+                            continue;
+                        }
+
+                        // FAIL CLOSED for the absent-boundary case: a zero-width insertion (an
+                        // import-shaped edit) on a carrier-IDE `SourceMap` projection whose source map
+                        // carries NO `x_verter_helper_preamble_end` boundary cannot be proven NOT to
+                        // be a preamble insertion. A real Verter carrier-IDE projection always
+                        // publishes the boundary, so its absence is a stale / non-Verter artifact;
+                        // accepting a strict map for such an edit could splice the import at the file
+                        // top. Drop rather than re-introduce that placement. A non-zero-width edit
+                        // (a replacement of synthetic code) is unaffected and takes the strict path.
+                        if edit.start == edit.end && mapper.helper_preamble_end().is_none() {
+                            continue;
+                        }
+                    }
+
                     // Map the carrier-IDE offsets through the single shared strict mapper, split by
                     // canonical identity: the CURRENT request's TSX uses the in-context mapper; a
                     // FOREIGN carrier `.tsx` requires its own context via the external resolver and
-                    // is DROPPED on a miss/failure — never mapped through the current mapper.
+                    // is DROPPED on a miss/failure — never mapped through the current mapper. A
+                    // current-file preamble insertion has already been diverted above, so this path
+                    // only sees ordinary edits (rename, remove-unused, replacements, mapped insertions)
+                    // and every foreign edit.
                     let mapped = resolve_carrier_ide_range_strict(
                         edit_path,
                         edit.start,
@@ -519,56 +580,9 @@ pub fn merge_code_actions(
                                 new_text: edit.new_text,
                             });
                         }
-                        continue;
                     }
-
-                    // Strict-mapper MISS. A provider `addMissingImport` quickfix inserts a brand-new
-                    // import at the synthetic helper-import preamble (offset 0), which the strict
-                    // mapper legitimately drops. Before dropping, attempt the SAME prelude re-anchor
-                    // the completion auto-import path uses — but ONLY for the CURRENT request's TSX:
-                    // `preamble_reanchor` / the in-context mapper describe the queried file, so a
-                    // FOREIGN carrier `.tsx` preamble insertion has no in-context anchor and MUST stay
-                    // dropped (re-anchoring it would splice an import into the wrong `.vue`). The
-                    // precomputed `preamble_reanchor` is `None` for a non-Vue carrier and an ambiguous
-                    // mixed-script SFC (resolved carrier-neutrally by the caller), and the shared
-                    // `reanchor_preamble_import_edits` itself fail-closes for a non-preamble miss and
-                    // for a `SelfFile` projection (no boundary), so every other miss falls through to
-                    // the drop below.
-                    let is_current_file = verter_span::path::canonicalize_path_cow(edit_path)
-                        == verter_span::path::canonicalize_path_cow(current_tsx_path);
-                    if is_current_file {
-                        // Carrier-NEUTRAL, fail-closed: build from the caller's precomputed import
-                        // anchor, which is `Some` ONLY when the current request's carrier is a Vue SFC
-                        // WITH an EXISTING `<script setup>` block (see
-                        // `resolve_carrier_preamble_import_anchor`). A Svelte / non-Vue carrier, or a
-                        // Vue carrier with no `<script setup>`, supplies `None` — the quick-fix import
-                        // is then DROPPED rather than synthesizing a (Vue-only) block into the wrong
-                        // place. The shared `reanchor_preamble_import_edits` borrows `edit.new_text`
-                        // (no clone) and only the SUCCESSFUL re-anchor moves it into the carrier
-                        // `TextEdit`.
-                        let borrowed = [crate::type_provider::auto_import::BorrowedImportEdit {
-                            start: edit.start,
-                            end: edit.end,
-                            new_text: &edit.new_text,
-                        }];
-                        let outcome =
-                            crate::type_provider::auto_import::reanchor_preamble_import_edits(
-                                &borrowed,
-                                tsx_line_index,
-                                mapper,
-                                preamble_reanchor,
-                                carrier_line_index,
-                            );
-                        if let Some(reanchored) = outcome.reanchored {
-                            let carrier_path =
-                                normalize_carrier_path(edit_path, carrier_source_exists);
-                            if let Some(uri) = path_to_uri(carrier_path) {
-                                changes.entry(uri).or_default().push(reanchored);
-                            }
-                        }
-                    }
-                    // FAIL CLOSED: any unmapped carrier-IDE edit that is not a re-anchorable
-                    // current-file preamble insertion (or whose use-site gate rejects it) is
+                    // FAIL CLOSED: any unmapped carrier-IDE edit (a strict-mapper miss that is not a
+                    // current-file preamble insertion, or a foreign edit with no/failed resolver) is
                     // dropped — never line-0'd.
                     continue;
                 }
@@ -596,6 +610,45 @@ pub fn merge_code_actions(
                     range,
                     new_text: edit.new_text,
                 });
+            }
+
+            // Flush the collected CURRENT-file preamble import insertions ONCE: the shared re-anchor
+            // coalesces every import IN INPUT ORDER into a SINGLE `<script setup>` `TextEdit` at the
+            // caller's precomputed anchor (never N overlapping zero-width inserts, never a synthesized
+            // second block). Carrier-NEUTRAL and fail-closed: `preamble_reanchor` is `Some` ONLY when
+            // the current request's carrier is a Vue SFC with an EXISTING, unambiguous `<script setup>`
+            // (resolved carrier-neutrally by the caller via `resolve_carrier_preamble_import_anchor`);
+            // a Svelte / non-Vue / no-`<script setup>` / mixed-script carrier supplies `None`, so the
+            // imports are DROPPED rather than mis-placed. The shared `reanchor_preamble_import_edits`
+            // borrows each `new_text` (no clone) and only the SUCCESSFUL re-anchor moves it into the
+            // carrier `TextEdit`. All entries target the current request's carrier, so the coalesced
+            // block keys the one current carrier URI.
+            if !preamble_imports.is_empty() {
+                let borrowed: Vec<crate::type_provider::auto_import::BorrowedImportEdit<'_>> =
+                    preamble_imports
+                        .iter()
+                        .map(|(start, end, new_text)| {
+                            crate::type_provider::auto_import::BorrowedImportEdit {
+                                start: *start,
+                                end: *end,
+                                new_text,
+                            }
+                        })
+                        .collect();
+                let outcome = crate::type_provider::auto_import::reanchor_preamble_import_edits(
+                    &borrowed,
+                    tsx_line_index,
+                    mapper,
+                    preamble_reanchor,
+                    carrier_line_index,
+                );
+                if let Some(reanchored) = outcome.reanchored {
+                    let carrier_path =
+                        normalize_carrier_path(current_tsx_path, carrier_source_exists);
+                    if let Some(uri) = path_to_uri(carrier_path) {
+                        changes.entry(uri).or_default().push(reanchored);
+                    }
+                }
             }
 
             if changes.is_empty() {

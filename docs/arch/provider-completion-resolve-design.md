@@ -171,32 +171,46 @@ A session with no provider, or a provider without resolve support, advertises
 
 The SAME carrier re-anchor that places a completion-resolve auto-import also places
 a code-action `addMissingImport` quickfix. A provider's `addMissingImport` fix
-(errorCode 2304) inserts a brand-new `import …` line at the top of the generated
-TSX, which lands in Verter's synthetic helper-import preamble — the strict
-`ProviderPositionMapper` returns `None` for that unmapped region, so the edit was
-historically DROPPED by `merge_code_actions` (the action then had no surviving edit
-and was filtered out). `merge_code_actions` now re-anchors such a CURRENT-file
-preamble insertion at the SFC's `<script setup>` import site through the SAME
-single implementation the completion path uses:
+(errorCode 2304) inserts a brand-new `import …` line at the HEAD of the generated
+TSX, inside Verter's synthetic helper-import preamble. That insertion offset is NOT
+safely placeable from its strict-mapped range: it can EITHER miss the strict mapper
+OR strict-map to the carrier file top `(0,0)` — a position ABOVE `<script setup>`
+that is an invalid import location. (A real provider insertion strict-maps to
+`(0,0)` whenever the IDE source map carries a run anchoring the generated head to
+carrier `(0,0)`, so the preamble region does NOT always strict-miss; trusting the
+strict map for a preamble insertion would therefore splice the import at the file
+top.) So `merge_code_actions` CLASSIFIES a CURRENT-file carrier-IDE edit
+via the typed helper-preamble-end boundary BEFORE accepting any strict-mapped range,
+and when it is a preamble insertion DIVERTS it to the re-anchor at the SFC's
+`<script setup>` import site through the SAME single implementation the completion
+path uses:
 
+- `auto_import::is_preamble_import_insertion(start, end, tsx_li, mapper)` — the
+  STRUCTURE-only classifier (zero-width geometry + the `x_verter_helper_preamble_end`
+  source-map boundary, never `new_text`, never the produced `(0,0)` value). It is the
+  discriminator the merge layer consults on each current-file edit; a preamble
+  insertion is diverted to the re-anchor, everything else takes the ordinary strict
+  path.
 - `auto_import::reanchor_preamble_import_edits(missed_edits, tsx_li, mapper, anchor,
-  carrier_li)` — the ONE shared re-anchor. It classifies each strict-mapper-missed
-  edit with `is_preamble_import_insertion`, coalesces the preamble imports in input
-  order, and builds ONE carrier `TextEdit` at the caller-supplied `anchor` via
+  carrier_li)` — the ONE shared re-anchor. It re-classifies each edit with
+  `is_preamble_import_insertion`, coalesces the preamble imports in input order, and
+  builds ONE carrier `TextEdit` at the caller-supplied `anchor` via
   `ScriptImportInsertionAnchor::build_edit_borrowed`. It returns a `ReanchorOutcome`
   (the coalesced edit + the first non-preamble miss + whether an anchor was needed
-  but absent). BOTH callers route their per-edit classify → anchor → build through
-  this one function, so there is genuinely ONE place that does "preamble-insertion →
-  carrier import anchor → edit":
+  but absent). BOTH callers route their classify → anchor → build through this one
+  function, so there is genuinely ONE place that does "preamble-insertion → carrier
+  import anchor → edit":
   - `translate_completion_import_edits` (completion resolve) adds only the
     strict-mapper verbatim route on top, then turns the outcome's two failure fields
     into `AutoImportEditMappingError::{UnmappableEdit, NoInsertionAnchor}`
-    (all-or-nothing). It still coalesces multiple imports — that coalescing now lives
-    INSIDE the shared function.
-  - `merge_code_actions` (code action) passes the single missed edit as a BORROWED
-    `BorrowedImportEdit` (the provider edit's `new_text` is borrowed, not cloned — it
-    only moves into the carrier `TextEdit` when the re-anchor succeeds) and drops on
-    any failure field.
+    (all-or-nothing). It coalesces multiple imports — that coalescing lives INSIDE the
+    shared function.
+  - `merge_code_actions` (code action) COLLECTS every current-file preamble insertion
+    of an action into a `Vec<BorrowedImportEdit>` across the edit loop (the provider
+    edit's owned `new_text` is moved out of the consumed edit into a holding buffer,
+    not cloned), then flushes them through the shared re-anchor ONCE after the loop, so
+    N add-imports coalesce into ONE `<script setup>` block (never N overlapping
+    zero-width inserts). It drops on any failure field.
 
 The `anchor` is the SINGLE use-site/policy seam — each caller resolves AND gates it
 for its own context before calling, so the two surfaces have correct, distinct
@@ -220,21 +234,47 @@ placement policies while sharing the mechanical re-anchor:
 
 Fail-closed, in addition to the use-site gate: a non-preamble miss, a `SelfFile`
 projection (no `helper_preamble_end` boundary), or an unresolvable carrier anchor
-all drop the edit — never line-0'd. The re-anchor fires ONLY for the CURRENT
-request's TSX (`canonicalize_path_cow(edit_path) == canonicalize_path_cow(current_tsx_path)`):
-a FOREIGN carrier `.tsx` preamble insertion has no in-context `<script setup>` anchor
-and stays dropped (re-anchoring it would splice an import into the wrong `.vue`). The
-merge call site threads the carrier source + SFC-absolute import spans (the same
-inputs the completion-resolve path reads) into `merge_code_actions`.
+all drop the edit — never line-0'd. The classify → divert step fires ONLY for the
+CURRENT request's TSX (`canonicalize_path_cow(edit_path) == canonicalize_path_cow(current_tsx_path)`),
+because the in-context `mapper` / boundary / `<script setup>` anchor describe the
+queried file only. A FOREIGN carrier `.tsx` edit is NEVER classified through the
+current mapper: it takes the ordinary foreign external-resolver strict path through
+`resolve_carrier_ide_range_strict`. There the foreign source map can STRICT-MAP the
+foreign preamble offset to the foreign carrier `(0,0)` (the foreign file top, ABOVE its
+`<script setup>`) — the same geometry that makes the current-file preamble bug real. So
+the foreign branch classifies the insertion via the FOREIGN context's OWN typed
+`helper_preamble_end` boundary (`is_preamble_import_insertion` against
+`ctx.tsx_line_index` / `ctx.mapper`) and DROPS it before the foreign
+`tsx_range_to_carrier_range`. A foreign add-import therefore can never strict-map to the
+foreign file top and be emitted there, because no foreign `<script setup>` anchor exists
+in this merge (the re-anchor describes the CURRENT request only); only a non-preamble
+foreign edit (non-zero-width, past the boundary, or a foreign map with no boundary
+metadata) keeps the strict path. The foreign insertion is never diverted onto the
+current request's `<script setup>` anchor either (which would splice the import into the
+wrong `.vue`). One additional fail-closed guard covers stale metadata: a current-file
+zero-width carrier-IDE insertion whose `SourceMap` projection carries NO
+`x_verter_helper_preamble_end` boundary cannot be PROVEN a non-preamble edit (the
+boundary is the only structural signal separating an import insertion at the file top
+from a genuine mapped insertion), so it is dropped rather than accept a strict map that
+could land at the file top. A real Verter carrier-IDE projection always publishes the
+boundary, so this guard only fires on stale / non-Verter artifacts. The merge call site
+threads the carrier source + SFC-absolute import spans (the same inputs the
+completion-resolve path reads) into `merge_code_actions`.
 
 NOTE (test reality): the hermetic e2e harness's `getCodeFixes` does not surface an
 `addMissingImport` for a carrier (or any in-memory / inferred-project) file on
 EITHER backend (no import-fix project index; `@verter/types` absent from the
 fixture's `node_modules`). The merge-layer re-anchor is therefore proven by the
-hermetic unit tests
-(`type_provider::merge::tests::merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup`
-plus the Svelte-carrier, Vue-without-`<script setup>`, past-preamble, and
-foreign-carrier negative siblings). The real-provider
+hermetic unit tests — both the strict-MISS preamble case
+(`type_provider::merge::tests::merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup`)
+AND the strict-MAP-to-`(0,0)` case the real provider produces
+(`merge_code_actions_add_import_that_strict_maps_to_file_top_reanchors_into_script_setup`,
+which asserts the import lands at the `<script setup>` content start, NOT the
+strict-mapped file top) — plus the Svelte-carrier, Vue-without-`<script setup>`,
+mixed-script, past-preamble, and foreign-carrier negative siblings (including
+`merge_code_actions_foreign_carrier_preamble_insertion_with_resolver_is_dropped`,
+which proves a foreign preamble insertion is dropped via the foreign external-resolver
+path and never diverted onto the current carrier). The real-provider
 `vue_add_missing_import_lands_in_source_via_prelude_reanchor` test is a fail-loud
 CANARY that probes the RAW provider output directly
 (`test_raw_provider_code_actions`, the `getCodeFixes` result BEFORE the merge): if

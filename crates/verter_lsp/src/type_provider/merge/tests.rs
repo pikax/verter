@@ -2030,18 +2030,23 @@ fn merge_signature_help_simple_label_passthrough() {
 
 // ── Code actions merge tests ──────────────────────────────────────
 
-/// @ai-generated — Code actions with mappable edits are returned
+/// A code action whose edit maps cleanly through the strict carrier-IDE mapper is returned. The edit
+/// is a NON-preamble REPLACEMENT of mapped script content (the `msg` identifier at TSX 6..9 → `.vue`
+/// `<script setup>` line 5 cols 6..9), so it takes the ordinary strict-map path. (A zero-width
+/// add-import insertion is NOT this case: it is classified as a preamble insertion and re-anchored —
+/// covered by the dedicated add-import re-anchor tests — and a zero-width insertion on a mapper with
+/// no `x_verter_helper_preamble_end` boundary fails closed.)
 #[test]
 fn merge_code_actions_with_edits() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
     let actions = vec![TypeCodeAction {
-        title: "Add missing import".to_string(),
+        title: "Rename symbol".to_string(),
         kind: Some("quickfix".to_string()),
         edits: vec![protocol::TypeCodeEdit {
             path: "/test.vue.tsx".to_string(),
-            start: 0,
-            end: 0,
-            new_text: "import { ref } from 'vue';\n".to_string(),
+            start: 6,
+            end: 9,
+            new_text: "renamed".to_string(),
         }],
     }];
 
@@ -2652,6 +2657,378 @@ fn merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup() {
         },
         "the re-anchored import must land at the <script setup> content start (line 1), got {:?}",
         edits[0].range.start
+    );
+}
+
+/// A carrier-IDE mapper whose synthetic helper-import preamble offset (TSX offset 0, the add-import
+/// insertion point) DOES strict-map to the carrier — to position `(0,0)`, the file top ABOVE
+/// `<script setup>`. This is the real provider geometry the strict-None fixture
+/// [`make_preamble_mapper_and_indexes`] CANNOT reproduce: a real `addMissingImport` insertion sits at
+/// the head of the generated TSX, and the IDE source map carries a run anchoring TSX `(0,0)` to
+/// carrier `(0,0)`, so the strict mapper SUCCEEDS to `(0,0)` instead of returning `None`. The typed
+/// `x_verter_helper_preamble_end` boundary still classifies the insertion as a preamble import, so the
+/// re-anchor must divert it BEFORE the strict `(0,0)` is accepted. Returns the carrier source (a real
+/// `<script setup>` SFC), its UTF-16 line index, the TSX UTF-16 line index, and the mapper.
+fn make_strict_mapped_preamble_fixture() -> (String, LineIndex, LineIndex, ProviderPositionMapper) {
+    // Carrier `.vue`: line 0 `<script setup lang="ts">`, line 1 blank, line 2 `const base = ...`.
+    let carrier_source = "<script setup lang=\"ts\">\n\nconst base = 1;\n</script>\n<template>\n  <div>{{ base }}</div>\n</template>\n".to_string();
+    // Generated TSX: line 0 is the synthetic helper preamble, line 1 the user decl, line 2 trailing
+    // synthetic component/export code.
+    let tsx_source =
+        "import { defineComponent } from 'vue';\nconst base = 1;\nexport default {};\n";
+
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("App.vue", &carrier_source);
+    // The DISCRIMINATING token: TSX line 0 col 0 → carrier line 0 col 0. With this run present, the
+    // strict mapper maps the offset-0 add-import insertion to carrier `(0,0)` (the file top, above
+    // `<script setup>`) — the geometry the strict-None fixture deliberately omits. Also map the user
+    // line so the mapper is otherwise realistic.
+    builder.add_token(0, 0, 0, 0, Some(source_id), None);
+    builder.add_token(1, 0, 2, 0, Some(source_id), None);
+    builder.add_token(1, 6, 2, 6, Some(source_id), None);
+    let base_json = builder.into_sourcemap().to_json_string();
+
+    // The `x_verter_helper_preamble_end` boundary IDE codegen emits: the generated position
+    // immediately after the last helper import (start of the user line, line 1 col 0). The offset-0
+    // insertion is at/before it, so `is_preamble_import_insertion` classifies it as a preamble import.
+    let mut value: serde_json::Value = serde_json::from_str(&base_json).unwrap();
+    value["x_verter_helper_preamble_end"] = serde_json::json!({ "line": 1, "character": 0 });
+    let json = serde_json::to_string(&value).unwrap();
+
+    let mapper = ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
+    let carrier_li = LineIndex::new_utf16(&carrier_source);
+    let tsx_li = LineIndex::new_utf16(tsx_source);
+    (carrier_source, carrier_li, tsx_li, mapper)
+}
+
+/// Pins the add-import re-anchor for the strict-mapped preamble geometry: a CURRENT-file
+/// `addMissingImport` quickfix whose zero-width insertion at the synthetic TSX preamble STRICT-MAPS
+/// to carrier `(0,0)` (the file top, ABOVE `<script setup>`) is classified via the typed
+/// helper-preamble-end boundary and RE-ANCHORED into the `<script setup>` import site — never
+/// accepted at the strict-mapped `(0,0)`, which is an invalid import location. The classifier
+/// consults the `x_verter_helper_preamble_end` boundary, not the produced `(0,0)` value, so a
+/// preamble insertion is diverted regardless of whether its strict map succeeds.
+///
+/// This fixture is distinct from the strict-None fixture: it adds a source-map token anchoring the
+/// generated head to carrier `(0,0)`, so the preamble offset STRICT-MAPS to `(0,0)` — the exact
+/// geometry a strict-miss fixture cannot produce. It exercises the path where the strict map
+/// succeeds at the file top and the boundary classifier (not strict-miss) must trigger the
+/// re-anchor.
+#[test]
+fn merge_code_actions_add_import_that_strict_maps_to_file_top_reanchors_into_script_setup() {
+    let (carrier_source, carrier_li, tsx_li, mapper) = make_strict_mapped_preamble_fixture();
+
+    // PRECONDITION distinguishing this from the strict-None fixture: TSX offset 0 (the add-import
+    // insertion point) DOES strict-map — to carrier `(0,0)`, the file top above `<script setup>`.
+    let mapped = tsx_range_to_carrier_range(0, 0, &tsx_li, &mapper, &carrier_li);
+    assert_eq!(
+        mapped,
+        Some(Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
+        }),
+        "fixture precondition: the preamble offset 0 must STRICT-MAP to carrier (0,0) — this is the \
+         path the strict-None fixture lacks, got {mapped:?}"
+    );
+
+    let actions = vec![TypeCodeAction {
+        title: "Add import from \"vue\"".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/test.vue.tsx".to_string(),
+            start: 0,
+            end: 0,
+            new_text: "import { computed } from \"vue\";\n".to_string(),
+        }],
+    }];
+
+    let no_external: Option<ExternalIdeResolver> = None;
+    // Carrier-keyed import anchor, resolved OUTSIDE the carrier-neutral merge layer (exactly as the
+    // `handle_code_action` server path does): a Vue SFC carrier WITH an existing `<script setup>`
+    // resolves to `ExistingScriptSetup`, which the merge layer re-anchors the preamble insertion to.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            &carrier_source,
+            &[],
+        );
+    let result = merge_code_actions(
+        actions,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        preamble_reanchor.as_ref(),
+    );
+
+    assert_eq!(
+        result.len(),
+        1,
+        "the add-import action must survive via the prelude re-anchor, not splice at the strict (0,0): \
+         {result:?}"
+    );
+    let CodeActionOrCommand::CodeAction(action) = &result[0] else {
+        panic!("expected a CodeAction");
+    };
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+    let (change_uri, edits) = changes.iter().next().expect("one change set");
+    // The re-anchored import must key the `.vue` SOURCE URI (never the generated `.tsx`).
+    assert_eq!(
+        change_uri.as_str(),
+        "file:///test.vue",
+        "the add-import edit must be keyed by the .vue source URI, got {change_uri:?}"
+    );
+    assert!(
+        !change_uri.as_str().ends_with(".tsx"),
+        "the add-import edit must NOT target the generated .tsx, got {change_uri:?}"
+    );
+    assert_eq!(edits.len(), 1, "exactly one re-anchored import edit");
+    // The import text is carried verbatim.
+    assert_eq!(
+        edits[0].new_text, "import { computed } from \"vue\";\n",
+        "the re-anchored edit must carry the provider's import text"
+    );
+    // It must NOT collapse to the strict-mapped (0,0) / Range::default(). The `<script setup>` content
+    // start is line 1 (past the one leading break), so the re-anchored range is a zero-width insertion
+    // ON line 1 — never the file top.
+    assert_ne!(
+        edits[0].range,
+        Range::default(),
+        "the re-anchored import must never land at the strict-mapped (0,0) file top"
+    );
+    assert_eq!(
+        edits[0].range.start, edits[0].range.end,
+        "an import insertion is a zero-width edit"
+    );
+    assert_eq!(
+        edits[0].range.start,
+        Position {
+            line: 1,
+            character: 0,
+        },
+        "the re-anchored import must land at the <script setup> content start (line 1), not the \
+         strict-mapped file top (0,0), got {:?}",
+        edits[0].range.start
+    );
+}
+
+/// A FOREIGN carrier `.tsx` add-import at the foreign helper preamble — WITH an external resolver
+/// supplying the foreign file's OWN context — is DROPPED, never diverted to the CURRENT request's
+/// `<script setup>` re-anchor. The current-file gate means a foreign edit is NEVER classified through
+/// the current mapper / boundary: it takes the foreign external-resolver strict path. A real foreign
+/// Verter sourcemap leaves the synthetic preamble UNMAPPED, so the foreign strict mapper returns
+/// `None` and the insertion drops. Discriminating: the SAME offset 0 IS a preamble insertion under the
+/// CURRENT mapper (it strict-maps to the current carrier's `(0,0)`), so a path-agnostic re-anchor
+/// would wrongly splice the foreign import into the CURRENT `.vue` `<script setup>`.
+#[test]
+fn merge_code_actions_foreign_carrier_preamble_insertion_with_resolver_is_dropped() {
+    let (carrier_source, carrier_li, tsx_li, mapper) = make_strict_mapped_preamble_fixture();
+
+    // Precondition: under the CURRENT mapper, offset 0 IS a preamble insertion that strict-maps to the
+    // current carrier `(0,0)` — so without the current-file gate a foreign offset-0 edit would be
+    // wrongly re-anchored onto THIS carrier.
+    assert!(
+        crate::type_provider::auto_import::is_preamble_import_insertion(0, 0, &tsx_li, &mapper),
+        "fixture precondition: offset 0 is a preamble insertion under the current mapper"
+    );
+
+    // A foreign `.tsx` with its OWN context whose sourcemap leaves the synthetic preamble UNMAPPED
+    // (the real Verter geometry: the helper preamble maps to no carrier content), so the foreign
+    // strict mapper returns None for offset 0.
+    let foreign_carrier =
+        "<script setup lang=\"ts\">\n\nconst far = 1;\n</script>\n<template>\n  <div/>\n</template>\n";
+    let foreign_tsx =
+        "import { defineComponent } from 'vue';\nconst far = 1;\nexport default {};\n";
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Other.vue", foreign_carrier);
+    // Map ONLY the user line (TSX line 1 → carrier line 2); the preamble (line 0) is UNMAPPED.
+    builder.add_token(1, 0, 2, 0, Some(source_id), None);
+    let foreign_json = builder.into_sourcemap().to_json_string();
+    let foreign_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&foreign_json).unwrap());
+    let foreign_carrier_li = LineIndex::new_utf16(foreign_carrier);
+    let foreign_tsx_li = LineIndex::new_utf16(foreign_tsx);
+
+    // Precondition: the FOREIGN sourcemap does NOT map foreign offset 0 (preamble unmapped).
+    assert!(
+        tsx_range_to_carrier_range(0, 0, &foreign_tsx_li, &foreign_mapper, &foreign_carrier_li)
+            .is_none(),
+        "fixture precondition: the foreign preamble offset 0 must be unmapped in the foreign context"
+    );
+
+    let resolver = |p: &str| -> Option<ExternalIdeContext> {
+        (p == "/other.vue.tsx").then(|| ExternalIdeContext {
+            tsx_line_index: foreign_tsx_li.clone(),
+            mapper: foreign_mapper.clone(),
+            carrier_line_index: foreign_carrier_li.clone(),
+            carrier_negotiated_line_index: None,
+        })
+    };
+    let ext: Option<ExternalIdeResolver> = Some(&resolver);
+
+    let foreign = vec![TypeCodeAction {
+        title: "Add import (foreign)".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/other.vue.tsx".to_string(),
+            start: 0,
+            end: 0,
+            new_text: "import { computed } from \"vue\";\n".to_string(),
+        }],
+    }];
+
+    // The carrier-keyed anchor is resolved for the CURRENT request (`/test.vue.tsx`) — `Some`,
+    // ExistingScriptSetup. The current-file gate keeps the FOREIGN edit from ever receiving it.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            &carrier_source,
+            &[],
+        );
+    let dropped = merge_code_actions(
+        foreign,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        ext,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        preamble_reanchor.as_ref(),
+    );
+    assert!(
+        dropped.is_empty(),
+        "a FOREIGN carrier preamble add-import must be DROPPED via the foreign external-resolver path \
+         — never diverted onto the CURRENT request's <script setup> anchor: {dropped:?}"
+    );
+}
+
+/// A FOREIGN carrier `.tsx` add-import at the foreign helper preamble — WITH an external resolver
+/// supplying the foreign file's OWN context whose foreign source map STRICT-MAPS the foreign preamble
+/// offset to the FOREIGN carrier `(0,0)` (the foreign file top, ABOVE its `<script setup>`) — is
+/// DROPPED, never emitted at the foreign file top.
+///
+/// This is the dangerous geometry the UNMAPPED-preamble foreign-drop test
+/// (`merge_code_actions_foreign_carrier_preamble_insertion_with_resolver_is_dropped`) cannot
+/// produce: there the foreign preamble strict-MISSES, so the foreign edit drops on the strict miss
+/// alone. Here the foreign map carries a token anchoring foreign-TSX `(0,0)` → foreign-carrier `(0,0)`
+/// AND publishes the foreign `x_verter_helper_preamble_end` boundary, so the foreign strict mapper
+/// SUCCEEDS to the foreign `(0,0)`. Without classifying the foreign insertion through the FOREIGN
+/// context's own typed helper-preamble boundary, that success would emit the import at the FOREIGN
+/// `.vue` top (above its `<script setup>`) — exactly the invalid placement the current-file divert
+/// prevents for the current request. There is NO foreign `<script setup>` anchor here
+/// (`preamble_reanchor` describes the CURRENT request only), so the foreign preamble insertion CANNOT
+/// be correctly placed and MUST be dropped.
+#[test]
+fn merge_code_actions_foreign_preamble_insertion_that_strict_maps_to_foreign_file_top_is_dropped() {
+    let (carrier_source, carrier_li, tsx_li, mapper) = make_strict_mapped_preamble_fixture();
+
+    // A foreign `.tsx` with its OWN context whose source map STRICT-MAPS foreign offset 0 to the
+    // foreign carrier `(0,0)` (the foreign file top, ABOVE its `<script setup>`) AND publishes the
+    // foreign helper-preamble-end boundary so offset 0 is at/before it — the SAME dangerous geometry
+    // that makes the current-file bug real, but on the foreign component (`Other.vue`).
+    let foreign_carrier = "<script setup lang=\"ts\">\n\nconst far = 1;\n</script>\n<template>\n  <div>{{ far }}</div>\n</template>\n";
+    let foreign_tsx =
+        "import { defineComponent } from 'vue';\nconst far = 1;\nexport default {};\n";
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("Other.vue", foreign_carrier);
+    // The DANGEROUS token: foreign-TSX line 0 col 0 → foreign-carrier line 0 col 0 (the file top).
+    // With this run present the foreign strict mapper SUCCEEDS to foreign-`(0,0)` for the offset-0
+    // add-import insertion — the geometry the UNMAPPED-preamble foreign fixture deliberately omits.
+    // Map the user line too so the foreign mapper is otherwise realistic.
+    builder.add_token(0, 0, 0, 0, Some(source_id), None);
+    builder.add_token(1, 0, 2, 0, Some(source_id), None);
+    builder.add_token(1, 6, 2, 6, Some(source_id), None);
+    let foreign_base_json = builder.into_sourcemap().to_json_string();
+    // Publish the foreign `x_verter_helper_preamble_end` boundary (foreign-TSX line 1 col 0), so the
+    // foreign offset-0 insertion is at/before it and classifies as a foreign preamble import.
+    let mut foreign_value: serde_json::Value = serde_json::from_str(&foreign_base_json).unwrap();
+    foreign_value["x_verter_helper_preamble_end"] =
+        serde_json::json!({ "line": 1, "character": 0 });
+    let foreign_json = serde_json::to_string(&foreign_value).unwrap();
+    let foreign_mapper =
+        ProviderPositionMapper::source_map(PositionMapper::from_json(&foreign_json).unwrap());
+    let foreign_carrier_li = LineIndex::new_utf16(foreign_carrier);
+    let foreign_tsx_li = LineIndex::new_utf16(foreign_tsx);
+
+    // DISCRIMINATING PRECONDITION: the FOREIGN strict map WOULD succeed to foreign-`(0,0)` — the path
+    // the UNMAPPED-preamble foreign fixture cannot produce. This proves the fixture exercises the
+    // dangerous case (a foreign preamble insertion that strict-maps to the foreign file top), so the
+    // empty result below is the foreign-boundary classifier dropping it, not a foreign strict miss.
+    assert_eq!(
+        tsx_range_to_carrier_range(0, 0, &foreign_tsx_li, &foreign_mapper, &foreign_carrier_li),
+        Some(Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
+        }),
+        "fixture precondition: the FOREIGN preamble offset 0 must STRICT-MAP to the foreign carrier \
+         (0,0) — the dangerous geometry the UNMAPPED-preamble foreign fixture lacks"
+    );
+
+    let resolver = |p: &str| -> Option<ExternalIdeContext> {
+        (p == "/other.vue.tsx").then(|| ExternalIdeContext {
+            tsx_line_index: foreign_tsx_li.clone(),
+            mapper: foreign_mapper.clone(),
+            carrier_line_index: foreign_carrier_li.clone(),
+            carrier_negotiated_line_index: None,
+        })
+    };
+    let ext: Option<ExternalIdeResolver> = Some(&resolver);
+
+    let foreign = vec![TypeCodeAction {
+        title: "Add import (foreign)".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/other.vue.tsx".to_string(),
+            start: 0,
+            end: 0,
+            new_text: "import { computed } from \"vue\";\n".to_string(),
+        }],
+    }];
+
+    // The carrier-keyed anchor is resolved for the CURRENT request (`/test.vue.tsx`) — `Some`,
+    // ExistingScriptSetup. We have NO foreign `<script setup>` anchor: the foreign preamble insertion
+    // must drop, never be emitted at the foreign file top and never be diverted onto THIS carrier.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            &carrier_source,
+            &[],
+        );
+    let dropped = merge_code_actions(
+        foreign,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        ext,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        preamble_reanchor.as_ref(),
+    );
+    assert!(
+        dropped.is_empty(),
+        "a FOREIGN carrier preamble add-import whose foreign source map strict-maps to the foreign \
+         file top (0,0) must be DROPPED — never emitted at the foreign .vue top, never diverted onto \
+         the current carrier: {dropped:?}"
     );
 }
 
