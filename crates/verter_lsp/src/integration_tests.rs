@@ -4648,6 +4648,11 @@ const msg = "hello"
             text_edit_new_text: None,
             insert_text: None,
             sort_text: None,
+            insert_text_format: None,
+            commit_characters: None,
+            filter_text: None,
+            preselect: None,
+            label_details: None,
             data: None,
         }],
     );

@@ -63,6 +63,34 @@ pub struct Completion {
     /// `insertText`.
     pub insert_text: Option<String>,
     pub sort_text: Option<String>,
+    /// How the editor must interpret the inserted text — plain text or an LSP
+    /// snippet (with `$0`/`${1:…}` tab-stop placeholders). Mirrors LSP
+    /// `InsertTextFormat`. Provider-neutral: each provider populates it from its
+    /// OWN snippet signal (TSGO's `insertTextFormat`; tsserver's `isSnippet`),
+    /// never from string-sniffing the label. `None` ⇒ the provider gave no
+    /// snippet signal and the consumer treats the item as plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_text_format: Option<CompletionInsertTextFormat>,
+    /// Characters that, when typed, commit this completion. Mirrors LSP
+    /// `CompletionItem.commitCharacters`. `None` when the provider's wire carries
+    /// none for the item (fail-closed — never fabricated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_characters: Option<Vec<String>>,
+    /// The text used to filter this item against the typed prefix, when it
+    /// differs from `label`. Mirrors LSP `CompletionItem.filterText`. `None`
+    /// leaves the editor filtering on the label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_text: Option<String>,
+    /// Whether the editor should pre-select this item in the list. Mirrors LSP
+    /// `CompletionItem.preselect`. `None` ⇒ no preselect signal from the
+    /// provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preselect: Option<bool>,
+    /// Additional inline label annotations (a trailing signature `detail` and a
+    /// right-aligned `description`, e.g. the import source module). Mirrors LSP
+    /// `CompletionItemLabelDetails`. `None` when the provider supplied none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_details: Option<CompletionLabelDetails>,
     /// Typed, provider-owned resolve key preserved for `completionItem/resolve`.
     ///
     /// This is the provider's OWN lazy-resolve handle — NOT an LSP routing
@@ -72,6 +100,32 @@ pub struct Completion {
     /// provider id) live in the LSP-side envelope, never inside this key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<CompletionResolveData>,
+}
+
+/// How a completion item's inserted text must be interpreted by the editor.
+///
+/// Backend-neutral mirror of LSP `InsertTextFormat`: TSGO carries the numeric
+/// `insertTextFormat` (1 = plain, 2 = snippet) on the wire; tsserver signals a
+/// snippet via the `isSnippet` boolean on a completion entry. Both normalize
+/// onto this two-variant carrier so the LSP merge re-emits the correct
+/// `InsertTextFormat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompletionInsertTextFormat {
+    PlainText,
+    Snippet,
+}
+
+/// Inline label annotations for a completion item.
+///
+/// Backend-neutral mirror of LSP `CompletionItemLabelDetails`: `detail` renders
+/// immediately after the label (typically a signature/type), `description`
+/// renders right-aligned (typically the import source). Either may be `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CompletionLabelDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Provider-pure lazy-resolve key carried on a [`Completion`].
@@ -197,6 +251,31 @@ pub struct CompletionResolveResult {
     /// provider returns one. `None` leaves the item's existing docs untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
+    /// Resolved label annotations (e.g. an import-source `description` recovered
+    /// only at `completionItem/resolve` / `completionEntryDetails` time). `None`
+    /// leaves the item's existing label details untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_details: Option<CompletionLabelDetails>,
+    /// A command the editor runs after inserting the item (e.g. an upstream-LSP
+    /// "trigger signature help" / format-on-accept command carried on the
+    /// `completionItem/resolve` response). `None` when the provider supplied
+    /// none. Provider-neutral: tsserver completion details carry no `command`,
+    /// so the tsserver path always leaves this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CompletionCommand>,
+}
+
+/// A command attached to a completion item, mirroring LSP `Command`.
+///
+/// Carried on a [`CompletionResolveResult`] when the provider's
+/// `completionItem/resolve` response attaches one. `arguments` is an opaque
+/// JSON array forwarded verbatim to the editor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompletionCommand {
+    pub title: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<serde_json::Value>>,
 }
 
 /// A text edit within a completion resolve result.

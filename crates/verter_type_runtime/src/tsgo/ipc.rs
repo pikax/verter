@@ -1020,6 +1020,33 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         .get("sortText")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // tgo speaks LSP, so an item carries the real `insertTextFormat` (1 = plain,
+    // 2 = snippet) when it is a snippet completion. Map the wire integer to the
+    // neutral carrier; any unknown value is treated as no signal (fail-closed).
+    let insert_text_format = item
+        .get("insertTextFormat")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| match n {
+            1 => Some(CompletionInsertTextFormat::PlainText),
+            2 => Some(CompletionInsertTextFormat::Snippet),
+            _ => None,
+        });
+    let commit_characters = item
+        .get("commitCharacters")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        });
+    let filter_text = item
+        .get("filterText")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let preselect = item.get("preselect").and_then(|v| v.as_bool());
+    // LSP `labelDetails` ({ detail?, description? }). Only minted when at least
+    // one sub-field is a string — an empty object carries no signal.
+    let label_details = item.get("labelDetails").and_then(parse_label_details);
 
     // The textEdit replace-range is applied as a REAL edit when the completion is accepted, so it
     // is fail-closed: when the content is unavailable, or the range cannot be proven against it,
@@ -1067,7 +1094,53 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         text_edit_new_text,
         insert_text,
         sort_text,
+        insert_text_format,
+        commit_characters,
+        filter_text,
+        preselect,
+        label_details,
         data,
+    })
+}
+
+/// Parse an LSP `CompletionItemLabelDetails`-shaped JSON value
+/// (`{ detail?, description? }`) into the neutral [`CompletionLabelDetails`]
+/// carrier. Returns `None` unless at least one sub-field is a string, so an
+/// empty `{}` (no signal) does not mint an empty carrier.
+fn parse_label_details(value: &serde_json::Value) -> Option<CompletionLabelDetails> {
+    let detail = value
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let description = value
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if detail.is_none() && description.is_none() {
+        return None;
+    }
+    Some(CompletionLabelDetails {
+        detail,
+        description,
+    })
+}
+
+/// Parse an LSP `Command`-shaped JSON value (`{ title, command, arguments? }`)
+/// into the neutral [`CompletionCommand`] carrier. Returns `None` unless BOTH
+/// `title` and `command` are strings — a partial object is not a valid command
+/// and is dropped fail-closed (never fabricated).
+fn parse_lsp_command(value: Option<&serde_json::Value>) -> Option<CompletionCommand> {
+    let value = value?;
+    let title = value.get("title").and_then(|v| v.as_str())?.to_string();
+    let command = value.get("command").and_then(|v| v.as_str())?.to_string();
+    let arguments = value
+        .get("arguments")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.to_vec());
+    Some(CompletionCommand {
+        title,
+        command,
+        arguments,
     })
 }
 
@@ -1117,6 +1190,11 @@ fn fold_lsp_resolve_detail_into_completion(
         text_edit_new_text: item.text_edit_new_text.clone(),
         insert_text: item.insert_text.clone(),
         sort_text: item.sort_text.clone(),
+        insert_text_format: item.insert_text_format,
+        commit_characters: item.commit_characters.clone(),
+        filter_text: item.filter_text.clone(),
+        preselect: item.preselect,
+        label_details: item.label_details.clone(),
         data: item.data.clone(),
     }
 }
@@ -1570,14 +1648,21 @@ pub(crate) fn rewrite_vue_imports_for_tsgo(content: &str, _path: &str) -> String
 /// embeds the file name there to re-locate the language service); tgo never reads
 /// a `dataSupport` flag, so advertising it would be a meaningless non-spec field.
 ///
+/// Completion fidelity: the parser DOES read `insertTextFormat` (snippet vs
+/// plain), `commitCharacters`, `filterText`, `preselect`, and `labelDetails`, so
+/// the matching client capabilities (`snippetSupport`, `commitCharactersSupport`,
+/// `labelDetailsSupport`) ARE advertised below — a server only emits those item
+/// fields when the client claims support for them. The resolve handlers fold back
+/// `labelDetails` and `command` in addition to `detail`/`documentation`/
+/// `additionalTextEdits`, so `resolveSupport.properties` lists all five.
+///
 /// Intentionally NOT advertised (no handler fulfills them — over-claim would be a
 /// silent no-op or worse): `documentSymbol`, `foldingRange`, `callHierarchy`,
 /// `typeHierarchy`, `selectionRange`, `linkedEditingRange`, and `workspace/symbol`
-/// (this provider issues none of those requests); completion `snippetSupport` /
-/// `insertReplaceSupport` / `labelDetailsSupport` (the completion parser maps a
-/// flat `insertText` / single `textEdit` and reads no snippet, insert-replace, or
-/// label-details shape); and `dataSupport` (not a real LSP capability — `data` is
-/// a spec-transparent passthrough, see above).
+/// (this provider issues none of those requests); completion `insertReplaceSupport`
+/// (the completion parser maps a single `textEdit` range, not an insert/replace
+/// pair); and `dataSupport` (not a real LSP capability — `data` is a
+/// spec-transparent passthrough, see above).
 fn build_client_capabilities() -> serde_json::Value {
     serde_json::json!({
         "textDocument": {
@@ -1613,12 +1698,26 @@ fn build_client_capabilities() -> serde_json::Value {
                     ]
                 },
                 "completionItem": {
+                    // A server only attaches these item fields when the client
+                    // advertises support; the completion parser reads each one
+                    // (`insertTextFormat`/`commitCharacters`/`labelDetails`), so
+                    // claim them here. `filterText`/`preselect` need no capability
+                    // flag — a server may always send them.
+                    "snippetSupport": true,
+                    "commitCharactersSupport": true,
+                    "labelDetailsSupport": true,
                     // Only these properties are folded back by this provider's
                     // resolve handlers; listing any other invites discarded work.
                     // (`data` rides every resolve round-trip transparently per the
                     // LSP spec — there is no `dataSupport` capability to advertise.)
                     "resolveSupport": {
-                        "properties": ["documentation", "detail", "additionalTextEdits"]
+                        "properties": [
+                            "documentation",
+                            "detail",
+                            "additionalTextEdits",
+                            "labelDetails",
+                            "command"
+                        ]
                     }
                 }
             },
@@ -2763,16 +2862,16 @@ impl TypeProvider for TsgoTypeProvider {
                 .request("completionItem/resolve", resolve_item)
                 .await?;
 
-            // Parse additionalTextEdits from the response
+            // Parse additionalTextEdits from the response. Edits may be absent —
+            // a resolve can still enrich the item with detail/documentation/
+            // labelDetails/command, so an empty edit list is NOT a reason to
+            // return `None` (review: previously it was, dropping every non-edit
+            // enrichment).
             let edits = result
                 .get("additionalTextEdits")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-
-            if edits.is_empty() {
-                return Ok(None);
-            }
 
             let content_snapshot = {
                 let cache = contents_cache.lock().await;
@@ -2784,12 +2883,28 @@ impl TypeProvider for TsgoTypeProvider {
                 .filter_map(|edit| parse_additional_text_edit(edit, content_snapshot.as_deref()))
                 .collect();
 
-            if additional_text_edits.is_empty() {
+            // The resolve response may also carry the lazy detail/documentation,
+            // refined `labelDetails`, and a post-accept `command` — fold them all.
+            let (detail, documentation) = extract_resolve_detail_and_documentation(&result);
+            let label_details = result.get("labelDetails").and_then(parse_label_details);
+            let command = parse_lsp_command(result.get("command"));
+
+            // Return a result when ANY enrichment is present; otherwise `None`
+            // (nothing to resolve) so the caller treats "no enrichment" uniformly.
+            if additional_text_edits.is_empty()
+                && detail.is_none()
+                && documentation.is_none()
+                && label_details.is_none()
+                && command.is_none()
+            {
                 Ok(None)
             } else {
                 Ok(Some(CompletionResolveResult {
                     additional_text_edits,
-                    ..Default::default()
+                    detail,
+                    documentation,
+                    label_details,
+                    command,
                 }))
             }
         })

@@ -5,7 +5,9 @@ use tower_lsp_server::ls_types::*;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
-use crate::type_provider::protocol::{self, CompletionKind, CompletionResult};
+use crate::type_provider::protocol::{
+    self, CompletionInsertTextFormat, CompletionKind, CompletionResult,
+};
 
 use super::position::tsx_range_to_carrier_range;
 
@@ -171,9 +173,30 @@ pub(crate) fn provider_completion_to_lsp_item(
         // `textEdit.newText` over an explicit `insertText`, so the item inserts
         // the intended text rather than the (possibly decorated) display label.
         insert_text: item.text_edit_new_text.or(item.insert_text),
+        // Carrier-IDE fidelity: propagate the provider's snippet/commit/filter/
+        // preselect/label-detail signals so a mapped completion behaves like the
+        // equivalent `.ts` one. Each is `None` when the provider gave no signal
+        // (fail-closed — never fabricated here).
+        insert_text_format: item.insert_text_format.map(convert_insert_text_format),
+        commit_characters: item.commit_characters,
+        filter_text: item.filter_text,
+        preselect: item.preselect,
+        label_details: item.label_details.map(|ld| CompletionItemLabelDetails {
+            detail: ld.detail,
+            description: ld.description,
+        }),
         text_edit,
         data,
         ..Default::default()
+    }
+}
+
+/// Map the neutral [`CompletionInsertTextFormat`] carrier onto the LSP
+/// [`InsertTextFormat`].
+fn convert_insert_text_format(format: CompletionInsertTextFormat) -> InsertTextFormat {
+    match format {
+        CompletionInsertTextFormat::PlainText => InsertTextFormat::PLAIN_TEXT,
+        CompletionInsertTextFormat::Snippet => InsertTextFormat::SNIPPET,
     }
 }
 

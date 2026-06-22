@@ -342,6 +342,7 @@ async fn resolve_completion_delegates_to_the_inner_provider() {
             }],
             detail: None,
             documentation: None,
+            ..Default::default()
         }),
     );
     let (provider, _crash_notify, _spawn_gate) = make_resilient(initial.clone(), replacement);

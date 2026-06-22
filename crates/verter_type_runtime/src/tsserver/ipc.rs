@@ -2265,6 +2265,35 @@ pub fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion>
         .get("insertText")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // tsserver signals a snippet entry with `isSnippet: true` (its genuine
+    // snippet signal — the entry's `insertText` then carries `$0`/`${n:…}`
+    // placeholders). Map it to the neutral carrier; a non-snippet entry leaves
+    // `None` (never fabricate a format from the label or kind). NOTE: tsserver
+    // only EMITS snippet entries when the session enables
+    // `includeCompletionsWithSnippetText`; the parse is correct regardless of
+    // whether that preference is on.
+    let insert_text_format = match item.get("isSnippet").and_then(|v| v.as_bool()) {
+        Some(true) => Some(CompletionInsertTextFormat::Snippet),
+        _ => None,
+    };
+    // tsserver may carry `commitCharacters` on an entry; parse if present.
+    let commit_characters = item
+        .get("commitCharacters")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        });
+    let filter_text = item
+        .get("filterText")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    // tsserver's `isRecommended` flags the entry the editor should pre-select.
+    let preselect = match item.get("isRecommended").and_then(|v| v.as_bool()) {
+        Some(true) => Some(true),
+        _ => None,
+    };
 
     // Preserve the tsserver resolve handle: the entry's `name` plus the
     // `source`/`data` an external-module (auto-import) entry carries. Hard-coding
@@ -2296,6 +2325,14 @@ pub fn parse_tsserver_completion(item: &serde_json::Value) -> Option<Completion>
         text_edit_new_text: None,
         insert_text,
         sort_text,
+        insert_text_format,
+        commit_characters,
+        filter_text,
+        preselect,
+        // tsserver completion ENTRIES do not carry label details at list time
+        // (they surface only at `completionEntryDetails` time); leave `None`
+        // here. The resolve path may recover a `description` later.
+        label_details: None,
         data,
     })
 }
@@ -2386,6 +2423,11 @@ fn enrich_tsserver_completion(item: &Completion, detail: &serde_json::Value) -> 
         text_edit_new_text: item.text_edit_new_text.clone(),
         insert_text: item.insert_text.clone(),
         sort_text: item.sort_text.clone(),
+        insert_text_format: item.insert_text_format,
+        commit_characters: item.commit_characters.clone(),
+        filter_text: item.filter_text.clone(),
+        preselect: item.preselect,
+        label_details: item.label_details.clone(),
         data: item.data.clone(),
     }
 }
@@ -2741,9 +2783,32 @@ pub fn completion_entry_details_to_resolve_result(
     let resolved_detail = (!display.is_empty()).then_some(display);
     let resolved_documentation = tsserver_completion_documentation(detail);
 
+    // An auto-import entry's details carry the originating module: newer tsserver
+    // returns `sourceDisplay` (a display-parts array), older returns a plain
+    // `source` string. Surface it as the label's right-aligned `description` so
+    // the resolved item shows where the symbol comes from. tsserver completion
+    // details have no `command` — always `None` (fail-closed, never fabricated).
+    let import_source = {
+        let from_display = tsserver_display_parts_text(detail.get("sourceDisplay"));
+        if !from_display.is_empty() {
+            Some(from_display)
+        } else {
+            detail
+                .get("source")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        }
+    };
+    let label_details = import_source.map(|description| CompletionLabelDetails {
+        detail: None,
+        description: Some(description),
+    });
+
     if additional_text_edits.is_empty()
         && resolved_detail.is_none()
         && resolved_documentation.is_none()
+        && label_details.is_none()
     {
         return None;
     }
@@ -2752,6 +2817,8 @@ pub fn completion_entry_details_to_resolve_result(
         additional_text_edits,
         detail: resolved_detail,
         documentation: resolved_documentation,
+        label_details,
+        command: None,
     })
 }
 

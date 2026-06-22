@@ -850,6 +850,25 @@ pub(super) async fn handle_completion_resolve(
                                         value: documentation,
                                     }));
                             }
+                            // Lazy label-detail / command enrichment: fold the
+                            // provider's resolved label details and post-accept
+                            // command onto the item when present. `None` leaves
+                            // the list-time value untouched. The
+                            // CompletionResolveResult contract carries these, so
+                            // dropping them would make the contract dishonest.
+                            if let Some(ld) = resolve_result.label_details.clone() {
+                                item.label_details = Some(CompletionItemLabelDetails {
+                                    detail: ld.detail,
+                                    description: ld.description,
+                                });
+                            }
+                            if let Some(cmd) = resolve_result.command.clone() {
+                                item.command = Some(Command {
+                                    title: cmd.title,
+                                    command: cmd.command,
+                                    arguments: cmd.arguments,
+                                });
+                            }
                             if !resolve_result.additional_text_edits.is_empty() {
                                 // The provider returned auto-import edits that MUST be placed. From
                                 // here on, missing IDE context / carrier URI / document OR an

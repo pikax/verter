@@ -514,3 +514,146 @@ real_provider_test!(
         );
     }
 );
+
+// Carrier completion-field fidelity through a REAL provider.
+//
+// Exercises the provider-side of the additive carrier-field plumbing (D3/D4):
+// a member completion fetched from the live provider must carry the new
+// `protocol::Completion` fields exactly as the provider's wire reports them —
+// never fabricated. The wire reality (empirically pinned here):
+//
+// * tgo speaks LSP and (with the now-advertised `commitCharactersSupport`
+//   client capability) attaches `commitCharacters` to every member completion
+//   — `[".", ",", ";"]` for the standard member-access context. So under tgo
+//   this test asserts the POSITIVE: at least one member carries a non-empty
+//   `commit_characters`. This fails on the pre-fix tree (the field did not
+//   exist, and the capability was not advertised so the wire dropped it).
+// * tsserver's `completionInfo` entries do NOT carry `commitCharacters`,
+//   `isSnippet`, `filterText`, or `isRecommended` for these members, so under
+//   tsserver every new field is correctly `None` (fail-closed — never
+//   fabricated). This test asserts that NEGATIVE.
+//
+// Both branches share the universal negative: a plain (non-snippet) member must
+// NOT carry `insert_text_format == Snippet` — no provider fabricates a snippet
+// format for a plain property. The emit half of the plumbing
+// (`protocol::Completion` → LSP `CompletionItem`) is pinned by the unit test
+// `provider_completion_to_lsp_item_propagates_carrier_fields` in
+// `type_provider::merge::tests`.
+real_provider_test!(
+    completion_carrier_fields_through_provider,
+    fixture = "single-project",
+    async fn run(session) {
+        use crate::type_provider::protocol::CompletionInsertTextFormat;
+
+        // A strongly-typed object literal; completing `obj.` yields members the
+        // provider materializes through the provider-direct path (which, unlike
+        // the LSP member-access path, reliably resolves the member surface in
+        // the test environment).
+        let member_src = "\
+const obj = { alpha: 1, betaLongName: \"x\", gamma(): number { return 1; } };
+export const out = obj.;
+";
+        let path = session
+            .open_in_provider("src/__carrier_member.tsx", member_src)
+            .await;
+        let off = (member_src.find("obj.;").expect("needle present") + "obj.".len()) as u32;
+
+        let mut items = Vec::new();
+        for _ in 0..8 {
+            if let Ok(r) = session.provider().get_completions(&path, off, Some(".")).await {
+                if !r.items.is_empty() {
+                    items = r.items;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+        if items.is_empty() {
+            // Fail-closed under require-mode; recorded skip otherwise.
+            if session.allow_empty_result_skip(&format!(
+                "provider returned no members for obj. at offset {off}"
+            )) {
+                return;
+            }
+        }
+
+        // Sanity: the members are present (proves we are inspecting the real
+        // member surface, not an empty/wrong payload).
+        let has = |label: &str| items.iter().any(|i| i.label == label);
+        assert!(
+            has("alpha") && has("betaLongName") && has("gamma"),
+            "member completion must include obj's members, got: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+
+        // Universal negative (BOTH providers): a plain property is never a
+        // snippet — no provider fabricates an `insert_text_format == Snippet`.
+        for it in &items {
+            assert_ne!(
+                it.insert_text_format,
+                Some(CompletionInsertTextFormat::Snippet),
+                "plain member `{}` must not carry a fabricated Snippet format",
+                it.label
+            );
+        }
+
+        match session.provider().provider_id() {
+            "tsgo" => {
+                // POSITIVE: tgo attaches commitCharacters to member completions.
+                // Discriminating — pre-fix the carrier had no `commit_characters`
+                // field and the client did not advertise `commitCharactersSupport`,
+                // so the wire value was dropped.
+                let with_commit: Vec<_> = items
+                    .iter()
+                    .filter(|i| i.commit_characters.as_ref().is_some_and(|c| !c.is_empty()))
+                    .collect();
+                assert!(
+                    !with_commit.is_empty(),
+                    "tgo member completions must carry non-empty commit_characters \
+                     (the real LSP wire signal), got none across {} items",
+                    items.len()
+                );
+                // The standard member-access commit set includes the member-chain
+                // characters; assert one of the expected commit chars is present
+                // on a member (proves we parsed the real array, not a stub).
+                let alpha = items
+                    .iter()
+                    .find(|i| i.label == "alpha")
+                    .expect("alpha present");
+                let commit = alpha
+                    .commit_characters
+                    .as_ref()
+                    .expect("tgo member carries commit_characters");
+                assert!(
+                    commit.iter().any(|c| c == "." || c == ";" || c == ","),
+                    "tgo member commit_characters should include member-chain chars, got: {commit:?}"
+                );
+            }
+            "tsserver" => {
+                // NEGATIVE / fail-closed: tsserver completion entries do not
+                // carry these fields at list time, so they stay None — never
+                // fabricated. (Snippet text is additionally gated off by the
+                // session's `includeCompletionsWithSnippetText: false` preference,
+                // so no member is a snippet here either.)
+                for it in &items {
+                    assert!(
+                        it.commit_characters.is_none(),
+                        "tsserver member `{}` must not fabricate commit_characters",
+                        it.label
+                    );
+                    assert!(
+                        it.insert_text_format.is_none(),
+                        "tsserver member `{}` carries no snippet signal here → None",
+                        it.label
+                    );
+                    assert!(
+                        it.label_details.is_none(),
+                        "tsserver member `{}` carries no label_details at list time",
+                        it.label
+                    );
+                }
+            }
+            other => panic!("unexpected provider id: {other}"),
+        }
+    }
+);

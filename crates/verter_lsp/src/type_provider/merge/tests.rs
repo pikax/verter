@@ -254,6 +254,11 @@ fn make_type_completion(label: &str) -> Completion {
         text_edit_new_text: None,
         insert_text: None,
         sort_text: None,
+        insert_text_format: None,
+        commit_characters: None,
+        filter_text: None,
+        preselect: None,
+        label_details: None,
         data: None,
     }
 }
@@ -630,6 +635,90 @@ fn provider_completion_to_lsp_item_prefers_new_text_over_label_when_range_droppe
         Some("foo (auto-import)"),
         "the committed text must not fall back to the decorated display label"
     );
+}
+
+/// The emit wiring for the additive carrier completion fields: every field a
+/// `.ts` file relies on (snippet `insert_text_format`, `commit_characters`,
+/// `filter_text`, `preselect`, `label_details`) must be propagated from the
+/// provider-neutral [`protocol::Completion`] carrier onto the LSP
+/// [`CompletionItem`] by [`provider_completion_to_lsp_item`].
+///
+/// Discriminating: pre-fix the carrier had NO such fields (and the mapper
+/// emitted only `label`/`kind`/`detail`/`documentation`/`sort_text`/
+/// `insert_text`/`text_edit`/`data`, defaulting the rest to `None`), so this
+/// test does not compile against the unmodified tree, and once the fields exist
+/// it FAILS unless the mapper actually copies each one through.
+#[test]
+fn provider_completion_to_lsp_item_propagates_carrier_fields() {
+    let mut entry = make_type_completion("createApp");
+    entry.insert_text_format = Some(protocol::CompletionInsertTextFormat::Snippet);
+    entry.commit_characters = Some(vec!["(".to_string(), ".".to_string()]);
+    entry.filter_text = Some("createApp".to_string());
+    entry.preselect = Some(true);
+    entry.label_details = Some(protocol::CompletionLabelDetails {
+        detail: Some("(app: App)".to_string()),
+        description: Some("vue".to_string()),
+    });
+
+    let item = provider_completion_to_lsp_item(
+        entry,
+        "createApp".to_string(),
+        None,
+        "tsgo",
+        Some("/ws/App.vue.tsx"),
+    );
+
+    assert_eq!(
+        item.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "a snippet carrier must surface as InsertTextFormat::SNIPPET on the LSP item"
+    );
+    assert_eq!(
+        item.commit_characters,
+        Some(vec!["(".to_string(), ".".to_string()]),
+        "commit_characters must propagate verbatim"
+    );
+    assert_eq!(
+        item.filter_text.as_deref(),
+        Some("createApp"),
+        "filter_text must propagate"
+    );
+    assert_eq!(item.preselect, Some(true), "preselect must propagate");
+    let label_details = item
+        .label_details
+        .expect("label_details must propagate onto the LSP item");
+    assert_eq!(label_details.detail.as_deref(), Some("(app: App)"));
+    assert_eq!(label_details.description.as_deref(), Some("vue"));
+}
+
+/// Fail-closed negative: a carrier with NONE of the new fields set must NOT
+/// fabricate them on the LSP item — every new field stays `None`. This pins the
+/// "parse what the wire carries; leave None otherwise; NEVER fabricate" rule at
+/// the emit boundary.
+#[test]
+fn provider_completion_to_lsp_item_does_not_fabricate_carrier_fields() {
+    // `make_type_completion` leaves every new field `None`.
+    let entry = make_type_completion("plainMember");
+    let item = provider_completion_to_lsp_item(
+        entry,
+        "plainMember".to_string(),
+        None,
+        "tsgo",
+        Some("/ws/App.vue.tsx"),
+    );
+    assert_eq!(
+        item.insert_text_format, None,
+        "a non-snippet carrier must NOT fabricate an insert_text_format"
+    );
+    assert_ne!(
+        item.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "a plain carrier is never a snippet"
+    );
+    assert_eq!(item.commit_characters, None);
+    assert_eq!(item.filter_text, None);
+    assert_eq!(item.preselect, None);
+    assert!(item.label_details.is_none());
 }
 
 /// @ai-generated — TypeProvider completions are added alongside verter completions
@@ -4181,6 +4270,11 @@ fn test_merge_completions_transforms_jsx_events() {
                 edit_range_start: None,
                 edit_range_end: None,
                 text_edit_new_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
             Completion {
@@ -4193,6 +4287,11 @@ fn test_merge_completions_transforms_jsx_events() {
                 edit_range_start: None,
                 edit_range_end: None,
                 text_edit_new_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -4246,6 +4345,11 @@ fn merge_expression_context_does_not_transform_jsx() {
                 edit_range_start: None,
                 edit_range_end: None,
                 text_edit_new_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
             Completion {
@@ -4258,6 +4362,11 @@ fn merge_expression_context_does_not_transform_jsx() {
                 edit_range_start: None,
                 edit_range_end: None,
                 text_edit_new_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
             Completion {
@@ -4270,6 +4379,11 @@ fn merge_expression_context_does_not_transform_jsx() {
                 edit_range_start: None,
                 edit_range_end: None,
                 text_edit_new_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -4337,6 +4451,11 @@ fn merge_enriches_verter_kind_from_type_provider() {
             text_edit_new_text: None,
             insert_text: None,
             sort_text: None,
+            insert_text_format: None,
+            commit_characters: None,
+            filter_text: None,
+            preselect: None,
+            label_details: None,
             data: None,
         }],
         is_incomplete: false,
@@ -4381,6 +4500,11 @@ fn merge_does_not_enrich_with_text_kind() {
             text_edit_new_text: None,
             insert_text: None,
             sort_text: None,
+            insert_text_format: None,
+            commit_characters: None,
+            filter_text: None,
+            preselect: None,
+            label_details: None,
             data: None,
         }],
         is_incomplete: false,

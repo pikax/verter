@@ -305,7 +305,8 @@ fn client_capabilities_advertise_diagnostic_tag_support() {
 ///
 /// tgo consumes the resolve round-trip at two sites — `get_completion_details`
 /// folds back `detail` + `documentation`; `resolve_completion` folds back
-/// `additionalTextEdits` (the auto-import edits). Per the LSP spec, a server only
+/// `additionalTextEdits` (the auto-import edits) plus the refined `labelDetails`
+/// and a post-accept `command` when present. Per the LSP spec, a server only
 /// computes a resolve property lazily when the client lists it in
 /// `resolveSupport.properties`; with empty capabilities tgo silently drops
 /// `additionalTextEdits`, so completion-driven auto-import never applies its
@@ -338,23 +339,26 @@ fn client_capabilities_advertise_completion_item_resolve_support() {
 
     // EXACTLY the properties tgo's resolve handlers actually fold back — no more.
     // `documentation` + `detail` from get_completion_details; `additionalTextEdits`
-    // from resolve_completion (auto-import). Advertising a property tgo does not
-    // consume would invite the server to compute work the client discards.
-    let expected: std::collections::BTreeSet<&str> =
-        ["documentation", "detail", "additionalTextEdits"]
-            .into_iter()
-            .collect();
+    // from resolve_completion (auto-import); `labelDetails` + `command` from
+    // resolve_completion's enrichment (folded onto the item by the LSP layer).
+    // Advertising a property tgo does not consume would invite the server to
+    // compute work the client discards.
+    let expected: std::collections::BTreeSet<&str> = [
+        "documentation",
+        "detail",
+        "additionalTextEdits",
+        "labelDetails",
+        "command",
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(
         props, expected,
         "resolveSupport.properties must be EXACTLY the folded-back set {expected:?}, got {props:?}"
     );
 
-    // Negative — do NOT over-claim properties tgo has no handler for. `command`
-    // is a common resolve property tgo never executes; it must be absent.
-    assert!(
-        !props.contains("command"),
-        "must NOT advertise `command` — tgo's resolve has no command handler"
-    );
+    // Negative — do NOT over-claim properties tgo has no handler for. `textEdit`
+    // resolve is never folded (only additionalTextEdits), so it must be absent.
     assert!(
         !props.contains("textEdit"),
         "must NOT advertise `textEdit` resolve — tgo only folds additionalTextEdits"
@@ -451,10 +455,11 @@ fn client_capabilities_advertise_completion_item_kind_value_set() {
 /// let tgo register/return data the client silently ignores.
 ///
 /// Also guards the `completionItem` shapes this provider's completion parser does
-/// NOT read — `snippetSupport`, `insertReplaceSupport`, `labelDetailsSupport`
-/// (the parser maps a flat `insertText` / single `textEdit` and reads no snippet,
-/// insert-replace, or label-details shape) — and `dataSupport` (not a real LSP
-/// capability; `data` is a spec-transparent resolve passthrough).
+/// NOT read — `insertReplaceSupport` (the parser maps a single `textEdit` range,
+/// not an insert/replace pair) and `dataSupport` (not a real LSP capability;
+/// `data` is a spec-transparent resolve passthrough) — while asserting the
+/// shapes the parser DOES read are advertised (`snippetSupport`,
+/// `commitCharactersSupport`, `labelDetailsSupport`).
 #[test]
 fn client_capabilities_do_not_overclaim_unhandled_features() {
     let caps = build_client_capabilities();
@@ -484,9 +489,8 @@ fn client_capabilities_do_not_overclaim_unhandled_features() {
     // advertising one invites tgo to emit a shape this provider silently discards.
     let completion_item = &td["completion"]["completionItem"];
     for unread in [
-        "snippetSupport",
+        // The parser maps a single `textEdit` range, not an insert/replace pair.
         "insertReplaceSupport",
-        "labelDetailsSupport",
         // `dataSupport` is not a real LSP capability (`data` is a spec-transparent
         // resolve passthrough); it must never be advertised.
         "dataSupport",
@@ -495,6 +499,24 @@ fn client_capabilities_do_not_overclaim_unhandled_features() {
             completion_item.get(unread).is_none(),
             "must NOT advertise completion.completionItem.{unread} — the completion \
              parser reads no such shape"
+        );
+    }
+
+    // Positive: shapes the parser NOW reads MUST be advertised — a server only
+    // emits these item fields when the client claims support. `snippetSupport`
+    // gates `insertTextFormat`, `commitCharactersSupport` gates `commitCharacters`,
+    // `labelDetailsSupport` gates `labelDetails`; the completion parser reads all
+    // three (`parse_completion_item`).
+    for advertised in [
+        "snippetSupport",
+        "commitCharactersSupport",
+        "labelDetailsSupport",
+    ] {
+        assert_eq!(
+            completion_item.get(advertised).and_then(|v| v.as_bool()),
+            Some(true),
+            "must advertise completion.completionItem.{advertised} — the completion \
+             parser reads the field it gates"
         );
     }
 }
@@ -2877,6 +2899,11 @@ fn bare_completion(label: &str) -> Completion {
         text_edit_new_text: None,
         insert_text: None,
         sort_text: None,
+        insert_text_format: None,
+        commit_characters: None,
+        filter_text: None,
+        preselect: None,
+        label_details: None,
         data: None,
     }
 }
