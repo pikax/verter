@@ -116,6 +116,20 @@ same reactivity / hydration / CSR-vs-SSR decisions, and produces the same observ
 executed against the pinned runtime. Verified by the jsdom behavioral harness (§5/§7-block) on
 `svelte@5.56.3` plus helper-topology goldens (structure + helper-call sequence, NOT bytes).
 
+**Owner directive (2026-06-22, EXPLICIT and binding): FORMAT / COSMETIC differences DO NOT MATTER and are NEVER
+a finding.** Intra-expression whitespace (`a+b` vs official `a + b`), behavior-preserving redundant parens
+(`(a+b)+c` vs `a+b+c`), and insignificant generated identifier names are EXPLICITLY ALLOWED to differ from the
+official output — the downstream minifier collapses them, so they have zero observable effect. The corpus/oracle
+compares **behaviorally + structurally** (helper family, call topology, reactivity decisions, DOM topology,
+diagnostics), NEVER raw bytes, for these cosmetic categories. Chasing byte-identity on cosmetic formatting is a
+PROCESS ERROR: a reviewer, corpus cell, or §1a check that flags a cosmetic-only diff as a blocker is WRONG —
+only a BEHAVIORAL / structural divergence blocks. The "byte-faithful" / "byte-parity" wording elsewhere in this
+plan (the block deliverables, [[codegen-byte-parity-doctrine]], D-14/D-15) means byte-parity of the NON-COSMETIC
+structural content ONLY (helper choice, memoization, reactivity, class/style normalization, valueless-vs-empty
+attr shape, reject/diagnostic ordering) — it NEVER requires cosmetic formatting parity. The corpus must compare
+expression CONTENT structurally (parse + compare, or token-normalized), so a cosmetic whitespace/paren diff
+PASSES as correct (it is correct), while a behavioral/structural diff still FAILS.
+
 ### 1.3 Ground truth (verified against the live tree)
 
 - **Vue runtime codegen** (`crates/verter_compiler/src/template/code_gen/{vdom,vapor,ssr,shared}/`):
@@ -200,6 +214,14 @@ executed against the pinned runtime. Verified by the jsdom behavioral harness (�
    uses vendored goldens.
 9. **Every new CRITICAL rule lands with a registered guard** (the R6 meta-guard at
    `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs`).
+10. **Cosmetic / format differences are EXPLICITLY WAIVED (owner directive, §1.2) — flagging one is a STOP-level
+    process error.** Intra-expression whitespace, behavior-preserving redundant parens, and insignificant
+    generated identifier names MAY differ from official and are NEVER a finding (the minifier collapses them).
+    The bar is behavioral + structural / helper-topology parity; the corpus compares expression content
+    STRUCTURALLY (parse/token-normalized) for cosmetic categories, NEVER raw bytes. Wasting review/fix rounds to
+    make cosmetic formatting byte-identical (e.g. an esrap-faithful re-printer for spacing) is forbidden — only
+    a BEHAVIORAL / structural divergence (helper choice, memoization, reactivity, class/style normalization,
+    attr-shape, diagnostic ordering) blocks.
 
 ---
 
