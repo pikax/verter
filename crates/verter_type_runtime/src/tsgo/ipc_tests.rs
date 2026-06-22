@@ -1778,7 +1778,7 @@ fn parse_lsp_related_never_stores_packed_position_anti_bogus_link() {
 /// to `content.len()`. A clamped EOF offset would fabricate a bogus "see
 /// declaration" link landing at the end of the file.
 ///
-/// Pre-fix (fail-open `position_to_offset`): line 99 clamps to `content.len()` (14),
+/// Pre-fix (fail-open `position_to_offset`): line 99 clamps to `content.len()` (15),
 /// so `related_information` is NON-empty with start == end == 14 — this assertion
 /// fires. Post-fix (`position_to_offset_checked`): the entry is dropped, the list is
 /// empty, and the PRIMARY diagnostic still survives.
@@ -1817,6 +1817,67 @@ fn parse_lsp_related_drops_same_file_out_of_range_offset() {
         diag.related_information.is_empty(),
         "a same-file related span past EOF must be DROPPED (checked conversion), \
          never clamped to a bogus EOF offset, got: {:?}",
+        diag.related_information
+    );
+}
+
+/// WRAP-TO-VALID: a SAME-FILE related coordinate of `2^32` must be DROPPED, not
+/// silently truncated into an IN-RANGE position. The parser reads each coordinate
+/// with `u32::try_from(value.as_u64()?)`; a lossy `as u32` cast would WRAP
+/// `4294967296` (2^32) down to `0` — an in-range line/column for this fixture —
+/// and then the checked converter (which only rejects past-EOF positions) would
+/// HAPPILY accept the wrapped `0`, fabricating a valid-looking but WRONG related
+/// link. The checked converter cannot catch this because the corruption happens
+/// in the cast BEFORE it runs. Only a checked `u64 → u32` conversion drops it.
+///
+/// Pre-fix (`as_u64()? as u32`): `start.character = 2^32` wraps to `0`, an
+/// in-range column, so `related_information` is NON-empty with a fabricated
+/// offset — this assertion fires. Post-fix (`u32::try_from(...).ok()?`): the
+/// out-of-u32-range coordinate yields `None`, the related entry is dropped, the
+/// list is empty, and the PRIMARY diagnostic still survives.
+#[test]
+fn parse_lsp_related_drops_same_file_wrap_to_valid_coordinate() {
+    // Sanity: `2^32` is exactly the value a lossy `as u32` cast wraps to `0` —
+    // an IN-RANGE column for the fixture below. This is the wrap-to-valid hazard.
+    assert_eq!(
+        4_294_967_296u64 as u32, 0,
+        "sanity: 2^32 wraps to an in-range column 0 under a lossy `as u32` cast"
+    );
+    let content = "const dup = 1;\n"; // 15 bytes, 2 lines (1 trailing empty)
+    let json = serde_json::json!({
+        "range": {
+            "start": { "line": 0, "character": 6 },
+            "end": { "line": 0, "character": 9 }
+        },
+        "severity": 1,
+        "code": 2451,
+        "message": "Cannot redeclare block-scoped variable 'dup'.",
+        "relatedInformation": [
+            {
+                "location": {
+                    // SAME file the parser holds content for — so cross-file drop
+                    // does not apply; only the checked conversion can reject this.
+                    "uri": "file:///proj/dup.ts",
+                    "range": {
+                        // 2^32 wraps to column 0 under `as u32`: an in-range
+                        // position the checked converter would accept. The whole
+                        // related entry must drop on the out-of-u32-range value.
+                        "start": { "line": 0, "character": 4_294_967_296u64 },
+                        "end": { "line": 0, "character": 9 }
+                    }
+                },
+                "message": "'dup' was also declared here."
+            }
+        ]
+    });
+    let diag = parse_lsp_diagnostic(&json, Some(content), Some("/proj/dup.ts")).unwrap();
+    // The primary diagnostic survives with its real in-range offsets.
+    assert_eq!(diag.start, 6, "primary start is a real in-range offset");
+    assert_eq!(diag.end, 9, "primary end is a real in-range offset");
+    assert!(
+        diag.related_information.is_empty(),
+        "a related coordinate of 2^32 must be DROPPED (checked u32 conversion), \
+         never wrapped to an in-range column 0, got: {:?}",
         diag.related_information
     );
 }

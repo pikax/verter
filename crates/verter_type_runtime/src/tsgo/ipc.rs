@@ -845,10 +845,17 @@ fn parse_lsp_related_info(
     let range = location.get("range")?;
     let start = range.get("start")?;
     let end = range.get("end")?;
-    let start_line = start.get("line")?.as_u64()? as u32;
-    let start_char = start.get("character")?.as_u64()? as u32;
-    let end_line = end.get("line")?.as_u64()? as u32;
-    let end_char = end.get("character")?.as_u64()? as u32;
+    // CHECKED `u64 → u32`: a malformed coordinate larger than `u32::MAX` (e.g.
+    // `2^32`) would WRAP to an in-range line/column under a lossy `as u32` cast,
+    // then PASS the checked position converter (which only rejects past-EOF
+    // positions), fabricating a valid-looking but WRONG related link. Dropping the
+    // whole related entry (fail-closed) on an out-of-u32-range coordinate is the
+    // only defense, because the corruption would happen in the cast BEFORE the
+    // converter runs.
+    let start_line = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let start_char = u32::try_from(start.get("character")?.as_u64()?).ok()?;
+    let end_line = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let end_char = u32::try_from(end.get("character")?.as_u64()?).ok()?;
 
     // A real byte offset exists only for a same-file related span (the parser holds
     // that file's content). A cross-file span has no content here, so there is no

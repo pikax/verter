@@ -505,10 +505,17 @@ fn parse_tsserver_related_info(
     let span = ri.get("span")?;
     let start = span.get("start")?;
     let end = span.get("end")?;
-    let start_line = start.get("line")?.as_u64()? as u32;
-    let start_offset = start.get("offset")?.as_u64()? as u32;
-    let end_line = end.get("line")?.as_u64()? as u32;
-    let end_offset = end.get("offset")?.as_u64()? as u32;
+    // CHECKED `u64 → u32`: a malformed coordinate larger than `u32::MAX` (e.g.
+    // `2^32 + 1`) would WRAP to an in-range 1-based line/offset under a lossy
+    // `as u32` cast, then PASS `tsserver_pos_to_byte_offset_checked` (which only
+    // rejects line/offset 0 and past-EOF positions), fabricating a valid-looking
+    // but WRONG related link. Dropping the whole related entry (fail-closed) on an
+    // out-of-u32-range coordinate is the only defense, because the corruption
+    // would happen in the cast BEFORE the converter runs.
+    let start_line = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let start_offset = u32::try_from(start.get("offset")?.as_u64()?).ok()?;
+    let end_line = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let end_offset = u32::try_from(end.get("offset")?.as_u64()?).ok()?;
     let file = verter_span::path::canonicalize_path(span.get("file")?.as_str()?);
 
     // A real byte offset exists only for a same-file related span (the parser holds

@@ -393,6 +393,71 @@ fn parse_tsserver_related_drops_same_file_out_of_range_offset() {
     );
 }
 
+/// WRAP-TO-VALID: a SAME-FILE related coordinate of `2^32 + 1` must be DROPPED,
+/// not silently truncated into an IN-RANGE position. The parser reads each
+/// coordinate with `u32::try_from(value.as_u64()?)`; a lossy `as u32` cast would
+/// WRAP `4294967297` (2^32 + 1) down to `1` — a valid 1-based line/offset for
+/// this fixture — and then `tsserver_pos_to_byte_offset_checked` (which only
+/// rejects line/offset 0 and past-EOF positions) would HAPPILY accept the wrapped
+/// `1`, fabricating a valid-looking but WRONG related link. The corruption
+/// happens in the cast BEFORE the checked converter runs, so only a checked
+/// `u64 → u32` conversion drops it. `2^32 + 1` (not `2^32`) is required because a
+/// bare `2^32` wraps to `0`, which the 1-based `checked_sub(1)` already rejects —
+/// that would not discriminate the cast bug from the existing guard.
+///
+/// Pre-fix (`as_u64()? as u32`): `start.offset = 2^32 + 1` wraps to `1`, an
+/// in-range 1-based offset, so `related_information` is NON-empty with a
+/// fabricated offset — this assertion fires. Post-fix (`u32::try_from(...).ok()?`):
+/// the out-of-u32-range coordinate yields `None`, the related entry is dropped,
+/// the list is empty, and the PRIMARY diagnostic still survives.
+#[test]
+fn parse_tsserver_related_drops_same_file_wrap_to_valid_coordinate() {
+    // Sanity: `2^32 + 1` is exactly the value a lossy `as u32` cast wraps to `1` —
+    // an IN-RANGE 1-based offset for the fixture below (a bare `2^32` would wrap to
+    // `0`, which the 1-based `checked_sub(1)` already rejects). This is the
+    // wrap-to-valid hazard.
+    assert_eq!(
+        4_294_967_297u64 as u32, 1,
+        "sanity: 2^32 + 1 wraps to an in-range 1-based offset 1 under a lossy `as u32` cast"
+    );
+    let content = "const dup = 1;\n"; // 15 bytes, 2 lines (1 trailing empty)
+    let diag = serde_json::json!({
+        "start": { "line": 1, "offset": 7 },
+        "end": { "line": 1, "offset": 10 },
+        "text": "Cannot redeclare block-scoped variable 'dup'.",
+        "code": 2451,
+        "category": "error",
+        "relatedInformation": [
+            {
+                "message": "'dup' was also declared here.",
+                "category": "message",
+                "code": 2451,
+                "span": {
+                    // 2^32 + 1 wraps to a valid 1-based offset 1 under `as u32`: an
+                    // in-range position the checked converter would accept. The
+                    // whole related entry must drop on the out-of-u32-range value.
+                    "start": { "line": 1, "offset": 4_294_967_297u64 },
+                    "end": { "line": 1, "offset": 10 },
+                    // SAME file the parser holds content for — so cross-file drop
+                    // does not apply; only the checked conversion can reject this.
+                    "file": "/proj/dup.ts"
+                }
+            }
+        ]
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    // The primary diagnostic survives with its real in-range offsets.
+    assert_eq!(parsed.start, 6, "primary start is a real in-range offset");
+    assert_eq!(parsed.end, 9, "primary end is a real in-range offset");
+    assert!(
+        parsed.related_information.is_empty(),
+        "a related coordinate of 2^32 + 1 must be DROPPED (checked u32 conversion), \
+         never wrapped to an in-range 1-based offset 1, got: {:?}",
+        parsed.related_information
+    );
+}
+
 #[test]
 fn test_parse_tsserver_completion() {
     let item = serde_json::json!({
