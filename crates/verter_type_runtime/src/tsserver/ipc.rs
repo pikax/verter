@@ -1713,13 +1713,13 @@ impl TypeProvider for TsserverTypeProvider {
                                 })
                                 .unwrap_or_default();
 
-                            let param_labels: Vec<String> =
-                                param_parts.iter().map(|(t, _)| t.clone()).collect();
-                            // Assemble the label and per-param UTF-16 offset spans
-                            // together so the offsets stay consistent with the label
-                            // bytes. Offsets (vs. plain `Simple`) let the client bold
+                            // Borrow each param's text in place (no clone): the
+                            // assembler reads the slices and records offsets in one
+                            // pass. Offsets (vs. plain `Simple`) let the client bold
                             // the exact active-parameter span; this is strictly
                             // richer and is computed from the wire display parts.
+                            let param_labels: Vec<&str> =
+                                param_parts.iter().map(|(t, _)| t.as_str()).collect();
                             let assembled = assemble_signature_label(
                                 &prefix,
                                 &param_labels,
@@ -2871,25 +2871,31 @@ pub struct AssembledSignatureLabel {
 /// misalign the bold span.
 pub fn assemble_signature_label(
     prefix: &str,
-    param_labels: &[String],
+    param_labels: &[impl AsRef<str>],
     separator: &str,
     suffix: &str,
 ) -> AssembledSignatureLabel {
-    let label = format!("{prefix}{}{suffix}", param_labels.join(separator));
-
+    // Single pass: build the label string AND the per-param UTF-16 offset spans
+    // together (no intermediate `Vec<String>` clone, no throwaway `join`). Each
+    // param's span is recorded against the running UTF-16 cursor as its text is
+    // appended, so the offsets stay exactly consistent with the label bytes.
     let separator_u16 = separator.encode_utf16().count() as u32;
+    let mut label = String::with_capacity(prefix.len() + separator.len() + suffix.len());
+    label.push_str(prefix);
     let mut cursor = prefix.encode_utf16().count() as u32;
     let mut param_offsets = Vec::with_capacity(param_labels.len());
     for (i, p) in param_labels.iter().enumerate() {
+        let p = p.as_ref();
         if i > 0 {
+            label.push_str(separator);
             cursor += separator_u16;
         }
-        let len = p.encode_utf16().count() as u32;
         let start = cursor;
-        let end = cursor + len;
-        param_offsets.push((start, end));
-        cursor = end;
+        label.push_str(p);
+        cursor += p.encode_utf16().count() as u32;
+        param_offsets.push((start, cursor));
     }
+    label.push_str(suffix);
 
     AssembledSignatureLabel {
         label,

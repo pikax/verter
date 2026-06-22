@@ -841,11 +841,12 @@ impl<T: TsQueryTransport> TypeProvider for ExtensionTypeProvider<T> {
                                 })
                                 .unwrap_or_default();
 
-                            let param_labels: Vec<String> =
-                                param_parts.iter().map(|(t, _)| t.clone()).collect();
-                            // Assemble label + per-param UTF-16 offset spans together
-                            // (LSP offsets are UTF-16 code units); offsets let the
-                            // client bold the exact active-parameter span.
+                            // Borrow each param's text in place (no clone); the
+                            // assembler builds label + per-param UTF-16 offset spans
+                            // in one pass. LSP offsets are UTF-16 code units; offsets
+                            // let the client bold the exact active-parameter span.
+                            let param_labels: Vec<&str> =
+                                param_parts.iter().map(|(t, _)| t.as_str()).collect();
                             let assembled = assemble_signature_label(
                                 &prefix,
                                 &param_labels,

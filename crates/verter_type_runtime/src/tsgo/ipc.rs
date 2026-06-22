@@ -3150,18 +3150,40 @@ fn parse_rename_edit<'a>(
 /// two-element array of unsigned integers (`[start, end)` UTF-16 offsets into the
 /// enclosing signature label).
 ///
-/// Fail-closed: returns `None` for any other shape (an array of the wrong arity,
-/// non-integer elements, an object, …) so the parameter is dropped rather than
-/// rendered with a fabricated label or wrong offsets.
-fn parse_lsp_parameter_label(value: &serde_json::Value) -> Option<ParameterLabelKind> {
+/// `signature_label_utf16_len` is the UTF-16 code-unit length of the ENCLOSING
+/// signature label; the offset form is bounds-checked against it.
+///
+/// Fail-closed (returns `None` so the parameter is dropped, NEVER rendered with a
+/// fabricated label or a wrong/truncated/out-of-bounds bold span) for any of:
+/// - a shape that is neither a string nor a 2-element array;
+/// - an offset element that is not a `u64` (e.g. negative, fractional) or that
+///   exceeds `u32::MAX` (`u32::try_from` overflow — a truncating `as u32` would
+///   silently fabricate a wrong span);
+/// - an empty or inverted span (`start >= end`);
+/// - an out-of-bounds span (`end > signature_label_utf16_len`).
+///
+/// An offset span that is truncated, inverted, or out of bounds would bold the
+/// WRONG run of the signature label (worse than no offsets), so it is rejected
+/// rather than emitted.
+fn parse_lsp_parameter_label(
+    value: &serde_json::Value,
+    signature_label_utf16_len: u32,
+) -> Option<ParameterLabelKind> {
     if let Some(s) = value.as_str() {
         return Some(ParameterLabelKind::Simple(s.to_string()));
     }
     if let Some(arr) = value.as_array() {
         if arr.len() == 2 {
-            let start = arr[0].as_u64()?;
-            let end = arr[1].as_u64()?;
-            return Some(ParameterLabelKind::Offsets(start as u32, end as u32));
+            // Checked: a value beyond u32::MAX must NOT truncate into a wrong
+            // offset — drop the offset form instead (`as u32` would fabricate).
+            let start = u32::try_from(arr[0].as_u64()?).ok()?;
+            let end = u32::try_from(arr[1].as_u64()?).ok()?;
+            // Reject empty/inverted spans and out-of-bounds spans: either would
+            // bold the wrong span of the label.
+            if start >= end || end > signature_label_utf16_len {
+                return None;
+            }
+            return Some(ParameterLabelKind::Offsets(start, end));
         }
     }
     None
@@ -3176,6 +3198,9 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
             arr.iter()
                 .filter_map(|sig| {
                     let label = sig.get("label")?.as_str()?.to_string();
+                    // UTF-16 length of THIS signature label; the offset-form param
+                    // labels below bounds-check their `end` against it.
+                    let label_utf16_len = label.encode_utf16().count() as u32;
                     let documentation = sig.get("documentation").and_then(extract_markup_string);
                     let parameters = sig
                         .get("parameters")
@@ -3189,7 +3214,10 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
                                     // into the signature label. Parse whichever the
                                     // server sent; fail-closed (skip) on neither —
                                     // never fabricate offsets.
-                                    let plabel = parse_lsp_parameter_label(p.get("label")?)?;
+                                    let plabel = parse_lsp_parameter_label(
+                                        p.get("label")?,
+                                        label_utf16_len,
+                                    )?;
                                     let pdoc =
                                         p.get("documentation").and_then(extract_markup_string);
                                     Some(ParameterInfo {
@@ -3201,11 +3229,12 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
                         })
                         .unwrap_or_default();
                     // LSP `SignatureInformation.activeParameter` (optional,
-                    // per-signature). Carried when present; `None` otherwise.
+                    // per-signature). Carried when present; checked (an out-of-range
+                    // index → `None`, never a truncated wrong index).
                     let active_parameter = sig
                         .get("activeParameter")
                         .and_then(|v| v.as_u64())
-                        .map(|v| v as u32);
+                        .and_then(|v| u32::try_from(v).ok());
                     Some(SignatureInfo {
                         label,
                         documentation,
@@ -3219,14 +3248,15 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
 
     SignatureHelp {
         signatures,
+        // Checked: an out-of-range index becomes `None`, never a truncated value.
         active_signature: result
             .get("activeSignature")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
         active_parameter: result
             .get("activeParameter")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
     }
 }
 

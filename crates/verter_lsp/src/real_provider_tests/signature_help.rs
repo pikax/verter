@@ -61,12 +61,13 @@ real_provider_test!(
     async fn run(session) {
         let uri = session.open_virtual("src/SigHelpCase.vue", SIG_SFC).await;
 
-        // Position the cursor at the `SIG_CURSOR` marker (the 2nd argument slot,
-        // i.e. active parameter index 1), then strip the marker so the call reads
-        // `addThree(1, )`.
+        // Place the cursor at the START of the `SIG_CURSOR` filler — i.e. the
+        // 2nd-argument slot, immediately after the first comma — so the active
+        // parameter is index 1 (`beta`). The marker is NOT stripped; it is harmless
+        // filler occupying the 2nd-arg position, and tsserver/tgo resolve the active
+        // param from the comma count BEFORE the cursor, which is unaffected by the
+        // identifier sitting at/after the cursor.
         let marker_pos = session.find_position(&uri, "SIG_CURSOR", 0);
-        // The marker text itself is harmless filler for the call; tsserver/tgo
-        // resolve the active param from the comma count before the cursor.
         let backend = if session.is_tsgo() { "tgo" } else { "tsserver" };
         let Some(help) = signature_help_with_retry(session, &uri, marker_pos).await else {
             // Fail-closed: under the require-env gate the harness build already
@@ -107,69 +108,98 @@ real_provider_test!(
             sig.label
         );
 
-        // --- Active-parameter signal (universal across both backends) ---
-        // The cursor sits in the 2nd argument slot → active param index 1. Accept
-        // EITHER the per-signature value (preferred) OR the top-level value (the
-        // form a client applies when per-sig is absent).
-        let effective_active = sig.active_parameter.or(help.active_parameter);
-        assert_eq!(
-            effective_active,
-            Some(1),
-            "active parameter must be index 1 (the 2nd arg slot); per-sig={:?} top-level={:?}",
-            sig.active_parameter,
-            help.active_parameter
-        );
+        // The fixture's parameter names are fixed, so the offset slices can be
+        // compared EXACTLY against the known param texts.
+        const EXPECTED_PARAMS: [&str; 3] = ["alpha: number", "beta: string", "gamma: boolean"];
+        // The cursor sits in the 2nd argument slot → active param index 1 (`beta`).
+        const EXPECTED_ACTIVE: u32 = 1;
 
-        // --- Offset-form labels (tsserver computes them; tgo passes through) ---
-        let label_u16_len = sig.label.encode_utf16().count() as u32;
-        let mut saw_offsets = false;
-        for (i, p) in params.iter().enumerate() {
-            if let ParameterLabel::LabelOffsets([start, end]) = p.label {
-                saw_offsets = true;
-                // Sane bounds + non-degenerate, non-empty span for a real param.
-                assert!(
-                    end <= label_u16_len,
-                    "param {i} offset end {end} within label len {label_u16_len} ({:?})",
-                    sig.label
-                );
+        let label_u16: Vec<u16> = sig.label.encode_utf16().collect();
+        let label_u16_len = label_u16.len() as u32;
+
+        // Per-backend asymmetry: tsserver is OUR computed path — Verter assembles
+        // the label and the per-param UTF-16 offset spans from tsserver's display
+        // parts and stamps the per-signature active parameter, so we assert the
+        // FULL fidelity (every param in offset form, each slice exact, per-sig
+        // active param stamped directly). tgo speaks raw LSP and passes the
+        // server's chosen form through (it may send Simple labels and may omit the
+        // per-signature activeParameter), so there we assert only the cross-backend
+        // active-param signal and validate offsets opportunistically when present.
+        if !session.is_tsgo() {
+            // --- tsserver: every parameter MUST be in offset form ---
+            // Pre-fix the merge always emitted `ParameterLabel::Simple`, so this
+            // EVERY-param offset assertion fails on the pre-K2 tree.
+            for (i, p) in params.iter().enumerate() {
+                let ParameterLabel::LabelOffsets([start, end]) = p.label else {
+                    panic!(
+                        "tsserver param {i} must be LabelOffsets (Verter computes offsets \
+                         from display parts), got {:?}; all labels = {:?}",
+                        p.label,
+                        params.iter().map(|p| &p.label).collect::<Vec<_>>()
+                    );
+                };
                 assert!(
                     start < end,
-                    "param {i} offset span must be non-empty (start {start} < end {end})"
+                    "tsserver param {i} offset span must be non-empty (start {start} < end {end})"
                 );
-                assert_ne!(
-                    (start, end),
-                    (0, 0),
-                    "param {i} offset must not be the degenerate [0,0]"
-                );
-                // The sliced label text must be a non-empty named parameter.
-                let label_u16: Vec<u16> = sig.label.encode_utf16().collect();
-                let slice =
-                    String::from_utf16(&label_u16[start as usize..end as usize]).unwrap();
                 assert!(
-                    !slice.trim().is_empty(),
-                    "param {i} offset slice must be a real parameter, got {slice:?}"
+                    end <= label_u16_len,
+                    "tsserver param {i} offset end {end} within label len {label_u16_len} ({:?})",
+                    sig.label
+                );
+                // The UTF-16 slice at [start, end) must equal the exact known param
+                // text — proving the offsets index the right run of the label, not
+                // merely a plausible-looking span.
+                let slice = String::from_utf16(&label_u16[start as usize..end as usize]).unwrap();
+                assert_eq!(
+                    slice, EXPECTED_PARAMS[i],
+                    "tsserver param {i} offset slice must equal the exact param text"
                 );
             }
-        }
 
-        if session.is_tsgo() {
-            // tgo speaks LSP and may emit EITHER form. We do not force Offsets here
-            // (the server chooses); the universal active-param assertion above is
-            // the cross-backend guarantee. If tgo DID send offsets, they were
-            // validated in the loop above.
-            eprintln!(
-                "tgo signature-help offsets present = {saw_offsets} (informational; \
-                 tgo may legitimately send Simple labels)"
+            // --- tsserver: per-signature active parameter stamped DIRECTLY ---
+            // Do NOT fall back to the top-level value here — the per-signature stamp
+            // on the selected overload is exactly the behavior under test. Pre-fix
+            // the merge hard-coded `active_parameter: None`, so this fails on the
+            // pre-K2 tree.
+            assert_eq!(
+                sig.active_parameter,
+                Some(EXPECTED_ACTIVE),
+                "tsserver must stamp the selected signature's per-sig active_parameter \
+                 directly (the 2nd-arg slot, index 1)"
             );
         } else {
-            // tsserver: Verter computes the offsets from display parts, so the
-            // active signature's parameters MUST be in offset form. This is the
-            // discriminating assertion — pre-fix the merge always emitted Simple.
-            assert!(
-                saw_offsets,
-                "tsserver active signature must carry LabelOffsets parameters, got {:?}",
-                params.iter().map(|p| &p.label).collect::<Vec<_>>()
+            // --- tgo: tolerant cross-backend active-param signal ---
+            // tgo's top-level activeParameter is the real cross-backend signal;
+            // accept the per-sig value when present, else the top-level value.
+            let effective_active = sig.active_parameter.or(help.active_parameter);
+            assert_eq!(
+                effective_active,
+                Some(EXPECTED_ACTIVE),
+                "tgo active parameter must be index 1 (the 2nd arg slot); per-sig={:?} \
+                 top-level={:?}",
+                sig.active_parameter,
+                help.active_parameter
             );
+
+            // tgo may emit EITHER label form. If it DID send offsets, they must be
+            // in-bounds, non-empty, and slice the exact param text (fail-closed in
+            // the parser already rejects out-of-bounds/inverted spans).
+            for (i, p) in params.iter().enumerate() {
+                if let ParameterLabel::LabelOffsets([start, end]) = p.label {
+                    assert!(
+                        start < end && end <= label_u16_len,
+                        "tgo param {i} offset span must be in-bounds and non-empty \
+                         (start {start} end {end} len {label_u16_len})"
+                    );
+                    let slice =
+                        String::from_utf16(&label_u16[start as usize..end as usize]).unwrap();
+                    assert_eq!(
+                        slice, EXPECTED_PARAMS[i],
+                        "tgo param {i} offset slice (when present) must equal the exact param text"
+                    );
+                }
+            }
         }
     }
 );

@@ -1634,38 +1634,183 @@ fn parse_signature_help_parses_offset_label_and_per_sig_active_param() {
     assert_eq!(sig.active_parameter, Some(1));
 }
 
+/// `parse_signature_help` bounds-checks each offset-form param label against ITS
+/// OWN signature label and drops (fail-closed) any out-of-bounds offset, while
+/// keeping the in-bounds ones.
+///
+/// Discriminates against the pre-fix parser, which had no label length to check
+/// against and emitted `Offsets(40, 99)` against a 40-UTF-16-unit label.
+#[test]
+fn parse_signature_help_drops_out_of_bounds_offset_param_keeps_in_bounds() {
+    // "greet(name: string, times: number): void" is 40 UTF-16 units long.
+    let label = "greet(name: string, times: number): void";
+    assert_eq!(label.encode_utf16().count(), 40);
+    let json = serde_json::json!({
+        "signatures": [{
+            "label": label,
+            "parameters": [
+                { "label": [6, 18] },   // in bounds → kept
+                { "label": [40, 99] }   // out of bounds → dropped
+            ],
+            "activeParameter": 0
+        }],
+        "activeSignature": 0,
+        "activeParameter": 0
+    });
+    let sig = parse_signature_help(&json);
+    let s0 = &sig.signatures[0];
+    assert_eq!(
+        s0.parameters.len(),
+        1,
+        "the out-of-bounds offset param must be dropped, leaving only the in-bounds one"
+    );
+    assert_eq!(s0.parameters[0].label, ParameterLabelKind::Offsets(6, 18));
+}
+
+/// `parse_signature_help` applies a CHECKED conversion to the active-signature /
+/// active-parameter indices: an index beyond `u32::MAX` becomes `None`, never a
+/// truncated wrong index.
+///
+/// Discriminates against the pre-fix `as u32`, which truncated
+/// `u32::MAX as u64 + 1` to `0` (a wrong, in-range-looking index).
+#[test]
+fn parse_signature_help_checks_active_indices_against_overflow() {
+    let overflow = u64::from(u32::MAX) + 1;
+    let json = serde_json::json!({
+        "signatures": [{
+            "label": "fn(x: number): void",
+            "parameters": [{ "label": "x" }],
+            "activeParameter": overflow
+        }],
+        "activeSignature": overflow,
+        "activeParameter": overflow
+    });
+    let sig = parse_signature_help(&json);
+    assert_eq!(
+        sig.active_signature, None,
+        "an active-signature index beyond u32::MAX must be None, not truncated to 0"
+    );
+    assert_eq!(
+        sig.active_parameter, None,
+        "an active-parameter index beyond u32::MAX must be None, not truncated to 0"
+    );
+    assert_eq!(
+        sig.signatures[0].active_parameter, None,
+        "a per-signature active-parameter beyond u32::MAX must be None, not truncated"
+    );
+}
+
 /// `parse_lsp_parameter_label` fail-closes: a non-string / non-2-int-array shape
 /// yields `None` (the parameter is dropped, NEVER given fabricated offsets).
 #[test]
 fn parse_lsp_parameter_label_fails_closed_on_bad_shapes() {
+    // A generous label length so shape (not bounds) is what's under test here.
+    const LEN: u32 = 64;
     // Valid: string.
     assert_eq!(
-        parse_lsp_parameter_label(&serde_json::json!("x: number")),
+        parse_lsp_parameter_label(&serde_json::json!("x: number"), LEN),
         Some(ParameterLabelKind::Simple("x: number".to_string()))
     );
-    // Valid: 2-element int array.
+    // Valid: 2-element int array, in bounds.
     assert_eq!(
-        parse_lsp_parameter_label(&serde_json::json!([3, 9])),
+        parse_lsp_parameter_label(&serde_json::json!([3, 9]), LEN),
         Some(ParameterLabelKind::Offsets(3, 9))
     );
     // Invalid shapes → None (fail-closed, no fabricated offsets).
-    assert_eq!(parse_lsp_parameter_label(&serde_json::json!([3])), None);
     assert_eq!(
-        parse_lsp_parameter_label(&serde_json::json!([3, 9, 12])),
+        parse_lsp_parameter_label(&serde_json::json!([3]), LEN),
         None
     );
     assert_eq!(
-        parse_lsp_parameter_label(&serde_json::json!(["a", "b"])),
+        parse_lsp_parameter_label(&serde_json::json!([3, 9, 12]), LEN),
         None
     );
     assert_eq!(
-        parse_lsp_parameter_label(&serde_json::json!({ "x": 1 })),
+        parse_lsp_parameter_label(&serde_json::json!(["a", "b"]), LEN),
         None
     );
-    assert_eq!(parse_lsp_parameter_label(&serde_json::json!(7)), None);
-    assert_eq!(parse_lsp_parameter_label(&serde_json::json!(null)), None);
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!({ "x": 1 }), LEN),
+        None
+    );
+    assert_eq!(parse_lsp_parameter_label(&serde_json::json!(7), LEN), None);
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!(null), LEN),
+        None
+    );
     // A negative offset is not a u64 → fail-closed.
-    assert_eq!(parse_lsp_parameter_label(&serde_json::json!([-1, 9])), None);
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([-1, 9]), LEN),
+        None
+    );
+}
+
+/// `parse_lsp_parameter_label` is a CRITICAL fail-closed surface: an offset that is
+/// out-of-bounds, inverted, empty, or overflows `u32` would bold the WRONG run of
+/// the signature label (worse than no offsets), so it is REJECTED rather than
+/// emitted.
+///
+/// Discriminates against the pre-fix parse, which cast each `u64` with `as u32`
+/// (silent truncation) and accepted any `start`/`end` pair without a bounds, an
+/// inversion, or an emptiness check — so every case below would have produced a
+/// wrong/truncated `Offsets(..)` on the pre-fix tree.
+#[test]
+fn parse_lsp_parameter_label_rejects_out_of_bounds_inverted_and_overflowing_offsets() {
+    // Enclosing signature label is 12 UTF-16 units long: valid offsets satisfy
+    // 0 <= start < end <= 12.
+    const LABEL_LEN: u32 = 12;
+
+    // In-bounds, well-ordered span → accepted.
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([3, 9]), LABEL_LEN),
+        Some(ParameterLabelKind::Offsets(3, 9)),
+        "an in-bounds, non-empty span is the valid offset form"
+    );
+    // end == label len is the inclusive boundary (half-open [start, end)) → ok.
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([6, 12]), LABEL_LEN),
+        Some(ParameterLabelKind::Offsets(6, 12)),
+        "end == label length is the in-bounds boundary of the half-open span"
+    );
+
+    // end one past the label length → out of bounds → dropped (pre-fix: emitted).
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([6, 13]), LABEL_LEN),
+        None,
+        "an offset end beyond the label length must be dropped, never bolded"
+    );
+    // start beyond the label length (with end further still) → out of bounds.
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([20, 33]), LABEL_LEN),
+        None,
+        "an entirely out-of-bounds span must be dropped"
+    );
+    // Inverted span (start > end) → dropped (pre-fix: emitted Offsets(5, 2)).
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([5, 2]), LABEL_LEN),
+        None,
+        "an inverted span must be dropped"
+    );
+    // Empty span (start == end) → dropped (a zero-width bold is meaningless).
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([4, 4]), LABEL_LEN),
+        None,
+        "an empty (zero-width) span must be dropped"
+    );
+    // An offset beyond u32::MAX → checked conversion drops it (pre-fix: `as u32`
+    // truncated `u32::MAX as u64 + 1` to 0, fabricating Offsets(0, ..)).
+    let overflow = u64::from(u32::MAX) + 1;
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([overflow, overflow + 4]), u32::MAX),
+        None,
+        "an offset exceeding u32::MAX must be dropped, never truncated into a wrong span"
+    );
+    // Even with a single overflowing endpoint the offset form is dropped.
+    assert_eq!(
+        parse_lsp_parameter_label(&serde_json::json!([0, overflow]), u32::MAX),
+        None,
+        "an end exceeding u32::MAX must be dropped, never truncated"
+    );
 }
 
 /// @ai-generated — decode_semantic_tokens decodes delta-encoded tokens

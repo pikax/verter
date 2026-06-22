@@ -616,6 +616,32 @@ mod tests {
         assert_eq!(back, local);
     }
 
+    /// The serialized `ParameterLabelKind` wire shape (the cross-process bytes a
+    /// signature-help carrier embeds). Pins the adjacently-tagged
+    /// `#[serde(tag = "kind", content = "value")]` representation and round-trips
+    /// both variants, so a future serde-attr change can't silently break the
+    /// signature-help parameter-label shape between processes.
+    #[test]
+    fn parameter_label_kind_wire_shape_is_pinned() {
+        // Simple → {"kind":"Simple","value":"x: number"}
+        let simple = ParameterLabelKind::Simple("x: number".to_string());
+        let json = serde_json::to_value(&simple).unwrap();
+        assert_eq!(json["kind"], "Simple");
+        assert_eq!(json["value"], "x: number");
+        let back: ParameterLabelKind = serde_json::from_value(json).unwrap();
+        assert_eq!(back, simple);
+
+        // Offsets → {"kind":"Offsets","value":[6,11]}
+        let offsets = ParameterLabelKind::Offsets(6, 11);
+        let json = serde_json::to_value(&offsets).unwrap();
+        assert_eq!(json["kind"], "Offsets");
+        assert_eq!(json["value"], serde_json::json!([6, 11]));
+        assert_eq!(json["value"][0], 6);
+        assert_eq!(json["value"][1], 11);
+        let back: ParameterLabelKind = serde_json::from_value(json).unwrap();
+        assert_eq!(back, offsets);
+    }
+
     /// The shared `parse_commit_characters` helper is strict and fail-closed for
     /// BOTH provider families. Discriminating against the pre-fix per-provider
     /// `filter_map(...).collect()`: that yielded `Some(vec![])` on an empty array
