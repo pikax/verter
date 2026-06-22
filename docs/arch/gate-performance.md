@@ -93,17 +93,43 @@ gate**, and its `exit 0` is the only true gate-pass contract.
 
 | Exit | Meaning |
 |------|---------|
-| `0`  | PASS (or PASS-WITH-TOLERATED — the env-only tolerated failure was the only failure) |
+| `0`  | PASS. On a genuinely-tooling-less runner (`buf` not resolvable) the Rust freshness pair SKIPS and passes, so the gate reports an ordinary PASS. PASS-WITH-TOLERATED is the *narrow* sub-verdict reached only when the preflight allowed tolerance AND the freshness pair nonetheless produced a tolerated `FAIL` line (a latent safety net, not the normal buf-less path) |
 | `1`  | FAIL — at least one non-tolerated test failed |
 | `124`| TIMEOUT — the whole-gate hard deadline (default 50 m) expired |
 | `125`| STALL — the stall detector tripped (no progress for the stall window) |
 | `126`| LOCK-REFUSED — a live gate already holds the single-flight lock |
 | `127`| USAGE / SETUP error — bad argv, or required tooling missing |
 
-The **only tolerated failure** is the env-only `cases::typeinfo_proto_ts_freshness::*`
-pair (the buf/oxfmt byte-pin, which depends on the locally available `buf` and
-`oxfmt` binaries). `gate.mjs` surfaces it as **PASS-WITH-TOLERATED** and still
-exits `0`. Every other failure is a real FAIL.
+The **only tolerated failure** is the `cases::typeinfo_proto_ts_freshness::*` pair
+(the buf/oxfmt byte-pin, which depends on the workspace `buf` and `oxfmt`
+binaries), and its tolerance is **verdict-gated** on a freshness-tooling preflight
+that runs before the archive build. The preflight ensures those binaries are
+present — auto-running `pnpm install --frozen-lockfile` (inside the
+mutex/timeout/stall machinery) when the `node_modules/.bin` shims are missing —
+and then gates the byte-pin tolerance on the outcome:
+
+- **Tooling present (the normal `node_modules` path)** — the tools resolve,
+  tolerance is **OFF**, and a freshness failure is a **HARD FAIL** (exit `1`): a
+  real stale-binding regression, to be regenerated via the proto pipeline and
+  committed, not waved through.
+- **Genuinely-tooling-less runner (pnpm not resolvable AND `buf` not resolvable)**
+  — this is exactly the condition under which the Rust freshness pair **skips
+  gracefully and passes** (`locate_buf_binary` early-returns `None`, the test
+  `eprintln!`s a skip and `return`s — a passing libtest test with no `FAIL` line).
+  So the gate sees no freshness failure and reports an **ordinary PASS** (exit
+  `0`). The preflight does flip the verdict-gated tolerance **ON** here, but that
+  is a **latent safety net**: it would surface **PASS-WITH-TOLERATED** only in the
+  unusual case the pair produced a tolerated `FAIL` line *despite* `buf` being
+  absent — which the normal skip path does not emit. `oxfmt` absence **never**
+  grants tolerance: with `buf` present the test runs, so a missing `oxfmt` is a
+  **LOUD setup failure** (exit `127`), not a degraded un-oxfmt'd run.
+- **Deterministic install failure (e.g. a frozen-lockfile mismatch)** — a **LOUD
+  setup failure** (exit `127`), never silently tolerated. This applies **when an
+  install is actually attempted**: when both `node_modules/.bin/{buf,oxfmt}` shims
+  are already present the preflight returns `already-present` and never runs
+  `pnpm install`, so no install failure can occur.
+
+Every other failure is a real FAIL.
 
 ### Cross-platform process containment
 

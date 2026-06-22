@@ -14,8 +14,10 @@
 //   `exit 0` means "the requested OPERATION succeeded" — it is scoped to the mode you ran, NOT a blanket
 //   gate pass. Concretely:
 //     * ONLY `node scripts/gate.mjs` (no mode flag) is THE GATE. Its exit 0 means the FULL test suite built
-//       AND passed (except env-tolerated failures, by exact name). That, and only that, is the gate-pass
-//       contract.
+//       AND passed (except the env-only typeinfo freshness PAIR, by exact name, AND only when the freshness-
+//       tooling preflight below proves `pnpm` is not resolvable AND `buf` is not resolvable — the condition
+//       under which the Rust byte-pin test skips; see FRESHNESS-TOOLING PREFLIGHT). That, and only that, is
+//       the gate-pass contract.
 //     * `--prepare` is a WARM-PASS only. Its exit 0 means PREPARED (the archive built + the first-launch
 //       assessment was warmed) — tests were NOT run, so it is NEVER a gate pass. Its success output carries
 //       the `PREPARED_NOT_GATE` marker and contains no `PASS` token precisely so a CI `grep PASS` cannot
@@ -90,6 +92,47 @@
 //   7. Spotlight marker (macOS): a <runnerTarget>/.metadata_never_index file is written so Spotlight does
 //      not index the build tree (a harmless no-op file on Linux/Windows).
 //
+// FRESHNESS-TOOLING PREFLIGHT + VERDICT-GATED TOLERANCE (gate mode only)
+//   The two `typeinfo_proto_ts_freshness` byte-equality tests regenerate the committed TS proto bindings
+//   through the workspace `buf` + `oxfmt` binaries (resolved under `node_modules/.bin` first, PATH second).
+//   In a fresh `git worktree` nobody runs `pnpm install`, so those binaries can be absent. With `buf` absent the
+//   Rust byte-pin pair SKIPS and PASSES (no FAIL line); the real risk is the OPPOSITE — a blanket env-tolerance
+//   would swallow (a) a trivially-fixable missing `pnpm install` and (b) a GENUINE stale-binding regression
+//   (tools present, bindings drifted, the test RUNS and FAILS), which shares the same two test names. So AFTER the gate mutex is held and BEFORE
+//   the archive build, the gate runs a pure-Node preflight (inside the SAME deadline/stall/teardown model):
+//   Tolerance is BUF-ABSENCE-ONLY: it is allowed ONLY when `buf` is not resolvable — exactly the condition
+//   under which the Rust byte-pin test SKIPS (`locate_buf_binary(root)?` early-returns). With `buf` present
+//   the test RUNS; `oxfmt` is the test's CONDITIONAL formatter, so a missing `oxfmt` with `buf` available is a
+//   LOUD setup failure (exit 127), NOT tolerated and NOT a degraded un-oxfmt'd run. Whether to ATTEMPT the
+//   install is a POSITIVE-RESOLVE-BEFORE-INSTALL fact (`pnpm` resolved via PATH — platform-aware, with the
+//   Windows .CMD/.cmd/.exe/.bat suffixes — and the RESOLVED path is the exact binary the launcher runs:
+//   directly on POSIX / that resolved `.cmd` path quoted under `cmd.exe /d /s /c` on Windows; a local
+//   `node_modules/.bin/pnpm` shim the launcher never invokes does NOT count), NOT inferred from an install
+//   spawn failure:
+//     * both `node_modules/.bin` shims present up front      → tolerance DISABLED (no install).
+//     * a shim missing → resolve `pnpm` via PATH (platform-aware) as a POSITIVE fact:
+//         - pnpm NOT resolvable → re-resolve `buf`/`oxfmt` (the install is NOT run):
+//             · `buf` NOT resolvable                          → the Rust freshness pair SKIPS gracefully and
+//               PASSES (no `FAIL` line), so the gate reports an ORDINARY PASS. The verdict-gated tolerance is
+//               flipped ON here as a LATENT safety net — it surfaces PASS-WITH-TOLERATED only in the unusual
+//               case the pair produces a tolerated `FAIL` despite `buf` being absent (the skip path does not).
+//             · `buf` present + `oxfmt` present               → tolerance DISABLED (path-fallback).
+//             · `buf` present + `oxfmt` MISSING               → SETUP FAILURE, exit 127 (LOUD; ensure `oxfmt`)
+//               — never tolerated, never a degraded run.
+//         - pnpm IS resolvable → `pnpm install --frozen-lockfile` (never mutates the lockfile), then:
+//             · watchdog (TIMEOUT/STALL)                      → propagated, never tolerated.
+//             · spawnError / launched non-zero                → SETUP FAILURE, exit 127 (LOUD, never
+//               PASS-WITH-TOLERATED) — e.g. a frozen-lockfile mismatch.
+//             · exit 0 → RE-RESOLVE `buf`/`oxfmt`: both present → tolerance DISABLED; `buf` missing OR `oxfmt`
+//               missing → SETUP FAILURE, exit 127.
+//   The verdict boundary is GATED on that result: PASS-WITH-TOLERATED can be reached ONLY when the preflight
+//   ALLOWED the tolerance (pnpm not resolvable AND `buf` not resolvable) AND the freshness pair actually
+//   produced a tolerated `FAIL` line. On a real buf-less runner the Rust pair SKIPS (no `FAIL`), so the gate
+//   reports an ordinary PASS and the allowance is never consumed — it is a latent net, not the normal
+//   buf-less verdict. Tools present/installed ⇒ a freshness-pair FAIL is a HARD failure; any other test,
+//   abnormal exit, missing summary, or count mismatch stays hard regardless.
+//   In CI deps are already installed, so the preflight is a cheap no-op.
+//
 // USAGE
 //   node scripts/gate.mjs [--timeout 50m] [--stall 12m] [--target-dir <DIR>] [--no-fail-fast]
 //                         [--test-threads N]                # THE GATE — exit 0 = suite built + passed.
@@ -153,6 +196,9 @@ import {
   mapStepReason,
   analyzeNextestSurface,
   analyzeLibtestSurface,
+  // freshness-tooling preflight (verdict-gating authority)
+  preflightFreshnessTooling,
+  pnpmInstallCommand,
   selectSessionSuites,
   deriveSuitePkgInfo,
   buildSuiteEnv,
@@ -673,6 +719,89 @@ async function runPrepare(ctx) {
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
 
+  // ---------- FRESHNESS-TOOLING PREFLIGHT (verdict-gating authority) ----------
+  // BEFORE the archive build (and inside the held mutex + containment model), self-ensure the typeinfo
+  // freshness tools (`buf` + `oxfmt`). The two byte-equality freshness tests regenerate the committed TS
+  // proto bindings through those binaries; in a fresh `git worktree` nobody runs `pnpm install`, so the
+  // tools can be absent — and with `buf` absent the Rust byte-pin pair SKIPS-and-PASSES (no FAIL line). The
+  // gate ensures the tooling so the byte-pin RUNS GENUINELY; it must NOT blanket-tolerate the env-only pair,
+  // because a GENUINE drift (tools present, bindings stale, the test RUNS and FAILS) shares those two names. It
+  // installs the frozen lockfile here and DISABLES the freshness tolerance when the tools are present, so a
+  // present/installed run treats a freshness FAIL as a HARD regression. Tolerance stays ENABLED only when
+  // pnpm is not resolvable AND `buf` is not resolvable (the Rust byte-pin would skip). `oxfmt` absence NEVER
+  // grants tolerance — with `buf` present, a missing `oxfmt` is a LOUD setup failure (a degraded un-oxfmt'd
+  // byte-compare can false-positive). A deterministic install failure (e.g. a frozen-lockfile mismatch) also
+  // FAILS LOUD as a setup error — never PASS-WITH-TOLERATED.
+  //
+  // `pnpm install --frozen-lockfile` runs through `runContainedStep` so it inherits the SAME whole-gate
+  // deadline + stall + teardown the cargo steps use (NOT an unbounded pre-mutex mutation). `--frozen-
+  // lockfile` never mutates the lockfile, so CI (deps already installed) makes the preflight a cheap no-op.
+  const preflight = await preflightFreshnessTooling({
+    repoRoot: repoRealpath,
+    // The preflight's tool RESOLVER must see the SAME PATH the Rust test execution sees: `cargoEnv`
+    // (built at the top of runGate via `buildCargoEnv(process.env, …)`) has had implicit-CWD PATH
+    // components stripped, so neither the preflight verdict NOR the executed cargo/nextest/libtest tests
+    // resolve a tool from CWD. Passing the RAW `process.env` here would let the preflight's empty-PATH-
+    // skip decide "buf absent ⇒ tolerate" while the test (which honors an empty PATH component as CWD)
+    // resolves a CWD buf and RUNS — a fail-open where a real stale-binding regression is tolerated.
+    env: cargoEnv,
+    runInstall: ({ pnpmPath }) => {
+      // Resolve the platform-correct `pnpm install --frozen-lockfile` launch from the RESOLVED `pnpmPath`
+      // the preflight proved on PATH (the single source of truth — never a bare `pnpm` token). On Windows
+      // the resolved path is a `.cmd` shim that Node's `spawn(…, { shell:false })` cannot launch directly,
+      // so `pnpmInstallCommand` routes the QUOTED resolved path through a VERIFIED ABSOLUTE command processor
+      // (a case-insensitive absolute existing `ComSpec`, else `<SystemRoot>\System32\cmd.exe`) — a real
+      // `.exe` that spawns directly and stays the reapable tree root for `runContainedStep`'s `taskkill /T`
+      // teardown — with `windowsVerbatimArguments` so Node does not re-quote it. On POSIX it launches the
+      // resolved path DIRECTLY (no PATH re-search). Either way the containment model is unchanged — we keep
+      // the explicit command so the spawn remains `shell:false`.
+      const launch = pnpmInstallCommand(pnpmPath);
+      // On Windows `pnpmInstallCommand` SETUP-FAILS when no absolute command processor (a verified absolute
+      // `ComSpec`, else `<SystemRoot>\System32\cmd.exe`) can be resolved — it returns `{ setupFail, detail }`
+      // instead of a launch shape, refusing to spawn a bare/relative `cmd.exe`. Reuse the EXISTING setup-fail
+      // rail: synthesize a `runContainedStep`-shaped result with `spawnError: true`, which
+      // `preflightFreshnessTooling` already maps to action "setup-fail" ⇒ EXIT_USAGE (FAIL LOUD), rather than
+      // inventing a new error protocol.
+      if (launch.setupFail) {
+        return {
+          code: EXIT_USAGE,
+          reason: "",
+          durationMs: 0,
+          stdout: "",
+          stderr: launch.detail,
+          spawnError: true,
+        };
+      }
+      const { cmd, args, windowsVerbatimArguments } = launch;
+      return runContainedStep({
+        cmd,
+        args,
+        windowsVerbatimArguments,
+        cwd: repoRealpath,
+        env: cargoEnv,
+        phase: "build", // install can be silent-ish while it links — allow artifact-growth as progress
+        deadlineMs,
+        stallMs,
+        targetDir: runnerTarget,
+      });
+    },
+  });
+  if (preflight.action === "setup-fail") {
+    err(`gate setup failed ensuring freshness tooling: ${preflight.detail}`);
+    return EXIT_USAGE;
+  }
+  if (preflight.action === "watchdog" && preflight.installRes && preflight.installRes.reason) {
+    err(
+      `pnpm install ${preflight.installRes.reason} after ` +
+        `${Math.round((preflight.installRes.durationMs || 0) / 1000)}s while ensuring freshness tooling`,
+    );
+    return mapStepReason(preflight.installRes);
+  }
+  const freshnessToleranceAllowed = preflight.freshnessToleranceAllowed;
+  log(
+    `freshness-tooling preflight: ${preflight.action} — tolerance ${freshnessToleranceAllowed ? "ALLOWED (pnpm not resolvable AND buf not resolvable; the Rust byte-pin would skip)" : "DISABLED (tools present/installed; a freshness FAIL is a HARD regression)"}`,
+  );
+
   // This CLI has NO self-test seam and NO ambient-env divert: runGate ALWAYS issues the real archive
   // build + nextest run + direct libtest execution. (The reusable multi-step seam lives in
   // gate-internals.mjs and is driven ONLY by the self-test, in-process — never reachable from this CLI.)
@@ -726,7 +855,7 @@ async function runGate(opts, ctx) {
   // SURFACE-1 verdict via the shared analyzer (the same code the self-test drives in-process). It consults
   // the run exit code + the summary `failed` total, NOT just the `FAIL [` lines, so a crash
   // (SIGABRT/SIGSEGV/LEAK/TIMEOUT/…) or a setup/harness error in ANY crate fails the gate.
-  const s1 = analyzeNextestSurface(nextestText, runRes.code);
+  const s1 = analyzeNextestSurface(nextestText, runRes.code, freshnessToleranceAllowed);
   for (const f of s1.failures) failures.push(f);
   if (s1.toleratedCount > 0) toleratedOccurred = true;
   log(
@@ -808,7 +937,7 @@ async function runGate(opts, ctx) {
     // (not a signal/abort), a parsed `test result: FAILED` summary whose `failed` count EXACTLY equals the
     // parsed FAILED names, and every name allowlisted. A crash (signal), a missing summary, or any
     // unaccounted failure is a HARD FAILURE.
-    const a2 = analyzeLibtestSurface(libText, res.code, s["binary-id"]);
+    const a2 = analyzeLibtestSurface(libText, res.code, s["binary-id"], freshnessToleranceAllowed);
     if (a2.verdict === "pass") {
       s2Passed++;
     } else if (a2.verdict === "tolerated") {
@@ -838,7 +967,12 @@ async function runGate(opts, ctx) {
   }
   if (toleratedOccurred) {
     log(
-      "VERDICT: PASS-WITH-TOLERATED (only the env-only typeinfo_proto_ts_freshness pair failed, by exact name)",
+      "VERDICT: PASS-WITH-TOLERATED (only the env-only typeinfo_proto_ts_freshness pair produced an actual " +
+        "FAIL line, by exact name, AND the freshness-tooling preflight proved pnpm is not resolvable AND buf " +
+        "is not resolvable, so the pair is tolerated. This is the LATENT-net path: the normal buf-less runner " +
+        "SKIPS the Rust byte-pin (no FAIL line) and reaches the ordinary PASS below — this branch fires only " +
+        "when the pair somehow FAILED despite buf being absent. When the tools are present/installed this pair " +
+        "is a HARD failure)",
     );
     return EXIT_PASS;
   }
