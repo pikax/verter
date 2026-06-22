@@ -809,21 +809,6 @@ pub fn path_is_carrier(path: &str) -> bool {
         })
 }
 
-/// Whether `path` is specifically the **Vue SFC** carrier (`.vue`), by the
-/// language registry's typed classification ([`verter_language::FileLanguage::is_vue`]) —
-/// the single classification authority. Narrower than [`path_is_carrier`]: a
-/// `.svelte` carrier, a `.svelte.ts` rune module, or any non-carrier path returns
-/// `false`. A consumer whose behavior is Vue-SFC-specific (synthesizing a
-/// `<script setup>` block, scanning Vue SFC blocks) gates on THIS, not on the
-/// framework-agnostic `path_is_carrier`, so a non-Vue carrier fails closed rather
-/// than being treated as a Vue SFC.
-pub fn path_is_vue_carrier(path: &str) -> bool {
-    verter_language::LanguageRegistry::global()
-        .classify_static(path)
-        .static_resolution()
-        .is_vue()
-}
-
 /// Strip the registry-classified CARRIER extension from a path or filename,
 /// returning the bare stem. `Foo.vue` → `Foo`, `Foo.svelte` → `Foo`. The
 /// carrier-extension set (the single classification authority) is consulted

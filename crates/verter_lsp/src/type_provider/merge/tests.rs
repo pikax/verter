@@ -2056,8 +2056,7 @@ fn merge_code_actions_with_edits() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        "",
-        &[],
+        None,
     );
     assert_eq!(result.len(), 1);
 }
@@ -2105,8 +2104,7 @@ fn merge_code_actions_remove_unused_deletion_maps_back_to_vue_source() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        "",
-        &[],
+        None,
     );
     assert_eq!(
         result.len(),
@@ -2211,8 +2209,7 @@ fn merge_code_actions_external_edit_keeps_real_range_or_fails_closed() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &read_source,
-        "",
-        &[],
+        None,
     );
     assert_eq!(result.len(), 1, "the external code action must survive");
     let CodeActionOrCommand::CodeAction(action) = &result[0] else {
@@ -2253,8 +2250,7 @@ fn merge_code_actions_external_edit_keeps_real_range_or_fails_closed() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        "",
-        &[],
+        None,
     );
     assert!(
         dropped.is_empty(),
@@ -2297,8 +2293,7 @@ fn merge_code_actions_foreign_carrier_edit_fails_closed_without_resolver() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        "",
-        &[],
+        None,
     );
     assert!(
         dropped.is_empty(),
@@ -2330,8 +2325,7 @@ fn merge_code_actions_foreign_carrier_edit_fails_closed_without_resolver() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        "",
-        &[],
+        None,
     );
     assert_eq!(kept.len(), 1, "the same-file carrier edit must survive");
     let CodeActionOrCommand::CodeAction(action) = &kept[0] else {
@@ -2407,8 +2401,7 @@ fn merge_code_actions_foreign_carrier_edit_maps_through_external_context() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        "",
-        &[],
+        None,
     );
     assert_eq!(
         result.len(),
@@ -2478,8 +2471,7 @@ fn merge_code_actions_same_file_differently_spelled_path_maps_not_dropped() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        "",
-        &[],
+        None,
     );
 
     assert_eq!(
@@ -2592,6 +2584,15 @@ fn merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup() {
     }];
 
     let no_external: Option<ExternalIdeResolver> = None;
+    // Carrier-keyed import anchor, resolved OUTSIDE the carrier-neutral merge layer (exactly as the
+    // `handle_code_action` server path does): a Vue SFC carrier WITH an existing `<script setup>`
+    // resolves to `ExistingScriptSetup`, which the merge layer re-anchors the preamble insertion to.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            &carrier_source,
+            &[],
+        );
     let result = merge_code_actions(
         actions,
         "/test.vue.tsx",
@@ -2602,8 +2603,7 @@ fn merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        &carrier_source,
-        &[],
+        preamble_reanchor.as_ref(),
     );
 
     assert_eq!(
@@ -2699,6 +2699,15 @@ fn merge_code_actions_zero_width_insertion_past_preamble_is_dropped() {
     }];
 
     let no_external: Option<ExternalIdeResolver> = None;
+    // The Vue carrier HAS a `<script setup>`, so the carrier-keyed anchor resolves
+    // `ExistingScriptSetup`; the drop is the merge layer's preamble-boundary check rejecting the
+    // PAST-boundary offset, not a missing anchor.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            &carrier_source,
+            &[],
+        );
     let dropped = merge_code_actions(
         actions,
         "/test.vue.tsx",
@@ -2709,8 +2718,7 @@ fn merge_code_actions_zero_width_insertion_past_preamble_is_dropped() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        &carrier_source,
-        &[],
+        preamble_reanchor.as_ref(),
     );
     assert!(
         dropped.is_empty(),
@@ -2741,6 +2749,15 @@ fn merge_code_actions_foreign_carrier_prelude_insertion_is_dropped() {
     }];
 
     let no_external: Option<ExternalIdeResolver> = None;
+    // The carrier-keyed anchor is resolved for the CURRENT request (`/test.vue.tsx`) — a Vue SFC with
+    // `<script setup>`, so `Some(ExistingScriptSetup)`. The merge layer's current-file gate keeps the
+    // FOREIGN `/other.vue.tsx` edit from ever receiving it, so it stays dropped.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            &carrier_source,
+            &[],
+        );
     let dropped = merge_code_actions(
         foreign,
         "/test.vue.tsx",
@@ -2751,8 +2768,7 @@ fn merge_code_actions_foreign_carrier_prelude_insertion_is_dropped() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        &carrier_source,
-        &[],
+        preamble_reanchor.as_ref(),
     );
     assert!(
         dropped.is_empty(),
@@ -2820,6 +2836,14 @@ fn merge_code_actions_svelte_carrier_prelude_insertion_is_dropped() {
     }];
 
     let no_external: Option<ExternalIdeResolver> = None;
+    // The carrier-keyed resolver classifies `/test.svelte` as a SVELTE (non-Vue) carrier ⇒ `None`,
+    // so the merge layer drops the preamble insertion fail-closed — never synthesizes a Vue block.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.svelte.tsx",
+            carrier_source,
+            &[],
+        );
     let dropped = merge_code_actions(
         actions,
         "/test.svelte.tsx",
@@ -2830,8 +2854,7 @@ fn merge_code_actions_svelte_carrier_prelude_insertion_is_dropped() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        carrier_source,
-        &[],
+        preamble_reanchor.as_ref(),
     );
     assert!(
         dropped.is_empty(),
@@ -2866,6 +2889,14 @@ fn merge_code_actions_vue_without_script_setup_prelude_insertion_is_dropped() {
     }];
 
     let no_external: Option<ExternalIdeResolver> = None;
+    // The carrier-keyed resolver returns `None` for a Vue SFC with no `<script setup>` (it drops the
+    // `CreateScriptSetup` synthesis), so the merge layer drops the preamble insertion fail-closed.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            carrier_source,
+            &[],
+        );
     let dropped = merge_code_actions(
         actions,
         "/test.vue.tsx",
@@ -2876,8 +2907,7 @@ fn merge_code_actions_vue_without_script_setup_prelude_insertion_is_dropped() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        carrier_source,
-        &[],
+        preamble_reanchor.as_ref(),
     );
     assert!(
         dropped.is_empty(),
@@ -2894,11 +2924,12 @@ fn merge_code_actions_vue_without_script_setup_prelude_insertion_is_dropped() {
 /// needs use-site/region threading, out of this block's scope), so on the AMBIGUOUS mixed case it
 /// drops rather than guess `<script setup>` and mis-place.
 ///
-/// Discriminating: the carrier HAS an existing `<script setup>`, so the pre-fix
-/// `codeaction_reanchor_anchor` resolves `ExistingScriptSetup` and the merge emits ONE re-anchored
-/// import into the setup block — a non-empty result. The fix detects the conflicting non-empty
-/// normal `<script>` (via the typed `scan_sfc_blocks` classification, no new string scanner) and
-/// returns `None` ⇒ the action is dropped ⇒ empty result.
+/// Discriminating: the carrier HAS an existing `<script setup>`, so without the ambiguity gate
+/// `resolve_script_import_anchor` resolves `ExistingScriptSetup` and the merge would emit ONE
+/// re-anchored import into the setup block — a non-empty result. The carrier-keyed
+/// `resolve_carrier_preamble_import_anchor` detects the conflicting non-empty normal `<script>` (via
+/// the typed `scan_sfc_blocks` classification, no new string scanner) and returns `None` ⇒ the action
+/// is dropped ⇒ empty result.
 #[test]
 fn merge_code_actions_mixed_script_vue_prelude_insertion_is_dropped() {
     // A Vue SFC with BOTH a non-empty Options-API `<script>` AND a `<script setup>`.
@@ -2934,6 +2965,15 @@ fn merge_code_actions_mixed_script_vue_prelude_insertion_is_dropped() {
     }];
 
     let no_external: Option<ExternalIdeResolver> = None;
+    // The carrier-keyed resolver detects the conflicting non-empty normal `<script>` beside the
+    // `<script setup>` (ambiguous mixed-script) and returns `None`, so the merge layer drops the
+    // preamble insertion fail-closed — never re-anchors into the (possibly wrong-scope) setup block.
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            carrier_source,
+            &[],
+        );
     let dropped = merge_code_actions(
         actions,
         "/test.vue.tsx",
@@ -2944,8 +2984,7 @@ fn merge_code_actions_mixed_script_vue_prelude_insertion_is_dropped() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        carrier_source,
-        &[],
+        preamble_reanchor.as_ref(),
     );
     assert!(
         dropped.is_empty(),
@@ -2970,8 +3009,7 @@ fn merge_code_actions_empty() {
         &carrier_exists,
         PositionEncodingKind::UTF16,
         &no_source,
-        "",
-        &[],
+        None,
     );
     assert!(result.is_empty());
 }

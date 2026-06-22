@@ -488,11 +488,14 @@ pub(super) async fn handle_code_action(
                         let negotiated_encoding = server.position_encoding.read().clone();
                         // For the add-import prelude re-anchor: a provider `addMissingImport`
                         // quickfix inserts a brand-new import at the synthetic TSX helper-preamble,
-                        // which the strict mapper drops; `merge_code_actions` re-anchors that
-                        // CURRENT-file insertion at the SFC's `<script setup>` import site through
-                        // the shared completion re-anchor. It needs the carrier source and the
-                        // SFC-absolute top-level import spans (exactly the completion-resolve
-                        // inputs). Empty/absent when the carrier document is not open — then a
+                        // which the strict mapper drops; the carrier-NEUTRAL `merge_code_actions`
+                        // re-anchors that CURRENT-file insertion at a PRECOMPUTED import anchor. The
+                        // anchor itself is resolved HERE through the carrier-keyed, USE-SITE-AWARE
+                        // `resolve_carrier_preamble_import_anchor` (Vue SFC carrier WITH an existing
+                        // `<script setup>`, unambiguous mixed-script) from the carrier source and the
+                        // SFC-absolute top-level import spans (exactly the completion-resolve inputs).
+                        // `None` when the carrier document is not open, or the carrier is not a Vue
+                        // SFC, or it lacks `<script setup>`, or it is ambiguous mixed-script — then a
                         // preamble insertion has no anchor and stays dropped (fail-closed).
                         let carrier_source: String = server
                             .documents
@@ -509,6 +512,12 @@ pub(super) async fn handle_code_action(
                                     .collect()
                             })
                             .unwrap_or_default();
+                        let preamble_reanchor =
+                            crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+                                &ctx.tsx_path,
+                                &carrier_source,
+                                &user_import_spans,
+                            );
                         let actions = merge::merge_code_actions(
                             type_actions,
                             &ctx.tsx_path,
@@ -523,8 +532,7 @@ pub(super) async fn handle_code_action(
                                     server.documents.host().workspace_read().read_file(p)
                                 })
                             },
-                            &carrier_source,
-                            &user_import_spans,
+                            preamble_reanchor.as_ref(),
                         );
                         all_actions.extend(actions);
                     }

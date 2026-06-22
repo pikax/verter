@@ -163,6 +163,91 @@ pub fn resolve_script_import_anchor(
     }
 }
 
+/// Resolve the carrier import anchor for the add-import quick-fix re-anchor — USE-SITE-AWARE and
+/// fail-closed. Returns `Some` ONLY when:
+/// 1. the request's carrier classifies as a **Vue SFC** via the carrier-generic
+///    [`crate::server::carrier_language_for`] over the carrier stem of `current_tsx_path` — keyed on
+///    the neutral carrier classification (a framework carrier that is NOT Svelte, mirroring
+///    `carrier_kind_for_on_type`; no banned `.is_vue()` routing predicate). A Svelte / non-Vue / non-
+///    carrier stem yields `None`, so the import is never re-anchored into a synthesized (Vue-only)
+///    `<script setup>` block spliced onto the wrong source; AND
+/// 2. that Vue SFC has an **existing** `<script setup>` block — [`resolve_script_import_anchor`]
+///    returns [`ScriptImportInsertionAnchor::ExistingScriptSetup`]. A Vue SFC with no `<script setup>`
+///    resolves to `CreateScriptSetup`, which is DROPPED here: synthesizing a brand-new block from a
+///    quick-fix would not add the import where the unresolved symbol lives (e.g. an Options-API
+///    `<script>`), so it fails closed rather than mis-place;
+///    AND
+/// 3. that `<script setup>` is the UNAMBIGUOUS import target — the SFC does NOT also carry a non-empty
+///    normal `<script>` (Options-API) block. `<script>` and `<script setup>` are SEPARATE module
+///    scopes: an import added to `<script setup>` does NOT resolve a symbol whose unresolved use-site
+///    is in the plain `<script>`. The re-anchor cannot prove WHICH block the use-site lives in (that
+///    needs use-site/region threading, carrier-membership-adjacent and out of this resolver's scope),
+///    so on the AMBIGUOUS mixed-script case it DROPS rather than guess `<script setup>` and mis-place.
+///    Block composition is read from the typed [`scan_sfc_blocks`] classification the anchor resolver
+///    itself uses — never a new string scanner.
+///
+/// This is the carrier-keyed import-reanchor capability the carrier-NEUTRAL code-action merge layer
+/// ([`crate::type_provider::merge::merge_code_actions`]) depends on: the merge layer takes the
+/// resulting precomputed [`ScriptImportInsertionAnchor`] and never performs a carrier classification
+/// itself. The Vue-specificity is an internal detail keyed on the neutral carrier classification, so
+/// no Vue gate sits in the shared merge routing.
+///
+/// It mirrors the discipline of the component-completion path (`build_auto_import_edit`'s
+/// `ExistingScriptSetup`-only gate) and the completion-resolve self-file guard. The completion-resolve
+/// path itself accepts a synthesized `CreateScriptSetup` (Volar parity) because it has ALREADY proven
+/// a real Vue carrier that is not a self-file projection; the code-action merge has weaker context
+/// here, so it restricts to the provable-correct anchor.
+pub(crate) fn resolve_carrier_preamble_import_anchor(
+    current_tsx_path: &str,
+    carrier_source: &str,
+    user_import_spans: &[(u32, u32)],
+) -> Option<ScriptImportInsertionAnchor> {
+    // The carrier stem is the IDE virtual path minus the trailing `.tsx`/`.jsx`. The branch only
+    // runs for `is_carrier_ide_path(current_tsx_path)` edits, so the suffix is present; guard anyway.
+    let carrier_stem = current_tsx_path
+        .strip_suffix(".tsx")
+        .or_else(|| current_tsx_path.strip_suffix(".jsx"))?;
+    // Carrier-keyed Vue classification — carrier-generic routing (no Vue-only `.is_vue()` predicate,
+    // which the carrier-routing guard bans). Mirrors `carrier_kind_for_on_type`: a non-carrier stem
+    // (plain script / unknown) has no `<script setup>` re-anchor; of the built-in CARRIERS, Svelte is
+    // resolved via the allowlisted carrier check, so a framework carrier that is NOT Svelte is the Vue
+    // SFC carrier. The `<script setup>` import-reanchor is Vue-SFC-specific, so only the Vue arm
+    // continues; a Svelte / non-Vue / non-carrier stem fails closed (`None`). A future third carrier
+    // would need its own explicit arm here, not a silent fall-through into the Vue branch.
+    let carrier_continues = crate::server::carrier_language_for(carrier_stem)
+        .is_some_and(|language| !language.is_svelte());
+    if !carrier_continues {
+        return None;
+    }
+
+    // AMBIGUITY GATE (fail-closed): a Vue SFC may carry BOTH a normal `<script>` (Options API) AND a
+    // `<script setup>`. They are separate scopes, so re-anchoring an add-import into `<script setup>`
+    // when the unresolved use-site is actually in the plain `<script>` mis-places it. We cannot prove
+    // the use-site block here, so when a NON-EMPTY normal `<script>` coexists with the setup block we
+    // DROP rather than guess. Uses the same typed `scan_sfc_blocks` classification as the resolver
+    // (no string sniffing): a normal `<script>` is `tag_name == "script" && !is_setup()`, and "non-
+    // empty" is non-whitespace inner content.
+    let blocks = scan_sfc_blocks(carrier_source);
+    let has_nonempty_normal_script = blocks.iter().any(|b| {
+        if b.tag_name != "script" || b.is_setup() {
+            return false;
+        }
+        let (start, end) = b.content_range();
+        carrier_source
+            .get(start as usize..end as usize)
+            .is_some_and(|inner| !inner.trim().is_empty())
+    });
+    if has_nonempty_normal_script {
+        return None;
+    }
+
+    match resolve_script_import_anchor(carrier_source, user_import_spans) {
+        anchor @ ScriptImportInsertionAnchor::ExistingScriptSetup { .. } => Some(anchor),
+        // No `<script setup>` to extend — do NOT synthesize a block from a quick-fix.
+        ScriptImportInsertionAnchor::CreateScriptSetup { .. } => None,
+    }
+}
+
 /// Errors that reject a completion resolve as a whole rather than applying a partial edit set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoImportEditMappingError {
