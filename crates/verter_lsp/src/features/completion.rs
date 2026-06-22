@@ -389,31 +389,12 @@ fn sfc_attribute_completions(source: &str, block: &SfcBlock) -> Vec<CompletionIt
 
 /// Build a root-level SFC snippet completion item.
 ///
-/// Root SFC snippets all begin with `<` (e.g. `<script setup lang="ts">…`). When a
-/// completion item carries NO `text_edit`, an LSP client computes the replace range
-/// from the "current word" at the cursor — and `<` is a word boundary. So for a
-/// typed prefix like `<script`, the client would replace only `script` and leave
-/// the typed `<` in place, doubling it against the snippet's own `<` (`<<script`).
-///
-/// To make the leading-`<` accounting explicit (provider-neutral, never left to a
-/// client heuristic), every `<`-prefixed snippet carries a `<`-anchored
-/// `text_edit`. The replace range is computed from the cursor byte `offset`:
-///
-/// 1. Start at `i = offset`; walk BACK over the partial tag-name word (ASCII
-///    alphanumeric, `-`, `_`).
-/// 2. If the byte immediately before the word is `<`, the range start is that `<`
-///    (so the edit absorbs the already-typed `<`).
-/// 3. Otherwise there is no adjacent typed `<` (bare word, whitespace before the
-///    cursor, or cursor at start): the range start is the word start, so the
-///    snippet's own `<` is the only one and nothing is duplicated.
-///
-/// `new_text` is the snippet string verbatim (tab-stops preserved); the item stays
-/// a SNIPPET. `insert_text` is also kept set so non-`text_edit`-aware fallbacks
-/// still work — clients prefer `text_edit` when present.
-///
-/// Fail-closed: if either byte offset fails to convert to a `Position` (never the
-/// case for valid in-range offsets), the item is emitted with `text_edit = None`
-/// rather than a wrong-range edit.
+/// Root SFC snippets all begin with `<` (e.g. `<script setup lang="ts">…`), so each
+/// carries a `<`-anchored `text_edit` whose replace range absorbs an already-typed
+/// `<` (see [`sfc_snippet_text_edit`] for the walk-back contract) — the
+/// leading-`<` accounting is explicit and provider-neutral rather than left to a
+/// client word heuristic. `insert_text` stays set as a fallback for clients that
+/// ignore `text_edit`, and the item stays a SNIPPET with tab-stops preserved.
 #[allow(clippy::too_many_arguments)]
 fn snippet_item(
     label: &str,
@@ -437,13 +418,16 @@ fn snippet_item(
     }
 }
 
-/// Compute the `<`-anchored replace `text_edit` for a root SFC snippet.
+/// Compute the `<`-anchored replace edit for a root SFC tag snippet.
 ///
-/// Returns `None` for snippets that do not start with `<` (none do today, but the
-/// guard keeps the rule explicit) and `None` (fail-closed) when a byte offset
-/// cannot be converted to a `Position`. See [`snippet_item`] for the walk-back
-/// rule. The walk is a pure byte computation over the tag-name word — the legit
-/// cursor-range computation, not source-text semantic inspection.
+/// Root tag snippets (`insert_text` beginning with `<`) must supply an explicit
+/// replace range that includes an immediately-preceding typed `<`, so accepting
+/// the item yields a single `<`. The range walks back from the cursor over the
+/// partial tag-name word (a pure cursor-range computation over ASCII tag bytes,
+/// not source-text semantic inspection) and absorbs a leading `<` when present;
+/// with no typed `<` the range starts at the word boundary so the snippet's own
+/// `<` is the only one. Returns `None` for non-`<` snippets and `None`
+/// (fail-closed) when a byte offset cannot be mapped to a `Position`.
 fn sfc_snippet_text_edit(
     insert_text: &str,
     source: &str,
@@ -455,7 +439,10 @@ fn sfc_snippet_text_edit(
     }
 
     let bytes = source.as_bytes();
-    let cursor = (offset as usize).min(bytes.len());
+    let cursor = offset as usize;
+    if cursor > bytes.len() {
+        return None;
+    }
 
     // Walk back over the partial tag-name word (ASCII alphanumeric / `-` / `_`).
     let mut i = cursor;

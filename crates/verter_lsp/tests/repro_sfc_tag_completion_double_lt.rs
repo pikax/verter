@@ -358,6 +358,14 @@ fn vue_ts_scaffold_on_empty_doc_has_single_left_angle() {
         Some(InsertTextFormat::SNIPPET),
         "scaffold completion should remain a snippet"
     );
+    // The scaffold carries the `<`-anchored edit like every `<`-prefixed snippet.
+    // On this whitespace-only doc the edit is a zero-length insert at the cursor
+    // (no typed `<` to absorb); `text_edit.is_some()` still discriminates the fix
+    // because the unfixed provider shipped `text_edit = None`.
+    assert!(
+        item.text_edit.is_some(),
+        "scaffold `vue-ts` must carry a `<`-anchored text_edit (was None unfixed)"
+    );
     let applied = apply_item(source, cursor, item);
     assert!(
         !applied.contains("<<"),
@@ -454,6 +462,8 @@ fn lone_left_angle_completion_does_not_double_left_angle() {
 /// and finds no `<` adjacent to the (empty) word → the snippet is inserted at the
 /// cursor. The exact output for this unusual trigger is intentionally NOT
 /// over-constrained; the ONLY invariant is that it must never produce `<<script`.
+// Guards the no-typed-`<` else-branch of the walk-back (applying a `<`-snippet
+// after a non-word boundary never yields `<<`), not the primary double-`<` fix.
 #[test]
 fn trailing_space_completion_never_doubles_left_angle() {
     let source = "<script ";
@@ -466,4 +476,37 @@ fn trailing_space_completion_never_doubles_left_angle() {
         !applied.contains("<<script"),
         "trailing-space trigger must never double `<`: {applied:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Whole-class guard: a future root snippet added without a `<`-anchored edit
+// must fail loudly here, not silently reintroduce the double-`<` for its tag.
+// ---------------------------------------------------------------------------
+
+/// Every root snippet whose `insert_text` starts with `<` must ship a
+/// `<`-anchored `text_edit`. An empty doc offers the maximal set (5 tags + 3
+/// scaffolds + i18n = 9), so this covers the whole class in one shot.
+#[test]
+fn every_left_angle_root_snippet_carries_a_text_edit() {
+    // Empty doc at cursor 0 offers the maximal root-snippet set (tags + scaffolds + i18n).
+    let source = "";
+    let items = root_items_at(source, 0);
+    let lt_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.insert_text.as_deref().is_some_and(|t| t.starts_with('<')))
+        .collect();
+    // Guard against the empty-filter false-pass: there must BE <-prefixed snippets.
+    assert!(
+        lt_items.len() >= 9,
+        "expected the maximal root-snippet set on an empty doc, got {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    for item in lt_items {
+        assert!(
+            item.text_edit.is_some(),
+            "root snippet `{}` starts with `<` but ships no `<`-anchored text_edit \
+             (would double the typed `<`)",
+            item.label
+        );
+    }
 }
