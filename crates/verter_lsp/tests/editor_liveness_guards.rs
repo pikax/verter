@@ -1204,14 +1204,15 @@ async fn sync_non_vue_struct_field(sync: ProjectSync) {
 /// (macro-generated / cross-module-opaque / escaping-closure / returned-aggregate
 /// laundering) is present: the runtime close-AFTER-successful-sync integration
 /// tests that exercise the actual close ordering regardless of how the stale set
-/// reached the close call. Reads the owning source files and asserts each
-/// regression test still exists, so a refactor that deletes the behavioral net
-/// (leaving only this static guard, which cannot see the residual forms) FAILS
-/// here loudly.
+/// reached the close call. Reads the owning source files (the `sync_coordinator`
+/// regression test lives in its extracted `sync_coordinator_tests.rs` sibling)
+/// and asserts each regression test still exists, so a refactor that deletes the
+/// behavioral net (leaving only this static guard, which cannot see the residual
+/// forms) FAILS here loudly.
 fn assert_runtime_close_after_sync_safety_net_present() {
     let cases: &[(&str, &str)] = &[
         (
-            "src/sync_coordinator.rs",
+            "src/sync_coordinator_tests.rs",
             "sync_file_retains_stale_paths_when_owner_change_sync_fails",
         ),
         (
