@@ -2886,6 +2886,75 @@ fn merge_code_actions_vue_without_script_setup_prelude_insertion_is_dropped() {
     );
 }
 
+/// A VUE carrier with BOTH a non-empty normal `<script>` (Options API) AND a `<script setup>` block
+/// (the "mixed-script" SFC) add-import prelude insertion is DROPPED fail-closed — NOT re-anchored
+/// into the `<script setup>` import site. `<script>` and `<script setup>` are SEPARATE module scopes:
+/// an import added to `<script setup>` does NOT resolve a symbol whose unresolved use-site is in the
+/// plain `<script>`. The code-action re-anchor cannot prove WHICH block the use-site lives in (that
+/// needs use-site/region threading, out of this block's scope), so on the AMBIGUOUS mixed case it
+/// drops rather than guess `<script setup>` and mis-place.
+///
+/// Discriminating: the carrier HAS an existing `<script setup>`, so the pre-fix
+/// `codeaction_reanchor_anchor` resolves `ExistingScriptSetup` and the merge emits ONE re-anchored
+/// import into the setup block — a non-empty result. The fix detects the conflicting non-empty
+/// normal `<script>` (via the typed `scan_sfc_blocks` classification, no new string scanner) and
+/// returns `None` ⇒ the action is dropped ⇒ empty result.
+#[test]
+fn merge_code_actions_mixed_script_vue_prelude_insertion_is_dropped() {
+    // A Vue SFC with BOTH a non-empty Options-API `<script>` AND a `<script setup>`.
+    let carrier_source = "<script lang=\"ts\">\nexport default { name: \"Mixed\" }\n</script>\n\n<script setup lang=\"ts\">\nconst base = 1;\n</script>\n<template>\n  <div>{{ base }}</div>\n</template>\n";
+    let (carrier_li, tsx_li, mapper) = make_preamble_mapper_for_carrier(carrier_source);
+
+    // Precondition: the carrier really is mixed-script (both blocks present and the normal
+    // `<script>` is non-empty), so the test exercises the ambiguity gate, not an unrelated drop.
+    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(carrier_source);
+    assert!(
+        blocks.iter().any(|b| b.is_setup()),
+        "fixture precondition: a `<script setup>` block must be present"
+    );
+    assert!(
+        blocks.iter().any(|b| {
+            b.tag_name == "script" && !b.is_setup() && {
+                let (s, e) = b.content_range();
+                !carrier_source[s as usize..e as usize].trim().is_empty()
+            }
+        }),
+        "fixture precondition: a non-empty normal `<script>` block must be present"
+    );
+
+    let actions = vec![TypeCodeAction {
+        title: "Add import from \"vue\"".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/test.vue.tsx".to_string(),
+            start: 0,
+            end: 0,
+            new_text: "import { computed } from \"vue\";\n".to_string(),
+        }],
+    }];
+
+    let no_external: Option<ExternalIdeResolver> = None;
+    let dropped = merge_code_actions(
+        actions,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        carrier_source,
+        &[],
+    );
+    assert!(
+        dropped.is_empty(),
+        "a mixed-script Vue SFC (normal `<script>` + `<script setup>`) must DROP the prelude \
+         add-import fail-closed — never re-anchor into `<script setup>` (a separate scope from the \
+         possible `<script>` use-site): {dropped:?}"
+    );
+}
+
 /// @ai-generated — Empty actions returns empty vec
 #[test]
 fn merge_code_actions_empty() {

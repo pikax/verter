@@ -446,7 +446,16 @@ pub fn merge_signature_help(
 ///    returns [`ScriptImportInsertionAnchor::ExistingScriptSetup`]. A Vue SFC with no `<script setup>`
 ///    resolves to `CreateScriptSetup`, which is DROPPED here: synthesizing a brand-new block from a
 ///    quick-fix would not add the import where the unresolved symbol lives (e.g. an Options-API
-///    `<script>`), so it fails closed rather than mis-place.
+///    `<script>`), so it fails closed rather than mis-place;
+///    AND
+/// 3. that `<script setup>` is the UNAMBIGUOUS import target — the SFC does NOT also carry a non-empty
+///    normal `<script>` (Options-API) block. `<script>` and `<script setup>` are SEPARATE module
+///    scopes: an import added to `<script setup>` does NOT resolve a symbol whose unresolved use-site
+///    is in the plain `<script>`. The code-action re-anchor cannot prove WHICH block the use-site
+///    lives in (that needs use-site/region threading, carrier-membership-adjacent and out of this
+///    block's scope), so on the AMBIGUOUS mixed-script case it DROPS rather than guess `<script
+///    setup>` and mis-place. Block composition is read from the typed [`scan_sfc_blocks`]
+///    classification the anchor resolver itself uses — never a new string scanner.
 ///
 /// This mirrors the discipline of the component-completion path (`build_auto_import_edit`'s
 /// `ExistingScriptSetup`-only gate) and the completion-resolve self-file guard. The completion-resolve
@@ -458,6 +467,7 @@ fn codeaction_reanchor_anchor(
     carrier_source: &str,
     user_import_spans: &[(u32, u32)],
 ) -> Option<crate::type_provider::auto_import::ScriptImportInsertionAnchor> {
+    use crate::documents::sfc_scanner::scan_sfc_blocks;
     use crate::type_provider::auto_import::{
         resolve_script_import_anchor, ScriptImportInsertionAnchor,
     };
@@ -470,6 +480,28 @@ fn codeaction_reanchor_anchor(
     if !verter_workspace::path_is_vue_carrier(carrier_stem) {
         return None;
     }
+
+    // AMBIGUITY GATE (fail-closed): a Vue SFC may carry BOTH a normal `<script>` (Options API) AND a
+    // `<script setup>`. They are separate scopes, so re-anchoring an add-import into `<script setup>`
+    // when the unresolved use-site is actually in the plain `<script>` mis-places it. We cannot prove
+    // the use-site block here, so when a NON-EMPTY normal `<script>` coexists with the setup block we
+    // DROP rather than guess. Uses the same typed `scan_sfc_blocks` classification as the resolver
+    // (no string sniffing): a normal `<script>` is `tag_name == "script" && !is_setup()`, and "non-
+    // empty" is non-whitespace inner content.
+    let blocks = scan_sfc_blocks(carrier_source);
+    let has_nonempty_normal_script = blocks.iter().any(|b| {
+        if b.tag_name != "script" || b.is_setup() {
+            return false;
+        }
+        let (start, end) = b.content_range();
+        carrier_source
+            .get(start as usize..end as usize)
+            .is_some_and(|inner| !inner.trim().is_empty())
+    });
+    if has_nonempty_normal_script {
+        return None;
+    }
+
     match resolve_script_import_anchor(carrier_source, user_import_spans) {
         anchor @ ScriptImportInsertionAnchor::ExistingScriptSetup { .. } => Some(anchor),
         // No `<script setup>` to extend — do NOT synthesize a block from a quick-fix.
@@ -570,9 +602,11 @@ pub fn merge_code_actions(
                     // `carrier_source` / `user_import_spans` / the in-context mapper describe the
                     // queried file, so a FOREIGN carrier `.tsx` preamble insertion has no in-context
                     // `<script setup>` anchor and MUST stay dropped (re-anchoring it would splice an
-                    // import into the wrong `.vue`). `reanchor_preamble_import_edit` itself
-                    // fail-closes for a non-preamble miss and for a `SelfFile` projection (no
-                    // boundary), so every other miss falls through to the drop below.
+                    // import into the wrong `.vue`). The use-site anchor (`codeaction_reanchor_anchor`)
+                    // additionally fails closed on a non-Vue carrier and an ambiguous mixed-script SFC,
+                    // and the shared `reanchor_preamble_import_edits` itself fail-closes for a
+                    // non-preamble miss and for a `SelfFile` projection (no boundary), so every other
+                    // miss falls through to the drop below.
                     let is_current_file = verter_span::path::canonicalize_path_cow(edit_path)
                         == verter_span::path::canonicalize_path_cow(current_tsx_path);
                     if is_current_file {
