@@ -454,6 +454,35 @@ impl RealProviderTestSession {
         abs_path
     }
 
+    /// Open an on-disk fixture file DIRECTLY in the type provider, reading its
+    /// real disk content, and return `(provider_path, content)`.
+    ///
+    /// This reads a file that PHYSICALLY EXISTS on disk under the fixture
+    /// `tsconfig` `include` and opens it with that real content, so it is a
+    /// CONFIGURED-PROJECT member on both providers. Contrast [`open_in_provider`],
+    /// which opens whatever inline content the caller passes at the given path: a
+    /// synthetic path with no on-disk counterpart lands such a buffer in tsserver's
+    /// *inferred* project, whose auto-import map excludes configured-project
+    /// siblings. Use THIS helper when the use-site must be a real tsconfig member —
+    /// the realistic shape for a PLAIN on-disk script use-site of provider-level
+    /// features (auto-import resolve) that depend on the use-site being part of the
+    /// same tsconfig project as the workspace export it imports. It does NOT model a
+    /// framework carrier's generated virtual TSX, whose project membership for
+    /// tsserver is a separate concern.
+    ///
+    /// The disk read is owned HERE (the test-fixture-read boundary) so callers
+    /// receive the content without an extra `std::fs` read of their own.
+    pub(crate) async fn open_fixture_in_provider(&self, relative_path: &str) -> (String, String) {
+        let abs_path = format!("{}/{relative_path}", self.workspace_id);
+        let content = std::fs::read_to_string(&abs_path)
+            .unwrap_or_else(|e| panic!("fixture file should exist on disk: {abs_path}: {e}"));
+        self.provider
+            .open_file(&abs_path, &content)
+            .await
+            .expect("provider open_file should succeed");
+        (abs_path, content)
+    }
+
     /// Build a `file://` URI from a fixture-relative path.
     #[allow(dead_code)]
     pub(crate) fn workspace_uri(&self, relative_path: &str) -> Uri {
