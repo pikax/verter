@@ -35,14 +35,21 @@ function notify(method, params) {
   write({ jsonrpc: "2.0", method, params });
 }
 
+// Install the SIGTERM handler BEFORE writing the stderr readiness lines: a test
+// that waits for a stderr marker (e.g. "alive") before calling kill() relies on
+// that marker meaning "the no-op SIGTERM handler is installed". Writing the
+// marker first would let the parent observe it — and send SIGTERM — in the window
+// before `process.on("SIGTERM", …)` runs, so the signal would hit the default
+// terminate action during boot and the child would die immediately instead of
+// swallowing it. Installing the handler first closes that race under load.
+if (env.FAKE_IGNORE_SIGTERM === "1") {
+  process.on("SIGTERM", () => {});
+}
+
 if (env.FAKE_STDERR_LINES) {
   for (const line of env.FAKE_STDERR_LINES.split(SEP)) {
     process.stderr.write(line + "\n");
   }
-}
-
-if (env.FAKE_IGNORE_SIGTERM === "1") {
-  process.on("SIGTERM", () => {});
 }
 
 let keepAlive;

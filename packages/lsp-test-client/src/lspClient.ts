@@ -442,10 +442,17 @@ export class LspClient {
       this.process.once("exit", finish);
       this.process.once("error", finish);
 
-      try {
-        this.process.kill("SIGTERM");
-      } catch {
-        /* already gone — a listener resolves */
+      // Only signal a child that actually acquired a pid. For a never-spawned
+      // child (`pid === undefined`) `ChildProcess.kill` reaches libuv with no
+      // target → `kill(0, SIGTERM)`, which signals the WHOLE process group and
+      // tears down the test runner itself. The `error` listener resolves the
+      // never-spawned case; the force timer is the last-resort fallback.
+      if (pid !== undefined) {
+        try {
+          this.process.kill("SIGTERM");
+        } catch {
+          /* already gone — a listener resolves */
+        }
       }
     });
   }
