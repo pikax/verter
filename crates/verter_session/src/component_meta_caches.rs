@@ -1007,16 +1007,16 @@ impl Default for OwnerCollectionDb {
 //
 // Universal shape cache. Replaces the previously-split
 // `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
-// (SemanticNode-keyed) by lifting the discriminant into a
+// (member-value-node-keyed) by lifting the discriminant into a
 // `ShapeSubject` variant. ONE cache, not two. Every shape lookup at
 // every projection boundary goes through this cache.
 //
 // The key shape:
 //
 //   ShapeCacheKey {
-//       subject: ShapeSubject {
-//           TypeExpr { scope, expr } | SemanticNode { scope, node }
-//       },
+//       subject: ShapeSubject,  // TypeExpr (scope+expr) | MemberValueNode
+//                               // (scope + sealed MemberShapeNodeSubject) |
+//                               // SyntheticBinding (content-free id)
 //       demand: ShapeDemand {
 //           path: Arc<[PathSegment]>,
 //           terminal_context: ProjectionReductionContext,  // mode + demand
@@ -1107,12 +1107,41 @@ impl NonSyntheticTypeExpr {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ConstructionSeal;
 
+/// Sealed graph-node identity for the regular member-shape subject: the
+/// EXACT settled `SurfaceMember.value` graph node. The inner ordinal is
+/// module-private so a raw `SemanticNodeId` cannot spread into the
+/// shape-key subject from an arbitrary node. The ONLY sanctioned
+/// construction is the member-value path (`from_surface_member`); the
+/// `#[cfg(test)]` ctor is for the cache-rail validation test only.
+///
+/// The newtype derives `Hash`/`Eq` TRANSPARENTLY over the same
+/// [`crate::semantic_query::SemanticNodeId`] — so the key's hash bytes are
+/// unchanged versus a bare ordinal field. This is a representation/naming
+/// seal, not a stale-entry compatibility change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct MemberShapeNodeSubject(crate::semantic_query::SemanticNodeId);
+
+impl MemberShapeNodeSubject {
+    /// Sanctioned construction: a component member's value graph node.
+    fn from_surface_member(member: &crate::semantic_query::SurfaceMember) -> Self {
+        Self(member.value)
+    }
+
+    /// Test-only arbitrary-node construction for the cache-rail validation
+    /// test (`query_db_self_root_tests`), which needs SOME node-subject key,
+    /// not specifically a member value.
+    #[cfg(test)]
+    fn from_semantic_node_for_test(node: crate::semantic_query::SemanticNodeId) -> Self {
+        Self(node)
+    }
+}
+
 /// Subject of a [`ShapeCacheKey`] — the *what* whose shape is cached.
 ///
 /// `TypeExpr` covers callers whose start point is a parser-produced
-/// `TypeExpr` annotation (the legacy `MaterializeMemoDb` shape).
-/// `SemanticNode` covers callers whose start point is a settled
-/// `SemanticNodeId` (the legacy `MemberShapeCacheDb` shape).
+/// `TypeExpr` annotation. `MemberValueNode` covers the per-member route
+/// whose start point is the settled `SurfaceMember.value` graph node,
+/// keyed by the sealed [`MemberShapeNodeSubject`] newtype.
 /// `SyntheticBinding` covers explicit deepening of a synthetic
 /// slot-binding carrier, keyed by the content-free
 /// [`crate::semantic_query::SyntheticBindingId`]. All subjects share the
@@ -1121,7 +1150,8 @@ struct ConstructionSeal;
 ///
 /// The variant payloads are non-constructible outside this module: the
 /// `TypeExpr` arm via its module-private [`NonSyntheticTypeExpr`] field,
-/// the `SemanticNode` / `SyntheticBinding` arms via a module-private
+/// the `MemberValueNode` arm via the module-private [`MemberShapeNodeSubject`]
+/// newtype's inner field, the `SyntheticBinding` arm via a module-private
 /// [`ConstructionSeal`] marker. External code matches on the variants
 /// (with `{ .. }`) but builds them ONLY through the `ShapeCacheKey`
 /// constructors. This is the structural half of the synthetic-carrier
@@ -1139,22 +1169,24 @@ pub enum ShapeSubject {
     /// `Pick<Foo, 'a' | 'b'>` raise hash to distinct entries because
     /// the raised `TypeExpr` is structurally distinct per member —
     /// callers seeking per-member dedup should prefer the
-    /// `SemanticNode` subject. The expression is wrapped in
+    /// `MemberValueNode` subject. The expression is wrapped in
     /// [`NonSyntheticTypeExpr`] so a synthetic carrier can never fold
     /// its `value_node` ordinal into the structural hash.
     TypeExpr {
         scope: Arc<str>,
         expr: NonSyntheticTypeExpr,
     },
-    /// SemanticNode-keyed subject. Sibling members whose
-    /// `SurfaceMember.value` is the same settled graph node collapse
-    /// onto each other's warm hits. Holds the `SemanticNodeId` directly;
-    /// the module-private `_seal` blocks external struct-literal
-    /// construction.
-    SemanticNode {
+    /// Member-value graph-node subject. Sibling members whose
+    /// `SurfaceMember.value` is the same settled graph node collapse onto
+    /// each other's warm hits. Keyed by the sealed [`MemberShapeNodeSubject`]
+    /// newtype (its inner arena ordinal is module-private), so a raw
+    /// `SemanticNodeId` cannot spread into the shape-key subject. This is a
+    /// generation/store-scoped graph-instance memo (single-entry,
+    /// fact-validated, generation-gated), NOT a durable content-free
+    /// query-identity key.
+    MemberValueNode {
         scope: Arc<str>,
-        node: crate::semantic_query::SemanticNodeId,
-        _seal: ConstructionSeal,
+        node: MemberShapeNodeSubject,
     },
     /// Synthetic-binding-keyed subject. The explicit-deepen identity for
     /// a `TypeExpr::SyntheticSlotBinding` carrier: the content-free
@@ -1177,7 +1209,7 @@ impl ShapeSubject {
     /// invalidation.
     pub(crate) fn scope_canonical(&self) -> &Arc<str> {
         match self {
-            ShapeSubject::TypeExpr { scope, .. } | ShapeSubject::SemanticNode { scope, .. } => {
+            ShapeSubject::TypeExpr { scope, .. } | ShapeSubject::MemberValueNode { scope, .. } => {
                 scope
             }
             ShapeSubject::SyntheticBinding { id, .. } => &id.scope_canonical_id,
@@ -1222,11 +1254,20 @@ impl ShapeDemand {
     /// Demand encoding "whole subject, no path narrowing,
     /// Internal-surface caller, caller-supplied reduction context".
     /// The single entry point for whole-subject demand construction.
-    /// Mode-only callers route through [`ShapeCacheKey::type_expr_whole`]
-    /// / [`ShapeCacheKey::semantic_node_whole`], which wrap the mode in
-    /// `ProjectionReductionContext::published(mode)` for the
-    /// implicit-Published default. Demand-explicit callers build the
-    /// context themselves and use the `_with_context` constructors.
+    ///
+    /// PRODUCTION callers build the [`ProjectionReductionContext`]
+    /// explicitly and use the `_with_context` constructors: TypeExpr
+    /// subjects via [`ShapeCacheKey::type_expr_whole_with_context`],
+    /// member-value subjects via
+    /// [`ShapeCacheKey::surface_member_value_whole_with_context`] (which
+    /// takes a `&SurfaceMember`). The mode-only convenience constructors
+    /// — [`ShapeCacheKey::type_expr_whole`] and the
+    /// `member_value_node_whole_for_test` ctor — wrap a bare
+    /// [`ProjectionMode`] in `ProjectionReductionContext::published(mode)`
+    /// for the implicit-Published default and are reserved for TESTS /
+    /// schema-probe helpers (`member_value_node_whole_for_test` is
+    /// `#[cfg(test)]`-only); no production member-value caller routes
+    /// through them.
     pub(crate) fn whole_subject_with_context(
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
@@ -1241,6 +1282,16 @@ impl ShapeDemand {
     }
 }
 
+/// In-memory `ShapeCacheDb` slot key. This is a derived-`Hash`/`Eq`
+/// DashMap key ONLY — it is NEVER persisted, stable-hashed, or
+/// wire-encoded (the type carries no `Serialize`/`Deserialize` and has
+/// no `bincode` / stable-hash / proto encode site anywhere in the tree).
+/// That is precisely why renaming a `ShapeSubject` variant — with the
+/// variant order preserved and the inner ordinal hidden behind a
+/// `#[derive(Hash, Eq)]` transparent newtype — keeps the key's runtime
+/// hash/equality identity byte-identical and therefore needs NO
+/// `CACHE_CLUSTER_SCHEMA_VERSION` bump (the schema version guards
+/// PERSISTED artifact layouts, not in-memory DashMap key identity).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ShapeCacheKey {
     /// Module-private so no other module (in-crate or downstream) can
@@ -1335,39 +1386,41 @@ impl ShapeCacheKey {
         })
     }
 
-    /// Construct a key for the legacy `MemberShapeCacheDb` shape
-    /// (SemanticNode-subject, whole-subject demand). Terminal
-    /// context is implicitly `Published(mode)`.
-    ///
-    /// Mode-only convenience: production callers route through
-    /// [`Self::semantic_node_whole_with_context`]; only tests reach the
-    /// mode-only form, so it is gated to match (no dead surface in
-    /// release or in a debug-but-not-test build).
+    /// Test-only: build a member-value-subject key from an ARBITRARY node id.
+    /// Used by the cache-rail self-root validation test, which needs SOME
+    /// node-subject key, not specifically a `SurfaceMember.value`. Named
+    /// `_for_test` so it can never masquerade as a production constructor.
     #[cfg(test)]
-    pub(crate) fn semantic_node_whole(
+    pub(crate) fn member_value_node_whole_for_test(
         scope: Arc<str>,
         node: crate::semantic_query::SemanticNodeId,
         mode: ProjectionMode,
     ) -> Self {
-        Self::semantic_node_whole_with_context(
-            scope,
-            node,
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        )
+        Self {
+            subject: ShapeSubject::MemberValueNode {
+                scope,
+                node: MemberShapeNodeSubject::from_semantic_node_for_test(node),
+            },
+            demand: ShapeDemand::whole_subject_with_context(
+                crate::semantic_query::ProjectionReductionContext::published(mode),
+            ),
+        }
     }
 
-    /// Construct a SemanticNode-subject whole-subject key under an
-    /// explicit [`ProjectionReductionContext`].
-    pub(crate) fn semantic_node_whole_with_context(
+    /// Construct a member-value-subject whole-subject key under an explicit
+    /// [`ProjectionReductionContext`]. The SOLE production construction path
+    /// for the member-shape subject — it takes the member by reference and
+    /// reads `member.value`, so an arbitrary `SemanticNodeId` cannot be routed
+    /// through the sealed subject.
+    pub(crate) fn surface_member_value_whole_with_context(
         scope: Arc<str>,
-        node: crate::semantic_query::SemanticNodeId,
+        member: &crate::semantic_query::SurfaceMember,
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
         Self {
-            subject: ShapeSubject::SemanticNode {
+            subject: ShapeSubject::MemberValueNode {
                 scope,
-                node,
-                _seal: ConstructionSeal,
+                node: MemberShapeNodeSubject::from_surface_member(member),
             },
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
@@ -1380,7 +1433,7 @@ impl ShapeCacheKey {
     /// The synthetic explicit-deepen route. There is no production
     /// consumer yet, so — like the `type_expr_whole` mode-only form, and
     /// under the SAME `cfg(any(test, debug_assertions))` gate — this keeps
-    /// no dead surface in release. (The narrower `semantic_node_whole`
+    /// no dead surface in release. (The narrower `member_value_node_whole_for_test`
     /// mode-only form is `cfg(test)`-only; this route stays reachable under
     /// `debug_assertions` so debug schema-probe helpers can mint the key.)
     #[cfg(any(test, debug_assertions))]
@@ -1469,8 +1522,8 @@ impl ShapeCacheDb {
                 ShapeSubject::TypeExpr { .. } => &rctx.cache_counters.materialize_memo,
                 // The synthetic-binding subject is a member-shape route —
                 // route its peek to the same counter as the regular
-                // `SemanticNode` member route.
-                ShapeSubject::SemanticNode { .. } | ShapeSubject::SyntheticBinding { .. } => {
+                // `MemberValueNode` member route.
+                ShapeSubject::MemberValueNode { .. } | ShapeSubject::SyntheticBinding { .. } => {
                     &rctx.cache_counters.member_shape_cache
                 }
             };

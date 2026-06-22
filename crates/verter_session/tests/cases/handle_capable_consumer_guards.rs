@@ -429,7 +429,7 @@ const STAGE4_CARRIER_INVENTORY: &[InventoryRow] = &[
             "src/meta_resolve/materialize/field_types.rs",
             "fn reduce_member_value_graph_native_with_context",
         )],
-        reason: "the ShapeSubject::SemanticNode subject reduces an already-lowered node directly \
+        reason: "the ShapeSubject::MemberValueNode subject reduces an already-lowered node directly \
                  through raise_and_reduce_with_context",
     },
     InventoryRow {

@@ -331,7 +331,7 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 //    `ShapeCacheDb` keyed on `(scope, expr, mode)`. The peek re-emits
 //    the cached entry's `fact_dep_signature` into the active fact tracer
 //    (the same `peek` protocol that the per-member slot of `ShapeCacheDb`
-//    indexed by `ShapeSubject::SemanticNode` follows) so the cm-result
+//    indexed by `ShapeSubject::MemberValueNode` follows) so the cm-result
 //    cache validation invariants are preserved.
 //  - `None` — the cache is cold for this triple; the caller must decide
 //    whether to reduce (operator-shape / generic instantiation cases) or
@@ -836,11 +836,11 @@ pub(crate) fn resolve_payload_surface(
 
 /// Peek-before-raise per-member helper.
 ///
-/// Wraps the cold compute path for one `(scope, member_value, mode)`
+/// Wraps the cold compute path for one `(scope, member, mode)`
 /// triple around the host-owned per-member slot of
 /// [`crate::component_meta_caches::ShapeCacheDb`] (indexed by
-/// [`crate::component_meta_caches::ShapeSubject::SemanticNode`] via
-/// `ShapeCacheKey::semantic_node_whole`). The contract:
+/// [`crate::component_meta_caches::ShapeSubject::MemberValueNode`] via
+/// `ShapeCacheKey::surface_member_value_whole_with_context`). The contract:
 ///
 ///  1. **Peek first.** Warm hits return the cached
 ///     [`crate::project_semantic_dispatch::raise::MaterializedTypeExpr`]
@@ -873,22 +873,26 @@ pub(crate) fn resolve_payload_surface(
 fn member_shape_peek_or_compute(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
-    member_value: SemanticNodeId,
+    member: &crate::semantic_query::SurfaceMember,
     mode: ProjectionMode,
 ) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
     use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 
+    // The member-value graph node is the raise/reduce subject; the cache
+    // key keys on the member by reference (`member.value`) so an arbitrary
+    // `SemanticNodeId` cannot be routed through the sealed shape subject.
+    let member_value = member.value;
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // Key the per-member SemanticNode slot by the EXACT reduction
+    // Key the per-member MemberValueNode slot by the EXACT reduction
     // context the cold path reduces under
     // (`type_expr_materializer_context(mode)` — `StructuralTransit` for
     // `Navigate`, `Published` otherwise). A bare `published(mode)` key
     // collided a transit-lowered carrier publication with a published
     // consumer over the same `(scope, node)`.
     let member_reduction_context = super::materialize::type_expr_materializer_context(mode);
-    let key = crate::component_meta_caches::ShapeCacheKey::semantic_node_whole_with_context(
+    let key = crate::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context(
         Arc::<str>::from(scope_canonical_id),
-        member_value,
+        member,
         member_reduction_context,
     );
 
@@ -1374,7 +1378,7 @@ pub(crate) fn surface_member_to_expanded_field(
     // of breadth-enumerating `Tool`'s own members into the published
     // surface — Rule-5 shallow-by-default depth gate.
     let materialized =
-        member_shape_peek_or_compute(query_engine, scope_canonical_id, member.value, publish_mode);
+        member_shape_peek_or_compute(query_engine, scope_canonical_id, member, publish_mode);
     let r#type = materialized.type_expr;
     debug_assert_eq!(
         shallow_type_expr.is_some(),

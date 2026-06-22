@@ -14213,8 +14213,8 @@ mod content_pinned_artifact_read_guards {
 // Per-member graph-native materialiser cache wire-up guard.
 //
 // `surface_member_to_expanded_field` MUST peek the per-member slot of
-// `ShapeCacheDb` (indexed by `ShapeSubject::SemanticNode` via
-// `ShapeCacheKey::semantic_node_whole`) BEFORE calling
+// `ShapeCacheDb` (indexed by `ShapeSubject::MemberValueNode` via
+// `ShapeCacheKey::surface_member_value_whole_with_context`) BEFORE calling
 // `raise_node_to_type_expr`. The guard pins the contract so a future
 // refactor cannot accidentally swap the peek-before-raise wire-up for
 // a raise-then-reduce wrapper (which would re-introduce the per-member
@@ -21132,6 +21132,27 @@ fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
          synthetic-deepen identity is the content-free `SyntheticBindingId`, not \
          an arena ordinal."
     );
+    // (a.2) The variant RETAINS the module-private `_seal: ConstructionSeal`
+    // field — the structural construction seal that blocks an external
+    // struct-literal build of `ShapeSubject::SyntheticBinding`. Pin both the
+    // field name and its sealing type so an accidental future removal (which
+    // would re-open external construction of the synthetic subject) trips RED.
+    assert!(
+        variant_body
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "_seal"),
+        "ShapeSubject::SyntheticBinding must retain its module-private `_seal: \
+         ConstructionSeal` field; this guard verifies the source-level seal shape \
+         used to block external struct-literal construction."
+    );
+    assert!(
+        variant_body
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "ConstructionSeal"),
+        "ShapeSubject::SyntheticBinding's `_seal` must be typed `ConstructionSeal` \
+         (the module-private marker) — the seal's type, not just the field name, \
+         is what makes the variant non-constructible outside this module."
+    );
 
     // (b) The `synthetic_binding_whole` constructor builds the variant.
     assert!(
@@ -21189,6 +21210,205 @@ fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
             .any(|tok| tok == "SemanticNodeId"),
         "scanner self-test: a planted `SemanticNodeId` field on the variant must \
          be detected"
+    );
+    // Self-discrimination for the `_seal` retention check: a variant WITH the
+    // seal exposes the `_seal` / `ConstructionSeal` tokens, and a variant
+    // WITHOUT it does not — so dropping `_seal` would make the (a.2) assertion
+    // trip RED.
+    let sealed = "enum E { SyntheticBinding { id: SyntheticBindingId, _seal: ConstructionSeal }, }";
+    let sealed_body = enum_variant_struct_body(sealed, "SyntheticBinding");
+    assert!(
+        sealed_body
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "_seal")
+            && sealed_body
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|tok| tok == "ConstructionSeal"),
+        "scanner self-test: a sealed variant must expose `_seal: ConstructionSeal`"
+    );
+    let unsealed = "enum E { SyntheticBinding { id: SyntheticBindingId }, }";
+    assert!(
+        !enum_variant_struct_body(unsealed, "SyntheticBinding")
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "_seal"),
+        "scanner self-test: a variant with the `_seal` field DROPPED must FAIL the \
+         retention check (proving the (a.2) assertion discriminates a seal removal)"
+    );
+}
+
+/// The regular member-shape cache subject is a SEALED graph-instance memo,
+/// not a free `SemanticNodeId` query-identity loophole. The subject's
+/// equivalence class is "the EXACT settled graph node that is a component
+/// member's value" (`SurfaceMember.value`); it is generation/store-scoped
+/// (single-entry, fact-validated, generation-gated), NOT a durable
+/// content-free R6 query-identity key. A raw `SemanticNodeId` must not be
+/// free to spread into the shape-key subject from an arbitrary node — the
+/// ONLY sanctioned construction is the member-value path.
+///
+/// Four source-scanned pins for the structural seal (the production
+/// mechanism is Rust privacy/newtype construction; this guard verifies the
+/// landed source shape):
+///   (a) the `ShapeSubject::MemberValueNode` variant keys on the sealed
+///       newtype `MemberShapeNodeSubject`, NOT a bare `SemanticNodeId`
+///       (a bare `SemanticNodeId` field would be externally spreadable);
+///   (b) the sealed newtype `MemberShapeNodeSubject(SemanticNodeId)` exists
+///       and its sanctioned constructor `from_surface_member` reads a
+///       `&SurfaceMember` (so the public-to-crate path is member-value-only,
+///       not arbitrary-node);
+///   (c) the production key constructor is the narrow
+///       `surface_member_value_whole_with_context`, taking a `&SurfaceMember`
+///       — and the retired arbitrary-`SemanticNodeId` production constructor
+///       `semantic_node_whole_with_context` is ABSENT from production
+///       (its only surviving form is the explicitly test-named
+///       `member_value_node_whole_for_test`);
+///   (d) `member_shape_peek_or_compute` takes the member by reference
+///       (`member: &SurfaceMember`), not a bare `SemanticNodeId`, so the
+///       caller cannot route an arbitrary node through the cache.
+#[test]
+fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
+    let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
+
+    // (a) The `ShapeSubject::MemberValueNode` variant keys on the sealed
+    //     newtype, not a bare `SemanticNodeId`.
+    let variant_body = enum_variant_struct_body(&src, "MemberValueNode");
+    // Anti-vacuity: the extractor found the real variant (its `node` field).
+    assert!(
+        variant_body.contains("node"),
+        "guard must extract the real ShapeSubject::MemberValueNode variant body"
+    );
+    assert!(
+        variant_body
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "MemberShapeNodeSubject"),
+        "the ShapeSubject::MemberValueNode variant must key its `node` on the \
+         SEALED newtype `MemberShapeNodeSubject`, so a raw `SemanticNodeId` \
+         cannot spread into the shape-key subject"
+    );
+    // Boundary-aware: the variant body must NOT carry a bare `SemanticNodeId`
+    // (it would be externally struct-constructible from any node and defeat
+    // the seal). The newtype hides the ordinal behind a module-private field.
+    assert!(
+        !variant_body
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "SemanticNodeId"),
+        "ShapeSubject::MemberValueNode must NOT carry a bare `SemanticNodeId` \
+         field — the sealed `MemberShapeNodeSubject` newtype is the only \
+         sanctioned representation (its inner ordinal is module-private)"
+    );
+
+    // (b) The sealed newtype + its member-value constructor exist.
+    assert!(
+        src.contains("struct MemberShapeNodeSubject"),
+        "the sealed newtype `MemberShapeNodeSubject` (the structural seal over \
+         the member's `SurfaceMember.value` graph node) must exist"
+    );
+    // The newtype's sanctioned constructor reads a `&SurfaceMember` — the
+    // public-to-crate construction is member-value-only, not arbitrary-node.
+    // Discriminating (mirrors pin (d)): the whitespace-normalized signature
+    // must show `from_surface_member` actually taking a `&...SurfaceMember`
+    // PARAMETER. A by-value `from_surface_member(member: SemanticNodeId)` (or
+    // any non-`&SurfaceMember` form) must FAIL this check — so the broad
+    // name-only `src.contains("fn from_surface_member")` fallback is gone.
+    let nt_ws = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    let signature_takes_member_ref = |normalized: &str| {
+        normalized.contains("from_surface_member(member: &crate::semantic_query::SurfaceMember")
+            || normalized.contains("from_surface_member(member: &SurfaceMember")
+            || normalized
+                .contains("from_surface_member (member: &crate::semantic_query::SurfaceMember")
+            || normalized.contains("from_surface_member (member: &SurfaceMember")
+    };
+    assert!(
+        signature_takes_member_ref(&nt_ws),
+        "the sealed newtype must expose `from_surface_member(member: &SurfaceMember)` \
+         as the sanctioned member-value constructor — a by-value or wrong-type \
+         signature (e.g. `from_surface_member(member: SemanticNodeId)`) must NOT \
+         satisfy the seal"
+    );
+
+    // (c) The narrow production key constructor takes a `&SurfaceMember`, and
+    //     the retired arbitrary-`SemanticNodeId` production constructor is gone.
+    assert!(
+        src.contains("fn surface_member_value_whole_with_context"),
+        "the narrow production key constructor \
+         `ShapeCacheKey::surface_member_value_whole_with_context(scope, \
+         &SurfaceMember, ctx)` must exist — it is the SOLE production \
+         construction path for the member-shape subject"
+    );
+    // The retired generic constructor that accepts an ARBITRARY `SemanticNodeId`
+    // must NOT exist in production. (A `#[cfg(test)]`-named
+    // `member_value_node_whole_for_test` is the only surviving arbitrary-node
+    // form; it carries `_for_test` so it cannot masquerade as production.)
+    let production = carrier_production_code(&src);
+    assert!(
+        !production.contains("fn semantic_node_whole"),
+        "the retired arbitrary-`SemanticNodeId` constructor \
+         `semantic_node_whole[_with_context]` must be ABSENT from production — \
+         construction is pinned to the member-value path \
+         `surface_member_value_whole_with_context`; the only test form is the \
+         explicitly-named `member_value_node_whole_for_test`"
+    );
+
+    // (d) The production peek/compute helper takes the member BY REFERENCE,
+    //     not a bare `SemanticNodeId` — so an arbitrary node cannot be routed
+    //     through the cache subject.
+    let projectors =
+        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
+    let proj_ws = projectors.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        proj_ws.contains("fn member_shape_peek_or_compute"),
+        "guard must find `member_shape_peek_or_compute`"
+    );
+    assert!(
+        proj_ws.contains("member : & crate :: semantic_query :: SurfaceMember")
+            || proj_ws.contains("member: &crate::semantic_query::SurfaceMember")
+            || proj_ws.contains("member : & SurfaceMember")
+            || proj_ws.contains("member: &SurfaceMember"),
+        "`member_shape_peek_or_compute` must take `member: &SurfaceMember` (the \
+         member-value path), not a bare `SemanticNodeId` — so the caller \
+         cannot route an arbitrary node through the sealed shape subject"
+    );
+
+    // Self-discrimination: the variant-keys-on-newtype check trips if a bare
+    // `SemanticNodeId` is (re-)planted on a `MemberValueNode`-shaped variant.
+    let planted = "enum E { MemberValueNode { scope: Arc<str>, node: SemanticNodeId }, }";
+    assert!(
+        enum_variant_struct_body(planted, "MemberValueNode")
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == "SemanticNodeId"),
+        "scanner self-test: a planted bare `SemanticNodeId` field on the \
+         variant must be detected (would defeat the seal)"
+    );
+    // And the retired-constructor scan trips on a planted production
+    // `fn semantic_node_whole`.
+    let planted_ctor = "pub(crate) fn semantic_node_whole_with_context() {}";
+    assert!(
+        carrier_production_code(planted_ctor).contains("fn semantic_node_whole"),
+        "scanner self-test: a planted production `fn semantic_node_whole` must \
+         be detected"
+    );
+    // Self-discrimination for the strengthened (b): a by-value / wrong-type
+    // `from_surface_member` signature must NOT satisfy the seal (the old broad
+    // name-only fallback would have accepted it; the new check rejects it).
+    let planted_byval =
+        "impl S { fn from_surface_member(member: SemanticNodeId) -> Self { Self(member) } }";
+    let planted_byval_ws = planted_byval
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !signature_takes_member_ref(&planted_byval_ws),
+        "scanner self-test: a by-value `from_surface_member(member: SemanticNodeId)` \
+         must FAIL the `&SurfaceMember`-parameter check (the seal requires the \
+         member-value path, not an arbitrary node)"
+    );
+    // And the real member-ref form must still PASS the same predicate.
+    let planted_ref =
+        "impl S { fn from_surface_member(member: &SurfaceMember) -> Self { Self(member.value) } }";
+    let planted_ref_ws = planted_ref.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        signature_takes_member_ref(&planted_ref_ws),
+        "scanner self-test: a `from_surface_member(member: &SurfaceMember)` form \
+         must satisfy the seal check"
     );
 }
 

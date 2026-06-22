@@ -471,10 +471,12 @@ fn no_carrier_verdict_db_self_test() {
 //   catches a hand-rolled `SemanticNodeId(_.value_node)` ordinal-key
 //   construction that never goes through the sealed constructors at all.
 //
-//   The regular `ShapeSubject::SemanticNode` route
-//   (`member_shape_peek_or_compute`) passes a `SemanticNodeId`
-//   PARAMETER directly (NOT `SemanticNodeId(x.value_node)`), so it is
-//   structurally unmatched by the scanner and unaffected.
+//   The regular `ShapeSubject::MemberValueNode` route
+//   (`member_shape_peek_or_compute`) takes the member BY REFERENCE
+//   (`member: &SurfaceMember`) and reads `member.value` through the
+//   sealed `MemberShapeNodeSubject` newtype — it NEVER writes
+//   `SemanticNodeId(x.value_node)`, so it is structurally unmatched by
+//   the scanner and unaffected.
 //
 //   Currently zero workspace consumers exercise the explicit-deepen
 //   route — the carrier is always shallow in every projector,
@@ -584,7 +586,7 @@ fn line_constructs_semantic_node_id_from_value_node(line: &str) -> bool {
 /// catches a hand-rolled `SemanticNodeId(_.value_node)` ordinal-key
 /// construction that bypasses the sealed constructors entirely. The
 /// previous "legitimate cache-route" exemption (an upstream
-/// `ShapeCacheKey::semantic_node_whole(` window) is REMOVED — there is no
+/// member-shape-key constructor window) is REMOVED — there is no
 /// legitimate `SemanticNodeId(carrier.value_node)` cache-key construction
 /// anymore, because the content-free `SyntheticBindingId` is the identity.
 const SYNTHETIC_DEEPEN_CONFINEMENT: ConfinementRecord = ConfinementRecord {
@@ -664,8 +666,9 @@ fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
          A `SemanticNodeId(_.value_node)` construction is a forbidden ordinal \
          bypass: it splits the cache per provenance ordinal and re-introduces \
          the R6 violation the content-free identity removed. The regular \
-         `ShapeSubject::SemanticNode` route passes a `SemanticNodeId` parameter \
-         directly and is unaffected. See \
+         `ShapeSubject::MemberValueNode` route takes the member by reference \
+         and reads `member.value` through the sealed `MemberShapeNodeSubject` \
+         newtype, so it is unaffected. See \
          `[[component-meta-shallow-by-default-rule]]` in \
          `.claude/skills/component-meta/SKILL.md`.\n\nViolations:\n{violations:#?}"
     );
@@ -705,10 +708,10 @@ fn synthetic_carrier_explicit_deepen_guard_self_test() {
 
     // The PREVIOUSLY-exempt cache-route split shapes are now ALSO
     // violations — the `value_node` ordinal is provenance, never a cache
-    // key, so even a `ShapeCacheKey::semantic_node_whole(... \
-    // SemanticNodeId(carrier.value_node) ...)` construction is a forbidden
-    // bypass. The deref line is flagged regardless of any upstream
-    // cache-route call.
+    // key, so even a member-shape-key constructor call wrapping a
+    // `SemanticNodeId(carrier.value_node)` argument is a forbidden bypass.
+    // The deref line is flagged regardless of any upstream cache-route
+    // call.
     let formerly_exempt_split_call =
         "    crate::semantic_query::SemanticNodeId(carrier.value_node),";
     assert!(
@@ -731,10 +734,11 @@ fn synthetic_carrier_explicit_deepen_guard_self_test() {
     let legit_semantic_node_id_from_const = "let id = SemanticNodeId(0);";
     let legit_semantic_node_id_from_field_no_value_node =
         "let id = SemanticNodeId(member.id_field);";
-    // The regular `SemanticNode` route passes a `SemanticNodeId`
-    // PARAMETER directly (not `SemanticNodeId(_.value_node)`) — unaffected.
+    // The regular `MemberValueNode` route takes the member BY REFERENCE
+    // and reads `member.value` through the sealed `MemberShapeNodeSubject`
+    // newtype (not `SemanticNodeId(_.value_node)`) — unaffected.
     let legit_regular_member_route =
-        "let key = ShapeCacheKey::semantic_node_whole(scope, member_value, mode);";
+        "let key = ShapeCacheKey::surface_member_value_whole_with_context(scope, member, mode);";
 
     for legit in [
         legit_content_free_route,

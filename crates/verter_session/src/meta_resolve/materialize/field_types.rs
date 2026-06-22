@@ -507,9 +507,9 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 /// parents, so the full subgraph of `member_value` is visited.
 /// Path-precision is provided at a higher layer by the per-member slot
 /// of [`crate::component_meta_caches::ShapeCacheDb`] (indexed by
-/// [`crate::component_meta_caches::ShapeSubject::SemanticNode`] via
-/// `ShapeCacheKey::semantic_node_whole`), which amortises sibling reuse,
-/// not by the reducer itself.
+/// [`crate::component_meta_caches::ShapeSubject::MemberValueNode`] via
+/// `ShapeCacheKey::surface_member_value_whole_with_context`), which
+/// amortises sibling reuse, not by the reducer itself.
 ///
 /// # Returns
 ///
