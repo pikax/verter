@@ -1,0 +1,82 @@
+name: neovim
+
+# Pure-Lua Neovim LSP-client config tests. No Rust build here: the always-on
+# gate is the headless plenary unit suite (config builders + on_attach). The
+# real-server smoke spec skips vacuously because no `verter-lsp` binary is built
+# in this job — that is intended for v0.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "editors/nvim/**"
+      - ".github/workflows/neovim.yml"
+  pull_request:
+    paths:
+      - "editors/nvim/**"
+      - ".github/workflows/neovim.yml"
+
+jobs:
+  test:
+    name: nvim ${{ matrix.neovim }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cross-platform portability is a CRITICAL rule: the Lua config layer
+        # must build path strings, resolve the binary, and run the suite on all
+        # three host OSes. The run step uses `shell: bash` so the same script
+        # works under Git-bash on the Windows runner.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # v0.12.0 is not released; the realistic matrix is the current stable
+        # plus nightly.
+        neovim: [v0.11.0, nightly]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.neovim }}
+
+      - name: Checkout plenary.nvim
+        uses: actions/checkout@v4
+        with:
+          repository: nvim-lua/plenary.nvim
+          path: .ci/plenary.nvim
+
+      - name: Run plenary busted suite
+        shell: bash
+        env:
+          PLENARY_PATH: ${{ github.workspace }}/.ci/plenary.nvim
+        run: |
+          set -euo pipefail
+          # Load minimal_init.lua into the PARENT nvim with `-u` so the
+          # `PlenaryBustedDirectory` command exists (it is defined by
+          # plenary, which minimal_init prepends to the rtp). Without `-u`
+          # the parent nvim has no plenary and the command is a no-op, so the
+          # suite would silently fail to run. The child `{minimal_init=...}`
+          # re-applies the same init for each spawned spec process.
+          #
+          # Capture output so we can fail the job even on plenary builds that do
+          # not propagate a nonzero exit code on test failure.
+          out=$(nvim --headless --noplugin \
+            -u editors/nvim/tests/minimal_init.lua \
+            -c "PlenaryBustedDirectory editors/nvim/tests/ {minimal_init='editors/nvim/tests/minimal_init.lua'}" \
+            -c "qa!" 2>&1) || rc=$?
+          rc=${rc:-0}
+          echo "$out"
+          # Whitespace-tolerant failure tokens. plenary prints `Failed : <n>`
+          # and `Errors : <n>` (ONE space, variable padding), so the old
+          # two-space `Failed  : [1-9]` / `Errored : [1-9]` patterns never
+          # matched and the gate could go green on a real failure.
+          if printf '%s\n' "$out" | grep -Eq 'Tests Failed|Schedule Error|Failed[[:space:]]*:[[:space:]]*[1-9]|Errors?[[:space:]]*:[[:space:]]*[1-9]'; then
+            echo "::error::Neovim plenary suite reported failures"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Neovim exited non-zero ($rc)"
+            exit "$rc"
+          fi
