@@ -15,13 +15,21 @@ output this session.
 
 ## Why population is deferred (the soundness trap)
 
-The Stage-6 declaration-body storage flip (Option B) mints `HotTypeRef` handles at the
-graph-bearing dispatch producer `lower_decl_body_with_provenance`
-(`crates/verter_session/src/project_semantic_dispatch/build.rs:2930`) by wrapping the
-`SemanticNodeId` the **RESOLVING** lowerer `shallow_lower_type_expr_with_context`
-(`crates/verter_session/src/project_semantic_dispatch/lower.rs:142`) already returns. The
-resolving lowerer's output depends on **args / env / substitutions / name-resolution /
-mode (demand) / scope payload**.
+The Stage-6 declaration-body storage flip (Option B) mints `HotTypeRef` handles in the thin
+accessor `decl_body_hot_ref`
+(`crates/verter_session/src/project_semantic_dispatch/mod.rs:847`) over the `SemanticNodeId` from
+the `Instantiate` query result. That result is `build_instantiate`'s post-processed node:
+`build_instantiate`
+(`crates/verter_session/src/project_semantic_dispatch/build.rs`) lowers the body via the
+graph-bearing resolving-lowerer helper `lower_decl_body_with_provenance` (`build.rs:2930`) — which
+produces the resolving-lowered body-**SHAPE** `SemanticNodeId` (interning a producer-owned
+`MergedDecl` / `Intersection` wrapper in ITS branches where contributors / arms merge, else the
+resolving lowerer's node) by driving the **RESOLVING** lowerer `shallow_lower_type_expr_with_context`
+(`crates/verter_session/src/project_semantic_dispatch/lower.rs:142`) — and then post-processes that
+body-shape (member-index surface backfill, and a cross-file `declare module` / `declare global`
+augmentation stitch for file-based decls) into the final `Instantiate` node `decl_body_hot_ref`
+mints over. `lower_decl_body_with_provenance` never calls `HotTypeRef::new`. The resolving lowerer's
+output depends on **args / env / substitutions / name-resolution / mode (demand) / scope payload**.
 
 The `PreparedStructuralBodyCache`
 (`crates/verter_session/src/resolver_core/structural_body_memo.rs`) key is

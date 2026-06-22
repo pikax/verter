@@ -116,8 +116,11 @@ route through:
   alias body through the shared hot accessor instead of lowering the prepared body `TypeExpr` directly —
   node-equivalent, no reverse bridge).
 
-The producer/mint (`lower_decl_body_with_provenance`) is unchanged — the accessor WRAPS its `Instantiate`
-result; it is not itself migrated (it stays the authored-IR→graph-IR bridge).
+The resolving-lowerer body-SHAPE producer `lower_decl_body_with_provenance` is unchanged and not itself
+migrated (it stays the authored-IR→graph-IR bridge); the `decl_body_hot_ref` accessor mints the handle over
+the `Instantiate` query result (`build_instantiate`'s post-processed node — `lower_decl_body_with_provenance`'s
+body-shape after the member-index surface backfill + conditional cross-file augmentation stitch), not over the
+producer's return.
 
 **Explicitly NOT migrated this session** (all genuinely deferred — see the deferred classes above):
 
