@@ -21,6 +21,38 @@ pub enum CarrierKind {
     Svelte,
 }
 
+/// Map a resolved [`FileLanguage`] to its markup [`CarrierKind`], fail-closed.
+///
+/// This is the SHARED, framework-NEUTRAL carrier-kind classifier the markup
+/// routing layers consult (the on-type auto-close gate and the add-import
+/// carrier-preamble re-anchor). It keys off DESCRIPTOR IDENTITY, not a Vue-only
+/// predicate or a `!is_svelte()` fallback: it confirms the language is a
+/// registered framework CARRIER row (its adapter id AND carrier language match a
+/// `built_in_descriptors()` row), then maps the row's wire [`FrameworkTag`] to a
+/// `CarrierKind`.
+///
+/// FAIL-CLOSED: a non-carrier `FileLanguage` (plain script / template row) and
+/// any carrier whose tag has no explicit `CarrierKind` arm both return `None`. A
+/// future third markup carrier therefore drops cleanly here until it gets its
+/// own `CarrierKind` and an arm below — it is NEVER silently treated as Vue (the
+/// hazard a `!is_svelte()` "not-Svelte ⇒ Vue" fallback would carry).
+pub(crate) fn carrier_kind_for_language(
+    language: &verter_session::FileLanguage,
+) -> Option<CarrierKind> {
+    use verter_protocol::typeinfo::graph::FrameworkTag;
+    let adapter_id = language.adapter_id()?;
+    let carrier_language = language.carrier_language_id()?;
+    let tag = verter_session::framework::descriptor::built_in_descriptors()
+        .into_iter()
+        .find(|d| &d.id == adapter_id && d.carrier_language.as_ref() == Some(carrier_language))
+        .map(|d| d.tag)?;
+    match tag {
+        FrameworkTag::Vue => Some(CarrierKind::Vue),
+        FrameworkTag::Svelte => Some(CarrierKind::Svelte),
+        _ => None,
+    }
+}
+
 /// Gated auto-close entry point used by the on-type formatting handler.
 ///
 /// Returns the closing-tag snippet ONLY when the typed `>` at `offset` sits in

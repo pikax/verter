@@ -166,11 +166,13 @@ pub fn resolve_script_import_anchor(
 /// Resolve the carrier import anchor for the add-import quick-fix re-anchor — USE-SITE-AWARE and
 /// fail-closed. Returns `Some` ONLY when:
 /// 1. the request's carrier classifies as a **Vue SFC** via the carrier-generic
-///    [`crate::server::carrier_language_for`] over the carrier stem of `current_tsx_path` — keyed on
-///    the neutral carrier classification (a framework carrier that is NOT Svelte, mirroring
-///    `carrier_kind_for_on_type`; no banned `.is_vue()` routing predicate). A Svelte / non-Vue / non-
-///    carrier stem yields `None`, so the import is never re-anchored into a synthesized (Vue-only)
-///    `<script setup>` block spliced onto the wrong source; AND
+///    [`crate::server::carrier_language_for`] over the carrier stem of `current_tsx_path`, mapped by
+///    the shared fail-closed [`carrier_kind_for_language`](crate::features::auto_close_tag::carrier_kind_for_language)
+///    descriptor-identity classifier (mirroring `carrier_kind_for_on_type`; no banned `.is_vue()`
+///    routing predicate, no `!is_svelte()` open fallback). A Svelte / non-carrier stem — and any
+///    future markup carrier without its own `CarrierKind` arm — yields `None`, so the import is never
+///    re-anchored into a synthesized (Vue-only) `<script setup>` block spliced onto the wrong source;
+///    AND
 /// 2. that Vue SFC has an **existing** `<script setup>` block — [`resolve_script_import_anchor`]
 ///    returns [`ScriptImportInsertionAnchor::ExistingScriptSetup`]. A Vue SFC with no `<script setup>`
 ///    resolves to `CreateScriptSetup`, which is DROPPED here: synthesizing a brand-new block from a
@@ -208,14 +210,19 @@ pub(crate) fn resolve_carrier_preamble_import_anchor(
         .strip_suffix(".tsx")
         .or_else(|| current_tsx_path.strip_suffix(".jsx"))?;
     // Carrier-keyed Vue classification — carrier-generic routing (no Vue-only `.is_vue()` predicate,
-    // which the carrier-routing guard bans). Mirrors `carrier_kind_for_on_type`: a non-carrier stem
-    // (plain script / unknown) has no `<script setup>` re-anchor; of the built-in CARRIERS, Svelte is
-    // resolved via the allowlisted carrier check, so a framework carrier that is NOT Svelte is the Vue
-    // SFC carrier. The `<script setup>` import-reanchor is Vue-SFC-specific, so only the Vue arm
-    // continues; a Svelte / non-Vue / non-carrier stem fails closed (`None`). A future third carrier
-    // would need its own explicit arm here, not a silent fall-through into the Vue branch.
-    let carrier_continues = crate::server::carrier_language_for(carrier_stem)
-        .is_some_and(|language| !language.is_svelte());
+    // which the carrier-routing guard bans). Mirrors `carrier_kind_for_on_type`: the carrier stem is
+    // classified to a `FileLanguage` via the shared carrier classifier, then mapped to a `CarrierKind`
+    // by the fail-closed, descriptor-identity `carrier_kind_for_language`. The `<script setup>`
+    // import-reanchor is Vue-SFC-specific, so ONLY a `Some(CarrierKind::Vue)` continues; a Svelte /
+    // non-carrier stem — and any future markup carrier without its own arm — maps to `Svelte` / `None`
+    // and fails closed here, never falling through into the Vue branch.
+    let carrier_continues =
+        crate::server::carrier_language_for(carrier_stem).is_some_and(|language| {
+            matches!(
+                crate::features::auto_close_tag::carrier_kind_for_language(&language),
+                Some(crate::features::auto_close_tag::CarrierKind::Vue)
+            )
+        });
     if !carrier_continues {
         return None;
     }

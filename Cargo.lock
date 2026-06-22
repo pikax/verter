@@ -3930,6 +3930,7 @@ dependencies = [
  "verter_audit",
  "verter_diagnostics",
  "verter_ffi",
+ "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",

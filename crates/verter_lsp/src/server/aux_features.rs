@@ -1028,14 +1028,17 @@ pub(super) async fn handle_formatting(
 /// in-memory carrier document may not carry a `.vue` / `.svelte` path), so it is
 /// consulted first via the registry; any other document classifies by canonical
 /// path through the host's static classifier — the same resolution
-/// `DocumentRegistry::document_file_language` performs. Only the built-in Vue /
-/// Svelte CARRIER rows map to a `CarrierKind`; everything else returns `None` and
-/// the on-type handler emits no edit.
+/// `DocumentRegistry::document_file_language` performs. The resolved
+/// `FileLanguage` is mapped to a `CarrierKind` by the shared, fail-closed
+/// [`carrier_kind_for_language`] descriptor-identity classifier; only the
+/// built-in Vue / Svelte CARRIER rows map to a `CarrierKind`, and everything
+/// else (non-carrier, or a future carrier without its own arm) returns `None`
+/// and the on-type handler emits no edit.
 fn carrier_kind_for_on_type(
     language_id: &str,
     canonical_id: &str,
 ) -> Option<crate::features::auto_close_tag::CarrierKind> {
-    use crate::features::auto_close_tag::CarrierKind;
+    use crate::features::auto_close_tag::carrier_kind_for_language;
     let language = verter_session::LanguageRegistry::global()
         .carrier_for_editor_language_id(language_id)
         .unwrap_or_else(|| {
@@ -1043,20 +1046,7 @@ fn carrier_kind_for_on_type(
                 .classify_static(canonical_id)
                 .static_resolution()
         });
-    // Carrier-generic routing (no Vue-only `.is_vue()` predicate — the carrier
-    // routing guard bans it). A non-carrier document (plain script / template
-    // row / unknown) has no markup region. Of the built-in CARRIERS, Svelte is
-    // resolved via the allowlisted carrier check; the only OTHER built-in markup
-    // carrier today is the Vue SFC, so a framework carrier that is not Svelte is
-    // the Vue carrier. A third markup carrier would need its own explicit arm
-    // here (and its own `CarrierKind`), not a silent fall-through.
-    if !language.is_framework_carrier() {
-        None
-    } else if language.is_svelte() {
-        Some(CarrierKind::Svelte)
-    } else {
-        Some(CarrierKind::Vue)
-    }
+    carrier_kind_for_language(&language)
 }
 
 pub(super) async fn handle_on_type_formatting(

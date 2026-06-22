@@ -791,3 +791,79 @@ fn vue_carrier_emitter_closes_div_with_attributes() {
          on its real `>`",
     );
 }
+
+// ───────────────── carrier_kind_for_language: fail-closed classifier ──────────
+//
+// The shared descriptor-identity carrier-kind classifier maps the two REAL
+// built-in carriers to their `CarrierKind` and FAILS CLOSED (`None`) for every
+// non-carrier language AND for a hypothetical THIRD markup carrier that has no
+// `CarrierKind` arm yet. The third-carrier case is the discriminating one: the
+// retired `!is_svelte()` "a framework carrier that is not Svelte ⇒ Vue" fallback
+// would have mis-classified it as Vue.
+
+/// The built-in Vue SFC carrier maps to `CarrierKind::Vue`.
+#[test]
+fn carrier_kind_for_language_maps_vue_carrier_to_vue() {
+    assert_eq!(
+        carrier_kind_for_language(&verter_session::FileLanguage::vue()),
+        Some(CarrierKind::Vue),
+    );
+}
+
+/// The built-in Svelte component carrier maps to `CarrierKind::Svelte`.
+#[test]
+fn carrier_kind_for_language_maps_svelte_carrier_to_svelte() {
+    assert_eq!(
+        carrier_kind_for_language(&verter_session::FileLanguage::svelte()),
+        Some(CarrierKind::Svelte),
+    );
+}
+
+/// A non-carrier `FileLanguage` (a plain script) has no markup region, so the
+/// classifier returns `None` — the on-type auto-close and the import-preamble
+/// re-anchor both correctly decline.
+#[test]
+fn carrier_kind_for_language_returns_none_for_plain_script() {
+    assert_eq!(
+        carrier_kind_for_language(&verter_session::FileLanguage::script_ts()),
+        None,
+    );
+}
+
+/// THE FAIL-CLOSED DISCRIMINATOR: a framework CARRIER row whose adapter is
+/// NEITHER Vue NOR Svelte (a hypothetical third markup carrier) is NOT a
+/// registered `built_in_descriptors()` row, so the descriptor-identity classifier
+/// maps it to `None` and every markup feature drops it cleanly.
+///
+/// This is exactly what the retired `!is_svelte()` fallback got WRONG: for this
+/// same third-carrier row `FileLanguage::is_svelte()` is `false`, so the old
+/// "not-Svelte framework carrier ⇒ Vue" form would have returned
+/// `Some(CarrierKind::Vue)` and spliced Vue-only markup behaviour onto an unknown
+/// carrier. The assertion below pins the corrected fail-closed result; the
+/// in-test recomputation of the old predicate documents the divergence so a
+/// regression to the open fallback breaks this test.
+#[test]
+fn carrier_kind_for_language_fails_closed_for_unknown_third_carrier() {
+    // A synthetic third markup carrier: a `Framework` row for an adapter id that
+    // no built-in descriptor registers.
+    let third_carrier = verter_session::FileLanguage::Framework {
+        adapter_id: verter_session::FrameworkAdapterId::new("third_markup_carrier"),
+        language_id: verter_session::LanguageId::new("third_markup_carrier"),
+    };
+
+    // The corrected, descriptor-identity classifier FAILS CLOSED.
+    assert_eq!(
+        carrier_kind_for_language(&third_carrier),
+        None,
+        "an unregistered third markup carrier must fail closed to None, never be \
+         silently classified as Vue",
+    );
+
+    // DISCRIMINATION: the retired `!is_svelte()` Vue fallback would have returned
+    // Vue for this exact row (it is a framework carrier and it is not Svelte).
+    assert!(
+        third_carrier.is_framework_carrier() && !third_carrier.is_svelte(),
+        "the synthetic row must satisfy the OLD fallback's predicate (framework \
+         carrier && !is_svelte), proving the new helper diverges from it",
+    );
+}
