@@ -1295,6 +1295,38 @@ perf job is MODELED on this — the same package, the same workflow shape — no
   feeding the optimizer (Block 14) and the final perf acceptance — it does NOT replace the §7 ≤1.10× synthetic
   Svelte-vs-Vapor regression gate.
 
+### 10.3 Deferred IDE/LSP parity follow-ups (post-compiler, user-directed 2026-06-22)
+
+These bring the Svelte IDE/LSP experience to Vue parity and land AFTER the compiler is feature-complete
+(post `5a-5m`; sequence around/after Blocks I / 10 / 11 / 13). They are NOT codegen blocks. Items 1 and 3 are
+CROSS-FRAMEWORK (the shared adapter / LSP substrate) — implement them in the shared layer so Vue and every
+future adapter benefit, never as a Svelte fork. When picked up, each lands with the standard gate + a
+regression test.
+
+1. **Editor syntax highlighting (text colours) for framework file extensions.** The VS Code extension
+   (`packages/vue-vscode`) does not syntax-highlight `.svelte` (and `.vue`) file CONTENT — the code text renders
+   uncoloured in the editor because no TextMate grammar / `contributes.grammars` (with embedded-language
+   injection for the `<script>` TS/JS, `<style>` CSS, and template regions) and/or semantic-token colouring is
+   provided for the framework file type. Ship the grammar(s) so framework files are highlighted like the official
+   Vue (Volar) / Svelte extensions. Cross-framework — each adapter's file extension needs its embedded-language
+   highlighting; provide it in the shared extension keyed by the adapter registry. (This is editor token
+   colouring, NOT file-tree icons.)
+2. **Ship / virtualize the JSX types shim — drop the `@verter/svelte-jsx` install requirement.** Today Svelte
+   support requires the user to install `@verter/svelte-jsx` (`packages/svelte-jsx`, consumed via
+   `packages/typescript-plugin`). Eliminate that user dependency: provide the JSX/TSX types shim from the
+   LSP/tooling (bundled with the language server / typescript-plugin) or as a VIRTUAL file the TS program / tsgo
+   resolves — analogous to the Vue JSX shim — so users get types with zero extra install. SOLUTION OPEN: when
+   picked up, run a codex-architect design to choose the mechanism (LSP-bundled types vs virtual-file injection
+   vs generated ambient module), define how the TS program / tsgo resolves it, and reach parity with the Vue
+   shim path. Touches `packages/typescript-plugin`, the virtual-file pipeline, and the Svelte carrier-backing
+   resolution.
+3. **[BUG] `.svelte` generated TSX is not updated on document change.** On a `.svelte` document change the
+   generated TSX is not regenerated/invalidated (stale TSX → stale types/diagnostics). Vue and Svelte SHARE the
+   same LSP and Vue updates correctly, so the Svelte document-change → TSX-regen path has a gap in the shared
+   sync/invalidation layer (host sync / `virtual_file_pipeline` / `sync_coordinator` + the language-shared
+   document-change handling). Fix in the SHARED layer (Vue parity), with a regression test that a `.svelte` edit
+   is reflected in the emitted TSX. A real defect, deferred — not pre-existing-by-design.
+
 ---
 
 ## 11. Legacy Deletions
