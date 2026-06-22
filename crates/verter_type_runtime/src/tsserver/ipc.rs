@@ -454,11 +454,12 @@ pub fn parse_tsserver_diagnostic(
 
     // `relatedInformation` carries the secondary "see declaration here" spans
     // (e.g. duplicate-identifier "also declared here"). Each entry has its own
-    // `span` with the related file's own `file`. Convert its 1-based line/offset
-    // to a byte offset the SAME way the primary span does: with the file's
-    // content when it is the SAME file the parser was given content for
-    // (`file_path`), else the packed-position fallback (the cross-file merge then
-    // fails closed on an unmappable packed span — never a wrong link).
+    // `span` with the related file's own `file`. `parse_tsserver_related_info`
+    // keeps ONLY a same-file related span whose content is available AND whose
+    // 1-based line/offset is in range — it converts through the CHECKED offset
+    // converter and DROPS the entry for a cross-file/no-content span OR an
+    // out-of-range same-file position (never stores a packed position, never clamps
+    // to EOF). A dropped secondary link beats a bogus one.
     let primary_file = file_path.map(verter_span::path::canonicalize_path);
     let related_information = d
         .get("relatedInformation")
@@ -492,8 +493,9 @@ pub fn parse_tsserver_diagnostic(
 /// a same file spelled differently (slashes, drive case, `\\?\`) still matches.
 ///
 /// Returns `None` (skip this entry, never fabricate, never store a packed value)
-/// when the message/span fields are missing, OR when the related span is cross-file
-/// (no content for it) — fail-closed: a dropped secondary link beats a bogus one.
+/// when the message/span fields are missing, when the related span is cross-file
+/// (no content for it), OR when a same-file 1-based line/offset is OUT OF RANGE for
+/// the content — fail-closed: a dropped secondary link beats a bogus one.
 fn parse_tsserver_related_info(
     ri: &serde_json::Value,
     primary_content: Option<&str>,
@@ -515,8 +517,14 @@ fn parse_tsserver_related_info(
     // mis-read as a byte offset. Both paths are already canonicalized.
     let same_file = primary_file == Some(file.as_str());
     let content = primary_content.filter(|_| same_file)?;
-    let start_byte = tsserver_pos_to_byte_offset(content, start_line, start_offset);
-    let end_byte = tsserver_pos_to_byte_offset(content, end_line, end_offset);
+    // Even a same-file related span can be MALFORMED (a 1-based line/offset past
+    // EOF). The fail-open `tsserver_pos_to_byte_offset` would CLAMP that to
+    // `content.len()` and forge a bogus "see declaration" link at EOF, so the
+    // related-info path uses the CHECKED converter and DROPS the entry (returns
+    // `None`) when the position is out of range — never clamps. The primary-span
+    // path keeps its own clamp/recovery behavior (out of scope here).
+    let start_byte = tsserver_pos_to_byte_offset_checked(content, start_line, start_offset)?;
+    let end_byte = tsserver_pos_to_byte_offset_checked(content, end_line, end_offset)?;
 
     Some(DiagnosticRelatedInfo {
         path: file,

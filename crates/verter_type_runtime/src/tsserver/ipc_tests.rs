@@ -344,6 +344,55 @@ fn parse_tsserver_related_never_stores_packed_position_anti_bogus_link() {
     }
 }
 
+/// A SAME-FILE related span whose 1-based line/offset is BEYOND the file's content
+/// must be DROPPED — not clamped to EOF. The related `file` matches the file the
+/// parser holds content for (same canonical path), so the cross-file drop does NOT
+/// apply; the only defense is a CHECKED conversion that returns `None` for an
+/// out-of-range line/offset instead of clamping to `content.len()`. A clamped EOF
+/// offset would fabricate a bogus "see declaration" link at the end of the file.
+///
+/// Pre-fix (fail-open `tsserver_pos_to_byte_offset`): line 100 clamps to
+/// `content.len()`, so `related_information` is NON-empty with a clamped offset —
+/// this assertion fires. Post-fix (`tsserver_pos_to_byte_offset_checked`): the entry
+/// is dropped, the list is empty, and the PRIMARY diagnostic still survives.
+#[test]
+fn parse_tsserver_related_drops_same_file_out_of_range_offset() {
+    let content = "const dup = 1;\n"; // 15 bytes, 2 lines (1 trailing empty)
+    let diag = serde_json::json!({
+        "start": { "line": 1, "offset": 7 },
+        "end": { "line": 1, "offset": 10 },
+        "text": "Cannot redeclare block-scoped variable 'dup'.",
+        "code": 2451,
+        "category": "error",
+        "relatedInformation": [
+            {
+                "message": "'dup' was also declared here.",
+                "category": "message",
+                "code": 2451,
+                "span": {
+                    // Line 100 is far past EOF: fail-open clamps to content.len().
+                    "start": { "line": 100, "offset": 5 },
+                    "end": { "line": 100, "offset": 9 },
+                    // SAME file the parser holds content for — so cross-file drop
+                    // does not apply; only the checked conversion can reject this.
+                    "file": "/proj/dup.ts"
+                }
+            }
+        ]
+    });
+
+    let parsed = parse_tsserver_diagnostic(&diag, Some(content), Some("/proj/dup.ts")).unwrap();
+    // The primary diagnostic survives with its real in-range offsets.
+    assert_eq!(parsed.start, 6, "primary start is a real in-range offset");
+    assert_eq!(parsed.end, 9, "primary end is a real in-range offset");
+    assert!(
+        parsed.related_information.is_empty(),
+        "a same-file related span past EOF must be DROPPED (checked conversion), \
+         never clamped to a bogus EOF offset, got: {:?}",
+        parsed.related_information
+    );
+}
+
 #[test]
 fn test_parse_tsserver_completion() {
     let item = serde_json::json!({

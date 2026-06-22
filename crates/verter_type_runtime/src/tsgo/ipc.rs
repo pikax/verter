@@ -791,11 +791,12 @@ fn parse_lsp_diagnostic(
     };
 
     // LSP `relatedInformation` carries the secondary "see declaration here" spans
-    // (each `{ location: { uri, range }, message }`). Resolve each related range
-    // to a byte offset the SAME way the primary range does: with the file's
-    // content when the related `location.uri` is the SAME file the parser holds
-    // content for (`file_path`), else the packed-position fallback (the cross-file
-    // merge then fails closed on an unmappable packed span — never a wrong link).
+    // (each `{ location: { uri, range }, message }`). `parse_lsp_related_info` keeps
+    // ONLY a same-file related span whose content is available AND whose position is
+    // in range — it converts through the CHECKED offset converter and DROPS the
+    // entry for a cross-file/no-content span OR an out-of-range same-file position
+    // (never stores a packed position, never clamps to EOF). A dropped secondary
+    // link beats a bogus one.
     let primary_file = file_path.map(verter_span::path::canonicalize_path);
     let related_information = d
         .get("relatedInformation")
@@ -830,9 +831,9 @@ fn parse_lsp_diagnostic(
 /// matches.
 ///
 /// Returns `None` (skip this entry, never fabricate, never store a packed value)
-/// when the message/location/uri/range fields are missing, OR when the related span
-/// is cross-file (no content for it) — fail-closed: a dropped secondary link beats
-/// a bogus one.
+/// when the message/location/uri/range fields are missing, when the related span
+/// is cross-file (no content for it), OR when a same-file position is OUT OF RANGE
+/// for the content — fail-closed: a dropped secondary link beats a bogus one.
 fn parse_lsp_related_info(
     ri: &serde_json::Value,
     primary_content: Option<&str>,
@@ -855,8 +856,14 @@ fn parse_lsp_related_info(
     // mis-read as a byte offset. Both paths are already canonicalized.
     let same_file = primary_file == Some(path.as_str());
     let content = primary_content.filter(|_| same_file)?;
-    let start_byte = position_to_offset(content, start_line, start_char);
-    let end_byte = position_to_offset(content, end_line, end_char);
+    // Even a same-file related span can be MALFORMED (a line/col past EOF). The
+    // fail-open `position_to_offset` would CLAMP that to `content.len()` and forge a
+    // bogus "see declaration" link at EOF, so the related-info path uses the CHECKED
+    // converter and DROPS the entry (returns `None`) when the position is out of
+    // range — never clamps. The primary-span path keeps its own clamp/recovery
+    // behavior (out of scope here).
+    let start_byte = position_to_offset_checked(content, start_line, start_char)?;
+    let end_byte = position_to_offset_checked(content, end_line, end_char)?;
 
     Some(DiagnosticRelatedInfo {
         path,
