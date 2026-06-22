@@ -52,12 +52,12 @@ fn root_items_at(source: &str, cursor_offset: usize) -> Vec<CompletionItem> {
         &pos,
         source,
         &blocks,
-        None,         // analysis
-        &line_index,  //
-        None,         // resolve_component
-        None,         // workspace_components
-        None,         // doc_uri
-        false,        // ssr_context
+        None,        // analysis
+        &line_index, //
+        None,        // resolve_component
+        None,        // workspace_components
+        None,        // doc_uri
+        false,       // ssr_context
     );
     result
         .expect("root-level position must yield completions")
@@ -146,11 +146,12 @@ fn apply_item(source: &str, cursor_offset: usize, item: &CompletionItem) -> Stri
 }
 
 fn find_item<'a>(items: &'a [CompletionItem], label: &str) -> &'a CompletionItem {
-    items
-        .iter()
-        .find(|i| i.label == label)
-        .unwrap_or_else(|| panic!("expected a `{label}` completion item; got {:?}",
-            items.iter().map(|i| &i.label).collect::<Vec<_>>()))
+    items.iter().find(|i| i.label == label).unwrap_or_else(|| {
+        panic!(
+            "expected a `{label}` completion item; got {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------

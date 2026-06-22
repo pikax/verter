@@ -55,7 +55,7 @@ pub fn completions_at_position(
 
     match context {
         CursorContext::RootLevel => Some(CompletionResult {
-            items: sfc_root_completions(source, blocks),
+            items: sfc_root_completions(source, blocks, offset, line_index),
             is_incomplete: false,
         }),
         CursorContext::BlockOpeningTag { ref tag_name } => {
@@ -206,7 +206,17 @@ pub fn completions_at_position(
 // =============================================================================
 
 /// Completions at root level (outside all blocks): tag snippets + scaffold snippets.
-fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem> {
+///
+/// Every snippet emitted here begins with `<`. To avoid a doubled `<` when the
+/// user has already typed a leading `<` (e.g. `<script|`), each snippet carries an
+/// explicit `<`-anchored `text_edit` computed from the cursor `offset`. See
+/// [`snippet_item`] for the replace-range walk-back rule.
+fn sfc_root_completions(
+    source: &str,
+    blocks: &[SfcBlock],
+    offset: u32,
+    line_index: &LineIndex,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let has_template = blocks.iter().any(|b| b.tag_name == "template");
     let has_script = blocks.iter().any(|b| b.tag_name == "script");
@@ -220,6 +230,9 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
             "<template>\n\t$0\n</template>",
             "Add <template> block",
             1,
+            source,
+            offset,
+            line_index,
         ));
     }
     if !has_script {
@@ -228,12 +241,18 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
             "<script setup lang=\"ts\">\n$0\n</script>",
             "Add <script setup> block",
             2,
+            source,
+            offset,
+            line_index,
         ));
         items.push(snippet_item(
             "script",
             "<script lang=\"ts\">\n$0\n</script>",
             "Add <script> block",
             3,
+            source,
+            offset,
+            line_index,
         ));
     }
     if !has_style {
@@ -242,12 +261,18 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
             "<style scoped>\n$0\n</style>",
             "Add <style scoped> block",
             4,
+            source,
+            offset,
+            line_index,
         ));
         items.push(snippet_item(
             "style",
             "<style>\n$0\n</style>",
             "Add <style> block",
             5,
+            source,
+            offset,
+            line_index,
         ));
     }
 
@@ -258,18 +283,27 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
             "<script setup lang=\"ts\">\n$0\n</script>\n\n<template>\n\t\n</template>",
             "Vue SFC scaffold (TypeScript)",
             0,
+            source,
+            offset,
+            line_index,
         ));
         items.push(snippet_item(
             "vue",
             "<script setup>\n$0\n</script>\n\n<template>\n\t\n</template>",
             "Vue SFC scaffold (JavaScript)",
             0,
+            source,
+            offset,
+            line_index,
         ));
         items.push(snippet_item(
             "vue-options",
             "<script lang=\"ts\">\nimport { defineComponent } from 'vue'\n\nexport default defineComponent({\n\t$0\n})\n</script>\n\n<template>\n\t\n</template>",
             "Vue SFC scaffold (Options API)",
             0,
+            source,
+            offset,
+            line_index,
         ));
     }
 
@@ -279,6 +313,9 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
         "<i18n lang=\"${1:json}\">\n$0\n</i18n>",
         "Add <i18n> block",
         6,
+        source,
+        offset,
+        line_index,
     ));
 
     items
@@ -350,12 +387,44 @@ fn sfc_attribute_completions(source: &str, block: &SfcBlock) -> Vec<CompletionIt
     items
 }
 
+/// Build a root-level SFC snippet completion item.
+///
+/// Root SFC snippets all begin with `<` (e.g. `<script setup lang="ts">…`). When a
+/// completion item carries NO `text_edit`, an LSP client computes the replace range
+/// from the "current word" at the cursor — and `<` is a word boundary. So for a
+/// typed prefix like `<script`, the client would replace only `script` and leave
+/// the typed `<` in place, doubling it against the snippet's own `<` (`<<script`).
+///
+/// To make the leading-`<` accounting explicit (provider-neutral, never left to a
+/// client heuristic), every `<`-prefixed snippet carries a `<`-anchored
+/// `text_edit`. The replace range is computed from the cursor byte `offset`:
+///
+/// 1. Start at `i = offset`; walk BACK over the partial tag-name word (ASCII
+///    alphanumeric, `-`, `_`).
+/// 2. If the byte immediately before the word is `<`, the range start is that `<`
+///    (so the edit absorbs the already-typed `<`).
+/// 3. Otherwise there is no adjacent typed `<` (bare word, whitespace before the
+///    cursor, or cursor at start): the range start is the word start, so the
+///    snippet's own `<` is the only one and nothing is duplicated.
+///
+/// `new_text` is the snippet string verbatim (tab-stops preserved); the item stays
+/// a SNIPPET. `insert_text` is also kept set so non-`text_edit`-aware fallbacks
+/// still work — clients prefer `text_edit` when present.
+///
+/// Fail-closed: if either byte offset fails to convert to a `Position` (never the
+/// case for valid in-range offsets), the item is emitted with `text_edit = None`
+/// rather than a wrong-range edit.
+#[allow(clippy::too_many_arguments)]
 fn snippet_item(
     label: &str,
     insert_text: &str,
     detail: &str,
     sort_priority: u32,
+    source: &str,
+    offset: u32,
+    line_index: &LineIndex,
 ) -> CompletionItem {
+    let text_edit = sfc_snippet_text_edit(insert_text, source, offset, line_index);
     CompletionItem {
         label: label.to_string(),
         kind: Some(CompletionItemKind::SNIPPET),
@@ -363,8 +432,56 @@ fn snippet_item(
         insert_text: Some(insert_text.to_string()),
         insert_text_format: Some(InsertTextFormat::SNIPPET),
         sort_text: Some(format!("{:04}", sort_priority)),
+        text_edit,
         ..Default::default()
     }
+}
+
+/// Compute the `<`-anchored replace `text_edit` for a root SFC snippet.
+///
+/// Returns `None` for snippets that do not start with `<` (none do today, but the
+/// guard keeps the rule explicit) and `None` (fail-closed) when a byte offset
+/// cannot be converted to a `Position`. See [`snippet_item`] for the walk-back
+/// rule. The walk is a pure byte computation over the tag-name word — the legit
+/// cursor-range computation, not source-text semantic inspection.
+fn sfc_snippet_text_edit(
+    insert_text: &str,
+    source: &str,
+    offset: u32,
+    line_index: &LineIndex,
+) -> Option<CompletionTextEdit> {
+    if !insert_text.starts_with('<') {
+        return None;
+    }
+
+    let bytes = source.as_bytes();
+    let cursor = (offset as usize).min(bytes.len());
+
+    // Walk back over the partial tag-name word (ASCII alphanumeric / `-` / `_`).
+    let mut i = cursor;
+    while i > 0 {
+        let b = bytes[i - 1];
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+
+    // If a typed `<` immediately precedes the partial word, absorb it; otherwise
+    // start at the word start so the snippet's own `<` is the only one.
+    let start_byte = if i > 0 && bytes[i - 1] == b'<' {
+        i - 1
+    } else {
+        i
+    };
+
+    let start = line_index.offset_to_position(start_byte as u32)?;
+    let end = line_index.offset_to_position(cursor as u32)?;
+    Some(CompletionTextEdit::Edit(TextEdit {
+        range: Range { start, end },
+        new_text: insert_text.to_string(),
+    }))
 }
 
 fn attr_item(name: &str, value_snippet: Option<&str>, detail: &str) -> CompletionItem {
