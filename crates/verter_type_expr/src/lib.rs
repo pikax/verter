@@ -247,8 +247,12 @@ pub enum TypeExpr {
     /// at the no-parser branch of `publish_merged_bindings`. The
     /// projector pipeline and component-meta registry treat this variant
     /// as a shallow terminal — explicit deep materialisation routes
-    /// through `ShapeCacheKey::semantic_node_whole(scope, value_node,
-    /// mode)`. See `[[component-meta-shallow-by-default-rule]]`.
+    /// through `ShapeCacheKey::synthetic_binding_whole(SyntheticBindingId::from_carrier_key(&carrier), mode)`,
+    /// rooting the cache identity on the content-free `SyntheticBindingId`.
+    /// The carrier's `value_node` arena ordinal is value-side provenance
+    /// only — dropped from the cache identity and re-attached at the compat
+    /// materialisation boundary via `to_carrier_key`, never a cache-key
+    /// field. See `[[component-meta-shallow-by-default-rule]]`.
     SyntheticSlotBinding(Arc<SyntheticCarrierKey>),
 
     /// A dynamic-import type reference, resolved cross-file by the shared

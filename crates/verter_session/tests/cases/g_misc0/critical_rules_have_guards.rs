@@ -735,12 +735,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // surface; re-introducing the R22 substrate is forbidden.
             "no_carrier_verdict_db",
             // Pins the legitimate explicit-deepen cache route through
-            // `ShapeCacheKey::semantic_node_whole(scope,
-            // SemanticNodeId(carrier.value_node), mode)`. Positive
-            // executable proof of the cache-key identity round-trip
-            // (insert + lookup + scope/mode/value_node discrimination);
-            // discriminates RED-on-revert if the cache route stops
-            // routing through `carrier.value_node`.
+            // `ShapeCacheKey::synthetic_binding_whole(SyntheticBindingId::
+            // from_carrier_key(&carrier), mode)`, rooting on the
+            // content-free `SyntheticBindingId`. Positive executable proof
+            // of the cache-key collapse invariant: two carriers with the
+            // SAME identity tuple but DIFFERENT `value_node` collapse onto
+            // ONE entry (`live_count() == 1`), the still-discriminating
+            // axes (scope / slot / binding / surface_kind / mode) each
+            // MISS, and `value_node` survives only as a value-side
+            // provenance round-trip. Discriminates RED-on-revert against
+            // the retired `SemanticNodeId(value_node)` key (which would
+            // key disjointly ⇒ `live_count() == 2`).
             "synthetic_carrier_explicit_deepen_proof",
             // The migration's content-free successor identity for the
             // synthetic carrier (`SyntheticBindingId`) carries no bare
