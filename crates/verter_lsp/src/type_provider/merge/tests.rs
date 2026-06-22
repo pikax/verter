@@ -2761,6 +2761,131 @@ fn merge_code_actions_foreign_carrier_prelude_insertion_is_dropped() {
     );
 }
 
+/// Like [`make_preamble_mapper_and_indexes`] but parametrized by an arbitrary carrier source, so a
+/// test can drive a NON-Vue (`.svelte`) or a Vue-without-`<script setup>` carrier through the
+/// add-import prelude re-anchor branch. The generated-TSX shape, source-map tokens, and the typed
+/// `x_verter_helper_preamble_end` boundary (`{line:1,col:0}`) are identical to the canonical
+/// fixture — so `is_preamble_import_insertion` ACCEPTS an offset-0 insertion regardless of the
+/// carrier. That isolates the use-site gate under test: whether the carrier is a Vue SFC and whether
+/// the resolved anchor is an EXISTING `<script setup>`, not whether the preamble classifier fires.
+/// Returns the carrier UTF-16 line index, the TSX UTF-16 line index, and the mapper (the caller
+/// already owns `carrier_source`).
+fn make_preamble_mapper_for_carrier(
+    carrier_source: &str,
+) -> (LineIndex, LineIndex, ProviderPositionMapper) {
+    let tsx_source =
+        "import { defineComponent } from 'vue';\nconst base = 1;\nexport default {};\n";
+
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+    let source_id = builder.set_source_and_content("App.carrier", carrier_source);
+    // Map ONLY a user line so offset 0 (the preamble) misses the strict mapper, exactly as the
+    // canonical fixture does. The carrier-source line that this targets is irrelevant to the gate
+    // under test (the re-anchor never consults it); it only has to exist as a mapped run.
+    builder.add_token(1, 0, 0, 0, Some(source_id), None);
+    let base_json = builder.into_sourcemap().to_json_string();
+    let mut value: serde_json::Value = serde_json::from_str(&base_json).unwrap();
+    value["x_verter_helper_preamble_end"] = serde_json::json!({ "line": 1, "character": 0 });
+    let json = serde_json::to_string(&value).unwrap();
+
+    let mapper = ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
+    let carrier_li = LineIndex::new_utf16(carrier_source);
+    let tsx_li = LineIndex::new_utf16(tsx_source);
+    (carrier_li, tsx_li, mapper)
+}
+
+/// A SVELTE carrier (`/test.svelte.tsx`) add-import prelude insertion is DROPPED — never re-anchored
+/// into a synthesized (Vue-only) `<script setup>` block spliced onto the `.svelte` source. The
+/// offset-0 insertion IS a preamble insertion (the fixture carries the boundary), so the drop is the
+/// USE-SITE Vue-carrier gate's decision, not an emergent "Svelte codegen omits the boundary" effect.
+/// Discriminating: WITHOUT the Vue gate, `resolve_script_import_anchor` over this `<script lang="ts">`
+/// Svelte source returns `CreateScriptSetup` and the merge would emit ONE action splicing a brand-new
+/// `<script setup lang="ts">` block into the `.svelte` file (wrong placement) — this test would then
+/// see a non-empty result.
+#[test]
+fn merge_code_actions_svelte_carrier_prelude_insertion_is_dropped() {
+    // A real Svelte component: an instance `<script lang="ts">` (NOT `<script setup>`), markup below.
+    let carrier_source = "<script lang=\"ts\">\nconst base = 1\n</script>\n<div>{base}</div>\n";
+    let (carrier_li, tsx_li, mapper) = make_preamble_mapper_for_carrier(carrier_source);
+
+    let actions = vec![TypeCodeAction {
+        title: "Add import from \"svelte\"".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            // The CURRENT request's generated file is the Svelte carrier IDE TSX.
+            path: "/test.svelte.tsx".to_string(),
+            start: 0,
+            end: 0,
+            new_text: "import { writable } from \"svelte/store\";\n".to_string(),
+        }],
+    }];
+
+    let no_external: Option<ExternalIdeResolver> = None;
+    let dropped = merge_code_actions(
+        actions,
+        "/test.svelte.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        carrier_source,
+        &[],
+    );
+    assert!(
+        dropped.is_empty(),
+        "a SVELTE carrier prelude add-import must be DROPPED fail-closed — never re-anchored into a \
+         synthesized Vue `<script setup>` block: {dropped:?}"
+    );
+}
+
+/// A VUE carrier WITHOUT a `<script setup>` block (Options-API `<script>` only) add-import prelude
+/// insertion is DROPPED — the code-action re-anchor accepts ONLY an EXISTING `<script setup>` anchor
+/// and never synthesizes a brand-new block from a quick-fix. Discriminating: WITHOUT dropping
+/// `CreateScriptSetup`, `resolve_script_import_anchor` returns `CreateScriptSetup` for this carrier
+/// and the merge would splice a NEW `<script setup>` block onto the `.vue` — which does NOT add the
+/// import to the existing `<script>` where the unresolved symbol lives (wrong placement). Then this
+/// test would see a non-empty result.
+#[test]
+fn merge_code_actions_vue_without_script_setup_prelude_insertion_is_dropped() {
+    // A Vue SFC with a NON-setup `<script>` (Options API) — no `<script setup>` block exists.
+    let carrier_source =
+        "<script lang=\"ts\">\nexport default { data: () => ({ base: 1 }) }\n</script>\n<template>\n  <div>{{ base }}</div>\n</template>\n";
+    let (carrier_li, tsx_li, mapper) = make_preamble_mapper_for_carrier(carrier_source);
+
+    let actions = vec![TypeCodeAction {
+        title: "Add import from \"vue\"".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            path: "/test.vue.tsx".to_string(),
+            start: 0,
+            end: 0,
+            new_text: "import { computed } from \"vue\";\n".to_string(),
+        }],
+    }];
+
+    let no_external: Option<ExternalIdeResolver> = None;
+    let dropped = merge_code_actions(
+        actions,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        carrier_source,
+        &[],
+    );
+    assert!(
+        dropped.is_empty(),
+        "a Vue SFC WITHOUT `<script setup>` must DROP the prelude add-import (no CreateScriptSetup \
+         synthesis from a quick-fix), never splice a new block: {dropped:?}"
+    );
+}
+
 /// @ai-generated — Empty actions returns empty vec
 #[test]
 fn merge_code_actions_empty() {

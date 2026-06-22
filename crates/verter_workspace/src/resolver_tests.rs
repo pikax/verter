@@ -694,6 +694,25 @@ fn strip_carrier_extension_is_registry_backed_for_every_carrier() {
 }
 
 #[test]
+fn path_is_vue_carrier_is_narrower_than_path_is_carrier() {
+    // The Vue SFC carrier IS a Vue carrier AND a carrier.
+    assert!(path_is_vue_carrier("/workspace/src/App.vue"));
+    assert!(path_is_carrier("/workspace/src/App.vue"));
+    // A Svelte carrier is a carrier but NOT a Vue carrier (discrimination is real):
+    // this is the gate that fail-closes a Svelte add-import re-anchor.
+    assert!(path_is_carrier("/workspace/src/Box.svelte"));
+    assert!(
+        !path_is_vue_carrier("/workspace/src/Box.svelte"),
+        "a `.svelte` carrier must NOT be classified as a Vue SFC carrier"
+    );
+    // A Svelte rune module is neither.
+    assert!(!path_is_vue_carrier("/workspace/src/store.svelte.ts"));
+    // Plain scripts are not Vue carriers.
+    assert!(!path_is_vue_carrier("/workspace/src/util.ts"));
+    assert!(!path_is_vue_carrier("/workspace/src/App.vue.tsx"));
+}
+
+#[test]
 fn carrier_api_provider_path_appends_ts_to_full_carrier() {
     // The API virtual path is the FULL carrier canonical + `.ts` for every
     // carrier — never a hardcoded `.vue.ts`.

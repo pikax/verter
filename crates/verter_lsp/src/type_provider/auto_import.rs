@@ -62,6 +62,19 @@ impl ScriptImportInsertionAnchor {
     /// Build a single zero-width-range `TextEdit` inserting `import_texts` (in order) at this
     /// anchor. Returns `None` if the anchor offset is not a valid position in `carrier_li`.
     pub fn build_edit(&self, import_texts: &[String], carrier_li: &LineIndex) -> Option<TextEdit> {
+        let borrowed: Vec<&str> = import_texts.iter().map(String::as_str).collect();
+        self.build_edit_borrowed(&borrowed, carrier_li)
+    }
+
+    /// Like [`Self::build_edit`] but accepts BORROWED import texts, so a caller that already holds
+    /// `&str` slices (the code-action merge, which avoids cloning the provider edit's `new_text`)
+    /// builds the carrier edit without owning the inputs. The owned output `new_text` is assembled
+    /// here by copying the borrowed texts into one block; the inputs are never mutated.
+    pub(crate) fn build_edit_borrowed(
+        &self,
+        import_texts: &[&str],
+        carrier_li: &LineIndex,
+    ) -> Option<TextEdit> {
         let (offset, new_text) = match self {
             ScriptImportInsertionAnchor::ExistingScriptSetup { offset } => {
                 (*offset, import_texts.concat())
@@ -74,7 +87,7 @@ impl ScriptImportInsertionAnchor {
                 let mut text = String::with_capacity(
                     open_tag.len()
                         + close_tag.len()
-                        + import_texts.iter().map(String::len).sum::<usize>(),
+                        + import_texts.iter().map(|t| t.len()).sum::<usize>(),
                 );
                 text.push_str(open_tag);
                 for t in import_texts {
@@ -180,11 +193,12 @@ impl std::fmt::Display for AutoImportEditMappingError {
 
 impl std::error::Error for AutoImportEditMappingError {}
 
-/// Whether an unmapped provider edit is structurally a re-anchorable auto-import insertion: a
-/// ZERO-WIDTH insertion located within the synthetic helper-import preamble. Proven from STRUCTURE
-/// only — the edit's geometry and the typed preamble-end boundary the IDE codegen publishes on the
-/// source map ([`ProviderPositionMapper::helper_preamble_end`]) — never from `new_text` content
-/// (the no-text-sniffing rule).
+/// Whether the generated-TSX `[start, end)` of an unmapped provider edit is structurally a
+/// re-anchorable auto-import insertion: a ZERO-WIDTH insertion located within the synthetic
+/// helper-import preamble. Proven from STRUCTURE only — the edit's geometry and the typed
+/// preamble-end boundary the IDE codegen publishes on the source map
+/// ([`ProviderPositionMapper::helper_preamble_end`]) — never from `new_text` content (the
+/// no-text-sniffing rule).
 ///
 /// The boundary is the generated-TSX position immediately after the last emitted helper import. An
 /// insertion at or before it lands in the preamble (re-anchorable); anything past it is trailing
@@ -194,16 +208,17 @@ impl std::error::Error for AutoImportEditMappingError {}
 /// the two cases a "before the first mapped run" heuristic gets wrong. With no boundary metadata
 /// the edit cannot be proven to be in the preamble, so it is rejected — never re-anchored on a guess.
 pub(crate) fn is_preamble_import_insertion(
-    edit: &ProviderImportEdit,
+    start: u32,
+    end: u32,
     tsx_li: &LineIndex,
     mapper: &ProviderPositionMapper,
 ) -> bool {
     // A non-empty range is a replacement of synthetic code, not an insertion.
-    if edit.start != edit.end {
+    if start != end {
         return false;
     }
     // Must address a real position inside the generated TSX (rejects out-of-range offsets).
-    let Some(pos) = tsx_li.offset_to_position(edit.start) else {
+    let Some(pos) = tsx_li.offset_to_position(start) else {
         return false;
     };
     match mapper.helper_preamble_end() {
@@ -217,38 +232,97 @@ pub(crate) fn is_preamble_import_insertion(
     }
 }
 
-/// Re-anchor a SINGLE provider edit that inserts a brand-new import at the synthetic helper-import
-/// preamble onto the carrier `<script setup>` import site — the shared per-edit re-anchor used by the
-/// code-action merge ([`crate::type_provider::merge::merge_code_actions`]).
+/// A single provider import edit borrowed for re-anchoring: byte offsets into the generated TSX plus
+/// a BORROWED replacement text. Lets the code-action merge classify/re-anchor an edit WITHOUT
+/// cloning its `new_text` — the owned text only moves into the final [`TextEdit`] when the re-anchor
+/// actually succeeds (the build coalesces by copying the borrowed texts into one block).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BorrowedImportEdit<'a> {
+    /// Byte offset start in the generated TSX.
+    pub start: u32,
+    /// Byte offset end in the generated TSX.
+    pub end: u32,
+    /// The replacement / inserted text (for a new import, a full `import … from '…'` line).
+    pub new_text: &'a str,
+}
+
+/// The outcome of [`reanchor_preamble_import_edits`] over a set of strict-mapper-MISSED provider
+/// edits. The two callers act on it differently — the completion translator turns the two failure
+/// fields into structured `Err`s (all-or-nothing); the code-action merge ignores them and simply
+/// drops (fail-closed) — but the CLASSIFY + ANCHOR + BUILD decision is computed in exactly one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReanchorOutcome {
+    /// The single coalesced carrier [`TextEdit`] that places every re-anchorable preamble import at
+    /// `anchor`, or `None` when no input edit was a re-anchorable preamble insertion (or the anchor
+    /// could not build an edit — see `anchor_missing`).
+    pub reanchored: Option<TextEdit>,
+    /// The `(start, end)` of the FIRST (in input order) missed edit that is NOT a preamble import
+    /// insertion — a replacement of synthetic code, a zero-width edit in a non-preamble synthetic
+    /// region, or an out-of-range offset. The completion translator rejects the whole resolve on it
+    /// ([`AutoImportEditMappingError::UnmappableEdit`]); the code-action path drops.
+    pub first_non_preamble_miss: Option<(u32, u32)>,
+    /// `true` when at least one input edit WAS a re-anchorable preamble insertion but no usable
+    /// anchor was supplied (or the anchor failed to build) — so the imports could not be placed.
+    /// The completion translator rejects with [`AutoImportEditMappingError::NoInsertionAnchor`]; the
+    /// code-action path drops.
+    pub anchor_missing: bool,
+}
+
+/// THE single preamble re-anchor used by BOTH the completion-resolve translator
+/// ([`translate_completion_import_edits`]) and the code-action merge
+/// ([`crate::type_provider::merge::merge_code_actions`]). Given the provider edits that already
+/// MISSED the strict mapper, it:
+/// 1. classifies each via [`is_preamble_import_insertion`] (the typed helper-preamble-end boundary —
+///    a `SelfFile` projection has no boundary ⇒ every edit is a non-preamble miss, fail-closed);
+/// 2. coalesces the preamble import texts IN INPUT ORDER and builds ONE carrier [`TextEdit`] at the
+///    caller-supplied `anchor` via [`ScriptImportInsertionAnchor::build_edit`] (so N imports land in
+///    one block / synthesize at most one `<script setup>` — never N overlapping zero-width inserts);
+/// 3. reports the first non-preamble miss and whether an anchor was needed but absent.
 ///
-/// It composes the SAME three primitives the completion-resolve translator
-/// ([`translate_completion_import_edits`]) uses, so there is ONE re-anchor implementation:
-/// 1. [`is_preamble_import_insertion`] — the edit must be a zero-width insertion at/before the typed
-///    helper-preamble-end boundary (a `SelfFile` projection has no boundary ⇒ `false`, fail-closed);
-/// 2. [`resolve_script_import_anchor`] — the SFC's `<script setup>` import insertion anchor from its
-///    own block/import facts (`carrier_source` + the SFC-absolute `user_import_spans`);
-/// 3. [`ScriptImportInsertionAnchor::build_edit`] — the zero-width carrier [`TextEdit`] carrying the
-///    provider's import text.
-///
-/// Returns `None` (caller DROPS, fail-closed) when the edit is NOT a preamble insertion, or the
-/// anchor offset is not a valid carrier position. Unlike the completion translator this is per-edit
-/// (the code-action path applies one quickfix edit at a time); the completion path keeps its own
-/// coalescing of multiple imports into one block. The caller MUST only invoke this for the CURRENT
-/// request's TSX — `tsx_li` / `mapper` / `carrier_source` describe the queried file, so a foreign
-/// carrier `.tsx` edit must be screened out by the caller before reaching here.
-pub(crate) fn reanchor_preamble_import_edit(
-    edit: &ProviderImportEdit,
+/// The `anchor` is the SINGLE policy seam: each caller resolves AND gates it for its own use-site
+/// before calling. The completion path (a proven Vue carrier that is not a self-file projection)
+/// passes any [`ScriptImportInsertionAnchor`], including a synthesized `CreateScriptSetup` (Volar
+/// parity). The code-action path passes ONLY an `ExistingScriptSetup` of a Vue carrier and `None`
+/// otherwise, so a Svelte / non-Vue / no-`<script setup>` carrier fails closed (it never synthesizes
+/// a block from a quick-fix). Passing `anchor = None` with preamble imports present yields
+/// `anchor_missing = true` and no edit. The caller MUST only invoke this for the CURRENT request's
+/// TSX — `tsx_li` / `mapper` describe the queried file, so a foreign carrier `.tsx` edit must be
+/// screened out before reaching here.
+pub(crate) fn reanchor_preamble_import_edits(
+    missed_edits: &[BorrowedImportEdit<'_>],
     tsx_li: &LineIndex,
     mapper: &ProviderPositionMapper,
-    carrier_source: &str,
+    anchor: Option<&ScriptImportInsertionAnchor>,
     carrier_li: &LineIndex,
-    user_import_spans: &[(u32, u32)],
-) -> Option<TextEdit> {
-    if !is_preamble_import_insertion(edit, tsx_li, mapper) {
-        return None;
+) -> ReanchorOutcome {
+    let mut anchored_imports: Vec<&str> = Vec::new();
+    let mut first_non_preamble_miss: Option<(u32, u32)> = None;
+
+    for edit in missed_edits {
+        if is_preamble_import_insertion(edit.start, edit.end, tsx_li, mapper) {
+            anchored_imports.push(edit.new_text);
+        } else if first_non_preamble_miss.is_none() {
+            first_non_preamble_miss = Some((edit.start, edit.end));
+        }
     }
-    let anchor = resolve_script_import_anchor(carrier_source, user_import_spans);
-    anchor.build_edit(std::slice::from_ref(&edit.new_text), carrier_li)
+
+    if anchored_imports.is_empty() {
+        return ReanchorOutcome {
+            reanchored: None,
+            first_non_preamble_miss,
+            anchor_missing: false,
+        };
+    }
+
+    let reanchored = anchor.and_then(|a| a.build_edit_borrowed(&anchored_imports, carrier_li));
+    // Preamble imports were present (we are past the empty early-return) but could not be placed:
+    // no anchor supplied, or the anchor failed to build an edit.
+    let anchor_missing = reanchored.is_none();
+    ReanchorOutcome {
+        reanchored,
+        first_non_preamble_miss,
+        anchor_missing,
+    }
 }
 
 /// Translate a TypeProvider's completion-resolve `additionalTextEdits` (generated-TSX byte
@@ -268,6 +342,11 @@ pub(crate) fn reanchor_preamble_import_edit(
 /// All re-anchored imports are coalesced into a single edit at the anchor (avoiding overlapping
 /// zero-width inserts and synthesizing at most one `<script setup>` block). All-or-nothing: if
 /// any edit must be re-anchored but no anchor is available, the whole resolve fails.
+///
+/// The classify → anchor → build step for the missed edits routes through the SINGLE shared
+/// [`reanchor_preamble_import_edits`] (the same primitive the code-action merge calls); this
+/// translator only adds the strict-mapper verbatim route on top and turns the shared outcome's
+/// failure fields into structured errors.
 pub fn translate_completion_import_edits(
     edits: &[ProviderImportEdit],
     anchor: Option<&ScriptImportInsertionAnchor>,
@@ -276,7 +355,7 @@ pub fn translate_completion_import_edits(
     carrier_li: &LineIndex,
 ) -> Result<Vec<TextEdit>, AutoImportEditMappingError> {
     let mut result: Vec<TextEdit> = Vec::new();
-    let mut anchored_imports: Vec<String> = Vec::new();
+    let mut missed: Vec<BorrowedImportEdit<'_>> = Vec::new();
 
     for edit in edits {
         match merge::tsx_range_to_carrier_range(edit.start, edit.end, tsx_li, mapper, carrier_li) {
@@ -286,27 +365,27 @@ pub fn translate_completion_import_edits(
                 range,
                 new_text: edit.new_text.clone(),
             }),
-            // A mapper miss is re-anchored ONLY if it is provably a zero-width auto-import
-            // insertion in the synthetic helper-import preamble. Every other miss is rejected,
-            // never spliced into user source.
-            None => {
-                if is_preamble_import_insertion(edit, tsx_li, mapper) {
-                    anchored_imports.push(edit.new_text.clone());
-                } else {
-                    return Err(AutoImportEditMappingError::UnmappableEdit {
-                        start: edit.start,
-                        end: edit.end,
-                    });
-                }
-            }
+            // Defer every strict-mapper miss to the shared re-anchor, which classifies it as a
+            // preamble import insertion (re-anchorable) or a non-preamble miss (rejected).
+            None => missed.push(BorrowedImportEdit {
+                start: edit.start,
+                end: edit.end,
+                new_text: &edit.new_text,
+            }),
         }
     }
 
-    if !anchored_imports.is_empty() {
-        let anchor = anchor.ok_or(AutoImportEditMappingError::NoInsertionAnchor)?;
-        let edit = anchor
-            .build_edit(&anchored_imports, carrier_li)
-            .ok_or(AutoImportEditMappingError::NoInsertionAnchor)?;
+    let outcome = reanchor_preamble_import_edits(&missed, tsx_li, mapper, anchor, carrier_li);
+    // A non-preamble miss rejects the whole resolve (UnmappableEdit takes precedence, exactly as the
+    // in-order loop did) — never a partial edit set spliced into user source.
+    if let Some((start, end)) = outcome.first_non_preamble_miss {
+        return Err(AutoImportEditMappingError::UnmappableEdit { start, end });
+    }
+    // A re-anchorable preamble import with no usable anchor rejects the whole resolve.
+    if outcome.anchor_missing {
+        return Err(AutoImportEditMappingError::NoInsertionAnchor);
+    }
+    if let Some(edit) = outcome.reanchored {
         result.push(edit);
     }
 

@@ -445,6 +445,18 @@ impl VerterLanguageServer {
     ) {
         *self.vfs_workspace.write() = Some(workspace);
     }
+
+    /// RAW (unmerged) provider code actions for a carrier URI + range + editor diagnostics — the
+    /// provider's `getCodeFixes` output BEFORE `merge_code_actions` (test harness access). Lets a
+    /// canary tell "provider emitted nothing" from "provider emitted but merge dropped it".
+    pub(crate) async fn test_raw_provider_code_actions(
+        &self,
+        uri: &tower_lsp_server::ls_types::Uri,
+        range: tower_lsp_server::ls_types::Range,
+        diagnostics: &[tower_lsp_server::ls_types::Diagnostic],
+    ) -> Vec<crate::type_provider::protocol::TypeCodeAction> {
+        aux_features::raw_provider_code_actions(self, uri, range, diagnostics).await
+    }
 }
 
 impl LanguageServer for VerterLanguageServer {

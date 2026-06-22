@@ -452,6 +452,24 @@ fn has_add_missing_vue_import(actions: &CodeActionResponse, uri: &Uri, symbol: &
     })
 }
 
+/// Does the RAW (unmerged) provider output — `getCodeFixes` over the generated TSX, BEFORE
+/// `merge_code_actions` — contain an `addMissingImport`-shaped action that inserts `symbol` from the
+/// `vue` module? Probes the provider edits directly (keyed to the generated `.tsx`), so the canary
+/// can tell whether the PROVIDER emitted the add-import at all — independent of the merge layer.
+fn raw_provider_has_add_import(
+    actions: &[crate::type_provider::protocol::TypeCodeAction],
+    symbol: &str,
+) -> bool {
+    actions.iter().any(|a| {
+        a.edits.iter().any(|e| {
+            e.start == e.end
+                && e.new_text.contains("import")
+                && e.new_text.contains(symbol)
+                && (e.new_text.contains("from \"vue\"") || e.new_text.contains("from 'vue'"))
+        })
+    })
+}
+
 real_provider_test!(
     vue_add_missing_import_lands_in_source_via_prelude_reanchor,
     fixture = "single-project",
@@ -483,48 +501,73 @@ const base = ref(1)
             end: ref_end,
         };
 
-        // Warm the project, then request code actions at the unresolved `ref` with the
-        // published 2304 in `context.diagnostics` (the wired errorCodes path that drives
-        // the provider's `getCodeFixes`). If the provider returns an `addMissingImport`,
-        // it MUST land in the `.vue` SOURCE at the re-anchored `<script setup>` site.
+        // Warm the project, then on each attempt probe BOTH layers with the published 2304 in
+        // `context.diagnostics` (the wired errorCodes path that drives `getCodeFixes`):
+        //   * `provider_emitted` — the RAW provider output (`getCodeFixes` over the generated TSX,
+        //     before the merge) contained an add-import for `ref`→`vue`;
+        //   * `landed` — the MERGED carrier output placed that import into the `.vue` SOURCE at the
+        //     re-anchored `<script setup>` site.
+        // Probing both lets the canary distinguish "provider emitted nothing" (harness limitation)
+        // from "provider emitted but the merge dropped/mis-placed it" (a real merge regression).
+        let mut provider_emitted = false;
         let mut landed = false;
         for attempt in 0..8 {
+            let raw = session
+                .server()
+                .test_raw_provider_code_actions(&uri, range, &[ts2304(range, "ref")])
+                .await;
+            if raw_provider_has_add_import(&raw, "ref") {
+                provider_emitted = true;
+            }
             let actions = code_action(session, &uri, range, vec![ts2304(range, "ref")]).await;
             if let Some(actions) = actions {
                 if has_add_missing_vue_import(&actions, &uri, "ref") {
                     landed = true;
-                    break;
                 }
+            }
+            if provider_emitted || landed {
+                break;
             }
             if attempt < 7 {
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             }
         }
 
-        // CANARY (harness limitation): in this hermetic e2e harness NEITHER provider
-        // returns an `addMissingImport` code action for a carrier (or any in-memory /
-        // inferred-project) file — `getCodeFixes` produces no add-import even though the
-        // 2304 is correctly detected (confirmed by probing the provider directly for
-        // `ref`→`vue` AND for the configured-project sibling `formatCount`→`./utils`,
-        // both empty). The harness project model + the missing `@verter/types` package
-        // mean the provider's import-fix index is unavailable here. This is INDEPENDENT
-        // of the merge-layer prelude re-anchor under test, which is fully exercised by
-        // the hermetic unit tests in `type_provider::merge::tests`
-        // (`merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup`
-        // and its two negative siblings).
+        if provider_emitted {
+            // REAL END-TO-END GATE: the provider DID surface an `addMissingImport`. The merge layer
+            // MUST re-anchor it into the `.vue` SOURCE — if the import did not land, the merge
+            // dropped or mis-placed it (a regression in the prelude re-anchor under test). Fail loud.
+            assert!(
+                landed,
+                "the provider returned an addMissingImport for `ref`→`vue`, but the merge layer did \
+                 NOT land it in the .vue source — the prelude re-anchor dropped or mis-placed the \
+                 quick-fix edit (regression)."
+            );
+            return;
+        }
+
+        // CANARY (harness limitation): the RAW provider probe confirmed NEITHER backend's
+        // `getCodeFixes` surfaces an `addMissingImport` for a carrier (or any in-memory /
+        // inferred-project) file here — even though the 2304 is correctly detected. The harness
+        // project model + the missing `@verter/types` package mean the provider's import-fix index
+        // is unavailable, so there is no add-import to merge. This is now PROVEN per-run by the raw
+        // probe above (not assumed): `provider_emitted` stayed false. The merge-layer prelude
+        // re-anchor itself is fully exercised by the hermetic unit tests in
+        // `type_provider::merge::tests`
+        // (`merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup` plus the
+        // Svelte / Vue-no-`<script setup>` / past-preamble / foreign-carrier negative siblings).
         //
-        // The canary FAILS LOUD the moment a provider DOES return the add-import here
-        // (harness gains an import-fix-capable project, or `@verter/types` is vendored):
-        // at that point `landed` becomes true and this assertion flips, promoting the
-        // line-asserting `has_add_missing_vue_import` check above into the real
-        // end-to-end gate (delete the canary, assert `landed`).
+        // Because the canary now keys on the RAW provider output, it CANNOT pass vacuously while the
+        // merge is broken: the moment a provider returns the add-import here, `provider_emitted`
+        // flips true and control takes the real end-to-end assert above (which fails loud if the
+        // merge does not land it). At that point delete this canary.
         canary_assert_known_limitation!(
             !landed,
-            "the provider's getCodeFixes does not surface an addMissingImport in this \
-             hermetic harness (no import-fix project index / missing @verter/types); the \
-             merge-layer prelude re-anchor is proven by the hermetic merge unit tests. \
-             When a provider returns the add-import here, promote this to a real assert \
-             that the import LANDED in the .vue (has_add_missing_vue_import)."
+            "neither backend's getCodeFixes surfaced an addMissingImport in this hermetic harness \
+             (raw provider probe empty: no import-fix project index / missing @verter/types); the \
+             merge-layer prelude re-anchor is proven by the hermetic merge unit tests. When a \
+             provider returns the add-import here, the raw probe flips `provider_emitted` and the \
+             real end-to-end landing assert fires instead."
         );
     }
 );

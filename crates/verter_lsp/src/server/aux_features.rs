@@ -588,6 +588,53 @@ fn build_provider_diagnostic_contexts(
         .collect()
 }
 
+/// Test-only RAW provider code-action probe: resolves the carrier→TSX provider context exactly as
+/// [`handle_code_action`] does, then calls the provider's `get_code_actions` (`getCodeFixes`) and
+/// returns its UNMERGED output — the generated-TSX-keyed [`TypeCodeAction`]s, before
+/// [`merge::merge_code_actions`]. The add-import-landing canary uses this to distinguish "the
+/// provider returned NO add-import" (a harness limitation — canary stays green) from "the provider
+/// DID return one but the merge dropped/mis-placed it" (a real regression — the canary must fail).
+/// Returns an empty vec when the provider is absent, the context cannot be resolved, or the range
+/// offsets cannot be mapped (fail-closed, same as the production handler's drops).
+#[cfg(test)]
+pub(super) async fn raw_provider_code_actions(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+    range: Range,
+    diagnostics: &[Diagnostic],
+) -> Vec<crate::type_provider::protocol::TypeCodeAction> {
+    let Some(tp) = &server.type_provider else {
+        return Vec::new();
+    };
+    let Some(ctx) = server.type_provider_context(uri) else {
+        return Vec::new();
+    };
+    let start_offset = merge::carrier_position_to_tsx_offset_validated(
+        &range.start,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    );
+    let end_offset = merge::carrier_position_to_tsx_offset_validated(
+        &range.end,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    );
+    let (Some(so), Some(eo)) = (start_offset, end_offset) else {
+        return Vec::new();
+    };
+    let diag_ctx = build_provider_diagnostic_contexts(
+        diagnostics,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    );
+    tp.get_code_actions(&ctx.tsx_path, so, eo, &diag_ctx)
+        .await
+        .unwrap_or_default()
+}
+
 /// Audit-aware wrapper for [`handle_code_action`].
 pub(super) async fn handle_code_action_with_audit(
     server: &VerterLanguageServer,

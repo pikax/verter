@@ -177,38 +177,71 @@ TSX, which lands in Verter's synthetic helper-import preamble — the strict
 historically DROPPED by `merge_code_actions` (the action then had no surviving edit
 and was filtered out). `merge_code_actions` now re-anchors such a CURRENT-file
 preamble insertion at the SFC's `<script setup>` import site through the SAME
-primitive the completion path uses:
+single implementation the completion path uses:
 
-- `auto_import::reanchor_preamble_import_edit(edit, tsx_li, mapper, carrier_source,
-  carrier_li, user_import_spans)` — the single per-edit re-anchor entry point. It
-  composes `is_preamble_import_insertion` (now `pub(crate)`) → `resolve_script_import_anchor`
-  → `ScriptImportInsertionAnchor::build_edit`. There is ONE re-anchor implementation:
-  the completion translator (`translate_completion_import_edits`) keeps its own
-  multi-edit coalescing but classifies each edit with the SAME
-  `is_preamble_import_insertion` predicate and anchors with the SAME
-  `resolve_script_import_anchor` / `build_edit`.
+- `auto_import::reanchor_preamble_import_edits(missed_edits, tsx_li, mapper, anchor,
+  carrier_li)` — the ONE shared re-anchor. It classifies each strict-mapper-missed
+  edit with `is_preamble_import_insertion`, coalesces the preamble imports in input
+  order, and builds ONE carrier `TextEdit` at the caller-supplied `anchor` via
+  `ScriptImportInsertionAnchor::build_edit_borrowed`. It returns a `ReanchorOutcome`
+  (the coalesced edit + the first non-preamble miss + whether an anchor was needed
+  but absent). BOTH callers route their per-edit classify → anchor → build through
+  this one function, so there is genuinely ONE place that does "preamble-insertion →
+  carrier import anchor → edit":
+  - `translate_completion_import_edits` (completion resolve) adds only the
+    strict-mapper verbatim route on top, then turns the outcome's two failure fields
+    into `AutoImportEditMappingError::{UnmappableEdit, NoInsertionAnchor}`
+    (all-or-nothing). It still coalesces multiple imports — that coalescing now lives
+    INSIDE the shared function.
+  - `merge_code_actions` (code action) passes the single missed edit as a BORROWED
+    `BorrowedImportEdit` (the provider edit's `new_text` is borrowed, not cloned — it
+    only moves into the carrier `TextEdit` when the re-anchor succeeds) and drops on
+    any failure field.
 
-Fail-closed, identical to the completion path: a non-preamble miss, a `SelfFile`
+The `anchor` is the SINGLE use-site/policy seam — each caller resolves AND gates it
+for its own context before calling, so the two surfaces have correct, distinct
+placement policies while sharing the mechanical re-anchor:
+
+- Completion resolve: it has ALREADY proven a real Vue carrier that is not a
+  `SelfFile` projection (`carrier_uri_from_ide_path` + `!is_self_file_projection`),
+  so it passes any `ScriptImportInsertionAnchor`, INCLUDING a synthesized
+  `CreateScriptSetup` block (Volar parity for an SFC that has no `<script setup>`
+  yet).
+- Code action: it has weaker context, so `codeaction_reanchor_anchor` is USE-SITE-AWARE
+  and fail-closed. It returns `Some` only when (1) the current request's carrier is a
+  **Vue SFC** (`verter_workspace::path_is_vue_carrier` over the carrier stem of
+  `current_tsx_path`) AND (2) that SFC has an EXISTING `<script setup>` block
+  (`ExistingScriptSetup`). A Svelte / non-Vue carrier, or a Vue SFC with no
+  `<script setup>` (which would otherwise synthesize a Vue-only block from a
+  quick-fix), yields `None` — the import is DROPPED, never mis-placed. Scoped
+  limitation: the code-action path does NOT synthesize a new `<script setup>` from a
+  quick-fix (the completion-accept path still does); a Vue SFC with only an
+  Options-API `<script>` therefore drops the add-import rather than create a block.
+
+Fail-closed, in addition to the use-site gate: a non-preamble miss, a `SelfFile`
 projection (no `helper_preamble_end` boundary), or an unresolvable carrier anchor
-all return `None` and the edit is dropped — never line-0'd. The re-anchor fires
-ONLY for the CURRENT request's TSX (`canonicalize_path_cow(edit_path) ==
-canonicalize_path_cow(current_tsx_path)`): a FOREIGN carrier `.tsx` preamble
-insertion has no in-context `<script setup>` anchor and stays dropped (re-anchoring
-it would splice an import into the wrong `.vue`). The merge call site threads the
-carrier source + SFC-absolute import spans (the same inputs the completion-resolve
-path reads) into `merge_code_actions`.
+all drop the edit — never line-0'd. The re-anchor fires ONLY for the CURRENT
+request's TSX (`canonicalize_path_cow(edit_path) == canonicalize_path_cow(current_tsx_path)`):
+a FOREIGN carrier `.tsx` preamble insertion has no in-context `<script setup>` anchor
+and stays dropped (re-anchoring it would splice an import into the wrong `.vue`). The
+merge call site threads the carrier source + SFC-absolute import spans (the same
+inputs the completion-resolve path reads) into `merge_code_actions`.
 
 NOTE (test reality): the hermetic e2e harness's `getCodeFixes` does not surface an
 `addMissingImport` for a carrier (or any in-memory / inferred-project) file on
 EITHER backend (no import-fix project index; `@verter/types` absent from the
-fixture's `node_modules`) — confirmed by probing the provider directly for
-`ref`→`vue` AND the configured sibling `formatCount`→`./utils`, both empty. The
-merge-layer re-anchor is therefore proven by the hermetic unit tests
+fixture's `node_modules`). The merge-layer re-anchor is therefore proven by the
+hermetic unit tests
 (`type_provider::merge::tests::merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup`
-plus its past-preamble and foreign-carrier negative siblings); the real-provider
+plus the Svelte-carrier, Vue-without-`<script setup>`, past-preamble, and
+foreign-carrier negative siblings). The real-provider
 `vue_add_missing_import_lands_in_source_via_prelude_reanchor` test is a fail-loud
-CANARY for that harness limitation (it flips to a real end-to-end landing assert
-when a provider returns the add-import here).
+CANARY that probes the RAW provider output directly
+(`test_raw_provider_code_actions`, the `getCodeFixes` result BEFORE the merge): if
+the provider emitted no add-import it stays green (proven per-run, not assumed); the
+moment a provider DOES emit one the canary flips to the real end-to-end assert that
+the import LANDED in the `.vue` — so it cannot pass vacuously while the merge is
+broken.
 
 ## Tests
 

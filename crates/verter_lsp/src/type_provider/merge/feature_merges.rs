@@ -436,6 +436,47 @@ pub fn merge_signature_help(
 
 // ── Code actions merge ──────────────────────────────────────────────
 
+/// Resolve the carrier import anchor for the add-import quick-fix re-anchor — USE-SITE-AWARE and
+/// fail-closed. Returns `Some` ONLY when:
+/// 1. the CURRENT request's carrier is a **Vue SFC** (`path_is_vue_carrier` over the carrier stem of
+///    `current_tsx_path`) — a Svelte / non-Vue carrier yields `None`, so the import is never
+///    re-anchored into a synthesized (Vue-only) `<script setup>` block spliced onto the wrong source;
+///    AND
+/// 2. that Vue SFC has an **existing** `<script setup>` block — [`resolve_script_import_anchor`]
+///    returns [`ScriptImportInsertionAnchor::ExistingScriptSetup`]. A Vue SFC with no `<script setup>`
+///    resolves to `CreateScriptSetup`, which is DROPPED here: synthesizing a brand-new block from a
+///    quick-fix would not add the import where the unresolved symbol lives (e.g. an Options-API
+///    `<script>`), so it fails closed rather than mis-place.
+///
+/// This mirrors the discipline of the component-completion path (`build_auto_import_edit`'s
+/// `ExistingScriptSetup`-only gate) and the completion-resolve self-file guard. The completion-resolve
+/// path itself accepts a synthesized `CreateScriptSetup` (Volar parity) because it has ALREADY proven
+/// a real Vue carrier that is not a self-file projection; the code-action merge has weaker context
+/// here, so it restricts to the provable-correct anchor.
+fn codeaction_reanchor_anchor(
+    current_tsx_path: &str,
+    carrier_source: &str,
+    user_import_spans: &[(u32, u32)],
+) -> Option<crate::type_provider::auto_import::ScriptImportInsertionAnchor> {
+    use crate::type_provider::auto_import::{
+        resolve_script_import_anchor, ScriptImportInsertionAnchor,
+    };
+
+    // The carrier stem is the IDE virtual path minus the trailing `.tsx`/`.jsx`. The branch only
+    // runs for `is_carrier_ide_path(current_tsx_path)` edits, so the suffix is present; guard anyway.
+    let carrier_stem = current_tsx_path
+        .strip_suffix(".tsx")
+        .or_else(|| current_tsx_path.strip_suffix(".jsx"))?;
+    if !verter_workspace::path_is_vue_carrier(carrier_stem) {
+        return None;
+    }
+    match resolve_script_import_anchor(carrier_source, user_import_spans) {
+        anchor @ ScriptImportInsertionAnchor::ExistingScriptSetup { .. } => Some(anchor),
+        // No `<script setup>` to extend — do NOT synthesize a block from a quick-fix.
+        ScriptImportInsertionAnchor::CreateScriptSetup { .. } => None,
+    }
+}
+
 /// Convert TypeProvider code actions to LSP CodeActions.
 ///
 /// A carrier IDE edit maps its TSX byte offsets back to the carrier source through that file's
@@ -450,9 +491,12 @@ pub fn merge_signature_help(
 /// generated TSX, which in Verter's projection lands inside the synthetic, unmapped helper-import
 /// preamble — so the strict mapper returns `None` and the edit would be DROPPED. Such a CURRENT-file
 /// preamble insertion is re-anchored at the carrier's `<script setup>` import insertion site through
-/// the SAME proven mechanism the completion auto-import path uses
-/// ([`crate::type_provider::auto_import::reanchor_preamble_import_edit`]) — `carrier_source` and
-/// `user_import_spans` (the SFC-absolute top-level import spans) drive that anchor. A FOREIGN
+/// the SAME shared re-anchor the completion auto-import path uses
+/// ([`crate::type_provider::auto_import::reanchor_preamble_import_edits`]) — `carrier_source` and
+/// `user_import_spans` (the SFC-absolute top-level import spans) drive a USE-SITE-AWARE anchor
+/// ([`codeaction_reanchor_anchor`]): re-anchor fires ONLY for a Vue SFC carrier WITH an existing
+/// `<script setup>` block. A Svelte / non-Vue carrier, or a Vue SFC with no `<script setup>` (which
+/// would otherwise synthesize a Vue-only block from a quick-fix), is DROPPED fail-closed. A FOREIGN
 /// carrier `.tsx` preamble insertion is NOT re-anchored (its `<script setup>` is not in-context) and
 /// stays dropped; a `SelfFile` projection has no preamble boundary, so it fails closed too.
 ///
@@ -532,21 +576,33 @@ pub fn merge_code_actions(
                     let is_current_file = verter_span::path::canonicalize_path_cow(edit_path)
                         == verter_span::path::canonicalize_path_cow(current_tsx_path);
                     if is_current_file {
-                        let provider_edit = crate::type_provider::auto_import::ProviderImportEdit {
+                        // USE-SITE-AWARE, fail-closed: resolve the carrier import anchor ONLY when
+                        // the current request's carrier is a Vue SFC AND it has an EXISTING
+                        // `<script setup>` block (see `codeaction_reanchor_anchor`). A Svelte /
+                        // non-Vue carrier, or a Vue carrier with no `<script setup>`, yields `None`
+                        // — the quick-fix import is then DROPPED rather than synthesizing a (Vue-only)
+                        // block into the wrong place. The shared `reanchor_preamble_import_edits`
+                        // borrows `edit.new_text` (no clone) and only the SUCCESSFUL re-anchor moves
+                        // it into the carrier `TextEdit`.
+                        let anchor = codeaction_reanchor_anchor(
+                            current_tsx_path,
+                            carrier_source,
+                            user_import_spans,
+                        );
+                        let borrowed = [crate::type_provider::auto_import::BorrowedImportEdit {
                             start: edit.start,
                             end: edit.end,
-                            new_text: edit.new_text.clone(),
-                        };
-                        if let Some(reanchored) =
-                            crate::type_provider::auto_import::reanchor_preamble_import_edit(
-                                &provider_edit,
+                            new_text: &edit.new_text,
+                        }];
+                        let outcome =
+                            crate::type_provider::auto_import::reanchor_preamble_import_edits(
+                                &borrowed,
                                 tsx_line_index,
                                 mapper,
-                                carrier_source,
+                                anchor.as_ref(),
                                 carrier_line_index,
-                                user_import_spans,
-                            )
-                        {
+                            );
+                        if let Some(reanchored) = outcome.reanchored {
                             let carrier_path =
                                 normalize_carrier_path(edit_path, carrier_source_exists);
                             if let Some(uri) = path_to_uri(carrier_path) {
@@ -555,7 +611,8 @@ pub fn merge_code_actions(
                         }
                     }
                     // FAIL CLOSED: any unmapped carrier-IDE edit that is not a re-anchorable
-                    // current-file preamble insertion is dropped — never line-0'd.
+                    // current-file preamble insertion (or whose use-site gate rejects it) is
+                    // dropped — never line-0'd.
                     continue;
                 }
 
