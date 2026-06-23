@@ -578,3 +578,47 @@ async fn dynamic_import_component_is_carrier_linked_tsserver() {
     );
     session.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// isolatedDeclarations — carrier codegen declaration-safety characterization
+// ---------------------------------------------------------------------------
+//
+// Under `isolatedDeclarations: true` + `declaration: true`, the provider rejects
+// any exported binding whose type cannot be emitted without inference (TS9xxx).
+// This is a carrier/codegen declaration-safety characterization, NOT import
+// resolution: Verter's generated IDE TSX for a `.vue` must NOT introduce
+// spurious TS9xxx isolated-declaration errors. Verified on BOTH providers: the
+// only diagnostics are the ambient `vue`-not-found / JSX-intrinsics noise (the
+// fixtures vendor no `vue`), never a TS9xxx — and `<IsoChild>` still resolves.
+
+real_provider_test!(
+    import_isolated_declarations_no_spurious_9xxx,
+    fixture = "import_isolated_declarations",
+    async fn run(session) {
+        let uri = session.open_fixture_file("src/App.vue").await;
+        session.open_fixture_file("src/IsoChild.vue").await;
+
+        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
+            eprintln!("skipping: provider not warmed up");
+            return;
+        }
+
+        let diags = session.merged_diagnostics(&uri).await;
+        // No TS9xxx isolated-declaration-family diagnostic may originate from
+        // Verter's generated carrier TSX.
+        let iso_decl_err = diags.iter().find(|d| {
+            matches!(
+                d.code.as_ref(),
+                Some(tower_lsp_server::ls_types::NumberOrString::String(s))
+                    if s.starts_with('9') && s.len() == 4
+            )
+        });
+        assert!(
+            iso_decl_err.is_none(),
+            "Verter's generated carrier TSX must not introduce a spurious TS9xxx \
+             isolated-declaration error; got: {iso_decl_err:?} (all: {diags:?})"
+        );
+        // And the imported child still resolves its props under isolatedDeclarations.
+        assert_tag_hover_has_prop(session, &uri, "<IsoChild", "isoChildOnly").await;
+    }
+);
