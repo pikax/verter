@@ -8129,6 +8129,50 @@ async fn barrel_eager_sync_follows_reexport_hops_and_is_provider_neutral() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn barrel_eager_sync_terminates_on_reexport_cycle_and_still_syncs_terminal() {
+    // A re-export CYCLE: `a.ts` (`export * from './b'`) <-> `b.ts`
+    // (`export * from './a'`), with `a.ts` ALSO re-exporting a terminal carrier
+    // (`export { default as Cyc } from './Cyc.vue'`). The bounded level-BFS must
+    // TERMINATE on the cycle (an unbounded walk would spin / overflow) AND still
+    // reach the terminal `Cyc.vue` carrier. Discriminating on the cycle bound:
+    // the test would hang (or never sync Cyc.vue) without cycle/visited tracking.
+    let cyc = "<script setup lang=\"ts\">\ndefineProps<{ cyc: number }>()\n</script>\n<template><div>{{ cyc }}</div></template>\n";
+    let a_barrel = "export * from './b'\nexport { default as Cyc } from './Cyc.vue'\n";
+    let b_barrel = "export * from './a'\n";
+    let usage = "<script setup lang=\"ts\">\nimport { Cyc } from './a'\n</script>\n<template><Cyc></Cyc></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
+        ("src/Cyc.vue", "vue", cyc),
+        ("src/a.ts", "typescript", a_barrel),
+        ("src/b.ts", "typescript", b_barrel),
+        ("src/Usage.vue", "vue", usage),
+    ])
+    .await;
+
+    let server = service.inner();
+    let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+
+    // If the BFS did not bound the cycle this call would not return.
+    server.ensure_barrel_imports_synced(&usage_uri).await;
+
+    let calls = provider.file_sync_calls();
+    let opened: Vec<String> = calls
+        .iter()
+        .filter_map(|call| match call {
+            MockCall::OpenFile { path, .. } => Some(path.replace('\\', "/")),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        opened.iter().any(|p| p.contains("Cyc.vue")),
+        "a re-export cycle must still terminate and sync the terminal carrier Cyc.vue; opened={opened:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "install_test_resolver_for_root builds a ProjectPayload::Fallback that does not parse \
             tsconfig `paths`, so an @/-alias seed cannot resolve in this harness. The production \
             Configured-project resolver is alias-aware and the BFS routes @/ through it exactly \

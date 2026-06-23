@@ -456,3 +456,125 @@ real_provider_test!(
         }
     }
 );
+
+// ---------------------------------------------------------------------------
+// Edge import forms on the bundler fixture: side-effect, dynamic, broken path
+// ---------------------------------------------------------------------------
+//
+// Same fixture, separate session: characterizes the non-value-component import
+// forms. Side-effect imports register NO component binding (Verter-owned); a
+// broken path surfaces module-not-found (TS2307); a dynamic `import('./X.vue')`
+// is NOT discovered as a template component (a tracked gap — async-component
+// discovery is not supported; the dynamic-import companion gap test asserts the
+// desired behavior).
+
+real_provider_test!(
+    import_core_bundler_edge,
+    fixture = "import_core_bundler",
+    async fn run(session) {
+        let uri = session.open_fixture_file("src/EdgeImports.vue").await;
+        session.open_fixture_file("src/DirectComp.vue").await;
+
+        // Verter-owned: side-effect + dynamic imports register NO template
+        // component value binding. Assert on the analysis snapshot regardless of
+        // provider warmth (a pure Verter classification).
+        let analysis = session
+            .server()
+            .test_documents()
+            .get_analysis(&uri)
+            .expect("EdgeImports.vue analysis should be present");
+        if let Some(template) = &analysis.template {
+            // A side-effect import (`import './sideEffect'`) and a dynamic import
+            // (`import('./DirectComp.vue')`) must not appear as template
+            // components.
+            assert!(
+                !template
+                    .components
+                    .iter()
+                    .any(|c| c.import_source.as_deref() == Some("./sideEffect")),
+                "a side-effect import must NOT register a template component; got: {:?}",
+                template.components.iter().map(|c| &c.name).collect::<Vec<_>>()
+            );
+            assert!(
+                !template.components.iter().any(|c| c.name == "Lazy"),
+                "a dynamic import bound to `Lazy` must NOT register a template component; got: {:?}",
+                template.components.iter().map(|c| &c.name).collect::<Vec<_>>()
+            );
+        }
+
+        // Provider semantic failure: the broken import path surfaces TS2307.
+        if session
+            .wait_until_ready(&uri, "{{ count }}", 3, "count")
+            .await
+        {
+            let diags = session.merged_diagnostics(&uri).await;
+            assert!(
+                diags.iter().any(|d| {
+                    matches!(
+                        d.code.as_ref(),
+                        Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == "2307"
+                    ) && d.message.contains("does-not-exist")
+                }),
+                "the broken import path must surface module-not-found (TS2307) for \
+                 ./does-not-exist; got: {diags:?}"
+            );
+        }
+    }
+);
+
+// TRACKED GAP: a `defineAsyncComponent(() => import('./Comp.vue'))` is NOT
+// DISCOVERED by Verter as a carrier-linked template component — the
+// template-component analysis records the `<Lazy>` usage with
+// `import_source = None`, so Verter-owned carrier features (auto-import,
+// go-to-definition into the carrier, rename spanning the carrier) do not target
+// it. (The provider still INFERS the props via TS, so plain hover happens to
+// show them — which is exactly why this test keys on the Verter-owned carrier
+// LINKAGE, not on provider-inferred hover.) This asserts the DESIRED linkage
+// (`import_source = Some(".../DirectComp.vue")`) so it FAILS today and PASSES
+// once async-component discovery is supported. Discriminating, not a stub.
+#[ignore = "tracked gap: defineAsyncComponent(() => import('./Comp.vue')) is not discovered as a carrier-linked template component (analysis import_source=None)"]
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_import_component_is_carrier_linked_tsserver() {
+    let Some(session) = crate::test_harness::TestSessionBuilder::new(
+        crate::test_harness::TestProviderKind::Tsserver,
+    )
+    .fixture("import_core_bundler")
+    .build()
+    .await
+    else {
+        return;
+    };
+    let uri = session
+        .open_virtual(
+            "src/DynamicConsumer.vue",
+            "<script setup lang=\"ts\">\n\
+             import { ref, defineAsyncComponent } from 'vue'\n\
+             const Lazy = defineAsyncComponent(() => import('./DirectComp.vue'))\n\
+             const count = ref(0)\n\
+             </script>\n\
+             <template>\n<div>{{ count }}</div>\n<Lazy directOnly=\"a\" />\n</template>\n",
+        )
+        .await;
+    session.open_fixture_file("src/DirectComp.vue").await;
+    let _ = session
+        .wait_until_ready(&uri, "{{ count }}", 3, "count")
+        .await;
+    let analysis = session
+        .server()
+        .test_documents()
+        .get_analysis(&uri)
+        .expect("DynamicConsumer.vue analysis should be present");
+    let lazy = analysis
+        .template
+        .as_ref()
+        .and_then(|t| t.components.iter().find(|c| c.name == "Lazy"))
+        .expect("the `<Lazy>` component usage should be recorded");
+    assert_eq!(
+        lazy.import_source.as_deref(),
+        Some("./DirectComp.vue"),
+        "a dynamically-imported component should be carrier-linked to its `.vue` \
+         source; got import_source={:?}",
+        lazy.import_source
+    );
+    session.shutdown().await;
+}
