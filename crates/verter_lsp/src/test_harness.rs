@@ -897,6 +897,73 @@ pub(crate) fn fixture_workspace_root(name: &str) -> String {
     crate::test_utils::canonical_test_path(&path)
 }
 
+/// Materialize the vendored `@pkg/ui` node-modules package (a TS-declared Vue
+/// component exported via package `exports`) into a fixture's `node_modules` at
+/// runtime, returning the workspace root.
+///
+/// `node_modules` is gitignored repo-wide, so a vendored package cannot be
+/// committed; the import-matrix nodenext test creates its own dependency this
+/// way (hermetic, reproducible, no external corpus). The disk write lives here
+/// in the (fixture-setup) harness — the same test-fixture-write category as the
+/// rest of this module — rather than in the test file. Paths use `PathBuf::join`
+/// (cross-platform).
+pub(crate) fn materialize_pkg_ui(fixture: &str) -> std::path::PathBuf {
+    let root = std::path::PathBuf::from(fixture_workspace_root(fixture));
+    let pkg = root.join("node_modules").join("@pkg").join("ui");
+    let dist = pkg.join("dist");
+    std::fs::create_dir_all(&dist).expect("create @pkg/ui dist dir");
+    std::fs::write(
+        pkg.join("package.json"),
+        r#"{
+  "name": "@pkg/ui",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  }
+}
+"#,
+    )
+    .expect("write @pkg/ui package.json");
+    std::fs::write(
+        dist.join("index.d.ts"),
+        "import type { DefineComponent } from \"vue\";\n\
+         export declare const PkgComp: DefineComponent<{ pkgRootOnly: string }>;\n",
+    )
+    .expect("write @pkg/ui index.d.ts");
+    std::fs::write(dist.join("index.js"), "export const PkgComp = {};\n")
+        .expect("write @pkg/ui index.js");
+    root
+}
+
+/// Materialize the vendored `@pkg/vuecomp` node-modules package (whose only
+/// component export is a RAW `.vue` SFC) into a fixture's `node_modules` at
+/// runtime, returning the workspace root. Same rationale/category as
+/// [`materialize_pkg_ui`].
+pub(crate) fn materialize_pkg_vuecomp(fixture: &str) -> std::path::PathBuf {
+    let root = std::path::PathBuf::from(fixture_workspace_root(fixture));
+    let pkg = root.join("node_modules").join("@pkg").join("vuecomp");
+    std::fs::create_dir_all(&pkg).expect("create @pkg/vuecomp dir");
+    std::fs::write(
+        pkg.join("package.json"),
+        r#"{
+  "name": "@pkg/vuecomp",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": { "./Vendored.vue": "./Vendored.vue" }
+}
+"#,
+    )
+    .expect("write @pkg/vuecomp package.json");
+    std::fs::write(
+        pkg.join("Vendored.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ vendoredVueOnly: string }>()\n</script>\n\
+         <template><div>{{ vendoredVueOnly }}</div></template>\n",
+    )
+    .expect("write Vendored.vue");
+    root
+}
+
 /// Infer a language ID from a file extension.
 fn language_id_for(path: &str) -> String {
     if path.ends_with(".vue") {

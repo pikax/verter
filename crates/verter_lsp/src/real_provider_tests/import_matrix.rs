@@ -209,41 +209,10 @@ async fn tgo_carrier_diagnostics_resolve_path_alias_tsgo() {
 //
 // `node_modules` is gitignored repo-wide, so a vendored package cannot be
 // committed. The test MATERIALIZES the minimal `@pkg/ui` package into the
-// fixture's (gitignored) `node_modules` at runtime before the provider session
-// starts — the test creates its own dependency, so it stays hermetic and
-// reproducible without an external corpus. Paths are built with `PathBuf::join`
-// (cross-platform).
-
-/// Materialize the vendored `@pkg/ui` package into the fixture `node_modules`.
-/// Returns the workspace root so the caller can build the session against it.
-fn materialize_pkg_ui(fixture: &str) -> std::path::PathBuf {
-    let root = std::path::PathBuf::from(crate::test_harness::fixture_workspace_root(fixture));
-    let pkg = root.join("node_modules").join("@pkg").join("ui");
-    let dist = pkg.join("dist");
-    std::fs::create_dir_all(&dist).expect("create @pkg/ui dist dir");
-    std::fs::write(
-        pkg.join("package.json"),
-        r#"{
-  "name": "@pkg/ui",
-  "version": "1.0.0",
-  "type": "module",
-  "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
-  }
-}
-"#,
-    )
-    .expect("write @pkg/ui package.json");
-    std::fs::write(
-        dist.join("index.d.ts"),
-        "import type { DefineComponent } from \"vue\";\n\
-         export declare const PkgComp: DefineComponent<{ pkgRootOnly: string }>;\n",
-    )
-    .expect("write @pkg/ui index.d.ts");
-    std::fs::write(dist.join("index.js"), "export const PkgComp = {};\n")
-        .expect("write @pkg/ui index.js");
-    root
-}
+// fixture's (gitignored) `node_modules` at runtime (via the fixture-setup
+// harness `materialize_pkg_ui`) before the provider session starts — the test
+// creates its own dependency, so it stays hermetic and reproducible without an
+// external corpus.
 
 /// Characterize nodenext package `exports` ("." entry) AND package `imports`
 /// (`#internal/*`) resolution for a Vue carrier. The shared workspace resolver
@@ -257,7 +226,7 @@ fn materialize_pkg_ui(fixture: &str) -> std::path::PathBuf {
 /// tgo carrier-diagnostics divergence separately.)
 #[tokio::test(flavor = "multi_thread")]
 async fn import_nodenext_packages_tsserver() {
-    let _root = materialize_pkg_ui("import_nodenext_packages");
+    let _root = crate::test_harness::materialize_pkg_ui("import_nodenext_packages");
     let Some(session) = crate::test_harness::TestSessionBuilder::new(
         crate::test_harness::TestProviderKind::Tsserver,
     )
@@ -290,35 +259,6 @@ async fn import_nodenext_packages_tsserver() {
     session.shutdown().await;
 }
 
-/// Materialize a node_modules package whose only component export is a RAW
-/// `.vue` SFC (no pre-generated `.d.ts`). Resolving its props requires Verter to
-/// GENERATE a carrier from external `.vue` source under `node_modules` — a
-/// hard-STOP boundary (the resolver is bounded by `workspace_root` and does not
-/// synthesize node_modules SFC carriers). Returns the workspace root.
-fn materialize_pkg_vuecomp(fixture: &str) -> std::path::PathBuf {
-    let root = std::path::PathBuf::from(crate::test_harness::fixture_workspace_root(fixture));
-    let pkg = root.join("node_modules").join("@pkg").join("vuecomp");
-    std::fs::create_dir_all(&pkg).expect("create @pkg/vuecomp dir");
-    std::fs::write(
-        pkg.join("package.json"),
-        r#"{
-  "name": "@pkg/vuecomp",
-  "version": "1.0.0",
-  "type": "module",
-  "exports": { "./Vendored.vue": "./Vendored.vue" }
-}
-"#,
-    )
-    .expect("write @pkg/vuecomp package.json");
-    std::fs::write(
-        pkg.join("Vendored.vue"),
-        "<script setup lang=\"ts\">\ndefineProps<{ vendoredVueOnly: string }>()\n</script>\n\
-         <template><div>{{ vendoredVueOnly }}</div></template>\n",
-    )
-    .expect("write Vendored.vue");
-    root
-}
-
 // CHARACTERIZATION (PASS — expectation overturned by evidence): a component
 // imported from a RAW `.vue` SFC inside `node_modules` DOES resolve its props.
 // Verter synthesizes the carrier surface for the external `.vue` and the
@@ -327,7 +267,7 @@ fn materialize_pkg_vuecomp(fixture: &str) -> std::path::PathBuf {
 // materialized at runtime since `node_modules` is gitignored.
 #[tokio::test(flavor = "multi_thread")]
 async fn node_modules_raw_vue_carrier_resolves_props_tsserver() {
-    let _root = materialize_pkg_vuecomp("import_nodenext_packages");
+    let _root = crate::test_harness::materialize_pkg_vuecomp("import_nodenext_packages");
     let Some(session) = crate::test_harness::TestSessionBuilder::new(
         crate::test_harness::TestProviderKind::Tsserver,
     )
