@@ -941,7 +941,7 @@ impl VerterLanguageServer {
     pub(super) async fn ensure_provider_synced(&self, uri: &Uri) {
         self.ensure_current_file_synced(uri).await;
         self.ensure_imported_carrier_apis_synced(uri).await;
-        self.ensure_barrel_imports_synced_for_tsgo(uri).await;
+        self.ensure_barrel_imports_synced(uri).await;
     }
 
     pub(super) async fn ensure_imported_carrier_apis_synced(&self, uri: &Uri) {
@@ -982,16 +982,20 @@ impl VerterLanguageServer {
         }
     }
 
-    /// Sync barrel (non-carrier re-export) imports and their Vue dependencies to TSGO.
+    /// Sync barrel (non-carrier re-export) imports and their framework-carrier
+    /// dependencies into the active type provider.
     ///
-    /// When a Vue file imports components through a barrel (`import { Comp } from './components'`),
-    /// `ensure_imported_carrier_apis_synced` misses both the barrel and its Vue re-export targets
-    /// because the barrel is a `.ts` file. This method discovers barrels from template component
-    /// usages, syncs their Vue dependencies first, then syncs the barrel itself.
-    pub(super) async fn ensure_barrel_imports_synced_for_tsgo(&self, uri: &Uri) {
-        if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-            return;
-        }
+    /// When a component is imported through a barrel (`import { Comp } from './components'`),
+    /// possibly across several `export *` / `export { … } from` hops, `ensure_imported_carrier_apis_synced`
+    /// misses both the intermediate `.ts` barrels and the terminal carrier (`.vue` / `.svelte`)
+    /// re-export targets. This walks the re-export graph reachable from the template's component
+    /// usages (a bounded level-BFS), classifies each hop by its RESOLVED target's carrier-ness
+    /// (never by the specifier string, so aliased `@/…` and `export *` re-exports are followed,
+    /// and the terminal carrier is reached at any depth), syncs the discovered carrier
+    /// dependencies first, then syncs the intermediate barrels. Provider-neutral: both tsgo and
+    /// tsserver benefit (a bounded over-sync of unrelated barrel imports is acceptable — the
+    /// provider decides the actual symbol).
+    pub(super) async fn ensure_barrel_imports_synced(&self, uri: &Uri) {
         let Some(sync) = &self.project_sync else {
             return;
         };
@@ -1014,6 +1018,18 @@ impl VerterLanguageServer {
         let mut seen_barrels = HashSet::new();
         let mut seen_barrel_carrier = HashSet::new();
 
+        // Bounds (defensive): a pathological or cyclic re-export graph must never stall
+        // did_open. Truncate (with a trace) rather than spin.
+        const MAX_BFS_DEPTH: usize = 8;
+        const MAX_NON_CARRIER_NODES: usize = 128;
+        const MAX_RESOLVED_REFS: usize = 1024;
+        const MAX_CARRIER_TARGETS: usize = 512;
+        let mut resolved_refs_remaining: usize = MAX_RESOLVED_REFS;
+
+        // Seed the frontier from template component import sources that resolve to a
+        // non-carrier (barrel) module. A directly-resolved carrier is already handled by
+        // carrier sync.
+        let mut frontier: Vec<String> = Vec::new();
         for component in &template.components {
             let Some(import_source) = component.import_source.as_deref() else {
                 continue;
@@ -1022,35 +1038,61 @@ impl VerterLanguageServer {
                 continue;
             };
             if verter_workspace::path_is_carrier(&resolved) {
-                continue; // a directly-resolved carrier is already handled by carrier sync
-            }
-            if !seen_barrels.insert(resolved.clone()) {
                 continue;
             }
+            if seen_barrels.insert(resolved.clone()) && barrel_ids.len() < MAX_NON_CARRIER_NODES {
+                frontier.push(resolved.clone());
+                barrel_ids.push(resolved);
+            }
+        }
 
-            // Load barrel into host and scan its module references for carrier
-            // (`.vue`, `.svelte`, …) specifiers re-exported through it.
-            host.ensure_loaded(&resolved);
-
-            if let Some(barrel_analysis) = host.get_analysis(&resolved) {
+        // Level-BFS over re-export hops. Each module reference is resolved through the shared
+        // (alias-aware) workspace resolver and classified by its RESOLVED target's carrier-ness
+        // — never by the specifier string — so `export * from './x'` and aliased (`@/…`)
+        // re-exports are followed, and the terminal carrier is reached at any depth.
+        let mut depth = 0usize;
+        while !frontier.is_empty() && depth < MAX_BFS_DEPTH {
+            let mut next: Vec<String> = Vec::new();
+            for barrel_id in &frontier {
+                host.ensure_loaded(barrel_id);
+                let Some(barrel_analysis) = host.get_analysis(barrel_id) else {
+                    continue;
+                };
                 for module_ref in barrel_analysis.module_references.iter() {
-                    if let Some(specifier) = &module_ref.literal_specifier {
-                        if verter_workspace::path_is_carrier(specifier) {
-                            if let Some(carrier_id) =
-                                self.resolve_import_specifier(&resolved, specifier)
-                            {
-                                if verter_workspace::path_is_carrier(&carrier_id)
-                                    && seen_barrel_carrier.insert(carrier_id.clone())
-                                {
-                                    barrel_carrier_deps.push(carrier_id);
-                                }
-                            }
+                    let Some(specifier) = module_ref.literal_specifier.as_deref() else {
+                        continue;
+                    };
+                    if resolved_refs_remaining == 0 {
+                        tracing::debug!(
+                            "barrel sync: resolved-ref budget exhausted; truncating re-export walk"
+                        );
+                        break;
+                    }
+                    resolved_refs_remaining -= 1;
+                    let Some(target) = self.resolve_import_specifier(barrel_id, specifier) else {
+                        continue;
+                    };
+                    if verter_workspace::path_is_carrier(&target) {
+                        if seen_barrel_carrier.insert(target.clone())
+                            && barrel_carrier_deps.len() < MAX_CARRIER_TARGETS
+                        {
+                            barrel_carrier_deps.push(target);
                         }
+                    } else if seen_barrels.insert(target.clone())
+                        && barrel_ids.len() < MAX_NON_CARRIER_NODES
+                    {
+                        next.push(target.clone());
+                        barrel_ids.push(target);
                     }
                 }
             }
-
-            barrel_ids.push(resolved);
+            frontier = next;
+            depth += 1;
+        }
+        if !frontier.is_empty() {
+            tracing::debug!(
+                "barrel sync: BFS depth/size bound reached; truncating remaining re-export hops"
+            );
         }
 
         // Sync carrier dependencies first (so the provider has their virtual
