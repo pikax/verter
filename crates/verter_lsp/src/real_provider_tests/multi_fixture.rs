@@ -91,8 +91,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/AppBarrel.vue").await;
         let _mycomp = session.open_fixture_file("src/components/MyComp.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 

@@ -83,10 +83,12 @@ real_provider_test!(
         // Named import reached through a barrel-of-barrels (`export *`).
         assert_tag_hover_has_prop(session, &uri, "<WidgetFromStar", "baseUrlOnly").await;
 
-        // type-only import (`import type { OnlyAType }`) — Verter-owned
-        // classification: it must NOT register a template component value
-        // binding. Read the analysis snapshot and assert the import is flagged
-        // type-only AND no component usage links back to its source.
+        // type-only import (`import type { OnlyAType }`). The template renders
+        // `<OnlyAType :typeFieldOnly="1" />` (an intentional misuse) so the
+        // script-imports carrier-linkage map has a name to match — mirroring the
+        // accepted `<Lazy>` carrier-linkage discrimination in
+        // `import_core_bundler_edge`. This forces the LINKAGE fact rather than
+        // leaving the negative vacuous (no tag → nothing to (wrongly) link).
         let analysis = session
             .server()
             .test_documents()
@@ -97,27 +99,107 @@ real_provider_test!(
             .iter()
             .find(|i| i.source == "./types")
             .expect("the `./types` import should be analyzed");
+        // Genuine, separate Verter-owned fact: the import is flagged type-only.
         assert!(
             type_import.is_type_only,
             "`import type {{ OnlyAType }}` must be classified type-only"
         );
-        if let Some(template) = &analysis.template {
-            assert!(
-                !template
-                    .components
-                    .iter()
-                    .any(|c| c.import_source.as_deref() == Some("./types")),
-                "a type-only import must NOT register a template component; \
-                 components: {:?}",
-                template
-                    .components
-                    .iter()
-                    .map(|c| (&c.name, &c.import_source))
-                    .collect::<Vec<_>>()
-            );
-        }
+        // CHARACTERIZED TRACKED DEFECT (discriminating, asserted UNCONDITIONALLY —
+        // App.vue has a `<template>`): the script-imports carrier-linkage map does
+        // NOT exclude type-only bindings, so a rendered `<OnlyAType>` is CURRENTLY
+        // carrier-linked to its `import type` source (`import_source =
+        // Some("./types")`) even though the import is correctly flagged type-only
+        // above. Per the carrier-IDE/typed-IR rule a `import type {...}` must NEVER
+        // be carrier-linked as a value component, so the DESIRED state is
+        // `import_source = None`; that desired negative is the `#[ignore]`'d
+        // companion `type_only_import_is_not_carrier_linked_*` (which FAILS today
+        // and PASSES once the carrier-linkage map filters type-only bindings). This
+        // test pins the current linkage so the gap is explicit, not silent, and so
+        // it FAILS the moment Verter is fixed — at which point promote the
+        // companion to a live assert.
+        let template = analysis
+            .template
+            .as_ref()
+            .expect("App.vue should have a <template>");
+        assert!(
+            template
+                .components
+                .iter()
+                .any(|c| c.name == "OnlyAType" && c.import_source.as_deref() == Some("./types")),
+            "characterized tracked defect: a rendered `<OnlyAType>` is CURRENTLY \
+             carrier-linked to its `import type` source (the carrier-linkage map \
+             does not filter type-only bindings) — if this now reads None, the \
+             defect is fixed: promote `type_only_import_is_not_carrier_linked_*`; \
+             got: {:?}",
+            template
+                .components
+                .iter()
+                .filter(|c| c.name == "OnlyAType")
+                .map(|c| (&c.name, &c.import_source))
+                .collect::<Vec<_>>()
+        );
     }
 );
+
+// TRACKED GAP: a type-only import (`import type { OnlyAType } from './types'`)
+// rendered as a template tag (`<OnlyAType :typeFieldOnly="1" />`) IS wrongly
+// carrier-linked as a value component today — the script-imports carrier-linkage
+// map built for the template converter does not exclude type-only bindings, so
+// the `<OnlyAType>` template-component usage carries
+// `import_source = Some("./types")`. Per the carrier-IDE / typed-IR rule a
+// `import type {...}` must NEVER be carrier-linked as a value component (the
+// import IS correctly flagged `is_type_only`, but the linkage map ignores that),
+// so the DESIRED `import_source` is None. This asserts that DESIRED non-linkage
+// so it FAILS today and PASSES once the carrier-linkage map filters type-only
+// bindings. The current (wrong) linkage is pinned by `import_core_bundler`'s
+// type-only block. Discriminating, not a stub.
+#[ignore = "tracked gap: a type-only import rendered as a tag is wrongly carrier-linked as a value component (carrier-linkage map does not filter type-only bindings; import_source=Some instead of None)"]
+#[tokio::test(flavor = "multi_thread")]
+async fn type_only_import_is_not_carrier_linked_as_value_component_tsserver() {
+    let Some(session) = crate::test_harness::TestSessionBuilder::new(
+        crate::test_harness::TestProviderKind::Tsserver,
+    )
+    .fixture("import_core_bundler")
+    .build()
+    .await
+    else {
+        return;
+    };
+    let uri = session.open_fixture_file("src/App.vue").await;
+    let _ = session
+        .wait_until_ready(&uri, "{{ count }}", 3, "count")
+        .await;
+    let analysis = session
+        .server()
+        .test_documents()
+        .get_analysis(&uri)
+        .expect("App.vue analysis should be present");
+    let type_import = analysis
+        .imports
+        .iter()
+        .find(|i| i.source == "./types")
+        .expect("the `./types` import should be analyzed");
+    assert!(
+        type_import.is_type_only,
+        "`import type {{ OnlyAType }}` must be classified type-only"
+    );
+    let template = analysis
+        .template
+        .as_ref()
+        .expect("App.vue should have a <template>");
+    let only_a_type_link = template
+        .components
+        .iter()
+        .find(|c| c.name == "OnlyAType")
+        .and_then(|c| c.import_source.clone());
+    assert_eq!(
+        only_a_type_link, None,
+        "a type-only import (`import type {{ OnlyAType }}`) must NEVER be \
+         carrier-linked as a value component (import_source must stay None); \
+         got: {only_a_type_link:?}"
+    );
+    session.shutdown().await;
+}
 
 // TRACKED GAP: a namespaced component tag (`<widgets.WidgetFromStar>`, reached
 // via `import * as widgets from './widgets'`) does NOT resolve to its carrier's
@@ -586,49 +668,53 @@ real_provider_test!(
             .test_documents()
             .get_analysis(&uri)
             .expect("EdgeImports.vue analysis should be present");
-        if let Some(template) = &analysis.template {
-            // Verter-owned classification, keyed on carrier LINKAGE (import_source),
-            // not on whether a tag happens to be parsed as a template usage:
-            //
-            // A side-effect import (`import './sideEffect'`) registers no component
-            // binding at all, so no template component links back to it.
-            assert!(
-                !template
-                    .components
-                    .iter()
-                    .any(|c| c.import_source.as_deref() == Some("./sideEffect")),
-                "a side-effect import must NOT register a carrier-linked template component; got: {:?}",
-                template
-                    .components
-                    .iter()
-                    .map(|c| (&c.name, &c.import_source))
-                    .collect::<Vec<_>>()
-            );
-            // A bare dynamic-import arrow (`const Lazy = () => import('./DirectComp.vue')`)
-            // rendered as `<Lazy directOnly="a" />` IS recorded as a template usage,
-            // but it is NOT carrier-linked: its `import_source` stays None, so no
-            // Verter-owned carrier feature targets `./DirectComp.vue` through it. The
-            // render forces the discrimination — were the arrow wrongly classified as
-            // a carrier-linked component, a `Lazy` entry would carry
-            // `import_source = Some("./DirectComp.vue")`. (The desired future linkage
-            // is the `#[ignore]`'d `dynamic_import_component_is_carrier_linked_*`
-            // companion; this characterizes the current non-linkage.)
-            assert!(
-                !template
-                    .components
-                    .iter()
-                    .any(|c| c.name == "Lazy"
-                        && c.import_source.as_deref() == Some("./DirectComp.vue")),
-                "a bare dynamic-import arrow bound to `Lazy` must NOT be carrier-linked \
-                 to ./DirectComp.vue (import_source stays None); got: {:?}",
-                template
-                    .components
-                    .iter()
-                    .filter(|c| c.name == "Lazy")
-                    .map(|c| (&c.name, &c.import_source))
-                    .collect::<Vec<_>>()
-            );
-        }
+        // Assert UNCONDITIONALLY (EdgeImports.vue has a `<template>`) so a missing
+        // template FAILS rather than silently no-op'ing past the carrier checks.
+        let template = analysis
+            .template
+            .as_ref()
+            .expect("EdgeImports.vue should have a <template>");
+        // Verter-owned classification, keyed on carrier LINKAGE (import_source),
+        // not on whether a tag happens to be parsed as a template usage:
+        //
+        // A side-effect import (`import './sideEffect'`) registers no component
+        // binding at all, so no template component links back to it.
+        assert!(
+            !template
+                .components
+                .iter()
+                .any(|c| c.import_source.as_deref() == Some("./sideEffect")),
+            "a side-effect import must NOT register a carrier-linked template component; got: {:?}",
+            template
+                .components
+                .iter()
+                .map(|c| (&c.name, &c.import_source))
+                .collect::<Vec<_>>()
+        );
+        // A bare dynamic-import arrow (`const Lazy = () => import('./DirectComp.vue')`)
+        // rendered as `<Lazy directOnly="a" />` IS recorded as a template usage,
+        // but it is NOT carrier-linked: its `import_source` stays None, so no
+        // Verter-owned carrier feature targets `./DirectComp.vue` through it. The
+        // render forces the discrimination — were the arrow wrongly classified as
+        // a carrier-linked component, a `Lazy` entry would carry
+        // `import_source = Some("./DirectComp.vue")`. (The desired future linkage
+        // is the `#[ignore]`'d `dynamic_import_component_is_carrier_linked_*`
+        // companion; this characterizes the current non-linkage.)
+        assert!(
+            !template
+                .components
+                .iter()
+                .any(|c| c.name == "Lazy"
+                    && c.import_source.as_deref() == Some("./DirectComp.vue")),
+            "a bare dynamic-import arrow bound to `Lazy` must NOT be carrier-linked \
+             to ./DirectComp.vue (import_source stays None); got: {:?}",
+            template
+                .components
+                .iter()
+                .filter(|c| c.name == "Lazy")
+                .map(|c| (&c.name, &c.import_source))
+                .collect::<Vec<_>>()
+        );
 
         // Provider semantic failure: the broken import path surfaces TS2307.
         if !session

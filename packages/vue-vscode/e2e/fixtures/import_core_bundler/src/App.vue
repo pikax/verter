@@ -35,4 +35,10 @@ const typed: OnlyAType = { typeFieldOnly: 1 };
   <NamedFromBarrel namedBarrelOnly="e" />
   <WidgetFromStar :baseUrlOnly="2" />
   <widgets.WidgetFromStar :baseUrlOnly="3" />
+  <!-- Intentional misuse: `OnlyAType` is a `import type`, not a value. Rendering
+       it as a tag gives the script-imports carrier-linkage map a name to match,
+       so the type-only carrier-linkage fact is forced rather than vacuous (see
+       the type-only block + the `type_only_import_is_not_carrier_linked_*`
+       tracked-gap companion in import_matrix.rs). -->
+  <OnlyAType :typeFieldOnly="1" />
 </template>
