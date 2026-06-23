@@ -1,0 +1,15 @@
+{
+  "name": "e2e-import-nodenext-packages",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#internal/*": "./src/internal/*"
+  },
+  "dependencies": {
+    "@pkg/ui": "file:./node_modules/@pkg/ui",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
