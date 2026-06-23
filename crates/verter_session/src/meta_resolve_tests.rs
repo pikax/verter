@@ -6774,7 +6774,7 @@ defineProps<Props<T>>()
 
     let raised = match projected {
         QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => dispatch
-            .raise_node_to_type_expr(node_id)
+            .materialize_output_type_expr(node_id)
             .expect("raise must succeed on a ProjectPath result"),
         other => panic!(
             "spike #1: dispatch returned non-Value for ProjectPath(Props<T>, ['items']): {other:?}\n\
@@ -6888,7 +6888,7 @@ defineProps<Wrapper<Inner>>()
     // shape. `type Wrapper<T> = T` with T=Inner reduces to Inner — the
     // raised TypeExpr should NOT be a Ref to "Wrapper".
     let expanded_raised = dispatch
-        .raise_node_to_type_expr(lowered_expanded)
+        .materialize_output_type_expr(lowered_expanded)
         .expect("raise expanded");
     if let TypeExpr::Ref { ref name, .. } = expanded_raised {
         assert_ne!(
@@ -6905,7 +6905,7 @@ defineProps<Wrapper<Inner>>()
     // Navigate). Raising back to TypeExpr should preserve the Wrapper
     // Ref so downstream callers can decide whether to project further.
     let navigate_raised = dispatch
-        .raise_node_to_type_expr(lowered_navigate)
+        .materialize_output_type_expr(lowered_navigate)
         .expect("raise navigate");
     match &navigate_raised {
         TypeExpr::Ref { name, .. } => {
@@ -7183,7 +7183,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     };
 
     let raised = dispatch
-        .raise_node_to_type_expr(badge_node)
+        .materialize_output_type_expr(badge_node)
         .expect("raise_node_to_type_expr must succeed on the badge projection");
 
     // Resolve any leading Parenthesized/Alias-style wrappers.

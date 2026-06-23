@@ -729,8 +729,8 @@ pub(crate) fn decompose_indexed_access_chain_node(
 // barrel-routed declarations, so the shared walker (the merge / heritage
 // / Omit composition) is the place to fix any compound-root gap.
 
-/// Class D — Pick route-target via dispatch's `execute_pick`
-///.
+/// Class D — Pick route-target via dispatch's `execute_pick`, yielding the
+/// Pick result `SemanticNodeId` (node-native).
 ///
 /// Resolves `symbol_name` to a base `SemanticNodeId` (via Class A
 /// lowering on a bare `Ref` of the symbol), then dispatches
@@ -738,16 +738,24 @@ pub(crate) fn decompose_indexed_access_chain_node(
 /// (which routes through `build_builtin_utility` Pick arm at
 /// `build.rs:870`).
 ///
-/// Returns `Some(reduced)` when the dispatch produces a non-Opaque
-/// projection. Caller pattern (per the engine's
-/// `project_route_surface_expr` Pick fallback): use the result as a
-/// route surface; fall back to the raw registry-candidate path on miss.
-pub(crate) fn pick_via_dispatch_pick_helper(
+/// Returns `Some(node)` — the settled Pick result graph node — when the
+/// dispatch produces a non-recursive, non-error projection. It does NOT
+/// raise the node to a `TypeExpr`: the §1a fence keeps the Pick route
+/// node-native so the caller drives the node-native member-surface core
+/// (`materialize_member_surface_node`) directly, instead of raising the
+/// Pick to a `TypeExpr` and re-feeding it into the lower-then-delegate
+/// `TypeExpr` arm (a materialize-then-decide round-trip).
+///
+/// Caller pattern (per the engine's `project_route_surface_expr` Pick
+/// fallback): use the result node as a route surface via
+/// `materialize_member_surface_node`; fall back to the raw
+/// registry-candidate path on miss.
+pub(crate) fn pick_via_dispatch_pick_node(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
     symbol_name: &str,
     members: &[String],
-) -> Option<verter_type_expr::TypeExpr> {
+) -> Option<crate::semantic_query::SemanticNodeId> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, QueryResult};
 
@@ -766,11 +774,10 @@ pub(crate) fn pick_via_dispatch_pick_helper(
 
     let members_arc: Vec<Arc<str>> = members.iter().map(|s| Arc::from(s.as_str())).collect();
     let result = dispatch.execute_pick(base, &members_arc, ProjectionMode::Expanded);
-    let node = match result {
-        QueryResult::Value(id) => id,
-        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-    };
-    dispatch.raise_node_to_type_expr(node)
+    match result {
+        QueryResult::Value(id) => Some(id),
+        QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+    }
 }
 
 /// Class D — generic-Ref instantiation via dispatch.
@@ -824,7 +831,7 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
         expr,
         ProjectionMode::Expanded,
     )?;
-    let raised = dispatch.raise_node_to_type_expr(lowered)?;
+    let raised = dispatch.materialize_output_type_expr(lowered)?;
     // Callers use `.unwrap_or_else(|| original.clone())`, so a no-op
     // (raised == expr) must surface as `None` to preserve the caller's
     // own fallback path. A miss-shaped raise (Unknown/Opaque) likewise
@@ -1124,5 +1131,80 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
         ProjectionMode::Identity | ProjectionMode::Navigate | ProjectionMode::Skeleton => {
             Some(projected)
         }
+    }
+}
+
+#[cfg(test)]
+mod pick_node_signature_tests {
+    //! §1a fence proof (compile-level ONLY): the Pick route helper
+    //! `pick_via_dispatch_pick_node` yields a graph `SemanticNodeId`, NOT a
+    //! raised `TypeExpr`. The materialize-then-decide path — raise Pick to a
+    //! `TypeExpr` and re-feed it into `materialize_member_surface_expr` — is
+    //! GONE: the helper no longer raises, so its only caller drives
+    //! `materialize_member_surface_node` (node-native) directly.
+    //!
+    //! The node-native swap is asserted at COMPILE LEVEL only, by the
+    //! `pick_helper_returns_a_graph_node_not_a_raised_type_expr` signature
+    //! test below: it coerces the helper to a fn pointer returning
+    //! `Option<SemanticNodeId>`, which type-checks only if the helper's real
+    //! signature matches. It FAILS to compile against the pre-change tree
+    //! (where the helper was `pick_via_dispatch_pick_helper` returning
+    //! `Option<TypeExpr>`) — both because the name does not exist and because
+    //! the return type would not unify with `Option<SemanticNodeId>`. That
+    //! compile-level signature assertion is the SOLE guard that the swap did
+    //! not regress to a raised `TypeExpr`.
+    //!
+    //! There is NO functional test exercising this helper today. The
+    //! `.or_else(|| pick_via_dispatch_pick_node(...))` Pick fallback in
+    //! `host_manage/component_meta_methods.rs` is CURRENTLY UNREACHABLE
+    //! through the in-tree Pick routes: it runs only when `properties` is
+    //! empty, but the per-member loop unconditionally pushes a property for
+    //! every member (a raw `IndexedAccess` fallback when nothing better is
+    //! found), so `properties` is empty iff `members` is empty — and every
+    //! `RouteDemand::Pick` producer REJECTS an empty key set
+    //! (`shallow_file_state.rs`, `graph_predicates.rs`). So no real Pick
+    //! route reaches this helper, and there is no functional test that drives
+    //! `pick_via_dispatch_pick_node` -> `materialize_member_surface_node`
+    //! (an empirical probe panic at the helper's head fired ZERO times across
+    //! the `verter_session` test suite).
+    //!
+    //! Error-arm behaviour difference (for the future reader, when this
+    //! fallback becomes reachable): the OLD `materialize_member_surface_expr`
+    //! NEVER returned `None` — on a miss it published the raised shell — so
+    //! the caller always got a member surface back; the NEW
+    //! `materialize_member_surface_node` returns `None` on
+    //! `MaterializeOutcome::Error`, and the caller then falls through to the
+    //! registry-candidate path instead. This error arm is currently
+    //! unreachable for the same reason as the fallback itself.
+    //!
+    //! DEFERRED: a durable body-level guard (one that fails closed on any
+    //! re-added raise inside `pick_via_dispatch_pick_node`) and a real
+    //! route-only-Pick functional test that actually drives this helper
+    //! belong with the later fence/guard work — NOT added here (a
+    //! body-scanning scanner is out of this block's scope, and a test that
+    //! cannot reach the code would be non-discriminating).
+
+    #[test]
+    fn pick_helper_returns_a_graph_node_not_a_raised_type_expr() {
+        // Coerce the helper to a fn pointer whose return type is EXACTLY
+        // `Option<SemanticNodeId>`. The coercion type-checks only if the
+        // helper's real signature matches; a `-> Option<TypeExpr>` helper
+        // (the old materialize-then-decide shape) would fail to unify here.
+        // This coercion genuinely FAILS to compile against the pre-change
+        // tree (old name / old return type) — it is the compile-level
+        // discriminator. (The prior `assert_ne!(TypeId, TypeId)` line was
+        // tautological — two distinct types are always distinct regardless
+        // of the code under test — and was removed; this fn-pointer coercion
+        // is the SOLE guard that the swap did not regress to a raised
+        // `TypeExpr`. There is NO functional test driving this helper today —
+        // the `.or_else` Pick fallback is currently unreachable; see the
+        // module `//!` comment above.)
+        let _proof: for<'a, 'b> fn(
+            &'b mut crate::resolver_core::ComponentMetaQueryEngine<'a>,
+            &str,
+            &str,
+            &[String],
+        ) -> Option<crate::semantic_query::SemanticNodeId> = super::pick_via_dispatch_pick_node;
+        let _ = _proof;
     }
 }

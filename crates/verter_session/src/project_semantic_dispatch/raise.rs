@@ -250,7 +250,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `KeyOf`, `TypeOf`) is the responsibility of the caller — typically
     /// [`Self::materialize_reduced_output_type_expr`]. This function alone
     /// is shell-only.
-    pub(crate) fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
+    fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
         let mut active = FxHashSet::default();
         self.raise_node_to_type_expr_inner(node, &mut active)
     }
@@ -751,20 +751,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// live graph store. It is deliberately NOT folded into an `Unknown`-sentinel
     /// here so callers can map a miss to whatever their own output contract
     /// requires.
-    // The intended/named boundary for output adapters / diagnostics / compat
-    // exporters that hold a `SemanticNodeId`, pending caller migration;
-    // exercised today by the carrier round-trip unit tests.
-    #[allow(dead_code)]
+    // The named output boundary for output adapters / diagnostics / compat
+    // exporters and the publication projectors that hold a `SemanticNodeId`:
+    // the plain SHELL raise (no operator reduction). The single output/compat
+    // seams route through this; the raw `raise_node_to_type_expr` primitive
+    // stays module-private.
     pub(crate) fn materialize_output_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
         self.raise_node_to_type_expr(node)
     }
 
-    /// Materializes `node` after applying the supplied projection publication
-    /// reduction context; callers must pass a published/output context.
+    /// Materializes `node` after applying the supplied projection
+    /// reduction context; callers must pass the EXACT output/materialization
+    /// reduction context for that publication surface.
     ///
     /// The context is taken explicitly (rather than narrowed to a mode or wrapped
     /// in an output-only newtype) because the production projection callers build
-    /// and own their reduction context — the lower-level
+    /// and own their reduction context — the real output path legitimately uses
+    /// `structural_transit_with_mode` and the published-macro-type-arg context,
+    /// not a single "published" mode — and the lower-level
     /// [`Self::raise_and_reduce_with_context`] stays the context primitive this
     /// boundary names for output use.
     ///
@@ -779,9 +783,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `node_id`, the raised `type_expr`, the accumulated `dep_signature`, and
     /// the `result_is_partial` flag — the publication-surface output contract
     /// the per-member projector consumes.
-    // The intended per-member publication-projector boundary, pending caller
-    // migration; exercised today by the dispatch reducer unit tests.
-    #[allow(dead_code)]
+    // The per-member publication-projector boundary: reduce-then-raise for
+    // the output/materialization surfaces (delegates straight to
+    // `raise_and_reduce_with_context`).
     pub(crate) fn materialize_reduced_output_type_expr(
         &self,
         node: SemanticNodeId,
@@ -898,10 +902,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// stops at the demanded terminal without breadth-enumerating
     /// composite members or inactive conditional branches.
     // reduce-then-raise orchestrator; the projection-output boundary
-    // (materialize_reduced_output_type_expr) wraps it. The production projector
-    // entry lands in a follow-up; until then it is dead in production.
-    #[allow(dead_code)]
-    pub(crate) fn raise_and_reduce_with_context(
+    // (materialize_reduced_output_type_expr) wraps it, and the production
+    // per-member projectors (field_types.rs) reach it through that boundary.
+    pub(super) fn raise_and_reduce_with_context(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -958,9 +961,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Stack-safe for arbitrarily deep acyclic structures (≥5000
     /// levels; verified by stack-safety regression fixtures in §4.1).
-    // Driven by `raise_and_reduce_with_context` above; dead in production
-    // until its production projector caller lands.
-    #[allow(dead_code)]
+    // Driven by `raise_and_reduce_with_context` above; reached in production
+    // through the reduce-then-raise output boundary
+    // (materialize_reduced_output_type_expr) from the per-member projectors.
     fn reduce_graph_node_iterative(
         &self,
         root: SemanticNodeId,
@@ -2267,9 +2270,9 @@ pub struct MaterializedTypeExpr {
     pub result_is_partial: bool,
 }
 
-// Accumulator for `raise_and_reduce_with_context`; dead in production until
-// that reduce entry's production projector caller lands.
-#[allow(dead_code)]
+// Accumulator for `raise_and_reduce_with_context`; reached in production
+// through the reduce-then-raise output boundary from the per-member
+// projectors.
 #[derive(Default)]
 struct ReduceState {
     visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
@@ -2285,9 +2288,9 @@ struct ReduceState {
     result_is_partial: bool,
 }
 
-// `ReduceState` helpers for `raise_and_reduce_with_context`; dead in production
-// until that reduce entry's production projector caller lands.
-#[allow(dead_code)]
+// `ReduceState` helpers for `raise_and_reduce_with_context`; reached in
+// production through the reduce-then-raise output boundary from the
+// per-member projectors.
 impl ReduceState {
     fn merge_dep_signature(&mut self, sig: &DepSignature) {
         for (canonical, version) in sig.iter() {

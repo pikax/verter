@@ -657,7 +657,7 @@ pub(super) fn raise_member_value(
     ctx: &dyn crate::resolver_core::ResolverContext,
     member: &TypeInfoSurfaceMember,
 ) -> Option<TypeExpr> {
-    ctx.dispatch().raise_node_to_type_expr(member.value)
+    ctx.dispatch().materialize_output_type_expr(member.value)
 }
 
 /// Realize a slot member's value to its underlying callable through the SHARED
@@ -680,7 +680,7 @@ pub(super) fn raise_realized_callable_member_value(
         ),
     )
     .unwrap_or(member.value);
-    dispatch.raise_node_to_type_expr(realized)
+    dispatch.materialize_output_type_expr(realized)
 }
 
 /// Resolve a `.vue` macro's NORMALIZED component-meta DTOs

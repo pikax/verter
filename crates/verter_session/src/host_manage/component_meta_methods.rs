@@ -46,7 +46,7 @@ use crate::meta_resolve::{
     ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
 };
 use crate::meta_resolve::{
-    pick_via_dispatch_pick_helper, project_expr_class_a_via_dispatch,
+    pick_via_dispatch_pick_node, project_expr_class_a_via_dispatch,
     project_expr_class_a_via_dispatch_threaded, project_type_surface_expr_via_host_threaded,
 };
 
@@ -1426,7 +1426,7 @@ impl VerterHost {
 
             // Step 8: raise the instantiated body; publish only when it is
             // an Object (the shallow substituted surface).
-            let raised = dispatch.raise_node_to_type_expr(node)?;
+            let raised = dispatch.materialize_output_type_expr(node)?;
             matches!(raised, TypeExpr::Object(_)).then_some(raised)
         }
         fn materialize_component_meta_registry_candidate(
@@ -2026,21 +2026,23 @@ impl VerterHost {
                         .then(|| TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties })))
                         .or_else(|| {
                             // The Pick route dispatches through the builtin
-                            // Pick utility path: pick_via_dispatch_pick_helper
+                            // Pick utility path: pick_via_dispatch_pick_node
                             // resolves the symbol to a base node via Class A
-                            // lowering, then dispatches `Pick<base, key_set>`;
-                            // falls back to the raw materialiser candidate for
-                            // non-Object bases.
-                            pick_via_dispatch_pick_helper(
+                            // lowering, then dispatches `Pick<base, key_set>`
+                            // and returns the Pick result NODE; the node-native
+                            // member-surface core materialises it directly
+                            // (no raise-then-re-lower). Falls back to the raw
+                            // materialiser candidate for non-Object bases.
+                            pick_via_dispatch_pick_node(
                                 query_engine,
                                 scope_canonical_id,
                                 symbol_name,
                                 members.as_slice(),
                             )
-                            .map(|projected| {
-                                query_engine.materialize_member_surface_expr(
+                            .and_then(|pick_node| {
+                                query_engine.materialize_member_surface_node(
                                     scope_canonical_id,
-                                    &projected,
+                                    pick_node,
                                     true,
                                 )
                             })

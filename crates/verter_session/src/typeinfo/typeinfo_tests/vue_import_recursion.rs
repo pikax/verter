@@ -241,7 +241,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
         }
     };
     dispatch
-        .raise_node_to_type_expr(terminal)
+        .materialize_output_type_expr(terminal)
         .unwrap_or_else(|| panic!("terminal of {path:?} for {canonical_id} must raise to TypeExpr"))
 }
 
@@ -968,7 +968,7 @@ fn project_vue_default_path_eager(
         }
     };
     dispatch
-        .raise_node_to_type_expr(terminal)
+        .materialize_output_type_expr(terminal)
         .unwrap_or_else(|| panic!("terminal of {path:?} for {canonical_id} must raise to TypeExpr"))
 }
 

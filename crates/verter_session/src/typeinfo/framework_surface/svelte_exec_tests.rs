@@ -235,7 +235,7 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
     )
     .unwrap_or(row_member.value);
     let value = dispatch
-        .raise_node_to_type_expr(realized)
+        .materialize_output_type_expr(realized)
         .expect("the realized snippet member raises to a TypeExpr");
     // VERIFIED ACTUAL SHAPE: the resolver keeps the `Snippet<Params>` carrier
     // as a `Ref` whose SINGLE type argument is the `Params` tuple

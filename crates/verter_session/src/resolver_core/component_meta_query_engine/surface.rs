@@ -104,7 +104,7 @@ pub(crate) fn surface_view_to_projected_surface(
         .map(|member| ProjectedMember {
             name: member.name.as_ref().to_string(),
             ty: dispatch
-                .raise_node_to_type_expr(member.value)
+                .materialize_output_type_expr(member.value)
                 .unwrap_or(TypeExpr::Unknown {
                     raw: SEMANTIC_SURFACE_MEMBER.to_string(),
                 }),
@@ -129,12 +129,12 @@ pub(crate) fn surface_view_to_projected_surface(
     let call_signatures = surface
         .call_signatures
         .iter()
-        .filter_map(|signature| dispatch.raise_node_to_type_expr(*signature))
+        .filter_map(|signature| dispatch.materialize_output_type_expr(*signature))
         .collect();
     let construct_signatures = surface
         .construct_signatures
         .iter()
-        .filter_map(|signature| dispatch.raise_node_to_type_expr(*signature))
+        .filter_map(|signature| dispatch.materialize_output_type_expr(*signature))
         .collect();
     // Graph `SurfaceView::index_signatures` carries the declared key/value
     // nodes + real OXC spans + the declaration file. Raise the key/value nodes
@@ -148,12 +148,12 @@ pub(crate) fn surface_view_to_projected_surface(
             ProjectedIndexSignature {
                 key_name: "key".to_string(),
                 key_type: dispatch
-                    .raise_node_to_type_expr(signature.key_type)
+                    .materialize_output_type_expr(signature.key_type)
                     .unwrap_or(TypeExpr::Unknown {
                         raw: SEMANTIC_SURFACE_MEMBER.to_string(),
                     }),
                 value_type: dispatch
-                    .raise_node_to_type_expr(signature.value_type)
+                    .materialize_output_type_expr(signature.value_type)
                     .unwrap_or(TypeExpr::Unknown {
                         raw: SEMANTIC_SURFACE_MEMBER.to_string(),
                     }),

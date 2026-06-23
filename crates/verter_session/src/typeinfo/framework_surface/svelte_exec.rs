@@ -541,7 +541,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 ),
             )
             .unwrap_or(member.value);
-            let value = dispatch.raise_node_to_type_expr(realized)?;
+            let value = dispatch.materialize_output_type_expr(realized)?;
             let scope = crate::typeinfo::framework_surface::scope::member_value_expr_scope(
                 host,
                 member,
@@ -1055,7 +1055,7 @@ fn callback_events_from_props_surface(
         // to a bare `Function` — the `?` rides the surface `optional` flag.) A
         // non-callable prop (`label?: string`) and a union with no callable arm
         // both yield `None` (NOT an event).
-        let raised = dispatch.raise_node_to_type_expr(realized);
+        let raised = dispatch.materialize_output_type_expr(realized);
         let Some(func) = raised
             .as_ref()
             .and_then(crate::meta_resolve::dispatch_helpers::callable_arm_from_raised)

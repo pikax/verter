@@ -202,7 +202,7 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
         other => panic!("empty-path Shallow projection of {name} failed: {other:?}"),
     };
     dispatch
-        .raise_node_to_type_expr(terminal)
+        .materialize_output_type_expr(terminal)
         .unwrap_or_else(|| panic!("{name} empty-path Shallow surface must project to TypeExpr"))
 }
 

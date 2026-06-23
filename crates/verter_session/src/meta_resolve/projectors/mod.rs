@@ -910,7 +910,7 @@ fn member_shape_peek_or_compute(
     let raised = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         dispatch
-            .raise_node_to_type_expr(member_value)
+            .materialize_output_type_expr(member_value)
             .unwrap_or(TypeExpr::Unknown { raw: String::new() })
     };
 

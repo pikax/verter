@@ -15813,7 +15813,7 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
     // function-like wire decision: the constructor distinction is erased at the
     // query-time round-trip boundary, never surfaced as `semanticMiss`).
     let raised = dispatch
-        .raise_node_to_type_expr(lowered)
+        .materialize_output_type_expr(lowered)
         .expect("function carrier must raise back to a TypeExpr");
     match &raised {
         TypeExpr::Function(func) => {

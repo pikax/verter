@@ -191,8 +191,8 @@ pub(crate) fn index_signatures_from_surface(
         .index_signatures
         .iter()
         .filter_map(|sig| {
-            let key_type = dispatch.raise_node_to_type_expr(sig.key_type)?;
-            let value_type = dispatch.raise_node_to_type_expr(sig.value_type)?;
+            let key_type = dispatch.materialize_output_type_expr(sig.key_type)?;
+            let value_type = dispatch.materialize_output_type_expr(sig.value_type)?;
             Some(ExpandedIndexSignature {
                 key_type,
                 value_type,
@@ -271,7 +271,7 @@ pub(crate) fn emits_from_typeinfo_surface(
     for sig in macro_surface.surface.call_signatures.iter() {
         // `TypeExpr` implements `Drop`, so `func` cannot be moved out of the
         // raised value; bind it and borrow the function.
-        let raised = dispatch.raise_node_to_type_expr(sig.node);
+        let raised = dispatch.materialize_output_type_expr(sig.node);
         let Some(TypeExpr::Function(func)) = &raised else {
             continue;
         };

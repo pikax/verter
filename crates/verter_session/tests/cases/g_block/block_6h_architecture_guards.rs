@@ -147,9 +147,19 @@ fn member_shape_peek_or_compute_runs_gates_before_cached_peek() {
     let content = read_projectors_mod();
     let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
 
+    // The raise step now goes through the named output boundary fn
+    // `materialize_output_type_expr` (the raw `raise_node_to_type_expr`
+    // primitive is module-private to raise.rs). Match the boundary fn, with
+    // a defensive fallback to the bare primitive name so the guard survives
+    // either shape; the ANCHOR is "the raise-to-TypeExpr step", whatever its
+    // current spelling.
     let raise_idx = body
-        .find("raise_node_to_type_expr(member_value)")
-        .expect("guard: raise call must remain in `member_shape_peek_or_compute`.");
+        .find("materialize_output_type_expr(member_value)")
+        .or_else(|| body.find("raise_node_to_type_expr(member_value)"))
+        .expect(
+            "guard: the output raise step (materialize_output_type_expr(member_value)) must \
+             remain in `member_shape_peek_or_compute`.",
+        );
     // The gate is invoked via the `_with_fence` variant
     // so the gate's cross-file dep facts thread into the admit's
     // `fact_dep_signature`. Match either the bare or the `_with_fence`

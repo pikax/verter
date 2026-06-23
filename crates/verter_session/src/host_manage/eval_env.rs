@@ -1077,7 +1077,7 @@ impl VerterHost {
                                         // audit-only re-lowering sidecar).
                                         produced_node_id = Some(base_id);
                                         if let Some(raised) =
-                                            dispatch.raise_node_to_type_expr(base_id)
+                                            dispatch.materialize_output_type_expr(base_id)
                                         {
                                             ExpansionResult::exact_concrete(
                                                 ExpandedNormalizedExpr { expr: raised },
@@ -1313,7 +1313,7 @@ impl VerterHost {
                                                 // id for the audit record
                                                 // before raise.
                                                 produced_node_id = Some(node_id);
-                                                match dispatch.raise_node_to_type_expr(node_id) {
+                                                match dispatch.materialize_output_type_expr(node_id) {
                                                     Some(raised) => {
                                                         ExpansionResult::exact_concrete(
                                                             ExpandedNormalizedExpr { expr: raised },

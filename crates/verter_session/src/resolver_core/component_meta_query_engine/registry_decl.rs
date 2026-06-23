@@ -486,7 +486,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | MaterializeOutcome::Tainted(id) => id,
             MaterializeOutcome::Error(_) => return None,
         };
-        dispatch.raise_node_to_type_expr(materialised_id)
+        dispatch.materialize_output_type_expr(materialised_id)
     }
 
     /// Resolve a type declaration, cached per query.
@@ -1136,7 +1136,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     ),
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => dispatch
-                        .raise_node_to_type_expr(node)
+                        .materialize_output_type_expr(node)
                         .filter(dispatch_route_expr_is_materialized),
                     _ => None,
                 }
@@ -1204,7 +1204,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             ),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => dispatch
-                .raise_node_to_type_expr(node)
+                .materialize_output_type_expr(node)
                 .filter(dispatch_route_expr_is_materialized),
             _ => None,
         }

@@ -42,6 +42,6 @@ impl VerterHost {
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-        dispatch.raise_node_to_type_expr(node)
+        dispatch.materialize_output_type_expr(node)
     }
 }

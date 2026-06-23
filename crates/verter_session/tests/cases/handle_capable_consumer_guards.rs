@@ -378,6 +378,250 @@ fn g_a_self_test_scanner_discriminates() {
     );
 }
 
+/// The single `raise_node_to_type_expr` definition line in raise.rs (the
+/// raw `SemanticNodeId -> Option<TypeExpr>` shell primitive), with its
+/// leading whitespace trimmed. There is exactly one such definition (the
+/// invariant guard `semantic_node_to_type_expr_has_exactly_one_path`
+/// independently asserts the count); this reads it back for the
+/// visibility check below. The `_inner` recursion helper is a DIFFERENT
+/// identifier (`fn raise_node_to_type_expr_inner(`), excluded by the
+/// trailing `(` whole-identifier boundary.
+fn raise_primitive_definition_line() -> String {
+    const RAISE_REL: &str = "src/project_semantic_dispatch/raise.rs";
+    let src = read_rel(RAISE_REL);
+    let mut found: Option<String> = None;
+    for line in src.lines() {
+        // The EXACT definition: `fn raise_node_to_type_expr(` — the char
+        // right after the identifier must be `(`, so the `_inner` helper
+        // (`fn raise_node_to_type_expr_inner(`) is NOT matched.
+        if let Some(pos) = line.find("fn raise_node_to_type_expr(") {
+            // Guard against a hypothetical `..._inner(` that happens to
+            // contain the substring: the matched run must be immediately
+            // followed by `(` (it is, by construction of the needle), and
+            // the char before `fn` (if any) must be whitespace so a
+            // longer identifier ending in `fn` is not caught.
+            let before = line[..pos].chars().next_back();
+            if before.map(|c| c.is_whitespace()).unwrap_or(true) {
+                assert!(
+                    found.is_none(),
+                    "expected EXACTLY ONE `fn raise_node_to_type_expr(` definition line in \
+                     {RAISE_REL}; found a second: {line}"
+                );
+                found = Some(line.trim().to_string());
+            }
+        }
+    }
+    found.unwrap_or_else(|| {
+        panic!("no `fn raise_node_to_type_expr(` definition line found in {RAISE_REL}")
+    })
+}
+
+#[test]
+fn raise_node_to_type_expr_primitive_is_module_private() {
+    // STRUCTURAL FENCE (anti-regression). The raw `SemanticNodeId ->
+    // Option<TypeExpr>` raise primitive `raise_node_to_type_expr` is the
+    // single shell raise. After the output-fence migration it is
+    // MODULE-PRIVATE: no `pub` / `pub(crate)` / `pub(super)` / `pub(in …)`
+    // qualifier. Out-of-module callers must route through the named output
+    // boundary fns (`materialize_output_type_expr` /
+    // `materialize_reduced_output_type_expr`), and an out-of-module direct
+    // call to the primitive is a COMPILE error (E0624 — `raise_node_to_type_expr`
+    // is a private INHERENT METHOD on `ProjectSemanticDispatch`, so an
+    // out-of-module call is "method is private", not the E0603 used for a
+    // private free item / module) — this test locks the visibility so a
+    // future widening (re-adding `pub(crate)`) is caught here even before
+    // any caller is added.
+    let def = raise_primitive_definition_line();
+    // The definition line, trimmed, must START with `fn` (a bare
+    // module-private fn). Any `pub`-led visibility qualifier precedes the
+    // `fn` keyword on the same line, so a `starts_with("fn ")` check is a
+    // complete and sufficient module-private assertion.
+    assert!(
+        def.starts_with("fn "),
+        "STRUCTURAL FENCE: `raise_node_to_type_expr` must be MODULE-PRIVATE (a bare `fn`, no \
+         `pub`/`pub(crate)`/`pub(super)` qualifier) so an out-of-module call is a compile error; \
+         the definition line is: `{def}`"
+    );
+    // Belt-and-braces: explicitly reject every `pub`-prefixed form so the
+    // intent of the check is unmistakable and a reformatting that splits
+    // the qualifier onto its own token still trips (the line begins with
+    // the qualifier in all rustfmt outputs).
+    for forbidden in ["pub fn", "pub(crate) fn", "pub(super) fn", "pub(in"] {
+        assert!(
+            !def.starts_with(forbidden),
+            "STRUCTURAL FENCE: `raise_node_to_type_expr` must NOT be `{forbidden}`-visible — it is \
+             the module-private raw primitive; the definition line is: `{def}`"
+        );
+    }
+}
+
+#[test]
+fn raise_primitive_module_private_self_test_discriminates() {
+    // The visibility classifier the guard relies on must FIRE on every
+    // `pub`-visible form and PASS the bare module-private form — proving it
+    // would catch a regression that re-widens the primitive.
+    let is_module_private = |def: &str| -> bool {
+        def.starts_with("fn ")
+            && !["pub fn", "pub(crate) fn", "pub(super) fn", "pub(in"]
+                .iter()
+                .any(|p| def.starts_with(p))
+    };
+    // PASS: the bare module-private definition (the post-fence shape).
+    assert!(
+        is_module_private(
+            "fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {"
+        ),
+        "self-test: a bare `fn raise_node_to_type_expr(` def MUST classify as module-private"
+    );
+    // FIRE (RED): every widened form must be rejected.
+    for widened in [
+        "pub(crate) fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {",
+        "pub fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {",
+        "pub(super) fn raise_node_to_type_expr(&self) {",
+        "pub(in crate::project_semantic_dispatch) fn raise_node_to_type_expr(&self) {",
+    ] {
+        assert!(
+            !is_module_private(widened),
+            "self-test: a `pub`-visible def `{widened}` MUST classify as NOT module-private — the \
+             structural fence would otherwise miss a visibility-widening regression"
+        );
+    }
+}
+
+/// The single `raise_and_reduce_with_context` definition line in raise.rs
+/// (the reduce-then-raise orchestrator the per-member publication
+/// projectors reach through `materialize_reduced_output_type_expr`), with
+/// its leading whitespace trimmed. There is exactly one such definition;
+/// this reads it back for the visibility check below. The trailing `(`
+/// whole-identifier boundary excludes any longer identifier that merely
+/// shares the prefix.
+fn raise_and_reduce_definition_line() -> String {
+    const RAISE_REL: &str = "src/project_semantic_dispatch/raise.rs";
+    let src = read_rel(RAISE_REL);
+    let mut found: Option<String> = None;
+    for line in src.lines() {
+        // The EXACT definition: `fn raise_and_reduce_with_context(` — the
+        // char right after the identifier must be `(`, so a longer
+        // identifier sharing the prefix is NOT matched.
+        if let Some(pos) = line.find("fn raise_and_reduce_with_context(") {
+            // The matched run is immediately followed by `(` (by
+            // construction of the needle); the char before `fn` (if any)
+            // must be whitespace so a longer identifier ending in `fn` is
+            // not caught.
+            let before = line[..pos].chars().next_back();
+            if before.map(|c| c.is_whitespace()).unwrap_or(true) {
+                assert!(
+                    found.is_none(),
+                    "expected EXACTLY ONE `fn raise_and_reduce_with_context(` definition line in \
+                     {RAISE_REL}; found a second: {line}"
+                );
+                found = Some(line.trim().to_string());
+            }
+        }
+    }
+    found.unwrap_or_else(|| {
+        panic!("no `fn raise_and_reduce_with_context(` definition line found in {RAISE_REL}")
+    })
+}
+
+#[test]
+fn raise_and_reduce_with_context_is_subsystem_confined() {
+    // STRUCTURAL FENCE (anti-regression), Q4. The reduce-then-raise
+    // orchestrator `raise_and_reduce_with_context` is CONFINED to the
+    // `project_semantic_dispatch` dispatch subsystem via `pub(super)`: its
+    // sole production caller is the in-module `materialize_reduced_output_type_expr`
+    // (the named output boundary the per-member publication projectors reach
+    // through), while its valid subsystem-level reducer characterization tests
+    // live in SIBLING modules of `raise` (`tests`, `carrier_reduction_tests`),
+    // which are dispatch-subsystem descendants and so can see a `pub(super)`
+    // method. An out-of-SUBSYSTEM direct call is a COMPILE error (E0624). This
+    // test locks the visibility so BOTH a widening (re-adding `pub(crate)` or
+    // `pub`) AND a wrong-direction narrowing to a bare module-private `fn`
+    // (which would break the sibling test callers) are caught here.
+    let def = raise_and_reduce_definition_line();
+    // The definition line, trimmed, must START with the subsystem-confined
+    // form — `pub(super) fn ` or the equivalent explicit
+    // `pub(in crate::project_semantic_dispatch) fn `. Any visibility
+    // qualifier precedes the `fn` keyword on the same line, so a set of
+    // `starts_with` checks is a complete and sufficient confinement assertion.
+    assert!(
+        def.starts_with("pub(super) fn ")
+            || def.starts_with("pub(in crate::project_semantic_dispatch) fn "),
+        "STRUCTURAL FENCE (Q4): `raise_and_reduce_with_context` must be CONFINED to the \
+         `project_semantic_dispatch` dispatch subsystem (`pub(super) fn` — or the equivalent \
+         `pub(in crate::project_semantic_dispatch) fn`) so an out-of-subsystem call is a compile \
+         error (E0624); the wrapper `materialize_reduced_output_type_expr` is the named entry; the \
+         definition line is: `{def}`"
+    );
+    // Belt-and-braces: explicitly reject the bare module-private form (a
+    // wrong-direction narrowing that would make the sibling-module reducer
+    // tests unreachable) and every wider `pub`/`pub(crate)` form. Note
+    // `pub(super) fn` does NOT start with `pub fn ` (the char after `pub`
+    // is `(`, not a space) nor `pub(crate) fn` (the inner path is `super`,
+    // not `crate`), so these checks do not false-fire on the accepted form.
+    for forbidden in ["fn ", "pub fn ", "pub(crate) fn "] {
+        assert!(
+            !def.starts_with(forbidden),
+            "STRUCTURAL FENCE (Q4): `raise_and_reduce_with_context` must NOT be `{forbidden}`-visible \
+             — it is confined to `project_semantic_dispatch` via `pub(super)`; a bare `fn ` would \
+             break its sibling-module (`tests`/`carrier_reduction_tests`) reducer characterization \
+             callers, and any `pub`/`pub(crate)` form would widen past the dispatch subsystem; the \
+             definition line is: `{def}`"
+        );
+    }
+}
+
+#[test]
+fn raise_and_reduce_subsystem_confined_self_test_discriminates() {
+    // The visibility classifier the Q4 guard relies on must ACCEPT the
+    // subsystem-confined forms (`pub(super)` / `pub(in crate::project_semantic_dispatch)`)
+    // and REJECT both a widening (`pub(crate)` / `pub`) AND a wrong-direction
+    // narrowing to a bare module-private `fn` (which would make the sibling
+    // dispatch-subsystem reducer tests unreachable). This proves the fence
+    // discriminates in BOTH directions: it FAILS on a tree where the method
+    // is bare `fn` or `pub(crate)`, and PASSES on the `pub(super)` tree.
+    let is_subsystem_confined = |def: &str| -> bool {
+        def.starts_with("pub(super) fn ")
+            || def.starts_with("pub(in crate::project_semantic_dispatch) fn ")
+    };
+    // PASS: the two accepted subsystem-confined forms (the post-Q4 shape and
+    // its explicit equivalent).
+    for accepted in [
+        "pub(super) fn raise_and_reduce_with_context(&self, node: SemanticNodeId, context: \
+         ProjectionReductionContext) -> MaterializedTypeExpr {",
+        "pub(in crate::project_semantic_dispatch) fn raise_and_reduce_with_context(&self, node: \
+         SemanticNodeId, context: ProjectionReductionContext) -> MaterializedTypeExpr {",
+    ] {
+        assert!(
+            is_subsystem_confined(accepted),
+            "self-test: a subsystem-confined def `{accepted}` MUST classify as confined to \
+             `project_semantic_dispatch`"
+        );
+    }
+    // FIRE (RED): every NON-confined form must be rejected — the wrong-direction
+    // narrowing to a bare module-private `fn` (which would break the sibling
+    // test callers — the original 8-A2 build break), AND the widenings the
+    // pre-Q4 `pub(crate)` shape and a bare `pub`.
+    for rejected in [
+        // Bare `fn` — a narrowing to module-private that makes the sibling
+        // `tests`/`carrier_reduction_tests` reducer callers unreachable (E0624).
+        "fn raise_and_reduce_with_context(&self, node: SemanticNodeId, context: \
+         ProjectionReductionContext) -> MaterializedTypeExpr {",
+        // The exact pre-Q4 `pub(crate)` shape this migration removed (widening).
+        "pub(crate) fn raise_and_reduce_with_context(&self, node: SemanticNodeId, context: \
+         ProjectionReductionContext) -> MaterializedTypeExpr {",
+        // A bare `pub` (widening).
+        "pub fn raise_and_reduce_with_context(&self) {",
+    ] {
+        assert!(
+            !is_subsystem_confined(rejected),
+            "self-test: a non-confined def `{rejected}` MUST classify as NOT subsystem-confined — the \
+             Q4 structural fence would otherwise miss either a visibility-widening regression or a \
+             wrong-direction narrowing to an unreachable bare `fn`"
+        );
+    }
+}
+
 // ===========================================================================
 // G-B — per-inventory: each hot carrier has a handle-native consumer
 // BEFORE producer conversion; deferred carriers are recorded with a

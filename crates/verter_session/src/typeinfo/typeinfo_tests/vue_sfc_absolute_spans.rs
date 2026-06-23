@@ -291,7 +291,7 @@ fn raise_member_value(
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     dispatch
-        .raise_node_to_type_expr(member.value)
+        .materialize_output_type_expr(member.value)
         .expect("slot member value must raise to a TypeExpr")
 }
 

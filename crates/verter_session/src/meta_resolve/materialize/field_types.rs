@@ -325,7 +325,8 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         );
     }
     let _us_rr_t0 = Instant::now();
-    let dispatch_materialized = dispatch.raise_and_reduce_with_context(lowered, reduction_context);
+    let dispatch_materialized =
+        dispatch.materialize_reduced_output_type_expr(lowered, reduction_context);
     let _us_rr_ms = _us_rr_t0.elapsed().as_secs_f64() * 1000.0;
     if _us_trace {
         eprintln!(
@@ -555,7 +556,7 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
     //   2. `raise_node_to_type_expr(reduced)` — single terminal raise.
     //   3. Returns `MaterializedTypeExpr { node_id, type_expr,
     //      dep_signature }`.
-    let materialized = dispatch.raise_and_reduce_with_context(member_value, context);
+    let materialized = dispatch.materialize_reduced_output_type_expr(member_value, context);
 
     // Dual-emit dispatch facts into BOTH downstream channels:
     // (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at
@@ -813,7 +814,7 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
         return materialized.clone();
     }
     dispatch
-        .raise_node_to_type_expr(preserved_node)
+        .materialize_output_type_expr(preserved_node)
         .unwrap_or_else(|| materialized.clone())
 }
 
