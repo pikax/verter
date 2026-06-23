@@ -25,11 +25,16 @@ use crate::resolver_core::component_meta_query_engine::{
     SEMANTIC_OBJECT_SURFACE,
 };
 use crate::semantic_query::{
-    DepSignature, HotTypeRef, IndexKey, MapperKey, OptionalityMod, PathSegment,
+    DepSignature, IndexKey, MapperKey, OptionalityMod, PathSegment,
     PrimitiveKind as SemanticPrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
     QueryResult, ReadonlyMod, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
 };
+// `HotTypeRef` is only referenced by the test-only `materialize_type_expr`
+// harness wrapper below; the production reverse boundaries take a
+// `SemanticNodeId` directly.
+#[cfg(test)]
+use crate::semantic_query::HotTypeRef;
 
 // =====================================================================
 // dispatch trace plumbing for cycle-BFS unit tests.
@@ -243,8 +248,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// need a [`TypeExpr`] for downstream payload construction. Operator-
     /// shape reduction (`IndexedAccess`, `Conditional`, `Mapped`,
     /// `KeyOf`, `TypeOf`) is the responsibility of the caller — typically
-    /// [`Self::raise_and_reduce`]. This function alone is
-    /// shell-only.
+    /// [`Self::reduce_and_raise_for_projection_output`]. This function alone
+    /// is shell-only.
     pub(crate) fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
         let mut active = FxHashSet::default();
         self.raise_node_to_type_expr_inner(node, &mut active)
@@ -723,32 +728,71 @@ impl<'a> ProjectSemanticDispatch<'a> {
         })
     }
 
-    /// The single reverse / materialisation boundary: project a
-    /// [`HotTypeRef`] handle back to a compat [`TypeExpr`].
+    /// Plain shell-only output-materialisation boundary: project a
+    /// [`SemanticNodeId`] back to a compat [`TypeExpr`] WITHOUT operator-shape
+    /// reduction.
     ///
-    /// This is the output/compat seam — it is the named boundary that the
-    /// migration collapses all `TypeExpr` materialisation onto. It is a
-    /// TOTAL wrapper over the shell-only [`Self::raise_node_to_type_expr`]
-    /// primitive: every carrier round-trips here (raw-fallback text →
-    /// `Unknown { raw }`, the synthetic binding, the constructor carrier, and
-    /// the `RecursiveRef` back-edge via `Opaque(QueryError::RecursiveRef)`).
-    /// Tuple-element rest fidelity round-trips separately through the `Tuple`
-    /// arm's `TupleElement.rest`; there is no standalone `Rest` carrier. A
-    /// deref miss (a stale handle whose node is out of the live arena)
-    /// yields a `"<materialize miss>"` fallback rather than panicking.
+    /// This is the output/compat seam for callers that already hold the exact
+    /// graph node they want to materialise (typically the demanded terminal of
+    /// a navigate-driven walk) and want it raised AS-IS. It is a thin wrapper
+    /// over the shell-only [`Self::raise_node_to_type_expr`] primitive, so every
+    /// carrier round-trips here (raw-fallback text → `Unknown { raw }`, the
+    /// synthetic binding, the constructor carrier, the `RecursiveRef` back-edge
+    /// via `Opaque(QueryError::RecursiveRef)`); tuple-element rest fidelity
+    /// rides on the `Tuple` arm's `TupleElement.rest`.
     ///
     /// Operator-shape REDUCTION (`IndexedAccess` / `Conditional` / `Mapped`
-    /// / `KeyOf` / `TypeOf`) is NOT performed here — that is
-    /// [`Self::raise_and_reduce`]'s job; this boundary is shell-only, like
-    /// the primitive it wraps.
-    // The production callers (output adapters / diagnostics / compat
-    // exporters) collapse onto this boundary as the hot path migrates off
-    // stored `TypeExpr` bodies; it is exercised today by the carrier
-    // round-trip unit tests.
+    /// / `KeyOf` / `TypeOf`) is NOT performed here — an operator node raises to
+    /// its operator `TypeExpr` un-reduced. Callers that need the operator
+    /// collapsed must go through [`Self::reduce_and_raise_for_projection_output`].
+    ///
+    /// The `Option` return is the miss signal: `None` means the node is not in
+    /// the live graph store. It is deliberately NOT folded into an
+    /// `Unknown`-sentinel here so callers can map a miss to whatever their own
+    /// output contract requires.
+    // The output adapters / diagnostics / compat exporters that hold a
+    // `SemanticNodeId` collapse onto this named boundary; exercised today by the
+    // carrier round-trip unit tests.
     #[allow(dead_code)]
+    pub(crate) fn materialize_output_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
+        self.raise_node_to_type_expr(node)
+    }
+
+    /// Projection-output materialisation boundary: reduce a
+    /// [`SemanticNodeId`] under the supplied [`ProjectionReductionContext`]
+    /// FIRST, THEN raise the reduced node to a [`TypeExpr`].
+    ///
+    /// The name is order-correct: reduction runs before the raise, so an
+    /// operator-shape node (`IndexedAccess` / `Conditional` / `Mapped` /
+    /// `KeyOf` / `TypeOf`) is collapsed to the type it resolves to before it is
+    /// raised — distinct from the shell-only
+    /// [`Self::materialize_output_type_expr`], which raises operators
+    /// un-reduced.
+    ///
+    /// Returns the full [`MaterializedTypeExpr`]: the producing reduced
+    /// `node_id`, the raised `type_expr`, the accumulated `dep_signature`, and
+    /// the `result_is_partial` flag — the publication-surface output contract
+    /// the per-member projector consumes.
+    // The per-member publication projector collapses onto this named boundary;
+    // exercised today by the dispatch reducer unit tests.
+    #[allow(dead_code)]
+    pub(crate) fn reduce_and_raise_for_projection_output(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> MaterializedTypeExpr {
+        self.raise_and_reduce_with_context(node, context)
+    }
+
+    /// Test-only `HotTypeRef`-shaped wrapper over
+    /// [`Self::materialize_output_type_expr`], kept so the carrier round-trip
+    /// tests can drive materialisation from a `HotTypeRef` handle. Production
+    /// callers hold a [`SemanticNodeId`] and go through the plain output
+    /// boundary directly; this helper exists only under test.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
-        self.raise_node_to_type_expr(handle.node())
+        self.materialize_output_type_expr(handle.node())
             .unwrap_or(TypeExpr::Unknown {
                 raw: "<materialize miss>".to_string(),
             })
@@ -770,8 +814,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// `ProjectSemanticDispatch::execute` (the [`SemanticQueryApi`] trait
     /// method) discards the dep-signature half of the cache read; this
-    /// variant keeps it so callers like [`Self::raise_and_reduce`] can
-    /// accumulate dep facts across nested dispatches and merge them into
+    /// variant keeps it so callers like [`Self::raise_and_reduce_with_context`]
+    /// can accumulate dep facts across nested dispatches and merge them into
     /// the session-layer `fact_versions`. This is the dispatch entry the
     /// cold-build subtree reducer and the operator sub-reductions
     /// (`ProjectPath` / `NormalizeIntersection` / macro-payload
@@ -822,13 +866,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `SemanticNodeId`, the raised `TypeExpr`, and the accumulated
     /// `DepSignature`.
     ///
-    /// Backwards-compatible entry — defaults to a
-    /// `Published(mode)` reduction context. Callers that need the
-    /// reduction-demand axis (`Published` vs `StructuralTransit`) go
-    /// through [`Self::raise_and_reduce_with_context`].
-    // Published(mode)-default convenience wrapper over
-    // `raise_and_reduce_with_context`; exercised by the dispatch reducer tests.
-    #[allow(dead_code)]
+    /// Test-only `Published(mode)`-default convenience wrapper over
+    /// [`Self::raise_and_reduce_with_context`]; the dispatch reducer tests
+    /// drive it with a bare [`ProjectionMode`]. Production reduce-then-raise
+    /// callers go through [`Self::reduce_and_raise_for_projection_output`] /
+    /// [`Self::raise_and_reduce_with_context`] with an explicit
+    /// [`ProjectionReductionContext`].
+    #[cfg(test)]
     pub(crate) fn raise_and_reduce(
         &self,
         node: SemanticNodeId,
@@ -837,8 +881,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.raise_and_reduce_with_context(node, ProjectionReductionContext::published(mode))
     }
 
-    /// Context-explicit variant of [`Self::raise_and_reduce`]
-    /// (demand-driven reducer spec).
+    /// Context-explicit reduce-then-raise reducer (demand-driven reducer
+    /// spec).
     ///
     /// The caller supplies the publication
     /// [`ProjectionReductionContext`] that flows into every operator
@@ -2175,7 +2219,9 @@ fn rebuild_function(
     ))
 }
 
-/// Materialization-grade result returned by [`raise_and_reduce`] and the
+/// Materialization-grade result returned by
+/// [`ProjectSemanticDispatch::reduce_and_raise_for_projection_output`] /
+/// [`ProjectSemanticDispatch::raise_and_reduce_with_context`] and the
 /// session-layer `materialize_*` wrapper.
 ///
 /// The session-layer caller `materialize_component_meta_type_expr_until_stable`

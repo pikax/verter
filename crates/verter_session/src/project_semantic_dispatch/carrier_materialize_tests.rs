@@ -1,12 +1,12 @@
 //! Carrier-contract foundation tests.
 //!
-//! `materialize_type_expr` is the single reverse boundary: every graph
-//! carrier round-trips `HotTypeRef` → `TypeExpr` here, including the
-//! unresolved carriers (`BareRef` / `ImportType`), the raw-fallback text
-//! carrier, the structural fidelity carrier (`ConstructorType`), the
-//! synthetic-binding carrier, the tuple-element `rest` flag (standalone
-//! `Rest` has NO graph carrier — tuple-rest fidelity rides on
-//! [`TupleElement::rest`]), and the demand-time-minted `RecursiveRef`
+//! `materialize_output_type_expr` is the plain shell-only reverse boundary:
+//! every graph carrier round-trips `SemanticNodeId` → `TypeExpr` here,
+//! including the unresolved carriers (`BareRef` / `ImportType`), the
+//! raw-fallback text carrier, the structural fidelity carrier
+//! (`ConstructorType`), the synthetic-binding carrier, the tuple-element
+//! `rest` flag (standalone `Rest` has NO graph carrier — tuple-rest fidelity
+//! rides on [`TupleElement::rest`]), and the demand-time-minted `RecursiveRef`
 //! back-edge (carried as `Opaque(QueryError::RecursiveRef)`).
 //!
 //! These tests are discriminating: each asserts the EXACT projected
@@ -70,12 +70,19 @@ fn synthetic_binding_id_is_content_free_and_rehydrates() {
     assert_eq!(SyntheticBindingId::from_carrier_key(&other), id);
 }
 
-/// Shared harness: intern `data`, materialise it, return the `TypeExpr`.
+/// Shared harness: intern `data`, materialise it through the plain
+/// shell-only output boundary, return the `TypeExpr`. A miss maps to the
+/// `"<materialize miss>"` sentinel (none of these carriers miss — the
+/// shapes are asserted exactly below).
 fn materialize(host: &VerterHost, data: SemanticNodeData) -> TypeExpr {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let node = graph.intern_node(data);
     let dispatch = ProjectSemanticDispatch::new(host);
-    dispatch.materialize_type_expr(HotTypeRef::new(node))
+    dispatch
+        .materialize_output_type_expr(node)
+        .unwrap_or(TypeExpr::Unknown {
+            raw: "<materialize miss>".to_string(),
+        })
 }
 
 #[test]
@@ -116,7 +123,9 @@ fn materialize_bare_ref_round_trips_type_args() {
         Arc::from(vec![arg].into_boxed_slice()),
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr(node)
+        .expect("carrier must raise through the plain output boundary");
     match &expr {
         TypeExpr::Ref {
             name,
@@ -158,7 +167,9 @@ fn materialize_typeof_round_trips_type_args() {
         Arc::from(vec![arg].into_boxed_slice()),
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr(node)
+        .expect("carrier must raise through the plain output boundary");
     match &expr {
         TypeExpr::TypeOf(value_ref) => {
             assert_eq!(
@@ -192,7 +203,9 @@ fn materialize_import_type_round_trips() {
         true,
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr(node)
+        .expect("carrier must raise through the plain output boundary");
 
     match &expr {
         TypeExpr::ImportType {
@@ -255,7 +268,9 @@ fn materialize_tuple_preserves_element_rest_flag() {
         readonly: false,
     });
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr(node)
+        .expect("carrier must raise through the plain output boundary");
 
     match &expr {
         TypeExpr::Tuple { elements, .. } => {
@@ -292,7 +307,9 @@ fn materialize_constructor_type_preserves_ctor_ness() {
     });
     let node = graph.intern_node(SemanticNodeData::ConstructorType { signature });
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr(node)
+        .expect("carrier must raise through the plain output boundary");
 
     // Must round-trip as a CONSTRUCTOR type, not a plain function — the
     // whole reason the carrier exists is to keep `new () => R` distinct
@@ -352,6 +369,41 @@ fn materialize_recursive_ref_back_edge_round_trips() {
         TypeExpr::RecursiveRef { name, .. } => assert_eq!(name.as_ref(), "Tree"),
         other => panic!("expected RecursiveRef, got {other:?}"),
     }
+}
+
+/// The `HotTypeRef`-shaped test harness `materialize_type_expr` must DELEGATE
+/// to the plain output boundary `materialize_output_type_expr`, projecting the
+/// SAME `TypeExpr` for the same node. This keeps the `HotTypeRef` harness alive
+/// and locks the delegation: a `materialize_type_expr` that stopped routing
+/// through `materialize_output_type_expr` (or unwrapped the miss differently)
+/// would diverge from the direct boundary call and FAIL this assertion.
+#[test]
+fn hot_type_ref_harness_delegates_to_plain_output_boundary() {
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let node = graph.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("Foo"),
+        NodeScopeId::Global,
+        Arc::from(Vec::new().into_boxed_slice()),
+    ));
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let via_harness = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let via_plain = dispatch
+        .materialize_output_type_expr(node)
+        .expect("the bare-ref carrier raises through the plain boundary");
+
+    // Both routes land the same `Ref { name: "Foo" }` — the harness is a thin
+    // `HotTypeRef`-shaped wrapper over the plain boundary, not a second path.
+    assert_eq!(
+        via_harness, via_plain,
+        "materialize_type_expr(HotTypeRef) must project the SAME TypeExpr as \
+         materialize_output_type_expr(node) — it delegates, it does not diverge"
+    );
+    assert!(
+        matches!(&via_harness, TypeExpr::Ref { name, .. } if name.as_ref() == "Foo"),
+        "expected the bare-ref to raise to Ref{{name=Foo}}, got {via_harness:?}"
+    );
 }
 
 /// Each typed semantic-sentinel `QueryError` must serialize to the

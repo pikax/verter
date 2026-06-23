@@ -713,3 +713,120 @@ fn typeof_resolution_stays_within_instantiate_window() {
          leak does NOT carry it); got {shape}"
     );
 }
+
+// ── output-materialization boundary — reduce vs no-reduce discrimination ────
+//
+// The two named output boundaries differ on an OPERATOR node whose RAW raise
+// and REDUCED raise are different `TypeExpr` variants. The `typeof f<string>`
+// carrier is exactly such a node:
+//
+//   - RAW raise (`materialize_output_type_expr`)  → `TypeExpr::TypeOf(..)` — the
+//     shell-only boundary leaves the operator carrier un-reduced; it just
+//     structurally raises the carrier head/path/args back to a `ValueRef`.
+//   - REDUCED raise (`reduce_and_raise_for_projection_output`, `Published(Expanded)`)
+//     → `TypeExpr::Function(..)` — the projection boundary reduces the carrier
+//     FIRST (resolves `f`, projects the path, applies the `<string>` arg) so it
+//     collapses to the instantiated `(x: string) => string`, then raises THAT.
+//
+// Discrimination is two-sided and hinges on the variant change under reduction:
+//   - if the plain boundary were (wrongly) made to reduce, it would return
+//     `Function` and the `TypeOf` assertion below FAILS;
+//   - if the projection boundary (wrongly) skipped the reduce step, it would
+//     return `TypeOf` and the `Function` (+ `node_id == Some(reduced)` +
+//     not-`TypeOf`) assertions below FAIL.
+// A primitive/leaf fixture (raw == reduced) would prove nothing — `typeof
+// f<string>` is the operator whose reduced shape genuinely differs from its raw
+// shape (`carrier_reduction_tests` proves the reduction lands a `Function`).
+#[test]
+fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
+    let host = host();
+    upsert_ts(&host, "/m.ts", GENERIC_FN_TS);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let carrier = typeof_carrier_node(&dispatch, "/m.ts", "f", &[], PrimitiveKind::String);
+
+    // 1) Plain shell-only boundary: NO operator reduction. A `typeof f<string>`
+    //    carrier raises to the operator `TypeExpr::TypeOf`, carrying its
+    //    projected value path and the instantiation arg — it is NOT collapsed to
+    //    the resolved signature.
+    let plain = dispatch
+        .materialize_output_type_expr(carrier)
+        .expect("the typeof carrier must raise (shell-only) to an operator shape");
+    match &plain {
+        TypeExpr::TypeOf(value_ref) => {
+            assert_eq!(
+                value_ref.path,
+                vec!["f".to_string()],
+                "the shell-only raise preserves the value root path un-reduced"
+            );
+            assert_eq!(
+                value_ref.type_args.len(),
+                1,
+                "the shell-only raise preserves the instantiation arg un-applied"
+            );
+            assert!(
+                matches!(
+                    &value_ref.type_args[0],
+                    TypeExpr::Primitive(PrimitiveName::String)
+                ),
+                "the un-applied arg round-trips as `string`, got {:?}",
+                value_ref.type_args[0]
+            );
+        }
+        other => panic!(
+            "materialize_output_type_expr MUST NOT reduce: a shell-only raise of `typeof \
+             f<string>` stays `TypeExpr::TypeOf`, got {other:?}"
+        ),
+    }
+    assert!(
+        !matches!(&plain, TypeExpr::Function(_)),
+        "the plain shell-only boundary must NOT collapse the operator to the resolved \
+         `Function` — that would mean it reduced"
+    );
+
+    // 2) Projection-output boundary: reduce-under-context THEN raise. The SAME
+    //    carrier resolves `f`, applies `<string>`, and collapses to the
+    //    instantiated `(x: string) => string`, which raises to a `Function`.
+    let materialized = dispatch.reduce_and_raise_for_projection_output(
+        carrier,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    let reduced_node = materialized
+        .node_id
+        .expect("the reduce-then-raise boundary records the producing reduced node");
+    assert_eq!(
+        materialized.node_id,
+        Some(reduced_node),
+        "the projection boundary carries the producing reduced SemanticNodeId"
+    );
+    // The recorded node MUST itself be the reduced `Function`, not the original
+    // operator carrier — i.e. the reduce step actually ran on the graph node.
+    let (tp, param0) = function_shape(&dispatch, reduced_node).unwrap_or_else(|| {
+        panic!(
+            "the reduced node must be the instantiated Function; got {:?}",
+            dispatch.graph().node_data(reduced_node).as_deref()
+        )
+    });
+    assert_eq!(
+        tp, 0,
+        "the projection boundary's reduced `typeof f<string>` is NON-generic (type params \
+         stripped); a skipped-reduce boundary would leave the operator carrier (no Function)"
+    );
+    assert_eq!(
+        param0,
+        Some(PrimitiveName::String),
+        "the reduced signature's parameter is substituted to `string`"
+    );
+    match &materialized.type_expr {
+        TypeExpr::Function(_) => {}
+        other => panic!(
+            "reduce_and_raise_for_projection_output MUST reduce THEN raise: `typeof f<string>` \
+             collapses to the instantiated signature, raising to `TypeExpr::Function`, got {other:?}"
+        ),
+    }
+    assert!(
+        !matches!(&materialized.type_expr, TypeExpr::TypeOf(_)),
+        "the projection boundary must NOT leave the operator un-reduced as `TypeExpr::TypeOf` — \
+         that would mean it skipped the reduce step"
+    );
+}
