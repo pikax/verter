@@ -4711,7 +4711,9 @@ pub enum SemanticNodeData {
     ///
     /// The walker treats this variant as terminal in `Navigate` mode
     /// ([`PathWalker`] does not dispatch `ResolveDecl`); in `Expanded` mode
-    /// the reducer ([`raise_and_reduce`]) issues a `ResolveDecl` dispatch
+    /// the reducer
+    /// ([`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_and_reduce_with_context`])
+    /// issues a `ResolveDecl` dispatch
     /// and substitutes the result.
     ///
     /// Raises to `TypeExpr::Ref { name: identity.decl_name, type_arguments: [] }`.
