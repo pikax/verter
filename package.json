@@ -33,6 +33,7 @@
     "build:mcp": "cargo build -p verter_mcp",
     "build:mcp:release": "cargo build -p verter_mcp --release",
     "build:lapce": "rustup target add wasm32-wasip1 && cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release && npx shx mkdir -p extensions/lapce/bin && npx shx cp extensions/lapce/target/wasm32-wasip1/release/verter_lapce.wasm extensions/lapce/bin/verter-lapce.wasm",
+    "build:zed": "rustup target add wasm32-wasip2 && cargo build --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release && npx shx mkdir -p extensions/zed/bin && npx shx cp extensions/zed/target/wasm32-wasip2/release/verter_zed.wasm extensions/zed/bin/verter-zed.wasm",
     "build:playground": "pnpm --filter @verter/playground build",
     "build:unplugin": "pnpm --filter @verter/unplugin build",
     "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
