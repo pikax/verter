@@ -1,9 +1,11 @@
 name: neovim
 
 # Neovim LSP-client config tests. Two gates:
-#   - `test`: the headless plenary unit suite (Lua config builders + on_attach).
-#     The real-server smoke spec skips vacuously because no `verter-lsp` binary is
-#     built in this job.
+#   - `test`: the headless plenary suite. It builds `verter-lsp` and exports
+#     `$VERTER_LSP_BIN`, so the real-server attach smoke (`smoke_spec.lua`) runs
+#     a REAL stdio attach against the built binary (it no longer skips
+#     vacuously). The always-on Lua unit specs (config builders + on_attach) run
+#     alongside it.
 #   - `rust-contract`: the Rust single-source-of-truth drift guard
 #     (`nvim_config_contract`), which asserts the Lua init-options layer stays in
 #     lockstep with the shared Rust contract. An nvim-side edit fires this so a
@@ -14,10 +16,12 @@ on:
     branches: [main]
     paths:
       - "editors/nvim/**"
+      - "crates/verter-editor-client/**"
       - ".github/workflows/neovim.yml"
   pull_request:
     paths:
       - "editors/nvim/**"
+      - "crates/verter-editor-client/**"
       - ".github/workflows/neovim.yml"
 
 jobs:
@@ -41,6 +45,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build verter-lsp
+        # The real-server attach smoke (`smoke_spec.lua`) drives a REAL
+        # `verter-lsp` over stdio, so the binary must exist. Build it in release
+        # mode; the plenary step below exports `$VERTER_LSP_BIN` at it so the
+        # smoke runs for real instead of skipping.
+        run: cargo build -p verter_lsp --release
+
       - name: Install Neovim
         uses: rhysd/action-setup-vim@v1
         with:
@@ -59,6 +73,21 @@ jobs:
           PLENARY_PATH: ${{ github.workspace }}/.ci/plenary.nvim
         run: |
           set -euo pipefail
+          # Resolve the freshly built verter-lsp binary cross-platform and export
+          # it as $VERTER_LSP_BIN in THIS shell, so `smoke_spec.lua` runs its REAL
+          # stdio attach (it honours $VERTER_LSP_BIN; without it the smoke skips
+          # vacuously). The Windows runner produces a .exe; branch on RUNNER_OS.
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            VERTER_LSP_BIN="${GITHUB_WORKSPACE}/target/release/verter-lsp.exe"
+          else
+            VERTER_LSP_BIN="${GITHUB_WORKSPACE}/target/release/verter-lsp"
+          fi
+          if [ ! -x "${VERTER_LSP_BIN}" ]; then
+            echo "::error::built verter-lsp not found/executable at ${VERTER_LSP_BIN}"
+            exit 1
+          fi
+          export VERTER_LSP_BIN
+          echo "using VERTER_LSP_BIN=${VERTER_LSP_BIN}"
           # Load minimal_init.lua into the PARENT nvim with `-u` so the
           # `PlenaryBustedDirectory` command exists (it is defined by
           # plenary, which minimal_init prepends to the rtp). Without `-u`

@@ -85,6 +85,7 @@ export default withMermaid(
             text: "Editor Support",
             items: [
               { text: "VS Code Extension", link: "/editor/vscode" },
+              { text: "Other Editors (Lapce/Zed/Helix/Neovim)", link: "/editor/other-editors" },
               { text: "LSP Features", link: "/editor/lsp-features" },
               { text: "MCP Server", link: "/editor/mcp-server" },
               { text: "Settings Reference", link: "/editor/settings" },
