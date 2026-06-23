@@ -457,6 +457,19 @@ impl VerterLanguageServer {
     ) -> Vec<crate::type_provider::protocol::TypeCodeAction> {
         aux_features::raw_provider_code_actions(self, uri, range, diagnostics).await
     }
+
+    /// MERGED (Verter lint/template + type-provider) diagnostics for a carrier URI,
+    /// mapped back onto the carrier source ranges (test harness access).
+    ///
+    /// Returns the exact set [`Self::publish_full_diagnostics`] would push to the
+    /// client, so a real-provider test can assert a specific TS diagnostic
+    /// (e.g. TS1192 default-import-of-no-default) surfaces on the `.vue` carrier.
+    pub(crate) async fn test_merged_diagnostics(
+        &self,
+        uri: &tower_lsp_server::ls_types::Uri,
+    ) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
+        self.compute_full_diagnostics(uri).await
+    }
 }
 
 impl LanguageServer for VerterLanguageServer {

@@ -32,9 +32,21 @@ use super::{ProviderProjectionContext, PublishedResolverSnapshot, VerterLanguage
 
 impl VerterLanguageServer {
     pub(super) async fn publish_full_diagnostics(&self, uri: &Uri) {
+        let diagnostics = self.compute_full_diagnostics(uri).await;
+        self.publish_diagnostics_raw(uri, diagnostics).await;
+    }
+
+    /// Compute the merged (Verter lint/template + type-provider) diagnostic set for
+    /// `uri`, mapped back onto the carrier source ranges, WITHOUT publishing it.
+    ///
+    /// This is the body shared with [`Self::publish_full_diagnostics`]; splitting the
+    /// computation from the push lets real-provider tests observe the merged set
+    /// directly (the test harness drains the client socket, so a pushed set is not
+    /// otherwise readable).
+    pub(super) async fn compute_full_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
         let verter_diags = self.compute_verter_diagnostics(uri);
 
-        let diagnostics = if let Some(tp) = &self.type_provider {
+        if let Some(tp) = &self.type_provider {
             match self.ide_context(uri) {
                 Some((tsx_path, tsx_content, mapper)) => {
                     let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
@@ -84,9 +96,7 @@ impl VerterLanguageServer {
             }
         } else {
             verter_diags
-        };
-
-        self.publish_diagnostics_raw(uri, diagnostics).await;
+        }
     }
 
     /// Audit-aware wrapper for [`Self::publish_full_diagnostics`].

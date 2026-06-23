@@ -851,6 +851,31 @@ impl RealProviderTestSession {
         false
     }
 
+    /// MERGED (Verter template/lint + type-provider) diagnostics for an open carrier
+    /// document, mapped back onto the carrier source ranges.
+    ///
+    /// Drives the same `publish_full_diagnostics` merge path the server uses, but
+    /// RETURNS the set (the harness drains the client socket, so a pushed set is not
+    /// readable). Ensures the carrier is synced first and retries briefly while the
+    /// provider's inferred project warms up, so a semantic diagnostic (e.g. a
+    /// missing-default-export TS error) that only appears once the program is built
+    /// is observed without a flaky first-shot empty read.
+    pub(crate) async fn merged_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
+        let mut last = Vec::new();
+        for attempt in 0..8 {
+            self.ensure_synced(uri).await;
+            let diags = self.server().test_merged_diagnostics(uri).await;
+            if !diags.is_empty() {
+                return diags;
+            }
+            last = diags;
+            if attempt < 7 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        }
+        last
+    }
+
     /// Shut down the type provider process.
     pub(crate) async fn shutdown(self) {
         let _ = self.provider.shutdown().await;
