@@ -76,6 +76,41 @@ real_provider_test!(
 );
 
 // ---------------------------------------------------------------------------
+// Path aliases through a barrel re-export: @/ alias + `export { default as X }`
+// ---------------------------------------------------------------------------
+
+real_provider_test!(
+    hover_aliased_barrel,
+    fixture = "path-aliases",
+    async fn run(session) {
+        // AppBarrel imports MyComp via `import { MyComp } from '@/components'`, where
+        // `src/components/index.ts` re-exports `./MyComp.vue`. Exercises the eager barrel BFS over
+        // an alias-resolved barrel hop end-to-end (real tsconfig `paths`): the `@/` specifier must
+        // resolve through the shared workspace resolver to the barrel, and the BFS must follow the
+        // re-export to MyComp's carrier so the provider resolves its props.
+        let uri = session.open_fixture_file("src/AppBarrel.vue").await;
+        let _mycomp = session.open_fixture_file("src/components/MyComp.vue").await;
+
+        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
+            eprintln!("skipping: provider not warmed up");
+            return;
+        }
+
+        let pos = session.find_position(&uri, "<MyComp", 1);
+        let hover = session.hover_text(&uri, pos).await;
+        assert!(
+            hover.is_some(),
+            "hover on @/-barrel-imported MyComp should return a result"
+        );
+        let text = hover.unwrap();
+        assert!(
+            text.contains("foo"),
+            "MyComp imported through a @/-aliased barrel should resolve its props (foo); got: {text}"
+        );
+    }
+);
+
+// ---------------------------------------------------------------------------
 // tsconfig references
 // ---------------------------------------------------------------------------
 

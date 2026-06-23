@@ -8129,6 +8129,54 @@ async fn barrel_eager_sync_follows_reexport_hops_and_is_provider_neutral() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "install_test_resolver_for_root builds a ProjectPayload::Fallback that does not parse \
+            tsconfig `paths`, so an @/-alias seed cannot resolve in this harness. The production \
+            Configured-project resolver is alias-aware and the BFS routes @/ through it exactly \
+            like the proven relative case above; @/ is verified end-to-end via the real-provider \
+            suite / the live repro. Un-ignore once the unit harness supports a Configured project."]
+async fn barrel_eager_sync_follows_aliased_reexport_hops() {
+    // Same 2-hop barrel, imported through a tsconfig path alias (`@/components`). Resolution must
+    // go through the shared alias-aware workspace resolver; classify-by-resolved-target then
+    // follows the hops to the terminal carrier just as in the relative case.
+    let tsconfig =
+        "{ \"compilerOptions\": { \"baseUrl\": \".\", \"paths\": { \"@/*\": [\"src/*\"] } } }\n";
+    let foo = "<script setup lang=\"ts\">\ndefineProps<{ foo: boolean; bar?: string }>()\n</script>\n<template><div>{{ foo }}</div></template>\n";
+    let mid_barrel = "export { default as Foo } from './Foo.vue'\n";
+    let top_barrel = "export * from './Foo'\n";
+    let usage = "<script setup lang=\"ts\">\nimport { Foo } from '@/components'\n</script>\n<template><Foo></Foo></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
+        ("tsconfig.json", "json", tsconfig),
+        ("src/components/Foo/Foo.vue", "vue", foo),
+        ("src/components/Foo/index.ts", "typescript", mid_barrel),
+        ("src/components/index.ts", "typescript", top_barrel),
+        ("src/Usage.vue", "vue", usage),
+    ])
+    .await;
+
+    let server = service.inner();
+    let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+
+    server.ensure_barrel_imports_synced(&usage_uri).await;
+
+    let opened: Vec<String> = provider
+        .file_sync_calls()
+        .iter()
+        .filter_map(|call| match call {
+            MockCall::OpenFile { path, .. } => Some(path.replace('\\', "/")),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        opened.iter().any(|p| p.contains("Foo.vue")),
+        "aliased (@/) barrel import must resolve through tsconfig paths and sync the terminal carrier; opened={opened:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sync_imported_carrier_api_lightweight_preserves_open_unowned_state() {
     // FIX-5: the ready-no-owner arm of sync_imported_carrier_api_lightweight must
     // NOT clear+close+return for an OPEN `.vue` that is imported-by-an-open-file
