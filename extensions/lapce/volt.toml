@@ -1,0 +1,88 @@
+name = "verter"
+version = "0.1.0"
+author = "pikax"
+display-name = "Verter (Vue / Svelte)"
+description = "Vue & Svelte language support powered by the Verter LSP"
+repository = "https://github.com/pikax/verter"
+wasm = "bin/verter-lapce.wasm"
+
+# When Lapce loads the volt for one of these languages / on a workspace that
+# contains a matching file, it spawns the wasm plugin, which in turn launches the
+# native `verter-lsp` binary over stdio. Vue/Svelte are the carriers; the server
+# projects them to TS internally, so only those two language ids are advertised.
+[activation]
+language = ["vue", "svelte"]
+workspace-contains = ["**/*.vue", "**/*.svelte"]
+
+# `[config."a.b"]` dotted keys are delivered to the plugin as NESTED
+# `initializationOptions` (`options["a"]["b"]`), matching how the reference volts
+# (lapce-rust, lapce-julia) read their config and how this volt's launch contract
+# reads it via the shared `verter-editor-client` crate.
+
+# --- Server discovery (consumed by the discovery precedence) ---
+
+[config."lsp.serverPath"]
+default = ""
+description = "Absolute path to a verter-lsp binary. When set, it overrides every other discovery source."
+
+[config."lsp.serverArgs"]
+default = []
+description = "Extra arguments appended to the verter-lsp launch (after the type-provider flag, before the workspace root). Crate-owned arguments (--type-provider, --tsdk, bare positionals) are ignored."
+
+[config."lsp.serverSource"]
+default = "managed"
+description = "Where to find verter-lsp when no serverPath is set: \"managed\" (a pinned binary in the volt directory) or \"path\" (opt into PATH discovery). With neither a serverPath nor a present managed/PATH binary, the volt fails loud with setup guidance instead of guessing."
+
+# --- Type provider ---
+
+[config."typeProvider"]
+default = "tsgo"
+description = "TypeScript type provider. This client only supplies the SDK-free providers: tsgo (default) or off. tsserver / auto / any other value are clamped to tsgo (the client never supplies a TypeScript SDK)."
+
+# --- Linting ---
+
+[config."lint.enabled"]
+default = false
+description = "Enable Verter lint diagnostics."
+
+[config."lint.preset"]
+default = "recommended"
+description = "Lint preset: essential | recommended | all | performance | a11y | strict. Unknown values clamp to recommended."
+
+# --- Inlay hints ---
+
+[config."inlayHints.enabled"]
+default = true
+description = "Enable inlay hints."
+
+# --- Vite config integration ---
+
+[config."viteConfig.enabled"]
+default = true
+description = "Read vite.config.* for resolve aliases and other build settings."
+
+[config."viteConfig.trustedFiles"]
+default = []
+description = "Vite config files trusted for execution."
+
+# --- Experimental ---
+
+[config."experimental.conditionalRootNarrowing"]
+default = false
+description = "Experimental: narrow fallthrough attributes through conditional template roots."
+
+[config."experimental.strictSlots"]
+default = false
+description = "Experimental: stricter slot type checking."
+
+# --- Hover ---
+
+[config."hover.provenance"]
+default = false
+description = "Include type provenance (where a type came from) in hover."
+
+# --- Statistics ---
+
+[config."statistics.enabled"]
+default = false
+description = "Emit server-side resolution statistics."

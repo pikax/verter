@@ -181,7 +181,7 @@ The verter config does **not** hand-author client capabilities (beyond the §2.4
 
 ### 4.1 Layout & workspace isolation
 
-A new directory **`editors/nvim/`** (mirrors the `editors/lapce/` home the sibling design proposes; `editors/` is the natural home for editor-client artifacts, distinct from `crates/` (workspace-member Rust) and `packages/` (pnpm TS/JS)). It contains **no Rust and no pnpm package** — pure Lua + docs — so it does not enter the Cargo workspace, the `cargo nextest run --workspace` gate, or the pnpm build graph.
+A new directory **`editors/nvim/`** (`editors/` is the natural home for config-only editor integrations, distinct from `extensions/` — the home for compiled editor clients such as the Lapce volt at `extensions/lapce/` — and from `crates/` (workspace-member Rust) and `packages/` (pnpm TS/JS)). It contains **no Rust and no pnpm package** — pure Lua + docs — so it does not enter the Cargo workspace, the `cargo nextest run --workspace` gate, or the pnpm build graph.
 
 ```
 editors/nvim/
