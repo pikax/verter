@@ -1,0 +1,68 @@
+{
+  "slug": "directive_text__style_text",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "directive_text__style_text",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "set_style",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "from_html",
+    "set_style",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "set_style": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function directive_text__style_text($$anchor) {let x = $.state(0); var div = root(); $.set_style(div, '', {}, {color: 'red'}); $.delegated('click', div, () => $.update(x)); $.append($$anchor, div);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

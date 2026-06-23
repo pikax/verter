@@ -33,8 +33,10 @@ mod client_allowlist;
 mod client_codegen_helpers;
 mod client_effect;
 mod client_plan;
+mod client_plan_spread_html;
 mod client_plan_types;
 mod client_shapes;
+mod client_spread_html_emit;
 mod client_surface;
 mod client_walk;
 mod css_reject;
@@ -238,22 +240,16 @@ impl<'a> LoweringCtx<'a> {
     pub(super) fn push_expr(&mut self, span: Span, scope: ScopeId) -> ExprId {
         let text = span_text(self.source, span);
         match collect_expr_references(text) {
-            Ok(references) => self.expressions.push(AnalyzedExpr {
-                source: text,
-                scope,
-                references,
-            }),
+            Ok(facts) => self
+                .expressions
+                .push(AnalyzedExpr::interned(text, scope, facts)),
             Err(()) => {
                 self.errors.push(
                     "svelte-runtime-expr-parse",
                     format!("could not parse template expression `{text}`"),
                     span,
                 );
-                self.expressions.push(AnalyzedExpr {
-                    source: text,
-                    scope,
-                    references: Vec::new(),
-                })
+                self.expressions.push(AnalyzedExpr::torn(text, scope))
             }
         }
     }

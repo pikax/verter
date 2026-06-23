@@ -336,33 +336,54 @@ fn pure_global_tagged_template_is_not_has_call() {
 // svelte@5.56.3: `class={a + b}` emits `$.set_class(el, 1, a + b)` (no clsx);
 // `class={c}` / `class={f()}` / `class={[…]}` / `class={{…}}` emit `$.clsx(…)`.
 
+/// The `class_value_needs_clsx` decision over a value-expression SOURCE: parse it the
+/// shared way (the same single parse the producers use) and read the unwrapped-root KIND
+/// fact, so a parenthesized literal / binary / template is classified on its UNWRAPPED
+/// root. Mirrors the production call site (which reads `analyzed.unwrapped_root_kind`).
+fn needs_clsx(src: &str) -> bool {
+    let facts = super::super::expr::collect_expr_references(src).expect("class value parses");
+    super::class_value_needs_clsx(facts.unwrapped_root_kind)
+}
+
 #[test]
 fn binary_literal_template_class_values_do_not_need_clsx() {
-    use super::class_value_needs_clsx;
     // A BinaryExpression (string concatenation) — NOT wrapped (the headline fix).
     assert!(
-        !class_value_needs_clsx("a + b"),
+        !needs_clsx("a + b"),
         "a binary-expression class value must NOT need clsx"
     );
     // A string / numeric / boolean Literal — NOT wrapped.
     assert!(
-        !class_value_needs_clsx("'x'"),
+        !needs_clsx("'x'"),
         "a string-literal class value must NOT need clsx"
     );
     assert!(
-        !class_value_needs_clsx("42"),
+        !needs_clsx("42"),
         "a numeric-literal class value must NOT need clsx"
     );
     // A TemplateLiteral — NOT wrapped.
     assert!(
-        !class_value_needs_clsx("`a${b}c`"),
+        !needs_clsx("`a${b}c`"),
         "a template-literal class value must NOT need clsx"
+    );
+    // PARENTHESIZED literal / binary / template — the unwrapped-root decision sees through
+    // the author parens, so these are STILL not wrapped (the cycle-4 fix).
+    assert!(
+        !needs_clsx("('x')"),
+        "a parenthesized string literal must NOT need clsx (decision on the unwrapped root)"
+    );
+    assert!(
+        !needs_clsx("((a + b))"),
+        "a doubly-parenthesized binary must NOT need clsx (decision on the unwrapped root)"
+    );
+    assert!(
+        !needs_clsx("(`x${a}`)"),
+        "a parenthesized template literal must NOT need clsx (decision on the unwrapped root)"
     );
 }
 
 #[test]
 fn other_class_value_shapes_need_clsx() {
-    use super::class_value_needs_clsx;
     // An Identifier, a CallExpression, a ConditionalExpression, a LogicalExpression,
     // an ObjectExpression, an ArrayExpression, and a MemberExpression — all wrapped.
     for src in [
@@ -376,10 +397,16 @@ fn other_class_value_shapes_need_clsx() {
         "obj.cls",
     ] {
         assert!(
-            class_value_needs_clsx(src),
+            needs_clsx(src),
             "class value `{src}` must need clsx (not Literal/Template/Binary)"
         );
     }
+    // A PARENTHESIZED conditional is STILL wrapped — the unwrapped root is a conditional,
+    // not a no-wrap kind (the clsx-YES boundary).
+    assert!(
+        needs_clsx("(on ? 'a' : 'b')"),
+        "a parenthesized conditional must STILL need clsx (unwrapped root is a conditional)"
+    );
 }
 
 // ── member `has_state` (`MemberExpression.js`'s `!is_pure(node)`) ──

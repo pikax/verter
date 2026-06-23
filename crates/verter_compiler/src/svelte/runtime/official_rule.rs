@@ -114,6 +114,20 @@ pub enum CoreOfficialValidationRule {
     ///
     /// [`ParsedSvelte::strict_parse_errors`]: crate::svelte::parser::ParsedSvelte::strict_parse_errors
     ParserStrictness,
+    /// A directive value that is a STATIC-TEXT value (`class:on="x"` / `use:foo="bar"`)
+    /// rather than a JS expression in curly braces — official `directive_invalid_value`.
+    /// Every directive family EXCEPT `style:` requires an expression value; only a
+    /// `style:prop="text"` accepts a static-text value (it folds as a quoted string). A
+    /// non-style directive whose value is a `Text` chunk (or a multi-chunk mixed value) is
+    /// the official compile error.
+    DirectiveInvalidValue,
+    /// An attribute NAME on an intrinsic element (or `<svelte:element>`) that is not a
+    /// valid HTML attribute name — official `attribute_invalid_name`. The official parser
+    /// rejects a name whose FIRST character is a digit / `-` / `.`, or that CONTAINS any of
+    /// `^ $ @ % & # ? ! | ( ) [ ] { } * + ~ ;`. A COMPONENT takes quoted prop keys, so an
+    /// invalid prop name on a component is ACCEPTED (not this rule); a colon name
+    /// (`foo:bar`), `data-x`, `aria-label`, and `_foo` are all valid.
+    AttributeInvalidName,
 }
 
 impl CoreOfficialValidationRule {
@@ -139,6 +153,8 @@ impl CoreOfficialValidationRule {
         CoreOfficialValidationRule::AttributeDuplicate,
         CoreOfficialValidationRule::OptionsInvalid,
         CoreOfficialValidationRule::ParserStrictness,
+        CoreOfficialValidationRule::DirectiveInvalidValue,
+        CoreOfficialValidationRule::AttributeInvalidName,
     ];
 
     /// The PascalCase rule name as it appears in a reject corpus row's `rule` field.
@@ -163,6 +179,8 @@ impl CoreOfficialValidationRule {
             Self::AttributeDuplicate => "AttributeDuplicate",
             Self::OptionsInvalid => "OptionsInvalid",
             Self::ParserStrictness => "ParserStrictness",
+            Self::DirectiveInvalidValue => "DirectiveInvalidValue",
+            Self::AttributeInvalidName => "AttributeInvalidName",
         }
     }
 
@@ -207,6 +225,8 @@ impl CoreOfficialValidationRule {
             // per-fixture in the parse-parity corpus. This is the canonical-code
             // documentation hook only — a representative member of the family.
             Self::ParserStrictness => "tag_invalid_name",
+            Self::DirectiveInvalidValue => "directive_invalid_value",
+            Self::AttributeInvalidName => "attribute_invalid_name",
         }
     }
 
@@ -239,6 +259,8 @@ impl CoreOfficialValidationRule {
             Self::AttributeDuplicate => "svelte-official-reject-attribute-duplicate",
             Self::OptionsInvalid => "svelte-official-reject-options-invalid",
             Self::ParserStrictness => "svelte-official-reject-parser-strictness",
+            Self::DirectiveInvalidValue => "svelte-official-reject-directive-invalid-value",
+            Self::AttributeInvalidName => "svelte-official-reject-attribute-invalid-name",
         }
     }
 
@@ -278,6 +300,15 @@ impl CoreOfficialValidationRule {
                 "malformed markup the official strict parser rejects (a raw `<`, a close \
                  tag with a trailing token, an empty attribute value, a nameless close, \
                  or an unterminated tag / block / value)"
+            }
+            Self::DirectiveInvalidValue => {
+                "a directive with a static-text value (only `style:` accepts a text value; \
+                 every other directive requires a JavaScript expression in curly braces)"
+            }
+            Self::AttributeInvalidName => {
+                "an attribute with an invalid name on an intrinsic element (a name starting \
+                 with a digit / `-` / `.`, or containing one of `^ $ @ % & # ? ! | ( ) [ ] \
+                 { } * + ~ ;`)"
             }
         };
         format!(

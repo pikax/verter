@@ -31,9 +31,11 @@ use rustc_hash::FxHashSet;
 
 use super::expr::{collect_pattern_names, reparse_module, ShadowStack};
 use super::official_rule::{CoreOfficialValidationRule, OfficialRejection};
+use crate::svelte::parser::tokenizer_scan::find_matching_brace_in;
 use crate::svelte::parser::{
     CloseTagViolationKind, ParsedSvelte, ScriptBodyGrammar, SvelteAttribute, SvelteAttributeKind,
-    SvelteAttributeValue, SvelteElement, SvelteElementKind, SvelteNode, SvelteParseRejectKind,
+    SvelteAttributeValue, SvelteDirectiveKind, SvelteElement, SvelteElementKind, SvelteNode,
+    SvelteParseRejectKind, SvelteSpecialKind,
 };
 
 /// Run the OFFICIAL-REJECT analysis gate over a parsed component: detect the
@@ -61,18 +63,34 @@ pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<Offic
     }
 
     // ─── ANALYZE PHASE (official `phases/2-analyze`) — runs ONLY on a CLEAN parse (the
-    // parse-defect stream above was empty). Ordered by upstream PASS order (NOT span):
-    // (a) the script-scope / global `$`-reference checks (`scope.js` + the store-subscription
-    // guard) run in the module → instance walk, BEFORE (b) the template-walk
-    // `node_invalid_placement`. So a script declaration / global-reference defect wins over a
-    // concurrent template placement defect. ───
+    // parse-defect stream above was empty). Ordered by upstream VISITOR/PASS order (NOT
+    // span, NOT the parse-vs-analyze phase): official reaches the template `element.js`
+    // directive-value check BEFORE the module/instance scope walk's `$`-declaration /
+    // global-`$`-reference checks, which in turn run BEFORE the template-walk
+    // `attribute_invalid_name` and `node_invalid_placement`. So:
+    //   directive_invalid_value  >  $-decl / global-$-ref  >  attribute_invalid_name  >  placement.
+    // A co-located `class:on="text"` + (a script `$foo` global / a `let $x` decl) rejects as
+    // `directive_invalid_value`; a co-located `$foo` global + `<div 1foo>` rejects as
+    // `global_reference_invalid` (the script global beats the attribute-name check). ───
+
+    // (a) The template-walk `directive_invalid_value` — a non-`style:` directive whose value
+    // is a STATIC-TEXT chunk (`class:on="x"` / `use:foo="bar"`) rather than a JS expression
+    // in curly braces. Official rejects this at the PARSE phase (`element.js` exempts ONLY a
+    // `StyleDirective` from the text-value check); Verter's forgiving parser accepts the
+    // markup, so the analyze gate mirrors the rejection. Ordered FIRST in the analyze phase:
+    // official reaches this directive-value check ahead of the scope walk's `$`-declaration /
+    // global-reference checks, so a malformed directive value wins over a concurrent script
+    // `$foo` / `let $x` defect (and over the attribute-name / placement scans).
+    if let Some(rule) = scan_directive_invalid_value(source, &parsed.template) {
+        return Some(OfficialRejection::of(rule));
+    }
 
     // The accepted top-level local names (declared in either script) — the referents a
     // `$foo` store-style reference / `bind:this` target may legally name. Collected
     // once for the reference scans.
     let declared = declared_top_level_locals(source, parsed);
 
-    // (a.1) Script name rules (`scope.js`): a `$`-prefixed declaration
+    // (b.1) Script name rules (`scope.js`): a `$`-prefixed declaration
     // (`dollar_prefix_invalid`). Scanned over each script's top-level declarators. (A
     // same-lexical-scope `let`/`const` redeclaration is a PARSE-phase `js_parse_error` owned by
     // the body-probe slot, not an analyze rule, so it is not re-detected here.)
@@ -82,7 +100,7 @@ pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<Offic
         }
     }
 
-    // (a.2) Global `$foo` / `$$foo` references in script + template + bind + event
+    // (b.2) Global `$foo` / `$$foo` references in script + template + bind + event
     // positions. A `$foo` is a violation only when `foo` is NOT a declared accepted local
     // AND lowercase-initial (`global_reference_invalid`); a `$$foo` (non-reserved) is always
     // `global_reference_invalid`; the reserved magic objects carry their EXACT runes-mode
@@ -94,16 +112,209 @@ pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<Offic
         return Some(rejection);
     }
 
-    // (b) The template-walk `node_invalid_placement` — the disallowed-descendant REPAIR
+    // (c) The template-walk `attribute_invalid_name` — a plain attribute on an INTRINSIC
+    // element (or `<svelte:element>`) whose NAME is not a valid HTML attribute name.
+    // Official rejects this at the PARSE phase (`read/element.js`); Verter's forgiving
+    // parser accepts the markup, so the analyze gate mirrors the rejection. Ordered AFTER
+    // the script-scope / global-reference checks (official reports the script global error
+    // before this attribute-name error — a co-located `$foo` global + `<div 1foo>` rejects
+    // as `global_reference_invalid`) and BEFORE the placement scan (an invalid name on a
+    // nested `<button>` rejects as `attribute_invalid_name`, not the placement defect).
+    if let Some(rule) = scan_attribute_invalid_name(&parsed.template) {
+        return Some(OfficialRejection::of(rule));
+    }
+
+    // (d) The template-walk `node_invalid_placement` — the disallowed-descendant REPAIR
     // families (a nested `<a>` / `<button>`, a heading-in-heading). Runs LAST in the analyze
-    // phase (after the script-scope / global-reference checks) and ONLY on a clean parse (the
-    // explicit-`</p>` autoclose is now a PARSE defect minted by the parser, so it is excluded
-    // from this scan).
+    // phase (after the directive-value, script-scope / global-reference, and attribute-name
+    // checks) and ONLY on a clean parse (the explicit-`</p>` autoclose is now a PARSE defect
+    // minted by the parser, so it is excluded from this scan).
     if let Some(rule) = scan_html_placement(&parsed.template, &mut Vec::new()) {
         return Some(OfficialRejection::of(rule));
     }
 
     None
+}
+
+/// Scan template nodes for a directive with a static-TEXT value on a NON-`style:` directive
+/// — the official `directive_invalid_value` parse error. Returns the rule on the FIRST
+/// violating directive in document order, or `None`.
+///
+/// Mirrors the official `phases/1-parse/state/element.js` rule EXACTLY: a directive value is
+/// invalid when `first_value.type === 'Text'` OR the value is a multi-chunk mixed value
+/// (`value.length > 1`); a `StyleDirective` is the SOLE exemption (it accepts a text value,
+/// which folds as a quoted string). Driven from the typed directive value variant, never a
+/// raw-source heuristic.
+fn scan_directive_invalid_value(
+    source: &str,
+    nodes: &[SvelteNode],
+) -> Option<CoreOfficialValidationRule> {
+    for node in nodes {
+        match node {
+            SvelteNode::Element(el) => {
+                for attr in &el.attributes {
+                    if let SvelteAttributeKind::Directive(dir) = &attr.kind {
+                        // `style:` is the SOLE directive family that accepts a static-text
+                        // value; every other directive requires an expression.
+                        if dir.kind == SvelteDirectiveKind::Style {
+                            continue;
+                        }
+                        if directive_value_is_invalid_text(source, &dir.value) {
+                            return Some(CoreOfficialValidationRule::DirectiveInvalidValue);
+                        }
+                    }
+                }
+                if let Some(rule) = scan_directive_invalid_value(source, &el.children) {
+                    return Some(rule);
+                }
+            }
+            SvelteNode::Block(block) => {
+                if let Some(rule) = scan_directive_invalid_value(source, &block.children) {
+                    return Some(rule);
+                }
+                for clause in &block.clauses {
+                    if let Some(rule) = scan_directive_invalid_value(source, &clause.children) {
+                        return Some(rule);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a directive's value is a STATIC-TEXT value that the official compiler rejects on
+/// a non-`style:` directive (`first_value.type === 'Text'` OR a multi-chunk mixed value).
+///
+/// - `None` (a valueless shorthand `class:on`) → NOT invalid (the implied same-named
+///   expression).
+/// - `Text` (a quoted plain-text body `class:on="x"`) → INVALID (the `type === 'Text'` arm).
+/// - `Expression` (a bare `class:on={x}`) → NOT invalid.
+/// - `Mixed` → invalid UNLESS it is EXACTLY one `{…}` ExpressionTag spanning the whole body
+///   (`class:on="{x}"`, the `value.length === 1` shape); any surrounding text / extra chunk
+///   (`class:on="a{x}"` / `class:on="{x}{y}"`) is the `value.length > 1` arm → INVALID.
+fn directive_value_is_invalid_text(source: &str, value: &Option<SvelteAttributeValue>) -> bool {
+    match value {
+        None => false,
+        Some(SvelteAttributeValue::Expression(_)) => false,
+        Some(SvelteAttributeValue::Text(_)) => true,
+        Some(SvelteAttributeValue::Mixed(span)) => {
+            // A single `{…}` ExpressionTag spanning the whole quoted body (no surrounding
+            // text, whitespace included) is the `value.length === 1` shape → valid; anything
+            // else (text before/after, a second interpolation) is `value.length > 1`.
+            !mixed_value_is_single_expression(source, *span)
+        }
+    }
+}
+
+/// Whether a quoted mixed value body is EXACTLY one `{…}` interpolation spanning the whole
+/// body (no bytes before `{` or after the matching `}`) — the official `value.length === 1`
+/// ExpressionTag-only shape. Uses the SHARED JS-aware brace scanner so a `}` inside a
+/// string / template literal within the interpolation does not close it early.
+fn mixed_value_is_single_expression(source: &str, span: verter_span::Span) -> bool {
+    let text = &source[span.start as usize..span.end as usize];
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'{') {
+        return false; // text (or whitespace) before the interpolation
+    }
+    let close = find_matching_brace_in(bytes, 1);
+    // The matching `}` must be the LAST byte of the body (no trailing text).
+    close == bytes.len().saturating_sub(1) && bytes.get(close) == Some(&b'}')
+}
+
+/// Scan template nodes for a PLAIN attribute on an INTRINSIC element (or a
+/// `<svelte:element>`) whose NAME is not a valid HTML attribute name — the official
+/// `attribute_invalid_name` parse error. Returns the rule on the FIRST violating
+/// attribute in document order, or `None`.
+///
+/// Mirrors the official `phases/1-parse/read/element.js` rule: an intrinsic element's
+/// attribute name is validated against the regex `/(^[0-9-.])|[\^$@%&#?!|()[\]{}^*+~;]/`
+/// (rejected iff it starts with a digit / `-` / `.`, or contains one of the operator
+/// characters). A COMPONENT takes quoted prop keys, so its prop names are NOT validated
+/// (official accepts `<Foo 1foo="x" />`). Driven from the typed attribute-name string +
+/// element kind, never a raw-source heuristic. Recurses the same node families the
+/// directive-value scan walks.
+fn scan_attribute_invalid_name(nodes: &[SvelteNode]) -> Option<CoreOfficialValidationRule> {
+    for node in nodes {
+        match node {
+            SvelteNode::Element(el) => {
+                // Only INTRINSIC elements and `<svelte:element this={…}>` validate attribute
+                // names; a component / `<svelte:component>` / `<svelte:self>` / other special
+                // takes quoted prop keys (official accepts an invalid prop name there).
+                let validates = matches!(
+                    el.kind,
+                    SvelteElementKind::Intrinsic
+                        | SvelteElementKind::Special(SvelteSpecialKind::Element)
+                );
+                if validates {
+                    for attr in &el.attributes {
+                        if let SvelteAttributeKind::Plain { name, .. } = &attr.kind {
+                            if attribute_name_is_invalid(name) {
+                                return Some(CoreOfficialValidationRule::AttributeInvalidName);
+                            }
+                        }
+                    }
+                }
+                if let Some(rule) = scan_attribute_invalid_name(&el.children) {
+                    return Some(rule);
+                }
+            }
+            SvelteNode::Block(block) => {
+                if let Some(rule) = scan_attribute_invalid_name(&block.children) {
+                    return Some(rule);
+                }
+                for clause in &block.clauses {
+                    if let Some(rule) = scan_attribute_invalid_name(&clause.children) {
+                        return Some(rule);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether an attribute NAME is invalid per the official `attribute_invalid_name` rule
+/// (the pinned `svelte@5.56.3` regex `/(^[0-9-.])|[\^$@%&#?!|()[\]{}^*+~;]/`): the FIRST
+/// character is a digit / `-` / `.`, OR the name CONTAINS one of
+/// `^ $ @ % & # ? ! | ( ) [ ] { } * + ~ ;`. A colon name (`foo:bar`), a leading `_`, and
+/// mid-name `-` / `.` (`data-x` / `aria-label` / `_foo`) are all VALID. Expressed as a
+/// typed char match, never a regex over source text.
+fn attribute_name_is_invalid(name: &str) -> bool {
+    // FIRST char: a digit / `-` / `.` is invalid (`1foo` / `-foo` / `.foo`). An empty name
+    // cannot reach here (the parser never produces a nameless Plain attribute), so the
+    // first-char check is on a present byte.
+    if let Some(first) = name.chars().next() {
+        if first.is_ascii_digit() || first == '-' || first == '.' {
+            return true;
+        }
+    }
+    // ANY char in the operator set anywhere in the name is invalid.
+    name.chars().any(|c| {
+        matches!(
+            c,
+            '^' | '$'
+                | '@'
+                | '%'
+                | '&'
+                | '#'
+                | '?'
+                | '!'
+                | '|'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '*'
+                | '+'
+                | '~'
+                | ';'
+        )
+    })
 }
 
 /// Select the FIRST-discovered (minimum `encounter_order`) unsuppressed PARSE defect from

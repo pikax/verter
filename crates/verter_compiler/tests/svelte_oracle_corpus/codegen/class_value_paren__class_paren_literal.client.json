@@ -1,0 +1,68 @@
+{
+  "slug": "class_value_paren__class_paren_literal",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "class_value_paren__class_paren_literal",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "set_class",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "from_html",
+    "set_class",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "set_class": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function class_value_paren__class_paren_literal($$anchor) {let a = $.state(0); var div = root(); $.set_class(div, 1, 'x'); $.delegated('click', div, () => $.update(a)); $.append($$anchor, div);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

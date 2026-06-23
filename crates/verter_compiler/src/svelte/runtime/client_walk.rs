@@ -90,6 +90,10 @@ pub(super) fn any_item_needs_name(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> 
 pub(super) fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
     match ir.node(node_id) {
         IrNode::Interpolation { .. } => true,
+        // A `{@html}` raw-markup tag is a dynamic node the DOM walk must reach (its
+        // `$.html` op operates on a `<!>` anchor var, or — when it is the sole controlled
+        // child — on the parent element followed by `$.reset(parent)`).
+        IrNode::Tag(super::ir::TagIr::Html { .. }) => true,
         IrNode::Element(el) => {
             el.attrs.iter().any(super::html::attr_is_dynamic_surface)
                 || el

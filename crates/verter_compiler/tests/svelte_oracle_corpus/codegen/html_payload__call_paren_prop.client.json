@@ -1,0 +1,64 @@
+{
+  "slug": "html_payload__call_paren_prop",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "html_payload__call_paren_prop",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "html",
+    "reset",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "html",
+    "pop",
+    "push",
+    "reset"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "html": 1,
+    "reset": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function html_payload__call_paren_prop($$anchor, $$props) {$.push($$props, true); var div = root(); $.html(div, () => $$props.render(), true); $.reset(div); $.append($$anchor, div); $.pop();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -73,6 +73,17 @@ pub(super) struct ClassifiedClientSurface {
     /// the attribute in the element's `AttrIr` list, so a per-attribute op maps back
     /// to its accepted emission shape. The plan coalesces the class/style entries.
     pub(super) dynamic_attr_shapes: Vec<(NodeId, usize, ClientDynamicAttrShape)>,
+    /// The accepted `{@html}` node ids — the FACT a `$.html` op consumes (the proof the
+    /// raw-markup tag is supported in this position). The plan reads the payload
+    /// expression + the only-child topology from the IR; this is the per-node acceptance
+    /// proof so an unclassified `{@html}` cannot reach the plan.
+    pub(super) html_nodes: Vec<NodeId>,
+    /// The accepted spread-attribute element node ids — the FACT a `$.attribute_effect`
+    /// op consumes. A spread on an element switches its WHOLE attribute strategy (every
+    /// co-located attribute folds into the single effect); the plan reads the
+    /// source-ordered attribute list from the IR, this is the per-element acceptance
+    /// proof.
+    pub(super) spread_elements: Vec<NodeId>,
     /// The read-only `$props()` usage fact (no prop write / bind reached the
     /// classifier).
     pub(super) props_usage: ClientPropsUsage,
@@ -181,6 +192,8 @@ impl ClientSyntaxSurface {
             bind_shapes: facts.bind_shapes,
             interp_shapes: facts.interp_shapes,
             dynamic_attr_shapes: facts.dynamic_attr_shapes,
+            html_nodes: facts.html_nodes,
+            spread_elements: facts.spread_elements,
             props_usage,
             script_items,
         })
@@ -246,6 +259,10 @@ struct SurfaceFacts {
     interp_shapes: Vec<(NodeId, ClientInterpolationShape)>,
     /// The accepted dynamic-attr / class / style shape per (node, attribute index).
     dynamic_attr_shapes: Vec<(NodeId, usize, ClientDynamicAttrShape)>,
+    /// The accepted `{@html}` node ids.
+    html_nodes: Vec<NodeId>,
+    /// The accepted spread-attribute element node ids.
+    spread_elements: Vec<NodeId>,
 }
 
 /// The default-deny classifier handle (a zero-size type the entry method hangs
@@ -603,9 +620,16 @@ fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSve
         // The supported clone-frame shapes — `root()` is a valid factory call (or
         // the standalone root, already refused upstream).
         TemplateFactory::FromHtml { .. } | TemplateFactory::Standalone { .. } => None,
-        // A `$.text(...)` / `$.comment()` node root — refuse, carrying the span of
-        // the first interpolation when the region is a reactive text run (for a
-        // precise diagnostic), else the root region's first node span.
+        // A lone `{@html}` root is a SUPPORTED `$.comment()`-anchored raw-markup root
+        // (`var fragment = $.comment(); var node = $.first_child(fragment); $.html(node,
+        // () => h);`) — the client backend emits the raw-markup root frame for it.
+        TemplateFactory::CommentAnchor {
+            reason: super::html::AnchorReason::RawHtmlRoot,
+        } => None,
+        // A `$.text(...)` / `$.comment()` node root (an empty / block-only / reactive-text
+        // root) — refuse, carrying the span of the first interpolation when the region is a
+        // reactive text run (for a precise diagnostic), else the root region's first node
+        // span.
         TemplateFactory::TextNode { .. } | TemplateFactory::CommentAnchor { .. } => {
             Some(UnsupportedSvelteRuntimeSurface::RootTextRegion {
                 span: root_region_span(ir, scope),
@@ -683,7 +707,14 @@ fn classify_node(
         }
         IrNode::Interpolation { escape, span, expr } => {
             if *escape == EscapeMode::Raw {
-                return Err(UnsupportedSvelteRuntimeSurface::SpreadOrHtml { span: *span });
+                // A raw-markup interpolation (`{@html}` in interpolation form) is the
+                // `$.html` surface — accept it as a raw-html node (the same emission the
+                // `TagIr::Html` node takes). The template lowering produces every `{@html}`
+                // as a `TagIr::Html` node, so this arm is a defensive mirror; it accepts
+                // rather than refuses so the raw-markup surface is never split.
+                let _ = expr;
+                facts.borrow_mut().html_nodes.push(node_id);
+                return Ok(());
             }
             // The interpolation expression must be a BARE signal / no-default-prop
             // read (the §1.2-class reactive-text surface). A complex expression
@@ -775,6 +806,17 @@ fn classify_node(
                 });
             };
             facts.borrow_mut().element_facts.push((node_id, element));
+            // A SPREAD on the element switches its WHOLE attribute strategy to the single
+            // `$.attribute_effect` fold. The fold models only the directly-foldable attr
+            // set; an event / `bind:` / `use:` / `transition:` / `let:` directive on a
+            // spread element fails closed HERE (before the per-attr loop), regardless of
+            // attribute order — so a delegated event on a spread element does not silently
+            // pass its own `classify_attr` arm and then diverge at the fold.
+            if element_has_spread(el) {
+                if let Some(surface) = refuse_spread_incompatible_attr(el, el.span) {
+                    return Err(surface);
+                }
+            }
             // The static attributes are classified against the strict per-element attr
             // allowlist (the typed `SupportedHtmlElement` is the per-tag key). A custom
             // element already failed closed at step (2), so the attr walk sees only an
@@ -803,6 +845,14 @@ fn classify_node(
             span: s.span,
         }),
         IrNode::Block(block) => Err(refuse_block(block)),
+        // A `{@html expr}` raw-markup tag is the `$.html` surface — accept it, recording
+        // the per-node acceptance proof. Its payload expression + the only-child topology
+        // are read from the IR at plan time. EVERY other standalone tag (`{@render}` /
+        // `{@const}` / `{@debug}` / `{@attach}`) is refused by `refuse_tag`.
+        IrNode::Tag(TagIr::Html { .. }) => {
+            facts.borrow_mut().html_nodes.push(node_id);
+            Ok(())
+        }
         IrNode::Tag(tag) => Err(refuse_tag(tag)),
     }
 }
@@ -829,10 +879,14 @@ fn refuse_block(block: &BlockIr) -> UnsupportedSvelteRuntimeSurface {
     }
 }
 
-/// The fail-closed reason for a standalone tag.
+/// The fail-closed reason for a standalone tag. A `{@html}` tag is the `$.html` surface
+/// and is accepted by the caller before this is reached, so it is not matched here.
 fn refuse_tag(tag: &TagIr) -> UnsupportedSvelteRuntimeSurface {
     match tag {
-        TagIr::Html { .. } => UnsupportedSvelteRuntimeSurface::SpreadOrHtml {
+        TagIr::Html { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+            // Unreachable: `{@html}` is accepted by `classify_node` before `refuse_tag`
+            // runs. The arm is retained so the match stays exhaustive over `TagIr`.
+            construct: "html",
             span: Span::new(0, 0),
         },
         TagIr::Render { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
@@ -940,6 +994,59 @@ fn static_non_static_property_shape(name: &str) -> Option<ClientDynamicAttrShape
     }
 }
 
+/// Whether an element carries any spread attribute (`{...x}`) — the trigger that
+/// switches its WHOLE attribute strategy to the single `$.attribute_effect` fold.
+fn element_has_spread(el: &super::ir::ElementIr) -> bool {
+    el.attrs.iter().any(|a| matches!(a, AttrIr::Spread { .. }))
+}
+
+/// Refuse a spread element that carries an attribute the `$.attribute_effect` fold does
+/// not model: an event handler / `bind:` / `use:` / `transition:` / `let:` directive
+/// (the handler-hoist / two-way-binding surface a spread fold leaves to its owning
+/// vertical). The foldable set — static / dynamic / mixed / `class:` / `style:` / a plain
+/// `class` / `style` attribute / further spreads — returns `None`. Driven from the typed
+/// `AttrIr` inventory, never a source scan.
+fn refuse_spread_incompatible_attr(
+    el: &super::ir::ElementIr,
+    el_span: Span,
+) -> Option<UnsupportedSvelteRuntimeSurface> {
+    for attr in &el.attrs {
+        match attr {
+            AttrIr::Static { .. }
+            | AttrIr::Dynamic { .. }
+            | AttrIr::Mixed { .. }
+            | AttrIr::Spread { .. }
+            | AttrIr::Class { .. }
+            | AttrIr::Style { .. } => {}
+            AttrIr::Event { event_type, .. } => {
+                return Some(UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
+                    event_type: event_type.clone(),
+                    span: el_span,
+                });
+            }
+            AttrIr::Bind { target, .. } => {
+                return Some(UnsupportedSvelteRuntimeSurface::Binding {
+                    target: target.clone(),
+                    span: el_span,
+                });
+            }
+            AttrIr::Use { .. } | AttrIr::Transition { .. } => {
+                return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "directive",
+                    span: el_span,
+                });
+            }
+            AttrIr::Let { .. } => {
+                return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "let-directive",
+                    span: el_span,
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Whether the element at `node_id` carries any `class:` directive (so a static
 /// `class` on it is the base value of the merged `$.set_class`, not a baked attr).
 fn element_has_class_directive(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
@@ -977,6 +1084,27 @@ fn classify_attr(
     // The accepted element's tag string (for the bind classifier's `input` host
     // check). `var_stem()` is the exact lowercase tag for every allowlist element.
     let tag = element.var_stem();
+    // A SPREAD on the element switches its WHOLE attribute strategy to the single
+    // `$.attribute_effect` fold: every co-located FOLDABLE attribute (static / dynamic /
+    // mixed / `class:` / `style:` / a plain `class` / `style`) moves into the runtime
+    // object literal, so it is NOT classified against the per-element static-attr
+    // allowlist (which would refuse a non-allowlisted name like `a` / `b`) nor recorded as
+    // a per-attribute op shape (the plan reads the source-ordered fold from the IR). The
+    // spread-INCOMPATIBLE directives (event / `bind:` / `use:` / `transition:` / `let:`)
+    // were already refused at the element level before this loop, so reaching here for a
+    // foldable attr is an accept. The spread itself is recorded by its own arm below.
+    if matches!(ir.node(node_id), IrNode::Element(el) if element_has_spread(el))
+        && matches!(
+            attr,
+            AttrIr::Static { .. }
+                | AttrIr::Dynamic { .. }
+                | AttrIr::Mixed { .. }
+                | AttrIr::Class { .. }
+                | AttrIr::Style { .. }
+        )
+    {
+        return Ok(());
+    }
     match attr {
         AttrIr::Static { name, value } => {
             // (a) A static `autofocus` / media `muted` is a NON-STATIC-PROPERTY
@@ -1082,7 +1210,18 @@ fn classify_attr(
             Ok(())
         }
         AttrIr::Spread { .. } => {
-            Err(UnsupportedSvelteRuntimeSurface::SpreadOrHtml { span: el_span })
+            // A spread switches the element's WHOLE attribute strategy: every co-located
+            // attribute folds — in source order — into the single `$.attribute_effect`
+            // object literal. The spread-incompatible directives (event / `bind:` / `use:`
+            // / `transition:` / `let:`) were already refused at the element level (before
+            // this per-attr loop), so reaching here means the element's whole attribute
+            // set is foldable. Record the element as a spread element ONCE (dedup, since a
+            // multi-spread element hits this arm per spread); the plan reads the
+            // source-ordered fold from the IR.
+            if !facts.borrow().spread_elements.contains(&node_id) {
+                facts.borrow_mut().spread_elements.push(node_id);
+            }
+            Ok(())
         }
         AttrIr::Bind { target, expr } => {
             // The narrow bind classifier: `bind:value` on an `<input>` to a

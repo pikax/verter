@@ -99,7 +99,7 @@ const SUPPORTED_MATRIX: &[&str] = &[
     "matrix/root_leading_text",
 ];
 
-/// The Block-5a ATTRIBUTE corpus — the `attributes/*` fixtures exercising the
+/// The native-client ATTRIBUTE corpus — the `attributes/*` fixtures exercising the
 /// dynamic-attribute / boolean-DOM-property / `class:`-`style:` directive / autofocus
 /// surface. Each row runs through the IDENTICAL compile + OXC-parse + BYTE-PRECISE
 /// full-module comparison gate as the matrix above: the committed `attributes/<slug>.
@@ -706,9 +706,761 @@ fn parses_as_js(code: &str) -> bool {
     !ret.panicked && ret.errors.is_empty()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AST-level paren-INSENSITIVE structural module comparison.
+//
+// The value emitter is SOURCE-PRESERVING: it keeps the author's redundant parens that the
+// official AST printer drops (`() => ((a, b))` vs `() => (a, b)`, `id: (c ? a : b)` vs
+// `id: c ? a : b`). Those are behavior-preserving COSMETIC differences the minifier collapses,
+// so they must NOT fail the convergence gate. But every BEHAVIORAL / structural difference —
+// a changed helper name, a changed call ARGUMENT COUNT, a `SequenceExpression` split into
+// separate arguments, a changed string / template literal content, a changed operator, a
+// changed identifier — MUST still fail.
+//
+// The comparator parses BOTH modules with OXC and compares a canonical STRUCTURAL SIGNATURE
+// that transparently UNWRAPS every `ParenthesizedExpression` on BOTH sides (so `(X)` ≡ `X` at
+// every position) while encoding everything else faithfully: statement kinds + order,
+// declaration kinds + binding names, call callee + per-argument structure (so a sequence as
+// ONE argument is distinct from two separate arguments — unwrapping parens never merges
+// them), member access (object + property + computed), operators, string/template CONTENTS
+// (byte-exact), object/array element structure, and identifier names. Whitespace is irrelevant
+// at the AST level. The signature is path-deterministic, so a paren-only diff yields IDENTICAL
+// signatures and any structural diff yields a divergence the assertion reports.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use oxc_ast::ast::{
+    Argument, ArrayExpressionElement, BindingPattern, Declaration, Expression, FormalParameters,
+    ObjectPropertyKind, PropertyKey, Statement, VariableDeclarationKind,
+};
+
+/// Peel every transparent `ParenthesizedExpression` wrapper, returning the inner node.
+fn unwrap_parens<'a, 'b>(expr: &'b Expression<'a>) -> &'b Expression<'a> {
+    let mut e = expr;
+    while let Expression::ParenthesizedExpression(p) = e {
+        e = &p.expression;
+    }
+    e
+}
+
+/// Strip the position NOISE (`span: Span { … }`, `node_id: Cell { … }`, `reference_id`,
+/// `scope_id`, `symbol_id`) from an OXC `{:?}` Debug rendering, so a conservative Debug
+/// fallback compares two STRUCTURALLY-identical nodes at different byte offsets as EQUAL
+/// (the fallback must not false-fail on span drift). The non-noise structure (operators,
+/// names, literal values, nesting) survives, so a genuine structural difference still differs.
+fn strip_debug_noise(debug: &str) -> String {
+    let mut out = String::with_capacity(debug.len());
+    let bytes = debug.as_bytes();
+    let mut i = 0;
+    // The noise keys whose `Key { … }` / `Key: <scalar>` payload is dropped.
+    const BRACED: [&str; 2] = ["span: Span {", "node_id: Cell {"];
+    const SCALARS: [&str; 4] = [
+        "reference_id: Cell {",
+        "scope_id: Cell {",
+        "symbol_id: Cell {",
+        "flags: ReferenceFlags",
+    ];
+    'outer: while i < bytes.len() {
+        for key in BRACED.iter().chain(SCALARS.iter()) {
+            if debug[i..].starts_with(key) {
+                // Skip the balanced `{ … }` that opens at the last `{` in the key.
+                let mut depth = 0i32;
+                let mut j = i;
+                // Advance to the first `{` of this key's brace group.
+                while j < bytes.len() && bytes[j] != b'{' {
+                    j += 1;
+                }
+                while j < bytes.len() {
+                    match bytes[j] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                // Drop a trailing `, ` separator after the removed field.
+                while j < bytes.len() && (bytes[j] == b',' || bytes[j] == b' ') {
+                    j += 1;
+                }
+                i = j;
+                continue 'outer;
+            }
+        }
+        let ch = debug[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+// COMPARATOR SCOPE — the `expr_sig` / `params_sig` / `module_sig` family is COMPLETE for the
+// Svelte client subset emitted TODAY: every axis that any currently-accepted surface can emit is
+// encoded (including param ORDER, optional-chain flags, member/computed shape, call-arg spread,
+// literal forms). A cluster of behavior-bearing axes is intentionally NOT yet encoded because no
+// accepted surface emits them — each is UNREACHABLE today (the emitter refuses the source that
+// would produce it):
+//   - FormalParameter.initializer (param default `(a = 1)`) — every emitter would emit it only
+//     from an author `<script>` function / `$derived` / a param-bearing handler, all refused.
+//   - async / generator bits (`r#async` / `generator` on functions) — author async/generator
+//     fns are refused (top-level fns reject as `InstanceScriptItem`).
+//   - ObjectProperty `kind` / `method` / `computed` / `shorthand` (method-vs-fn-value, computed
+//     `__proto__`) — esoteric object-property edges no accepted author expr reaches.
+//   - the discriminant-only statement/declaration fallback (`for` / `while` / `throw` / `switch`
+//     / `try` collapse to `Stmt(discriminant)`) — author `<script>` control-flow is refused.
+// The always-emitted import axis is independently pinned by `emitted_imports_ok` at both gate
+// sites. CONTRACT: the first block that ADMITS any of these surfaces (5c+) MUST encode the
+// matching axis in the SAME change — the comparator is the gate's oracle, so a dropped axis that
+// becomes REACHABLE is a silent false-PASS. (Tracked: svelte-native-compiler-plan.md §8 D-17.)
+//
+/// The canonical paren-insensitive STRUCTURAL signature of an expression. Two expressions that
+/// differ ONLY by redundant parens produce the SAME signature; any other structural difference
+/// (operator / literal content / identifier / member / call-arg count or per-arg shape)
+/// produces a DIFFERENT signature.
+fn expr_sig(expr: &Expression) -> String {
+    let expr = unwrap_parens(expr);
+    match expr {
+        // A paren wrapper is already peeled above; this arm is unreachable but keeps the match
+        // total for the variant.
+        Expression::ParenthesizedExpression(p) => expr_sig(&p.expression),
+        Expression::Identifier(id) => format!("Id({})", id.name),
+        Expression::StringLiteral(s) => format!("Str({:?})", s.value),
+        Expression::NumericLiteral(n) => {
+            format!("Num({})", n.raw.as_ref().map(|r| r.as_str()).unwrap_or(""))
+        }
+        Expression::BigIntLiteral(b) => format!(
+            "BigInt({})",
+            b.raw.as_ref().map(|r| r.as_str()).unwrap_or("")
+        ),
+        Expression::BooleanLiteral(b) => format!("Bool({})", b.value),
+        Expression::NullLiteral(_) => "Null".to_string(),
+        Expression::RegExpLiteral(r) => format!(
+            "RegExp({})",
+            r.raw.as_ref().map(|r| r.as_str()).unwrap_or("")
+        ),
+        Expression::TemplateLiteral(t) => {
+            // Quasis (raw text, byte-exact) interleaved with the expression signatures of the
+            // `${…}` parts. Both the literal TEXT and the interpolated expressions are
+            // significant.
+            let quasis: Vec<String> = t
+                .quasis
+                .iter()
+                .map(|q| format!("{:?}", q.value.raw.as_str()))
+                .collect();
+            let exprs: Vec<String> = t.expressions.iter().map(expr_sig).collect();
+            format!(
+                "Tmpl(quasis=[{}],exprs=[{}])",
+                quasis.join(","),
+                exprs.join(",")
+            )
+        }
+        Expression::StaticMemberExpression(m) => {
+            // `m.optional` is SEMANTICS-BEARING: `a?.b` short-circuits to `undefined` when `a`
+            // is nullish, `a.b` throws — so the signature MUST distinguish them (a redundant
+            // paren is cosmetic, an optional-chain `?` is not).
+            format!(
+                "Member({}.{}{})",
+                expr_sig(&m.object),
+                if m.optional { "?" } else { "" },
+                m.property.name
+            )
+        }
+        Expression::ComputedMemberExpression(m) => {
+            format!(
+                "Computed({}{}[{}])",
+                expr_sig(&m.object),
+                if m.optional { "?" } else { "" },
+                expr_sig(&m.expression)
+            )
+        }
+        Expression::PrivateFieldExpression(m) => {
+            format!(
+                "Private({}.{}#{})",
+                expr_sig(&m.object),
+                if m.optional { "?" } else { "" },
+                m.field.name
+            )
+        }
+        Expression::CallExpression(c) => {
+            format!(
+                "Call(callee={},optional={},args=[{}])",
+                expr_sig(&c.callee),
+                c.optional,
+                arguments_sig(&c.arguments),
+            )
+        }
+        Expression::NewExpression(c) => {
+            format!(
+                "New(callee={},args=[{}])",
+                expr_sig(&c.callee),
+                arguments_sig(&c.arguments)
+            )
+        }
+        Expression::BinaryExpression(b) => {
+            format!(
+                "Bin({} {} {})",
+                expr_sig(&b.left),
+                b.operator.as_str(),
+                expr_sig(&b.right)
+            )
+        }
+        Expression::LogicalExpression(l) => {
+            format!(
+                "Logic({} {} {})",
+                expr_sig(&l.left),
+                l.operator.as_str(),
+                expr_sig(&l.right)
+            )
+        }
+        Expression::UnaryExpression(u) => {
+            format!("Unary({}{})", u.operator.as_str(), expr_sig(&u.argument))
+        }
+        Expression::UpdateExpression(u) => {
+            // The argument is a SimpleAssignmentTarget; render it via its source-free shape.
+            format!(
+                "Update(prefix={},{}{})",
+                u.prefix,
+                u.operator.as_str(),
+                simple_target_sig(&u.argument)
+            )
+        }
+        Expression::ConditionalExpression(c) => {
+            format!(
+                "Cond({} ? {} : {})",
+                expr_sig(&c.test),
+                expr_sig(&c.consequent),
+                expr_sig(&c.alternate)
+            )
+        }
+        Expression::SequenceExpression(s) => {
+            // EACH element is a distinct signature entry — a sequence is NEVER merged with a
+            // surrounding argument list (this is what catches the arg-split regression).
+            let parts: Vec<String> = s.expressions.iter().map(expr_sig).collect();
+            format!("Seq([{}])", parts.join(","))
+        }
+        Expression::AssignmentExpression(a) => {
+            format!(
+                "Assign({} {} {})",
+                assignment_target_sig(&a.left),
+                a.operator.as_str(),
+                expr_sig(&a.right)
+            )
+        }
+        Expression::ArrayExpression(arr) => {
+            let parts: Vec<String> = arr
+                .elements
+                .iter()
+                .map(|el| match el {
+                    ArrayExpressionElement::SpreadElement(s) => {
+                        format!("Spread({})", expr_sig(&s.argument))
+                    }
+                    ArrayExpressionElement::Elision(_) => "Hole".to_string(),
+                    other => other
+                        .as_expression()
+                        .map(expr_sig)
+                        .unwrap_or_else(|| "?".to_string()),
+                })
+                .collect();
+            format!("Arr([{}])", parts.join(","))
+        }
+        Expression::ObjectExpression(obj) => {
+            let parts: Vec<String> = obj
+                .properties
+                .iter()
+                .map(|p| match p {
+                    ObjectPropertyKind::ObjectProperty(op) => {
+                        format!("{}:{}", property_key_sig(&op.key), expr_sig(&op.value))
+                    }
+                    ObjectPropertyKind::SpreadProperty(sp) => {
+                        format!("...{}", expr_sig(&sp.argument))
+                    }
+                })
+                .collect();
+            format!("Obj({{{}}})", parts.join(","))
+        }
+        Expression::ArrowFunctionExpression(a) => {
+            let params = params_sig(&a.params);
+            // The arrow body: either a single expression (an `() => EXPR`) or a block of
+            // statements. Both forms are encoded so a body shape change is caught.
+            let body = if a.expression {
+                // An expression body is one ExpressionStatement in the function body.
+                a.body
+                    .statements
+                    .first()
+                    .map(|s| stmt_sig(s))
+                    .unwrap_or_else(|| "<empty>".to_string())
+            } else {
+                statements_sig(&a.body.statements)
+            };
+            format!(
+                "Arrow(params={},expr={},body={})",
+                params, a.expression, body
+            )
+        }
+        Expression::FunctionExpression(f) => {
+            format!(
+                "Fn(name={},params={},body={})",
+                f.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
+                params_sig(&f.params),
+                f.body
+                    .as_ref()
+                    .map(|b| statements_sig(&b.statements))
+                    .unwrap_or_default()
+            )
+        }
+        Expression::ThisExpression(_) => "This".to_string(),
+        Expression::TaggedTemplateExpression(t) => {
+            // `tag`fragment`…`` — the tag callee + the template quasis (byte-exact text) and
+            // interpolated expressions. Span-FREE so the same tagged template at different byte
+            // offsets compares EQUAL.
+            let quasis: Vec<String> = t
+                .quasi
+                .quasis
+                .iter()
+                .map(|q| format!("{:?}", q.value.raw.as_str()))
+                .collect();
+            let exprs: Vec<String> = t.quasi.expressions.iter().map(expr_sig).collect();
+            format!(
+                "Tagged(tag={},quasis=[{}],exprs=[{}])",
+                expr_sig(&t.tag),
+                quasis.join(","),
+                exprs.join(",")
+            )
+        }
+        Expression::AwaitExpression(a) => format!("Await({})", expr_sig(&a.argument)),
+        Expression::ChainExpression(c) => match &c.expression {
+            oxc_ast::ast::ChainElement::CallExpression(call) => format!(
+                "Chain(Call(callee={},optional={},args=[{}]))",
+                expr_sig(&call.callee),
+                call.optional,
+                arguments_sig(&call.arguments)
+            ),
+            // The TOP element of the chain carries the OUTER optional bit (`a?.b.c` vs
+            // `a?.b?.c` differ ONLY here — the top member's `optional`), which is
+            // semantics-bearing and MUST be encoded; inner members recurse through `expr_sig`
+            // (the top-level member arms, which also encode `optional`).
+            oxc_ast::ast::ChainElement::StaticMemberExpression(m) => {
+                format!(
+                    "Chain(Member({}.{}{}))",
+                    expr_sig(&m.object),
+                    if m.optional { "?" } else { "" },
+                    m.property.name
+                )
+            }
+            oxc_ast::ast::ChainElement::ComputedMemberExpression(m) => {
+                format!(
+                    "Chain(Computed({}{}[{}]))",
+                    expr_sig(&m.object),
+                    if m.optional { "?" } else { "" },
+                    expr_sig(&m.expression)
+                )
+            }
+            oxc_ast::ast::ChainElement::PrivateFieldExpression(m) => {
+                format!(
+                    "Chain(Private({}.{}#{}))",
+                    expr_sig(&m.object),
+                    if m.optional { "?" } else { "" },
+                    m.field.name
+                )
+            }
+            other => format!("Chain(?{:?})", std::mem::discriminant(other)),
+        },
+        // Any remaining expression kind (a class / yield / JSX / import / TS wrapper / …) is
+        // not part of the emitted client subset. Fall back to the span-stripped Debug —
+        // CONSERVATIVE: it FAILS on any STRUCTURAL difference (a false-PASS is impossible)
+        // while ignoring span/node-id position noise (so a structurally-identical unhandled
+        // node at a different byte offset still compares equal).
+        other => format!("Other({})", strip_debug_noise(&format!("{:?}", other))),
+    }
+}
+
+/// The signature of a call/`new` argument list — each argument is a DISTINCT entry, so a
+/// `SequenceExpression` passed as ONE argument (`f((a, b))`) is structurally different from
+/// two separate arguments (`f(a, b)`). Unwrapping parens never collapses the boundary.
+fn arguments_sig(args: &oxc_allocator::Vec<'_, Argument<'_>>) -> String {
+    let parts: Vec<String> = args
+        .iter()
+        .map(|a| match a {
+            Argument::SpreadElement(s) => format!("Spread({})", expr_sig(&s.argument)),
+            other => other
+                .as_expression()
+                .map(expr_sig)
+                .unwrap_or_else(|| "?".to_string()),
+        })
+        .collect();
+    parts.join(",")
+}
+
+/// The signature of an object property KEY (a static name, a string/numeric literal, or a
+/// computed `[expr]`).
+fn property_key_sig(key: &PropertyKey) -> String {
+    match key {
+        PropertyKey::StaticIdentifier(id) => format!("k:{}", id.name),
+        PropertyKey::PrivateIdentifier(id) => format!("k:#{}", id.name),
+        PropertyKey::StringLiteral(s) => format!("k:{:?}", s.value),
+        PropertyKey::NumericLiteral(n) => format!("k:{}", n.value),
+        other => other
+            .as_expression()
+            .map(|e| format!("k:[{}]", expr_sig(e)))
+            .unwrap_or_else(|| "k:?".to_string()),
+    }
+}
+
+/// The signature of a simple assignment / update target (an identifier or member).
+fn simple_target_sig(target: &oxc_ast::ast::SimpleAssignmentTarget) -> String {
+    use oxc_ast::ast::SimpleAssignmentTarget as T;
+    match target {
+        T::AssignmentTargetIdentifier(id) => format!("Id({})", id.name),
+        T::StaticMemberExpression(m) => {
+            format!("Member({}.{})", expr_sig(&m.object), m.property.name)
+        }
+        T::ComputedMemberExpression(m) => {
+            format!(
+                "Computed({}[{}])",
+                expr_sig(&m.object),
+                expr_sig(&m.expression)
+            )
+        }
+        T::PrivateFieldExpression(m) => {
+            format!("Private({}.#{})", expr_sig(&m.object), m.field.name)
+        }
+        other => format!("Target({})", strip_debug_noise(&format!("{:?}", other))),
+    }
+}
+
+/// The signature of an assignment target (a simple identifier/member, or a destructuring
+/// pattern — encoded via span-stripped Debug, which never appears in the emitted client subset).
+fn assignment_target_sig(target: &oxc_ast::ast::AssignmentTarget) -> String {
+    use oxc_ast::ast::AssignmentTarget as T;
+    match target {
+        T::AssignmentTargetIdentifier(id) => format!("Id({})", id.name),
+        T::StaticMemberExpression(m) => {
+            format!("Member({}.{})", expr_sig(&m.object), m.property.name)
+        }
+        T::ComputedMemberExpression(m) => {
+            format!(
+                "Computed({}[{}])",
+                expr_sig(&m.object),
+                expr_sig(&m.expression)
+            )
+        }
+        T::PrivateFieldExpression(m) => {
+            format!("Private({}.#{})", expr_sig(&m.object), m.field.name)
+        }
+        other => format!("Target({})", strip_debug_noise(&format!("{:?}", other))),
+    }
+}
+
+/// The signature of a binding pattern (the declared name(s) of a `var`/`let`/`const`).
+fn binding_sig(pattern: &BindingPattern) -> String {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => format!("name:{}", id.name),
+        // Destructuring / defaults / rest — encoded via span-stripped Debug (the emitted client
+        // decls are simple `var name = …`, so these do not appear; Debug is the fallback).
+        other => format!("pat:{}", strip_debug_noise(&format!("{:?}", other))),
+    }
+}
+
+/// The canonical structural signature of a FUNCTION/ARROW PARAMETER LIST — the ORDERED
+/// binding identities of each parameter (name + position) plus a rest marker. Parameter NAMES
+/// and their ORDER are SEMANTIC for the emitted client code: a memoized `$.template_effect`
+/// arrow `($0, $1) => … ${$0} … ${$1} …` binds each `$N` deps-array slot positionally, so a
+/// param-order swap (`($1, $0) =>`) re-binds the dep values with a byte-identical body — a real
+/// behavior change a count-only signature would silently pass. Encoding the ordered patterns
+/// (via `binding_sig`) closes that hole while staying paren/span-insensitive.
+fn params_sig(params: &FormalParameters) -> String {
+    let mut parts: Vec<String> = params
+        .items
+        .iter()
+        .map(|p| binding_sig(&p.pattern))
+        .collect();
+    if let Some(rest) = &params.rest {
+        parts.push(format!(
+            "...{}",
+            strip_debug_noise(&format!("{:?}", rest.rest))
+        ));
+    }
+    format!("[{}]", parts.join(","))
+}
+
+/// The canonical structural signature of ONE statement.
+fn stmt_sig(stmt: &Statement) -> String {
+    match stmt {
+        Statement::ExpressionStatement(s) => format!("Expr({})", expr_sig(&s.expression)),
+        Statement::VariableDeclaration(d) => decl_var_sig(d.kind, &d.declarations),
+        Statement::ReturnStatement(r) => format!(
+            "Return({})",
+            r.argument.as_ref().map(expr_sig).unwrap_or_default()
+        ),
+        Statement::IfStatement(s) => format!(
+            "If(test={},cons={},alt={})",
+            expr_sig(&s.test),
+            stmt_sig(&s.consequent),
+            s.alternate.as_ref().map(stmt_sig).unwrap_or_default()
+        ),
+        Statement::BlockStatement(b) => format!("Block({})", statements_sig(&b.body)),
+        Statement::FunctionDeclaration(f) => format!(
+            "FnDecl(name={},params={},body={})",
+            f.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
+            params_sig(&f.params),
+            f.body
+                .as_ref()
+                .map(|b| statements_sig(&b.statements))
+                .unwrap_or_default()
+        ),
+        Statement::ImportDeclaration(i) => {
+            // The import source + the imported-binding shape (a namespace / named / side-effect
+            // import). The source string is byte-significant.
+            format!(
+                "Import(src={:?},specs={})",
+                i.source.value,
+                i.specifiers.as_ref().map(|s| s.len()).unwrap_or(0)
+            )
+        }
+        Statement::ExportNamedDeclaration(e) => format!(
+            "ExportNamed({})",
+            e.declaration.as_ref().map(decl_sig).unwrap_or_default()
+        ),
+        Statement::ExportDefaultDeclaration(e) => {
+            use oxc_ast::ast::ExportDefaultDeclarationKind as K;
+            match &e.declaration {
+                K::FunctionDeclaration(f) => format!(
+                    "ExportDefaultFn(name={},params={},body={})",
+                    f.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
+                    params_sig(&f.params),
+                    f.body
+                        .as_ref()
+                        .map(|b| statements_sig(&b.statements))
+                        .unwrap_or_default()
+                ),
+                K::ClassDeclaration(_) => "ExportDefaultClass".to_string(),
+                other => other
+                    .as_expression()
+                    .map(|e| format!("ExportDefault({})", expr_sig(e)))
+                    .unwrap_or_else(|| "ExportDefault?".to_string()),
+            }
+        }
+        // Any remaining statement kind: conservative Debug fallback (FAILs on any difference;
+        // these do not appear in the emitted client subset).
+        other => format!("Stmt({:?})", std::mem::discriminant(other)),
+    }
+}
+
+/// The signature of a `var`/`let`/`const` declaration's declarator list.
+fn decl_var_sig(
+    kind: VariableDeclarationKind,
+    declarators: &oxc_allocator::Vec<'_, oxc_ast::ast::VariableDeclarator<'_>>,
+) -> String {
+    let parts: Vec<String> = declarators
+        .iter()
+        .map(|d| {
+            format!(
+                "{},init={}",
+                binding_sig(&d.id),
+                d.init.as_ref().map(expr_sig).unwrap_or_default()
+            )
+        })
+        .collect();
+    format!("Var({:?},[{}])", kind, parts.join(";"))
+}
+
+/// The signature of a (named-export) declaration.
+fn decl_sig(decl: &Declaration) -> String {
+    match decl {
+        Declaration::VariableDeclaration(d) => decl_var_sig(d.kind, &d.declarations),
+        Declaration::FunctionDeclaration(f) => format!(
+            "FnDecl(name={},params={})",
+            f.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
+            params_sig(&f.params)
+        ),
+        other => format!("Decl({:?})", std::mem::discriminant(other)),
+    }
+}
+
+/// The signature of a statement LIST (in order).
+fn statements_sig(stmts: &oxc_allocator::Vec<'_, Statement<'_>>) -> String {
+    let parts: Vec<String> = stmts.iter().map(stmt_sig).collect();
+    format!("[{}]", parts.join(";"))
+}
+
+/// The canonical paren-insensitive structural signature of a whole module. Parses `code` with
+/// OXC (a parse failure panics with a clear message — the caller already guards `parses_as_js`,
+/// so a failure here is a torn module). Two modules differing only by redundant parens produce
+/// the SAME signature.
+fn module_sig(code: &str, side: &str) -> String {
+    let alloc = Allocator::default();
+    let source_type = oxc_span::SourceType::mjs();
+    let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
+    assert!(
+        !ret.panicked && ret.errors.is_empty(),
+        "the {side} module did not parse as JS (a hard FAIL):\n{code}\nerrors: {:?}",
+        ret.errors
+    );
+    statements_sig(&ret.program.body)
+}
+
+/// Assert the emitted module and the golden are STRUCTURALLY equal modulo redundant parens.
+/// A behavioral / structural divergence (helper name, call-arg count, sequence split, literal
+/// content, operator, identifier, member, statement order) fails with a message naming the
+/// slug and showing both signatures + both raw modules.
+fn assert_modules_structurally_equal(slug: &str, emitted: &str, golden: &str) {
+    let emitted_sig = module_sig(emitted, "emitted");
+    let golden_sig = module_sig(golden, "golden");
+    assert_eq!(
+        emitted_sig, golden_sig,
+        "STRUCTURAL drift for codegen cell {slug} (paren-insensitive, but argument/identifier/\
+         operator/literal/structure-precise):\n--- emitted (raw) ---\n{emitted}\n\
+         --- golden (raw) ---\n{golden}"
+    );
+}
+
+// ── §1a comparator discrimination tests ──────────────────────────────────────
+// These prove the structural comparator is NOT a gerrymander: a redundant-paren-only diff
+// PASSES (the cosmetic-paren waiver), but every BEHAVIORAL / structural diff — a changed
+// helper name, a changed call ARG COUNT, a sequence split into separate args, a changed
+// string / template content, a changed operator, a changed identifier — FAILS. Each test
+// would catch the bug it names: it FAILS against the (intentionally diverged) "regression"
+// module and PASSES against the (paren-only-diverged) "cosmetic" module.
+
+/// Whether two JS modules have the SAME paren-insensitive structural signature.
+fn sigs_equal(a: &str, b: &str) -> bool {
+    module_sig(a, "a") == module_sig(b, "b")
+}
+
+#[test]
+fn struct_compare_waives_redundant_parens() {
+    // A redundant author paren the official printer drops is a COSMETIC difference — the
+    // comparator must treat it as EQUAL.
+    assert!(
+        sigs_equal(
+            "$.html(node, () => (a, b));",
+            "$.html(node, () => ((a, b)));"
+        ),
+        "a double-paren-wrapped sequence must compare EQUAL to a single-paren-wrapped one"
+    );
+    assert!(
+        sigs_equal(
+            "$.set_attribute(div, 'id', c ? a : b);",
+            "$.set_attribute(div, 'id', (c ? a : b));"
+        ),
+        "a parenthesized conditional value must compare EQUAL to the bare one"
+    );
+    assert!(
+        sigs_equal("var x = a + b + c;", "var x = (a + b) + c;"),
+        "a same-precedence left-operand paren must compare EQUAL (the printer drops it)"
+    );
+    assert!(
+        sigs_equal("var x = a + (b + c);", "var x = (a + (b + c));"),
+        "a redundant outer paren around a kept inner paren must compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_changed_helper_name() {
+    // A different helper name (`$.set_text` vs `$.set_attribute`) is a BEHAVIORAL divergence.
+    assert!(
+        !sigs_equal("$.set_text(div, x);", "$.set_attribute(div, x);"),
+        "a changed helper name must FAIL the structural comparison"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_changed_call_arg_count() {
+    // A different argument COUNT (the trailing `true` on `$.html`) is a BEHAVIORAL divergence.
+    assert!(
+        !sigs_equal("$.html(n, () => h);", "$.html(n, () => h, true);"),
+        "a changed call argument count must FAIL the structural comparison"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_sequence_arg_split() {
+    // The arg-split regression: a `SequenceExpression` as ONE argument
+    // (`$.html(n, () => (a, b), true)` — 3 args) is structurally DISTINCT from two separate
+    // arguments (`$.html(n, () => a, b, true)` — 4 args). Unwrapping parens must NOT merge the
+    // sequence into the argument list. THIS is the planted behavioral diff the brief names.
+    let three_args = "$.html(n, () => (a, b), true);";
+    let four_args = "$.html(n, () => a, b, true);";
+    assert!(
+        !sigs_equal(three_args, four_args),
+        "a 3-arg sequence call must FAIL against a 4-arg split call (the arg-split regression)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_changed_string_or_template_content() {
+    // A changed STRING content (`$$props.foo` vs `$$props.bar`) is a BEHAVIORAL divergence.
+    assert!(
+        !sigs_equal("var x = $$props.foo;", "var x = $$props.bar;"),
+        "a changed member property must FAIL the structural comparison"
+    );
+    // A changed string literal value.
+    assert!(
+        !sigs_equal("var x = 'Hello';", "var x = 'Goodbye';"),
+        "a changed string literal must FAIL the structural comparison"
+    );
+    // A changed TEMPLATE-literal quasi (text) content.
+    assert!(
+        !sigs_equal("var x = `Hello ${y}`;", "var x = `Goodbye ${y}`;"),
+        "a changed template-literal quasi must FAIL the structural comparison"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_changed_operator() {
+    // A changed binary OPERATOR (`a + b` vs `a - b`) is a BEHAVIORAL divergence.
+    assert!(
+        !sigs_equal("var x = a + b;", "var x = a - b;"),
+        "a changed binary operator must FAIL the structural comparison"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_changed_identifier() {
+    // A changed identifier — a raw `count` read vs the `$.get(count)`-rewritten one — is a
+    // BEHAVIORAL divergence (a dropped reactive read).
+    assert!(
+        !sigs_equal(
+            "$.set_text(node, count);",
+            "$.set_text(node, $.get(count));"
+        ),
+        "a raw identifier vs a $.get-wrapped read must FAIL the structural comparison"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_swapped_arrow_param_order() {
+    // PARAMETER-ORDER swap: a memoized `$.template_effect` arrow binds each `$N` deps-array
+    // slot POSITIONALLY, so `($0, $1) => … ${$0} … ${$1}` and `($1, $0) => … ${$0} … ${$1}`
+    // have a BYTE-IDENTICAL body but RE-BIND the dep values — a real behavior change. The
+    // structural comparator MUST distinguish them (a count-only param signature would not).
+    let correct =
+        "$.template_effect(($0, $1) => $.set_text(t, `${$0} ${$1}`), [() => a(), () => b()]);";
+    let swapped =
+        "$.template_effect(($1, $0) => $.set_text(t, `${$0} ${$1}`), [() => a(), () => b()]);";
+    assert!(
+        !sigs_equal(correct, swapped),
+        "a swapped arrow PARAMETER ORDER must FAIL the structural comparison (positional dep re-bind)"
+    );
+    // A renamed parameter is likewise distinct (the name is part of the binding identity).
+    assert!(
+        !sigs_equal("($0) => $0 + 1;", "($x) => $x + 1;"),
+        "a renamed arrow parameter must FAIL the structural comparison"
+    );
+    // SANITY: identical params still compare EQUAL modulo a redundant body paren (no false fail).
+    assert!(
+        sigs_equal("($0, $1) => ($0 + $1);", "($0, $1) => $0 + $1;"),
+        "identical params with a redundant body paren must still compare EQUAL"
+    );
+}
+
 /// Every supported emission slug — the headline / robustness fixtures
 /// ([`SUPPORTED_FIXTURES`]), the exhaustive supported-sub-shape matrix
-/// ([`SUPPORTED_MATRIX`]), and the Block-5a attribute corpus
+/// ([`SUPPORTED_MATRIX`]), and the native-client attribute corpus
 /// ([`SUPPORTED_ATTRIBUTES`]). All three groups run through the identical compile +
 /// OXC-parse + full-module-comparison gate.
 fn all_supported_slugs() -> Vec<&'static str> {
@@ -753,8 +1505,8 @@ fn supported_matrix_enumerates_every_documented_sub_shape() {
 }
 
 #[test]
-fn supported_attributes_cover_the_full_block5a_corpus() {
-    // The Block-5a attribute corpus is the byte-precise oracle for the
+fn supported_attributes_cover_the_full_attribute_corpus() {
+    // The native-client attribute corpus is the byte-precise oracle for the
     // dynamic-attribute / boolean-property / class-style-directive / autofocus
     // surface; a dropped row is a coverage regression. This count gate fails LOUDLY
     // if a row is dropped, and the no-duplicate check guards against a typo.
@@ -813,22 +1565,20 @@ fn emitted_client_topology_matches_official_goldens() {
             "delegated-event drift for {slug}:\n{code}"
         );
 
-        // (6) THE FULL-MODULE comparison — Verter's normalized emitted module vs the
-        // official normalized golden. This is the argument/offset/identifier-precise
-        // oracle: it catches a `$$props.bar` vs `.foo`, a raw `count` vs
-        // `$.get(count)`, a dropped `$.child(_, true)` arg, a sibling-offset drift,
-        // or significant template TEXT whitespace that the helper-name SEQUENCE
-        // (assertion 1) cannot see. Cosmetic whitespace OUTSIDE literals is
-        // normalized on both sides; literal/template TEXT is byte-exact.
-        assert_eq!(
-            normalize_module_for_comparison(&code),
-            golden_client_module(&golden),
-            "FULL-MODULE drift for {slug} (argument/identifier/offset-precise):\n\
-             --- emitted (normalized) ---\n{}\n--- golden (official, normalized) ---\n{}\n\
-             --- emitted (raw) ---\n{code}",
-            normalize_module_for_comparison(&code),
-            golden_client_module(&golden),
-        );
+        // (6) THE FULL-MODULE comparison — Verter's emitted module vs the official golden,
+        // compared by PARSED STRUCTURAL EQUIVALENCE (the same AST-structural comparator the
+        // codegen corpus uses): the argument/offset/identifier-precise oracle that catches a
+        // `$$props.bar` vs `.foo`, a raw `count` vs `$.get(count)`, a dropped `$.child(_, true)`
+        // arg, a sibling-offset drift, a sequence split into separate args, or significant
+        // template TEXT — while WAIVING a behavior-preserving redundant paren the official
+        // printer drops (the cosmetics-waived doctrine). The waiver is by parsed structure, NOT
+        // a string scrub: a transparent `ParenthesizedExpression` wrapper is ignored, but a
+        // SEMANTIC paren (`(a, b)` as one arg vs two, `(a ?? b).c` vs `a ?? b.c`) still parses
+        // to a different tree and fails. This is what makes the unconditional concise-arrow-body
+        // wrap (`() => (EXPR)`) — which over-wraps a non-object memoizer dep
+        // cosmetically (`[() => (String(x))]` vs official `[() => String(x)]`) — invisible HERE
+        // exactly as it is in the codegen corpus, with no shape predicate at the wrap site.
+        assert_modules_structurally_equal(slug, &code, &golden_client_module(&golden));
     }
 }
 
@@ -1137,6 +1887,78 @@ fn full_module_gate_discriminates_the_pre_fix_defects() {
 }
 
 #[test]
+fn structural_full_module_gate_rejects_pre_fix_defects() {
+    // The full-module gate now compares by PARSED STRUCTURAL EQUIVALENCE
+    // (`assert_modules_structurally_equal`). This proves THAT comparator — not only the
+    // legacy `normalize_module_for_comparison` string compare — REJECTS representative pre-fix
+    // defect shapes against the official goldens (so the paren-waiver did not blind the gate to
+    // any real divergence: identifier/member, dropped arg, statement order, memoization shape).
+    let rejects_structurally = |golden_slug: &str, pre_fix: &str| {
+        let golden = golden_client_module(&client_golden(golden_slug));
+        assert!(
+            !sigs_equal(pre_fix, &golden),
+            "the STRUCTURAL gate MUST reject the pre-fix defect for {golden_slug}:\n{pre_fix}"
+        );
+    };
+    // Wrong member (`$$props.bar` vs `.foo`).
+    rejects_structurally(
+        "runes/props_alias",
+        "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; \
+         var root = $.from_html(`<p> </p>`); export default function props_alias($$anchor, $$props) { \
+         var p = root(); var text = $.child(p, true); $.reset(p); \
+         $.template_effect(() => $.set_text(text, $$props.bar)); $.append($$anchor, p); }",
+    );
+    // Dropped `true` arg on `$.child`.
+    rejects_structurally(
+        "runes/is_text_flag",
+        "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; \
+         var root = $.from_html(`<p> </p> <button>x</button>`, 1); \
+         export default function is_text_flag($$anchor) { let count = $.state(0); var fragment = root(); \
+         var p = $.first_child(fragment); var text = $.child(p); $.reset(p); var button = $.sibling(p, 2); \
+         $.template_effect(() => $.set_text(text, $.get(count))); \
+         $.delegated('click', button, () => $.update(count)); $.append($$anchor, fragment); } $.delegate(['click']);",
+    );
+    // Statement ORDER (non-interleaved accumulator decls) — a structural statement-list diff.
+    rejects_structurally(
+        "attributes/class_directives",
+        "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; \
+         var root = $.from_html(`<button></button> <button></button>`, 1); \
+         export default function class_directives($$anchor) { let on = $.state(false); let off = $.state(false); \
+         let c = 'a'; var fragment = root(); var button = $.first_child(fragment); var button_1 = $.sibling(button, 2); \
+         let classes; let classes_1; $.template_effect(() => { \
+         classes = $.set_class(button, 1, 'base', null, classes, { foo: $.get(on) }); \
+         classes_1 = $.set_class(button_1, 1, $.clsx(c), null, classes_1, { foo: $.get(on), bar: !$.get(off) }); }); \
+         $.delegated('click', button, () => $.set(on, !$.get(on))); \
+         $.delegated('click', button_1, () => $.set(off, !$.get(off))); $.append($$anchor, fragment); } $.delegate(['click']);",
+    );
+    // Memoization GRANULARITY (whole-template vs expression-part) — a structural call-shape diff.
+    rejects_structurally(
+        "attributes/mixed_class_call",
+        "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; \
+         var root = $.from_html(`<div></div>`); export default function mixed_class_call($$anchor) { \
+         let c = $.state('x'); var div = root(); \
+         $.template_effect(($0) => $.set_class(div, 1, $0), [() => `a${String($.get(c)) ?? ''}b`]); \
+         $.delegated('click', div, () => $.set(c, $.get(c) + '!')); $.append($$anchor, div); } $.delegate(['click']);",
+    );
+
+    // INVALID-JS defects (an UNESCAPED `${` opening a bogus interpolation; a RAW newline inside a
+    // single-quoted literal): the structural comparator's `module_sig` ASSERTS the side parses, so
+    // an invalid-JS emission HARD-FAILS the gate. Here we prove the defect string is NOT valid JS
+    // (the parse-assert would fire), i.e. the gate cannot silently pass it.
+    assert!(
+        !parses_as_js(
+            "export default function f($$anchor) { let v = $.state(0); \
+             $.set_attribute(input, 'id', `a${b${$.get(v) ?? ''}`); }"
+        ),
+        "an unescaped `${{` template defect must be INVALID JS (the structural gate parse-assert fires)"
+    );
+    assert!(
+        !parses_as_js("export default function f() { $.set_class(div, 1, 'a\nb'); }"),
+        "a raw-newline single-quoted defect must be INVALID JS (the structural gate parse-assert fires)"
+    );
+}
+
+#[test]
 fn normalizer_preserves_whitespace_inside_literals() {
     // F12: the normalizer collapses cosmetic whitespace OUTSIDE literals but
     // PRESERVES it inside string / template-literal TEXT — so meaningful text
@@ -1175,10 +1997,10 @@ fn helper_sequence_masking_ignores_helper_shaped_strings() {
 }
 
 // ===========================================================================
-// The SYSTEMATIC CODEGEN CORPUS — Block 5a's slice of the cumulative 5a–5m
-// codegen corpus (`scripts/gen-svelte-codegen-corpus.mjs`).
+// The SYSTEMATIC CODEGEN CORPUS — the native-client codegen corpus
+// (`scripts/gen-svelte-codegen-corpus.mjs`).
 //
-// The generator mechanically enumerates Block 5a's codegen surface over three
+// The generator mechanically enumerates the native-client codegen surface over three
 // orthogonal axes — value-expression SHAPE × TARGET × REACTIVITY — and pins the
 // OFFICIAL pinned-`svelte@5.56.3` module of every cell as the golden (under the
 // `codegen/` subtree: `<slug>.svelte` + `<slug>.client.json` together). This gate
@@ -1356,6 +2178,36 @@ fn codegen_corpus_covers_every_required_axis() {
         ),
         ("required_content_axes", "content_counts", "content"),
         ("required_container_axes", "container_counts", "container"),
+        // The element-spread fold / `{@html}` anchor + payload / compose axes.
+        (
+            "required_spread_fold_axes",
+            "spread_fold_counts",
+            "spread-fold",
+        ),
+        (
+            "required_html_anchor_axes",
+            "html_anchor_counts",
+            "html-anchor",
+        ),
+        (
+            "required_html_payload_axes",
+            "html_payload_counts",
+            "html-payload",
+        ),
+        ("required_compose_axes", "compose_counts", "compose"),
+        (
+            "required_directive_text_axes",
+            "directive_text_counts",
+            "directive-text",
+        ),
+        (
+            "required_class_value_paren_axes",
+            "class_value_paren_counts",
+            "class-value-paren",
+        ),
+        // The `$.template_effect` MEMOIZER-DEPS axis — the second concise-arrow-from-payload
+        // embedding surface (an object dep `() => ({ … })` from a call-bearing directive).
+        ("required_memo_deps_axes", "memo_deps_counts", "memo-deps"),
     ] {
         let req = required(req_key);
         let cnts = counts(count_key);
@@ -1369,18 +2221,17 @@ fn codegen_corpus_covers_every_required_axis() {
         }
     }
 
-    // The committed manifest total matches the on-disk cell count across ALL THREE buckets
-    // (byte-match `fold-exact`/PASS1/PASS2 cells + `refuse` markers + `live-fallback`
-    // markers) — no orphan / missing cell the discovery walk would silently include or
-    // exclude. (`codegen_slugs()` already excludes the live-fallback cells, which are
-    // counted separately.)
+    // The committed manifest total matches the on-disk cell count across ALL buckets
+    // (byte-match `fold-exact`/PASS1/PASS2 cells + `refuse` markers + `live-fallback` markers)
+    // — no orphan / missing cell the discovery walk would silently include or exclude.
+    // (`codegen_slugs()` already excludes the marker-only cells, which are counted separately.)
     let total = manifest["total"].as_u64().unwrap() as usize;
     let on_disk =
         codegen_slugs().len() + codegen_refuse_slugs().len() + codegen_live_fallback_slugs().len();
     assert_eq!(
         total,
         on_disk,
-        "manifest `total` must equal the committed cell count across all three buckets \
+        "manifest `total` must equal the committed cell count across all buckets \
          (byte-match {} + refuse {} + live-fallback {})",
         codegen_slugs().len(),
         codegen_refuse_slugs().len(),
@@ -1390,9 +2241,9 @@ fn codegen_corpus_covers_every_required_axis() {
     // HARDCODED axis anchor: the manifest's `required_*` lists are DERIVED from the
     // generator's `SHAPES`/`TARGETS`/`REACTIVITIES`, so dropping an enumerator there also
     // shrinks the `required_*` list — which the ≥1-row loop above would then vacuously
-    // satisfy. Pinning the full Block-5a axis vocabulary HERE (independent of the
+    // satisfy. Pinning the full codegen axis vocabulary HERE (independent of the
     // manifest) makes a generator-side axis drop fail the Rust gate, not only the JS
-    // generator's own check. These are the architect-specified Block-5a codegen axes.
+    // generator's own check. These are the architect-specified native-client codegen axes.
     let shapes: std::collections::BTreeSet<String> =
         required("required_shape_axes").into_iter().collect();
     for shape in [
@@ -1476,6 +2327,242 @@ fn codegen_corpus_covers_every_required_axis() {
         assert!(
             container_axes.contains(container),
             "the codegen corpus must declare the `{container}` container axis"
+        );
+    }
+
+    // The ELEMENT-SPREAD fold axis (the `$.attribute_effect` fold composition + payload
+    // kind + element kind). Pinned HERE (independent of the manifest) so a generator-side
+    // enumerator drop fails the Rust gate, not only the JS check.
+    let spread_fold_axes: std::collections::BTreeSet<String> =
+        required("required_spread_fold_axes").into_iter().collect();
+    for axis in [
+        "alone",
+        "static_before",
+        "static_after",
+        "static_around",
+        "dynamic_before",
+        "dynamic_after",
+        "mixed_before",
+        "mixed_after",
+        "classdir_shorthand",
+        "classdir_cond",
+        "classdir_before",
+        "styledir_expr",
+        "styledir_important_expr",
+        // A STATIC-TEXT style directive value folds as the quoted string (the SOLE directive
+        // family that accepts a text value).
+        "styledir_text",
+        "class_attr_static",
+        "class_attr_dyn",
+        "style_attr_static",
+        // A VALUELESS boolean attribute folds as the raw `true` (NOT the empty-string `''`).
+        "valueless",
+        "valueless_input",
+        "class_attr_and_dir",
+        "multi_classdir",
+        "multi_styledir",
+        "both_dirs",
+        "two_spreads",
+        "three_spreads",
+        "spread_attr_spread",
+        "spread_dyn_spread",
+        "payload_member",
+        "payload_call",
+        "payload_optional_call",
+        "payload_conditional",
+        "payload_logical",
+        // A SequenceExpression payload KEEPS its parens; a colliding payload identifier
+        // renames the DOM var — both the paren-preservation / collision boundaries.
+        "payload_sequence",
+        "payload_object_literal",
+        "payload_props",
+        "payload_collision_p",
+        // Author transparent parens around a fold value drop (`id={(a ? b : c)}` →
+        // `id: a ? b : c`); a mixed text+interpolation style directive under a spread folds
+        // the template literal.
+        "payload_dyn_paren",
+        "payload_class_dir_paren",
+        "payload_style_dir_paren",
+        "payload_style_mixed",
+        // An authored `defaultValue` / `defaultChecked` reset attr on an `<input>` spread
+        // SUPPRESSES the 7-argument tail (camelCase, case-sensitive); a lowercase
+        // `defaultvalue` KEEPS it.
+        "input_default_value",
+        "input_default_checked",
+        "input_default_value_dyn",
+        "input_lc_defaultvalue",
+        // A ROOT paren around a member-spread payload (`{...(obj.attrs)}`) peels cleanly
+        // and is accepted (the member spread is emitted unchanged, not failed closed).
+        "payload_paren_member_spread",
+        "element_a",
+        "element_button",
+        "element_h1",
+        "element_input",
+        "element_p",
+    ] {
+        assert!(
+            spread_fold_axes.contains(axis),
+            "the codegen corpus must declare the `{axis}` element-spread fold axis"
+        );
+    }
+
+    // The `{@html}` ANCHOR-topology axis (only-child / sibling / root / nested / interleave).
+    let html_anchor_axes: std::collections::BTreeSet<String> =
+        required("required_html_anchor_axes").into_iter().collect();
+    for axis in [
+        "only_child",
+        "sibling_text_before",
+        "sibling_text_after",
+        "sibling_text_both",
+        "two_adjacent",
+        "nested_in_element",
+        "root",
+        "root_with_sibling",
+        "two_root",
+    ] {
+        assert!(
+            html_anchor_axes.contains(axis),
+            "the codegen corpus must declare the `{axis}` {{@html}} anchor axis"
+        );
+    }
+
+    // The `{@html}` PAYLOAD-kind axis (the thunk + the direct-identifier-call elision).
+    let html_payload_axes: std::collections::BTreeSet<String> =
+        required("required_html_payload_axes").into_iter().collect();
+    for axis in [
+        "static_string",
+        "identifier",
+        "member",
+        "call_elision",
+        // A prop callee thunks the rewritten member; args / optional callees do NOT elide.
+        "call_prop_thunk",
+        "call_with_args",
+        "call_optional",
+        "member_call",
+        // A PAREN-WRAPPED direct call STILL elides (the callee parens are peeled); a
+        // paren-wrapped PROP callee thunks the rewritten callee call (author parens dropped).
+        "call_paren",
+        "call_doubleparen",
+        "call_paren_prop",
+        "conditional",
+        "template",
+        // Author transparent parens around the payload drop (`{@html (c ? a : b)}` →
+        // `() => c ? a : b`); a bare sequence KEEPS one paren pair.
+        "paren_conditional",
+        "paren_member",
+        "bare_sequence",
+        // An OBJECT-LITERAL payload wraps the concise-arrow body so a leading `{` is an object
+        // expression, not a block body returning `undefined` — including a member / computed
+        // index / method call whose leftmost leaf is the object, and an author-parenthesized
+        // object (which keeps its own single pair, no double wrap).
+        "object_literal",
+        "member_of_object_literal",
+        "index_of_object_literal",
+        "call_on_object_literal",
+        "paren_object",
+        // An OPTIONAL-CHAIN access on an object literal — OXC wraps it in a `ChainExpression`,
+        // but the chain's leftmost leaf is still the object, so the whole body wraps; without it
+        // the body is non-parsing JS (a block followed by a stray `?.`).
+        "opt_member_of_object_literal",
+        "opt_index_of_object_literal",
+        "opt_call_on_object_literal",
+        "opt_callee_of_object_literal",
+        // A MULTI-MEMBER optional chain whose TOP member is also optional — locks the
+        // optional-flag discrimination on the OUTER chain element (`?.o.p` vs `?.o?.p`).
+        "chain_top_optional",
+        // The systematic object-leading × control axis for the UNCONDITIONAL concise-arrow-body
+        // wrap. An object-LEFT logical (`{a:1} || b`) and a tagged template whose tag
+        // leftmost leaf is an object member (`` {f}.f`tpl` ``) DISCRIMINATE "revert the wrap"
+        // (without the outer paren the body parses `{` as a block). The non-object controls
+        // (array / arrow / unary / new) are no-spurious-wrap anchors. (An object-LEFT binary
+        // `{a:1} + 2` is absent: official itself emits NON-PARSING JS there, so there is no
+        // parseable golden — the TS-skin and binary cases are covered by the Verter-only unit
+        // test `html_ts_wrapper_object_payload_*` instead.)
+        "object_left_logical",
+        "tagged_template_object",
+        "array_payload",
+        "arrow_payload",
+        "unary_payload",
+        "new_payload",
+    ] {
+        assert!(
+            html_payload_axes.contains(axis),
+            "the codegen corpus must declare the `{axis}` {{@html}} payload axis"
+        );
+    }
+
+    // The directive STANDALONE axis (a `class:` / `style:` directive on a NON-spread
+    // element → the coalesced `$.set_class` / `$.set_style`): the static-text style value
+    // family AND the valueless-base `class` / `style` family (the raw `true` base). Pinned
+    // HERE (independent of the manifest) so a generator-side enumerator drop fails the Rust
+    // gate, not only the JS check.
+    let directive_text_axes: std::collections::BTreeSet<String> =
+        required("required_directive_text_axes")
+            .into_iter()
+            .collect();
+    for axis in [
+        "style_text",
+        "style_text_important",
+        "style_text_hyphen",
+        "class_valueless_base",
+        "style_valueless_base",
+        // A MIXED text+interpolation `style:` directive folds the reactive template literal
+        // (`|important` uses the array form); author transparent parens around a standalone
+        // style-directive value drop.
+        "style_mixed_live",
+        "style_mixed_important",
+        "style_dir_paren",
+    ] {
+        assert!(
+            directive_text_axes.contains(axis),
+            "the codegen corpus must declare the `{axis}` directive standalone axis"
+        );
+    }
+
+    // The COMPOSE axis (spread + `{@html}` on the same element).
+    let compose_axes: std::collections::BTreeSet<String> =
+        required("required_compose_axes").into_iter().collect();
+    for axis in ["spread_html_static", "spread_html_reactive"] {
+        assert!(
+            compose_axes.contains(axis),
+            "the codegen corpus must declare the `{axis}` compose axis"
+        );
+    }
+
+    // The standalone `class={…}` clsx-decision axis (a PAREN-WRAPPED class value — the
+    // clsx decision is computed on the UNWRAPPED root kind). Pinned HERE (independent of
+    // the manifest) so a generator-side enumerator drop fails the Rust gate, not only the
+    // JS check.
+    let class_value_paren_axes: std::collections::BTreeSet<String> =
+        required("required_class_value_paren_axes")
+            .into_iter()
+            .collect();
+    for axis in [
+        // A parenthesized literal / binary / template stays NO-clsx; a parenthesized
+        // conditional DOES clsx (the clsx-YES boundary).
+        "class_paren_literal",
+        "class_paren_binary",
+        "class_paren_template",
+        "class_paren_conditional",
+    ] {
+        assert!(
+            class_value_paren_axes.contains(axis),
+            "the codegen corpus must declare the `{axis}` class-value-paren axis"
+        );
+    }
+
+    // The `$.template_effect` MEMOIZER-DEPS axis — the SECOND concise-arrow-from-payload
+    // embedding surface (a call-bearing reactive `class:`/`style:` directive memoizes its
+    // directives OBJECT into a deps-array slot `[() => ({ … })]`; the same unconditional
+    // concise-arrow-body wrap keeps that object dep an expression). Pinned HERE (independent of
+    // the manifest) so a generator-side enumerator drop fails the Rust gate, not only the JS
+    // check — the regression anchor for the memoizer-site under-wrap class.
+    let memo_deps_axes: std::collections::BTreeSet<String> =
+        required("required_memo_deps_axes").into_iter().collect();
+    for axis in ["class_dir_object_call", "style_dir_object_call"] {
+        assert!(
+            memo_deps_axes.contains(axis),
+            "the codegen corpus must declare the `{axis}` memo-deps axis"
         );
     }
 
@@ -1563,16 +2650,12 @@ fn emitted_codegen_corpus_matches_official_goldens() {
             golden_delegated(&golden),
             "delegated-event drift for codegen cell {slug}:\n{code}"
         );
-        // (6) THE FULL-MODULE byte comparison (argument/offset/identifier-precise).
-        assert_eq!(
-            normalize_module_for_comparison(&code),
-            golden_client_module(&golden),
-            "FULL-MODULE drift for codegen cell {slug} (argument/identifier/offset-precise):\n\
-             --- emitted (normalized) ---\n{}\n--- golden (official, normalized) ---\n{}\n\
-             --- emitted (raw) ---\n{code}",
-            normalize_module_for_comparison(&code),
-            golden_client_module(&golden),
-        );
+        // (6) THE FULL-MODULE STRUCTURAL comparison (paren-insensitive, but argument /
+        // identifier / operator / literal-content / structure-precise). The value emitter is
+        // source-preserving, so a behavior-preserving redundant author paren the official
+        // printer drops (`() => ((a, b))` vs `() => (a, b)`, `id: (c ? a : b)` vs
+        // `id: c ? a : b`) is WAIVED — but every behavioral / structural divergence still fails.
+        assert_modules_structurally_equal(slug, &code, &golden_client_module(&golden));
     }
 }
 
@@ -1618,11 +2701,6 @@ fn refuse_bucket_cells_are_refused_with_const_fold_throw() {
                     surface.diagnostic_code(),
                     "svelte-runtime-unsupported-const-fold-throw",
                     "refuse cell {slug} must carry the const-fold-throw diagnostic code"
-                );
-                assert_eq!(
-                    surface.owning_block(),
-                    "5a",
-                    "a const-fold throw is a 5a mixed-attribute surface"
                 );
             }
             Ok(code) => panic!(

@@ -41,21 +41,6 @@ impl Memoizer {
     }
 }
 
-/// Wrap a concise-arrow body that is an OBJECT LITERAL in parentheses
-/// (`{ … }` → `({ … })`), so `() => { … }` returns the object instead of parsing
-/// `{ … }` as a block statement. This is the official `b.arrow` parenthesization for
-/// an `ObjectExpression` body — needed for a memoized `class:`/`style:` directives
-/// object dep (`() => ({ foo: … })`). Any other body (a call, a `$.clsx(…)`, an
-/// identifier) is returned unchanged. A leading `[` (an array dep) is valid as a bare
-/// concise body and needs no wrap.
-fn wrap_arrow_body(body: &str) -> String {
-    if body.trim_start().starts_with('{') {
-        format!("({body})")
-    } else {
-        body.to_string()
-    }
-}
-
 /// Emit the grouped reactive-text `$.template_effect`, choosing the official shape:
 ///
 /// - NO writes → nothing.
@@ -86,9 +71,18 @@ pub(super) fn emit_text_effect(out: &mut String, text_writes: &[String], deps: &
         .map(|i| format!("${i}"))
         .collect::<Vec<_>>()
         .join(", ");
+    // Each memoized dep is a `() => <expr>` concise arrow — a concise-arrow-from-payload body, so
+    // it routes through the shared UNCONDITIONAL wrap (`() => (EXPR)`). A leading-`{` object dep
+    // (`() => ({ color: … })`) returns the object instead of parsing a block body; over-wrapping a
+    // non-object dep is behavior-preserving and invisible to the paren-insensitive comparator.
     let deps_array = deps
         .iter()
-        .map(|d| format!("() => {}", wrap_arrow_body(d)))
+        .map(|d| {
+            format!(
+                "() => {}",
+                super::client_codegen_helpers::concise_arrow_expr_body(d)
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     if text_writes.len() == 1 {

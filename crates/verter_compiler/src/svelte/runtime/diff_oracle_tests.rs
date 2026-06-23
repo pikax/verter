@@ -54,7 +54,8 @@ use super::html::{
 };
 use super::ir::{
     AttrIr, BlockIr, ExprId, IrNode, MixedAttrPart, NodeId, NonStaticPropertyKind,
-    NonStaticPropertyValue, RuntimeOp, SpecialKind, SvelteRuntimeIr, TemplateScopeId,
+    NonStaticPropertyValue, RuntimeOp, SpecialKind, StyleDirectiveValue, SvelteRuntimeIr,
+    TemplateScopeId,
 };
 use super::topology::plan_client_topology;
 use super::{lower_parsed_svelte_to_ir, plan_static_templates, SvelteRuntimeOptions};
@@ -826,7 +827,17 @@ fn project_directive_exprs(ir: &SvelteRuntimeIr) -> Vec<CandDirectiveExpr> {
         for attr in attrs {
             let (kind, shape) = match attr {
                 AttrIr::Class { condition, .. } => ("class", shape_of(*condition)),
-                AttrIr::Style { value, .. } => ("style", shape_of(*value)),
+                AttrIr::Style { value, .. } => (
+                    "style",
+                    match value {
+                        StyleDirectiveValue::Expr(e) => shape_of(Some(*e)),
+                        // A static-text OR mixed value has no SINGLE directive expression
+                        // (a mixed value's parts are not one `ExprId`).
+                        StyleDirectiveValue::Text(_) | StyleDirectiveValue::Mixed(_) => {
+                            shape_of(None)
+                        }
+                    },
+                ),
                 AttrIr::Bind { expr, .. } => ("bind", shape_of(*expr)),
                 AttrIr::Use { arg, .. } => ("use", shape_of(*arg)),
                 AttrIr::Event { handler, .. } => ("on", shape_of(Some(*handler))),

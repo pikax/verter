@@ -16,8 +16,8 @@
 
 use super::entity_decode::{decode_text_entities, escape_html_attr};
 use super::ir::{
-    AttrIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, StaticAttrValue, SvelteRuntimeIr,
-    TemplateScope, TemplateScopeId,
+    AttrIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, StaticAttrValue, StyleDirectiveValue,
+    SvelteRuntimeIr, TemplateScope, TemplateScopeId,
 };
 use super::whitespace::{clean_nodes, is_html_ws, CleanContext, CleanItem};
 
@@ -152,6 +152,11 @@ pub enum AnchorReason {
     BlockOnlyRoot,
     /// The region is empty.
     EmptyRoot,
+    /// The region's SOLE root is a `{@html}` raw-markup tag (a `$.comment()`-anchored
+    /// root: `var fragment = $.comment(); var node = $.first_child(fragment); $.html(node,
+    /// () => h);`). Distinct from a block-only root so the client backend emits the
+    /// supported raw-markup root frame instead of failing closed.
+    RawHtmlRoot,
 }
 
 /// A dynamic slot the template region needs.
@@ -469,6 +474,13 @@ fn is_sole_controlled(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> bool {
 /// for this serializer — the static default is preserved here, and the
 /// bind-aware stripping is owned by the bindings layer.
 fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) {
+    // A SPREAD on the element switches its WHOLE attribute strategy to the single
+    // `$.attribute_effect` fold: EVERY co-located attribute — including the static ones —
+    // moves into the runtime object literal, so NONE is baked into the cloned skeleton
+    // (the official `Element.js` spread path emits a bare `<div></div>`).
+    if attrs.iter().any(|a| matches!(a, AttrIr::Spread { .. })) {
+        return;
+    }
     // The official `RegularElement.js` rule: a static `class` / `style` stays baked
     // into the skeleton ONLY when the element carries NO `class:` / `style:`
     // directive — a directive pulls the attribute OUT into the merged `$.set_class`
@@ -685,9 +697,17 @@ pub(super) fn synthesize_region(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> 
     // of comment markers (`<!><!>`) with the fragment flag.
     if let [CleanItem::Node(only)] = items.as_slice() {
         if !is_static_html_root(ir.node(*only)) {
-            return TemplateFactory::CommentAnchor {
-                reason: AnchorReason::BlockOnlyRoot,
+            // A lone `{@html}` root is a SUPPORTED `$.comment()`-anchored raw-markup root
+            // (distinct from a block-only root, which fails closed).
+            let reason = if matches!(
+                ir.node(*only),
+                IrNode::Tag(crate::svelte::runtime::ir::TagIr::Html { .. })
+            ) {
+                AnchorReason::RawHtmlRoot
+            } else {
+                AnchorReason::BlockOnlyRoot
             };
+            return TemplateFactory::CommentAnchor { reason };
         }
     }
     let mut html = String::new();
@@ -887,7 +907,14 @@ fn collect_attr_slots(
                 property, value, ..
             } => Some(DynamicSlotKind::Style {
                 property: property.clone(),
-                value: *value,
+                // A static-text OR mixed style value carries no SINGLE value EXPRESSION (the
+                // dynamic-slot value is one `ExprId`); only a single-expression value carries
+                // its id. A mixed value's parts are folded downstream in
+                // `project_set_style_op` — the slot here just marks the node dynamic.
+                value: match value {
+                    StyleDirectiveValue::Expr(e) => Some(*e),
+                    StyleDirectiveValue::Text(_) | StyleDirectiveValue::Mixed(_) => None,
+                },
             }),
             AttrIr::Spread { expr } => Some(DynamicSlotKind::Spread { expr: *expr }),
             AttrIr::Bind { target, expr } => Some(DynamicSlotKind::Bind {

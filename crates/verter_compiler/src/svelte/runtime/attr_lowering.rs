@@ -17,7 +17,7 @@ use verter_span::Span;
 use super::entity_decode::decode_attr_entities;
 use super::events::{can_delegate_event, normalize_event_name};
 use super::expr::ScopeId;
-use super::ir::{AttrIr, MixedAttrPart, StaticAttrValue, TransitionKind};
+use super::ir::{AttrIr, MixedAttrPart, StaticAttrValue, StyleDirectiveValue, TransitionKind};
 use super::{local_name_span, span_text, spread_expr_span, LoweringCtx};
 use crate::svelte::parser::tokenizer_scan::find_matching_brace_in;
 use crate::svelte::parser::{
@@ -386,8 +386,41 @@ fn lower_directive(
             })
         }
         SvelteDirectiveKind::Style => {
-            // Shorthand `style:color` ⇒ the value is `color`.
-            let value = value_expr(ctx).or_else(|| shorthand_expr(ctx));
+            // `style:` is the SOLE directive family that accepts a STATIC-TEXT value
+            // (`style:color="red"` → the quoted string `{ color: 'red' }`); a bare `={x}`
+            // / quoted single-`{x}` / shorthand value lowers to an expression. (A non-style
+            // directive with a text value is rejected upstream by the official-reject gate
+            // as `directive_invalid_value`, so it never reaches here.)
+            let value = match &directive.value {
+                // A static-text value carries the DECODED text (the fold emits the
+                // single-quoted literal); NOT a synthetic string-literal expr.
+                Some(SvelteAttributeValue::Text(span)) => {
+                    StyleDirectiveValue::Text(decode_attr_entities(span_text(ctx.source, *span)))
+                }
+                // A MIXED quoted body that is NOT a single `{x}` chunk (`style:color="a{x}b"`
+                // / `style:color="{x}{y}"`) is a text+interpolation concatenation — lower it
+                // through the shared mixed-attr-parts splitter into the ordered literal /
+                // expression run (the projector folds the template-literal). A SINGLE-`{x}`
+                // quoted body (`style:color="{x}"`) is the `value.length === 1` shape and
+                // stays an `Expr` (handled by the `_` arm below via
+                // `single_expression_value_span`).
+                Some(v @ SvelteAttributeValue::Mixed(span))
+                    if single_expression_value_span(ctx, Some(v)).is_none() =>
+                {
+                    StyleDirectiveValue::Mixed(lower_mixed_attr_parts(ctx, *span, scope))
+                }
+                // A bare `={x}` / quoted single-`{x}` value, OR the shorthand `style:color`
+                // (the implied same-named `color` reference) lowers to an expression.
+                _ => {
+                    let expr = value_expr(ctx).or_else(|| shorthand_expr(ctx));
+                    match expr {
+                        Some(expr) => StyleDirectiveValue::Expr(expr),
+                        // A `style:color` shorthand whose local-name span could not be
+                        // located (defensive): fall back to a text value of the local name.
+                        None => StyleDirectiveValue::Text(directive.local.clone()),
+                    }
+                }
+            };
             Some(AttrIr::Style {
                 property: directive.local.clone(),
                 value,

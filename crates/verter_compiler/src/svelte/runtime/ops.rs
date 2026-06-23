@@ -10,7 +10,7 @@ use super::html::cannot_be_set_statically;
 use super::ir::{
     ActionOp, AttrIr, AttrOp, AttrOpKind, BindOp, EventOp, EventTarget, IrNode, MixedAttrPart,
     NodeId, NonStaticPropertyKind, NonStaticPropertyOp, NonStaticPropertyValue, OpId, RuntimeOp,
-    SpecialElementIr, SpecialKind, TagIr, TemplateScope, TransitionOp,
+    SpecialElementIr, SpecialKind, StyleDirectiveValue, TagIr, TemplateScope, TransitionOp,
 };
 
 /// Populate the reactive runtime ops for every reactive surface the lowering
@@ -87,16 +87,13 @@ fn collect_node_ops(
                 collect_node_ops(nodes, child, ops, local);
             }
         }
-        IrNode::Tag(TagIr::Html { expr }) => {
-            // `{@html}` is a reactive raw-text surface — model it as reactive text.
-            let op = push_op(
-                ops,
-                RuntimeOp::ReactiveText {
-                    target: node_id,
-                    expr,
-                },
-            );
-            local.push(op);
+        IrNode::Tag(TagIr::Html { .. }) => {
+            // `{@html}` is the dedicated `$.html` raw-markup surface (NOT a reactive-text
+            // node): the client backend projects its op from the classified html-node
+            // facts (so it carries the only-child topology + the thunk-elision payload),
+            // and the server backend renders it through the `DynamicSlotKind::Html` slot.
+            // It carries NO `ReactiveText` op here — that would mis-route it through the
+            // text-effect path (`$.set_text` over a non-existent text node).
         }
         IrNode::Tag(TagIr::Attach { expr }) => {
             let op = push_op(
@@ -215,7 +212,7 @@ fn collect_attr_ops(
             ),
             AttrIr::Style {
                 property,
-                value: Some(expr),
+                value: StyleDirectiveValue::Expr(expr),
                 ..
             } => push_local(
                 ops,
@@ -294,13 +291,22 @@ fn collect_attr_ops(
                     },
                 },
             ),
-            // A value-less shorthand whose lowering produced no expression, a
-            // `let:` slot-prop directive (a slot-scope concern, not a node-reactive
-            // surface), and a static attribute carry no node-reactive op here.
+            // A STATIC-TEXT (`style:color="red"`) or MIXED (`style:color="a{x}b"`) style
+            // directive carries no single expression but STILL emits the coalesced
+            // `$.set_style` (official emits `$.set_style(div, '', {}, { color: 'red' })` /
+            // `{ color: `a${x ?? ''}b` }`); push the no-single-expr trigger so the projection
+            // fires (it reads the full attr list and re-derives the mixed template + its
+            // reactivity).
+            AttrIr::Style {
+                value: StyleDirectiveValue::Text(_) | StyleDirectiveValue::Mixed(_),
+                ..
+            } => push_local(ops, local, RuntimeOp::StyleDirectiveTrigger { target }),
+            // A value-less shorthand whose lowering produced no expression, a `let:`
+            // slot-prop directive (a slot-scope concern, not a node-reactive surface), and
+            // a static attribute carry no node-reactive op here.
             AttrIr::Class {
                 condition: None, ..
             }
-            | AttrIr::Style { value: None, .. }
             | AttrIr::Bind { expr: None, .. }
             | AttrIr::Let { .. }
             | AttrIr::Static { .. } => {}

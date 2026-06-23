@@ -26,6 +26,7 @@ use super::expr::{
     arrow_scope_names, block_scope_names, collect_direct_decls, collect_pattern_names,
     collect_var_hoists, for_left_names, function_scope_names, is_effect_callee, is_props_callee,
     reparse_module, BindingRuntimeKind, BindingTable, ScopeGraph, ScopeId, ShadowStack,
+    UnwrappedRootKind,
 };
 use super::expr_rewrite::is_signal_kind;
 
@@ -124,40 +125,27 @@ pub fn expr_has_call(
 /// lowered to a TemplateLiteral upstream, so it is handled by its own (non-clsx) path
 /// and never reaches this predicate.
 ///
-/// Typed-IR only: re-parses the borrowed expression source through OXC (the same
-/// reparse the `has_call` / `has_state` analyses use) and inspects the TOP-LEVEL
-/// expression KIND — no string sniffing. A parse failure conservatively returns
-/// `true` (the wrap is the default for an arbitrary expression).
+/// The KIND is read from the TRANSPARENT-ROOT-UNWRAPPED top-level expression — NOT the
+/// paren-wrapped root. Official runs the value expression through its AST printer (which
+/// drops transparent author parens) BEFORE the `needs_clsx` node-type check, so a
+/// parenthesized literal / template / binary (`class={('x')}` / `class={((a + b))}` /
+/// `` class={(`x${a}`)} ``) stays UNWRAPPED. The kind comes from the shared
+/// [`UnwrappedRootKind`] analysis fact ([`AnalyzedExpr::unwrapped_root_kind`]) — one parse
+/// per expression, no reparse, no string sniffing. This `$.clsx` DECISION is the behavioral
+/// use of the unwrapped root; the emitted class value TEXT routes through the value printer
+/// separately, which is source-preserving (it keeps the author's parens verbatim and rewrites
+/// only signal/prop reads + strips TS — a kept redundant paren is a behavior-preserving
+/// cosmetic difference the minifier collapses).
+///
+/// [`UnwrappedRootKind`]: super::expr::UnwrappedRootKind
+/// [`AnalyzedExpr::unwrapped_root_kind`]: super::expr::AnalyzedExpr::unwrapped_root_kind
 #[must_use]
-pub fn class_value_needs_clsx(source: &str) -> bool {
-    let alloc = Allocator::default();
-    let wrapped = format!("({source})");
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return true;
-    }
-    let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
-        return true;
-    };
-    // Unwrap the synthetic outer parentheses added by the `({source})` wrapper. An
-    // AUTHOR-written outer parenthesization (`class={(a)}`) survives as a nested
-    // `ParenthesizedExpression`, which official treats by its OWN node type
-    // (`ParenthesizedExpression` is none of Literal/TemplateLiteral/BinaryExpression),
-    // so it IS wrapped — matching the single unwrap here.
-    let inner = match &stmt.expression {
-        Expression::ParenthesizedExpression(p) => &p.expression,
-        other => other,
-    };
+pub fn class_value_needs_clsx(kind: UnwrappedRootKind) -> bool {
     !matches!(
-        inner,
-        Expression::BooleanLiteral(_)
-            | Expression::NullLiteral(_)
-            | Expression::NumericLiteral(_)
-            | Expression::BigIntLiteral(_)
-            | Expression::RegExpLiteral(_)
-            | Expression::StringLiteral(_)
-            | Expression::TemplateLiteral(_)
-            | Expression::BinaryExpression(_)
+        kind,
+        UnwrappedRootKind::Literal
+            | UnwrappedRootKind::TemplateLiteral
+            | UnwrappedRootKind::BinaryExpression
     )
 }
 
@@ -226,10 +214,10 @@ pub(super) fn expr_references_signal(
     bindings: &BindingTable,
     scopes: &ScopeGraph,
 ) -> bool {
-    let Ok(refs) = super::expr::collect_expr_references(source) else {
+    let Ok(facts) = super::expr::collect_expr_references(source) else {
         return false;
     };
-    refs.iter().any(|r| {
+    facts.references.iter().any(|r| {
         bindings
             .resolve_kind(scopes, scope, &r.name)
             .is_some_and(|k| is_signal_kind(k) || k == BindingRuntimeKind::Prop)
@@ -868,9 +856,16 @@ impl NeedsContextScan<'_> {
         self.unsafe_roots.contains(name) && !self.scopes.is_shadowed(name)
     }
 
-    /// Whether a callee / member expression's leftmost identifier is an unsafe root
-    /// (so the call / member triggers `needs_context`). A leftmost identifier that
-    /// is a local / global / safe binding does NOT trigger.
+    /// Whether a callee / member expression is UNSAFE (so the call / member triggers
+    /// `needs_context`) — the official `is_safe_identifier` rule. Walks the member chain
+    /// (peeling transparent paren / TS-non-null skins, the OXC equivalent of estree's
+    /// paren-elision / TS-stripping) to the LEFTMOST leaf and:
+    /// - a NON-identifier leftmost leaf (an object literal `{x:1}.m`, an array, a call
+    ///   result, a template, `this`) is UNSAFE — the official `if (node.type !==
+    ///   'Identifier') return false`;
+    /// - an identifier leftmost leaf is unsafe only when it roots at an unsafe binding
+    ///   (an `import` / `$props()` destructure name) — a local / global / safe binding is
+    ///   safe.
     fn root_is_unsafe(&self, expr: &Expression<'_>) -> bool {
         let mut node = expr;
         loop {
@@ -881,7 +876,11 @@ impl NeedsContextScan<'_> {
                 Expression::ParenthesizedExpression(p) => node = &p.expression,
                 Expression::TSNonNullExpression(e) => node = &e.expression,
                 Expression::Identifier(id) => return self.is_unsafe_root(id.name.as_str()),
-                _ => return false,
+                // A member / call rooted at a NON-identifier leaf (an object literal, an
+                // array, a call result, a template, `this`) is not a safe identifier — the
+                // official `is_safe_identifier` returns `false` for it (so `{x:1}.m`,
+                // `{x:1}['m']`, `{f(){}}.f()` all need component context).
+                _ => return true,
             }
         }
     }

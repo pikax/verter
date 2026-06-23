@@ -1,0 +1,63 @@
+{
+  "slug": "html_anchor__root_with_sibling",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "html_anchor__root_with_sibling",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "next",
+    "sibling",
+    "first_child",
+    "html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "first_child",
+    "from_html",
+    "html",
+    "next",
+    "sibling"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "next": 1,
+    "sibling": 1,
+    "first_child": 1,
+    "html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "text <!>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`text <!>`, 1); export default function html_anchor__root_with_sibling($$anchor) {let __rune = 0; $.next(); var fragment = root(); var node = $.sibling($.first_child(fragment)); $.html(node, () => h); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -33,7 +33,7 @@ use super::expr_emit;
 use super::expr_rewrite::{self, PropReads, ProxyInitMap};
 use super::ir::{
     AttrIr, AttrOpKind, BindOp, EventOp, EventTarget, ExprId, IrNode, MixedAttrPart, NodeId,
-    NonStaticPropertyKind, NonStaticPropertyValue, RuntimeOp, SvelteRuntimeIr,
+    NonStaticPropertyKind, NonStaticPropertyValue, RuntimeOp, StyleDirectiveValue, SvelteRuntimeIr,
 };
 use verter_span::Span;
 
@@ -103,6 +103,15 @@ pub(super) struct SupportedClientIr<'a> {
     /// the SOLE input `build_script_items` lowers. The broad statement-rewrite path
     /// is gone; this is the only instance-script source.
     pub(super) script_items: Vec<super::client_shapes::SupportedInstanceScriptItem>,
+    /// The accepted `{@html}` node ids (the classifier's typed FACT) — proves each
+    /// raw-markup node is supported in its position, so the plan projects a
+    /// [`ClientRuntimeOp::Html`] / [`ClientNode::RawHtml`] instead of refusing.
+    pub(super) html_nodes: Vec<NodeId>,
+    /// The accepted spread-attribute element node ids (the classifier's typed FACT) —
+    /// each such element folds its WHOLE attribute set into a single
+    /// [`ClientRuntimeOp::AttributeEffect`]; the per-attribute ops the IR also produced
+    /// for these elements are suppressed.
+    pub(super) spread_elements: Vec<NodeId>,
 }
 
 impl<'a> SupportedClientIr<'a> {
@@ -144,6 +153,8 @@ impl<'a> SupportedClientIr<'a> {
             interp_shapes: classified.interp_shapes.clone(),
             element_facts: classified.element_facts.clone(),
             script_items: classified.script_items.clone(),
+            html_nodes: classified.html_nodes.clone(),
+            spread_elements: classified.spread_elements.clone(),
         };
 
         // Divergence guard: the op projection re-derives a plain dynamic attribute's
@@ -268,7 +279,17 @@ impl<'a> SupportedClientIr<'a> {
                 span: *span,
                 text: text.clone(),
             }),
-            IrNode::Interpolation { span, expr, .. } => {
+            IrNode::Interpolation { span, expr, escape } => {
+                // A RAW interpolation (`{@html}` in interpolation form — accepted as a
+                // raw-html node) projects to a `RawHtml` node. (The template lowering
+                // produces every `{@html}` as a `TagIr::Html` node, so this is a defensive
+                // mirror of the dominant raw-html path.)
+                if *escape == super::ir::EscapeMode::Raw {
+                    return Ok(ClientNode::RawHtml {
+                        span: *span,
+                        expr: *expr,
+                    });
+                }
                 // The classifier already proved this interpolation is a bare reactive
                 // signal / no-default-prop read (recorded as a `ClientInterpolationShape`
                 // fact); a non-reactive or complex interpolation failed closed there.
@@ -285,6 +306,13 @@ impl<'a> SupportedClientIr<'a> {
                     expr: *expr,
                 })
             }
+            // A `{@html expr}` raw-markup tag (accepted by the classifier) projects to a
+            // `RawHtml` node so the DOM walk can reach its `<!>` anchor (or recognise it
+            // as the controlled sole child of its parent).
+            IrNode::Tag(super::ir::TagIr::Html { expr }) => Ok(ClientNode::RawHtml {
+                span: Span::new(id.0, id.0),
+                expr: *expr,
+            }),
             IrNode::Element(el) => {
                 // The classifier already minted the typed `SupportedHtmlElement` fact
                 // for this element (the strict-allowlist `try_from` proof). An element
@@ -374,21 +402,22 @@ impl<'a> SupportedClientIr<'a> {
                 })
             }
             // A dynamic attribute / `class={…}` / `style={…}` / `class:` / `style:`
-            // directive — the emission lives on the corresponding op; the
-            // element attr records the supported KIND only. (The classifier already
-            // accepted these, recording the per-attribute dynamic-attr shape.)
+            // directive, OR a spread `{...x}` — the emission lives on the corresponding op
+            // (a per-attribute write, or the coalesced `$.attribute_effect` fold for a
+            // spread element); the element attr records the supported KIND only. (The
+            // classifier already accepted these.)
             AttrIr::Dynamic { .. }
             | AttrIr::Mixed { .. }
             | AttrIr::Class { .. }
-            | AttrIr::Style { .. } => Ok(ClientAttr::Dynamic),
+            | AttrIr::Style { .. }
+            | AttrIr::Spread { .. } => Ok(ClientAttr::Dynamic),
             // Any other attribute kind was refused by the classifier — defensive.
-            AttrIr::Spread { .. }
-            | AttrIr::Use { .. }
-            | AttrIr::Transition { .. }
-            | AttrIr::Let { .. } => Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-                name: "unsupported-attr".to_string(),
-                span: Span::new(0, 0),
-            }),
+            AttrIr::Use { .. } | AttrIr::Transition { .. } | AttrIr::Let { .. } => {
+                Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                    name: "unsupported-attr".to_string(),
+                    span: Span::new(0, 0),
+                })
+            }
         }
     }
 
@@ -427,11 +456,25 @@ impl<'a> SupportedClientIr<'a> {
         // rest are folded into it.
         let mut plain_attr_done: rustc_hash::FxHashSet<(NodeId, String)> =
             rustc_hash::FxHashSet::default();
+        // The first `SpreadAttrs` op for a spread element materializes the whole
+        // `$.attribute_effect` fold; later spreads on the same element are folded into it.
+        let mut spread_attrs_done: rustc_hash::FxHashSet<NodeId> = rustc_hash::FxHashSet::default();
         let mut ops = Vec::new();
         for &op_id in &scope.local_ops {
             // Skip any op targeting the options marker (a dead compile-option attr).
             if let Some(target) = op_target_node(self.ir.op(op_id)) {
                 if is_options_marker(target) {
+                    continue;
+                }
+                // A SPREAD element folds its WHOLE attribute set into one
+                // `$.attribute_effect` (projected from the `SpreadAttrs` op below); every
+                // OTHER per-attribute op the IR produced for the same element (a dynamic /
+                // class / style write, a non-static property init) is absorbed into the
+                // fold, so it is suppressed here. (The `SpreadAttrs` op itself is NOT
+                // suppressed — it is the trigger that emits the fold.)
+                if self.spread_elements.contains(&target)
+                    && !matches!(self.ir.op(op_id), RuntimeOp::SpreadAttrs { .. })
+                {
                     continue;
                 }
             }
@@ -491,16 +534,35 @@ impl<'a> SupportedClientIr<'a> {
                         }
                     }
                 },
+                // A non-single-expression style directive trigger (static-text OR mixed) —
+                // the coalesced `$.set_style` projection fires once per element (same
+                // `style_done` dedup as the reactive style path), reading every style
+                // directive (Expr + Text + Mixed).
+                RuntimeOp::StyleDirectiveTrigger { target } => {
+                    if style_done.insert(*target) {
+                        let op = self.project_set_style_op(*target)?;
+                        ops.push(op);
+                    }
+                }
                 // A "cannot be set statically" attribute init (`autofocus` /
                 // media `muted`) — the §1.2-class non-static-property surface (5a).
                 RuntimeOp::NonStaticProperty { target, property } => {
                     let op = self.project_non_static_property_op(*target, property)?;
                     ops.push(op);
                 }
+                // A spread element folds its WHOLE attribute set (in source order) into a
+                // single `$.attribute_effect`. The IR emits one `SpreadAttrs` op per
+                // spread; the FIRST one materializes the whole fold (reading every
+                // co-located attribute from the element), later ones are skipped.
+                RuntimeOp::SpreadAttrs { target, .. } => {
+                    if spread_attrs_done.insert(*target) {
+                        let op = self.project_attribute_effect_op(*target)?;
+                        ops.push(op);
+                    }
+                }
                 // A broad op the supported surface never produces — defensive
                 // refusal (never silently dropped).
-                RuntimeOp::SpreadAttrs { .. }
-                | RuntimeOp::Attachment { .. }
+                RuntimeOp::Attachment { .. }
                 | RuntimeOp::Action { .. }
                 | RuntimeOp::Transition { .. } => {
                     return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
@@ -509,6 +571,17 @@ impl<'a> SupportedClientIr<'a> {
                     });
                 }
             }
+        }
+        // The `{@html}` raw-markup nodes have NO IR runtime op (they are tag NODES), so
+        // their `$.html` ops are projected here, in IR node-id (source) order. Each is
+        // emitted as a distinct `ClientRuntimeOp::Html` carrying its already-assembled
+        // payload (a `() => expr` thunk, or the bare elided callee) and its only-child
+        // topology flag.
+        let mut html_ids: Vec<NodeId> = self.html_nodes.clone();
+        html_ids.sort_by_key(|n| n.0);
+        for node_id in html_ids {
+            let op = self.project_html_op(node_id)?;
+            ops.push(op);
         }
         Ok(ops)
     }
@@ -705,8 +778,9 @@ impl<'a> SupportedClientIr<'a> {
         for attr in &el.attrs {
             match attr {
                 AttrIr::Dynamic { name: n, expr } if n == name => {
-                    let rewritten =
-                        self.rewrite(*expr, self.ir.analysis.expressions.get(*expr).scope)?;
+                    // A VALUE-position rewrite: source-preserving (author parens kept; a
+                    // top-level sequence is wrapped once so it stays one value).
+                    let rewritten = self.rewrite_value_preserving_source(*expr)?;
                     let has_state = self.expr_has_state(*expr);
                     let has_call = self.expr_has_call(*expr);
                     return Ok((
@@ -745,7 +819,7 @@ impl<'a> SupportedClientIr<'a> {
     ///
     /// Returns the structured value + whether ANY surviving (un-folded) part references
     /// state.
-    fn mixed_attr_value(
+    pub(super) fn mixed_attr_value(
         &self,
         parts: &[MixedAttrPart],
     ) -> Result<(AttrValue, bool), UnsupportedSvelteRuntimeSurface> {
@@ -757,8 +831,9 @@ impl<'a> SupportedClientIr<'a> {
                     Ok((AttrValue::Const(js_single_quoted(text)), false))
                 }
                 MixedAttrPart::Expr(e) => {
-                    let analyzed = self.ir.analysis.expressions.get(*e);
-                    let rewritten = self.rewrite(*e, analyzed.scope)?;
+                    // The single-chunk quoted value is a VALUE position — source-preserving
+                    // (author parens kept; a top-level sequence is wrapped once).
+                    let rewritten = self.rewrite_value_preserving_source(*e)?;
                     let has_state = self.expr_has_state(*e);
                     Ok((
                         AttrValue::Single {
@@ -824,7 +899,11 @@ impl<'a> SupportedClientIr<'a> {
                             }
                         }
                     }
-                    let rewritten = self.rewrite(*e, analyzed.scope)?;
+                    // A template-literal `${…}` interpolation is a VALUE position —
+                    // source-preserving (author parens kept; a top-level sequence is wrapped
+                    // once). The `?? ''` coalesce decision below peels parens of its own
+                    // (`unwrap_parens`) for its precedence check, so it is unaffected.
+                    let rewritten = self.rewrite_value_preserving_source(*e)?;
                     has_state |= self.expr_has_state(*e);
                     // The `?? ''` coercion for this LIVE part — official's
                     // `build_template_chunk` `is_defined`/precedence rule. A memoized part
@@ -868,7 +947,7 @@ impl<'a> SupportedClientIr<'a> {
 
     /// The IR element node for a target [`NodeId`] (a non-element target is a
     /// classifier/plan divergence — fail closed defensively).
-    fn element_for(
+    pub(super) fn element_for(
         &self,
         target: NodeId,
     ) -> Result<&super::ir::ElementIr, UnsupportedSvelteRuntimeSurface> {
@@ -987,8 +1066,9 @@ impl<'a> SupportedClientIr<'a> {
                 Ok((AttrValue::Const(js_single_quoted(text)), false))
             }
             NonStaticPropertyValue::Expr(expr) => {
-                let rewritten =
-                    self.rewrite(*expr, self.ir.analysis.expressions.get(*expr).scope)?;
+                // A VALUE position (`defaultValue={…}`; the `$.autofocus(node, value)` init
+                // likewise) — source-preserving (author parens kept; sequence wrapped once).
+                let rewritten = self.rewrite_value_preserving_source(*expr)?;
                 Ok((
                     AttrValue::Single {
                         rewritten,
@@ -1050,14 +1130,24 @@ impl<'a> SupportedClientIr<'a> {
                     // A static `class` consumed as the `$.set_class` BASE value is a
                     // runtime JS-STRING argument (NOT a baked skeleton attr), so its
                     // HTML entities DECODE — the same `decode_attr_entities` the mixed
-                    // literal chunks already use (`class="a&amp;b"` → base `'a&b'`).
-                    let lit = value.as_ref().map(|v| v.value.as_str()).unwrap_or("");
-                    base_value = Some(AttrValue::Const(js_single_quoted(&decode_attr_entities(
-                        lit,
-                    ))));
+                    // literal chunks already use (`class="a&amp;b"` → base `'a&b'`). A
+                    // VALUELESS `class` (`value: None` — `<div class class:on={c}>`) is the
+                    // RAW boolean base `true`, distinct from a present empty-string `class=""`
+                    // (`Some("")`) which stays `''`.
+                    base_value = Some(match value {
+                        None => AttrValue::Const("true".to_string()),
+                        Some(v) => {
+                            AttrValue::Const(js_single_quoted(&decode_attr_entities(&v.value)))
+                        }
+                    });
                 }
                 AttrIr::Dynamic { name, expr } if name == "class" => {
-                    let v = self.rewrite(*expr, self.ir.analysis.expressions.get(*expr).scope)?;
+                    // The `$.set_class` BASE value is a VALUE position — source-preserving
+                    // (author parens kept; sequence wrapped once). The `needs_clsx` decision
+                    // below reads the UNWRAPPED-ROOT KIND fact (computed on the
+                    // transparent-paren-unwrapped root), so a parenthesized literal / binary /
+                    // template is correctly classified as no-clsx.
+                    let v = self.rewrite_value_preserving_source(*expr)?;
                     // Official `Attribute.js` sets `needs_clsx` for a single-expression
                     // `class={…}` UNLESS the value is a `Literal` / `TemplateLiteral` /
                     // `BinaryExpression`: a `class={a + b}` string-concatenation, a
@@ -1067,12 +1157,13 @@ impl<'a> SupportedClientIr<'a> {
                     // `has_call` base memoizes the WHOLE wrap (`[() => $.clsx(call)]`, the
                     // official `build_set_class`).
                     let analyzed = self.ir.analysis.expressions.get(*expr);
-                    let rewritten =
-                        if super::reactive_analysis::class_value_needs_clsx(analyzed.source) {
-                            format!("$.clsx({v})")
-                        } else {
-                            v
-                        };
+                    let rewritten = if super::reactive_analysis::class_value_needs_clsx(
+                        analyzed.unwrapped_root_kind,
+                    ) {
+                        format!("$.clsx({v})")
+                    } else {
+                        v
+                    };
                     base_value = Some(AttrValue::Single {
                         rewritten,
                         has_call: self.expr_has_call(*expr),
@@ -1094,7 +1185,9 @@ impl<'a> SupportedClientIr<'a> {
                         Some(e) => {
                             dir_has_state |= self.expr_has_state(*e);
                             directives_has_call |= self.expr_has_call(*e);
-                            self.rewrite(*e, self.ir.analysis.expressions.get(*e).scope)?
+                            // The directive condition is a VALUE position — source-preserving
+                            // (author parens kept; sequence wrapped once).
+                            self.rewrite_value_preserving_source(*e)?
                         }
                         // A value-less shorthand `class:foo` with no synthesized
                         // condition is a defensive empty (lowering always synthesizes
@@ -1164,14 +1257,21 @@ impl<'a> SupportedClientIr<'a> {
                 AttrIr::Static { name, value } if name == "style" => {
                     // A static `style` consumed as the `$.set_style` BASE value is a
                     // runtime JS-STRING argument (NOT a baked skeleton attr), so its
-                    // HTML entities DECODE (`style="q:'&quot;'"` → base `'q:\'"\''`).
-                    let lit = value.as_ref().map(|v| v.value.as_str()).unwrap_or("");
-                    base_value = Some(AttrValue::Const(js_single_quoted(&decode_attr_entities(
-                        lit,
-                    ))));
+                    // HTML entities DECODE (`style="q:'&quot;'"` → base `'q:\'"\''`). A
+                    // VALUELESS `style` (`value: None` — `<div style style:color={c}>`) is the
+                    // RAW boolean base `true`, distinct from a present empty-string `style=""`
+                    // (`Some("")`) which stays `''`.
+                    base_value = Some(match value {
+                        None => AttrValue::Const("true".to_string()),
+                        Some(v) => {
+                            AttrValue::Const(js_single_quoted(&decode_attr_entities(&v.value)))
+                        }
+                    });
                 }
                 AttrIr::Dynamic { name, expr } if name == "style" => {
-                    let v = self.rewrite(*expr, self.ir.analysis.expressions.get(*expr).scope)?;
+                    // The `$.set_style` BASE value is a VALUE position — source-preserving
+                    // (author parens kept; sequence wrapped once).
+                    let v = self.rewrite_value_preserving_source(*expr)?;
                     // The whole dynamic expression is the base value; a `has_call` base
                     // memoizes the whole expression.
                     base_value = Some(AttrValue::Single {
@@ -1193,12 +1293,28 @@ impl<'a> SupportedClientIr<'a> {
                     important: is_important,
                 } => {
                     let v = match value {
-                        Some(e) => {
+                        StyleDirectiveValue::Expr(e) => {
                             dir_has_state |= self.expr_has_state(*e);
                             directives_has_call |= self.expr_has_call(*e);
-                            self.rewrite(*e, self.ir.analysis.expressions.get(*e).scope)?
+                            // A VALUE position — source-preserving (author parens kept;
+                            // sequence wrapped once).
+                            self.rewrite_value_preserving_source(*e)?
                         }
-                        None => continue,
+                        // A static-text style value folds as a quoted string literal
+                        // (`{ color: 'red' }`) — no state / call flags.
+                        StyleDirectiveValue::Text(text) => js_single_quoted(text),
+                        // A MIXED text+interpolation value (`style:color="a{x}b"`) folds as
+                        // the template-literal `` `a${x ?? ''}b` ``, built through the shared
+                        // mixed-value + fold-text path with NO memoizer (the effect re-runs).
+                        StyleDirectiveValue::Mixed(parts) => {
+                            let (mixed, st) = self.mixed_attr_value(parts)?;
+                            dir_has_state |= st;
+                            // A `has_call` interpolation inside the template forces the
+                            // effect (the official memoizer rule), exactly as a base mixed
+                            // value does.
+                            directives_has_call |= mixed.has_call();
+                            self.fold_attr_value_text(&mixed)
+                        }
                     };
                     let entry = (object_key(property), v);
                     if *is_important {
@@ -1256,6 +1372,94 @@ impl<'a> SupportedClientIr<'a> {
             &self.proxy_inits,
         )
         .map(|r| r.text)
+    }
+
+    /// Rewrite one template expression for a VALUE / PROPERTY position — source-preserving,
+    /// with the one BEHAVIORAL value-position transform the official `b.thunk` / `b.spread` /
+    /// property-value printer also performs: re-wrapping EXACTLY a top-level
+    /// `SequenceExpression` in one paren pair so it stays a single value.
+    ///
+    /// Concretely: rewrite the WHOLE expression source through the shared source-preserving
+    /// expression rewriter (signal/prop reads lowered, TS stripped, author parens +
+    /// whitespace kept verbatim), then wrap the result in one paren pair IFF the unwrapped
+    /// root is a `SequenceExpression`. The sequence wrap is BEHAVIORAL: a bare `a, b` must
+    /// stay ONE value, so the official printer (and Verter) wrap a top-level sequence in one
+    /// paren pair — without it a `{@html a, b}` would emit `() => a, b`, splitting `b` into a
+    /// positional argument (structurally broken). Author parens around a non-sequence value
+    /// (`(c ? a : b)`, `(o.x)`) are kept verbatim — the official printer drops them, but that
+    /// is a behavior-preserving redundant-paren COSMETIC difference the minifier collapses.
+    ///
+    /// This is the value/property-position printer ONLY (it adds the sequence wrap). The
+    /// generic [`rewrite`] is the same source-preserving rewriter WITHOUT the sequence wrap,
+    /// used at lvalue / bind / event / other-sensitive sites.
+    ///
+    /// [`rewrite`]: Self::rewrite
+    pub(super) fn rewrite_value_preserving_source(
+        &self,
+        expr_id: ExprId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        let analyzed = self.ir.analysis.expressions.get(expr_id);
+        let rewritten = expr_rewrite::rewrite_expression_full(
+            analyzed.source,
+            analyzed.scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+            &self.prop_reads,
+            &self.proxy_inits,
+        )
+        .map(|r| r.text)?;
+        Ok(if analyzed.unwrapped_is_sequence {
+            // A BARE author sequence (`a, b`) must stay one value: the official printer wraps
+            // a top-level `SequenceExpression` in one paren pair so it does not split into
+            // positional arguments / object entries (`{@html a, b}` -> `() => (a, b)`). This
+            // is BEHAVIORAL, not cosmetic: source-preservation alone would emit `() => a, b`
+            // (a broken argument count).
+            format!("({rewritten})")
+        } else {
+            rewritten
+        })
+    }
+
+    /// Rewrite a value for embedding as a CONCISE ARROW BODY (`() => <here>`), then wrap it in
+    /// one paren pair UNCONDITIONALLY (`EXPR` → `(EXPR)`) so `() => (EXPR)` is ALWAYS an
+    /// expression body. There is NO shape-dependent wrap decision: the body is wrapped whether or
+    /// not it leads with a `{` (object literal / object-rooted member / TS skin), so `() => { … }`
+    /// can never parse `{ … }` as a block returning `undefined` (`{@html {a:1}}` -> `() => ({a:1})`,
+    /// `{@html {a:1} as any}` -> `() => ({a:1} as any)` after the TS strip), and a bare `a, b`
+    /// sequence can never split a positional arg (`{@html a, b}` -> `() => (a, b)`). Over-wrapping a
+    /// complete expression is behavior-preserving and cosmetically invisible to the
+    /// paren-insensitive structural corpus comparator. This is the official `b.arrow`
+    /// parenthesization applied unconditionally — complete-by-construction (no shape predicate can
+    /// under-wrap a future skin), so the wrap routes through the shared
+    /// [`concise_arrow_expr_body`] helper.
+    ///
+    /// The rewrite is the GENERIC post-strip expression rewriter (signal/prop reads lowered, TS
+    /// stripped, author parens + whitespace kept verbatim) — NOT
+    /// [`rewrite_value_preserving_source`] (whose sequence re-wrap is unnecessary here, since the
+    /// unconditional outer paren already keeps a top-level sequence as one value). The wrap belongs
+    /// at this arrow-body embedding site only, NOT inside the multi-site value/property printer
+    /// (used at object-property / conditional-arm sites where a leading `{` is not a
+    /// statement-start, so wrapping there would be incorrect).
+    ///
+    /// [`concise_arrow_expr_body`]: super::client_codegen_helpers::concise_arrow_expr_body
+    /// [`rewrite_value_preserving_source`]: Self::rewrite_value_preserving_source
+    pub(super) fn rewrite_arrow_body_value(
+        &self,
+        expr_id: ExprId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        let analyzed = self.ir.analysis.expressions.get(expr_id);
+        let rewritten = expr_rewrite::rewrite_expression_full(
+            analyzed.source,
+            analyzed.scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+            &self.prop_reads,
+            &self.proxy_inits,
+        )
+        .map(|r| r.text)?;
+        Ok(super::client_codegen_helpers::concise_arrow_expr_body(
+            &rewritten,
+        ))
     }
 
     /// Whether the component needs a component context (`$.push`/`$.pop`) — the

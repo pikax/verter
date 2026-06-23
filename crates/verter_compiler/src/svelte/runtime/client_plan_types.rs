@@ -59,6 +59,18 @@ pub(super) enum ClientNode {
         /// The child node ids (into the plan's narrow node arena).
         children: Vec<ClientNodeId>,
     },
+    /// A `{@html expr}` raw-markup insertion node. The raw-markup expression was
+    /// REWRITTEN at build time (the fallible rewrite — an `await` / destructuring write
+    /// inside the payload fails closed BEFORE the plan exists), so the emitter consumes
+    /// the already-rewritten payload from the corresponding [`ClientRuntimeOp::Html`].
+    /// The node carries the expression id so the DOM walk can reach the `<!>` anchor it
+    /// occupies (or recognise it as the controlled sole child of its parent element).
+    RawHtml {
+        /// The source span.
+        span: Span,
+        /// The raw-markup expression id (into the IR expression arena).
+        expr: ExprId,
+    },
     /// The `<svelte:options>` compile-option marker — consumed, renders nothing
     /// (carried so the node arena mirrors the IR node-id space; the walk skips it).
     OptionsMarker {
@@ -268,6 +280,53 @@ pub(super) enum ClientRuntimeOp {
         reactive: bool,
         /// The accumulator STEM (`styles`) when the reactive-directive path needs one.
         accumulator_stem: Option<&'static str>,
+    },
+    /// A coalesced `$.attribute_effect(el, () => ({ <fold> }))` write — the SINGLE
+    /// reactive effect a spread element gets in place of the per-attribute path. The
+    /// presence of ANY spread on an element switches its WHOLE attribute strategy: every
+    /// co-located attribute folds into the single object literal the effect returns — plain
+    /// attributes (static / dynamic / mixed / a plain `class` / `style` attribute) and the
+    /// spreads themselves IN SOURCE ORDER, with every `class:` directive merged into ONE
+    /// trailing `[$.CLASS]: { … }` and every `style:` directive into ONE trailing
+    /// `[$.STYLE]: { … }` appended LAST (the official `Element.js` spread path) — and the
+    /// element emits NO separate `$.set_attribute` / `$.set_class` / `$.set_style` /
+    /// property write and NO `$.template_effect`. The op carries the already-assembled object-literal BODY (the
+    /// fold text between the `{` and `}`, expressions rewritten through the shared
+    /// rewriter); the emitter wraps it in the `el, () => ({ <body> })` call with the real
+    /// DOM var.
+    AttributeEffect {
+        /// The target node id.
+        target: ClientNodeId,
+        /// The assembled object-literal fold body (`...p, id: x, [$.CLASS]: { on: c }`),
+        /// source-ordered. Empty for an attribute-less spread is impossible (a spread is
+        /// always present), so the body always carries at least one `...spread`.
+        fold_body: String,
+        /// Whether the element takes the trailing `void 0, void 0, void 0, void 0, true`
+        /// argument tail — the official form for a void / self-closing element (an
+        /// `<input>`, whose value/defaultValue handling the trailing `true` flags). A
+        /// 2-argument call otherwise.
+        input_trailing: bool,
+    },
+    /// A `{@html node, () => h [, true])` raw-markup insertion. The payload is the
+    /// already-assembled SECOND argument — a `() => <rewritten-expr>` thunk, or the bare
+    /// callee identifier when the payload is a direct zero-argument identifier call
+    /// (`{@html render()}` → `render`, the official thunk elision). `only_child` selects
+    /// the topology: a `{@html}` that is the SOLE controlled child of its parent element
+    /// operates on the PARENT element var with the trailing `true` argument and is
+    /// followed by `$.reset(parent)`; a `{@html}` with siblings operates on its OWN `<!>`
+    /// anchor var (reached by the DOM walk) with NO trailing argument.
+    Html {
+        /// The target node id (the `{@html}` tag node). For the only-child case the
+        /// emitter resolves the PARENT element's var; for the sibling case the node's own
+        /// walk var.
+        target: ClientNodeId,
+        /// The already-assembled second argument (`() => h` thunk, or the bare elided
+        /// callee `render`).
+        payload: String,
+        /// Whether this `{@html}` is the SOLE controlled child of its parent element (the
+        /// official `is_controlled` case): operate on the parent var + trailing `true` +
+        /// `$.reset(parent)`.
+        only_child: bool,
     },
 }
 

@@ -1,32 +1,25 @@
 //! The closed family of unsupported Svelte runtime surfaces + its diagnostic
-//! projection (owning vertical, diagnostic id, message, span). Each later block
-//! deletes its own arm + tests cleanly.
+//! projection (the machine-stable diagnostic id, message, and span).
 
 use verter_span::Span;
 
 /// The closed family of Svelte runtime surfaces this backend does NOT yet emit.
 ///
-/// Each variant names ONE surface family and records its OWNING vertical (the
-/// later block that lands it), so the fail-closed diagnostics group by owner and
-/// each later block deletes its own arm + tests cleanly. The diagnostic id shape
-/// is `svelte-runtime-unsupported-<surface>`.
+/// Each variant names ONE surface family; the fail-closed diagnostics are
+/// identified by the machine-stable diagnostic id (`svelte-runtime-unsupported-<surface>`).
+/// A surface that becomes supported deletes its own arm + tests cleanly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedSvelteRuntimeSurface {
     /// A dynamic attribute, boolean DOM prop, `class:` / `class={}`, `style:` /
     /// `style={}`, or a non-static property write not covered by the input
-    /// cleanup (5a).
+    /// cleanup.
     DynamicAttribute {
         /// The attribute / directive name.
         name: String,
         /// The source span.
         span: Span,
     },
-    /// A spread `{...x}` or `{@html}` (5b).
-    SpreadOrHtml {
-        /// The source span.
-        span: Span,
-    },
-    /// A binding beyond `bind:value` on an `<input>` and element `bind:this` (5c).
+    /// A binding beyond `bind:value` on an `<input>` and element `bind:this`.
     Binding {
         /// The bind target (`checked`, `group`, `this` on a component, …).
         target: String,
@@ -34,7 +27,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
         span: Span,
     },
     /// A non-delegated / capture / global-target event, or a legacy `on:`
-    /// modifier wrapper (5d).
+    /// modifier wrapper.
     NonDelegatedEvent {
         /// The event type.
         event_type: String,
@@ -42,7 +35,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
         span: Span,
     },
     /// A control-flow block (`{#if}` / `{#each}` / `{#await}` / `{#key}`) or a
-    /// declaration / `{@const}` / `{@debug}` tag (5e).
+    /// declaration / `{@const}` / `{@debug}` tag.
     Block {
         /// A short construct label (`if`, `each`, `const`, …).
         construct: &'static str,
@@ -50,7 +43,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
         span: Span,
     },
     /// A component, snippet, `{@render}`, `{@attach}`, transition, action,
-    /// animation, or a renderable `<svelte:*>` element (5f).
+    /// animation, or a renderable `<svelte:*>` element.
     ComponentOrSnippet {
         /// A short construct label.
         construct: &'static str,
@@ -60,14 +53,14 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// A rune beyond the supported `$state` / `$derived` / `$effect` / basic
     /// `$props()` subset (`$state.raw` / `$state.snapshot` / `$effect.pre` /
     /// `$effect.root` / `$effect.tracking` / `$props()` rest / `$props.id` /
-    /// `$bindable` / `$inspect`) (5g).
+    /// `$bindable` / `$inspect`).
     AdvancedRune {
         /// A short rune label.
         rune: &'static str,
         /// The source span.
         span: Span,
     },
-    /// A `$host()` rune (a custom-element-only API) / custom-element output (5h).
+    /// A `$host()` rune (a custom-element-only API) / custom-element output.
     HostOrCustomElement {
         /// A short rune / surface label.
         surface: &'static str,
@@ -81,7 +74,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// `<section>` / `<ul>` / `<textarea>` / `<select>` / `<option>` / `<img>` /
     /// `<video>` / a raw `<slot>` / a special-content-model tag …) fails closed here.
     /// Adding a tag requires extending the finite enum AND adding a golden in the same
-    /// change. This is the "regular element not yet in the client core" refusal (5a),
+    /// change. This is the "regular element not yet in the client core" refusal,
     /// kept DISTINCT from [`ElementName`](Self::ElementName) (a tag that IS in the
     /// allowlist-shape but is an invalid/reserved JS binding name).
     Element {
@@ -95,7 +88,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// not matching `/^[A-Za-z_$][A-Za-z0-9_$]*$/`). The official compiler
     /// collision-renames the DOM local (`var_1` / `class_1`) through its general name
     /// allocator; that naming-completion path is a deferral-ledger follow-up, so an
-    /// identifier-unsafe element tag fails closed rather than emitting invalid JS (5v).
+    /// identifier-unsafe element tag fails closed rather than emitting invalid JS.
     ElementName {
         /// The offending tag name.
         tag: String,
@@ -107,7 +100,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// it to a `node.textContent = '…'` write rather than a reactive
     /// `$.template_effect`; static folding is a deferral-ledger follow-up, so a
     /// non-reactive interpolation fails closed rather than emitting a divergent
-    /// reactive-text op (5n).
+    /// reactive-text op.
     StaticInterpolation {
         /// The source span of the interpolation expression.
         span: Span,
@@ -117,7 +110,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// it through a destructure closure (`$.set(count, obj.count, true)`); that
     /// lowering is a deferral-ledger follow-up, so a destructuring write target
     /// fails closed rather than emitting a raw (un-rewritten) destructuring
-    /// assignment to a reactive binding (5p).
+    /// assignment to a reactive binding.
     DestructuringWrite {
         /// The source span.
         span: Span,
@@ -128,19 +121,19 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// `$.template_effect` over it) — a distinct emission shape from the
     /// `from_html`-clone path. That topology is a deferral-ledger follow-up, so a
     /// root reactive text-node region fails closed rather than emitting an
-    /// undeclared text-node var (invalid JS) (5q).
+    /// undeclared text-node var (invalid JS).
     RootTextRegion {
         /// The source span of the root interpolation region.
         span: Span,
     },
     /// Legacy non-runes lowering (`export let` / `$:` / `<slot>` / store
-    /// auto-subscriptions / the legacy flag) (5i).
+    /// auto-subscriptions / the legacy flag).
     LegacyMode {
         /// The source span.
         span: Span,
     },
     /// Experimental async (`$state.eager` / `$effect.pending` / async block
-    /// helpers / async `$derived`) (5j).
+    /// helpers / async `$derived`).
     ExperimentalAsync {
         /// A short rune / surface label.
         surface: &'static str,
@@ -149,17 +142,17 @@ pub enum UnsupportedSvelteRuntimeSurface {
     },
     /// A dev-mode (`dev: true`) codegen request — the dev-mode output axis
     /// (validation wrappers, `$.add_locations`, dev `$inspect` / `$.trace`) is not
-    /// emitted; only the production runes client output is (5k).
+    /// emitted; only the production runes client output is.
     DevMode {
         /// The source span.
         span: Span,
     },
-    /// A top-level `<style>` / CSS scoping surface (5l).
+    /// A top-level `<style>` / CSS scoping surface.
     Style {
         /// The source span.
         span: Span,
     },
-    /// `<svelte:options>` / a compile-option axis beyond name/runes/client (5m).
+    /// `<svelte:options>` / a compile-option axis beyond name/runes/client.
     OptionsAxis {
         /// The source span.
         span: Span,
@@ -171,7 +164,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// `$state` signal read or a no-default prop read; every other expression shape
     /// needs the official `build_template_chunk` evaluator (memoizer / `has_call` /
     /// nullish-coalesce / parenthesization) — a reactive-text-completion follow-up,
-    /// so it fails closed (5r).
+    /// so it fails closed.
     ComplexInterpolation {
         /// The source span of the interpolation expression.
         span: Span,
@@ -179,7 +172,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// An instance-script `import` or a `<script module>` script. The official
     /// compiler hoists an instance import to module scope and emits a module-script
     /// statement; that script-hoisting lowering is a script-completion follow-up,
-    /// so an import / module script fails closed (5s).
+    /// so an import / module script fails closed.
     ScriptImport {
         /// A short construct label (`import`, `module script`).
         construct: &'static str,
@@ -189,7 +182,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// A `<script lang="ts">` / `<script lang="tsx">` (TypeScript) script. The
     /// official compiler strips the TS annotations before lowering; the TS-strip
     /// path is a script-completion follow-up, so a TypeScript script fails closed
-    /// (5t).
+    ///.
     TypeScript {
         /// The source span.
         span: Span,
@@ -199,7 +192,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// template-literal escaping / whitespace normalization). The supported literal
     /// chunk is simple ASCII; a complex chunk needs the official boundary-trimming /
     /// entity-decode / escaping path — a reactive-text-completion follow-up, so it
-    /// fails closed (5u).
+    /// fails closed.
     ComplexTextChunk {
         /// The source span of the text run.
         span: Span,
@@ -215,9 +208,9 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// closed here BY CONSTRUCTION rather than reaching the broad statement-rewrite
     /// lowering. Adding a shape requires extending the finite
     /// [`SupportedInstanceScriptItem`](super::client_shapes::SupportedInstanceScriptItem)
-    /// enum AND adding a golden in the same change. The script-completion vertical
-    /// (5w) owns the broader instance-script surface (functions, statements,
-    /// `$:` reactivity, multi-declarators).
+    /// enum AND adding a golden in the same change. The broader instance-script
+    /// surface (functions, statements, `$:` reactivity, multi-declarators) is not
+    /// yet supported.
     InstanceScriptItem {
         /// A short construct label (`function`, `class`, `enum`, `$: label`,
         /// `plain let`, `$$-prefixed binding`, …).
@@ -231,7 +224,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// (`$$slots` from the slot inventory, `$$props` / `$$restProps` from the props
     /// object); emitting a raw reference to them in the runes client output binds an
     /// undefined identifier (a runtime `ReferenceError`). The magic-object synthesis
-    /// is a script-completion follow-up (5w), so a magic-identifier reference fails
+    /// is a script-completion follow-up, so a magic-identifier reference fails
     /// closed rather than emitting an undefined read.
     MagicIdentifier {
         /// The magic identifier name (`$$slots` / `$$props` / `$$restProps`).
@@ -243,7 +236,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// surviving explicit `</p>` close — the IMPLICIT-autoclose case. The official
     /// compiler AUTO-CLOSES the `<p>` (a warning) and re-parents the block element as a
     /// sibling, then ACCEPTS the component; modeling that autoclose DOM re-parenting is
-    /// outside the §1.2 core, so it fails closed as an unsupported FEATURE (5x) rather
+    /// outside the §1.2 core, so it fails closed as an unsupported FEATURE rather
     /// than emitting the wrong DOM tree. (The EXPLICIT-`</p>` case is an official REJECT
     /// — `element_invalid_closing_tag_autoclosed` — handled by the official-reject gate.)
     ParagraphAutoclose {
@@ -260,7 +253,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// expression would convert the official compiler's compile-failure into a
     /// runtime crash). This is the EAGER `Evaluation` semantics — a throw in a
     /// non-selected logical operand / conditional branch (`false && (1n / 0n)`)
-    /// still refuses, because official evaluates both before selecting (5a). Cases:
+    /// still refuses, because official evaluates both before selecting. Cases:
     /// mixing BigInt with a Number in arithmetic / bitwise (`2 + 1n`), BigInt
     /// division / remainder by `0n`, BigInt `>>>`, unary `+` on BigInt, a negative
     /// BigInt exponent, `in` / `instanceof` with a known primitive RHS, and a
@@ -274,8 +267,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span of the interpolation expression.
         span: Span,
     },
-    /// SSR (`generate: 'server'`) — the server backend is not yet implemented
-    /// (owning vertical 8).
+    /// SSR (`generate: 'server'`) — the server backend is not yet implemented.
     ServerGenerate {
         /// The source span.
         span: Span,
@@ -283,55 +275,11 @@ pub enum UnsupportedSvelteRuntimeSurface {
 }
 
 impl UnsupportedSvelteRuntimeSurface {
-    /// The owning vertical label (the block that lands this surface).
-    #[must_use]
-    pub fn owning_block(&self) -> &'static str {
-        match self {
-            Self::DynamicAttribute { .. } => "5a",
-            Self::SpreadOrHtml { .. } => "5b",
-            Self::Binding { .. } => "5c",
-            Self::NonDelegatedEvent { .. } => "5d",
-            Self::Block { .. } => "5e",
-            Self::ComponentOrSnippet { .. } => "5f",
-            Self::AdvancedRune { .. } => "5g",
-            Self::HostOrCustomElement { .. } => "5h",
-            // An out-of-allowlist intrinsic element is the regular-element owner (the
-            // same vertical owning the form / special-element + input-cleanup breadth).
-            Self::Element { .. } => "5a",
-            Self::ElementName { .. } => "5v",
-            Self::LegacyMode { .. } => "5i",
-            Self::ExperimentalAsync { .. } => "5j",
-            Self::DevMode { .. } => "5k",
-            Self::Style { .. } => "5l",
-            Self::OptionsAxis { .. } => "5m",
-            Self::StaticInterpolation { .. } => "5n",
-            Self::DestructuringWrite { .. } => "5p",
-            Self::RootTextRegion { .. } => "5q",
-            Self::ComplexInterpolation { .. } => "5r",
-            Self::ScriptImport { .. } => "5s",
-            Self::TypeScript { .. } => "5t",
-            Self::ComplexTextChunk { .. } => "5u",
-            // A non-allowlist instance-script item / a magic identifier is the
-            // script-completion vertical (functions, statements, `$:` reactivity,
-            // the auto-injected `$$slots`/`$$props`/`$$restProps` magic objects).
-            Self::InstanceScriptItem { .. } => "5w",
-            Self::MagicIdentifier { .. } => "5w",
-            // The `<p>` implicit-autoclose DOM re-parenting is the close-tag-structure
-            // completion vertical (5x).
-            Self::ParagraphAutoclose { .. } => "5x",
-            // A const-fold compile-time throw is a 5a mixed-attribute surface (the
-            // const-fold tri-state `Refuse` arm).
-            Self::ConstFoldThrow { .. } => "5a",
-            Self::ServerGenerate { .. } => "8",
-        }
-    }
-
     /// The machine-stable diagnostic id (`svelte-runtime-unsupported-<surface>`).
     #[must_use]
     pub fn diagnostic_code(&self) -> &'static str {
         match self {
             Self::DynamicAttribute { .. } => "svelte-runtime-unsupported-dynamic-attribute",
-            Self::SpreadOrHtml { .. } => "svelte-runtime-unsupported-spread-or-html",
             Self::Binding { .. } => "svelte-runtime-unsupported-binding",
             Self::NonDelegatedEvent { .. } => "svelte-runtime-unsupported-non-delegated-event",
             Self::Block { .. } => "svelte-runtime-unsupported-block",
@@ -360,14 +308,13 @@ impl UnsupportedSvelteRuntimeSurface {
         }
     }
 
-    /// A human-readable message naming the surface + owning vertical.
+    /// A human-readable message naming the unsupported surface.
     #[must_use]
     pub fn message(&self) -> String {
         let detail = match self {
             Self::DynamicAttribute { name, .. } => {
                 format!("the dynamic attribute / directive `{name}`")
             }
-            Self::SpreadOrHtml { .. } => "a spread `{...}` / `{@html}` surface".to_string(),
             Self::Binding { target, .. } => format!("the `bind:{target}` binding"),
             Self::NonDelegatedEvent { event_type, .. } => {
                 format!("the non-delegated / capture / global event `{event_type}`")
@@ -451,10 +398,7 @@ impl UnsupportedSvelteRuntimeSurface {
                 "server-side rendering (`generate: 'server'`)".to_string()
             }
         };
-        format!(
-            "Svelte client emission does not yet support {detail} (owning vertical {}).",
-            self.owning_block()
-        )
+        format!("Svelte client emission does not yet support {detail}.")
     }
 
     /// The source span the diagnostic refers to.
@@ -462,7 +406,6 @@ impl UnsupportedSvelteRuntimeSurface {
     pub fn span(&self) -> Span {
         match self {
             Self::DynamicAttribute { span, .. }
-            | Self::SpreadOrHtml { span }
             | Self::Binding { span, .. }
             | Self::NonDelegatedEvent { span, .. }
             | Self::Block { span, .. }

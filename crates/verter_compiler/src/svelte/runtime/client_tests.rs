@@ -3,14 +3,16 @@
 //! These drive the full pipeline (parse → lower → plan → topology → emit) and pin
 //! the emitted-JS shape against the official `svelte@5.56.3` output captured via
 //! the oracle. Each test is discriminating with negative assertions; the
-//! fail-closed family asserts the precise typed surface + owning vertical (never a
+//! fail-closed family asserts the precise typed surface + diagnostic id (never a
 //! silent empty module, never a panic).
 
 use oxc_allocator::Allocator;
 
 use crate::svelte::parser::parse_svelte;
 use crate::svelte::runtime::client::UnsupportedSvelteRuntimeSurface;
-use crate::svelte::runtime::{compile_client, ClientCompileError, SvelteRuntimeOptions};
+use crate::svelte::runtime::{
+    compile_client, ClientCompileError, CoreOfficialValidationRule, SvelteRuntimeOptions,
+};
 
 /// Compile a Svelte source to its client JS, panicking on a lowering/unsupported
 /// error (for the SUPPORTED fixtures).
@@ -359,7 +361,7 @@ fn static_no_dynamic_fragment_emits_next_between_clone_and_append() {
     // Verified against svelte@5.56.3. RED against the pre-fix walk (which emitted
     // `var fragment = root();` directly followed by `$.append`, no `$.next()`). The
     // `$state` declarator makes it runes-mode (a bare `<p>a</p><p>b</p>` is legacy,
-    // refused at 5i) but `c` is unused so it stays a pure-static template.
+    // refused as legacy mode) but `c` is unused so it stays a pure-static template.
     let src = "<script>let c = $state(0);</script>\n<p>a</p><p>b</p>\n";
     let js = emit(src, "App.svelte");
     assert!(
@@ -788,48 +790,44 @@ fn props_alias_no_default_reads_source_key_off_props() {
 }
 
 #[test]
-fn props_default_referencing_a_sibling_prop_fails_closed_to_5g() {
-    // A `$props()` member DEFAULT is the deferral-ledger props-default surface (5g) —
+fn props_default_referencing_a_sibling_prop_fails_closed() {
+    // A `$props()` member DEFAULT is the deferral-ledger props-default surface —
     // the supported props surface is a NO-DEFAULT destructure only. A referencing
     // default (`{ a = 1, b = a }`) is one such demoted shape.
     assert_fail_closed(
         "<script>let { a = 1, b = a } = $props();</script>\n<p>{b}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() default"),
     );
 }
 
 #[test]
-fn props_default_referencing_via_no_default_sibling_fails_closed_to_5g() {
+fn props_default_referencing_via_no_default_sibling_fails_closed() {
     // `let { a, b = a } = $props()` — `b` carries a default, so it is the demoted
-    // props-default surface (5g), regardless that the default references a sibling.
+    // props-default surface, regardless that the default references a sibling.
     assert_fail_closed(
         "<script>let { a, b = a } = $props();</script>\n<p>{a}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() default"),
     );
 }
 
 #[test]
-fn props_non_literal_default_fails_closed_to_5g() {
+fn props_non_literal_default_fails_closed() {
     // A non-literal `$props()` default (`[]`) is the demoted props-default surface
-    // (5g) — like every default, including a constant literal.
+    // — like every default, including a constant literal.
     assert_fail_closed(
         "<script>let { a = [] } = $props();</script>\n<p>{a}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() default"),
     );
 }
 
 #[test]
-fn props_literal_default_fails_closed_to_5g() {
-    // A CONSTANT-LITERAL `$props()` default (`{ a = 1 }`) is ALSO demoted (5g) — the
+fn props_literal_default_fails_closed() {
+    // A CONSTANT-LITERAL `$props()` default (`{ a = 1 }`) is ALSO demoted — the
     // supported props surface is a NO-DEFAULT destructure only (the literal-default
     // flag-3 eager form is a deferral-ledger follow-up). The discriminating negative
     // for the no-default-only rule.
     assert_fail_closed(
         "<script>let { a = 1 } = $props();</script>\n<p>{a}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() default"),
     );
 }
@@ -933,26 +931,21 @@ fn no_filename_derives_unknown() {
 }
 
 // ── lang="ts" ────────────────────────────────────────────────────────────────
-// ── Fail-closed (per surface family, with the right owning vertical) ─────────
+// ── Fail-closed (per surface family, asserting the exact typed surface) ───────
 
-/// Assert that `source` fails closed with a surface matching `predicate` whose
-/// `owning_block` is `block`.
-fn assert_fail_closed(
-    source: &str,
-    block: &str,
-    predicate: impl Fn(&UnsupportedSvelteRuntimeSurface) -> bool,
-) {
+/// Assert that `source` fails closed with an unsupported surface matching
+/// `predicate` (the discriminating typed-surface check) and carrying the
+/// machine-stable `svelte-runtime-unsupported-` diagnostic id.
+fn assert_fail_closed(source: &str, predicate: impl Fn(&UnsupportedSvelteRuntimeSurface) -> bool) {
     match emit_result(source) {
         Err(ClientCompileError::Unsupported(surface)) => {
+            // The discriminating `predicate` pins the EXACT typed surface variant (the
+            // machine-stable identity), so the assertion characterizes the refusal arm by
+            // its enum shape + diagnostic code, never by a plan/phase label.
             assert!(
                 predicate(&surface),
                 "wrong fail-closed surface: {surface:?} (code {})",
                 surface.diagnostic_code()
-            );
-            assert_eq!(
-                surface.owning_block(),
-                block,
-                "wrong owning vertical for {surface:?}"
             );
             // The diagnostic id has the `svelte-runtime-unsupported-` prefix.
             assert!(
@@ -969,10 +962,9 @@ fn assert_fail_closed(
 }
 
 #[test]
-fn if_block_fails_closed_to_5e() {
+fn if_block_fails_closed() {
     assert_fail_closed(
         "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n",
-        "5e",
         |s| {
             matches!(
                 s,
@@ -986,13 +978,12 @@ fn if_block_fails_closed_to_5e() {
 }
 
 #[test]
-fn each_block_fails_closed_to_5e() {
-    // An `{#each}` block is an unsupported control-flow block (5e). `items` is a
+fn each_block_fails_closed() {
+    // An `{#each}` block is an unsupported control-flow block. `items` is a
     // plain-local array + a trailing reactive `$state` keeps the component
     // runes-mode, so the block gate is the surface (not the state-shape gate).
     assert_fail_closed(
         "<script>let items = [1, 2]; let c = $state(0);</script>\n{#each items as x}<p>{x}</p>{/each}\n<button onclick={() => c++}>{c}</button>\n",
-        "5e",
         |s| {
             matches!(
                 s,
@@ -1006,13 +997,12 @@ fn each_block_fails_closed_to_5e() {
 }
 
 #[test]
-fn await_block_fails_closed_to_5e() {
-    // An `{#await}` block is an unsupported control-flow block (5e) — fail closed.
+fn await_block_fails_closed() {
+    // An `{#await}` block is an unsupported control-flow block — fail closed.
     // `p` is a plain-local promise + a trailing reactive `$state` keeps runes-mode,
     // so the block gate is the surface (not the non-primitive state-shape gate).
     assert_fail_closed(
         "<script>let p = Promise.resolve(1); let c = $state(0);</script>\n{#await p}<p>loading</p>{:then v}<p>{v}</p>{/await}\n<button onclick={() => c++}>{c}</button>\n",
-        "5e",
         |s| {
             matches!(
                 s,
@@ -1026,37 +1016,34 @@ fn await_block_fails_closed_to_5e() {
 }
 
 #[test]
-fn await_expression_in_interpolation_fails_closed_to_5r() {
+fn await_expression_in_interpolation_fails_closed() {
     // A non-identifier interpolation expression (here an IIFE wrapping an `await`) is
     // the `build_template_chunk` breadth — it fails closed at the complex-interpolation
-    // gate (5r) before any async-rewrite gate. Only a bare reactive-signal /
+    // gate before any async-rewrite gate. Only a bare reactive-signal /
     // no-default-prop identifier read is the supported interpolation surface.
     assert_fail_closed(
         "<script>let p = $state(0); let n = $state(0);</script>\n<button onclick={() => n++}>{(async () => await p)()}</button>\n",
-        "5r",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }),
     );
 }
 
 #[test]
-fn capture_event_fails_closed_to_5d() {
-    // A CAPTURE-phase event (`onclickcapture`) is a non-delegated event (5d) — fail
+fn capture_event_fails_closed() {
+    // A CAPTURE-phase event (`onclickcapture`) is a non-delegated event — fail
     // closed (only modern delegated, non-capture, modifier-free events are
     // supported).
     assert_fail_closed(
         "<script>let n = $state(0);</script>\n<button onclickcapture={() => n++}>x</button>\n",
-        "5d",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { .. }),
     );
 }
 
 #[test]
-fn legacy_on_modifier_event_fails_closed_to_5d() {
+fn legacy_on_modifier_event_fails_closed() {
     // A legacy `on:click|stop` directive (a modifier-bearing event) is non-delegated
-    // (5d) — fail closed.
+    // — fail closed.
     assert_fail_closed(
         "<script>let n = $state(0);</script>\n<button on:click|stop={() => n++}>x</button>\n",
-        "5d",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { .. }),
     );
 }
@@ -1064,7 +1051,7 @@ fn legacy_on_modifier_event_fails_closed_to_5d() {
 #[test]
 fn dynamic_attribute_now_emits_set_attribute() {
     // a dynamic attribute (`id={id}`) now EMITS `$.set_attribute` (was a
-    // 5a refusal previously). The reactive handler keeps `id` a real signal.
+    // per-attribute refusal previously). The reactive handler keeps `id` a real signal.
     let js = emit(
         "<script>let id = $state('x');</script>\n<div onclick={() => id += '!'} id={id}></div>\n",
         "App.svelte",
@@ -1080,7 +1067,7 @@ fn dynamic_attribute_now_emits_set_attribute() {
 
 #[test]
 fn class_directive_now_emits_set_class() {
-    // a `class:` directive now EMITS the merged `$.set_class` (was a 5a
+    // a `class:` directive now EMITS the merged `$.set_class` (was a per-attribute
     // refusal previously).
     let js = emit(
         "<script>let on = $state(true);</script>\n<div onclick={() => on = !on} class:active={on}></div>\n",
@@ -1096,30 +1083,953 @@ fn class_directive_now_emits_set_class() {
 }
 
 #[test]
-fn html_tag_fails_closed_to_5b() {
-    assert_fail_closed(
+fn html_tag_emits_the_raw_markup_helper() {
+    // A `{@html}` as the sole child of an element emits `$.html(el, () => h, true)` +
+    // `$.reset(el)` — the controlled-child raw-markup form (the third arg `true`).
+    let js = emit(
         "<script>let h = $state('<b>x</b>');</script>\n<div>{@html h}</div>\n",
-        "5b",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::SpreadOrHtml { .. }),
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.html(div, () => h, true)")),
+        "a {{@html}} sole child must emit the controlled $.html form:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("$.reset(div)")),
+        "the {{@html}} sole-child form must reset the element after:\n{js}"
+    );
+    // NEGATIVE: the removed refusal must be gone — no spread-or-html diagnostic surfaces.
+    assert!(
+        !js.contains("svelte-runtime-unsupported-spread-or-html"),
+        "the deleted spread-or-html refusal must not surface:\n{js}"
     );
 }
 
 #[test]
-fn spread_fails_closed_to_5b() {
-    // A spread attribute (5b); `rest` is a plain-local object + a trailing reactive
-    // `$state` keeps runes-mode, so the spread gate is the surface.
-    assert_fail_closed(
-        "<script>let rest = {}; let c = $state(0);</script>\n<div {...rest}></div>\n<button onclick={() => c++}>{c}</button>\n",
-        "5b",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::SpreadOrHtml { .. }),
+fn element_spread_emits_the_attribute_effect_fold() {
+    // An element spread `{...props}` (a free-identifier payload) emits the single
+    // `$.attribute_effect(el, () => ({ ...props }))` fold — NOT a refusal, NOT a
+    // per-attribute path. The unused `$state` marker forces runes mode (a no-script
+    // component compiles legacy).
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div {...props}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.attribute_effect(div, () => ({ ...props }))")),
+        "an element spread must emit the attribute_effect fold:\n{js}"
+    );
+    // NEGATIVE: the element gets NO separate $.set_attribute and the deleted diagnostic
+    // is absent.
+    assert!(
+        !js.contains("$.set_attribute"),
+        "a spread element must NOT emit a separate $.set_attribute:\n{js}"
+    );
+    assert!(
+        !js.contains("svelte-runtime-unsupported-spread-or-html"),
+        "the deleted spread-or-html refusal must not surface:\n{js}"
     );
 }
 
 #[test]
-fn checked_bind_fails_closed_to_5c() {
+fn element_spread_folds_static_dynamic_directives_in_source_order() {
+    // The fold order: plain attrs / spreads in SOURCE order, then the merged `[$.CLASS]`,
+    // then `[$.STYLE]`. A static `class` attribute stays a `class:` key (NOT computed);
+    // a `class:` shorthand directive folds into `[$.CLASS]` as object shorthand; a
+    // `style:` expression directive folds into `[$.STYLE]`. The static `class="c"` is NOT
+    // baked into the template (the spread switches the whole strategy) — the skeleton is
+    // bare.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div class=\"c\" {...props} class:on style:width={w}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(div, () => ({ class: 'c', ...props, [$.CLASS]: { on }, [$.STYLE]: { width: w } }))"
+        )),
+        "the fold must order plain attrs/spreads in source order then merged CLASS/STYLE:\n{js}"
+    );
+    // NEGATIVE: the static class is NOT baked into the cloned skeleton.
+    assert!(
+        n.contains(&nc("$.from_html(`<div></div>`)")),
+        "a spread element's static attrs must NOT be baked into the template:\n{js}"
+    );
+}
+
+#[test]
+fn input_spread_emits_the_seven_argument_attribute_effect() {
+    // A void / self-closing `<input>` spread emits the 7-argument form
+    // `$.attribute_effect(input, () => ({ ...props }), void 0, void 0, void 0, void 0,
+    // true)` — the trailing argument tail official emits for an input.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<input {...props} />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(input, () => ({ ...props }), void 0, void 0, void 0, void 0, true)"
+        )),
+        "an <input> spread must emit the 7-argument attribute_effect:\n{js}"
+    );
+}
+
+#[test]
+fn html_direct_call_payload_elides_the_thunk_to_the_bare_callee() {
+    // A `{@html render()}` (a direct, non-optional, zero-argument identifier call) elides
+    // the `() => …` thunk to the bare callee `render` — the official CallExpression
+    // elision. A member call / optional call / args is NOT elided (covered by the corpus).
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div>{@html render()}</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.html(div, render, true)")),
+        "a direct identifier-call {{@html}} payload must elide to the bare callee:\n{js}"
+    );
+    // NEGATIVE: it must NOT wrap the call in a thunk.
+    assert!(
+        !n.contains(&nc("$.html(div, () => render(), true)")),
+        "the elided payload must not be a thunk:\n{js}"
+    );
+}
+
+#[test]
+fn html_prop_call_payload_does_not_elide_and_thunks_the_rewritten_member() {
+    // A `{@html render()}` whose `render` is a no-default `$props()` binding does NOT
+    // elide: the callee rewrites to the member `$$props.render`, so the official form is
+    // the THUNK over the rewritten whole expression — `$.html(div, () => $$props.render(),
+    // true)`. Elision applies ONLY when the rewritten callee equals the bare name (a plain
+    // / local / demoted id). Pinned svelte@5.56.3.
+    let js = emit(
+        "<script>let { render } = $props()</script>\n<div>{@html render()}</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.html(div, () => $$props.render(), true)")),
+        "a prop-callee {{@html}} call must thunk the rewritten member, not elide:\n{js}"
+    );
+    // NEGATIVE: it must NOT elide to the bare callee (the prior reparse-bug emitted the
+    // un-rewritten `render`).
+    assert!(
+        !n.contains(&nc("$.html(div, render, true)"))
+            && !n.contains(&nc("$.html(div, $$props.render, true)")),
+        "a prop-callee {{@html}} call must NOT elide to a bare callee:\n{js}"
+    );
+}
+
+#[test]
+fn spread_payload_sequence_stays_one_wrapped_value() {
+    // A SequenceExpression spread payload `{...(a, b)}` stays ONE spread value: the
+    // BEHAVIORAL sequence wrap keeps it parenthesized so it does NOT split into two object
+    // entries (`...a, b`), which would be a semantic change. Source-preserving keeps the
+    // author paren and the sequence wrap re-wraps it, so the emitted operand is a wrapped
+    // sequence (`...(a, b)`, modulo a behavior-preserving redundant outer paren the minifier
+    // collapses — this assertion is paren-COUNT-insensitive on purpose).
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div {...(a, b)}></div>\n",
+        "App.svelte",
+    );
+    // Use the paren-preserving collapse (`normalize_js_cosmetics` strips arrow-body parens,
+    // which would erase the sequence wrap we are asserting). Source-preserving keeps the
+    // author paren and the sequence wrap re-wraps it, so the operand is a wrapped sequence
+    // (`...((a, b))` — a redundant outer paren the minifier collapses). Assert the spread
+    // operand carries the wrapped sequence, paren-COUNT-insensitively.
+    let n = collapse_ws_keep_parens(&js);
+    assert!(
+        n.contains("...(") && n.contains("(a, b)"),
+        "a sequence-expression spread payload must stay a wrapped single value:\n{js}"
+    );
+    // NEGATIVE (the behavioral discriminator): the sequence must NOT be split into two
+    // entries — `b` must not leak as a second object entry.
+    assert!(
+        !n.contains("...a, b)") && !n.contains("...a, b }"),
+        "a sequence-expression spread payload must NOT be split into two entries:\n{js}"
+    );
+}
+
+#[test]
+fn html_object_literal_payload_wraps_arrow_body_as_object() {
+    // An OBJECT-LITERAL `{@html}` payload wraps the concise-arrow body in one paren pair so
+    // `() => { … }` is an OBJECT expression, not a block body returning `undefined`. Pinned
+    // svelte@5.56.3: `{@html {a:1}}` → `$.html(div, () => ({ a: 1 }), true)`. Without the wrap
+    // the body parses as a block (`{ a: 1 }` is a labeled statement) and returns `undefined` —
+    // a SILENT behavioral miscompile (the markup goes blank), exactly like the sequence wrap is
+    // behavioral.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div>{@html {a:1}}</div>\n",
+        "App.svelte",
+    );
+    // Use the paren-preserving collapse (`normalize_js_cosmetics` strips arrow-body parens,
+    // which would erase the object wrap we are asserting). The paren after `() => ` is
+    // LOAD-BEARING, so assert the literal `() => ({` body.
+    let n = collapse_ws_keep_parens(&js);
+    assert!(
+        n.contains("$.html(div, () => ({"),
+        "an object-literal {{@html}} payload must wrap the arrow body as an object:\n{js}"
+    );
+    // NEGATIVE (the behavioral discriminator): it must NOT emit the bare block-body form
+    // `() => {a:1}` / `() => { a: 1 }` (a block returning `undefined`).
+    assert!(
+        !n.contains("() => {a:1}") && !n.contains("() => { a: 1 }") && !n.contains("() => {a: 1}"),
+        "the object-literal payload must NOT emit a bare block body returning undefined:\n{js}"
+    );
+}
+
+#[test]
+fn html_member_of_object_literal_payload_reparses_as_valid_js() {
+    // A MEMBER access ON an object literal (`{@html {html:'x'}.html}`) is the NON-PARSING case:
+    // without the wrap the body is `() => {html:'x'}.html` — a block statement followed by a
+    // stray `.html`, which is INVALID JS (a hard syntax error, not just a wrong value). The wrap
+    // makes it `() => ({ html: 'x' }).html`, valid and correct. Pinned svelte@5.56.3.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div>{@html {html:\"<b>x</b>\"}.html}</div>\n",
+        "App.svelte",
+    );
+    // POSITIVE: the whole emitted module RE-PARSES as valid JS (the wrap defuses the
+    // block-then-`.html` syntax error). This is THE load-bearing assertion: the unwrapped form
+    // `() => {html:'x'}.html` is a hard JS syntax error, so a passing re-parse proves the wrap.
+    assert!(
+        parses_as_js(&js),
+        "a member-of-object-literal {{@html}} payload must emit re-parsable JS:\n{js}"
+    );
+    // POSITIVE: the object literal opens immediately after the arrow with an opening paren
+    // (`() => ({`), and the `.html` member access is present — the body is the parenthesized
+    // member expression, not a bare block-then-member. The exact paren-close position
+    // (`({obj}).html` vs `({obj}.html)`) is a behavior-preserving redundant-paren difference the
+    // minifier collapses; both return `obj.html`. Assert paren-position-insensitively.
+    let n = collapse_ws_keep_parens(&js);
+    assert!(
+        n.contains("() => ({") && n.contains(".html)"),
+        "the member-of-object-literal payload must wrap the leading object literal:\n{js}"
+    );
+    // NEGATIVE (the discriminator): it must NOT emit the unwrapped block-then-member form
+    // `() => {html:"<b>x</b>"}.html` (the non-parsing miscompile).
+    assert!(
+        !n.contains("() => {html:"),
+        "the member-of-object-literal payload must NOT emit a bare block-then-member body:\n{js}"
+    );
+}
+
+#[test]
+fn html_optional_chain_object_literal_payload_wraps_arrow_body() {
+    // An OPTIONAL-CHAIN member ON an object literal (`{@html {html:'x'}?.html}`) is wrapped by
+    // OXC in a `ChainExpression`, but the chain's leftmost leaf is still the object literal, so
+    // the whole concise-arrow body must wrap. Without the wrap the body is `() => {html:'x'}?.html`
+    // — a block statement followed by a stray `?.html`, which is INVALID JS (a hard syntax error,
+    // not just a wrong value). The wrap makes it `() => ({ html: 'x' })?.html`, valid and correct.
+    // Pinned svelte@5.56.3.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div>{@html {html:\"<b>x</b>\"}?.html}</div>\n",
+        "App.svelte",
+    );
+    // POSITIVE: the whole emitted module RE-PARSES as valid JS (the wrap defuses the
+    // block-then-`?.html` syntax error). This is THE load-bearing assertion: the unwrapped form
+    // `() => {html:'x'}?.html` is a hard JS syntax error, so a passing re-parse proves the wrap.
+    assert!(
+        parses_as_js(&js),
+        "an optional-chain-on-object-literal {{@html}} payload must emit re-parsable JS:\n{js}"
+    );
+    // POSITIVE: the object literal opens immediately after the arrow with an opening paren
+    // (`() => ({`), and the `?.html` optional member access is present — the body is the
+    // parenthesized optional-chain member expression, not a bare block-then-chain. The exact
+    // paren-close position is a behavior-preserving redundant-paren difference the minifier
+    // collapses; both return `obj?.html`. Assert paren-position-insensitively.
+    let n = collapse_ws_keep_parens(&js);
+    assert!(
+        n.contains("() => ({") && n.contains("?.html"),
+        "the optional-chain-on-object-literal payload must wrap the leading object literal:\n{js}"
+    );
+    // NEGATIVE (the discriminator): it must NOT emit the unwrapped block-then-chain form
+    // `() => {html:"<b>x</b>"}?.html` (the non-parsing miscompile the missing `ChainExpression`
+    // arm produced).
+    assert!(
+        !n.contains("() => {html:"),
+        "the optional-chain payload must NOT emit a bare block-then-chain body:\n{js}"
+    );
+}
+
+#[test]
+fn html_ts_wrapper_object_payload_wraps_arrow_body_unconditionally() {
+    // A TS-WRAPPER over an object literal (`{a:1} as any`, `… satisfies …`, `…!`) is the case a
+    // shape-based left-spine wrap predicate would UNDER-wrap: a top-level `as`/`satisfies`/`!` skin
+    // is NOT an object-literal root, so a leftmost-leaf-is-object decision returns `false` and the
+    // body emits as the bare block-body form `() => {a:1}` (a block returning `undefined` — a
+    // SILENT behavioral miscompile). Because the concise-arrow payload body is always
+    // parenthesized (`() => (EXPR)`), after the rewriter strips the TS skin the object literal
+    // is parenthesized and returns correctly — complete-by-construction, no shape predicate.
+    //
+    // This is a PLAIN-`<script>` form on purpose (NOT a corpus cell): the `lang="ts"` variant
+    // panics Verter's parse-domain TS-strip gate (a later block), and official svelte@5.56.3
+    // REJECTS the plain-`<script>` TS-in-template form (no golden) while Verter ACCEPTS it (the
+    // template expr parses as TSX and the rewriter strips the TS skin) — so it can only be locked
+    // by a unit test on the accepted form, never an official-golden corpus row.
+    let payloads = [
+        "{a:1} as any",
+        "{a:1} satisfies Record<string,number>",
+        "{a:1}!",
+        "{a:1} as any as any",
+        // Stacked transparent skins in BOTH orders — non-null-then-`as` and an inner-`as`
+        // under a non-null — each must peel to the parenthesized object, never a bare block.
+        "{a:1}! as any",
+        "({a:1} as any)!",
+    ];
+    for payload in payloads {
+        let source =
+            format!("<script>let __rune = $state(0);</script>\n<div>{{@html {payload}}}</div>\n");
+        let js = emit(&source, "App.svelte");
+        // Keep arrow-body parens (the wrap is exactly what we assert; `normalize_js_cosmetics`
+        // would strip it).
+        let n = collapse_ws_keep_parens(&js);
+        // LOAD-BEARING: the whole emitted module re-parses as valid JS. (The bare-block form
+        // `() => {a:1}` ALSO re-parses — `{a:1}` is a labeled statement — so re-parse alone does
+        // NOT discriminate the TS-skin object case; the no-bare-block negative below does.)
+        assert!(
+            parses_as_js(&js),
+            "a TS-wrapper-of-object {{@html}} payload `{payload}` must emit re-parsable JS:\n{js}"
+        );
+        // POSITIVE: the wrapped object thunk — the arrow body opens with `(` and the object
+        // literal is parenthesized (`({`), so it RETURNS the object instead of parsing a block
+        // body. (`({a:1} as any)!` over-wraps to `() => (({a:1}))` — still parenthesized, never a
+        // bare block — so the assertion is on the object's `({` wrap, paren-COUNT-insensitive.)
+        assert!(
+            n.contains("$.html(div, () => (") && n.contains("({"),
+            "a TS-wrapper-of-object {{@html}} payload `{payload}` must wrap the arrow body as an object:\n{js}"
+        );
+        // NEGATIVE (the discriminator that FAILS without the unconditional wrap): it must NOT
+        // emit the bare block-body form `() => {a:1}` / `() => { a: 1 }` (a block returning
+        // `undefined`).
+        assert!(
+            !n.contains("() => {a:1}")
+                && !n.contains("() => { a: 1 }")
+                && !n.contains("() => {a: 1}"),
+            "a TS-wrapper-of-object {{@html}} payload `{payload}` must NOT emit a bare block body returning undefined:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn spread_payload_identifier_collision_renames_the_dom_var() {
+    // A `<p {...p}>` collides: the DOM-var stem `p` clashes with the free spread-payload
+    // identifier `p`. Official renames the DOM local to `p_1` so the `...p` payload still
+    // refers to the binding, not the element node. Pinned svelte@5.56.3:
+    // `var p_1 = ...; $.attribute_effect(p_1, () => ({ ...p }))`.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<p {...p}></p>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.attribute_effect(p_1, () => ({ ...p }))")),
+        "a colliding {{...p}} payload must rename the DOM var to p_1:\n{js}"
+    );
+    // NEGATIVE: the DOM var must NOT shadow the payload as a bare `p`.
+    assert!(
+        !n.contains(&nc("$.attribute_effect(p, () => ({ ...p }))")),
+        "the DOM var must not shadow the spread payload identifier:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("var p = ")),
+        "the colliding element must not declare `var p`:\n{js}"
+    );
+}
+
+#[test]
+fn style_directive_static_text_value_quotes_the_string() {
+    // A `style:color="red"` (a static-TEXT directive value) folds the value as the QUOTED
+    // string literal `{ color: 'red' }` — NOT a bare identifier `{ color: red }` (an
+    // undefined reference). Only `style:` accepts a text value. Pinned svelte@5.56.3:
+    // `$.set_style(div, '', {}, { color: 'red' })`.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<div style:color=\"red\" onclick={() => x++}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_style(div, '', {}, { color: 'red' })")),
+        "a static-text style directive value must be a quoted string:\n{js}"
+    );
+    // NEGATIVE: it must NOT emit the bare (undefined) identifier.
+    assert!(
+        !n.contains(&nc("{ color: red }")),
+        "a static-text style directive must NOT emit a bare identifier:\n{js}"
+    );
+}
+
+#[test]
+fn style_directive_static_text_value_in_a_spread_fold_quotes_the_string() {
+    // The same static-text style directive INSIDE a spread fold folds as the quoted
+    // `[$.STYLE]: { color: 'red' }`. Pinned svelte@5.56.3:
+    // `$.attribute_effect(div, () => ({ ...p, [$.STYLE]: { color: 'red' } }))`.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div {...p} style:color=\"red\"></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(div, () => ({ ...p, [$.STYLE]: { color: 'red' } }))"
+        )),
+        "a static-text style directive in a spread fold must quote the string:\n{js}"
+    );
+    // NEGATIVE: the bare identifier form must be absent.
+    assert!(
+        !n.contains(&nc("[$.STYLE]: { color: red }")),
+        "a static-text style directive in a spread fold must NOT emit a bare identifier:\n{js}"
+    );
+}
+
+#[test]
+fn valueless_attribute_in_a_spread_fold_emits_raw_true_not_an_empty_string() {
+    // A VALUELESS boolean attribute (`<input {...props} disabled />`) folds as the RAW
+    // boolean `disabled: true` — NOT the empty-string `disabled: ''`. The IR carries the
+    // value as `Option<StaticAttrValue>` where `None` is a valueless attribute; the fold
+    // emits the bare `true` token for `None` (an empty-string value is a DIFFERENT IR
+    // shape — `Some("")` — covered below). Pinned svelte@5.56.3:
+    // `$.attribute_effect(input, () => ({ ...props, disabled: true }), …, true)`.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<input {...props} disabled />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(input, () => ({ ...props, disabled: true }), void 0, void 0, void 0, void 0, true)"
+        )),
+        "a valueless attribute in a spread fold must emit the raw `true`:\n{js}"
+    );
+    // NEGATIVE: the empty-string form must be ABSENT (the pre-fix bug emitted `: ''`).
+    assert!(
+        !n.contains(&nc("disabled: ''")),
+        "a valueless attribute must NOT fold as an empty string:\n{js}"
+    );
+}
+
+#[test]
+fn present_empty_string_attribute_in_a_spread_fold_stays_an_empty_string() {
+    // A PRESENT-but-empty attribute (`disabled=""`, IR `Some(StaticAttrValue{value:""})`)
+    // is DISTINCT from a valueless attribute: it folds as the empty-string `disabled: ''`,
+    // NOT `disabled: true`. This pins the `None`-vs-`Some("")` boundary the valueless fix
+    // must preserve. Pinned svelte@5.56.3:
+    // `$.attribute_effect(input, () => ({ ...props, disabled: '' }), …, true)`.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<input {...props} disabled=\"\" />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(input, () => ({ ...props, disabled: '' }), void 0, void 0, void 0, void 0, true)"
+        )),
+        "a present empty-string attribute in a spread fold must stay an empty string:\n{js}"
+    );
+    // NEGATIVE: it must NOT become the raw `true` (that is the VALUELESS form).
+    assert!(
+        !n.contains(&nc("disabled: true")),
+        "a present empty-string attribute must NOT fold as the raw `true`:\n{js}"
+    );
+}
+
+#[test]
+fn input_spread_with_a_default_value_reset_attr_suppresses_the_trailing_tail() {
+    // An `<input>` spread fold normally takes the 7-argument tail (`…, void 0, void 0,
+    // void 0, void 0, true`). The official compiler SUPPRESSES that tail when the input
+    // carries an authored plain attribute named EXACTLY `defaultValue` (camelCase): the
+    // reset attribute opts the element out of the value/defaultValue reset behavior the
+    // tail encodes. Pinned svelte@5.56.3:
+    // `$.attribute_effect(input, () => ({ ...$$props.p, defaultValue: 'x' }));` (NO tail).
+    let js = emit(
+        "<script>let { p } = $props();</script>\n<input {...p} defaultValue=\"x\" />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(input, () => ({ ...$$props.p, defaultValue: 'x' }))"
+        )),
+        "an <input> spread with `defaultValue` must fold the attribute:\n{js}"
+    );
+    // NEGATIVE: the 7-argument trailing tail must be ABSENT — the reset attr suppresses it.
+    assert!(
+        !n.contains(&nc("void 0, void 0, void 0, void 0, true")),
+        "an <input> spread carrying `defaultValue` must NOT emit the trailing tail:\n{js}"
+    );
+}
+
+#[test]
+fn input_spread_with_a_default_checked_reset_attr_suppresses_the_trailing_tail() {
+    // The same reset rule for a valueless `defaultChecked` (camelCase). Pinned
+    // svelte@5.56.3: `$.attribute_effect(input, () => ({ ...$$props.p, defaultChecked:
+    // true }));` (NO tail).
+    let js = emit(
+        "<script>let { p } = $props();</script>\n<input {...p} defaultChecked />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(input, () => ({ ...$$props.p, defaultChecked: true }))"
+        )),
+        "an <input> spread with `defaultChecked` must fold the raw boolean:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("void 0, void 0, void 0, void 0, true")),
+        "an <input> spread carrying `defaultChecked` must NOT emit the trailing tail:\n{js}"
+    );
+}
+
+#[test]
+fn input_spread_with_a_lowercase_defaultvalue_keeps_the_trailing_tail() {
+    // The reset-attribute match is CASE-SENSITIVE on the RAW authored name: a lowercase
+    // `defaultvalue` is NOT a reset attribute, so the tail STAYS. Pinned svelte@5.56.3:
+    // `$.attribute_effect(input, () => ({ ...$$props.p, defaultvalue: 'x' }), void 0,
+    // void 0, void 0, void 0, true);` (tail KEPT).
+    let js = emit(
+        "<script>let { p } = $props();</script>\n<input {...p} defaultvalue=\"x\" />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(input, () => ({ ...$$props.p, defaultvalue: 'x' }), void 0, void 0, void 0, void 0, true)"
+        )),
+        "a lowercase `defaultvalue` must KEEP the 7-argument tail:\n{js}"
+    );
+}
+
+#[test]
+fn input_spread_with_a_value_attr_keeps_the_trailing_tail() {
+    // NEGATIVE control: a plain `value` attribute is NOT a reset attribute, so the tail
+    // STAYS (only the camelCase `defaultValue` / `defaultChecked` suppress it). Pinned
+    // svelte@5.56.3 keeps the 7-argument tail.
+    let js = emit(
+        "<script>let { p } = $props();</script>\n<input {...p} value=\"x\" />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect(input, () => ({ ...$$props.p, value: 'x' }), void 0, void 0, void 0, void 0, true)"
+        )),
+        "a `value` attribute must KEEP the 7-argument tail:\n{js}"
+    );
+}
+
+#[test]
+fn html_paren_member_callee_emits_source_preserving_thunk() {
+    // A `{@html (o.render)()}` is NOT a bare-identifier call (the callee `(o.render)` peels
+    // to a MEMBER, not an Identifier), so it does NOT elide to a bare callee; it routes to the
+    // value-thunk path, which is SOURCE-PRESERVING (the author paren is kept verbatim) and then
+    // gets the unconditional concise-arrow-body wrap, so the thunk is the correct ZERO-ARG member
+    // call `() => ((o.render)())` (the `$state o` is never reassigned here, so it demotes to a
+    // plain `o`). The extra outer paren over a complete call expression is behavior-preserving and
+    // collapses in the minifier (official drops both redundant parens); the BEHAVIORAL bar is a
+    // correct thunk with a correct zero-arg member call, asserted here paren-COUNT-insensitively.
+    let js = emit(
+        "<script>let o = $state(0);</script>\n<div>{@html (o.render)()}</div>\n",
+        "App.svelte",
+    );
+    let n = collapse_ws_keep_parens(&js);
+    // POSITIVE (paren-COUNT-insensitive): the thunk leads with `() => (` and its body is the
+    // zero-arg member call `(o.render)()` (redundant outer parens are behavior-preserving).
+    assert!(
+        n.contains("$.html(div, () => (") && n.contains("(o.render)(") && n.contains("), true)"),
+        "a paren-member {{@html}} callee must emit the source-preserving zero-arg thunk:\n{js}"
+    );
+    // NEGATIVE (behavioral): it must NOT elide to a bare callee (the callee is a member, not a
+    // bare identifier), and it must NOT leak an argument (the call stays zero-arg).
+    assert!(
+        !n.contains("$.html(div, o.render, true)")
+            && !n.contains("$.html(div, () => (o.render)(o)")
+            && !n.contains("$.html(div, () => ((o.render)(o)"),
+        "a paren-member {{@html}} callee must stay a thunked zero-arg call:\n{js}"
+    );
+}
+
+#[test]
+fn html_bare_identifier_call_elides_to_the_bare_callee() {
+    // A bare-identifier `{@html render()}` (a direct, non-optional, zero-arg identifier call
+    // whose callee rewrites UNCHANGED) ELIDES the `() => …` thunk to the bare callee `render`.
+    // Pinned svelte@5.56.3: `$.html(div, render, true)`.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div>{@html render()}</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.html(div, render, true)")),
+        "a bare-identifier {{@html}} call must elide to the bare callee:\n{js}"
+    );
+}
+
+#[test]
+fn class_value_paren_literal_does_not_clsx() {
+    // `class={('x')}` — the class-clsx decision is computed on the UNWRAPPED root (a literal),
+    // so NO `$.clsx` wrap (the behavioral fact survives the source-preserving rollback). The
+    // author paren is kept verbatim (`('x')`) — a behavior-preserving cosmetic difference the
+    // minifier collapses, so the value assertion is paren-insensitive.
+    let js = emit(
+        "<script>let a = $state(0);</script>\n<div class={('x')} onclick={() => a++}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class(div, 1,")) && n.contains(&nc("'x'")),
+        "a parenthesized literal class must emit the raw literal value:\n{js}"
+    );
+    // NEGATIVE (the behavioral class-clsx discriminator): no clsx wrap for a literal class value.
+    assert!(
+        !n.contains(&nc("$.clsx")),
+        "a parenthesized literal class must NOT be clsx-wrapped:\n{js}"
+    );
+}
+
+#[test]
+fn class_value_paren_binary_does_not_clsx() {
+    // `class={((a + b))}` — the class-clsx decision sees the unwrapped binary root → NO clsx.
+    // The author parens are kept verbatim (source-preserving) — paren-insensitive value
+    // assertion; the behavioral discriminator is the ABSENCE of the clsx wrap.
+    let js = emit(
+        "<script>let a = $state(0); let b = $state(0);</script>\n<div class={((a + b))} onclick={() => { a++; b++; }}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class(div, 1,")) && n.contains(&nc("$.get(a) + $.get(b)")),
+        "a parenthesized binary class must emit the raw binary value:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("$.clsx")),
+        "a parenthesized binary class must NOT be clsx-wrapped:\n{js}"
+    );
+}
+
+#[test]
+fn class_value_paren_template_does_not_clsx() {
+    // `` class={(`x${a}`)} `` — the class-clsx decision sees the unwrapped template root → NO
+    // clsx. Author parens kept verbatim (paren-insensitive value assertion).
+    let js = emit(
+        "<script>let a = $state(0);</script>\n<div class={(`x${a}`)} onclick={() => a++}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class(div, 1,")) && n.contains(&nc("`x${$.get(a)}`")),
+        "a parenthesized template class must emit the raw template value:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("$.clsx")),
+        "a parenthesized template class must NOT be clsx-wrapped:\n{js}"
+    );
+}
+
+#[test]
+fn class_value_paren_conditional_does_clsx() {
+    // `class={(a ? 'x' : 'y')}` — the class-clsx decision sees the unwrapped conditional root →
+    // DOES clsx (the clsx-YES boundary; the behavioral fact survives). The author paren is
+    // kept INSIDE the clsx arg (source-preserving) — `$.clsx(($.get(a) ? 'x' : 'y'))`, a
+    // behavior-preserving cosmetic difference; the behavioral discriminator is the PRESENCE of
+    // the clsx wrap around the conditional.
+    let js = emit(
+        "<script>let a = $state(0);</script>\n<div class={(a ? 'x' : 'y')} onclick={() => a++}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class(div, 1, $.clsx(")) && n.contains(&nc("$.get(a) ? 'x' : 'y'")),
+        "a parenthesized conditional class must be clsx-wrapped around the conditional:\n{js}"
+    );
+}
+
+#[test]
+fn valueless_class_base_in_set_class_emits_raw_true_not_an_empty_string() {
+    // A VALUELESS `class` attribute consumed as the `$.set_class` BASE value (`<div class
+    // class:on={x}>`) emits the RAW boolean `true` as the base argument — NOT `''`. The
+    // valueless `class` carries `value: None`, so the base is `true`, mirroring the spread
+    // fold. Pinned svelte@5.56.3:
+    // `$.set_class(div, 1, true, null, classes, { on: $.get(x) })`.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<div class class:on={x} onclick={() => x++}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.set_class(div, 1, true, null, classes, { on: $.get(x) })"
+        )),
+        "a valueless class base must emit the raw `true`:\n{js}"
+    );
+    // NEGATIVE: the empty-string base must be ABSENT (the pre-fix bug emitted `'', `).
+    assert!(
+        !n.contains(&nc("$.set_class(div, 1, '', null")),
+        "a valueless class base must NOT emit an empty-string base:\n{js}"
+    );
+}
+
+#[test]
+fn valueless_style_base_in_set_style_emits_raw_true_not_an_empty_string() {
+    // A VALUELESS `style` attribute consumed as the `$.set_style` BASE value (`<div style
+    // style:color={x}>`) emits the RAW boolean `true` as the base argument — NOT `''`.
+    // Pinned svelte@5.56.3: `$.set_style(div, true, styles, { color: $.get(x) })`.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<div style style:color={x} onclick={() => x++}></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_style(div, true, styles, { color: $.get(x) })")),
+        "a valueless style base must emit the raw `true`:\n{js}"
+    );
+    // NEGATIVE: the empty-string base must be ABSENT.
+    assert!(
+        !n.contains(&nc("$.set_style(div, '', styles")),
+        "a valueless style base must NOT emit an empty-string base:\n{js}"
+    );
+}
+
+#[test]
+fn html_paren_wrapped_direct_call_payload_elides_the_thunk_to_the_bare_callee() {
+    // A `{@html (render)()}` (a direct zero-arg identifier call whose callee is wrapped in
+    // transparent author parens) STILL elides the thunk to the bare callee `render` — the
+    // parens are peeled off the OXC `ParenthesizedExpression` callee before the
+    // identifier-call check (the same transparent-paren peel the spread-operand path does).
+    // Pinned svelte@5.56.3: `$.html(div, render, true)` (parens gone).
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div>{@html (render)()}</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.html(div, render, true)")),
+        "a paren-wrapped direct identifier-call {{@html}} payload must elide to the bare callee:\n{js}"
+    );
+    // NEGATIVE: it must NOT keep the author parens in a thunk (the pre-fix bug).
+    assert!(
+        !n.contains(&nc("$.html(div, () => (render)(), true)")),
+        "a paren-wrapped elided payload must not keep the author parens in a thunk:\n{js}"
+    );
+}
+
+#[test]
+fn html_double_paren_wrapped_direct_call_payload_elides_the_thunk() {
+    // A `{@html ((render))()}` (a doubly-paren-wrapped callee) ALSO elides — the peel
+    // walks through EVERY transparent `ParenthesizedExpression`. Pinned svelte@5.56.3:
+    // `$.html(div, render, true)`.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div>{@html ((render))()}</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.html(div, render, true)")),
+        "a double-paren-wrapped direct identifier-call {{@html}} payload must elide:\n{js}"
+    );
+    // NEGATIVE: no nested-paren thunk.
+    assert!(
+        !n.contains(&nc("$.html(div, () => ((render))(), true)")),
+        "a double-paren-wrapped elided payload must not keep the author parens:\n{js}"
+    );
+}
+
+#[test]
+fn html_paren_wrapped_prop_call_payload_thunks_the_rewritten_callee_without_author_parens() {
+    // A `{@html (render)()}` whose `render` is a no-default `$props()` binding does NOT
+    // elide (the callee rewrites to the member `$$props.render`), so it stays a THUNK — but
+    // the thunk renders the REWRITTEN CALLEE CALL `() => $$props.render()`, NOT the blind
+    // whole-source rewrite `() => ($$props.render)()` (which would keep the author parens).
+    // Pinned svelte@5.56.3: `$.html(div, () => $$props.render(), true)`.
+    let js = emit(
+        "<script>let { render } = $props()</script>\n<div>{@html (render)()}</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.html(div, () => $$props.render(), true)")),
+        "a paren-wrapped prop-callee {{@html}} call must thunk the rewritten callee without parens:\n{js}"
+    );
+    // NEGATIVE: the author parens must NOT survive into the thunk (the pre-fix bug), and it
+    // must NOT elide to a bare callee.
+    assert!(
+        !n.contains(&nc("$.html(div, () => ($$props.render)(), true)")),
+        "a paren-wrapped prop-callee thunk must NOT keep the author parens:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("$.html(div, render, true)"))
+            && !n.contains(&nc("$.html(div, $$props.render, true)")),
+        "a paren-wrapped prop-callee {{@html}} call must NOT elide to a bare callee:\n{js}"
+    );
+}
+
+#[test]
+fn class_directive_static_text_value_refuses_as_invalid_directive_value() {
+    // A `class:on="x"` (a static-TEXT CLASS directive value) is an OFFICIAL COMPILE ERROR
+    // (`directive_invalid_value`): a directive value must be a JS expression in curly
+    // braces; ONLY `style:` accepts a static-text value. Verter must REFUSE on the
+    // official-reject rail (never emit `{ on: 'x' }`). Pinned svelte@5.56.3 throws
+    // `directive_invalid_value` at the parse phase.
+    let err = emit_result(
+        "<script>let x = $state(0);</script>\n<div class:on=\"x\" onclick={() => x++}></div>\n",
+    )
+    .expect_err("a static-text class directive must refuse");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject refusal, got {err:?}");
+    };
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::DirectiveInvalidValue,
+        "a static-text class directive must reject via the DirectiveInvalidValue rule"
+    );
+    assert_eq!(
+        rejection.official_code, "directive_invalid_value",
+        "the rejection mirrors the official `directive_invalid_value` code"
+    );
+}
+
+#[test]
+fn html_sibling_reaches_its_own_comment_anchor_without_the_reset_third_arg() {
+    // A `{@html}` with a text sibling reaches its OWN `<!>` anchor (NOT the only-child
+    // form): `var node = $.sibling($.child(div)); $.html(node, () => h);` (NO third arg),
+    // and the `<!>` placeholder is injected into the template.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n<div>before {@html h} after</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.from_html(`<div>before <!> after</div>`)")),
+        "a sibling {{@html}} must inject a <!> placeholder into the template:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("$.html(node, () => h)")),
+        "a sibling {{@html}} must reach its own anchor with no third arg:\n{js}"
+    );
+    // NEGATIVE: the sibling form must NOT use the only-child third-arg / parent target.
+    assert!(
+        !n.contains(&nc("$.html(node, () => h, true)")),
+        "the sibling form must not carry the only-child third arg:\n{js}"
+    );
+}
+
+#[test]
+fn spread_and_html_compose_attribute_effect_then_html_then_reset() {
+    // A spread + `{@html}` on the same element compose: `$.attribute_effect` (attrs)
+    // first, then `$.html(div, () => h, true)` (children), then `$.reset(div)`.
+    let js = emit(
+        "<script>let h = $state(\"\");</script>\n<div {...props}>{@html h}</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    let effect = n
+        .find(&nc("$.attribute_effect(div, () => ({ ...props }))"))
+        .expect("the attribute_effect fold must be present");
+    let html = n
+        .find(&nc("$.html(div, () => h, true)"))
+        .expect("the html op must be present");
+    let reset = n
+        .find(&nc("$.reset(div)"))
+        .expect("the reset must be present");
+    assert!(
+        effect < html && html < reset,
+        "the compose order must be attribute_effect → html → reset:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_spread_still_refuses_as_advanced_rune_not_the_deleted_spread_surface() {
+    // A `{...rest}` whose `rest` is a `$props()` REST destructure (`let { a, ...rest } =
+    // $props()`) is the advanced-rune rest-props surface (`$.rest_props` + `rest_excludes`), which
+    // the script-shape gate rejects BEFORE the template. It must STILL refuse — and the
+    // diagnostic must be the `$props() rest` AdvancedRune, NOT the now-deleted
+    // spread-or-html surface (a regression guard that element-spread acceptance did not
+    // leak into the rest-props destructure).
+    let err =
+        emit_result("<script>let { a, ...rest } = $props()</script>\n<div {...rest}></div>\n")
+            .expect_err("a $props() rest destructure must still refuse");
+    let ClientCompileError::Unsupported(surface) = err else {
+        panic!("expected an Unsupported refusal, got {err:?}");
+    };
+    assert!(
+        matches!(
+            surface,
+            UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if rune == "$props() rest"
+        ),
+        "a $props() rest destructure must refuse as the `$props() rest` AdvancedRune, \
+         got {surface:?}"
+    );
+    assert_eq!(
+        surface.diagnostic_code(),
+        "svelte-runtime-unsupported-advanced-rune",
+        "the rest-props refusal carries the advanced-rune diagnostic, NOT spread-or-html"
+    );
+}
+
+#[test]
+fn component_spread_still_refuses_as_component_surface() {
+    // A component spread `<Foo {...p}>` is the component surface (component attrs
+    // route differently); element-spread acceptance must NOT leak into it. The unused
+    // `$state` marker forces runes mode so the component (not legacy mode) is the surface.
+    let err = emit_result("<script>let __rune = $state(0);</script>\n<Foo {...p} />\n")
+        .expect_err("a component spread must still refuse");
+    let ClientCompileError::Unsupported(surface) = err else {
+        panic!("expected an Unsupported refusal, got {err:?}");
+    };
+    assert!(
+        matches!(
+            surface,
+            UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+        ),
+        "a component spread must refuse as the component surface, got {surface:?}"
+    );
+}
+
+#[test]
+fn html_inside_if_block_still_refuses_as_block_surface() {
+    // A `{@html}` INSIDE an `{#if}` block is the control-flow block-body surface; `{@html}`
+    // acceptance is scoped to the element/fragment/root context that stands alone, so a
+    // block-wrapped `{@html}` must still refuse via the block refusal.
+    let err = emit_result(
+        "<script>let h = $state('<b>x</b>'); let on = $state(true);</script>\n{#if on}{@html h}{/if}\n",
+    )
+    .expect_err("a {@html} inside an {#if} block must still refuse");
+    let ClientCompileError::Unsupported(surface) = err else {
+        panic!("expected an Unsupported refusal, got {err:?}");
+    };
+    assert!(
+        matches!(surface, UnsupportedSvelteRuntimeSurface::Block { .. }),
+        "a block-wrapped {{@html}} must refuse as the block surface, got {surface:?}"
+    );
+}
+
+#[test]
+fn spread_element_with_event_still_refuses() {
+    // A spread element that ALSO carries an event handler is outside the decided fold
+    // surface (the event-handler hoist the fold does not model) — it must refuse, not
+    // silently fold the event. Routed through the event channel.
+    let err = emit_result(
+        "<script>let c = $state(0);</script>\n<div {...p} onclick={() => c++}></div>\n",
+    )
+    .expect_err("a spread element with an event must refuse");
+    let ClientCompileError::Unsupported(surface) = err else {
+        panic!("expected an Unsupported refusal, got {err:?}");
+    };
+    assert!(
+        matches!(
+            surface,
+            UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { .. }
+        ),
+        "a spread element with an event must refuse via the event channel, got {surface:?}"
+    );
+}
+
+#[test]
+fn checked_bind_fails_closed() {
     assert_fail_closed(
         "<script>let on = $state(false);</script>\n<input type=\"checkbox\" bind:checked={on} />\n",
-        "5c",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "checked"),
     );
 }
@@ -1129,12 +2039,12 @@ fn checked_bind_fails_closed_to_5c() {
 // A `bind:value={member}` is supported ONLY when the member's ROOT identifier
 // resolves to a `$state` binding (the value rewrite is then correct). A member
 // rooted at a `$props()` prop / a `$bindable` prop / a `$derived` memo / a plain
-// local / an imported binding all fail closed (5c) — official emits a distinct
+// local / an imported binding all fail closed — official emits a distinct
 // surface (a `$.prop` flag-7 accessor for a prop, a read-only memo write for a
 // derived, …), so accepting them would emit a divergent module.
 
 #[test]
-fn bind_value_prop_member_fails_closed_to_5c() {
+fn bind_value_prop_member_fails_closed() {
     // F-α: `bind:value={obj.x}` where `obj` is a `$props()` binding. Official emits
     // `let obj = $.prop($$props,'obj',7)` + `$.bind_value(input, () => obj().x, …)`;
     // Verter would read it off the no-default-prop path (`$$props.obj.x`) — a
@@ -1142,54 +2052,49 @@ fn bind_value_prop_member_fails_closed_to_5c() {
     // member target unconditionally (the prop-bind guard only caught a BARE ident).
     assert_fail_closed(
         "<script>let { obj } = $props();</script>\n<input bind:value={obj.x} />\n",
-        "5c",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
     );
 }
 
 #[test]
-fn bind_value_aliased_prop_member_fails_closed_to_5c() {
+fn bind_value_aliased_prop_member_fails_closed() {
     // F-α: an ALIASED prop local (`{ obj: o }`) bound member `o.x` resolves the
-    // same way — the root `o` is a prop, so it fails closed (5c). A coarse
+    // same way — the root `o` is a prop, so it fails closed. A coarse
     // name-based check on the source key (`obj`) would miss the alias; the
     // scope-aware root resolution catches it.
     assert_fail_closed(
         "<script>let { obj: o } = $props();</script>\n<input bind:value={o.x} />\n",
-        "5c",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
     );
 }
 
 #[test]
-fn bind_value_derived_member_fails_closed_to_5g() {
-    // A `$derived` is demoted entirely (5g) — a component declaring `$derived` fails
+fn bind_value_derived_member_fails_closed() {
+    // A `$derived` is demoted entirely — a component declaring `$derived` fails
     // at the rune-position gate before the member-bind gate is reached.
     assert_fail_closed(
         "<script>let c = $state(0); let d = $derived({ x: c });</script>\n<input bind:value={d.x} />\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$derived"),
     );
 }
 
 #[test]
-fn bind_value_plain_local_member_fails_closed_to_5c() {
+fn bind_value_plain_local_member_fails_closed() {
     // F-α: a member rooted at a PLAIN local (`let o = {...}`, never a rune) is not
     // a reactive surface; the value-bind boundary is `$state`-rooted only, so it
-    // fails closed (5c).
+    // fails closed.
     assert_fail_closed(
         "<script>let o = { x: '' }; let c = $state(0);</script>\n<input bind:value={o.x} />\n<button onclick={() => c++}>{c}</button>\n",
-        "5c",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
     );
 }
 
 #[test]
-fn bind_value_import_member_fails_closed_to_5s() {
-    // An instance `import` is demoted (5s script-import) — a component with an import
+fn bind_value_import_member_fails_closed() {
+    // An instance `import` is demoted (script-import) — a component with an import
     // fails at the script-hoist gate before the member-bind gate is reached.
     assert_fail_closed(
         "<script>import { store } from './s.js'; let c = $state(0);</script>\n<input bind:value={store.x} />\n<button onclick={() => c++}>{c}</button>\n",
-        "5s",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::ScriptImport { .. }),
     );
 }
@@ -1197,18 +2102,17 @@ fn bind_value_import_member_fails_closed_to_5s() {
 //
 // `<select>` / `<option>` / `<datalist>` / `<textarea>` are NOT in the finite
 // client-core element allowlist (`a` / `button` / `div` / `h1` / `input` / `p`), so
-// a component using ANY of them fails closed at the ELEMENT gate (5a,
-// `svelte-runtime-unsupported-element`) on the FIRST out-of-allowlist element —
+// a component using ANY of them fails closed at the ELEMENT gate
+// (`svelte-runtime-unsupported-element`) on the FIRST out-of-allowlist element —
 // regardless of its attrs or interior. (The pre-restructure tree accepted these
 // elements and gated only specific attrs; the strict allowlist demotes them whole.)
 
 #[test]
 fn select_option_element_fails_closed_at_the_element_allowlist() {
-    // A `<select><option value="a">` component fails at the element gate (5a) on the
+    // A `<select><option value="a">` component fails at the element gate on the
     // first out-of-allowlist element (`<select>`), not at the `value` attr.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option value=\"a\">A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
     );
 }
@@ -1219,7 +2123,6 @@ fn select_value_element_fails_closed_at_the_element_allowlist() {
     // the `value`).
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select value=\"x\"><option>A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
     );
 }
@@ -1227,10 +2130,9 @@ fn select_value_element_fails_closed_at_the_element_allowlist() {
 #[test]
 fn datalist_element_fails_closed_at_the_element_allowlist() {
     // A `<datalist>` is out of the allowlist — the component fails at the element gate
-    // (5a) on `<datalist>`.
+    // on `<datalist>`.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<datalist><option value=\"a\">A</option></datalist>\n<button onclick={() => c++}>{c}</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "datalist"),
     );
 }
@@ -1239,10 +2141,9 @@ fn datalist_element_fails_closed_at_the_element_allowlist() {
 fn textarea_value_element_now_fails_closed_at_the_element_allowlist() {
     // DEMOTION proof: a static `value` on `<textarea>` USED to serialize verbatim and
     // emit a Main; `<textarea>` is now out of the allowlist, so the component fails
-    // closed at the element gate (5a) and emits NO Main.
+    // closed at the element gate and emits NO Main.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<textarea value=\"hi\"></textarea>\n<button onclick={() => c++}>{c}</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "textarea"),
     );
 }
@@ -1251,10 +2152,9 @@ fn textarea_value_element_now_fails_closed_at_the_element_allowlist() {
 fn option_selected_element_now_fails_closed_at_the_element_allowlist() {
     // DEMOTION proof: a static `selected` on `<option>` USED to serialize
     // `selected=""`; `<select>` / `<option>` are now out of the allowlist, so the
-    // component fails closed at the element gate (5a) on `<select>`.
+    // component fails closed at the element gate on `<select>`.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option selected>A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
     );
 }
@@ -1265,27 +2165,25 @@ fn option_selected_element_now_fails_closed_at_the_element_allowlist() {
 // attributes via PROPERTIES at runtime: official omits non-`is` attrs from the
 // skeleton and emits `$.set_custom_element_data(node, name, value)`. Verter omits
 // the attr from the skeleton (custom-element serializer rule) AND emits no setter
-// — the attr silently VANISHES. Fail closed (5h).
+// — the attr silently VANISHES. Fail closed.
 
 #[test]
-fn custom_element_static_attr_fails_closed_to_5h() {
+fn custom_element_static_attr_fails_closed() {
     // F-γ: `<my-widget foo="bar">` → official `$.set_custom_element_data(my_widget,
     // 'foo', 'bar')`. RED: Verter dropped `foo` entirely (no skeleton entry, no
     // setter).
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<my-widget foo=\"bar\"></my-widget>\n<button onclick={() => c++}>{c}</button>\n",
-        "5h",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::HostOrCustomElement { .. }),
     );
 }
 
 #[test]
-fn customized_builtin_static_attr_fails_closed_to_5h() {
+fn customized_builtin_static_attr_fails_closed() {
     // F-γ: a customized built-in (`is=`) with a non-`is` static attr — official
-    // `$.set_custom_element_data(button, 'foo', 'bar')`. Fail closed (5h).
+    // `$.set_custom_element_data(button, 'foo', 'bar')`. Fail closed.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<button is=\"my-btn\" foo=\"bar\">x</button>\n<button onclick={() => c++}>{c}</button>\n",
-        "5h",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::HostOrCustomElement { .. }),
     );
 }
@@ -1294,99 +2192,87 @@ fn customized_builtin_static_attr_fails_closed_to_5h() {
 fn customized_builtin_is_only_now_fails_closed_at_the_element_gate() {
     // DEMOTION proof: a customized built-in with ONLY the `is` attr USED to serialize
     // `is="my-btn"` and emit a Main. Under the strict allowlist, ANY element carrying
-    // an `is` attribute is rejected at the element gate (5h, `host-custom-element`)
+    // an `is` attribute is rejected at the element gate (`host-custom-element`)
     // BEFORE the attr walk — so an `is`-only `<button>` now fails closed (no Main).
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<button is=\"my-btn\">x</button>\n<button onclick={() => c++}>{c}</button>\n",
-        "5h",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::HostOrCustomElement { .. }),
     );
 }
 
 #[test]
-fn component_fails_closed_to_5f() {
-    // A component reference (a capitalized tag) is the 5f vertical. No import is used
-    // (imports are demoted to 5s) so the component node is the surface under test.
-    assert_fail_closed(
-        "<script>let c = $state(0);</script>\n<Foo />\n",
-        "5f",
-        |s| {
-            matches!(
-                s,
-                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
-            )
-        },
-    );
+fn component_fails_closed() {
+    // A component reference (a capitalized tag) is the component surface. No import is used
+    // (imports are demoted as script-import) so the component node is the surface under test.
+    assert_fail_closed("<script>let c = $state(0);</script>\n<Foo />\n", |s| {
+        matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+        )
+    });
 }
 
 #[test]
-fn props_rest_fails_closed_to_5g_not_partial() {
-    // A `$props()` REST form fails closed (5g) — it must NOT partially emit.
+fn props_rest_fails_closed_not_partial() {
+    // A `$props()` REST form fails closed — it must NOT partially emit.
     assert_fail_closed(
         "<script>let { name, ...rest } = $props();</script>\n<p>{name}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() rest"),
     );
 }
 
 #[test]
-fn props_bindable_fails_closed_to_5g() {
+fn props_bindable_fails_closed() {
     assert_fail_closed(
         "<script>let { value = $bindable(0) } = $props();</script>\n<p>{value}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
     );
 }
 
 #[test]
-fn state_raw_fails_closed_to_5g() {
+fn state_raw_fails_closed() {
     assert_fail_closed(
         "<script>let c = $state.raw(0);</script>\n<button onclick={() => c = 1}>{c}</button>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.raw"),
     );
 }
 
 #[test]
-fn legacy_mode_fails_closed_to_5i() {
-    // A non-runes component (no rune calls) is legacy mode → 5i.
+fn legacy_mode_fails_closed() {
+    // A non-runes component (no rune calls) is legacy mode.
     assert_fail_closed(
         "<script>export let label;</script>\n<p>{label}</p>\n",
-        "5i",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyMode { .. }),
     );
 }
 
 #[test]
-fn top_level_style_fails_closed_to_5l() {
-    // F4: a top-level `<style>` (CSS scoping) fails closed (5l) — it is NOT accepted
+fn top_level_style_fails_closed() {
+    // F4: a top-level `<style>` (CSS scoping) fails closed — it is NOT accepted
     // as a runtime Main. RED against the pre-fix emitter (which emitted a Main and
     // silently dropped the style / its scoping).
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button onclick={() => c++}>{c}</button>\n",
-        "5l",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Style { .. }),
     );
 }
 
 #[test]
-fn svelte_options_custom_element_fails_closed_to_5h() {
-    // F4: `<svelte:options customElement>` is the custom-element axis (5h). RED
+fn svelte_options_custom_element_fails_closed() {
+    // F4: `<svelte:options customElement>` is the custom-element axis. RED
     // against the pre-fix path (which refused it as the wrong vertical / accepted a
     // Main).
     assert_fail_closed(
         "<svelte:options customElement=\"x-foo\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        "5h",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::HostOrCustomElement { .. }),
     );
 }
 
 #[test]
-fn svelte_options_other_axis_fails_closed_to_5m() {
-    // F4: a `<svelte:options>` axis beyond name/runes (here `namespace`) is 5m.
+fn svelte_options_other_axis_fails_closed() {
+    // F4: a `<svelte:options>` axis beyond name/runes (here `namespace`) is an unsupported options axis.
     assert_fail_closed(
         "<svelte:options namespace=\"svg\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        "5m",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::OptionsAxis { .. }),
     );
 }
@@ -1407,46 +2293,42 @@ fn svelte_options_runes_only_is_supported_and_emits() {
 }
 
 #[test]
-fn effect_pre_fails_closed_to_5g() {
-    // F4: `$effect.pre(...)` is an advanced rune (5g) — it must fail closed, not
+fn effect_pre_fails_closed() {
+    // F4: `$effect.pre(...)` is an advanced rune — it must fail closed, not
     // emit raw `$effect.pre` (a runtime ReferenceError). RED against the pre-fix
     // path (which emitted raw).
     assert_fail_closed(
         "<script>let c = $state(0); $effect.pre(() => console.log(c));</script>\n<button onclick={() => c++}>{c}</button>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect.pre"),
     );
 }
 
 #[test]
-fn state_snapshot_in_expression_fails_closed_to_5g() {
-    // `$state.snapshot(x)` INSIDE an interpolation fails closed (5g) — the
+fn state_snapshot_in_expression_fails_closed() {
+    // `$state.snapshot(x)` INSIDE an interpolation fails closed — the
     // unsupported-rune-inside-an-expression case. A primitive `$state` keeps the
     // component out of the object-state gate, so the `$state.snapshot` rune form is
     // the surface under test.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{$state.snapshot(c)}</button>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"),
     );
 }
 
 #[test]
-fn inspect_rune_fails_closed_to_5g() {
-    // F4: `$inspect(...)` is the 5g vertical (prod no-op form not emitted).
+fn inspect_rune_fails_closed() {
+    // F4: `$inspect(...)` is an advanced rune (prod no-op form not emitted).
     assert_fail_closed(
         "<script>let c = $state(0); $inspect(c);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$inspect"),
     );
 }
 
 #[test]
-fn host_rune_fails_closed_to_5h() {
-    // F4: `$host()` is the custom-element-only API (5h).
+fn host_rune_fails_closed() {
+    // F4: `$host()` is the custom-element-only API.
     assert_fail_closed(
         "<script>let c = $state(0); const el = $host();</script>\n<button onclick={() => c++}>{c}</button>\n",
-        "5h",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::HostOrCustomElement { surface, .. } if *surface == "$host"),
     );
 }
@@ -1455,14 +2337,13 @@ fn host_rune_fails_closed_to_5h() {
 fn shadowed_rune_name_is_not_refused_as_advanced_rune() {
     // F4 DISCRIMINATION: a function PARAM named like a rune (`function f($inspect) {
     // return $inspect.foo }`) is SHADOWED — its member access is NOT a rune reference,
-    // so the rune-form scan does NOT fire (the component is not refused as 5g
+    // so the rune-form scan does NOT fire (the component is not refused as an advanced rune
     // `AdvancedRune`). The function itself is out-of-allowlist, so it fails closed at
-    // the instance-script-item gate (5w, construct `function`), NOT on the rune basis.
+    // the instance-script-item gate (construct `function`), NOT on the rune basis.
     // This pins the precedence: the magic / rune scans (which honor shadowing) own
     // their precise diagnostics; the generic item refusal owns the rest.
     assert_fail_closed(
         "<script>\n\tlet c = $state(0);\n\tfunction f($inspect) { return $inspect.foo; }\n</script>\n<button onclick={() => c++}>{c}</button>\n",
-        "5w",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "function"),
     );
 }
@@ -1471,84 +2352,78 @@ fn shadowed_rune_name_is_not_refused_as_advanced_rune() {
 //    in its exact legal position; refuse everywhere else) ──────────────────────
 
 #[test]
-fn bare_state_in_default_param_fails_closed_to_5g() {
+fn bare_state_in_default_param_fails_closed() {
     // A bare `$state(0)` in a function DEFAULT-PARAM position is NOT a supported
     // rune position (the supported `$state` position is the init of a top-level
-    // instance-script identifier declarator). It must fail closed (5g), never emit
+    // instance-script identifier declarator). It must fail closed, never emit
     // raw `$state(0)` (a runtime ReferenceError). RED against the pre-fix scan,
     // which skipped bare `$state` calls ("they carry their own emission").
     assert_fail_closed(
         "<script>let count=$state(0); function f(x = $state(0)) {}</script>\n<p>hi</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state"),
     );
 }
 
 #[test]
-fn bare_props_in_call_arg_fails_closed_to_5g() {
+fn bare_props_in_call_arg_fails_closed() {
     // A bare `$props()` as a CALL ARGUMENT (`console.log($props())`) is not the
-    // single supported top-level `$props()` destructure position — fail closed (5g),
+    // single supported top-level `$props()` destructure position — fail closed,
     // never emit raw `$props()`. RED against the pre-fix scan.
     assert_fail_closed(
         "<script>console.log($props())</script>\n<p>hi</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props"),
     );
 }
 
 #[test]
-fn bare_effect_in_function_body_fails_closed_to_5g() {
+fn bare_effect_in_function_body_fails_closed() {
     // An `$effect(fn)` NESTED in a function body is not a top-level instance-script
-    // statement (the supported `$effect` position) — fail closed (5g), never emit
+    // statement (the supported `$effect` position) — fail closed, never emit
     // raw `$effect(...)`. RED against the pre-fix scan.
     assert_fail_closed(
         "<script>let c=$state(0); function f(){ $effect(() => c); }</script>\n<p>hi</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect"),
     );
 }
 
 #[test]
-fn bare_derived_in_call_arg_fails_closed_to_5g() {
+fn bare_derived_in_call_arg_fails_closed() {
     // A bare `$derived(...)` as a CALL ARGUMENT (`foo($derived(c))`) is not the
-    // supported top-level identifier-declarator-init position — fail closed (5g).
+    // supported top-level identifier-declarator-init position — fail closed.
     // RED against the pre-fix scan.
     assert_fail_closed(
         "<script>let c=$state(0); foo($derived(c));</script>\n<p>hi</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$derived"),
     );
 }
 
 #[test]
-fn bare_derived_in_nested_block_fails_closed_to_5g() {
+fn bare_derived_in_nested_block_fails_closed() {
     // A `$derived(...)` declarator nested in a BLOCK statement (`{ let d =
-    // $derived(c); }`) is not a TOP-LEVEL declarator — fail closed (5g). Official
+    // $derived(c); }`) is not a TOP-LEVEL declarator — fail closed. Official
     // lowers it; our supported subset is narrower (deferral ledger). RED against
     // the pre-fix scan.
     assert_fail_closed(
         "<script>let c=$state(0); { let d = $derived(c); }</script>\n<p>hi</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$derived"),
     );
 }
 
 #[test]
-fn bare_rune_identifier_reference_fails_closed_to_5g() {
+fn bare_rune_identifier_reference_fails_closed() {
     // A bare rune-name IDENTIFIER reference (`foo($state)`) — the rune function
     // passed by reference, not called in its supported position — fails closed
-    // (5g). RED against the pre-fix scan (which only saw the declarator init).
+    //. RED against the pre-fix scan (which only saw the declarator init).
     assert_fail_closed(
         "<script>let c=$state(0); foo($state);</script>\n<p>hi</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state"),
     );
 }
-// ── Module scripts (`<script module>`) — demoted entirely (5s) ─────────────────
+// ── Module scripts (`<script module>`) — demoted entirely ─────────────────
 
 #[test]
-fn module_script_fails_closed_to_5s_script_import() {
-    // A `<script module>` is demoted ENTIRELY (5s script-import) — the module-script
+fn module_script_fails_closed_script_import() {
+    // A `<script module>` is demoted ENTIRELY (script-import) — the module-script
     // hoist is a script-completion follow-up, refused before any module-rune scan.
     // Covers a module `$state` / `$derived` / `$props()` and a rune-free module body
     // (all fail at the same script-hoist gate, regardless of the module content). An
@@ -1563,21 +2438,20 @@ fn module_script_fails_closed_to_5s_script_import() {
         let src = format!(
             "<script module>{module_body}</script>\n<script>let c = $state(0);</script>\n<button onclick={{() => c++}}>{{c}}</button>\n"
         );
-        assert_fail_closed(&src, "5s", |s| {
+        assert_fail_closed(&src, |s| {
             matches!(s, UnsupportedSvelteRuntimeSurface::ScriptImport { .. })
         });
     }
 }
 
 #[test]
-fn var_state_declarator_fails_closed_to_5g() {
+fn var_state_declarator_fails_closed() {
     // A `var` `$state` declarator is a distinct official surface — a `var` rune read
     // is `$.safe_get(c)` (var hoisting), not `$.get(c)`. Verter does not emit the
-    // `$.safe_get` form, so it fails closed (5g) rather than emitting `$.get`. RED
+    // `$.safe_get` form, so it fails closed rather than emitting `$.get`. RED
     // against the pre-fix classifier (which accepted `var`/`const` rune declarators).
     assert_fail_closed(
         "<script>var c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        "5g",
         |s| {
             matches!(
                 s,
@@ -1591,14 +2465,13 @@ fn var_state_declarator_fails_closed_to_5g() {
 }
 
 #[test]
-fn const_state_declarator_fails_closed_to_5g_not_static_fold() {
+fn const_state_declarator_fails_closed_not_static_fold() {
     // A read-only `const` `$state` compiles to an EMPTY reactive topology in
     // official (the value is constant-folded), a divergent surface — fail closed at
-    // the decl-kind gate (5g), NOT as a static-interpolation fold (5n). RED against
-    // the pre-fix flow (which reached the 5n static-fold check for the `{c}` read).
+    // the decl-kind gate, NOT as a static-interpolation fold. RED against
+    // the pre-fix flow (which reached the static-interpolation fold check for the `{c}` read).
     assert_fail_closed(
         "<script>let w = $state(0); const c = $state(0);</script>\n<button onclick={() => w++}>{c}{w}</button>\n",
-        "5g",
         |s| {
             matches!(
                 s,
@@ -1612,12 +2485,11 @@ fn const_state_declarator_fails_closed_to_5g_not_static_fold() {
 }
 
 #[test]
-fn var_derived_declarator_fails_closed_to_5g() {
+fn var_derived_declarator_fails_closed() {
     // A `var` `$derived` declarator reads with `$.safe_get` in official — fail closed
-    // (5g) rather than emit the `$.get` form Verter produces.
+    // rather than emit the `$.get` form Verter produces.
     assert_fail_closed(
         "<script>let c = $state(0); var d = $derived(c * 2);</script>\n<button onclick={() => c++}>{d}</button>\n",
-        "5g",
         |s| {
             matches!(
                 s,
@@ -1631,13 +2503,12 @@ fn var_derived_declarator_fails_closed_to_5g() {
 }
 
 #[test]
-fn const_derived_declarator_fails_closed_to_5g() {
+fn const_derived_declarator_fails_closed() {
     // A `const` `$derived` declarator — even though official reads it with `$.get`,
     // the supported client surface accepts ONLY `let` rune declarators, so it fails
-    // closed (5g) until the const/var rune-declarator forms are lowered faithfully.
+    // closed until the const/var rune-declarator forms are lowered faithfully.
     assert_fail_closed(
         "<script>let c = $state(0); const d = $derived(c * 2);</script>\n<button onclick={() => c++}>{d}</button>\n",
-        "5g",
         |s| {
             matches!(
                 s,
@@ -1654,14 +2525,13 @@ fn non_rune_const_local_fails_closed_as_instance_script_item() {
     // A plain non-rune `const` local (`const STEP = 2`) is OUTSIDE the strict finite
     // instance-script allowlist (the three shapes are `let`-only: `$state(<primitive>)`,
     // a no-default `$props()` destructure, a bare `let el;` bind:this target). A
-    // `const` / `var` declaration fails closed at the instance-script-item gate (5w,
-    // construct `const declaration`). RED against the pre-restructure tree (which
+    // `const` / `var` declaration fails closed at the instance-script-item gate
+    // (construct `const declaration`). RED against the pre-restructure tree (which
     // emitted `const STEP = 2;` verbatim). The supported `$state` is the rune that keeps
     // the component in runes mode (so the surface under test is the `const`, not the
     // legacy-mode gate).
     assert_fail_closed(
         "<script>let c = $state(0); const STEP = 2;</script>\n<button onclick={() => c++}>{c}</button>\n",
-        "5w",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "const declaration"),
     );
 }
@@ -1677,7 +2547,6 @@ fn root_text_node_region_fails_closed() {
     // `$.set_text(text, …)` referencing an undeclared `text`).
     assert_fail_closed(
         "<script>let count=$state(0); function inc(){count+=1;}</script>\n{count}\n",
-        "5q",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::RootTextRegion { .. }),
     );
 }
@@ -1697,43 +2566,41 @@ fn interpolation_inside_an_element_is_not_refused_as_root_text() {
 }
 
 #[test]
-fn pure_static_text_root_fails_closed_to_5q() {
+fn pure_static_text_root_fails_closed() {
     // A PURE STATIC-TEXT root (`hello world` as the component root, no wrapping
     // element) is the official text-first topology — official emits `$.next(); var
     // text = $.text('hello world'); $.append(...)` (a `$.text()` NODE root reached
     // via `$.next()`), a distinct emission shape from the `from_html`-clone path.
     // Verter's clone-frame path would emit `var text = root();` where `root` is
     // bound to a `$.text(...)` NODE (not a factory function) → `TypeError: root is
-    // not a function` at mount. It fails closed (5q) rather than emit that broken
+    // not a function` at mount. It fails closed rather than emit that broken
     // module. RED against the pre-fix tree (which emitted `var root = $.text(...)`
     // followed by `var <region> = root();`).
-    assert_fail_closed(
-        "<script>let c=$state(0);</script>hello world\n",
-        "5q",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::RootTextRegion { .. }),
-    );
-}
-
-#[test]
-fn empty_template_root_fails_closed_to_5q() {
-    // An EMPTY template (only a `<script>`, no rendered DOM) compiles in official to
-    // a component fn with NO `root()` call / NO `$.append` (the body is just the
-    // script lowering). Verter's clone-frame path would synthesise a `$.comment()`
-    // root and then call `root()` on that NODE → `TypeError`. It fails closed (5q)
-    // rather than emit an undeclared/broken clone frame. RED against the pre-fix
-    // tree (which emitted `var root = $.comment();` + `var fragment = root();`).
-    assert_fail_closed("<script>let c=$state(0);</script>\n", "5q", |s| {
+    assert_fail_closed("<script>let c=$state(0);</script>hello world\n", |s| {
         matches!(s, UnsupportedSvelteRuntimeSurface::RootTextRegion { .. })
     });
 }
 
 #[test]
-fn options_runes_with_static_text_root_fails_closed_to_5q() {
+fn empty_template_root_fails_closed() {
+    // An EMPTY template (only a `<script>`, no rendered DOM) compiles in official to
+    // a component fn with NO `root()` call / NO `$.append` (the body is just the
+    // script lowering). Verter's clone-frame path would synthesise a `$.comment()`
+    // root and then call `root()` on that NODE → `TypeError`. It fails closed
+    // rather than emit an undeclared/broken clone frame. RED against the pre-fix
+    // tree (which emitted `var root = $.comment();` + `var fragment = root();`).
+    assert_fail_closed("<script>let c=$state(0);</script>\n", |s| {
+        matches!(s, UnsupportedSvelteRuntimeSurface::RootTextRegion { .. })
+    });
+}
+
+#[test]
+fn options_runes_with_static_text_root_fails_closed() {
     // A `<svelte:options runes />hello` (runes forced via the options element, with
     // a bare static-text root) is the same text-first topology — official emits
-    // `$.next(); var text = $.text('hello'); $.append(...)`. It fails closed (5q),
+    // `$.next(); var text = $.text('hello'); $.append(...)`. It fails closed,
     // never the broken `root()`-on-a-node clone frame.
-    assert_fail_closed("<svelte:options runes={true} />hello\n", "5q", |s| {
+    assert_fail_closed("<svelte:options runes={true} />hello\n", |s| {
         matches!(s, UnsupportedSvelteRuntimeSurface::RootTextRegion { .. })
     });
 }
@@ -1782,27 +2649,25 @@ fn from_html_fragment_root_still_emits_after_root_region_refusal() {
 // ── Scan ALL `$props()` declarators (one supported shape; reject the rest) ─────
 
 #[test]
-fn second_props_declarator_with_computed_key_fails_closed_to_5g() {
+fn second_props_declarator_with_computed_key_fails_closed() {
     // `let {a}=$props(), {[k]:b}=$props();` — the first basic destructure must NOT
     // admit the file while the second (a COMPUTED key) slips through and emits a
     // raw prop read. ALL `$props()` declarators are scanned; the computed-key one
-    // fails closed (5g). RED against the pre-fix `props_shape`, which returned after
+    // fails closed. RED against the pre-fix `props_shape`, which returned after
     // the FIRST declarator.
     assert_fail_closed(
         "<script>let k='x'; let {a}=$props(), {[k]:b}=$props();</script>\n<p>{b}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() computed key"),
     );
 }
 
 #[test]
-fn second_props_call_whole_object_fails_closed_to_5g() {
+fn second_props_call_whole_object_fails_closed() {
     // Two SEPARATE `$props()` statements where the second is a whole-object binding
-    // (`let p = $props()`) — the whole-object form fails closed (5g) even though a
+    // (`let p = $props()`) — the whole-object form fails closed even though a
     // basic destructure preceded it. RED against scanning only the first.
     assert_fail_closed(
         "<script>let {a}=$props(); let p=$props();</script>\n<p>{a}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() whole-object"),
     );
 }
@@ -1846,8 +2711,8 @@ fn bind_this_emits_before_the_sibling_text_effect() {
 }
 
 #[test]
-fn dev_codegen_request_fails_closed_to_5k() {
-    // F4: a DEV-MODE codegen request (`dev_codegen: true`) fails closed (5k) — the
+fn dev_codegen_request_fails_closed() {
+    // F4: a DEV-MODE codegen request (`dev_codegen: true`) fails closed — the
     // dev-mode output axis is not emitted; only production output is. The dev signal
     // is distinct from `is_production` (the §1.2 default does NOT request dev). RED
     // against the pre-fix path (which ignored the dev flag and emitted prod output).
@@ -1862,13 +2727,12 @@ fn dev_codegen_request_fails_closed_to_5k() {
         Err(ClientCompileError::Unsupported(
             surface @ UnsupportedSvelteRuntimeSurface::DevMode { .. },
         )) => {
-            assert_eq!(surface.owning_block(), "5k");
             assert_eq!(
                 surface.diagnostic_code(),
                 "svelte-runtime-unsupported-dev-mode"
             );
         }
-        other => panic!("a dev-codegen request must fail closed to DevMode (5k), got: {other:?}"),
+        other => panic!("a dev-codegen request must fail closed to DevMode, got: {other:?}"),
     }
     // NEGATIVE: the SAME component WITHOUT dev_codegen emits (the default is not
     // dev — §1.2 must still compile).
@@ -2009,24 +2873,22 @@ fn mixed_class_call_module_matches_the_committed_jsdom_smoke_fixture() {
 // ── Additional surface gates (R1, R4, R5, R7, R8) ──────────────────────────────
 
 #[test]
-fn destructured_state_object_fails_closed_to_5g_not_panic() {
-    // R1: `let { a } = $state({a:1})` MUST fail closed (5g), NEVER reach a panic.
+fn destructured_state_object_fails_closed_not_panic() {
+    // R1: `let { a } = $state({a:1})` MUST fail closed, NEVER reach a panic.
     // Official 5.56.3 supports it (temp + proxy), but full destructured-state
     // lowering is a deferral-ledger item; a clean fail-closed is correct. RED against
     // the prior `unreachable!()` (which PANICKED on this valid input).
     assert_fail_closed(
         "<script>let { a } = $state({ a: 1 });</script>\n<p>{a}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { .. }),
     );
 }
 
 #[test]
-fn destructured_state_array_fails_closed_to_5g_not_panic() {
+fn destructured_state_array_fails_closed_not_panic() {
     // R1: `let [x] = $state([1])` — the array-destructure form also fails closed.
     assert_fail_closed(
         "<script>let [x] = $state([1]);</script>\n<p>{x}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { .. }),
     );
 }
@@ -2039,7 +2901,6 @@ fn props_computed_key_fails_closed_not_partial() {
     // basic).
     assert_fail_closed(
         "<script>const k = 'x'; let { [k]: a } = $props();</script>\n<p>{a}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { .. }),
     );
 }
@@ -2050,7 +2911,6 @@ fn props_nested_destructure_fails_closed_not_partial() {
     // (`props_invalid_pattern`); Verter fails closed.
     assert_fail_closed(
         "<script>let { a: { b } } = $props();</script>\n<p>{b}</p>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { .. }),
     );
 }
@@ -2075,7 +2935,7 @@ fn props_string_literal_key_reads_via_bracket_access() {
     );
 }
 #[test]
-fn bind_value_to_call_expression_fails_closed_to_5c() {
+fn bind_value_to_call_expression_fails_closed() {
     // R8: `bind:value={foo()}` is not a valid lvalue — official raises
     // `bind_invalid_expression`; Verter fails closed (never emits `foo() = $$value`).
     // RED against the prior path (which validated only tag/target, not the
@@ -2084,7 +2944,6 @@ fn bind_value_to_call_expression_fails_closed_to_5c() {
     // legacy-mode refusal).
     assert_fail_closed(
         "<script>let n = $state(0); function foo() { return 1; }</script>\n<input bind:value={foo()} />\n",
-        "5c",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
     );
 }
@@ -2103,8 +2962,8 @@ fn bind_value_to_identifier_still_emits() {
     );
 }
 #[test]
-fn lang_ts_component_with_bind_targets_fails_closed_to_5t() {
-    // A `<script lang="ts">` component is demoted ENTIRELY (5t typescript), refused
+fn lang_ts_component_with_bind_targets_fails_closed() {
+    // A `<script lang="ts">` component is demoted ENTIRELY (typescript), refused
     // at the parse gate BEFORE any bind / TS-wrapped-target classification. Covers a
     // clean / TS-non-null / TS-`as` / TS-wrapped-member `bind:value` and a TS-wrapped
     // `bind:this` — all fail at the same TypeScript-script gate regardless of the
@@ -2117,7 +2976,7 @@ fn lang_ts_component_with_bind_targets_fails_closed_to_5t() {
     ];
     for body in cases {
         let src = format!("<script lang=\"ts\">{body}\n");
-        assert_fail_closed(&src, "5t", |s| {
+        assert_fail_closed(&src, |s| {
             matches!(s, UnsupportedSvelteRuntimeSurface::TypeScript { .. })
         });
     }
@@ -2150,27 +3009,25 @@ fn reactive_text_bare_signal_read_stays_inline() {
 // is RED against the pre-refactor tree.
 
 #[test]
-fn binary_constant_interpolation_fails_closed_to_5r() {
+fn binary_constant_interpolation_fails_closed() {
     // A `{1 + 1}` interpolation is a non-identifier (binary) expression — the
-    // `build_template_chunk` breadth (5r), refused at the complex-interpolation gate.
+    // `build_template_chunk` breadth, refused at the complex-interpolation gate.
     // The component is runes-mode (the `$state` declarator) so the legacy refusal
     // does not pre-empt the interpolation classification.
     assert_fail_closed(
         "<script>let n = $state(0);</script>\n<p>{1 + 1}</p>\n<button onclick={() => n++}>{n}</button>\n",
-        "5r",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }),
     );
 }
 
 #[test]
-fn non_reactive_const_interpolation_fails_closed_to_5n() {
+fn non_reactive_const_interpolation_fails_closed() {
     // A `{C}` read of an instance-script plain `const` is a bare identifier resolving
     // to a NON-reactive binding — official static-folds it to `textContent`, a
-    // distinct topology (5n). A separate reactive `$state` drives the onclick so the
+    // distinct topology. A separate reactive `$state` drives the onclick so the
     // component reaches the interpolation classifier.
     assert_fail_closed(
         "<script>let n = $state(0); const C = 5;</script>\n<p>{C}</p>\n<button onclick={() => n++}>{n}</button>\n",
-        "5n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::StaticInterpolation { .. }),
     );
 }
@@ -2178,12 +3035,11 @@ fn non_reactive_const_interpolation_fails_closed_to_5n() {
 #[test]
 fn never_reassigned_state_interpolation_fails_closed() {
     // A `{n}` read of a `$state` that is NEVER reassigned lowers (in official) to a
-    // plain `let n = 5;` and a STATIC `textContent` write, not a reactive op (5n). A
+    // plain `let n = 5;` and a STATIC `textContent` write, not a reactive op. A
     // SEPARATE reactive `$state` drives the supported onclick (so the component is
     // runes-mode + reactive without reassigning `n`).
     assert_fail_closed(
         "<script>let n = $state(5); let c = $state(0);</script>\n<button onclick={() => c++}>{n}</button>\n",
-        "5n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::StaticInterpolation { .. }),
     );
 }
@@ -2207,12 +3063,11 @@ fn instance_export_const_fails_closed() {
     // An instance-script `export const` is OUTSIDE the strict finite instance-script
     // allowlist (the three shapes: `$state(<primitive>)`, a no-default `$props()`
     // destructure, a bare `let el;` bind:this target). It fails closed at the
-    // instance-script-item gate (5w, `InstanceScriptItem` construct `export`) rather
+    // instance-script-item gate (`InstanceScriptItem` construct `export`) rather
     // than emitting an `export` inside the component function (invalid JS). RED against
     // the pre-restructure tree (which emitted the `export const` verbatim).
     assert_fail_closed(
         "<script>let n = $state(0); export const helper = 1;</script>\n<button onclick={() => n++}>{n}</button>\n",
-        "5w",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "export"),
     );
 }
@@ -2220,10 +3075,9 @@ fn instance_export_const_fails_closed() {
 #[test]
 fn instance_export_function_fails_closed() {
     // An instance-script `export function` also fails closed at the instance-script-item
-    // gate (5w) — an `export`-declaration statement is out-of-allowlist.
+    // gate — an `export`-declaration statement is out-of-allowlist.
     assert_fail_closed(
         "<script>let n = $state(0); export function helper() { return 1; }</script>\n<button onclick={() => n++}>{n}</button>\n",
-        "5w",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "export"),
     );
 }
@@ -2233,11 +3087,10 @@ fn instance_top_level_function_fails_closed() {
     // A plain top-level instance-script FUNCTION (no rune inside) is out-of-allowlist
     // — the supported `onclick` is an inline `$state`-write arrow, so a function
     // (whether a handler reference or a helper) fails closed at the instance-script-item
-    // gate (5w, construct `function`). RED against the pre-restructure tree (which
+    // gate (construct `function`). RED against the pre-restructure tree (which
     // lowered the function body verbatim with reactive reads rewritten).
     assert_fail_closed(
         "<script>let count = $state(0); function f(obj) { ({ count } = obj); }</script>\n<button onclick={() => count++}>{count}</button>\n",
-        "5w",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "function"),
     );
 }
@@ -2245,10 +3098,9 @@ fn instance_top_level_function_fails_closed() {
 #[test]
 fn instance_top_level_class_fails_closed() {
     // A plain top-level instance-script CLASS is out-of-allowlist — fail closed at the
-    // instance-script-item gate (5w, construct `class`).
+    // instance-script-item gate (construct `class`).
     assert_fail_closed(
         "<script>let count = $state(0); class C { #x = 0; bump() { this.#x++; } }</script>\n<button onclick={() => count++}>{count}</button>\n",
-        "5w",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "class"),
     );
 }
@@ -2256,26 +3108,24 @@ fn instance_top_level_class_fails_closed() {
 #[test]
 fn multi_declarator_state_with_destructure_fails_closed() {
     // A multi-declarator statement where a LATER declarator destructures `$state`
-    // (`let ok = $state(0); let { a } = $state({ a: 1 })`) must fail closed (5g) —
+    // (`let ok = $state(0); let { a } = $state({ a: 1 })`) must fail closed —
     // the gate scans ALL `$state` declarators, not just the first. RED against the
     // pre-refactor gate (which classified only the first declarator and silently
     // dropped the destructured one → a runtime `ReferenceError` on `a`).
     assert_fail_closed(
         "<script>let ok = $state(0); let { a } = $state({ a: 1 });</script>\n<button onclick={() => ok++}>{ok}{a}</button>\n",
-        "5g",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { .. }),
     );
 }
 
 #[test]
-fn ts_wrapped_update_target_in_handler_fails_closed_to_5d() {
+fn ts_wrapped_update_target_in_handler_fails_closed() {
     // An onclick arrow whose body is a TS-wrapped update (`count!++`) is NOT a clean
     // `$state` assignment / update — the update target is a TS-non-null wrapper, not a
-    // bare identifier, so the handler-shape gate refuses it (5d). Only a clean
+    // bare identifier, so the handler-shape gate refuses it. Only a clean
     // `$state` write body is the supported §1.2-class handler.
     assert_fail_closed(
         "<script>let count = $state(0);</script>\n<button onclick={() => { count!++; }}>{count}</button>\n",
-        "5d",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { .. }),
     );
 }
@@ -2284,13 +3134,12 @@ fn ts_wrapped_update_target_in_handler_fails_closed_to_5d() {
 fn private_field_update_inside_a_class_method_fails_closed() {
     // The private-field passthrough (`this.#x++` inside a class method) is no longer a
     // SUPPORTED surface: a top-level class is out-of-allowlist, so the whole component
-    // fails closed at the instance-script-item gate (5w, construct `class`) — a class
+    // fails closed at the instance-script-item gate (construct `class`) — a class
     // method body never reaches the rewriter. (The pre-restructure tree lowered the
     // class body verbatim; the class is now §1.2-out-of-core. Covered alongside
     // `instance_top_level_class_fails_closed`.)
     assert_fail_closed(
         "<script>let n = $state(0); class C { #x = 0; bump() { this.#x++; } }</script>\n<button onclick={() => n++}>{n}</button>\n",
-        "5w",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "class"),
     );
 }
@@ -2301,18 +3150,17 @@ fn private_field_update_inside_a_class_method_fails_closed() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn custom_element_no_attr_fails_closed_to_5h() {
+fn custom_element_no_attr_fails_closed() {
     // A bare hyphenated CUSTOM element (`<my-widget></my-widget>`, no attributes) is
     // already in the demote list (the official compiler clones it via `importNode`
     // and sets its attributes via `$.set_custom_element_data` — web-components
     // breadth). A custom element with an UNSUPPORTED attribute already fails closed
-    // (5h); the no-attribute case was leaking through the element classifier and
-    // being emitted. It must fail closed at the custom-element owner (5h), never an
+    //; the no-attribute case was leaking through the element classifier and
+    // being emitted. It must fail closed at the custom-element owner, never an
     // accepted Main. RED against the pre-fix tree (which emitted a `from_html`
     // `var fragment = root()` clone for it).
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<my-widget></my-widget>\n",
-        "5h",
         |s| {
             matches!(
                 s,
@@ -2323,26 +3171,23 @@ fn custom_element_no_attr_fails_closed_to_5h() {
 }
 
 #[test]
-fn reserved_word_element_tag_fails_closed_to_5v_not_invalid_js() {
+fn reserved_word_element_tag_fails_closed_not_invalid_js() {
     // A reserved-word HTML tag (`<var>`) whose synthesized DOM local var name would
     // be the reserved word `var` is accepted-and-emitted as `var var = root();` —
     // INVALID JS (a `SyntaxError`). The official compiler collision-renames the local
     // (`var_1`), which is naming breadth, not the §1.2-class core. It must fail closed
-    // at the element-naming owner (5v), never emit invalid JS. RED against the pre-fix
+    // at the element-naming owner, never emit invalid JS. RED against the pre-fix
     // tree (which emitted `var var = root();`).
-    assert_fail_closed(
-        "<script>let c = $state(0);</script>\n<var></var>\n",
-        "5v",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ElementName { .. }),
-    );
+    assert_fail_closed("<script>let c = $state(0);</script>\n<var></var>\n", |s| {
+        matches!(s, UnsupportedSvelteRuntimeSurface::ElementName { .. })
+    });
 }
 
 #[test]
-fn reserved_word_class_element_tag_fails_closed_to_5v() {
-    // `<class>` → `var class = root();` is likewise invalid JS — fail closed (5v).
+fn reserved_word_class_element_tag_fails_closed() {
+    // `<class>` → `var class = root();` is likewise invalid JS — fail closed.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<class></class>\n",
-        "5v",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::ElementName { .. }),
     );
 }
@@ -2371,14 +3216,13 @@ fn standard_identifier_safe_element_tags_still_emit() {
 #[test]
 fn textarea_element_fails_closed_at_the_element_allowlist() {
     // `<textarea>` is NOT in the finite client-core element allowlist (`a` / `button`
-    // / `div` / `h1` / `input` / `p`), so it fails closed at the ELEMENT gate (5a,
-    // `svelte-runtime-unsupported-element`) — BEFORE any content / value-handling
+    // / `div` / `h1` / `input` / `p`), so it fails closed at the ELEMENT gate
+    // (`svelte-runtime-unsupported-element`) — BEFORE any content / value-handling
     // classification. (Demoted by the strict-allowlist restructure: a static
     // `<textarea>` interior used to emit; it is now §1.2-out-of-core.) RED against the
     // pre-restructure tree (which accepted `<textarea>` and emitted a clone frame).
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<textarea>{c}</textarea><button onclick={() => c++}>x</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "textarea"),
     );
 }
@@ -2386,18 +3230,16 @@ fn textarea_element_fails_closed_at_the_element_allowlist() {
 #[test]
 fn select_and_option_elements_fail_closed_at_the_element_allowlist() {
     // `<select>` / `<option>` are NOT in the element allowlist — a component using them
-    // fails closed at the element gate (5a, `svelte-runtime-unsupported-element`) on
+    // fails closed at the element gate (`svelte-runtime-unsupported-element`) on
     // the FIRST out-of-allowlist element (`<select>`), regardless of its interior. RED
     // against the pre-restructure tree (which accepted them).
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option>{c}</option></select><button onclick={() => c++}>x</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
     );
     // A nested reactive interior is irrelevant — the element gate fires first.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option><b>{c}</b></option></select><button onclick={() => c++}>x</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
     );
 }
@@ -2406,11 +3248,10 @@ fn select_and_option_elements_fail_closed_at_the_element_allowlist() {
 fn static_textarea_content_now_fails_closed_at_the_element_allowlist() {
     // NEGATIVE / demotion proof: even a STATIC-only `<textarea>hi</textarea>` (which
     // the pre-restructure tree serialized verbatim and EMITTED) now fails closed at the
-    // element gate (5a) — `<textarea>` is out of the finite allowlist, so it has no
+    // element gate — `<textarea>` is out of the finite allowlist, so it has no
     // emission path. The component must NOT emit a Main.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<textarea>hi</textarea><button onclick={() => c++}>x</button>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "textarea"),
     );
 }
@@ -2645,11 +3486,11 @@ fn strip_redundant_arrow_parens(s: &str) -> String {
 // source/DOM-walk order; a NON-reactive one is a plain init statement.
 //
 // The event handlers are the supported inline-arrow `$state`-write shape
-// (`onclick={() => v = !v}`) — a named-function handler is the 5d wrapper surface.
+// (`onclick={() => v = !v}`) — a named-function handler is the event-wrapper surface.
 
 /// Normalize an EXPECTED emitted-JS substring the same way [`normalize_js_cosmetics`]
 /// normalizes the emitter output (whitespace stripped, JS string-literal quotes
-/// unified to `"`), so a 5a assertion is written in NATURAL spaced single-quote form
+/// unified to `"`), so an attribute assertion is written in NATURAL spaced single-quote form
 /// and compared against the equally-normalized emitter output.
 fn nc(expected: &str) -> String {
     normalize_js_cosmetics(expected)
@@ -2684,7 +3525,7 @@ fn dynamic_attr_reactive_emits_set_attribute_in_template_effect() {
 // the §1.2-class supported subset: every template-readable local is a `$state`
 // signal, a `$props()` read (also reactive in the output), or a `bind:this` ref — a
 // plain non-rune `let v = 'x'` fails closed at the instance-script-item gate ("plain
-// let", 5s). The non-reactive INIT path is still implemented (and is exercised by the
+// let", script-import). The non-reactive INIT path is still implemented (and is exercised by the
 // init-only `$.autofocus` cases below); a non-reactive `$.set_attribute` /
 // `$.set_class` / `$.set_style` init becomes testable once plain-local support lands.
 
@@ -2998,21 +3839,19 @@ fn reactive_attr_and_reactive_text_share_one_template_effect() {
 // ── the dynamic-attribute / class / style surface negative boundary: deferred surfaces STILL refuse ─────────────────
 
 #[test]
-fn plain_value_attr_still_refuses_to_5c() {
-    // `value={v}` (a plain form-control setter) is 5c, NOT 5a — it must still refuse
-    // (through the 5c-owning form-control / bindings channel).
+fn plain_value_attr_still_refuses() {
+    // `value={v}` (a plain form-control setter) is a binding, NOT a plain attribute — it must still refuse
+    // (through the binding-owning form-control / bindings channel).
     assert_fail_closed(
         "<script>let v = $state('x');</script>\n<input onclick={() => v += '!'} value={v}>\n",
-        "5c",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
     );
 }
 
 #[test]
-fn plain_checked_attr_still_refuses_to_5c() {
+fn plain_checked_attr_still_refuses() {
     assert_fail_closed(
         "<script>let v = $state(false);</script>\n<input onclick={() => v = !v} checked={v}>\n",
-        "5c",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "checked"),
     );
 }
@@ -3023,7 +3862,6 @@ fn dynamic_dir_attr_still_refuses() {
     // it must still fail closed rather than mis-emit a plain set_attribute.
     assert_fail_closed(
         "<script>let d = $state('ltr');</script>\n<div onclick={() => d = 'rtl'} dir={d}>x</div>\n",
-        "5a",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "dir"),
     );
 }
@@ -3048,24 +3886,24 @@ fn dynamic_muted_on_non_media_element_emits_property_write() {
     );
 }
 
-// (Spread `{...rest}` (5b) and `{@html}` (5b) refusals are covered by the existing
-// `spread_fails_closed_to_5b` / `html_tag_fails_closed_to_5b` gates — the
-// dynamic-attribute / class / style widening did NOT touch them, so they stay refused
-// with no new test needed.)
+// (Element spread `{...x}` → `$.attribute_effect` and `{@html}` → `$.html` emission are
+// covered by `element_spread_emits_the_attribute_effect_fold`,
+// `html_tag_emits_the_raw_markup_helper`, and the systematic byte-golden corpus; a
+// `$props()` rest destructure stays refused — see
+// `props_rest_spread_still_refuses_as_advanced_rune_not_the_deleted_spread_surface`.)
 
 #[test]
-fn prop_bind_value_still_refuses_to_5c() {
-    // `bind:value` to a prop is 5c (the prop-bind path) — a regression-safety negative.
+fn prop_bind_value_still_refuses() {
+    // `bind:value` to a prop is a binding (the prop-bind path) — a regression-safety negative.
     assert_fail_closed(
         "<script>let { v } = $props();</script>\n<input bind:value={v}>\n",
-        "5c",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
     );
 }
 
 #[test]
 fn no_dynamic_attr_emits_the_boolean_set_attribute_misform() {
-    // A global discriminating negative: NO 5a form ever emits the forbidden boolean
+    // A global discriminating negative: NO attribute form ever emits the forbidden boolean
     // `$.set_attribute(el, name, value, true)` 4th-arg signature (the 4th arg is
     // hydration-warning suppression, never emitted in normal output).
     for src in [
@@ -3105,5 +3943,208 @@ fn class_and_style_shorthand_directives_synthesize_the_implied_identifier() {
         normalize_js_cosmetics(&style_js)
             .contains(&nc("$.set_style(div, '', styles, { color: $.get(color) })")),
         "a `style:color` shorthand must synthesize the `color` value:\n{style_js}"
+    );
+}
+
+// ─── Value-position emission is source-preserving (author parens kept) ───
+// The value/property printer keeps the author's parens verbatim. The one BEHAVIORAL
+// value-position transform is the sequence wrap: a top-level `SequenceExpression` is wrapped
+// in one paren pair so it stays a single value (`{@html a, b}` -> `() => (a, b)`) rather than
+// splitting `b` into a positional argument. Redundant author parens around a non-sequence
+// value are a behavior-preserving cosmetic difference the minifier collapses, so the
+// behavioral tests below are paren-COUNT-insensitive on the value bytes.
+
+/// Collapse runs of ASCII whitespace to a single space WITHOUT touching parens — for the
+/// `{@html}` arrow-body tests, where the sequence-wrap `=>(…)` distinction is exactly what
+/// `normalize_js_cosmetics` deliberately erases (`strip_redundant_arrow_parens`). A
+/// paren-preserving collapse is the discriminating comparator for the sequence-wrap.
+fn collapse_ws_keep_parens(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_ws = false;
+    for ch in s.chars() {
+        if ch.is_ascii_whitespace() {
+            if !prev_ws {
+                out.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            out.push(ch);
+            prev_ws = false;
+        }
+    }
+    out
+}
+
+#[test]
+fn html_thunk_keeps_sequence_as_one_wrapped_value() {
+    // `{@html (a, b)}` → the BEHAVIORAL sequence wrap keeps the top-level sequence as ONE
+    // value (`() => (a, b)`, modulo a behavior-preserving redundant outer paren the minifier
+    // collapses — this assertion is paren-COUNT-insensitive). Dropping the wrap would leak `b`
+    // as a 3rd positional `$.html` arg, structurally breaking the call. The free `a`/`b`
+    // demote to bare reads.
+    let js = emit(
+        "<script>let __rune = $state(0);</script>\n{@html (a, b)}<button onclick={() => __rune++}>x</button>\n",
+        "App.svelte",
+    );
+    let n = collapse_ws_keep_parens(&js);
+    // The emitted thunk wraps the sequence (`() => ((a, b))` — source paren kept plus the
+    // behavioral wrap, a redundant outer paren the minifier collapses). Assert the thunk body
+    // is a single wrapped sequence value, paren-COUNT-insensitively.
+    assert!(
+        n.contains("$.html(node, () => (") && n.contains("(a, b)"),
+        "a bare-sequence {{@html}} thunk must keep the sequence wrapped as one value:\n{js}"
+    );
+    // NEGATIVE (the behavioral discriminator): the sequence must NOT be unwrapped into a 3rd
+    // positional `$.html` argument.
+    assert!(
+        !n.contains("$.html(node, () => a, b)"),
+        "a bare-sequence {{@html}} thunk must NOT split the sequence into a 3rd arg:\n{js}"
+    );
+}
+
+// ─── Invalid attribute name → official reject ───
+// Official rejects a plain attribute on an intrinsic element (or `<svelte:element>`) whose
+// name starts with a digit / `-` / `.` or contains an operator char — `attribute_invalid_name`.
+
+#[test]
+fn invalid_attribute_name_rejects_on_a_plain_element() {
+    // `<div 1foo="x">` REJECTS with `attribute_invalid_name` — a name starting with a digit.
+    let err = emit_result("<script>let c = $state(0);</script>\n<div 1foo=\"x\"><button onclick={() => c++}>{c}</button></div>\n")
+        .expect_err("an invalid attribute name must fail closed");
+    match err {
+        ClientCompileError::OfficialReject(rej) => assert_eq!(
+            rej.rule,
+            CoreOfficialValidationRule::AttributeInvalidName,
+            "a digit-initial attribute name must reject as AttributeInvalidName:\n{rej:?}"
+        ),
+        other => panic!("expected an OfficialReject(AttributeInvalidName), got {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_attribute_name_rejects_under_a_spread() {
+    // `<div {...p} 1foo="x">` REJECTS with `attribute_invalid_name` — the spread fold must
+    // NOT swallow the invalid co-located name.
+    let err = emit_result("<script>let p = $state({}), c = $state(0);</script>\n<div {...p} 1foo=\"x\"><button onclick={() => { c++; p = {}; }}>{c}</button></div>\n")
+        .expect_err("an invalid attribute name under a spread must fail closed");
+    match err {
+        ClientCompileError::OfficialReject(rej) => assert_eq!(
+            rej.rule,
+            CoreOfficialValidationRule::AttributeInvalidName,
+            "a digit-initial name under a spread must reject as AttributeInvalidName:\n{rej:?}"
+        ),
+        other => panic!("expected an OfficialReject(AttributeInvalidName), got {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_attribute_name_rejects_an_operator_char() {
+    // `<div @foo="x">` REJECTS — the name contains the `@` operator char.
+    let err = emit_result(
+        "<script>let c = $state(0);</script>\n<div @foo=\"x\"><button onclick={() => c++}>{c}</button></div>\n",
+    )
+    .expect_err("an operator-char attribute name must fail closed");
+    assert!(
+        matches!(
+            err,
+            ClientCompileError::OfficialReject(rej) if rej.rule == CoreOfficialValidationRule::AttributeInvalidName
+        ),
+        "an `@`-containing attribute name must reject as AttributeInvalidName:\n{err:?}"
+    );
+}
+
+#[test]
+fn valid_attribute_names_still_accept() {
+    // NEGATIVE side: `data-x` / `aria-label` / `_foo` / `foo:bar` are VALID names — they must
+    // NOT reject (a colon name + a leading underscore + mid-name hyphens are all accepted).
+    for src in [
+        "<script>let p = $state({}), c = $state(0);</script>\n<div {...p} data-x=\"1\"><button onclick={() => { c++; p = {}; }}>{c}</button></div>\n",
+        "<script>let c = $state(0);</script>\n<div aria-label=\"x\"><button onclick={() => c++}>{c}</button></div>\n",
+        "<script>let c = $state(0);</script>\n<div _foo=\"x\"><button onclick={() => c++}>{c}</button></div>\n",
+    ] {
+        let r = emit_result(src);
+        assert!(
+            !matches!(
+                &r,
+                Err(ClientCompileError::OfficialReject(rej)) if rej.rule == CoreOfficialValidationRule::AttributeInvalidName
+            ),
+            "a valid attribute name must NOT reject as AttributeInvalidName:\n{src}\n{r:?}"
+        );
+    }
+}
+
+// ─── Mixed text+interpolation style directive ───
+// `style:color="a{x}b"` (the SOLE directive family that accepts a text body) folds the
+// template-literal `{ color: `a${x ?? ''}b` }`; a NON-reassigned $state const-folds (the
+// static path), so the live cells reassign `x`.
+
+#[test]
+fn mixed_style_directive_folds_a_reactive_template_literal() {
+    // `<div style:color="a{x}b">` (x reassigned) → `$.set_style(div, '', styles, { color:
+    // `a${$.get(x) ?? ''}b` })` inside a template_effect.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<div style:color=\"a{x}b\"><button onclick={() => x++}>b</button></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.set_style(div, '', styles, { color: `a${$.get(x) ?? ''}b` })"
+        )),
+        "a mixed-style directive must fold the reactive template literal:\n{js}"
+    );
+    // NEGATIVE: it must NOT mis-parse `a{x}b` as a lone expression / object literal.
+    assert!(
+        !n.contains(&nc("{ color: a{x}b }")) && !n.contains(&nc("color: $.get(a)")),
+        "a mixed-style directive must NOT mis-parse the concatenation:\n{js}"
+    );
+}
+
+#[test]
+fn mixed_style_directive_important_uses_the_array_form() {
+    // `<div style:color|important="a{x}b">` → the `[normal, important]` array form
+    // `$.set_style(div, '', styles, [{}, { color: `a${$.get(x) ?? ''}b` }])`.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<div style:color|important=\"a{x}b\"><button onclick={() => x++}>b</button></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.set_style(div, '', styles, [{}, { color: `a${$.get(x) ?? ''}b` }])"
+        )),
+        "an `|important` mixed-style directive must use the array form:\n{js}"
+    );
+}
+
+#[test]
+fn mixed_style_directive_under_a_spread_folds_into_the_style_object() {
+    // `<div {...props} style:color="a{x}b">` → `[$.STYLE]: { color: `a${$.get(x) ?? ''}b` }`
+    // (the free `props` demotes to a bare spread; the reassigned `$state x` is reactive).
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<div {...props} style:color=\"a{x}b\"><button onclick={() => x++}>b</button></div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("[$.STYLE]: { color: `a${$.get(x) ?? ''}b` }")),
+        "a mixed-style directive under a spread must fold into the [$.STYLE] object:\n{js}"
+    );
+}
+
+#[test]
+fn mixed_class_directive_value_rejects_as_directive_invalid_value() {
+    // `class:on="a{x}b"` is NOT a style directive, so a multi-chunk mixed value is the
+    // official `directive_invalid_value` reject (only `style:` accepts a text-ish value).
+    let err = emit_result(
+        "<script>let x = $state(0);</script>\n<div class:on=\"a{x}b\"><button onclick={() => x++}>b</button></div>\n",
+    )
+    .expect_err("a mixed class-directive value must fail closed");
+    assert!(
+        matches!(
+            err,
+            ClientCompileError::OfficialReject(rej) if rej.rule == CoreOfficialValidationRule::DirectiveInvalidValue
+        ),
+        "a mixed class-directive value must reject as DirectiveInvalidValue:\n{err:?}"
     );
 }

@@ -370,6 +370,72 @@ pub struct AnalyzedExpr<'a> {
     /// The free identifier references in the expression, in source order, paired
     /// with whether each is an assignment TARGET (a write) vs a read.
     pub references: Vec<ExprReference>,
+    /// When the expression is a DIRECT, non-optional, ZERO-ARGUMENT call on a plain
+    /// IDENTIFIER callee (`render()`) — peeling through transparent
+    /// `ParenthesizedExpression`s — the callee identifier name. `None` for every other
+    /// shape (`render(x)`, `render?.()`, `obj.render()`, `new Foo()`, a bare identifier,
+    /// a template). Drives the `{@html render()}` thunk-elision decision (the official
+    /// compiler elides the `() => …` thunk to the bare callee ONLY when the callee
+    /// rewrites unchanged). Harvested from the SAME parse that collects `references`
+    /// (no second reparse, no synthesize-then-reparse).
+    pub direct_zero_arg_call_callee: Option<String>,
+    /// Whether the transparent-paren-unwrapped root is a `SequenceExpression`. The value
+    /// printer re-wraps EXACTLY a top-level sequence in one paren pair (a bare `a, b` becomes
+    /// `(a, b)` so it stays one value rather than splitting into positional arguments / object
+    /// entries) — the one BEHAVIORAL value-position transform. Every other unwrapped root is
+    /// emitted source-preserving (author parens kept verbatim).
+    pub unwrapped_is_sequence: bool,
+    /// The KIND of the transparent-paren-unwrapped root expression, for the `class={…}`
+    /// `$.clsx` decision (the official `Attribute.js` rule reads the UNWRAPPED node type:
+    /// a literal / template / binary value emits RAW, every other kind wraps in `$.clsx`).
+    /// Computed on the same transparent-paren-unwrapped root.
+    pub unwrapped_root_kind: UnwrappedRootKind,
+}
+
+/// The KIND of a value expression's transparent-paren-unwrapped root, restricted to the
+/// distinction the `class={…}` `$.clsx` decision needs: the three official no-clsx-wrap
+/// node kinds (a `Literal` family member, a `TemplateLiteral`, a `BinaryExpression`) vs
+/// everything else. The official `Attribute.js` rule computes `needs_clsx` from the node
+/// type of the value expression AFTER transparent author parens are removed — so a
+/// parenthesized literal / template / binary stays unwrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnwrappedRootKind {
+    /// A literal (string / numeric / boolean / null / bigint / regexp) — no `$.clsx` wrap.
+    Literal,
+    /// A `TemplateLiteral` (`` `a${b}c` ``) — no `$.clsx` wrap.
+    TemplateLiteral,
+    /// A `BinaryExpression` (`a + b`) — no `$.clsx` wrap.
+    BinaryExpression,
+    /// Every other expression kind (identifier / member / call / conditional / logical /
+    /// object / array / sequence / unary / `new` / …) — wrapped in `$.clsx`.
+    Other,
+}
+
+impl<'a> AnalyzedExpr<'a> {
+    /// Build an analyzed expression from the per-parse [`ExprAnalysisFacts`].
+    pub(crate) fn interned(source: &'a str, scope: ScopeId, facts: ExprAnalysisFacts) -> Self {
+        Self {
+            source,
+            scope,
+            references: facts.references,
+            direct_zero_arg_call_callee: facts.direct_zero_arg_call_callee,
+            unwrapped_is_sequence: facts.unwrapped_is_sequence,
+            unwrapped_root_kind: facts.unwrapped_root_kind,
+        }
+    }
+
+    /// Build the analyzed expression for a TORN parse (the fragment did not parse cleanly):
+    /// no references, treated as a non-sequence root with an unknown root kind.
+    pub(crate) fn torn(source: &'a str, scope: ScopeId) -> Self {
+        Self {
+            source,
+            scope,
+            references: Vec::new(),
+            direct_zero_arg_call_callee: None,
+            unwrapped_is_sequence: false,
+            unwrapped_root_kind: UnwrappedRootKind::Other,
+        }
+    }
 }
 
 /// One FREE identifier reference inside an analyzed expression (an
@@ -1340,16 +1406,38 @@ pub(super) fn for_left_names(
     frame
 }
 
+/// The per-expression facts harvested from ONE OXC parse of a template-expression
+/// text: its free references, the direct-zero-arg-identifier-call callee fact, and the
+/// two transparent-paren-unwrapped root facts (whether the root is a `SequenceExpression`
+/// — the BEHAVIORAL sequence-wrap signal — and its KIND for the `class={…}` `$.clsx`
+/// decision). Both root facts peel transparent outer parens internally to CLASSIFY the
+/// root; neither slices an emitted-source span (the value printer is source-preserving).
+pub(crate) struct ExprAnalysisFacts {
+    /// The free identifier references (read vs write), in source order.
+    pub references: Vec<ExprReference>,
+    /// The callee name when the WHOLE expression is a direct, non-optional, zero-arg
+    /// identifier call (peeling transparent parens); `None` otherwise.
+    pub direct_zero_arg_call_callee: Option<String>,
+    /// Whether the transparent-paren-unwrapped root is a `SequenceExpression` — the value
+    /// printer re-wraps EXACTLY a top-level sequence in one paren pair (a bare `a, b` becomes
+    /// `(a, b)` so it stays one value), the one BEHAVIORAL value-position transform.
+    pub unwrapped_is_sequence: bool,
+    /// The KIND of the transparent-paren-unwrapped root (for the `class={…}` `$.clsx`
+    /// decision).
+    pub unwrapped_root_kind: UnwrappedRootKind,
+}
+
 /// Collect the FREE identifier references of a single template-expression text,
-/// classifying each as a read or a write (assignment / update target). The
-/// references EXCLUDE identifiers bound LOCALLY inside the expression (nested
-/// arrow/function params + nested locals), so a template expression's free
-/// references are the ones whose meaning is decided by the enclosing
-/// template/script scope.
+/// classifying each as a read or a write (assignment / update target), PLUS the
+/// direct-zero-arg-identifier-call callee fact — both from ONE parse. The references
+/// EXCLUDE identifiers bound LOCALLY inside the expression (nested arrow/function
+/// params + nested locals), so a template expression's free references are the ones
+/// whose meaning is decided by the enclosing template/script scope.
 ///
-/// A fragment that does not parse cleanly yields `Err(())` so the caller can
-/// surface a parse diagnostic rather than silently returning no references.
-pub(crate) fn collect_expr_references(text: &str) -> Result<Vec<ExprReference>, ()> {
+/// A fragment that does not parse cleanly yields `Err(())` so the caller can surface a
+/// parse diagnostic rather than silently returning no references.
+pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, ()> {
+    use oxc_ast::ast::{Expression, Statement};
     let alloc = Allocator::default();
     // Wrap as a parenthesised expression statement so a bare expression body
     // (`count + 1`, `() => count++`, `box.a`) parses as a module statement.
@@ -1363,7 +1451,81 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<Vec<ExprReference>, 
         local_frames: Vec::new(),
     };
     collector.visit_program(&parsed.program);
-    Ok(collector.refs)
+    // The whole expression body (the `({text});` wrapper's lone expression statement) —
+    // the SAME parsed program both downstream facts read (no second reparse).
+    let body_expr = parsed.program.body.first().and_then(|stmt| match stmt {
+        Statement::ExpressionStatement(s) => Some(&s.expression),
+        _ => None,
+    });
+    // The direct-zero-arg-identifier-call fact: the WHOLE expression is a non-optional,
+    // zero-argument `CallExpression` whose callee peels (through transparent parens) to a
+    // plain identifier.
+    let direct_zero_arg_call_callee = body_expr.and_then(|expr| {
+        let mut e = expr;
+        while let Expression::ParenthesizedExpression(p) = e {
+            e = &p.expression;
+        }
+        match e {
+            Expression::CallExpression(call) if !call.optional && call.arguments.is_empty() => {
+                // The callee may itself be wrapped in transparent author parens
+                // (`(render)()` / `((render))()` — OXC represents each `(…)` as a
+                // `ParenthesizedExpression`). Peel them, the SAME transparent-paren peel
+                // the whole-expression walk above does, before the identifier check, so a
+                // paren-wrapped zero-arg call still harvests its callee name.
+                let mut callee = &call.callee;
+                while let Expression::ParenthesizedExpression(p) = callee {
+                    callee = &p.expression;
+                }
+                match callee {
+                    Expression::Identifier(id) => Some(id.name.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    });
+    // The transparent-paren-unwrapped root facts: peel every transparent outer
+    // `ParenthesizedExpression` to the root operand, then CLASSIFY it — whether it is a
+    // `SequenceExpression` (the BEHAVIORAL sequence-wrap signal) and its KIND (the `class={…}`
+    // `$.clsx` decision). This is pure analysis: it never slices an emitted-source span (the
+    // value printer keeps the author's parens verbatim, so no paren-removal slice is needed).
+    let (unwrapped_is_sequence, unwrapped_root_kind) = match body_expr {
+        Some(expr) => {
+            let mut inner = expr;
+            while let Expression::ParenthesizedExpression(p) = inner {
+                inner = &p.expression;
+            }
+            (
+                matches!(inner, Expression::SequenceExpression(_)),
+                unwrapped_root_kind_of(inner),
+            )
+        }
+        None => (false, UnwrappedRootKind::Other),
+    };
+    Ok(ExprAnalysisFacts {
+        references: collector.refs,
+        direct_zero_arg_call_callee,
+        unwrapped_is_sequence,
+        unwrapped_root_kind,
+    })
+}
+
+/// Classify a value expression's transparent-paren-unwrapped root into the
+/// [`UnwrappedRootKind`] the `class={…}` `$.clsx` decision needs — the three official
+/// no-clsx-wrap node kinds (`Literal` family / `TemplateLiteral` / `BinaryExpression`) vs
+/// everything else.
+fn unwrapped_root_kind_of(expr: &Expression) -> UnwrappedRootKind {
+    match expr {
+        Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::RegExpLiteral(_)
+        | Expression::StringLiteral(_) => UnwrappedRootKind::Literal,
+        Expression::TemplateLiteral(_) => UnwrappedRootKind::TemplateLiteral,
+        Expression::BinaryExpression(_) => UnwrappedRootKind::BinaryExpression,
+        _ => UnwrappedRootKind::Other,
+    }
 }
 
 /// Collects free identifier references (read vs write) from a wrapped expression,

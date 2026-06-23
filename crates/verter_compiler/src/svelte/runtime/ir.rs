@@ -284,8 +284,10 @@ pub enum AttrIr {
     Style {
         /// The style property name.
         property: String,
-        /// The value expression, or `None` for the shorthand `style:prop`.
-        value: Option<ExprId>,
+        /// The value: an EXPRESSION (`style:color={x}` / shorthand `style:color`) or a
+        /// STATIC-TEXT literal (`style:color="red"` — the SOLE directive family that
+        /// accepts a text value; it folds as a quoted string).
+        value: StyleDirectiveValue,
         /// Whether the `|important` modifier was present.
         important: bool,
     },
@@ -346,6 +348,34 @@ pub enum AttrIr {
     },
 }
 
+/// The value of a `style:` directive — the SOLE directive family that accepts a
+/// static-text value (every other directive REJECTS a text value as the official
+/// `directive_invalid_value`).
+///
+/// - [`Expr`](Self::Expr) — `style:color={x}` (a bare expression), the quoted single-`{x}`
+///   form (`style:color="{x}"`), OR the shorthand `style:color` (the implied `color`
+///   reference). Folds as `{ color: <rewritten expr> }`.
+/// - [`Text`](Self::Text) — `style:color="red"` (a static-text body). Carries the DECODED
+///   text (NOT JS-quoted); the projector emits the single-quoted string literal
+///   (`{ color: 'red' }`). A text-only style directive has NO `ExprId` — there is no
+///   synthetic string-literal expression.
+/// - [`Mixed`](Self::Mixed) — `style:color="a{x}b"` (a text + interpolation concatenation,
+///   the SOLE directive family that accepts one). Carries the ordered literal / expression
+///   parts; the projector folds the template-literal `` { color: `a${x ?? ''}b` } `` through
+///   the SAME shared mixed-value + fold-text path a mixed plain attribute uses. A quoted
+///   single-`{x}` value (`style:color="{x}"`) is NOT mixed — it is one `Expr` chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StyleDirectiveValue {
+    /// An expression value (`style:color={x}` / shorthand `style:color`).
+    Expr(ExprId),
+    /// A static-text value (`style:color="red"`) — the DECODED text, NOT JS-quoted.
+    Text(String),
+    /// A MIXED text + interpolation value (`style:color="a{x}b"`) — the ordered
+    /// literal / `{expr}` parts the projector concatenates into the template-literal
+    /// `` `a${x ?? ''}b` ``.
+    Mixed(Vec<MixedAttrPart>),
+}
+
 /// One part of a mixed / concatenated attribute value (`class="a {b}"`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MixedAttrPart {
@@ -391,6 +421,19 @@ pub enum RuntimeOp {
         target: NodeId,
         /// The spread expressions in source order.
         spreads: Vec<ExprId>,
+    },
+    /// A `style:` directive TRIGGER for a value that is NOT a single reactive expression —
+    /// a STATIC-TEXT body (`style:color="red"`) OR a MIXED text+interpolation body
+    /// (`style:color="a{x}b"`). Neither carries a single `ExprId`, so the value cannot ride
+    /// the expr-bearing [`RuntimeOp::ReactiveAttr`] path; the op is a pure marker that the
+    /// element bears such a style directive, so the coalesced `$.set_style(node, …)`
+    /// projection fires (even when every style directive is non-expression). The
+    /// `style_done` dedup + `project_set_style_op` (which reads ALL the element's style
+    /// attrs and re-derives reactivity, including the mixed template-literal) own the
+    /// concrete call — this op never re-derives the value.
+    StyleDirectiveTrigger {
+        /// The target node.
+        target: NodeId,
     },
     /// A two-way binding.
     Binding {

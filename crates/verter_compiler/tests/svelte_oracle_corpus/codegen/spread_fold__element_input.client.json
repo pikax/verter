@@ -1,0 +1,54 @@
+{
+  "slug": "spread_fold__element_input",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "spread_fold__element_input",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "attribute_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "attribute_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/>`); export default function spread_fold__element_input($$anchor) {let __rune = 0; var input = root(); $.attribute_effect(input, () => ({...props}), void 0, void 0, void 0, void 0, true); $.append($$anchor, input);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

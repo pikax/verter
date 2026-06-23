@@ -20,6 +20,7 @@ pub(super) fn op_target_node(op: &RuntimeOp) -> Option<NodeId> {
         RuntimeOp::ReactiveText { target, .. }
         | RuntimeOp::ReactiveAttr { target, .. }
         | RuntimeOp::SpreadAttrs { target, .. }
+        | RuntimeOp::StyleDirectiveTrigger { target }
         | RuntimeOp::Binding { target, .. }
         | RuntimeOp::Attachment { target, .. }
         | RuntimeOp::Action { target, .. }
@@ -110,6 +111,19 @@ pub(super) fn escape_template_text(s: &str) -> String {
     out
 }
 
+/// Wrap a CONCISE-ARROW expression-payload body in one paren pair UNCONDITIONALLY
+/// (`EXPR` → `(EXPR)`), so `() => (EXPR)` is always an expression body — never a
+/// block body (`() => { … }` parses `{ … }` as a block returning `undefined`) and
+/// never split (`() => a, b` would leak `b` as a positional arg). This is the official
+/// `b.arrow` parenthesization applied unconditionally: over-wrapping a complete
+/// expression is behavior-preserving and cosmetically invisible to the paren-insensitive
+/// structural corpus comparator. Used at EVERY concise-arrow-from-payload site
+/// (the `{@html}` thunk + the `$.template_effect` memoizer deps array). Any future
+/// concise-arrow-from-payload path MUST route through this — there is no shape predicate.
+pub(super) fn concise_arrow_expr_body(body: &str) -> String {
+    format!("({body})")
+}
+
 /// An object-literal KEY for a `class:` / `style:` directive name: a bare identifier
 /// key for a plain JS-identifier name (`foo`, `fontWeight`), or a QUOTED key for a
 /// name that is not a valid bare identifier (`--x`, `font-size`, `aria-label`). The
@@ -135,6 +149,53 @@ pub(super) fn style_object(entries: &[(String, String)]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{{ {body} }}")
+}
+
+/// Render a `key: value` object-literal property, collapsing to the JS object
+/// SHORTHAND `key` when the value text EQUALS the (unquoted) key — the official
+/// printer's shorthand for `{ on: on }` → `{ on }` (a `class:on` / `class:on={on}` /
+/// `style:color` directive whose condition is the same-named binding). A quoted key
+/// (`'font-size'`) never shorthands.
+pub(super) fn object_property(key: &str, value: &str) -> String {
+    if key == value && is_plain_js_identifier(key) {
+        key.to_string()
+    } else {
+        format!("{key}: {value}")
+    }
+}
+
+/// Render the merged `[$.STYLE]` fold entry for a spread element's `style:` directives,
+/// or `None` when there are none. A normal directive folds into the object shorthand
+/// (`{ color: 'red', width: w }`); when ANY `|important` directive is present, the entry
+/// switches to the official `[{ <normal> }, { <important> }]` array form. Each entry is
+/// the already-rendered `key` / `key: value` property text + its `important` flag.
+pub(super) fn fold_style_directives(entries: &[(String, bool)]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let normal: Vec<&str> = entries
+        .iter()
+        .filter(|(_, imp)| !imp)
+        .map(|(s, _)| s.as_str())
+        .collect();
+    let important: Vec<&str> = entries
+        .iter()
+        .filter(|(_, imp)| *imp)
+        .map(|(s, _)| s.as_str())
+        .collect();
+    let obj = |props: &[&str]| -> String {
+        if props.is_empty() {
+            "{}".to_string()
+        } else {
+            format!("{{ {} }}", props.join(", "))
+        }
+    };
+    let body = if important.is_empty() {
+        obj(&normal)
+    } else {
+        format!("[{}, {}]", obj(&normal), obj(&important))
+    };
+    Some(format!("[$.STYLE]: {body}"))
 }
 
 /// Whether a string is a single plain JS identifier (`/^[A-Za-z_$][A-Za-z0-9_$]*$/`)

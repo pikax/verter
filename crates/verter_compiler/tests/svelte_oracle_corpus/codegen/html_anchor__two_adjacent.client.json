@@ -1,0 +1,64 @@
+{
+  "slug": "html_anchor__two_adjacent",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "html_anchor__two_adjacent",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "child",
+    "html",
+    "sibling",
+    "html",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "html",
+    "reset",
+    "sibling"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "child": 1,
+    "html": 2,
+    "sibling": 1,
+    "reset": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><!><!></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><!><!></div>`); export default function html_anchor__two_adjacent($$anchor) {let __rune = 0; var div = root(); var node = $.child(div); $.html(node, () => a); var node_1 = $.sibling(node); $.html(node_1, () => b); $.reset(div); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

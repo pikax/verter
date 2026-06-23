@@ -221,56 +221,19 @@ pub fn rewrite_expression_full(
         other => other,
     };
 
-    // Pass 1: a COMPLETE scope-aware AST walk records every binding-bearing
-    // occurrence (read / reassign / update) as a TYPED occurrence plus any
-    // unsupported expression form. The walk delegates to `walk::walk_*` after
-    // handling each node, so NO subtree is dropped — a NON-delegating
-    // `visit_update_expression` would silently drop the rest of an update's
-    // subtree. Pass 2 turns the occurrences into CodeTransform edits or a refusal.
-    let mut collector = BindingOccurrenceCollector {
-        ctx: RewriteResolveCtx {
+    // Collect the binding-bearing read/write occurrences and plan them into the typed
+    // signal-rewrite edits (the shared two-pass core; a refusal returns the typed surface).
+    let edits = plan_signal_edits(
+        inner,
+        RewriteResolveCtx {
             bindings,
             scopes,
             outer_scope: scope,
             prop_reads,
             proxy_inits,
         },
-        locals: Vec::new(),
-        occurrences: Vec::new(),
-        refusal: None,
-    };
-    collector.rewrite_expr(inner);
-    if let Some(surface) = collector.refusal {
-        return Err(surface);
-    }
-    let occurrences = collector.occurrences;
-
-    // Pass 2 (RewritePlanner): every resolved signal/prop occurrence MUST carry a
-    // rewrite decision (the post-pass invariant). Build the edits from the typed
-    // occurrences; a `RewriteDecision::Refuse` returns the typed surface.
-    let mut planner = RewritePlanner {
-        edits: Vec::new(),
-        refusal: None,
-        unresolved: false,
-    };
-    planner.plan(&occurrences);
-    if let Some(surface) = planner.refusal {
-        return Err(surface);
-    }
-    // POST-PASS ASSERTION: no resolved signal/prop occurrence may remain without a
-    // rewrite decision. The planner sets `unresolved` if it ever sees a
-    // `MustRewrite` occurrence it did not turn into an edit — a structural
-    // safeguard against a silent un-rewritten signal read slipping through.
-    debug_assert!(
-        !planner.unresolved,
-        "rewrite planner left a resolved signal/prop occurrence un-rewritten in `{source}`"
-    );
-    if planner.unresolved {
-        return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
-            span: VerterSpan::new(0, 0),
-        });
-    }
-    let edits = planner.edits;
+        source,
+    )?;
 
     let ct_alloc = Allocator::default();
     let mut ct = CodeTransform::new(&wrapped, &ct_alloc);
@@ -302,6 +265,60 @@ pub fn rewrite_expression_full(
     Ok(RewrittenExpr {
         text: body.to_string(),
     })
+}
+
+/// Collect the binding-bearing read/write occurrences of one expression node and plan them
+/// into the typed signal-rewrite [`Edit`]s — the two-pass core of the source-preserving
+/// [`rewrite_expression_full`]. A refusal (an unsupported write target / `await` / TS-wrapped
+/// reactive target, or a resolved occurrence left un-rewritten) returns the typed surface.
+/// `source` is the original expression text (for the debug assertion message only).
+fn plan_signal_edits(
+    inner: &Expression<'_>,
+    ctx: RewriteResolveCtx<'_>,
+    source: &str,
+) -> Result<Vec<Edit>, UnsupportedSvelteRuntimeSurface> {
+    // Pass 1: a COMPLETE scope-aware AST walk records every binding-bearing occurrence
+    // (read / reassign / update) as a TYPED occurrence plus any unsupported expression form.
+    // The walk delegates to `walk::walk_*` after handling each node, so NO subtree is
+    // dropped. Pass 2 turns the occurrences into CodeTransform edits or a refusal.
+    let mut collector = BindingOccurrenceCollector {
+        ctx,
+        locals: Vec::new(),
+        occurrences: Vec::new(),
+        refusal: None,
+    };
+    collector.rewrite_expr(inner);
+    if let Some(surface) = collector.refusal {
+        return Err(surface);
+    }
+    let occurrences = collector.occurrences;
+
+    // Pass 2 (RewritePlanner): every resolved signal/prop occurrence MUST carry a rewrite
+    // decision (the post-pass invariant). Build the edits from the typed occurrences; a
+    // `RewriteDecision::Refuse` returns the typed surface.
+    let mut planner = RewritePlanner {
+        edits: Vec::new(),
+        refusal: None,
+        unresolved: false,
+    };
+    planner.plan(&occurrences);
+    if let Some(surface) = planner.refusal {
+        return Err(surface);
+    }
+    // POST-PASS ASSERTION: no resolved signal/prop occurrence may remain without a rewrite
+    // decision. The planner sets `unresolved` if it ever sees a `MustRewrite` occurrence it
+    // did not turn into an edit — a structural safeguard against a silent un-rewritten
+    // signal read slipping through.
+    debug_assert!(
+        !planner.unresolved,
+        "rewrite planner left a resolved signal/prop occurrence un-rewritten in `{source}`"
+    );
+    if planner.unresolved {
+        return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
+            span: VerterSpan::new(0, 0),
+        });
+    }
+    Ok(planner.edits)
 }
 
 /// One mapped/unmapped edit the rewriter records over the wrapped expression

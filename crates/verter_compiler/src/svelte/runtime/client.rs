@@ -80,7 +80,7 @@ pub(super) fn emit_client_module(
 
 /// The client-module emitter — holds the NARROW plan and the deterministic name
 /// allocator state.
-struct ClientEmitter<'a> {
+pub(super) struct ClientEmitter<'a> {
     /// The narrow plan — the SOLE emission input.
     plan: &'a ClientModulePlan<'a>,
     /// Reserved + already-allocated names (collision avoidance).
@@ -133,6 +133,17 @@ impl<'a> ClientEmitter<'a> {
         for name in &plan.build.declared_roots {
             used.insert(name.clone());
         }
+        // ALSO reserve every FREE template-expression reference (reads AND writes), so a
+        // generated DOM-var stem never collides with a free identifier the template emits.
+        // `<p {...p}>` would otherwise emit `var p` (the `<p>` element local) shadowing the
+        // `...p` spread payload — official renames the DOM local to `p_1`. The official
+        // `scope.generate` reserves referenced free identifiers generally; seeding them here
+        // makes `alloc_name` rename the synthesized stem (→ `p_1`) across ALL surfaces.
+        for analyzed in plan.build.ir.analysis.expressions.all() {
+            for reference in &analyzed.references {
+                used.insert(reference.name.clone());
+            }
+        }
         for reserved in ["$", "$$anchor", "$$props", "$$value"] {
             used.insert(reserved.to_string());
         }
@@ -155,8 +166,14 @@ impl<'a> ClientEmitter<'a> {
     /// Returns the `'a`-lifetime reference (copied out of the plan) so it does NOT
     /// borrow `self` — the walk reads IR geometry while still mutating `self`'s
     /// var-name maps.
-    fn ir(&self) -> &'a SvelteRuntimeIr<'a> {
+    pub(super) fn ir(&self) -> &'a SvelteRuntimeIr<'a> {
         self.plan.build.ir
+    }
+
+    /// The narrow plan (the SOLE emission input) — read by the sibling spread/`{@html}`
+    /// emission helpers for the op set.
+    pub(super) fn plan(&self) -> &ClientModulePlan<'a> {
+        self.plan
     }
 
     /// The NARROW node for an IR node id (the plan node arena mirrors the IR node
@@ -204,12 +221,29 @@ impl<'a> ClientEmitter<'a> {
         // multi-region component (a nested block body) is a block surface already
         // refused upstream.
         let root_factory = html_plan.templates.first();
-        let root_var = self.alloc_name("root");
-        let mounts_fragment = emit_root_hoist(&mut out, &root_var, root_factory);
+        // A lone `{@html}` root is `$.comment()`-anchored IN THE BODY (no module hoist),
+        // so it reserves no `root` factory var.
+        let comment_anchor_root = matches!(
+            root_factory,
+            Some(TemplateFactory::CommentAnchor {
+                reason: super::html::AnchorReason::RawHtmlRoot,
+            })
+        );
+        let root_var = if comment_anchor_root {
+            String::new()
+        } else {
+            self.alloc_name("root")
+        };
+        let mounts_fragment = if comment_anchor_root {
+            // No `var root = …` module hoist; the `$.comment()` is created in the body.
+            true
+        } else {
+            emit_root_hoist(&mut out, &root_var, root_factory)
+        };
         out.push('\n');
 
         // (3) The component body.
-        self.emit_body(&mut out, &root_var, mounts_fragment);
+        self.emit_body(&mut out, &root_var, mounts_fragment, comment_anchor_root);
 
         // (4) The `$.delegate([...])` epilogue.
         if !topology.delegated_events.is_empty() {
@@ -220,8 +254,15 @@ impl<'a> ClientEmitter<'a> {
         ClientModule { code: out }
     }
 
-    /// Emit the component function body.
-    fn emit_body(&mut self, out: &mut String, root_var: &str, mounts_fragment: bool) {
+    /// Emit the component function body. `comment_anchor_root` marks the lone-`{@html}`
+    /// root whose fragment is `$.comment()` created in the body (no `root()` clone frame).
+    fn emit_body(
+        &mut self,
+        out: &mut String,
+        root_var: &str,
+        mounts_fragment: bool,
+        comment_anchor_root: bool,
+    ) {
         // The component-context (`$.push`/`$.pop`) + props-param facts were decided
         // by the semantic projection (`SupportedClientIr::build`); the emitter reads
         // the narrow decision, never re-derives it.
@@ -264,7 +305,8 @@ impl<'a> ClientEmitter<'a> {
         // `$.first_child` / `$.child`; only the root fragment is text-first-aware.) The
         // trailing static-run `$.next(skipped - 1)` in the walk is a SEPARATE cursor
         // advance and stays as-is.
-        if mounts_fragment && self.root_region_is_text_first(root_scope_id) {
+        if mounts_fragment && !comment_anchor_root && self.root_region_is_text_first(root_scope_id)
+        {
             out.push_str("\t$.next();\n");
         }
         let region_var = if mounts_fragment {
@@ -273,7 +315,13 @@ impl<'a> ClientEmitter<'a> {
             // The single clone-root element's own var (named by its tag).
             self.single_root_var_name(root_scope_id)
         };
-        out.push_str(&format!("\tvar {region_var} = {root_var}();\n"));
+        // A lone-`{@html}` root creates its fragment via `$.comment()` (no `root()` clone
+        // frame); every other root clones the module-hoisted `root` factory.
+        if comment_anchor_root {
+            out.push_str(&format!("\tvar {region_var} = $.comment();\n"));
+        } else {
+            out.push_str(&format!("\tvar {region_var} = {root_var}();\n"));
+        }
 
         // The DOM walk populates the node/interp var maps the ops read.
         self.emit_walk(out, root_scope_id, &region_var, mounts_fragment);
@@ -422,6 +470,17 @@ impl<'a> ClientEmitter<'a> {
             // sibling descends via `$.sibling(id)`), matching official `flush_node`.
             skipped = 1;
             named_any = true;
+            // A `{@html}` that is the SOLE controlled child of its parent gets NO `<!>`
+            // anchor and NO walk descent: its `$.html(parent, …, true)` was emitted at the
+            // parent's init position. It still counts as a named position (so the parent's
+            // `$.reset` emits), but it allocates no var and advances no cursor.
+            if let CleanItem::Node(node) = item {
+                if matches!(self.client_node(*node), ClientNode::RawHtml { .. })
+                    && self.html_op_is_only_child(*node)
+                {
+                    continue;
+                }
+            }
             // Build the descent expression for this position. The official `is_text`
             // boolean trails the descent helper when the descended-to position is a
             // text DOM node that is a PURE single interpolation (`$.child(p, true)` /
@@ -451,6 +510,15 @@ impl<'a> ClientEmitter<'a> {
                 }
                 CleanItem::Node(node) => {
                     self.node_var.insert(*node, var.clone());
+                    // A `{@html}` with siblings reaches its OWN `<!>` anchor var (just
+                    // descended to); emit `$.html(node, payload)` here (NO trailing `true`
+                    // — that is the only-child form). The parent's `$.reset` is emitted by
+                    // the parent's child walk.
+                    if let ClientNode::RawHtml { .. } = self.client_node(*node) {
+                        if let Some(payload) = self.html_op_payload(*node) {
+                            out.push_str(&format!("\t$.html({var}, {payload});\n"));
+                        }
+                    }
                     // The element is a NARROW `ClientNode::Element` (the emission
                     // decision); its children are the IR geometry the cleaner
                     // partitions. A non-element narrow node has no children to walk.
@@ -678,11 +746,16 @@ impl<'a> ClientEmitter<'a> {
                     ..
                 } => self.emit_event(out, NodeId(target.0), event_type, handler),
                 // The reactive-text / reactive-attr / class / style ops were grouped
-                // above; the non-reactive attr inits were emitted in (b).
+                // above; the non-reactive attr inits were emitted in (b). The
+                // `$.attribute_effect` spread fold and the `$.html` raw-markup op are
+                // INLINE init-domain ops (emitted during the walk at the element's init
+                // position / the `{@html}` anchor descent), so they are not emitted here.
                 ClientRuntimeOp::ReactiveText { .. }
                 | ClientRuntimeOp::ReactiveAttr { .. }
                 | ClientRuntimeOp::SetClass { .. }
-                | ClientRuntimeOp::SetStyle { .. } => {}
+                | ClientRuntimeOp::SetStyle { .. }
+                | ClientRuntimeOp::AttributeEffect { .. }
+                | ClientRuntimeOp::Html { .. } => {}
             }
         }
     }
@@ -863,7 +936,7 @@ impl<'a> ClientEmitter<'a> {
 
     /// The emitted DOM-variable name reaching a node (from the walk's `node_var` map),
     /// or the `node` fallback (unreachable on the accept path).
-    fn dom_var(&self, target: NodeId) -> String {
+    pub(super) fn dom_var(&self, target: NodeId) -> String {
         self.node_var
             .get(&target)
             .cloned()
@@ -1210,6 +1283,26 @@ impl<'a> ClientEmitter<'a> {
                     None,
                     &mut None,
                 ))),
+                // The `$.attribute_effect` spread fold for a spread element — emitted at
+                // the element's init position (the official `Element.js` spread emission
+                // order: after the input cleanup, before the children / reset).
+                ClientRuntimeOp::AttributeEffect {
+                    target,
+                    fold_body,
+                    input_trailing,
+                } if NodeId(target.0) == node => Some(InlineInit::Stmt(
+                    self.emit_attribute_effect(node, fold_body, *input_trailing),
+                )),
+                // A `{@html}` that is the SOLE controlled child of THIS element — emitted
+                // at the element's init position, operating on the element var with the
+                // trailing `true` (the `$.reset(element)` follows via the child walk).
+                ClientRuntimeOp::Html {
+                    target,
+                    payload,
+                    only_child: true,
+                } if self.html_only_child_parent(NodeId(target.0)) == Some(node) => {
+                    Some(InlineInit::Stmt(self.emit_html_only_child(node, payload)))
+                }
                 _ => None,
             })
             .collect();

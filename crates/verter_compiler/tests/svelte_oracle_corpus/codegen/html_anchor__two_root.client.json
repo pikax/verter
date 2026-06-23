@@ -1,0 +1,61 @@
+{
+  "slug": "html_anchor__two_root",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "html_anchor__two_root",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "first_child",
+    "html",
+    "sibling",
+    "html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "first_child",
+    "from_html",
+    "html",
+    "sibling"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "first_child": 1,
+    "html": 2,
+    "sibling": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<!><!>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<!><!>`, 1); export default function html_anchor__two_root($$anchor) {let __rune = 0; var fragment = root(); var node = $.first_child(fragment); $.html(node, () => a); var node_1 = $.sibling(node); $.html(node_1, () => b); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}
