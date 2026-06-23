@@ -746,10 +746,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// its operator `TypeExpr` un-reduced. Callers that need the operator
     /// collapsed must go through [`Self::materialize_reduced_output_type_expr`].
     ///
-    /// The `Option` return is the miss signal: `None` means the node is not in
-    /// the live graph store. It is deliberately NOT folded into an
-    /// `Unknown`-sentinel here so callers can map a miss to whatever their own
-    /// output contract requires.
+    /// The `Option` return is the miss signal: `None` means the requested node —
+    /// or a node required while raising it — is unavailable/unraisable from the
+    /// live graph store. It is deliberately NOT folded into an `Unknown`-sentinel
+    /// here so callers can map a miss to whatever their own output contract
+    /// requires.
     // The intended/named boundary for output adapters / diagnostics / compat
     // exporters that hold a `SemanticNodeId`, pending caller migration;
     // exercised today by the carrier round-trip unit tests.
@@ -760,6 +761,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Materializes `node` after applying the supplied projection publication
     /// reduction context; callers must pass a published/output context.
+    ///
+    /// The context is taken explicitly (rather than narrowed to a mode or wrapped
+    /// in an output-only newtype) because the production projection callers build
+    /// and own their reduction context — the lower-level
+    /// [`Self::raise_and_reduce_with_context`] stays the context primitive this
+    /// boundary names for output use.
     ///
     /// Reduction runs FIRST, then the reduced node is raised to a
     /// [`TypeExpr`], so an operator-shape node (`IndexedAccess` / `Conditional`
