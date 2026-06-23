@@ -99,17 +99,20 @@ impl From<DiscoveryError> for LaunchError {
 impl fmt::Display for LaunchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Keep the shared crate's distinct reason, then append actionable,
-        // variant-tailored guidance naming the config keys the user can set.
+        // variant-tailored guidance naming the config keys the user can set, and a
+        // pointer to the editor docs page for the full setup steps.
         write!(f, "{}", self.source)?;
         match self.source {
             DiscoveryError::PathFoundButNotOptedIn { .. } => f.write_str(
                 ". Set `lsp.serverPath` to the absolute path of a verter-lsp binary, \
-                 or opt into PATH discovery with `lsp.serverSource = \"path\"`.",
+                 or opt into PATH discovery with `lsp.serverSource = \"path\"` \
+                 (see the Lapce README or https://verterjs.dev/editor/other-editors).",
             ),
             DiscoveryError::NothingResolved { .. } => f.write_str(
                 ". Set `lsp.serverPath` to the absolute path of a verter-lsp binary, \
                  or install verter-lsp on your PATH and opt in with \
-                 `lsp.serverSource = \"path\"`.",
+                 `lsp.serverSource = \"path\"` \
+                 (see the Lapce README or https://verterjs.dev/editor/other-editors).",
             ),
         }
     }
@@ -717,6 +720,54 @@ mod tests {
                 DiscoveryError::NothingResolved { .. }
             ),
             "an unsupported platform must fail loud (no guessed binary), got {unsupported:?}"
+        );
+    }
+
+    #[test]
+    fn launch_error_points_at_setup_docs_while_keeping_both_remedies() {
+        // Beyond naming the two config-key remedies, the actionable guidance must
+        // also point the user at where to read the full setup steps — the editor
+        // docs page — so a fresh user who hit the loud fail has a discoverable next
+        // step. This holds for BOTH distinct discovery reasons, and the error stays
+        // a loud failure (never silently resolves to an Ok launch).
+
+        // NothingResolved: empty config.
+        let nothing = plan_launch(Some("/x"), &json!({}), "linux", "x86_64").unwrap_err();
+        let nothing_msg = nothing.to_string();
+        assert!(
+            nothing_msg.contains("verterjs.dev/editor"),
+            "NothingResolved guidance must point at the editor docs page; got: {nothing_msg}"
+        );
+        assert!(
+            nothing_msg.contains("lsp.serverPath"),
+            "NothingResolved guidance must still name lsp.serverPath; got: {nothing_msg}"
+        );
+        assert!(
+            nothing_msg.contains("serverSource"),
+            "NothingResolved guidance must still name the serverSource opt-in; got: {nothing_msg}"
+        );
+
+        // PathFoundButNotOptedIn: synthesise the distinct variant directly (the volt
+        // only computes a PATH candidate when opted in, so this reason is reached via
+        // the shared crate). The wrapper's Display must carry the same docs reference.
+        let path_not_opted: LaunchError = DiscoveryError::PathFoundButNotOptedIn {
+            reason: "a verter-lsp was found on PATH but PATH discovery was not opted into"
+                .to_string(),
+            found_on_path: "/on/path/verter-lsp".to_string(),
+        }
+        .into();
+        let path_msg = path_not_opted.to_string();
+        assert!(
+            path_msg.contains("verterjs.dev/editor"),
+            "PathFoundButNotOptedIn guidance must point at the editor docs page; got: {path_msg}"
+        );
+        assert!(
+            path_msg.contains("lsp.serverPath"),
+            "PathFoundButNotOptedIn guidance must still name lsp.serverPath; got: {path_msg}"
+        );
+        assert!(
+            path_msg.contains("serverSource"),
+            "PathFoundButNotOptedIn guidance must still name the serverSource opt-in; got: {path_msg}"
         );
     }
 

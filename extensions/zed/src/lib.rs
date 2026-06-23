@@ -89,18 +89,21 @@ impl From<DiscoveryError> for LaunchError {
 impl fmt::Display for LaunchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Keep the shared crate's distinct reason, then append actionable,
-        // variant-tailored guidance naming the Zed settings keys the user can set.
+        // variant-tailored guidance naming the Zed settings keys the user can set,
+        // and a pointer to the editor docs page for the full setup steps.
         write!(f, "{}", self.source)?;
         match self.source {
             DiscoveryError::PathFoundButNotOptedIn { .. } => f.write_str(
                 ". Set `lsp.verter.binary.path` to the absolute path of a verter-lsp \
                  binary, or opt into PATH discovery with \
-                 `lsp.verter.settings.serverSource = \"path\"`.",
+                 `lsp.verter.settings.serverSource = \"path\"` \
+                 (see the Zed README or https://verterjs.dev/editor/other-editors).",
             ),
             DiscoveryError::NothingResolved { .. } => f.write_str(
                 ". Set `lsp.verter.binary.path` to the absolute path of a verter-lsp \
                  binary, or install verter-lsp on your PATH and opt in with \
-                 `lsp.verter.settings.serverSource = \"path\"`.",
+                 `lsp.verter.settings.serverSource = \"path\"` \
+                 (see the Zed README or https://verterjs.dev/editor/other-editors).",
             ),
         }
     }
@@ -554,6 +557,62 @@ mod tests {
                 DiscoveryError::NothingResolved { .. }
             ),
             "an opt-in with no PATH hit must fail loud (no guessed binary), got {absent:?}"
+        );
+    }
+
+    #[test]
+    fn launch_error_points_at_setup_docs_while_keeping_both_remedies() {
+        // Beyond naming the two settings-key remedies, the actionable guidance must
+        // also point the user at where to read the full setup steps — the editor
+        // docs page — so a fresh user who hit the loud fail has a discoverable next
+        // step. This holds for BOTH distinct discovery reasons, and the error stays
+        // a loud failure (never silently resolves to an Ok launch).
+
+        // NothingResolved: empty settings, no override.
+        let nothing = plan_launch(Some("/x"), &json!({}), None, None, false).unwrap_err();
+        let nothing_msg = nothing.to_string();
+        assert!(
+            nothing_msg.contains("verterjs.dev/editor"),
+            "NothingResolved guidance must point at the editor docs page; got: {nothing_msg}"
+        );
+        assert!(
+            nothing_msg.contains("lsp.verter.binary.path"),
+            "NothingResolved guidance must still name the override key; got: {nothing_msg}"
+        );
+        assert!(
+            nothing_msg.contains("serverSource"),
+            "NothingResolved guidance must still name the serverSource opt-in; got: {nothing_msg}"
+        );
+
+        // PathFoundButNotOptedIn: a real PATH hit injected WITHOUT opt-in maps to the
+        // distinct reason; the wrapper's Display must carry the same docs reference.
+        let path_not_opted = plan_launch(
+            Some("/x"),
+            &json!({}),
+            None,
+            Some("/on/path/verter-lsp"),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                path_not_opted.discovery_error(),
+                DiscoveryError::PathFoundButNotOptedIn { .. }
+            ),
+            "a PATH hit without opt-in must map to PathFoundButNotOptedIn, got {path_not_opted:?}"
+        );
+        let path_msg = path_not_opted.to_string();
+        assert!(
+            path_msg.contains("verterjs.dev/editor"),
+            "PathFoundButNotOptedIn guidance must point at the editor docs page; got: {path_msg}"
+        );
+        assert!(
+            path_msg.contains("lsp.verter.binary.path"),
+            "PathFoundButNotOptedIn guidance must still name the override key; got: {path_msg}"
+        );
+        assert!(
+            path_msg.contains("serverSource"),
+            "PathFoundButNotOptedIn guidance must still name the serverSource opt-in; got: {path_msg}"
         );
     }
 
