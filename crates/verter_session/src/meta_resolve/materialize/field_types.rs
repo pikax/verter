@@ -501,7 +501,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 /// # Shape
 ///
 /// Graph-native: walks the reachable subgraph of `member_value` via
-/// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_and_reduce`]
+/// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_and_reduce_with_context`]
 /// (which dispatches per shape through `execute_cooperative`). NOT
 /// path-precise: the iterative reducer pushes children before reducing
 /// parents, so the full subgraph of `member_value` is visited.
