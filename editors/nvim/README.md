@@ -128,13 +128,16 @@ require("verter").setup({
   vite_config = { enabled = true, trusted_files = {} },
   experimental = { conditional_root_narrowing = false, strict_slots = false },
   hover = { provenance = false },
-  frameworks = { "vue", "svelte" },
+  statistics = { enabled = false },
   capabilities = nil,             -- merged in (blink.cmp / cmp_nvim_lsp)
 })
 ```
 
-Only the server-read init options are forwarded. VS-Code-UI-only surfaces
-(`configuration`, `mcp`, `decorations`, `statistics`) are intentionally omitted.
+Only the canonical six server-read init options are forwarded — `lint`,
+`inlayHints`, `viteConfig`, `experimental`, `hover`, `statistics` (the same
+parity set every Verter editor client ships). VS-Code-UI-only surfaces
+(`configuration`, `mcp`, `decorations`) are intentionally omitted, and
+`frameworks` is dropped because the server ignores it.
 
 ### File watching (`watch_files`, default OFF)
 

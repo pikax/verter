@@ -92,12 +92,16 @@ end
 
 --- Build the `init_options` table sent on `initialize`.
 ---
---- Emits exactly the camelCase wire keys the server reads
---- (`lifecycle.rs::handle_initialize`, `config.rs`) and nothing else. VS-Code-UI-only
---- surfaces (`configuration`, `mcp`, `decorations`, `statistics`) are intentionally
---- omitted: the server never reads them and a plain LSP client has its own
---- language-service settings. `frameworks` is informational (the server ignores it)
---- but is mirrored for completeness.
+--- Emits exactly the six camelCase wire keys the server reads
+--- (`lifecycle.rs::handle_initialize`, `config.rs`) and nothing else:
+--- `lint`, `inlayHints`, `viteConfig`, `experimental`, `hover`, `statistics`.
+--- This is the canonical init-options parity set shared with every other Verter
+--- editor client (`verter_editor_client::build_initialization_options`); the Rust
+--- drift-guard `crates/verter-editor-client/tests/nvim_config_contract.rs` binds
+--- this builder to that SSoT. VS-Code-UI-only surfaces (`configuration`, `mcp`,
+--- `decorations`) are intentionally omitted: the server never reads them and a
+--- plain LSP client has its own language-service settings. `frameworks` is NOT
+--- emitted — the server ignores it, so it was dead protocol surface.
 ---@param opts table merged options
 ---@return table init_options
 function M.build_init_options(opts)
@@ -120,7 +124,11 @@ function M.build_init_options(opts)
     hover = {
       provenance = opts.hover.provenance,
     },
-    frameworks = opts.frameworks,
+    -- The server reads `initializationOptions.statistics` (`statistics.set_enabled`)
+    -- and defaults it OFF when absent; emit it explicitly so a user opt-in is honored.
+    statistics = {
+      enabled = opts.statistics.enabled,
+    },
   }
 end
 

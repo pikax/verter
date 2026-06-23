@@ -39,7 +39,7 @@ local function merged(overrides)
     vite_config = { enabled = true, trusted_files = {} },
     experimental = { conditional_root_narrowing = false, strict_slots = false },
     hover = { provenance = false },
-    frameworks = { "vue", "svelte" },
+    statistics = { enabled = false },
     capabilities = nil,
   }
   return vim.tbl_deep_extend("force", base, overrides or {})
@@ -207,7 +207,12 @@ describe("verter.config.build_init_options", function()
     assert.are.equal(false, io.experimental.strictSlots)
     assert.is_not_nil(io.hover)
     assert.are.equal(false, io.hover.provenance)
-    assert.are.same({ "vue", "svelte" }, io.frameworks)
+    -- `statistics` is server-read (statistics.set_enabled) and shipped OFF by
+    -- default; it is part of the canonical parity set.
+    assert.is_not_nil(io.statistics)
+    assert.are.equal(false, io.statistics.enabled)
+    -- `frameworks` is NOT emitted: the server ignores it (dead protocol surface).
+    assert.is_nil(io.frameworks)
   end)
 
   it("translates snake_case opts into camelCase wire keys (no snake_case leak)", function()
@@ -239,23 +244,37 @@ describe("verter.config.build_init_options", function()
     -- carry these onto the wire table. (The previous version of this test
     -- passed vacuously because the input never contained these keys.)
     -- `rawget` defeats any metatable that might mask a key.
+    --
+    -- NOTE: `statistics` is NOT in this set — it IS a server-read parity key, so
+    -- it is emitted (asserted in the closed-whitelist test below). The builder
+    -- positively constructs each emitted group, so an injected non-parity key
+    -- like `statistics.panel` still cannot leak: only `statistics.enabled` is
+    -- read and re-emitted.
     local io = config.build_init_options(merged({
       configuration = { foo = true },
       mcp = { enabled = true },
       decorations = { inline = true },
-      statistics = { panel = true },
+      statistics = { enabled = false, panel = true },
     }))
     assert.is_nil(rawget(io, "configuration"))
     assert.is_nil(rawget(io, "mcp"))
     assert.is_nil(rawget(io, "decorations"))
-    assert.is_nil(rawget(io, "statistics"))
+    -- statistics IS emitted, but only its server-read `enabled` field — the
+    -- injected `panel` sub-key is not forwarded (positive construction).
+    assert.is_not_nil(rawget(io, "statistics"))
+    assert.are.equal(false, io.statistics.enabled)
+    assert.is_nil(rawget(io.statistics, "panel"))
   end)
 
   it("emits EXACTLY the server-read top-level keys (closed whitelist)", function()
     -- Even with extra UI-only keys injected, the result's top-level key set is
-    -- exactly the server-read surface. `frameworks` IS intended (design §3.6,
-    -- informational) so the whitelist KEEPS it. A pass-through impl would add
-    -- the injected keys and fail this sorted-set compare.
+    -- exactly the canonical six server-read keys
+    -- (verter_editor_client::build_initialization_options): `statistics` is
+    -- server-read and PRESENT; `frameworks` is server-ignored and ABSENT. A
+    -- pass-through impl would add the injected keys and fail this sorted-set
+    -- compare. The Rust drift-guard
+    -- (crates/verter-editor-client/tests/nvim_config_contract.rs) binds this set
+    -- to the shared SSoT.
     local io = config.build_init_options(merged({
       configuration = { foo = true },
       mcp = { enabled = true },
@@ -265,7 +284,7 @@ describe("verter.config.build_init_options", function()
       keys[#keys + 1] = k
     end
     table.sort(keys)
-    local expected = { "experimental", "frameworks", "hover", "inlayHints", "lint", "viteConfig" }
+    local expected = { "experimental", "hover", "inlayHints", "lint", "statistics", "viteConfig" }
     table.sort(expected)
     assert.are.same(expected, keys)
   end)

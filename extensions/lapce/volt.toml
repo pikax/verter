@@ -30,8 +30,8 @@ default = []
 description = "Extra arguments appended to the verter-lsp launch (after the type-provider flag, before the workspace root). Crate-owned arguments (--type-provider, --tsdk, bare positionals) are ignored."
 
 [config."lsp.serverSource"]
-default = "managed"
-description = "Where to find verter-lsp when no serverPath is set: \"managed\" (a pinned binary in the volt directory) or \"path\" (opt into PATH discovery). With neither a serverPath nor a present managed/PATH binary, the volt fails loud with setup guidance instead of guessing."
+default = "none"
+description = "How to find verter-lsp when no lsp.serverPath is set. \"none\" (default) selects no auto-discovery source: set lsp.serverPath to an absolute verter-lsp path, or opt into PATH discovery with \"path\". \"path\" looks up verter-lsp on your PATH. (A \"managed\" pinned-binary source is reserved for a future release and is NOT available yet; it is not auto-discovered.) With \"none\" and no lsp.serverPath, the volt fails loud with setup guidance instead of guessing."
 
 # --- Type provider ---
 

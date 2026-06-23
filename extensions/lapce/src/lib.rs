@@ -586,8 +586,15 @@ mod tests {
     #[test]
     fn no_source_configured_fails_loud_and_does_not_launch() {
         // Neither an override nor a PATH opt-in: nothing launches and a loud,
-        // actionable error (naming lsp.serverPath) is shown instead.
-        for cfg in [json!({}), json!({ "lsp": { "serverSource": "managed" } })] {
+        // actionable error (naming lsp.serverPath) is shown instead. The cases
+        // cover the empty config, the reserved-but-unavailable "managed" source,
+        // and the shipped "none" default — all three are honest non-launch
+        // postures that surface setup guidance instead of guessing.
+        for cfg in [
+            json!({}),
+            json!({ "lsp": { "serverSource": "managed" } }),
+            json!({ "lsp": { "serverSource": "none" } }),
+        ] {
             let mut launcher = RecordingLauncher::default();
             let launched = handle_initialize(&mut launcher, Some("/x"), &cfg, "linux", "x86_64");
 
@@ -609,6 +616,75 @@ mod tests {
                 "error must mention the PATH opt-in; got: {err}"
             );
         }
+    }
+
+    /// The `lsp.serverSource` value baked into the shipped `volt.toml`, read from
+    /// the committed manifest so this test binds to the value users actually get
+    /// (and cannot silently drift if the default is changed). The manifest is
+    /// embedded at compile time, so the test sees exactly the file that ships.
+    fn shipped_server_source_default() -> String {
+        const VOLT_TOML: &str = include_str!("../volt.toml");
+        let manifest: toml::Value =
+            toml::from_str(VOLT_TOML).expect("volt.toml must be valid TOML");
+        manifest
+            .get("config")
+            .and_then(|c| c.get("lsp.serverSource"))
+            .and_then(|s| s.get("default"))
+            .and_then(toml::Value::as_str)
+            .expect("volt.toml must declare config.\"lsp.serverSource\".default")
+            .to_string()
+    }
+
+    #[test]
+    fn fresh_default_serversource_fails_loud_actionably_not_phantom_managed() {
+        // A FRESH user configures nothing, so the volt's DEFAULT `lsp.serverSource`
+        // governs discovery. Read that default straight from the shipped manifest
+        // so this test is a genuine default-binding guard — it tracks whatever
+        // value actually ships, it does not restate a hardcoded constant.
+        let default_source = shipped_server_source_default();
+
+        // RED-on-revert hook: the v0 default must NOT name the "managed" capability,
+        // which does not exist (plan_launch hardcodes `managed_present: None`). With
+        // the old phantom `"managed"` default this assertion fails RED, pinning the
+        // honest-default decision permanently.
+        assert_ne!(
+            default_source, "managed",
+            "the shipped lsp.serverSource default must not be the phantom \"managed\" \
+             capability (no managed provisioning exists in v0): got {default_source:?}"
+        );
+
+        // Build the exact cfg a fresh user gets: only the volt's default
+        // serverSource, no serverPath override, no explicit opt-in.
+        let cfg = json!({ "lsp": { "serverSource": default_source } });
+
+        let mut launcher = RecordingLauncher::default();
+        let launched = handle_initialize(&mut launcher, Some("/x"), &cfg, "linux", "x86_64");
+
+        // The honest v0 posture: no auto-discovery source is selected, so nothing
+        // launches and a loud, actionable error is shown instead of a silent guess.
+        assert!(
+            !launched,
+            "a fresh-default launch must NOT start a server (no discovery source selected)"
+        );
+        assert!(
+            launcher.launched.is_none(),
+            "start_lsp must not be called on the fresh default"
+        );
+
+        let err = launcher
+            .error
+            .expect("a loud, actionable error must be shown");
+        // The error names the override key the user can set...
+        assert!(
+            err.contains("lsp.serverPath"),
+            "fresh-default error must name lsp.serverPath; got: {err}"
+        );
+        // ...and the PATH opt-in (`serverSource = \"path\"`), so the user has two
+        // concrete next steps.
+        assert!(
+            err.contains("serverSource"),
+            "fresh-default error must mention the serverSource PATH opt-in; got: {err}"
+        );
     }
 
     #[test]

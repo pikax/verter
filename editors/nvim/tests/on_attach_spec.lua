@@ -21,7 +21,7 @@ local function merged(overrides)
     vite_config = { enabled = true, trusted_files = {} },
     experimental = { conditional_root_narrowing = false, strict_slots = false },
     hover = { provenance = false },
-    frameworks = { "vue", "svelte" },
+    statistics = { enabled = false },
     capabilities = nil,
   }
   return vim.tbl_deep_extend("force", base, overrides or {})

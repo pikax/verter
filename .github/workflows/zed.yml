@@ -18,10 +18,12 @@ on:
     branches: [main]
     paths:
       - "extensions/zed/**"
+      - "crates/verter-editor-client/**"
       - ".github/workflows/zed.yml"
   pull_request:
     paths:
       - "extensions/zed/**"
+      - "crates/verter-editor-client/**"
       - ".github/workflows/zed.yml"
 
 jobs:

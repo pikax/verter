@@ -17,10 +17,12 @@ on:
     branches: [main]
     paths:
       - "editors/helix/**"
+      - "crates/verter-editor-client/**"
       - ".github/workflows/helix.yml"
   pull_request:
     paths:
       - "editors/helix/**"
+      - "crates/verter-editor-client/**"
       - ".github/workflows/helix.yml"
 
 jobs:

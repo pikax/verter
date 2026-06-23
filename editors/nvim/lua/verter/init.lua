@@ -16,6 +16,13 @@ local M = {}
 --- server would silently fall back to `auto`, degrading provider selection with
 --- no error, so `setup` refuses to register on an invalid value (fail-closed,
 --- mirroring the missing-binary path).
+---
+--- This is a DELIBERATE native-client superset of the SDK-less wasm clients'
+--- `{tsgo, off}` clamp (Lapce/Zed): Neovim is a full editor that can supply a
+--- TypeScript SDK on PATH and `tsserver` self-discovers its own install, so the
+--- richer `auto | tsgo | tsserver | off` surface is an intentional advanced
+--- capability here, not a divergence. The default still stays `tsgo` (self-
+--- contained, discovers its own binary).
 local VALID_TYPE_PROVIDERS = {
   auto = true,
   tsgo = true,
@@ -59,13 +66,16 @@ local DEFAULTS = {
   semantic_tokens = true,
   -- Forwarded to the server via cmd_env.VERTER_LOG.
   log_level = "info",
-  -- Init-option parity (server-read subset only).
+  -- Init-option parity (the canonical six server-read keys only; mirrors
+  -- verter_editor_client::build_initialization_options). `frameworks` is NOT a
+  -- key: the server ignores it.
   lint = { enabled = false, preset = "recommended" },
   inlay_hints = { enabled = true },
   vite_config = { enabled = true, trusted_files = {} },
   experimental = { conditional_root_narrowing = false, strict_slots = false },
   hover = { provenance = false },
-  frameworks = { "vue", "svelte" },
+  -- The server defaults statistics OFF; mirror that default OFF here.
+  statistics = { enabled = false },
   -- User completion-engine capabilities (blink.cmp / cmp_nvim_lsp). Merged in.
   capabilities = nil,
 }

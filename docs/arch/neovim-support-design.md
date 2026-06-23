@@ -156,6 +156,8 @@ Studied in `packages/vue-vscode/src/extension.ts` (`buildServerOptions`, `client
 
 **Server launch (VS Code → Neovim):** VS Code launches `verter-lsp --type-provider=<tp> --tsdk=<tsdk> --plugin-path=<node_modules> [--mcp-port=0 --mcp-lint-preset=<p>] <rootPath>` with `env.VERTER_LOG`. **Decisive simplification (shared with the Lapce design): use `--type-provider=tsgo` and omit `--tsdk` / `--plugin-path`.** In `main.rs`, `--tsdk` and `--plugin-path` are consumed **only** by the tsserver path; `try_spawn_tsgo` ignores them and discovers the tsgo binary itself (`find_tsgo_binary_canonical`: `VERTER_TSGO_BIN` env → workspace `node_modules` → PATH → npm/npx cache). So the tsgo provider is self-contained — the user installs `@typescript/native-preview` per-project (the normal case for a Vue/Svelte project), exactly as the VS Code tsgo path expects. The `--mcp-*` flags are parsed-but-ignored by the server (MCP shipped separately) and are **omitted**. Resulting default `cmd`: `verter-lsp --type-provider=tsgo <root>` (plus user-overridable extra args).
 
+**Type-provider surface — a deliberate native-client superset.** The default stays `tsgo`, but the Neovim client validates `type_provider` against the full server-accepted set `{ auto, tsgo, tsserver, off }` (`VALID_TYPE_PROVIDERS` in `init.lua`), rejecting anything else fail-closed. This is an **intentional advanced capability**, not a divergence from the SDK-less wasm clients (Lapce/Zed), which clamp to `{ tsgo, off }`. The wasm volts cannot supply a TypeScript SDK, so they refuse `tsserver`/`auto`; Neovim is a full editor where the user can put a TypeScript SDK on PATH and `tsserver` self-discovers its own install, so exposing `tsserver`/`auto` as opt-in overrides is correct here. Users who do nothing get the self-contained `tsgo` provider; the broader surface is purely an advanced override.
+
 ### 3.6 Initialization-options parity
 
 VS Code passes a rich `initializationOptions`; the server reads only a subset (`lifecycle.rs` `handle_initialize`; `config.rs`). The Neovim config mirrors the **server-relevant** subset and drops VS-Code-UI-only fields.
@@ -167,9 +169,11 @@ VS Code passes a rich `initializationOptions`; the server reads only a subset (`
 | `viteConfig: { enabled, trustedFiles }` | yes (`vite_config_options`) | `init_options.viteConfig` |
 | `experimental: { conditionalRootNarrowing, strictSlots }` | yes (`config::parse_experimental_init_options`) | `init_options.experimental` |
 | `hover: { provenance }` | yes (`config::parse_hover_init_options`) | `init_options.hover` |
-| `statistics: { … }` | yes (`statistics.set_enabled`) | optional; default omit in v0 |
-| `frameworks: ["vue","svelte"]` | informational | hardcode `["vue","svelte"]` |
+| `statistics: { enabled }` | yes (`statistics.set_enabled`) | `init_options.statistics`, default OFF |
+| `frameworks: ["vue","svelte"]` | **no — server ignores it** | **dropped** (dead protocol surface) |
 | `configuration: { vue, typescript, css, emmet, … }` | opportunistic VS-Code language-service settings | **drop** — these are VS Code's emmet/css/html/ts language-service settings; Neovim has its own. v0 omits. |
+
+The Neovim client now emits **exactly** the canonical six server-read init-option keys — `lint`, `inlayHints`, `viteConfig`, `experimental`, `hover`, `statistics` — the same parity set every Verter editor client ships (`verter_editor_client::build_initialization_options`, the SSoT). `statistics` is emitted (default OFF, honoring a user opt-in); the previously-emitted `frameworks` key is **dropped** because the server ignores it. This builder is bound to the shared SSoT by a Rust drift-guard (`crates/verter-editor-client/tests/nvim_config_contract.rs`): it extracts `build_init_options`' top-level keys and asserts set equality against `build_initialization_options(&{})`, so a missing key (e.g. dropping `statistics`) or an extra key (e.g. re-adding `frameworks`) fails the gate. Neovim was the only editor client not written in Rust, hence the only one able to silently re-diverge; the drift-guard closes that gap.
 
 VS-Code-only surfaces **excluded** entirely: `$/verter/*` custom requests + `decorations.*` (panels/decorations), `mcp.*`, the `@verter/typescript-plugin` wiring (tsserver-in-tsserver, N/A). A plain LSP client simply never sends the `$/verter/*` requests; the server only responds when asked, so **all standard LSP features flow unchanged** and only VS-Code-exclusive panels are absent.
 

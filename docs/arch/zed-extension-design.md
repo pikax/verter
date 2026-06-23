@@ -246,7 +246,7 @@ wiring test.
 
 `verter-lsp` reads the editor's `params.capabilities` in exactly one place —
 position-encoding negotiation (`lifecycle.rs`, prefers UTF-8 > UTF-32 > UTF-16, defaults
-UTF-16). The tgo client-capabilities are STATIC server-side
+UTF-16). The tsgo client-capabilities are STATIC server-side
 (`build_client_capabilities()` in `crates/verter_type_runtime/src/tsgo/ipc.rs` is a pure
 literal independent of the editor). Zed's native LSP client builds and sends standard
 `textDocument` capabilities; the extension hand-authors none. The only quality dependency is
@@ -458,7 +458,7 @@ the fastest transport and the idiomatic Zed mechanism.
 ### 5.3 Where the work runs
 
 All semantic work — parsing, TS projection, type resolution, component-meta, diagnostics —
-runs **inside the native `verter-lsp`** (native Rust + the tgo native provider). The
+runs **inside the native `verter-lsp`** (native Rust + the tsgo native provider). The
 extension contributes no computation. Syntax highlighting/outline is driven by the
 tree-sitter grammar from the official Vue/Svelte extension (Verter ships none), which runs in
 Zed's native core, independent of the LSP request path.
@@ -546,7 +546,7 @@ chain.
   Touches **no existing crate**.
 - **`crates/verter-editor-client`** — consumed unchanged as the shared launch contract; the
   Zed extension required NO modification to it.
-- New `package.json` script `build:zed`; a new CI job. **No server-side change** (tgo
+- New `package.json` script `build:zed`; a new CI job. **No server-side change** (tsgo
   client-caps + position-encoding are already static/handled).
 - The canonical `cargo nextest run --workspace` + `cargo test -p verter_session --tests` gate
   is unaffected by `extensions/zed/` (out of workspace).

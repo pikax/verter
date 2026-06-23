@@ -18,10 +18,12 @@ on:
     branches: [main]
     paths:
       - "extensions/lapce/**"
+      - "crates/verter-editor-client/**"
       - ".github/workflows/lapce.yml"
   pull_request:
     paths:
       - "extensions/lapce/**"
+      - "crates/verter-editor-client/**"
       - ".github/workflows/lapce.yml"
 
 jobs:
