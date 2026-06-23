@@ -355,3 +355,104 @@ async fn node_modules_raw_vue_carrier_resolves_props_tsserver() {
     );
     session.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// 3. import_refs_monorepo — composite project references (cross-project carrier)
+// ---------------------------------------------------------------------------
+//
+// A composite-references workspace: `packages/app` references `packages/ui`
+// (both `composite: true`) and imports the ui project's component through an
+// `@ui/*` path alias. Exercises cross-project COMPONENT carrier resolution
+// (the existing `monorepo` / `tsconfig-references` fixtures are reference
+// models; this one specifically resolves a referenced project's `.vue`).
+
+real_provider_test!(
+    import_refs_monorepo,
+    fixture = "import_refs_monorepo",
+    async fn run(session) {
+        let uri = session
+            .open_fixture_file("packages/app/src/App.vue")
+            .await;
+        session
+            .open_fixture_file("packages/ui/src/UiButton.vue")
+            .await;
+
+        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
+            eprintln!("skipping: provider not warmed up");
+            return;
+        }
+
+        assert_tag_hover_has_prop(session, &uri, "<UiButton", "uiButtonOnly").await;
+    }
+);
+
+// ---------------------------------------------------------------------------
+// 4. import_syntax_passthrough — TS 6/7 syntax (Verter non-corruption)
+// ---------------------------------------------------------------------------
+//
+// Characterizes that Verter's IDE-TSX codegen PRESERVES modern import syntax
+// through to the provider (rather than corrupting/dropping it). Both real
+// providers (TS 6.0.x tsserver, TS 7 tgo) were verified to behave identically:
+// `with { type: "json" }` and `import defer` are accepted cleanly; a deprecated
+// `assert { type: "json" }` surfaces TS2880. These are NON-corruption checks,
+// not provider-capability checks — `import defer` / import attributes only
+// intersect Verter via codegen preservation (namespaced component tags, the
+// only place `import defer` would bind a component, are a separate tracked gap).
+//
+// Helper to find a TS diagnostic by code in the carrier-merged set.
+fn merged_has_ts_code(diags: &[tower_lsp_server::ls_types::Diagnostic], code: &str) -> bool {
+    diags.iter().any(|d| {
+        matches!(
+            d.code.as_ref(),
+            Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == code
+        )
+    })
+}
+
+real_provider_test!(
+    import_syntax_passthrough,
+    fixture = "import_syntax_passthrough",
+    async fn run(session) {
+        // (a) `with { type: "json" }` — Verter must preserve the attribute so the
+        // provider accepts it: NO deprecated-assertion TS2880 and NO
+        // module-not-found (TS2307) for the resolved JSON on the carrier.
+        let with_uri = session.open_fixture_file("src/WithJson.vue").await;
+        if session
+            .wait_until_ready(&with_uri, "{{ count }}", 3, "count")
+            .await
+        {
+            let diags = session.merged_diagnostics(&with_uri).await;
+            assert!(
+                !merged_has_ts_code(&diags, "2880"),
+                "a correct `with {{ type: \"json\" }}` import must NOT surface the \
+                 deprecated-assertion TS2880 (Verter corrupted the attribute?); got: {diags:?}"
+            );
+            assert!(
+                !diags.iter().any(|d| {
+                    matches!(
+                        d.code.as_ref(),
+                        Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == "2307"
+                    ) && d.message.contains("data.json")
+                }),
+                "the JSON module must resolve through the preserved import attribute \
+                 (no TS2307 for ./data.json); got: {diags:?}"
+            );
+        }
+
+        // (b) deprecated `assert { type: "json" }` — Verter must PRESERVE the
+        // provider's TS2880 mapped onto the carrier (not drop/corrupt it).
+        let assert_uri = session.open_fixture_file("src/AssertJson.vue").await;
+        if session
+            .wait_until_ready(&assert_uri, "{{ count }}", 3, "count")
+            .await
+        {
+            let diags = session.merged_diagnostics(&assert_uri).await;
+            assert!(
+                merged_has_ts_code(&diags, "2880")
+                    || diags.iter().any(|d| d.message.contains("import attributes")),
+                "a deprecated `assert {{ type: \"json\" }}` import must surface TS2880 \
+                 on the carrier (Verter must preserve the provider diagnostic); got: {diags:?}"
+            );
+        }
+    }
+);
