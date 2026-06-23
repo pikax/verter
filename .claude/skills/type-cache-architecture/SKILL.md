@@ -1218,6 +1218,34 @@ favour of `ShapeCacheDb`; the static guard
 `crates/verter_session/tests/cases/g_block/block_6i_static_guards.rs::shape_cache_db_replaces_split_caches`
 asserts neither may be re-introduced.
 
+The `ShapeCacheDb` per-member subject is the sealed `MemberShapeNodeSubject(SemanticNodeId)`
+newtype keying the `ShapeSubject::MemberValueNode` arm — a generation/store-scoped
+graph-instance memo, NOT a durable content-free query-identity key (it carries a
+`SemanticNodeId`, which is precisely why it is sealed behind the newtype rather than
+exposed as a content-free key). Shape/materialize cache-key hygiene guards (all
+RECORDED SOURCE SCANNERS — structural confinement is PRIMARY, the scanners are the
+bounded residual supplement). Only the TWO `SemanticNodeId`-keyed scanners
+(`no_unsanctioned_semantic_node_id_in_shape_or_materialize_key` +
+`synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`) become structural
+and are DELETED once the key-safety newtype substrate lands (newtype the env/content
+hashes + seal the `SemanticNodeId`/`value_node` tuple fields), see
+`docs/arch/key-safety-newtype-substrate-debt.md`. The third scanner
+`no_carrier_verdict_db` (retired-symbol absence) is NOT closed by that substrate —
+newtyping hashes / sealing `SemanticNodeId` does not prevent reintroducing a private
+`CarrierVerdictDb` / `carrier_verdicts` symbol — so it REMAINS a recorded scanner (or
+would need its own separate structural closure for retired-symbol absence).
+The three guards:
+`no_unsanctioned_semantic_node_id_in_shape_or_materialize_key`
+(`crates/verter_session/tests/cases/g_cache/r6_r21_query_identity_keys.rs` — forbids the
+content/version field markers on the shape/materialize derived-`Hash` keys and pins the
+`SemanticNodeId` allow-list to exactly two positions); `no_carrier_verdict_db`
+(`crates/verter_session/tests/cases/g_misc2/no_carrier_verdict_db.rs` — retired-symbol
+absence); `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
+(`crates/verter_session/tests/cases/g_misc2/synthetic_carrier_explicit_deepen_routes_through_shape_cache_key.rs`
+— bans the direct `SemanticNodeId(<ident>.value_node)` ordinal-key shape; the regular
+`ShapeSubject::MemberValueNode` route reads `member.value` through the sealed
+`MemberShapeNodeSubject` newtype and is structurally unmatched).
+
 ## Two-phase emission map (R28)
 
 Parse-time emission (eager, shallow, O(file_size)) populates the parse-domain

@@ -71,24 +71,40 @@
 //!     `SyntheticCarrierKey.value_node` is a public u64, so a raw
 //!     ordinal-key construction is still writable. This scanner is the
 //!     bounded residual SYNTACTIC supplement to that structural primary.
-//!   mechanism_ruling=binding neutral architecture design ruling for this
-//!     work unit: this scanner is NOT structurally impossible today
-//!     (SemanticNodeId is a public tuple struct; SyntheticCarrierKey.value_node
-//!     is a public u64), so it survives as a permitted bounded residual
-//!     supplement and MUST carry this full durable record.
+//!   scanner_scope_claim=The scanner matches EXACTLY the direct,
+//!     newline/whitespace-tolerant `SemanticNodeId(<ident>.value_node)` shape —
+//!     a single identifier followed by `.value_node`. It does NOT claim to
+//!     catch every conceivable ordinal-key construction. EXPLICITLY OUTSIDE the
+//!     scanner's claim (and covered by the structural primary — sealed
+//!     `NonSyntheticTypeExpr` + module-private `ShapeSubject`/`ShapeCacheKey`
+//!     construction + sealed `MemberShapeNodeSubject`): a receiver EXPRESSION
+//!     (`(expr).value_node`); CHAINED field access (`self.carrier.value_node`);
+//!     METHOD/INDEX receivers (`carrier().value_node`, `foo[0].value_node`);
+//!     and BINDING INDIRECTION (`let vn = carrier.value_node;
+//!     SemanticNodeId(vn)`). The scanner is a single-needle direct-shape
+//!     supplement, NOT an exhaustive data-flow analysis.
+//!   mechanism_ruling=binding architecture design ruling
+//!     (see `docs/arch/cache-key-guard-mechanism-rulings.md`): this scanner is
+//!     NOT structurally impossible today (SemanticNodeId is a public tuple
+//!     struct; SyntheticCarrierKey.value_node is a public u64), so it survives
+//!     as a permitted bounded residual supplement and MUST carry this full
+//!     durable record.
 //!   hardening_rounds=1
 //!   hardening_history=
 //!     - first hardening pass: broadened the match from a per-LINE scan
 //!       to a whitespace/newline-tolerant STREAM scan over the whole
 //!       preprocessed source (byte offsets mapped back to line numbers
 //!       for the report). WHY: the line-based form admitted a multi-line
-//!       false negative — a split construction
+//!       false negative — a split direct construction
 //!       `SemanticNodeId(\n    carrier.value_node\n)` straddles a newline
-//!       and was therefore invisible to a per-line matcher, contradicting
-//!       the scanner's whitespace-tolerant / "ANY construction" claim.
-//!       The SPELLING set is UNCHANGED — the needle is still
-//!       `SemanticNodeId(<ident>.value_node)`; only line-vs-stream
-//!       matching changed (within the two-pass hardening bound).
+//!       and was therefore invisible to a per-line matcher, defeating the
+//!       scanner's newline/whitespace-tolerant DIRECT-shape match. The
+//!       SPELLING set is UNCHANGED — the needle is still the single direct
+//!       `SemanticNodeId(<ident>.value_node)` shape; only line-vs-stream
+//!       matching changed (within the two-pass hardening bound). This pass
+//!       did NOT broaden the matched SHAPE beyond the direct single-ident
+//!       form (the scope claim above is the exact match, not "ANY
+//!       construction").
 
 use std::path::{Path, PathBuf};
 
@@ -429,14 +445,19 @@ fn collect_production_sources() -> Vec<PathBuf> {
 }
 
 /// Identifier-boundary token-STREAM scan over a whole (preprocessed)
-/// source: returns the byte offset of every
+/// source: returns the byte offset of every match of the DIRECT shape
 /// `SemanticNodeId\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*value_node`
-/// construction.
+/// — a single identifier followed by `.value_node`.
 ///
-/// This is the canonical shape of "construct a `SemanticNodeId` from the
-/// `value_node` field of some struct value" — a forbidden ordinal
-/// cache-key construction. It catches the suspicious pattern without
-/// depending on the binding's name.
+/// This is the direct shape of "construct a `SemanticNodeId` from the
+/// `value_node` field of a named struct value" — a forbidden ordinal
+/// cache-key construction. It catches that direct shape without
+/// depending on the binding's name. It does NOT claim to catch every
+/// conceivable ordinal-key construction: a receiver expression, chained
+/// field access, a method/index receiver, or binding indirection
+/// (`let vn = carrier.value_node; SemanticNodeId(vn)`) is OUTSIDE the
+/// matched shape and is covered by the structural primary (see the
+/// guard-local `scanner_scope_claim`).
 ///
 /// Whole-source STREAM scan, not per-line: the matcher's inter-token
 /// whitespace skips include NEWLINES, so a construction that straddles
@@ -578,14 +599,18 @@ struct ConfinementRecord {
 }
 
 /// The architecture guard test: no production source file may construct a
-/// `SemanticNodeId` from any struct's `value_node` field — the scanner's
-/// syntactic predicate bans EVERY such construction outright (it does not
-/// try to prove cache-key-ness from text). The architectural target it
-/// enforces: the synthetic-deepen identity is the content-free
-/// `SyntheticBindingId` via `ShapeCacheKey::synthetic_binding_whole`, and
-/// the `value_node` arena ordinal is value-side provenance only, so a
-/// `SemanticNodeId(_.value_node)` construction would be an ordinal
-/// cache-key bypass. There is no exemption.
+/// `SemanticNodeId` from a named value's `value_node` field via the DIRECT
+/// `SemanticNodeId(<ident>.value_node)` shape — the scanner's syntactic
+/// predicate bans that direct shape outright (it does not try to prove
+/// cache-key-ness from text, and it does not claim to catch receiver
+/// expressions / chained access / method-or-index receivers / binding
+/// indirection, which the structural primary covers — see the guard-local
+/// `scanner_scope_claim`). The architectural target it enforces: the
+/// synthetic-deepen identity is the content-free `SyntheticBindingId` via
+/// `ShapeCacheKey::synthetic_binding_whole`, and the `value_node` arena
+/// ordinal is value-side provenance only, so a direct
+/// `SemanticNodeId(<ident>.value_node)` construction would be an ordinal
+/// cache-key bypass. There is no exemption for the matched direct shape.
 #[test]
 fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
     // Structural-Confinement-First: this scanner is the bounded residual
@@ -669,13 +694,17 @@ fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
 }
 
 /// Self-test for the explicit-deepen guard: the STREAM scanner catches
-/// every `SemanticNodeId(<ident>.value_node)` ordinal-key construction —
-/// including the shapes that were once exempt as "legitimate
-/// cache-route" split calls (no such exemption exists) AND a MULTI-LINE
-/// split construction (a multi-line shape no per-line matcher can see) —
-/// while the genuinely-legit shapes (`SemanticNodeId(0)`,
-/// `SemanticNodeId(member.id_field)`, `value_node:` field decls,
-/// serialization) stay non-matching.
+/// every instance of the DIRECT single-ident shape
+/// `SemanticNodeId(<ident>.value_node)` — including the shapes that were
+/// once exempt as "legitimate cache-route" split calls (no such exemption
+/// exists) AND a MULTI-LINE split of that direct shape (a multi-line form
+/// no per-line matcher can see) — while the genuinely-legit shapes
+/// (`SemanticNodeId(0)`, `SemanticNodeId(member.id_field)`, `value_node:`
+/// field decls, serialization) stay non-matching. Per the guard-local
+/// `scanner_scope_claim`, shapes OUTSIDE the direct single-ident form
+/// (receiver expressions, chained access, method/index receivers, binding
+/// indirection) are not part of the matched shape and are covered by the
+/// structural primary, not this scanner.
 #[test]
 fn synthetic_carrier_explicit_deepen_guard_self_test() {
     // -----------------------------------------------------------------
@@ -774,7 +803,7 @@ fn synthetic_carrier_explicit_deepen_guard_self_test() {
     // and reads `member.value` through the sealed `MemberShapeNodeSubject`
     // newtype (not `SemanticNodeId(_.value_node)`) — unaffected.
     let legit_regular_member_route =
-        "let key = ShapeCacheKey::surface_member_value_whole_with_context(scope, member, mode);";
+        "let key = ShapeCacheKey::surface_member_value_whole_with_context(scope, member, terminal_context);";
     // A multi-line construction reading a DIFFERENT field (`member.id`, no
     // `value_node`) must NOT trip — proving the stream scan still pins the
     // exact `value_node` field, not "any `SemanticNodeId(\n ident.field`".

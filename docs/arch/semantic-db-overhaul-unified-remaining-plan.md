@@ -1379,7 +1379,7 @@ PARALLEL to the remaining scheduler work (U1/U7/U9).
   (an enum leaks session cache-family semantics into the scheduler).
 - **Do NOT build `DagAdmissionBudget`.** `DagCapacityBudget` /
   `DagCapacityReservation` is the single ledger.
-- **Use `ShapeCacheDb`** (keyed by `ShapeSubject::SemanticNode`), NOT the retired
+- **Use `ShapeCacheDb`** (keyed by `ShapeSubject::MemberValueNode`), NOT the retired
   split `MaterializeMemoDb` / `MemberShapeCacheDb` shape caches. The static guard
   `block_6i_static_guards.rs::shape_cache_db_replaces_split_caches` forbids
   re-introduction.

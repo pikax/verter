@@ -620,6 +620,15 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // The R6 meta-guard itself is anti-stub: a CRITICAL rule
             // must reference a non-empty guard list.
             "every_registry_entry_lists_at_least_one_guard",
+            // The registry-completeness walk that backs
+            // `every_registry_guard_name_resolves_to_a_known_test` must
+            // fail CLOSED: a non-`NotFound` metadata IO error on a crate /
+            // `tests/` / `src/` subtree panics instead of silently skipping
+            // (which would let the meta-guard believe guard coverage exists
+            // for files it never scanned). This self-test proves the
+            // fail-closed `NotADirectory`-panics + `NotFound`-no-panic
+            // discipline of the walk's directory classifier.
+            "registry_completeness_walk_hard_fails_on_metadata_error_self_test",
         ],
     ),
     (
@@ -770,11 +779,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `crates/verter_session/tests/cases/g_misc2/synthetic_carrier_explicit_deepen_routes_through_shape_cache_key.rs`.
             "synthetic_carrier_explicit_deepen_routes_through_shape_cache_key",
             // The discriminator self-test for the value_node scanner above:
-            // proves the STREAM scan catches every
-            // `SemanticNodeId(<ident>.value_node)` construction (including a
-            // MULTI-LINE split) and false-positives on none. Registered so
-            // the anti-stub proof cannot be deleted without the registry
-            // noticing.
+            // proves the STREAM scan catches every instance of the DIRECT
+            // single-ident shape `SemanticNodeId(<ident>.value_node)`
+            // (including a MULTI-LINE split of that shape) and false-positives
+            // on none. The scanner claims only the direct shape; receiver
+            // expressions / chained access / binding indirection are covered by
+            // the structural primary. Registered so the anti-stub proof cannot
+            // be deleted without the registry noticing.
             "synthetic_carrier_explicit_deepen_guard_self_test",
             // Discriminating self-tests for the hard-failing production-
             // source traversal both scanners share: the top-level crate /
@@ -1182,16 +1193,137 @@ fn title_normaliser_handles_markdown_and_critical_suffix() {
     assert_eq!(normalise_title("## Not A Rule"), "Not A Rule".to_string(),);
 }
 
-/// Walk every `.rs` file rooted at `path` (recursively) and call
-/// `visit` with each file's path.
+/// Discriminating self-test for the registry-completeness walk's
+/// fail-closed directory classification: `registry_completeness_classified_as_dir`
+/// must hard-fail (panic) on a non-`NotFound` metadata IO error rather than
+/// silently treating the path as a non-directory. This is the precise
+/// difference from `Path::is_dir()`, which collapses EVERY metadata error
+/// (including a `NotADirectory`/permission error) to `false` and would drop a
+/// crate, a `tests/`/`src/` subtree, or a subdir from the registry-completeness
+/// scan vacuously — letting the meta-guard believe guard coverage exists for
+/// files it never scanned.
+///
+/// Uniquely named (NOT shared with the g_misc2 scanners' same-purpose
+/// self-tests): the HashSet-dedup lesson is that two same-named self-tests in
+/// different files leave neither protected — so this guard's fail-closed walk
+/// gets its own distinctly-named self-test, registered under its own name.
+#[test]
+fn registry_completeness_walk_hard_fails_on_metadata_error_self_test() {
+    let scratch = std::env::temp_dir().join(format!(
+        "verter_registry_completeness_classify_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    fs::create_dir_all(&scratch).expect("create scratch dir");
+
+    // A real directory classifies as a directory.
+    assert!(
+        registry_completeness_classified_as_dir(&scratch),
+        "classifier must report an existing directory as a directory"
+    );
+
+    // A genuinely-absent path (`NotFound`) is a LEGITIMATE non-directory
+    // answer — a crate root without a `tests/`/`src/` is simply skipped, NOT a
+    // panic.
+    let absent = scratch.join("definitely_absent").join("src");
+    assert!(
+        !registry_completeness_classified_as_dir(&absent),
+        "classifier must report a genuinely-absent (NotFound) path as a \
+         non-directory WITHOUT panicking — a missing `src/`/`tests/` is a legitimate skip"
+    );
+
+    // A path that traverses THROUGH a regular file as if it were a directory
+    // produces a non-`NotFound` metadata IO error (`NotADirectory` on Unix, an
+    // analogous non-NotFound kind on Windows). `registry_completeness_classified_as_dir`
+    // MUST panic on it; `Path::is_dir()` would silently return `false` (the
+    // fail-open class this guard closes).
+    let regular_file = scratch.join("regular.txt");
+    fs::write(&regular_file, b"not a directory").expect("write regular file");
+    let through_file = regular_file.join("src");
+
+    // Sanity precondition: confirm this scratch path is the IO-error (NOT
+    // NotFound) case on this platform, so the test discriminates rather than
+    // passing vacuously where the path resolves to NotFound.
+    let probe = fs::metadata(&through_file);
+    assert!(
+        probe
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound),
+        "self-test precondition: traversing through a regular file must yield a \
+         non-NotFound metadata IO error on this platform; got {probe:?}"
+    );
+
+    let panicked =
+        std::panic::catch_unwind(|| registry_completeness_classified_as_dir(&through_file))
+            .is_err();
+    assert!(
+        panicked,
+        "classifier must HARD-FAIL (panic) on a non-NotFound metadata IO error \
+         instead of silently treating the path as a non-directory. `Path::is_dir()` \
+         would return `false` here, dropping a subtree from the registry-completeness \
+         scan — that fail-open is exactly what this classifier closes."
+    );
+
+    fs::remove_dir_all(&scratch).ok();
+}
+
+/// Hard-failing directory classification for the registry-completeness
+/// walk. Returns whether `path` is a directory.
+///
+/// A genuinely-absent path (`ErrorKind::NotFound`) is a legitimate
+/// non-directory answer (`false`) — a crate root without a `tests/` or
+/// `src/` is simply skipped. ANY OTHER metadata IO error (permissions, a
+/// `NotADirectory` traversal, a stale handle) is a hard panic carrying the
+/// path: `Path::is_dir()` collapses every such error to `false` and would
+/// silently drop a crate, a `tests/`/`src/` subtree, or a whole subdir from
+/// the registry-completeness scan — the fail-open class that lets the
+/// meta-guard believe guard coverage exists for files it never scanned.
+///
+/// Uniquely named (NOT `classified_as_dir`): the g_misc2 scanners each carry
+/// their own same-purpose helper + self-test, and a HashSet-dedup of
+/// same-named self-tests would leave one copy silently satisfying the
+/// registry for several — so this guard's fail-closed walk discipline gets
+/// its own distinctly-named helper and self-test.
+fn registry_completeness_classified_as_dir(path: &std::path::Path) -> bool {
+    match fs::metadata(path) {
+        Ok(meta) => meta.is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!(
+            "scan integrity: failed to classify `{}`: {e}",
+            path.display()
+        ),
+    }
+}
+
+/// Walk every `.rs` file rooted at `path` (recursively).
+///
+/// A `read_dir` failure that is a legitimate `NotFound` (a crate may lack a
+/// `tests/` or `src/` directory) is an empty skip; any OTHER `read_dir`
+/// error is a hard panic carrying the path — never a silent `return` that
+/// would drop a whole subtree from the registry-completeness scan and let
+/// the meta-guard pass vacuously. Each `DirEntry` is unwrapped with a panic
+/// (no `.flatten()` that would silently drop an errored entry), and the
+/// dir-vs-file classification uses `registry_completeness_classified_as_dir`
+/// (panic-on-non-NotFound-error), never `path.is_dir()`.
 fn walk_rs_files(path: &PathBuf, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(path) {
         Ok(it) => it,
-        Err(_) => return,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => panic!(
+            "scan integrity: failed to read directory `{}`: {e}",
+            path.display()
+        ),
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "scan integrity: failed to read a directory entry under `{}`: {e}",
+                path.display()
+            )
+        });
         let p = entry.path();
-        if p.is_dir() {
+        if registry_completeness_classified_as_dir(&p) {
             walk_rs_files(&p, out);
         } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
             out.push(p);
@@ -1208,9 +1340,15 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
         Ok(it) => it,
         Err(e) => panic!("read crates/: {e}"),
     };
-    for crate_entry in crate_entries.flatten() {
+    for crate_entry in crate_entries {
+        // Unwrap each `DirEntry` with a panic carrying the directory — no
+        // `.flatten()` that would silently drop a crate dir whose entry
+        // errored from the registry-completeness scan.
+        let crate_entry = crate_entry.unwrap_or_else(|e| {
+            panic!("scan integrity: failed to read a crates/ directory entry: {e}")
+        });
         let crate_path = crate_entry.path();
-        if !crate_path.is_dir() {
+        if !registry_completeness_classified_as_dir(&crate_path) {
             continue;
         }
 
@@ -1262,7 +1400,7 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
         let mut files = Vec::new();
         walk_rs_files(&tests_dir, &mut files);
         let src_dir = crate_path.join("src");
-        if src_dir.is_dir() {
+        if registry_completeness_classified_as_dir(&src_dir) {
             walk_rs_files(&src_dir, &mut files);
         }
         for file in files {

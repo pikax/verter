@@ -1040,7 +1040,7 @@ impl Default for OwnerCollectionDb {
 // `descend_published_member` and re-consult the cache at each hop.
 // ===========================================================================
 
-// Overlay/base isolation for `SemanticNode`-subject entries does NOT
+// Overlay/base isolation for `MemberValueNode`-subject entries does NOT
 // rely on `SemanticNodeId` being generation-tagged (the arena is
 // append-only across generations and IDs are raw `u64`). Isolation comes
 // from three mechanisms working together:

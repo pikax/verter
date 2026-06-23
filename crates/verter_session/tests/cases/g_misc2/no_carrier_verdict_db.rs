@@ -31,10 +31,10 @@
 //!     — a compile-fail import would catch only a PUBLIC reintroduction,
 //!     not a private type/module/field/accessor; retired-symbol absence is
 //!     expressible only as a name-spelling source scan.
-//!   mechanism_ruling=binding neutral architecture design ruling for this
-//!     work unit: a source scanner is the justified mechanism for R22
-//!     retired-symbol absence (Rust cannot prove "identifier absent from
-//!     the whole codebase / never reintroduced").
+//!   mechanism_ruling=binding architecture design ruling
+//!     (see `docs/arch/cache-key-guard-mechanism-rulings.md`): a source scanner
+//!     is the justified mechanism for R22 retired-symbol absence (Rust cannot
+//!     prove "identifier absent from the whole codebase / never reintroduced").
 //!   hardening_rounds=0
 //!   hardening_history=none — record adopted at this reorganization; no
 //!     spelling-case add/broaden.

@@ -1281,6 +1281,149 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     );
 }
 
+/// `OwnerCollectionDb` reuse + `invalidate_canonical` acceptance, asserted
+/// through the `live_count()` entry-count handle (the count is `entries.len()`).
+/// The sibling `owner_collection_db_self_root_sibling_edit_rejects_warm_entry`
+/// asserts self-root rejection via a `cold_ran` flag after a content edit; this
+/// pairs the cache-hit-EQUIVALENCE half (a warm re-read REUSES the entry — no
+/// recompute, `live_count` stable) with the explicit `invalidate_canonical`
+/// invalidation path, both read through `live_count()`.
+///
+/// 1. Populate: a cold publish over a TRACKED owner admits exactly one entry —
+///    `live_count()` goes 0 → 1.
+/// 2. Reuse equivalence: a second unchanged `get_or_compute` REUSES the warm
+///    entry — its cold closure does NOT run and `live_count()` stays 1.
+/// 3. Invalidation: `invalidate_canonical(owner)` drops the owner's entry —
+///    `live_count()` goes 1 → 0 — and the next `get_or_compute` RECOMPUTES
+///    (cold closure runs) and re-admits the entry (`live_count()` back to 1).
+///
+/// Discriminates: if warm reuse regressed, step 2's cold closure runs and
+/// `live_count` would have to climb to admit a second entry; if
+/// `invalidate_canonical` regressed (did not drop the owner's entry),
+/// `live_count` stays 1 across the invalidation and the post-invalidation read
+/// is a stale warm hit (cold closure does NOT run).
+#[test]
+fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recomputes() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let c = "/self_root_owner_collection/owner.ts";
+    load_tracked_keyed(&host, c);
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().owner_collection_db();
+    let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
+
+    assert_eq!(
+        db.live_count(),
+        0,
+        "fixture invariant: the OwnerCollectionDb starts with no entry for the owner"
+    );
+
+    // Observe the keyed canonical's content version at cold-publish time,
+    // exactly as the production producer does.
+    let observed_keyed_hash = observed_whole_hash(ctx, c);
+    let owned = c.to_string();
+    let publish = |marker: &'static str| {
+        let owned = owned.clone();
+        move || {
+            let sig = engine_fact_signature_for_exported_type(
+                ctx,
+                owned.as_str(),
+                "Probe",
+                observed_keyed_hash,
+            )
+            .into_cacheable()
+            .expect("provenance-pure signature builds — observed artifact present")
+            .facts;
+            Some((
+                Some(TypeExpr::Unknown {
+                    raw: marker.to_string(),
+                }),
+                sig,
+            ))
+        }
+    };
+
+    // ── Populate: cold publish admits exactly one entry (live_count 0 -> 1).
+    let _ = db
+        .get_or_compute(&key, ctx, publish("first"))
+        .expect("cold publish succeeds");
+    assert_eq!(
+        db.live_count(),
+        1,
+        "populate: a cold publish over a TRACKED owner must admit exactly one entry"
+    );
+
+    // ── Reuse equivalence: an unchanged second read REUSES the warm entry —
+    // its cold closure must NOT run and live_count must stay 1.
+    let mut reuse_cold_ran = false;
+    let warm = db
+        .get_or_compute(&key, ctx, || {
+            reuse_cold_ran = true;
+            Some((
+                Some(TypeExpr::Unknown {
+                    raw: "should-not-run".to_string(),
+                }),
+                empty_fact_signature(),
+            ))
+        })
+        .expect("warm read produces a value");
+    assert!(
+        !reuse_cold_ran,
+        "cache-hit equivalence: an unchanged second get_or_compute MUST reuse the warm \
+         OwnerCollectionDb entry — its cold closure must NOT run"
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "cache-hit equivalence: a warm reuse must NOT admit a second entry (live_count stable at 1)"
+    );
+    assert!(
+        matches!(warm.as_deref(), Some(TypeExpr::Unknown { raw }) if raw == "first"),
+        "the warm reuse must bubble the originally-published body, not recompute"
+    );
+
+    // ── Invalidation: invalidate_canonical drops the owner's entry
+    // (live_count 1 -> 0).
+    db.invalidate_canonical(c);
+    assert_eq!(
+        db.live_count(),
+        0,
+        "DISCRIMINATING (invalidation): invalidate_canonical MUST drop the owner's \
+         OwnerCollectionDb entry (live_count 1 -> 0) — a retained entry would serve stale"
+    );
+
+    // ── Recompute: the next read RECOMPUTES (cold closure runs) and re-admits.
+    // The flag is a `Cell` captured by reference (so the `move` closure, which
+    // must own `inner`, moves the REFERENCE and mutates the SAME flag rather
+    // than a copied `bool`).
+    let recompute_cold_ran = std::cell::Cell::new(false);
+    let recompute_flag = &recompute_cold_ran;
+    let recomputed = db
+        .get_or_compute(&key, ctx, {
+            let inner = publish("second");
+            move || {
+                recompute_flag.set(true);
+                inner()
+            }
+        })
+        .expect("post-invalidation read produces a value");
+    assert!(
+        recompute_cold_ran.get(),
+        "DISCRIMINATING (invalidation): after invalidate_canonical the next read MUST \
+         recompute (cold closure runs), not serve a stale warm entry"
+    );
+    assert_eq!(
+        db.live_count(),
+        1,
+        "the recompute must re-admit exactly one entry (live_count back to 1)"
+    );
+    assert!(
+        matches!(recomputed.as_deref(), Some(TypeExpr::Unknown { raw }) if raw == "second"),
+        "the recompute must surface the freshly-published body"
+    );
+}
+
 /// `MaterializeMemoDb` — producer-level self-root canary. The
 /// production producer is [`engine_fact_signature_for_materialize_memo`]
 /// (called by the materialize write-through). It is provenance-pure:

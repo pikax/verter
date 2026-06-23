@@ -573,6 +573,85 @@ fn ref_cycle_result_key_is_content_free_and_env_discriminating() {
     );
 }
 
+/// R21 breadth: the `RefCycleResultKey`'s SLOT-EMBEDDED env axes
+/// (`project_identity` / `type_env_hash` / `lib_env_hash`, carried on the
+/// `ResolvedDeclSlotIdentity` root) each independently discriminate the key,
+/// and an IDENTICAL slot env co-locates (content-free equivalence). The
+/// sibling `ref_cycle_result_key_is_content_free_and_env_discriminating`
+/// builds its root via `type_slot_unscoped` (ZERO env) and varies only
+/// `resolve_env_hash` / `version` / the root NAME — it never moves the slot's
+/// embedded env dimensions. This pairs that gap (the slot env axes) the way
+/// `materialization_cache_key_is_content_free_and_env_discriminating` already
+/// covers the materialize key's slot.
+///
+/// This is the R21 scoping rule for a `lib`-BEARING query-identity cache: the
+/// five env dimensions are orthogonal, so two `RefCycleResultKey`s that differ
+/// in EXACTLY one slot-embedded dimension MUST hash distinctly. If the slot
+/// dimensions collapsed into one bundled hash (the R21 violation), a key
+/// resolved under project/env A would alias a lookup under project/env B.
+///
+/// Discriminates: if `project_identity` / `lib_env_hash` / `type_env_hash`
+/// were dropped from `ResolvedDeclSlotIdentity`'s `Hash`/`Eq` (env-collapse),
+/// the per-axis `assert_ne!`s flip — two cross-project / cross-lib /
+/// cross-type-env keys would hash-collide and over-share one cache slot.
+#[test]
+fn ref_cycle_result_key_slot_env_axes_discriminate() {
+    use verter_session::component_meta_caches::{RefCycleResultKey, REF_CYCLE_RESULT_VERSION};
+    use verter_session::semantic_query::ResolvedDeclSlotIdentity;
+
+    // `type_slot` carries the env-bearing, content-free subject identity:
+    // (canonical, name, project_identity, type_env_hash, lib_env_hash).
+    let slot = |project_identity: u32, type_env: [u8; 16], lib_env: [u8; 16]| {
+        ResolvedDeclSlotIdentity::type_slot(
+            Arc::from("/a.ts"),
+            Arc::from("Foo"),
+            project_identity,
+            type_env,
+            lib_env,
+        )
+    };
+
+    let base = RefCycleResultKey {
+        root: slot(1, [2u8; 16], [3u8; 16]),
+        resolve_env_hash: [4u8; 16],
+        version: REF_CYCLE_RESULT_VERSION,
+    };
+
+    // Content-free equivalence: an IDENTICAL slot env (same project / type-env /
+    // lib-env / canonical / name) co-locates onto the same key.
+    let same = RefCycleResultKey {
+        root: slot(1, [2u8; 16], [3u8; 16]),
+        resolve_env_hash: [4u8; 16],
+        version: REF_CYCLE_RESULT_VERSION,
+    };
+    assert_eq!(
+        hash_of(&base),
+        hash_of(&same),
+        "content-free equivalence: an identical slot env must hash to the same \
+         RefCycleResultKey slot (candidates co-locate)",
+    );
+
+    // Each slot-embedded env axis independently discriminates.
+    for (label, variant_slot) in [
+        ("project_identity", slot(9, [2u8; 16], [3u8; 16])),
+        ("type_env_hash", slot(1, [99u8; 16], [3u8; 16])),
+        ("lib_env_hash", slot(1, [2u8; 16], [99u8; 16])),
+    ] {
+        let variant = RefCycleResultKey {
+            root: variant_slot,
+            resolve_env_hash: [4u8; 16],
+            version: REF_CYCLE_RESULT_VERSION,
+        };
+        assert_ne!(
+            hash_of(&base),
+            hash_of(&variant),
+            "the slot-embedded `{label}` axis MUST distinguish the RefCycleResultKey \
+             slot (R21 — the lib/type/project env dimensions are orthogonal; a \
+             collapse would alias cross-{label} keys)",
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MaterializeStructureDb — MaterializationCacheKey
 // ---------------------------------------------------------------------------
@@ -811,13 +890,45 @@ fn materialization_cache_key_is_content_free_and_env_discriminating() {
 //     key-safety newtype substrate, which is out of scope for this work.
 //     A bounded source scan over the key struct/enum bodies is the
 //     justified expression.
-//   mechanism_ruling=binding neutral architecture design ruling for this
-//     work unit: classify this guard as a recorded scanner, NOT structural
-//     enforcement, because the raw Hash16/HashValue aliases cannot
-//     distinguish resolve_env_hash from whole_hash by type without an
-//     out-of-scope key-safety newtype substrate.
+//   mechanism_ruling=binding architecture design ruling
+//     (see `docs/arch/cache-key-guard-mechanism-rulings.md`): classify this
+//     guard as a recorded scanner, NOT structural enforcement, because the raw
+//     Hash16/HashValue aliases cannot distinguish resolve_env_hash from
+//     whole_hash by type without an out-of-scope key-safety newtype substrate.
 //   hardening_rounds=0
 //   hardening_history=none — adopted at 0
+//   structural_close_debt=KEY-SAFETY NEWTYPE SUBSTRATE (structural debt, P1).
+//     This scanner — together with the g_misc2
+//     `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
+//     scanner (the TWO `SemanticNodeId`-keyed scanners) — is a RECORDED
+//     SOURCE SCANNER precisely because the structural mechanism does not
+//     exist YET. The g_misc2 `no_carrier_verdict_db` scanner is NOT part of
+//     this pair: it is a retired-symbol-absence scan and is NOT closed by
+//     this substrate — newtyping hashes / sealing `SemanticNodeId` does not
+//     prevent reintroducing a private `CarrierVerdictDb` / `carrier_verdicts`
+//     symbol — so it REMAINS a recorded scanner (or would need its own
+//     separate structural closure for retired-symbol absence). The TWO
+//     `SemanticNodeId`-keyed scanners become STRUCTURAL (compiler-enforced,
+//     not a text scan) and are DELETED once BOTH land:
+//       (a) the env/content hash aliases `Hash16` / `HashValue` are NEWTYPED
+//           so `resolve_env_hash` is type-distinct from `whole_hash` (a
+//           content/version hash then cannot be written into a derived-`Hash`
+//           query-identity key without a type error — no name-spelling scan
+//           needed); AND
+//       (b) `SemanticNodeId` and the `value_node` /
+//           `SyntheticCarrierKey.value_node` tuple fields are SEALED (private
+//           field + narrow constructors) so a raw `SemanticNodeId(u64)` /
+//           `SemanticNodeId(<ident>.value_node)` construction is IMPOSSIBLE
+//           outside the owning layer.
+//     CLOSURE CRITERIA: when (a)+(b) land, the structural enforcement
+//     replaces the TWO `SemanticNodeId`-keyed scanners and they are DELETED
+//     — making them last-resort-WITH-A-PATH, not permanent
+//     (`no_carrier_verdict_db` is unaffected and remains). The durable ruling notes
+//     the structural close — a private `SemanticNodeId` tuple field — is the
+//     ONLY design that dominates scanner-chasing (broadening a text scanner
+//     into receiver/chained/binding data-flow spends effort without improving
+//     the real guarantee, because structural confinement is the primary
+//     cache-safety mechanism). Tracked: `docs/arch/key-safety-newtype-substrate-debt.md`.
 //
 // This scanner does NOT and CANNOT prove field-type identity through the
 // type system; it is a bounded name-spelling scan over the key bodies. It

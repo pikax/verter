@@ -2663,3 +2663,182 @@ fn stale_parser_version_augmenter_excluded_current_version_contributes() {
          surface"
     );
 }
+
+// ────────────────────────────────────────────────────────────────
+// Breadth acceptance: ONE populated `EffectiveExportSet` consumer
+// entry, exercised under BOTH a cache-hit-equivalence view AND an
+// invalidation view — pairing the two halves the per-arm tests
+// (`edit_augmenting_file_invalidates_consumer`,
+// `edit_unrelated_file_does_not_invalidate_consumer`) assert
+// SEPARATELY, against ONE shared entry. The additive value is
+// asserting selectivity ON THE SAME ENTRY: an unrelated edit keeps it
+// warm (equivalence) while an augmenter edit invalidates it
+// (invalidation), proving the consumer's `FileWholeHash` read-set
+// records the augmenter contributor but NOT the unrelated file.
+// ────────────────────────────────────────────────────────────────
+
+#[test]
+fn augmenter_consumer_entry_survives_unrelated_edit_but_invalidates_on_augmenter_edit() {
+    let store = FileArtifactStore::new();
+
+    // Augmenter at /aug.ts (contributes a `declare module "vue"` surface).
+    let aug_hash = [61u8; 16];
+    let _aug_key = insert_artifact_from_fixture(
+        &store,
+        "/aug.ts",
+        "module_augmentation_external.ts",
+        aug_hash,
+    );
+
+    // Unrelated file with NO augmentations.
+    let unrelated_hash = [62u8; 16];
+    let _unrelated_key = insert_artifact_with_raw_source(
+        &store,
+        "/unrelated.ts",
+        "export const greeting = 'hi';\nexport {};\n",
+        unrelated_hash,
+    );
+
+    let route_db = RouteDb::new();
+    let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
+    let key = EffectiveExportSetKey {
+        provider_canonical: "vue".to_owned(),
+        project_identity: ProjectIdentity([1u8; 16]),
+        resolve_env_hash: [2u8; 16],
+        lib_env_hash: [3u8; 16],
+        session_scope: EffectiveExportSetScope::Base,
+    };
+
+    // Cold compute populates ONE consumer entry, recording the augmenter's
+    // `FileWholeHash` contributor anchor in its signature. The unrelated file
+    // is NOT a contributor, so it never enters the signature.
+    let whole_hash_oracle = |c: &str| {
+        if c == "/aug.ts" {
+            Some(aug_hash)
+        } else if c == "/unrelated.ts" {
+            Some(unrelated_hash)
+        } else {
+            None
+        }
+    };
+    let _cold = route_db.get_or_compute_effective_export_set(
+        key.clone(),
+        target.clone(),
+        &AcceptAllView::new(1),
+        None,
+        &store,
+        whole_hash_oracle,
+        |_, _| None,
+    );
+
+    // ── Cache-hit equivalence #1: re-read under an AcceptAll view → warm HIT
+    // (the same populated entry round-trips, no recompute).
+    let warm_equiv = route_db.get_effective_export_set(&key, &AcceptAllView::new(1));
+    assert!(
+        warm_equiv.is_some(),
+        "cache-hit equivalence: an unedited re-read MUST return the warm \
+         EffectiveExportSet entry"
+    );
+
+    // ── Cache-hit equivalence #2 (selectivity): edit the UNRELATED file. The
+    // view reports the unrelated file's NEW (stale) hash while the augmenter's
+    // hash still matches. A `FileWholeHash{canonical=/unrelated.ts}` anchor in
+    // the consumer's signature would therefore FAIL validation against its
+    // original hash → invalidate (`is_none()`). The entry survives warm
+    // (`is_some()`) ONLY because the unrelated file is genuinely ABSENT from the
+    // consumer's signature — that absence is precisely what this arm proves.
+    #[derive(Debug)]
+    struct UnrelatedEditedView {
+        token: StoreViewCompatToken,
+        aug_canonical: String,
+        aug_hash: [u8; 16],
+        unrelated_canonical: String,
+        unrelated_new_hash: [u8; 16],
+    }
+    impl StoreView for UnrelatedEditedView {
+        fn compat_token(&self) -> StoreViewCompatToken {
+            self.token
+        }
+        fn validates(&self, fact: &FactVersionRef) -> bool {
+            match fact {
+                // The augmenter's hash MUST still match (no edit to it).
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id == &self.aug_canonical =>
+                {
+                    hash == &self.aug_hash
+                }
+                // The UNRELATED file was edited: report its NEW hash. A
+                // signature carrying its original `FileWholeHash` would fail
+                // here, so a passing `is_some()` proves that anchor is absent.
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id == &self.unrelated_canonical =>
+                {
+                    hash == &self.unrelated_new_hash
+                }
+                _ => true,
+            }
+        }
+    }
+    let unrelated_view = UnrelatedEditedView {
+        token: StoreViewCompatToken {
+            epoch: 2,
+            session: None,
+            validity_fingerprint: 0,
+        },
+        aug_canonical: "/aug.ts".to_owned(),
+        aug_hash,
+        unrelated_canonical: "/unrelated.ts".to_owned(),
+        unrelated_new_hash: [63u8; 16], // post-edit unrelated hash (orig was 62)
+    };
+    let warm_after_unrelated = route_db.get_effective_export_set(&key, &unrelated_view);
+    assert!(
+        warm_after_unrelated.is_some(),
+        "selectivity (equivalence): editing the UNRELATED file MUST NOT invalidate \
+         the consumer entry — the unrelated file is ABSENT from the consumer's \
+         FileWholeHash signature. The view reports the unrelated file's stale hash, \
+         so a too-broad signature that anchored /unrelated.ts would fail validation \
+         here and evict (`is_none()`); surviving warm proves the anchor is absent."
+    );
+
+    // ── Invalidation: edit the AUGMENTER. A view reporting the augmenter's NEW
+    // hash MUST invalidate the SAME entry — its `FileWholeHash` contributor
+    // anchor under the consumer's signature now points at the stale hash.
+    #[derive(Debug)]
+    struct EditedAugmenterView {
+        token: StoreViewCompatToken,
+        edited_canonical: String,
+        new_hash: [u8; 16],
+    }
+    impl StoreView for EditedAugmenterView {
+        fn compat_token(&self) -> StoreViewCompatToken {
+            self.token
+        }
+        fn validates(&self, fact: &FactVersionRef) -> bool {
+            match fact {
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id == &self.edited_canonical =>
+                {
+                    hash == &self.new_hash
+                }
+                _ => true,
+            }
+        }
+    }
+    let edited_view = EditedAugmenterView {
+        token: StoreViewCompatToken {
+            epoch: 3,
+            session: None,
+            validity_fingerprint: 0,
+        },
+        edited_canonical: "/aug.ts".to_owned(),
+        new_hash: [99u8; 16], // post-edit augmenter hash
+    };
+    let warm_after_augmenter_edit = route_db.get_effective_export_set(&key, &edited_view);
+    assert!(
+        warm_after_augmenter_edit.is_none(),
+        "DISCRIMINATING (invalidation): editing the AUGMENTER MUST invalidate the \
+         consumer entry — the per-contributor FileWholeHash anchor under the \
+         consumer's signature must fail validation against the new hash. A signature \
+         that dropped the augmenter contributor would keep serving the stale entry."
+    );
+}
