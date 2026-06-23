@@ -36,6 +36,7 @@ mod definition;
 mod diagnostics;
 mod document_symbols;
 mod hover;
+mod import_matrix;
 mod multi_fixture;
 mod references;
 mod rename;
