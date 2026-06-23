@@ -10210,10 +10210,18 @@ fn test_write_if_changed_overwrites_different() {
 #[test]
 fn test_materialize_first_call_creates_files() {
     let tmp = tempfile::tempdir().unwrap();
-    let nm = tmp.path().join("node_modules/@verter/types");
+    // Build the workspace-root URI cross-platform: the shared helper normalizes
+    // backslashes -> forward slashes and emits a valid `file:///C:/...` (Windows)
+    // / `file:///home/...` (Unix) URI, where naive `format!("file://{}", display)`
+    // produces a backslash path with no leading slash on Windows (a fake UNC
+    // authority that resolves to the wrong directory).
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
+    // Mirror exactly how `materialize_verter_types` derives the root path from the
+    // URI, so the expectation survives Windows drive-letter lowercasing / path
+    // canonicalization.
+    let nm = std::path::PathBuf::from(crate::documents::uri_to_canonical_id_from_str(&root))
+        .join("node_modules/@verter/types");
     assert!(!nm.exists());
-    // materialize_verter_types expects URI strings but falls back to path
-    let root = format!("file://{}", tmp.path().display());
     let result = materialize_verter_types(&[root]);
     assert!(!result.any_failed, "should not fail on first call");
     assert!(result.wrote_any, "should write stub files on first call");
@@ -10229,7 +10237,7 @@ fn test_materialize_first_call_creates_files() {
 #[test]
 fn test_materialize_second_call_is_noop() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = format!("file://{}", tmp.path().display());
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
     let first = materialize_verter_types(&[root.clone()]);
     assert!(!first.any_failed, "first materialization should succeed");
     assert!(first.wrote_any, "first materialization should write files");
@@ -10245,7 +10253,12 @@ fn test_materialize_second_call_is_noop() {
 #[test]
 fn test_materialize_skips_real_installed_package() {
     let tmp = tempfile::tempdir().unwrap();
-    let nm = tmp.path().join("node_modules/@verter/types");
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
+    // Pre-populate the real package at the SAME canonical directory the code
+    // derives from the URI, so `materialize_verter_types` sees the pre-installed
+    // package on Windows (drive-letter lowercasing / canonicalization match).
+    let nm = std::path::PathBuf::from(crate::documents::uri_to_canonical_id_from_str(&root))
+        .join("node_modules/@verter/types");
     let dist = nm.join("dist");
     std::fs::create_dir_all(&dist).unwrap();
     // Pre-populate with real package content (no marker, uses dist/index.d.ts).
@@ -10254,7 +10267,6 @@ fn test_materialize_skips_real_installed_package() {
     std::fs::write(dist.join("index.d.ts"), real_dts).unwrap();
     std::fs::write(nm.join("package.json"), real_pkg).unwrap();
 
-    let root = format!("file://{}", tmp.path().display());
     let result = materialize_verter_types(&[root]);
     assert!(
         !result.any_failed,

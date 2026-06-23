@@ -962,7 +962,7 @@ mod manifest_tests {
 }
 
 /// The committed `Cargo.lock` is the canonical mechanism that pins `lsp-types` to
-/// a pre-0.95 version. From 0.95 the `Url` type was renamed to `Uri`, and the
+/// a pre-0.96 version. From 0.96 the `Url` type was renamed to `Uri`, and the
 /// upstream `psp-types` dependency (which declares an unpinned `lsp-types = "0"`)
 /// then fails to compile against it. This test guards the pin permanently: if the
 /// lock drifts to a `Url`->`Uri` version, the wasm build breaks and this fails
@@ -1007,8 +1007,8 @@ mod lockfile_tests {
         let version = lsp_types_version();
         let (major, minor) = major_minor(&version);
         assert!(
-            major == 0 && minor < 95,
-            "lsp-types must stay < 0.95 (the Url->Uri rename that breaks psp-types); \
+            major == 0 && minor < 96,
+            "lsp-types must stay < 0.96 (the Url->Uri rename that breaks psp-types); \
              found {version}. Re-pin with: cargo update -p lsp-types --precise 0.94.1"
         );
     }

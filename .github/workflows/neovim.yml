@@ -1,9 +1,13 @@
 name: neovim
 
-# Pure-Lua Neovim LSP-client config tests. No Rust build here: the always-on
-# gate is the headless plenary unit suite (config builders + on_attach). The
-# real-server smoke spec skips vacuously because no `verter-lsp` binary is built
-# in this job — that is intended for v0.
+# Neovim LSP-client config tests. Two gates:
+#   - `test`: the headless plenary unit suite (Lua config builders + on_attach).
+#     The real-server smoke spec skips vacuously because no `verter-lsp` binary is
+#     built in this job.
+#   - `rust-contract`: the Rust single-source-of-truth drift guard
+#     (`nvim_config_contract`), which asserts the Lua init-options layer stays in
+#     lockstep with the shared Rust contract. An nvim-side edit fires this so a
+#     drift from the Rust SSoT is caught here, not only in the Lua suite.
 
 on:
   push:
@@ -82,3 +86,17 @@ jobs:
             echo "::error::Neovim exited non-zero ($rc)"
             exit "$rc"
           fi
+
+  rust-contract:
+    name: nvim config contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Neovim init-options drift guard
+        shell: bash
+        run: cargo test -p verter-editor-client --test nvim_config_contract

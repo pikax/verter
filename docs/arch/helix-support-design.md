@@ -1,6 +1,6 @@
 # Verter Helix Support — Design & Implementation Plan
 
-> Status: **LANDED — config-only v0.** Helix support ships at [`editors/helix/`](../../editors/helix/) as a `languages.toml` snippet + README, guarded by the hermetic Rust contract test `crates/verter-editor-client/tests/helix_config_contract.rs`. Scope: a discoverable `verter-lsp` binary (NO managed download), ZERO server-side change. Anything beyond v0 (a `hx --health` CI smoke, upstreaming) is roadmap — see [`editors/helix/FOLLOWUPS.md`](../../editors/helix/FOLLOWUPS.md).
+> Status: **LANDED — config-only v0.** Helix support ships at [`editors/helix/`](../../editors/helix/) as a `languages.toml` snippet + README, guarded by the hermetic Rust contract test `crates/verter-editor-client/tests/helix_config_contract.rs`. Scope: a discoverable `verter-lsp` binary (NO managed download), ZERO server-side change. Anything beyond v0 (a `hx --health` CI smoke, upstreaming) is roadmap — see [§9.1 Roadmap (out of v0 scope)](#91-roadmap-out-of-v0-scope).
 > Sibling designs: [`docs/arch/neovim-support-design.md`](./neovim-support-design.md) and [`docs/arch/lapce-extension-design.md`](./lapce-extension-design.md) (same server, different editors). The server-launch contract (type provider, init-options parity) is shared; the **distribution model differs per editor**. **Correction over the sibling docs:** the verter-lsp type-provider value is **`tsgo`**, not `tgo` (the sibling docs contain the `tgo` typo — see §3.3). `tgo` is not a recognized value and silently falls through to `auto`.
 
 ## 1. Context
@@ -184,8 +184,9 @@ A new directory **`editors/helix/`** mirrors `editors/nvim/` as the home for a c
 editors/helix/
   languages.toml        # the shippable snippet users merge into ~/.config/helix/languages.toml
   README.md             # install steps, --type-provider=tsgo rationale, config parity, hx --health check
-  FOLLOWUPS.md          # tracked v0 follow-ups (hx --health CI smoke, upstreaming)
 ```
+
+Roadmap items beyond v0 (managed download, upstreaming, the `hx --health` smoke, incremental tokens) live in [§9.1 Roadmap (out of v0 scope)](#91-roadmap-out-of-v0-scope), each with its external blocker.
 
 The config-validation test (§7) lives at **`crates/verter-editor-client/tests/helix_config_contract.rs`**, reading `editors/helix/languages.toml` and asserting its fields against the **shared launch contract** — its anchor assertion is that the snippet's `args` equal `verter_editor_client::build_server_args(None, &json!({}))`, so a drift in the shared contract's provider flag fails the test until `languages.toml` is updated. The test is hermetic (no Helix binary, no `verter-lsp` process) and keeps `editors/helix/` config-only. (`verter-editor-client` is the pure SSoT launch-contract crate already shared by the Lapce and Zed clients; the test tying Helix to it lives there rather than in `crates/verter_lsp/tests/` so it asserts against that contract directly.)
 
@@ -265,11 +266,11 @@ All blocks are in `editors/helix/` + one test file under `crates/verter-editor-c
   - A negative assertion that the default snippet does **not** set `required-root-patterns` (guards the architect decision that gating is opt-in, not a shipped default).
 
 ### Block H2 — README + follow-ups
-- `editors/helix/README.md` (§4.3: Helix install, the tsgo note, the `config` parity table, the `hx --health` verification, advanced usage) and `editors/helix/FOLLOWUPS.md` (tracked v0 follow-ups).
+- `editors/helix/README.md` (§4.3: Helix install, the tsgo note, the `config` parity table, the `hx --health` verification, advanced usage). Beyond-v0 follow-ups are tracked in [§9.1 Roadmap (out of v0 scope)](#91-roadmap-out-of-v0-scope).
 - A separate `docs/` guide page is a roadmap item, not part of v0 — the README is the canonical install doc.
 
 ### Block H3 (optional) — `hx --health` CI smoke
-- A gated CI job that installs a pinned Helix, drops `editors/helix/languages.toml` into the Helix config dir, builds `verter-lsp`, puts it on PATH, and runs `hx --health vue` + `hx --health svelte`, asserting the output contains `verter-lsp` and a green/✓ status. **Gated** to skip when Helix or the binary is unavailable (matching how the zed / neovim / lapce jobs defer their real-server smoke). Tracked in `editors/helix/FOLLOWUPS.md`.
+- A gated CI job that installs a pinned Helix, drops `editors/helix/languages.toml` into the Helix config dir, builds `verter-lsp`, puts it on PATH, and runs `hx --health vue` + `hx --health svelte`, asserting the output contains `verter-lsp` and a green/✓ status. **Gated** to skip when Helix or the binary is unavailable (matching how the zed / neovim / lapce jobs defer their real-server smoke). Tracked in [§9.1 Roadmap (out of v0 scope)](#91-roadmap-out-of-v0-scope).
 - This is **lower-value** than H1 (the TOML-parse test already guards the shipped contract; `hx --health` only re-confirms Helix accepts it), so H3 is optional / a follow-up.
 
 ## 7. Test strategy (mandatory-rule compliant)
@@ -307,6 +308,15 @@ The project mandates automated tests for LSP/editor-integration changes (no manu
 - **Formatter interplay** — if a user already configured another server/formatter for vue/svelte, replacing the server list is correct for default LSP behavior, but they may need `only-features`/`except-features` filtering; documented in the README. [noted]
 - **Semantic tokens** are full-document only (`full = true`, no range/delta) — a **server-side** characteristic, not a Helix knob; range/delta is tracked separately (out of scope). [follow-up, shared with nvim design]
 - **svelte has no built-in `roots`** — Helix falls back to VCS-dir detection (correct for the common case); minimal overlay preserves the built-in, and `workspaceFolders` covers root resolution regardless. The asymmetry is a reason to **preserve** built-ins (Option A), not restate them. [noted, not a blocker]
+
+## 9.1 Roadmap (out of v0 scope)
+
+Enhancements intentionally **not** implemented in the config-only v0. Each item states its concrete external blocker. None is a defect in the shipped contract — they are gated on release engineering (published per-platform `verter-lsp` assets) or are server-side changes outside the `languages.toml` config layer.
+
+- **No managed binary download.** Helix convention (like Neovim's, unlike Lapce's volt) is that the editor does not fetch language-server binaries; the user installs `verter-lsp` themselves and points `command` at it (PATH name or absolute path). *Blocker:* revisit only if Helix gains a managed-binary mechanism. Managed provisioning itself is tracked as the scheduled managed-binary-provisioning work, not owned here.
+- **No upstream `[language-server.verter]` default in Helix's built-in `languages.toml`.** Helix's built-in defaults point vue/svelte at Volar/svelteserver, and adding a third-party server to upstream defaults is not their model — the in-repo snippet is the supported channel. *Blocker:* not pursued (upstream policy), not an asset/release gate.
+- **Gated `hx --health` UI smoke.** A CI job that installs a pinned Helix, drops `editors/helix/languages.toml` into the config dir, puts a built `verter-lsp` on PATH, and asserts `hx --health vue` / `hx --health svelte` show `verter-lsp`. Lower value than the hermetic TOML-parse contract test (which already guards the shipped contract). *Blocker:* needs a pinned Helix available in CI; deferred, mirroring how the zed / neovim / lapce jobs defer their real-server smoke.
+- **Incremental semantic tokens (range/delta).** `verter-lsp` currently advertises full-document tokens only; range/delta is a server-side enhancement shared with the Neovim design. *Blocker:* a future `verter_lsp` protocol change (server-side), not a Helix knob.
 
 ## 10. Citations
 

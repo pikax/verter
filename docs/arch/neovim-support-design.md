@@ -358,6 +358,16 @@ Citations: [plenary.nvim TESTS_README](https://github.com/nvim-lua/plenary.nvim/
 - **Semantic tokens** are full-document only (`full=Bool(true)`, no range/delta) — kept on with an opt-out; range/delta is a **server-side** enhancement tracked separately (out of scope). [follow-up]
 - **Completion engine** — blink.cmp recommended for speed; not required for auto-import. [doc note]
 
+## 9.1 Roadmap (out of v0 scope)
+
+Enhancements intentionally **not** implemented in the config-only v0. Each item states its concrete external blocker. None is a defect in the shipped Lua config layer — they are gated on release engineering (published per-platform `verter-lsp` assets) or are server-side changes outside the Lua config layer.
+
+- **Upstream `lsp/verter.lua` in `neovim/nvim-lspconfig`.** Widest reach for Neovim users; the runtime path is unchanged (`lsp/*.lua` is just a config-table source for the same built-in client, §2.1). *Blocker:* stable public `verter-lsp` install instructions + published release assets.
+- **mason.nvim registry entry** (`:MasonInstall verter-lsp`). mason owns the download/SHA logic; the Lua module deliberately does not (§5.2). *Blocker:* published per-platform release assets + checksums. Managed provisioning itself is tracked as the scheduled managed-binary-provisioning work.
+- **Standalone `verter.nvim` mirror repo.** A separate installable mirror of `editors/nvim/` so lazy.nvim users can `{ "verter-dev/verter.nvim" }` without the monorepo. *Blocker:* release engineering / a published mirror; no runtime-path change.
+- **`watch_files` stays OFF by default** (documented opt-in, [README → File watching](../../editors/nvim/README.md#file-watching-watch_files-default-off)). The save-notify autocmd (§2.5) is the cheap cross-file freshness signal in its place. *Blocker:* revisit only if a `node_modules`-ignoring watcher path lands (server/client-side).
+- **Incremental semantic tokens (range/delta).** `verter-lsp` advertises full-document tokens only (§2.6); range/delta would let the Neovim default stay on with lower cost. *Blocker:* a future `verter_lsp` protocol change (server-side, shared with the Helix design).
+
 ## 10. Citations
 
 - Neovim `lsp.txt` (release-0.11): https://github.com/neovim/neovim/blob/release-0.11/runtime/doc/lsp.txt
