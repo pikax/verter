@@ -1,0 +1,49 @@
+# Verter — Vue & Svelte language support for Helix.
+#
+# Helix has a built-in native LSP client, so "Helix support" is pure
+# `languages.toml` configuration: no compiled extension, no server-side change.
+# The native client talks stdio directly to the native `verter-lsp` process and
+# this file does zero per-request work — it is read once at startup.
+#
+# Merge this into your global `~/.config/helix/languages.toml`, or into a
+# project-local `.helix/languages.toml`. Helix merges `[[language]]` entries
+# per-field by `name`, so the minimal overrides below preserve Helix's built-in
+# grammar, scope, file-types, and roots for vue/svelte.
+#
+# Prerequisites:
+#   - `verter-lsp` on your $PATH (or set `command` to an absolute path). There is
+#     no managed download — install it via your package manager or
+#     `cargo build -p verter_lsp --release`.
+#   - `@typescript/native-preview` (tsgo) installed in the project for full type
+#     features. The default type provider is `tsgo`, which self-discovers its
+#     binary (VERTER_TSGO_BIN env -> project node_modules -> PATH -> npm/npx
+#     cache). NOTE: the provider value is `tsgo`, NOT `tgo` — `tgo` is
+#     unrecognized and silently falls back to `auto`.
+
+[language-server.verter]
+command = "verter-lsp"
+# Helix sends the workspace root via the `initialize` request's workspaceFolders,
+# not via argv, so there is no positional root here. This matches the shared
+# launch contract `build_server_args(None, {})`.
+args = ["--type-provider=tsgo"]
+# `config` maps directly to the LSP initializationOptions. It is the server-read
+# init parity set — the same six keys the shared `build_initialization_options`
+# emits — so the config and the launch contract cannot drift. `statistics` is
+# server-read (lifecycle.rs reads `initializationOptions.statistics.enabled`) and
+# shipped explicitly OFF: telemetry is off by default; a user opts in by flipping
+# it to `true`. See README.md for the parity table.
+config = { lint = { enabled = false, preset = "recommended" }, inlayHints = { enabled = true }, viteConfig = { enabled = true, trustedFiles = [] }, experimental = { conditionalRootNarrowing = false, strictSlots = false }, hover = { provenance = false }, statistics = { enabled = false } }
+
+# Attach verter to the built-in vue and svelte languages. These minimal overrides
+# MERGE per-field with Helix's built-in entries: grammar, scope, file-types, and
+# roots are inherited — do NOT restate them. `language-servers = ["verter"]`
+# replaces the built-in vuels/svelteserver so verter is the single authority
+# (Helix merges diagnostics/completion/code-action across all attached servers,
+# so attaching both would double-publish).
+[[language]]
+name = "vue"
+language-servers = ["verter"]
+
+[[language]]
+name = "svelte"
+language-servers = ["verter"]

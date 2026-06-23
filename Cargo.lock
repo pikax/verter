@@ -3757,6 +3757,7 @@ name = "verter-editor-client"
 version = "0.0.1-beta.1"
 dependencies = [
  "serde_json",
+ "toml",
 ]
 
 [[package]]

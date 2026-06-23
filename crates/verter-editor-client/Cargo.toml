@@ -12,3 +12,8 @@ categories = ["development-tools"]
 
 [dependencies]
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# Parses the shipped editors/helix/languages.toml in the helix_config_contract
+# integration test. Pinned to the same 1.1 line verter_session uses.
+toml = "1.1"
