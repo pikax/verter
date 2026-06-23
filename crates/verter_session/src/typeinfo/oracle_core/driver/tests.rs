@@ -218,7 +218,8 @@ fn snapshot_path_uses_full_manifest_rooted_infix() {
         "utility_composition/u_abc.json"
     );
     let path = snapshot_abs_path("utility_composition", "u_abc");
-    let s = path.to_string_lossy();
+    // Normalize separators so the forward-slash assertion holds on Windows too.
+    let s = path.to_string_lossy().replace('\\', "/");
     // The FULL infix is required — joining only `oracle_snapshots/` would read
     // the wrong directory (§Q1).
     assert!(
@@ -387,7 +388,8 @@ fn corpus_root_is_manifest_rooted() {
     // The final component is `env_corpus_dir_name(id)`, not the raw id —
     // the `:` tag separator maps to `-` at the path boundary.
     let p = corpus_root("blake3:abc");
-    let s = p.to_string_lossy();
+    // Normalize separators so the forward-slash assertion holds on Windows too.
+    let s = p.to_string_lossy().replace('\\', "/");
     assert!(
         s.ends_with("src/typeinfo/typeinfo_tests/oracle_env/blake3-abc"),
         "{s}"
