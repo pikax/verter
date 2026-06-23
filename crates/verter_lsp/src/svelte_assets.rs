@@ -366,17 +366,30 @@ mod tests {
             .to_path_buf()
     }
 
+    /// Resolve a `node_modules/.bin` entry to an EXECUTABLE path. On Windows the
+    /// extensionless `.bin/<name>` is a POSIX shell script (the runnable forms
+    /// are `<name>.cmd` / `<name>.exe`); exec'ing the bare script there fails
+    /// with `%1 is not a valid Win32 application`. Probe the platform-appropriate
+    /// executable forms first, falling back to the bare name on Unix.
+    fn locate_bin(bin_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+        if cfg!(windows) {
+            for ext in ["cmd", "CMD", "exe", "EXE", "bat"] {
+                let p = bin_dir.join(format!("{name}.{ext}"));
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+            // No Windows launcher present: a bare POSIX shim is not executable
+            // via std::process on Windows, so treat it as absent.
+            return None;
+        }
+        let p = bin_dir.join(name);
+        p.exists().then_some(p)
+    }
+
     fn locate_type_checker() -> Option<std::path::PathBuf> {
         let bin = workspace_root().join("node_modules/.bin");
-        let tsgo = bin.join("tsgo");
-        if tsgo.exists() {
-            return Some(tsgo);
-        }
-        let tsc = bin.join("tsc");
-        if tsc.exists() {
-            return Some(tsc);
-        }
-        None
+        locate_bin(&bin, "tsgo").or_else(|| locate_bin(&bin, "tsc"))
     }
 
     /// Vendor minimal `svelte` types into `<root>/node_modules/svelte` from the
