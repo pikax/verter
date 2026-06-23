@@ -67,3 +67,8 @@ tempfile = "3.27"
 # spans, bare-local stale sets, and aliased delegation (a line-based scan is
 # trivially evadable). Mirrors `verter_session`'s syn-based architecture guards.
 syn = { version = "2.0", features = ["full", "visit", "parsing"] }
+# Used by `tests/stdio_launch_smoke.rs` to build the verter-lsp launch argv and
+# initializationOptions through the SHARED editor-client launch contract, so the
+# stdio handshake smoke also pins that contract (the same source the Lapce/Zed
+# clients consume).
+verter-editor-client = { path = "../verter-editor-client" }

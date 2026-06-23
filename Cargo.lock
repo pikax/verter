@@ -3934,6 +3934,7 @@ dependencies = [
  "tower-lsp-server",
  "tracing",
  "tracing-subscriber",
+ "verter-editor-client",
  "verter_actions",
  "verter_audit",
  "verter_diagnostics",
