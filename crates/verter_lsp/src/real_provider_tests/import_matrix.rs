@@ -67,8 +67,7 @@ real_provider_test!(
             session.open_fixture_file(f).await;
         }
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -214,12 +213,19 @@ async fn tgo_carrier_diagnostics_resolve_path_alias_tsgo() {
 // creates its own dependency, so it stays hermetic and reproducible without an
 // external corpus.
 
-/// Characterize nodenext package `exports` ("." entry) AND package `imports`
-/// (`#internal/*`) resolution for a Vue carrier. The shared workspace resolver
-/// must be package.json-aware (read `exports`/`imports`) for the `<PkgComp>` /
-/// `<InternalComp>` tags to resolve their props. If a form does not resolve, it
-/// is a tracked gap — see the `#[ignore]`'d companions; this test asserts the
-/// forms that DO resolve so it never reports a green by skipping.
+/// Characterize nodenext package `exports` resolution for a Vue carrier. The
+/// PRIMARY assertion is a VERTER-OWNED resolver fact: the shared workspace
+/// resolver is package.json-`exports`-aware, so the consumer's analysis records
+/// a resolved canonical id for the `@pkg/ui` (`exports` "." entry) import — that
+/// IS Verter resolving the package, not the TS provider. The tsserver hover is a
+/// secondary end-to-end signal that the resolved carrier also surfaces props.
+///
+/// The package `imports` map (`#internal/*`) is a known partial: the shared
+/// resolver does NOT populate `resolved_canonical_id` for package.json `#imports`
+/// subpaths. That gap is its own desired-behavior `#[ignore]`'d companion
+/// (`nodenext_package_imports_subpath_populates_resolved_canonical_id_tsserver`)
+/// which asserts the DESIRED `Some(..)` so it fails today; here we assert the
+/// CURRENT `None` so the characterization is explicit, not silent.
 ///
 /// Tsserver-only: the nodenext+package-`exports` program shape is exercised on
 /// the configured tsserver project. (A tgo companion gap test characterizes the
@@ -241,21 +247,97 @@ async fn import_nodenext_packages_tsserver() {
         .open_fixture_file("src/internal/InternalComp.ts")
         .await;
 
-    if session
-        .wait_until_ready(&uri, "{{ count }}", 3, "count")
+    // PRIMARY (Verter-owned, provider-independent): the shared resolver populates
+    // a canonical id for the package-`exports` "." import. Read the analysis
+    // snapshot regardless of provider warmth — this is a pure Verter resolver fact.
+    let analysis = session
+        .server()
+        .test_documents()
+        .get_analysis(&uri)
+        .expect("App.vue analysis should be present");
+    let pkg_import = analysis
+        .imports
+        .iter()
+        .find(|i| i.source == "@pkg/ui")
+        .expect("the `@pkg/ui` import should be analyzed");
+    assert!(
+        pkg_import.resolved_canonical_id.is_some(),
+        "Verter's shared resolver must be package.json-`exports`-aware and populate \
+         resolved_canonical_id for the `@pkg/ui` \".\" entry; got None"
+    );
+    // CHARACTERIZED PARTIAL: the `#internal/*` (`#imports`) subpath is NOT
+    // populated by the shared resolver today. Asserting the current None makes the
+    // gap explicit; the desired `Some(..)` lives in the `#[ignore]`'d companion.
+    let internal_import = analysis
+        .imports
+        .iter()
+        .find(|i| i.source == "#internal/InternalComp.js")
+        .expect("the `#internal/InternalComp.js` import should be analyzed");
+    assert!(
+        internal_import.resolved_canonical_id.is_none(),
+        "characterized gap: the shared resolver does NOT populate resolved_canonical_id \
+         for a package.json `#imports` subpath; got Some — promote the \
+         `#[ignore]`'d companion to a real assert"
+    );
+
+    // SECONDARY (end-to-end): once the provider is warm, the resolved package
+    // carriers also surface their props via hover.
+    if !session
+        .require_or_skip_ready(&uri, "{{ count }}", 3, "count")
         .await
     {
-        // Package `exports` "." entry: the shared resolver is package.json-aware
-        // and resolves `@pkg/ui` to its `exports`-mapped `.d.ts`, so `<PkgComp>`
-        // surfaces its props.
-        assert_tag_hover_has_prop(&session, &uri, "<PkgComp", "pkgRootOnly").await;
-        // Package `imports` map (`#internal/*`): resolves at the provider level so
-        // `<InternalComp>` surfaces its props. (Verter's own
-        // `resolved_canonical_id` stays None for the `#internal` subpath — see the
-        // tracked-gap note in the report — but the provider resolves it and hover
-        // works, so the IDE surface is correct.)
-        assert_tag_hover_has_prop(&session, &uri, "<InternalComp", "internalOnly").await;
+        session.shutdown().await;
+        return;
     }
+    // Package `exports` "." entry: `<PkgComp>` surfaces its props.
+    assert_tag_hover_has_prop(&session, &uri, "<PkgComp", "pkgRootOnly").await;
+    // Package `imports` map (`#internal/*`): resolves at the PROVIDER level so
+    // `<InternalComp>` surfaces its props even though Verter's own canonical-id is
+    // None (asserted above) — the IDE surface is correct via the provider.
+    assert_tag_hover_has_prop(&session, &uri, "<InternalComp", "internalOnly").await;
+    session.shutdown().await;
+}
+
+// TRACKED GAP: Verter's shared workspace resolver does NOT populate
+// `AnalyzedImport.resolved_canonical_id` for a package.json `#imports` subpath
+// (`#internal/*`). The provider still resolves the subpath (so hover/props work
+// — see `import_nodenext_packages_tsserver`), but Verter-owned carrier features
+// keyed on the canonical id (dependency tracking, go-to-definition via the
+// resolver) do not target it. This asserts the DESIRED `Some(..)` so it FAILS
+// today and PASSES once the shared resolver becomes package.json-`#imports`-aware
+// for canonical-id population. Discriminating, not a stub.
+#[ignore = "tracked gap: shared resolver does not populate resolved_canonical_id for package.json #imports subpaths"]
+#[tokio::test(flavor = "multi_thread")]
+async fn nodenext_package_imports_subpath_populates_resolved_canonical_id_tsserver() {
+    let _root = crate::test_harness::materialize_pkg_ui("import_nodenext_packages");
+    let Some(session) = crate::test_harness::TestSessionBuilder::new(
+        crate::test_harness::TestProviderKind::Tsserver,
+    )
+    .fixture("import_nodenext_packages")
+    .build()
+    .await
+    else {
+        return;
+    };
+    let uri = session.open_fixture_file("src/App.vue").await;
+    session
+        .open_fixture_file("src/internal/InternalComp.ts")
+        .await;
+    let analysis = session
+        .server()
+        .test_documents()
+        .get_analysis(&uri)
+        .expect("App.vue analysis should be present");
+    let internal_import = analysis
+        .imports
+        .iter()
+        .find(|i| i.source == "#internal/InternalComp.js")
+        .expect("the `#internal/InternalComp.js` import should be analyzed");
+    assert!(
+        internal_import.resolved_canonical_id.is_some(),
+        "the shared resolver should populate resolved_canonical_id for a package.json \
+         `#imports` subpath (`#internal/*`); got None"
+    );
     session.shutdown().await;
 }
 
@@ -317,8 +399,7 @@ real_provider_test!(
             .open_fixture_file("packages/ui/src/UiButton.vue")
             .await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -332,12 +413,14 @@ real_provider_test!(
 //
 // Characterizes that Verter's IDE-TSX codegen PRESERVES modern import syntax
 // through to the provider (rather than corrupting/dropping it). Both real
-// providers (TS 6.0.x tsserver, TS 7 tgo) were verified to behave identically:
-// `with { type: "json" }` and `import defer` are accepted cleanly; a deprecated
-// `assert { type: "json" }` surfaces TS2880. These are NON-corruption checks,
-// not provider-capability checks — `import defer` / import attributes only
-// intersect Verter via codegen preservation (namespaced component tags, the
-// only place `import defer` would bind a component, are a separate tracked gap).
+// providers (TS 6.0.x tsserver, TS 7 tgo) behave identically:
+// `with { type: "json" }` resolves the JSON to its typed shape, `import defer
+// * as ns` keeps the deferred namespace binding resolvable, and a deprecated
+// `assert { type: "json" }` surfaces TS2880. Each form carries a POSITIVE
+// resolution signal (a hover on a unique resolved member) plus the absence of a
+// corruption diagnostic — not just absence-of-error. `import defer` binds only a
+// namespace value (a dotted `<ns.Comp>` template tag is a separate tracked gap),
+// so it is exercised here through its namespace member, not a component tag.
 //
 // Helper to find a TS diagnostic by code in the carrier-merged set.
 fn merged_has_ts_code(diags: &[tower_lsp_server::ls_types::Diagnostic], code: &str) -> bool {
@@ -354,46 +437,125 @@ real_provider_test!(
     fixture = "import_syntax_passthrough",
     async fn run(session) {
         // (a) `with { type: "json" }` — Verter must preserve the attribute so the
-        // provider accepts it: NO deprecated-assertion TS2880 and NO
-        // module-not-found (TS2307) for the resolved JSON on the carrier.
+        // provider accepts it AND resolves the JSON to its typed shape.
         let with_uri = session.open_fixture_file("src/WithJson.vue").await;
-        if session
-            .wait_until_ready(&with_uri, "{{ count }}", 3, "count")
+        if !session
+            .require_or_skip_ready(&with_uri, "{{ count }}", 3, "count")
             .await
         {
-            let diags = session.merged_diagnostics(&with_uri).await;
-            assert!(
-                !merged_has_ts_code(&diags, "2880"),
-                "a correct `with {{ type: \"json\" }}` import must NOT surface the \
-                 deprecated-assertion TS2880 (Verter corrupted the attribute?); got: {diags:?}"
-            );
-            assert!(
-                !diags.iter().any(|d| {
-                    matches!(
-                        d.code.as_ref(),
-                        Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == "2307"
-                    ) && d.message.contains("data.json")
-                }),
-                "the JSON module must resolve through the preserved import attribute \
-                 (no TS2307 for ./data.json); got: {diags:?}"
-            );
+            return;
         }
+        let diags = session.merged_diagnostics(&with_uri).await;
+        // Negative: no corruption of the attribute (would surface the deprecated-
+        // assertion TS2880), no module-not-found for the resolved JSON.
+        assert!(
+            !merged_has_ts_code(&diags, "2880"),
+            "a correct `with {{ type: \"json\" }}` import must NOT surface the \
+             deprecated-assertion TS2880 (Verter corrupted the attribute?); got: {diags:?}"
+        );
+        assert!(
+            !diags.iter().any(|d| {
+                matches!(
+                    d.code.as_ref(),
+                    Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == "2307"
+                ) && d.message.contains("data.json")
+            }),
+            "the JSON module must resolve through the preserved import attribute \
+             (no TS2307 for ./data.json); got: {diags:?}"
+        );
+        // Positive: the JSON import resolved to a TYPED object (not `any`/missing).
+        // `data.json` is `{ "jsonValueOnly": "hello" }`; the script binds
+        // `const value = data.jsonValueOnly`. Hover on `value` surfaces its type:
+        // when the attribute is preserved and the JSON resolves, the member typed
+        // as `string` flows through, so the hover reads `const value: string`. A
+        // dropped/`any` import would surface `const value: any` — so asserting the
+        // resolved `string` (and the absence of `any`) is discriminating.
+        let value_pos = session.find_position(&with_uri, "const value", 6);
+        let value_hover = session
+            .hover_text(&with_uri, value_pos)
+            .await
+            .unwrap_or_else(|| panic!("hover on the JSON-derived `value` should return a result"));
+        assert!(
+            value_hover.contains("string") && !value_hover.contains(": any"),
+            "the JSON import must resolve to its typed shape so `value` (=\
+             `data.jsonValueOnly`) types as `string`, not `any` (attribute \
+             preserved + JSON resolved); got: {value_hover}"
+        );
+        // And the property access itself must not error (TS2339) — it type-checks
+        // only against the resolved JSON object type, never against `any`/missing.
+        assert!(
+            !diags.iter().any(|d| {
+                matches!(
+                    d.code.as_ref(),
+                    Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == "2339"
+                ) && d.message.contains("jsonValueOnly")
+            }),
+            "accessing `data.jsonValueOnly` must not surface TS2339 (the JSON \
+             resolved to its typed shape); got: {diags:?}"
+        );
 
         // (b) deprecated `assert { type: "json" }` — Verter must PRESERVE the
         // provider's TS2880 mapped onto the carrier (not drop/corrupt it).
         let assert_uri = session.open_fixture_file("src/AssertJson.vue").await;
-        if session
-            .wait_until_ready(&assert_uri, "{{ count }}", 3, "count")
+        if !session
+            .require_or_skip_ready(&assert_uri, "{{ count }}", 3, "count")
             .await
         {
-            let diags = session.merged_diagnostics(&assert_uri).await;
-            assert!(
-                merged_has_ts_code(&diags, "2880")
-                    || diags.iter().any(|d| d.message.contains("import attributes")),
-                "a deprecated `assert {{ type: \"json\" }}` import must surface TS2880 \
-                 on the carrier (Verter must preserve the provider diagnostic); got: {diags:?}"
-            );
+            return;
         }
+        let assert_diags = session.merged_diagnostics(&assert_uri).await;
+        assert!(
+            merged_has_ts_code(&assert_diags, "2880")
+                || assert_diags
+                    .iter()
+                    .any(|d| d.message.contains("import attributes")),
+            "a deprecated `assert {{ type: \"json\" }}` import must surface TS2880 \
+             on the carrier (Verter must preserve the provider diagnostic); got: {assert_diags:?}"
+        );
+
+        // (c) `import defer * as ns from "./mod"` (TS 5.9+, legal under
+        // `module: preserve`) — Verter must PRESERVE the `defer` modifier through
+        // IDE-TSX codegen: the deferred namespace binding still resolves (hover on
+        // a member surfaces its unique name) and no spurious diagnostic is emitted
+        // for the deferred import on the carrier.
+        let defer_uri = session.open_fixture_file("src/WithDefer.vue").await;
+        if !session
+            .require_or_skip_ready(&defer_uri, "{{ count }}", 3, "count")
+            .await
+        {
+            return;
+        }
+        // Positive: the deferred namespace member resolves to its typed value.
+        // `deferred.ts` exports `deferredValueOnly = "deferred"`; the script binds
+        // `const value = deferred.deferredValueOnly`. Hover on the member surfaces
+        // its unique resolved name — proving the `import defer * as deferred`
+        // namespace binding resolved through Verter's preserved `defer` modifier.
+        let ns_member_pos = session.find_position(&defer_uri, "deferred.deferredValueOnly", 9);
+        let ns_member_hover = session
+            .hover_text(&defer_uri, ns_member_pos)
+            .await
+            .unwrap_or_else(|| panic!("hover on the deferred namespace member should return a result"));
+        assert!(
+            ns_member_hover.contains("deferredValueOnly"),
+            "the `import defer * as deferred` namespace binding must resolve its \
+             member `deferredValueOnly` (the `defer` modifier was preserved); got: {ns_member_hover}"
+        );
+        // Negative: preserving `import defer` must not introduce a spurious
+        // module-not-found error for the deferred module on the carrier. (The
+        // fixture vendors no `vue`, so an ambient `vue`-not-found TS2307 + the
+        // JSX-intrinsics noise are expected and unrelated — we key on the
+        // `./deferred` specifier specifically.)
+        let defer_diags = session.merged_diagnostics(&defer_uri).await;
+        assert!(
+            !defer_diags.iter().any(|d| {
+                matches!(
+                    d.code.as_ref(),
+                    Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == "2307"
+                ) && d.message.contains("deferred")
+            }),
+            "an `import defer` of an existing module must resolve (no TS2307 for \
+             ./deferred); got: {defer_diags:?}"
+        );
     }
 );
 
@@ -403,10 +565,11 @@ real_provider_test!(
 //
 // Same fixture, separate session: characterizes the non-value-component import
 // forms. Side-effect imports register NO component binding (Verter-owned); a
-// broken path surfaces module-not-found (TS2307); a dynamic `import('./X.vue')`
-// is NOT discovered as a template component (a tracked gap — async-component
-// discovery is not supported; the dynamic-import companion gap test asserts the
-// desired behavior).
+// broken path surfaces module-not-found (TS2307); a bare dynamic-import arrow
+// (`() => import('./X.vue')`) rendered as a tag is recorded as a template usage
+// but is NOT carrier-linked (its `import_source` stays None — async-component
+// discovery is a tracked gap whose desired linkage the dynamic-import companion
+// gap test asserts).
 
 real_provider_test!(
     import_core_bundler_edge,
@@ -424,41 +587,67 @@ real_provider_test!(
             .get_analysis(&uri)
             .expect("EdgeImports.vue analysis should be present");
         if let Some(template) = &analysis.template {
-            // A side-effect import (`import './sideEffect'`) and a dynamic import
-            // (`import('./DirectComp.vue')`) must not appear as template
-            // components.
+            // Verter-owned classification, keyed on carrier LINKAGE (import_source),
+            // not on whether a tag happens to be parsed as a template usage:
+            //
+            // A side-effect import (`import './sideEffect'`) registers no component
+            // binding at all, so no template component links back to it.
             assert!(
                 !template
                     .components
                     .iter()
                     .any(|c| c.import_source.as_deref() == Some("./sideEffect")),
-                "a side-effect import must NOT register a template component; got: {:?}",
-                template.components.iter().map(|c| &c.name).collect::<Vec<_>>()
+                "a side-effect import must NOT register a carrier-linked template component; got: {:?}",
+                template
+                    .components
+                    .iter()
+                    .map(|c| (&c.name, &c.import_source))
+                    .collect::<Vec<_>>()
             );
+            // A bare dynamic-import arrow (`const Lazy = () => import('./DirectComp.vue')`)
+            // rendered as `<Lazy directOnly="a" />` IS recorded as a template usage,
+            // but it is NOT carrier-linked: its `import_source` stays None, so no
+            // Verter-owned carrier feature targets `./DirectComp.vue` through it. The
+            // render forces the discrimination — were the arrow wrongly classified as
+            // a carrier-linked component, a `Lazy` entry would carry
+            // `import_source = Some("./DirectComp.vue")`. (The desired future linkage
+            // is the `#[ignore]`'d `dynamic_import_component_is_carrier_linked_*`
+            // companion; this characterizes the current non-linkage.)
             assert!(
-                !template.components.iter().any(|c| c.name == "Lazy"),
-                "a dynamic import bound to `Lazy` must NOT register a template component; got: {:?}",
-                template.components.iter().map(|c| &c.name).collect::<Vec<_>>()
+                !template
+                    .components
+                    .iter()
+                    .any(|c| c.name == "Lazy"
+                        && c.import_source.as_deref() == Some("./DirectComp.vue")),
+                "a bare dynamic-import arrow bound to `Lazy` must NOT be carrier-linked \
+                 to ./DirectComp.vue (import_source stays None); got: {:?}",
+                template
+                    .components
+                    .iter()
+                    .filter(|c| c.name == "Lazy")
+                    .map(|c| (&c.name, &c.import_source))
+                    .collect::<Vec<_>>()
             );
         }
 
         // Provider semantic failure: the broken import path surfaces TS2307.
-        if session
-            .wait_until_ready(&uri, "{{ count }}", 3, "count")
+        if !session
+            .require_or_skip_ready(&uri, "{{ count }}", 3, "count")
             .await
         {
-            let diags = session.merged_diagnostics(&uri).await;
-            assert!(
-                diags.iter().any(|d| {
-                    matches!(
-                        d.code.as_ref(),
-                        Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == "2307"
-                    ) && d.message.contains("does-not-exist")
-                }),
-                "the broken import path must surface module-not-found (TS2307) for \
-                 ./does-not-exist; got: {diags:?}"
-            );
+            return;
         }
+        let diags = session.merged_diagnostics(&uri).await;
+        assert!(
+            diags.iter().any(|d| {
+                matches!(
+                    d.code.as_ref(),
+                    Some(tower_lsp_server::ls_types::NumberOrString::String(s)) if s == "2307"
+                ) && d.message.contains("does-not-exist")
+            }),
+            "the broken import path must surface module-not-found (TS2307) for \
+             ./does-not-exist; got: {diags:?}"
+        );
     }
 );
 
@@ -538,8 +727,7 @@ real_provider_test!(
         let uri = session.open_fixture_file("src/App.vue").await;
         session.open_fixture_file("src/IsoChild.vue").await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 

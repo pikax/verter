@@ -1035,6 +1035,11 @@ impl VerterLanguageServer {
         const MAX_RESOLVED_REFS: usize = 1024;
         const MAX_CARRIER_TARGETS: usize = 512;
         let mut resolved_refs_remaining: usize = MAX_RESOLVED_REFS;
+        // Trace each size cap at most once — the first time a genuinely-new node is
+        // dropped because the cap is full — so the truncation the comment promises is
+        // observable. Cheap: one trace per cap, never per skipped item.
+        let mut non_carrier_cap_traced = false;
+        let mut carrier_cap_traced = false;
 
         // Seed the frontier from template component import sources that resolve to a
         // non-carrier (barrel) module. A directly-resolved carrier is already handled by
@@ -1050,9 +1055,17 @@ impl VerterLanguageServer {
             if verter_workspace::path_is_carrier(&resolved) {
                 continue;
             }
-            if seen_barrels.insert(resolved.clone()) && barrel_ids.len() < MAX_NON_CARRIER_NODES {
-                frontier.push(resolved.clone());
-                barrel_ids.push(resolved);
+            if seen_barrels.insert(resolved.clone()) {
+                if barrel_ids.len() < MAX_NON_CARRIER_NODES {
+                    frontier.push(resolved.clone());
+                    barrel_ids.push(resolved);
+                } else if !non_carrier_cap_traced {
+                    non_carrier_cap_traced = true;
+                    tracing::debug!(
+                        "barrel sync: non-carrier node cap ({MAX_NON_CARRIER_NODES}) reached; \
+                         truncating remaining barrel modules"
+                    );
+                }
             }
         }
 
@@ -1083,16 +1096,28 @@ impl VerterLanguageServer {
                         continue;
                     };
                     if verter_workspace::path_is_carrier(&target) {
-                        if seen_barrel_carrier.insert(target.clone())
-                            && barrel_carrier_deps.len() < MAX_CARRIER_TARGETS
-                        {
-                            barrel_carrier_deps.push(target);
+                        if seen_barrel_carrier.insert(target.clone()) {
+                            if barrel_carrier_deps.len() < MAX_CARRIER_TARGETS {
+                                barrel_carrier_deps.push(target);
+                            } else if !carrier_cap_traced {
+                                carrier_cap_traced = true;
+                                tracing::debug!(
+                                    "barrel sync: carrier-target cap ({MAX_CARRIER_TARGETS}) reached; \
+                                     truncating remaining carrier re-export targets"
+                                );
+                            }
                         }
-                    } else if seen_barrels.insert(target.clone())
-                        && barrel_ids.len() < MAX_NON_CARRIER_NODES
-                    {
-                        next.push(target.clone());
-                        barrel_ids.push(target);
+                    } else if seen_barrels.insert(target.clone()) {
+                        if barrel_ids.len() < MAX_NON_CARRIER_NODES {
+                            next.push(target.clone());
+                            barrel_ids.push(target);
+                        } else if !non_carrier_cap_traced {
+                            non_carrier_cap_traced = true;
+                            tracing::debug!(
+                                "barrel sync: non-carrier node cap ({MAX_NON_CARRIER_NODES}) reached; \
+                                 truncating remaining barrel modules"
+                            );
+                        }
                     }
                 }
             }

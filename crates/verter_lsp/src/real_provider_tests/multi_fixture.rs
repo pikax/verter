@@ -131,8 +131,7 @@ real_provider_test!(
             .open_fixture_file("src/components/layouts/PageContent.vue")
             .await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -169,8 +168,7 @@ real_provider_test!(
             .open_fixture_file("src/components/layouts/PageContent.vue")
             .await;
 
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 
@@ -193,10 +191,13 @@ real_provider_test!(
 // ---------------------------------------------------------------------------
 //
 // A barrel whose ONLY export is a NAMED re-export (`export { default as Widget }`,
-// no own default) imported as a DEFAULT import (`import Idx from '@/components'`).
-// TS rejects this with TS1192 ("Module has no default export") BEFORE any prop
-// check on `<Idx>`. This asserts the merged template+TS diagnostic set surfaces
-// the 1192 on the `.vue` carrier (a diagnostics assertion, not a hover one).
+// no own default) imported as a DEFAULT import (`import Idx from './components'`).
+// The barrel is imported RELATIVELY (not via a `@/` alias) so the rejection does
+// not depend on tsconfig `paths` resolution, which diverges across providers in
+// the carrier-diagnostics program. TS rejects this with TS1192 ("Module has no
+// default export") BEFORE any prop check on `<Idx>`. This asserts the merged
+// template+TS diagnostic set surfaces the 1192 on the `.vue` carrier (a
+// diagnostics assertion, not a hover one).
 
 real_provider_test!(
     diagnostics_default_import_no_default_ts1192,
@@ -209,8 +210,7 @@ real_provider_test!(
 
         // Warm the provider's inferred project (a cold program returns no
         // diagnostics on the first request).
-        if !session.wait_until_ready(&uri, "{{ count }}", 3, "count").await {
-            eprintln!("skipping: provider not warmed up");
+        if !session.require_or_skip_ready(&uri, "{{ count }}", 3, "count").await {
             return;
         }
 

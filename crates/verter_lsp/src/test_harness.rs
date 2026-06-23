@@ -851,6 +851,55 @@ impl RealProviderTestSession {
         false
     }
 
+    /// Fail-closed variant of [`Self::wait_until_ready`] for tests whose
+    /// resolution-dependent assertions only run once the provider is warm.
+    ///
+    /// A plain `if !wait_until_ready(..) { return; }` guard is VACUOUS under the
+    /// require gate: on a cold provider the test returns green without ever
+    /// reaching its assertions, yet a required-but-cold provider should be a HARD
+    /// failure. This helper closes that gap by routing the not-ready case through
+    /// the same require-mode policy as an absent provider:
+    ///
+    /// - ready → `true` (the caller proceeds to its assertions);
+    /// - NOT ready AND this provider's REQUIRE env is set
+    ///   (`VERTER_REQUIRE_{TSSERVER,TSGO}=1`) → **panic** so the CI gate fails
+    ///   loudly instead of reporting a green it never earned;
+    /// - NOT ready and NOT required → `false` (the caller does the existing
+    ///   graceful local skip — `return`).
+    ///
+    /// Net effect under the REQUIRE gate: every call site MUST reach its
+    /// resolution assertion or panic — there is no silent green.
+    pub(crate) async fn require_or_skip_ready(
+        &self,
+        uri: &Uri,
+        needle: &str,
+        delta: usize,
+        expected_label: &str,
+    ) -> bool {
+        if self
+            .wait_until_ready(uri, needle, delta, expected_label)
+            .await
+        {
+            return true;
+        }
+        if provider_required(self.kind) {
+            panic!(
+                "{}=1 but the {} real-provider test never warmed up for {} \
+                 (expected completion `{expected_label}` at `{needle}`+{delta}): \
+                 a required provider that cannot resolve is a HARD failure, not a skip",
+                self.kind.require_env(),
+                self.kind.label(),
+                uri.as_str(),
+            );
+        }
+        eprintln!(
+            "skipping ({}): provider not warmed up for {}",
+            self.kind.label(),
+            uri.as_str()
+        );
+        false
+    }
+
     /// MERGED (Verter template/lint + type-provider) diagnostics for an open carrier
     /// document, mapped back onto the carrier source ranges.
     ///
