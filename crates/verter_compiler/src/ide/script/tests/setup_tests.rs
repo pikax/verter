@@ -2,32 +2,49 @@
 
 use super::*;
 
-/// IDE output rewrites `.vue` import specifiers to `.vue.ts` so that
-/// type providers (TSGO/tsserver) resolve them to the public API output.
-/// The rewrite uses CodeTransform::prepend_left so the sourcemap stays correct.
+/// The `@verter/types` slot-argument extractor must match a slot member whose
+/// type is optional (`((...) => any) | undefined`). An optional slot member's
+/// type carries the `| undefined` arm, which the bare `(...args) => any`
+/// conditional does NOT match — so it would resolve to `never` and break
+/// `v-slot` destructuring for components with optional slots (e.g. RouterView's
+/// `default?`). The generated declaration must unwrap the optional arm.
 #[test]
 fn standalone_and_ambient_types_preserve_slot_argument_maps() {
-    let slot_signature =
+    let ambient_slot_signature =
         "TSlots extends Record<string, any>,\n    N extends keyof TSlots & string,";
+    let standalone_slot_signature =
+        "TSlots extends Record<string, any>,\n  N extends keyof TSlots & string,";
+    let optional_aware_conditional =
+        "): TSlots[N] extends ((...args: infer P) => any) | undefined ? P[0] : never;";
+    let bare_non_optional_conditional =
+        "): TSlots[N] extends (...args: infer P) => any ? P[0] : never;";
 
     assert!(
-        VERTER_TYPES_AMBIENT_MODULE.contains(slot_signature),
+        VERTER_TYPES_AMBIENT_MODULE.contains(ambient_slot_signature),
         "ambient @verter/types declarations should infer the concrete slot map first"
     );
     assert!(
-        VERTER_TYPES_AMBIENT_MODULE
-            .contains("): TSlots[N] extends (...args: infer P) => any ? P[0] : never;"),
-        "ambient @verter/types declarations should preserve slot prop types"
+        VERTER_TYPES_AMBIENT_MODULE.contains(optional_aware_conditional),
+        "ambient @verter/types declarations should preserve slot prop types for optional slots"
     );
     assert!(
-        VERTER_TYPES_STANDALONE_DTS
-            .contains("TSlots extends Record<string, any>,\n  N extends keyof TSlots & string,"),
+        !VERTER_TYPES_AMBIENT_MODULE.contains(bare_non_optional_conditional),
+        "ambient @verter/types declarations must not use the bare conditional that drops \
+         optional slot props to `never`"
+    );
+
+    assert!(
+        VERTER_TYPES_STANDALONE_DTS.contains(standalone_slot_signature),
         "standalone @verter/types stub should infer the concrete slot map first"
     );
     assert!(
-        VERTER_TYPES_STANDALONE_DTS
-            .contains("): TSlots[N] extends (...args: infer P) => any ? P[0] : never;"),
-        "standalone @verter/types stub should preserve slot prop types"
+        VERTER_TYPES_STANDALONE_DTS.contains(optional_aware_conditional),
+        "standalone @verter/types stub should preserve slot prop types for optional slots"
+    );
+    assert!(
+        !VERTER_TYPES_STANDALONE_DTS.contains(bare_non_optional_conditional),
+        "standalone @verter/types stub must not use the bare conditional that drops \
+         optional slot props to `never`"
     );
 }
 

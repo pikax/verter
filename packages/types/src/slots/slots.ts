@@ -171,4 +171,4 @@ export declare function extractArgumentsFromRenderSlot<
 >(
   component: { $slots: TSlots },
   slotName: N,
-): TSlots[N] extends (...args: infer P) => any ? P[0] : never;
+): TSlots[N] extends ((...args: infer P) => any) | undefined ? P[0] : never;

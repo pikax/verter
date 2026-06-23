@@ -45,7 +45,7 @@ export declare function extractArgumentsFromRenderSlot<
     $slots: TSlots;
   },
   slotName: N,
-): TSlots[N] extends (...args: infer P) => any ? P[0] : never;
+): TSlots[N] extends ((...args: infer P) => any) | undefined ? P[0] : never;
 export type ExtractLeafElement<T> = T extends HTMLElement
   ? T
   : T extends { $el: infer E }
