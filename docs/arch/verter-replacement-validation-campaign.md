@@ -82,7 +82,7 @@ Three comparison harnesses + an extraction pipeline, built on what already exist
 - **Phase 1 — recon**: run the tooling over 2–3 representative projects to validate the loop and surface the first issue wave (extracted generically).
 - **Phase 2 — scale**: cover all 7 projects × 3 workstreams; one fix-manager per confirmed deviation; gated by independent review + confirm.
 
-**Prioritization** (codex-validated): Phase 1 lands the **P1-PIPE** foundation first (local-analysis config + corpus loader + producer-side redaction + widened leak guard + the 5-class deviation ledger), then the workstreams in order **TSC → build → IDE**.
+**Prioritization** (user-set): Phase 1 lands the **P1-PIPE** foundation first (local-analysis config + corpus loader + producer-side redaction + widened leak guard + the 5-class deviation ledger), then the workstreams in **IDE → TSC → build** order. (Codex had suggested TSC-first; the user prioritizes DX/IDE — it is the headline goal and the in-flight barrel/import-resolution + import-matrix work already feeds it. TSC second, build last.)
 
 **MoM dispatch**: the CTO decomposes into managers (recon, per-workstream analysis, hermetic-extraction, fix). Every landed fix passes independent dual review + a confirm gate. Architecture decisions are codex-owned. Corpus projects are analysis inputs only (§4.3).
 
