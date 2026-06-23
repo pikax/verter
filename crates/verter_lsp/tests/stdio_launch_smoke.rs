@@ -222,11 +222,18 @@ fn verter_lsp_initialize_handshake_returns_capabilities() {
     );
 
     // ── Spawn the real binary over stdio ────────────────────────────────────
+    // stderr is discarded (`Stdio::null()`) rather than piped: the test never
+    // inspects it, and an undrained pipe would deadlock the handshake. The child
+    // inherits this process's environment, so under `RUST_LOG`/`VERTER_LOG=debug`
+    // (CI or a dev shell) a piped-but-undrained stderr could fill its small OS
+    // buffer before `initialize` is answered, blocking the server on the stderr
+    // write and tripping a spurious read timeout. Nulling stderr removes that
+    // failure mode while keeping the handshake assertions fully discriminating.
     let mut child = Command::new(env!("CARGO_BIN_EXE_verter-lsp"))
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn the verter-lsp binary");
 
@@ -371,9 +378,14 @@ fn verter_lsp_initialize_handshake_returns_capabilities() {
     }
 }
 
-/// Convert a filesystem path to a `file://` URI (matching the binary's own
+/// Convert a filesystem path to a `file://` URI (mirroring the binary's own
 /// `path_to_file_uri`): a POSIX absolute path becomes `file://<path>`, a Windows
 /// path (`C:\...`) becomes `file:///C:/...`.
+///
+/// Kept local rather than reusing the binary's helper: that helper lives in
+/// `verter_lsp`'s private `uri` module / `main.rs`, neither of which is reachable
+/// from this integration-test crate, and the `rootUri` it produces is not
+/// load-bearing for the handshake (the hermetic `off` init never resolves it).
 fn path_to_file_uri(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     if normalized.starts_with('/') {

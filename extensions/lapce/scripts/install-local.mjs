@@ -21,7 +21,7 @@ let args;
 
 if (process.platform === "win32") {
   const ps1 = path.join(scriptDir, "install-local.ps1");
-  // Prefer PowerShell 7+ (pwsh) when present, else Windows PowerShell.
+  // Windows PowerShell (always present on Windows); the .ps1 targets 5.1.
   command = "powershell.exe";
   args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1, ...forwarded];
 } else {
