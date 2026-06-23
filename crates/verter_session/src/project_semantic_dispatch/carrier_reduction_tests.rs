@@ -723,7 +723,7 @@ fn typeof_resolution_stays_within_instantiate_window() {
 //   - RAW raise (`materialize_output_type_expr`)  → `TypeExpr::TypeOf(..)` — the
 //     shell-only boundary leaves the operator carrier un-reduced; it just
 //     structurally raises the carrier head/path/args back to a `ValueRef`.
-//   - REDUCED raise (`reduce_and_raise_for_projection_output`, `Published(Expanded)`)
+//   - REDUCED raise (`materialize_reduced_output_type_expr`, `Published(Expanded)`)
 //     → `TypeExpr::Function(..)` — the projection boundary reduces the carrier
 //     FIRST (resolves `f`, projects the path, applies the `<string>` arg) so it
 //     collapses to the instantiated `(x: string) => string`, then raises THAT.
@@ -787,17 +787,16 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
     // 2) Projection-output boundary: reduce-under-context THEN raise. The SAME
     //    carrier resolves `f`, applies `<string>`, and collapses to the
     //    instantiated `(x: string) => string`, which raises to a `Function`.
-    let materialized = dispatch.reduce_and_raise_for_projection_output(
+    let materialized = dispatch.materialize_reduced_output_type_expr(
         carrier,
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
     let reduced_node = materialized
         .node_id
         .expect("the reduce-then-raise boundary records the producing reduced node");
-    assert_eq!(
-        materialized.node_id,
-        Some(reduced_node),
-        "the projection boundary carries the producing reduced SemanticNodeId"
+    assert_ne!(
+        reduced_node, carrier,
+        "reduction must produce a node distinct from the un-reduced operator carrier"
     );
     // The recorded node MUST itself be the reduced `Function`, not the original
     // operator carrier — i.e. the reduce step actually ran on the graph node.
@@ -820,7 +819,7 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
     match &materialized.type_expr {
         TypeExpr::Function(_) => {}
         other => panic!(
-            "reduce_and_raise_for_projection_output MUST reduce THEN raise: `typeof f<string>` \
+            "materialize_reduced_output_type_expr MUST reduce THEN raise: `typeof f<string>` \
              collapses to the instantiated signature, raising to `TypeExpr::Function`, got {other:?}"
         ),
     }

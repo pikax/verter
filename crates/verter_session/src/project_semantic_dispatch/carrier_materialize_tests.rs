@@ -371,14 +371,16 @@ fn materialize_recursive_ref_back_edge_round_trips() {
     }
 }
 
-/// The `HotTypeRef`-shaped test harness `materialize_type_expr` must DELEGATE
-/// to the plain output boundary `materialize_output_type_expr`, projecting the
-/// SAME `TypeExpr` for the same node. This keeps the `HotTypeRef` harness alive
-/// and locks the delegation: a `materialize_type_expr` that stopped routing
-/// through `materialize_output_type_expr` (or unwrapped the miss differently)
-/// would diverge from the direct boundary call and FAIL this assertion.
+/// The `HotTypeRef`-shaped test harness `materialize_type_expr` projects the
+/// SAME `TypeExpr` as the plain `materialize_output_type_expr` boundary for the
+/// same node (behavioral equivalence of the harness wrapper); it does not
+/// assert the harness routes through that boundary internally.
+///
+/// It also pins the harness's `None`-miss mapping: a node ABSENT from the live
+/// graph store makes the plain boundary return `None`, and the harness maps that
+/// miss to the `"<materialize miss>"` sentinel.
 #[test]
-fn hot_type_ref_harness_delegates_to_plain_output_boundary() {
+fn hot_type_ref_harness_matches_plain_output_boundary() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let node = graph.intern_node(SemanticNodeData::new_bare_ref(
@@ -393,16 +395,33 @@ fn hot_type_ref_harness_delegates_to_plain_output_boundary() {
         .materialize_output_type_expr(node)
         .expect("the bare-ref carrier raises through the plain boundary");
 
-    // Both routes land the same `Ref { name: "Foo" }` — the harness is a thin
-    // `HotTypeRef`-shaped wrapper over the plain boundary, not a second path.
+    // Both routes land the same `Ref { name: "Foo" }` — the harness wrapper is
+    // behaviorally equivalent to the plain boundary for the same node.
     assert_eq!(
         via_harness, via_plain,
         "materialize_type_expr(HotTypeRef) must project the SAME TypeExpr as \
-         materialize_output_type_expr(node) — it delegates, it does not diverge"
+         materialize_output_type_expr(node) for the same node"
     );
     assert!(
         matches!(&via_harness, TypeExpr::Ref { name, .. } if name.as_ref() == "Foo"),
         "expected the bare-ref to raise to Ref{{name=Foo}}, got {via_harness:?}"
+    );
+
+    // Miss case: a node ordinal never interned into this fresh graph store is
+    // absent, so the plain boundary returns `None` and the harness maps the miss
+    // to the `"<materialize miss>"` sentinel. This pins the harness's own
+    // miss-unwrap behavior (the only behavior it adds over the plain boundary).
+    let absent = SemanticNodeId(u64::MAX);
+    assert!(
+        dispatch.materialize_output_type_expr(absent).is_none(),
+        "an un-interned node ordinal must miss the plain boundary"
+    );
+    assert!(
+        matches!(
+            &dispatch.materialize_type_expr(HotTypeRef::new(absent)),
+            TypeExpr::Unknown { raw } if raw == "<materialize miss>"
+        ),
+        "the harness must map a plain-boundary miss to the `<materialize miss>` sentinel"
     );
 }
 

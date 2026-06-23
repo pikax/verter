@@ -145,9 +145,9 @@ impl HotTypeRef {
         Self(node)
     }
 
-    /// The underlying interned node id. Used only at the
-    /// [`materialize_type_expr`](crate::project_semantic_dispatch::ProjectSemanticDispatch::materialize_type_expr)
-    /// reverse boundary and by handle-capable consumers; it is never lifted
+    /// The underlying interned node id. Reached at the
+    /// [`materialize_output_type_expr`](crate::project_semantic_dispatch::ProjectSemanticDispatch::materialize_output_type_expr)
+    /// output boundary and by handle-capable consumers; it is never lifted
     /// into a cache key.
     #[must_use]
     pub fn node(self) -> SemanticNodeId {
