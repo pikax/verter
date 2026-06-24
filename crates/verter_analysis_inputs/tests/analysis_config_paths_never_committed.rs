@@ -603,6 +603,44 @@ fn is_shape_scanned_artifact_discriminates() {
 }
 
 #[test]
+fn changelog_is_token_clean_and_regeneration_stays_clean() {
+    let root = repo_root();
+    // (a) The committed changelog carries no private token (the tree-wide CLASS 1
+    // scan covers this too; this is the focused, discriminating restatement).
+    let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).expect("read CHANGELOG.md");
+    assert_eq!(
+        token_leak(&changelog),
+        None,
+        "CHANGELOG.md must contain no private token"
+    );
+    // (b) git-cliff regeneration must stay clean: cliff.toml declares a postprocess
+    // redactor. Without it, the next `git-cliff` run would reintroduce a token from
+    // a commit subject. A future removal of the redactor is caught here.
+    let cliff = std::fs::read_to_string(root.join("cliff.toml")).expect("read cliff.toml");
+    assert!(
+        cliff.contains("postprocess"),
+        "cliff.toml must declare a postprocess redactor so regeneration stays clean"
+    );
+    // The redactor must itself be clean (no contiguous private token in the config).
+    assert_eq!(
+        token_leak(&cliff),
+        None,
+        "cliff.toml's redactor must not spell a private token contiguously"
+    );
+    // It must target each private-token shape. The patterns are written as
+    // `<frag>[-_ .]?<frag>`, so check each token's two halves co-occur in a pattern.
+    for (head, tail) in [("nexus", "ui"), ("accio", "research"), ("judis", "app")] {
+        let targets = cliff
+            .lines()
+            .any(|l| l.contains("pattern") && l.contains(head) && l.contains(tail));
+        assert!(
+            targets,
+            "cliff.toml postprocess must target the {head}…{tail} private token"
+        );
+    }
+}
+
+#[test]
 fn gitignore_ignores_the_analysis_directory() {
     let root = repo_root();
     let gitignore = std::fs::read_to_string(root.join(".gitignore")).expect("read .gitignore");

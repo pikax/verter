@@ -4747,10 +4747,19 @@ const tag = 'div';
 }
 
 #[test]
-fn nexus_notification_produces_valid_tsx() {
-    let source = match std::fs::read_to_string("d:/dev/accioresearch/WLS/nexus/nexus-ui/packages/ui/src/components/Notifications/components/Notification.vue") {
+fn external_notification_component_produces_valid_tsx() {
+    // The fixture path comes from an env var so no private/local path lives in the
+    // tree; with the var unset the test SKIPs (its prior behavior on a missing file).
+    let Some(path) = std::env::var_os("VERTER_NOTIFICATION_FIXTURE_VUE") else {
+        eprintln!("SKIP: VERTER_NOTIFICATION_FIXTURE_VUE not set");
+        return;
+    };
+    let source = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => { eprintln!("SKIP: file not found"); return; }
+        Err(_) => {
+            eprintln!("SKIP: file not found");
+            return;
+        }
     };
     let alloc = Allocator::new();
     let options = crate::compile::CodegenOptions {
@@ -4832,10 +4841,14 @@ const { msg, count } = defineProps<{
 }
 
 #[test]
-fn nexus_bloc_produces_valid_tsx() {
-    let source = match std::fs::read_to_string(
-        "d:/dev/accioresearch/WLS/nexus/nexus-ui/packages/ui/src/components/atom/Bloc/Bloc.vue",
-    ) {
+fn external_block_component_produces_valid_tsx() {
+    // The fixture path comes from an env var so no private/local path lives in the
+    // tree; with the var unset the test SKIPs (its prior behavior on a missing file).
+    let Some(path) = std::env::var_os("VERTER_BLOCK_FIXTURE_VUE") else {
+        eprintln!("SKIP: VERTER_BLOCK_FIXTURE_VUE not set");
+        return;
+    };
+    let source = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => {
             eprintln!("SKIP: file not found");

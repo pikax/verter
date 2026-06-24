@@ -15,12 +15,18 @@ const localTimeoutMs = 20_000;
 const directStyleRegressionScript = path.resolve(e2eDir, "scripts", "direct-style-exit-repro.mjs");
 const directStyleTimeoutMs = 20_000;
 
-const defaultNexusUiRoot = "D:/dev/accioresearch/WLS/nexus/nexus-ui";
-const nexusUiRoot = process.env.VERTER_NEXUS_UI_ROOT ?? defaultNexusUiRoot;
-const nexusUiPackageDir = path.resolve(nexusUiRoot, "packages", "ui");
-const nexusUiDistDir = path.resolve(nexusUiPackageDir, "dist");
-const nexusUiTimeoutMs = 60_000;
-const runNexusUiCheck = process.env.VERTER_RUN_NEXUS_UI === "1";
+// The optional external consumer-repro lives in a local checkout whose path comes
+// purely from an env var; no private/local path lives in the tree. The check is
+// gated on VERTER_RUN_EXTERNAL_LIB=1 and is a no-op when the root env var is unset.
+const externalLibRoot = process.env.VERTER_EXTERNAL_LIB_ROOT;
+const externalLibPackageDir = externalLibRoot
+  ? path.resolve(externalLibRoot, "packages", "ui")
+  : undefined;
+const externalLibDistDir = externalLibPackageDir
+  ? path.resolve(externalLibPackageDir, "dist")
+  : undefined;
+const externalLibTimeoutMs = 60_000;
+const runExternalLibCheck = process.env.VERTER_RUN_EXTERNAL_LIB === "1";
 
 const viteBin = path.resolve(unpluginDir, "node_modules", "vite", "bin", "vite.js");
 const pnpmInvocation = resolvePnpmInvocation();
@@ -217,15 +223,22 @@ async function buildLinkedUnplugin() {
   });
 }
 
-async function runNexusUiFallback() {
+async function runExternalLibFallback() {
+  // The pnpm workspace filter for the external consumer also comes from the
+  // environment (the operator's local package name), so no private package name
+  // is hardcoded. Defaults to the package directory's build script.
+  const filter = process.env.VERTER_EXTERNAL_LIB_FILTER;
+  const args = filter
+    ? [...pnpmInvocation.args, "--filter", filter, "build-lib"]
+    : [...pnpmInvocation.args, "run", "build-lib"];
   return runCommand({
-    label: "nexus-ui @nexus/ui build-lib",
-    cwd: nexusUiRoot,
+    label: "external lib build-lib",
+    cwd: externalLibRoot,
     command: pnpmInvocation.command,
-    args: [...pnpmInvocation.args, "--filter", "@nexus/ui", "build-lib"],
-    timeoutMs: nexusUiTimeoutMs,
-    cleanupDir: nexusUiDistDir,
-    expectedOutput: nexusUiDistDir,
+    args,
+    timeoutMs: externalLibTimeoutMs,
+    cleanupDir: externalLibDistDir,
+    expectedOutput: externalLibDistDir,
   });
 }
 
@@ -254,26 +267,30 @@ async function main() {
     throw new Error("Local Vite lib-build smoke test failed after the direct regression passed.");
   }
 
-  if (!runNexusUiCheck) {
+  if (!runExternalLibCheck || !externalLibPackageDir) {
     console.log(
-      "[exit-regression] nexus-ui validation skipped by default; set VERTER_RUN_NEXUS_UI=1 to run it manually",
+      "[exit-regression] external-lib validation skipped by default; set VERTER_RUN_EXTERNAL_LIB=1 and VERTER_EXTERNAL_LIB_ROOT to run it manually",
     );
     return;
   }
 
-  if (!existsSync(nexusUiPackageDir)) {
-    console.log(`[exit-regression] nexus-ui validation skipped: ${nexusUiPackageDir} not found`);
+  if (!existsSync(externalLibPackageDir)) {
+    console.log(
+      `[exit-regression] external-lib validation skipped: ${externalLibPackageDir} not found`,
+    );
     return;
   }
 
-  console.log(`[exit-regression] validating the original consumer repro at ${nexusUiPackageDir}`);
+  console.log(
+    `[exit-regression] validating the original consumer repro at ${externalLibPackageDir}`,
+  );
 
-  const nexusResult = await runNexusUiFallback();
-  printResult(nexusResult);
+  const externalResult = await runExternalLibFallback();
+  printResult(externalResult);
 
-  if (!nexusResult.ok) {
+  if (!externalResult.ok) {
     throw new Error(
-      "The CSS-path fix passed locally but nexus-ui/packages/ui still did not exit cleanly.",
+      "The CSS-path fix passed locally but the external lib package still did not exit cleanly.",
     );
   }
 }

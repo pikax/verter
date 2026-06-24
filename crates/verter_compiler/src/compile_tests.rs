@@ -6145,7 +6145,8 @@ import { helperFn } from "./helpers";
 fn companion_script_type_only_import_not_in_returned() {
     // Companion <script> imports that are only used as type assertions should NOT
     // be in __returned__. This matches Vue's official compiler behavior.
-    // Regression test for CurrencyCodes build failure in judis-app.
+    // Regression test: a type-only companion-script import must not appear in
+    // __returned__ (a build failure otherwise, matching the official compiler).
     let result = compile_sfc(
         r#"<script lang="ts">
 import { computed, defineComponent } from "vue";

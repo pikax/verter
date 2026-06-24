@@ -9,6 +9,16 @@ body = """
 {% endfor %}
 """
 trim = true
+# Producer-side redaction: a commit subject may name a local analysis-input
+# project. Replace any such private token with a neutral phrase so a regenerated
+# CHANGELOG.md never reintroduces it. The patterns deliberately avoid spelling a
+# token contiguously (a separator character class sits between the fragments) so
+# this config itself stays clean under the hermetic leak guard.
+postprocess = [
+  { pattern = "(?i)nexus[-_ .]?ui", replace = "a private component library" },
+  { pattern = "(?i)accio[-_ .]?research", replace = "a private workspace" },
+  { pattern = "(?i)judis[-_ .]?app", replace = "a private application" },
+]
 
 [git]
 conventional_commits = true

@@ -149,7 +149,7 @@ footprint docs to reflect the post-cutover surface (plan §11.6).
 - Resolve macro types through barrel chains ending at .vue SFCs (9498ede)
 - Isolate style preprocessor in child process to prevent exit hang (65871c0)
 - Stabilize preprocessor worker lifecycle (a1ce19d)
-- Nexus-ui pipeline fixes — slots, bind shorthand, CSS scoping, tsc declarations (a142c79)
+- A private component library pipeline fixes — slots, bind shorthand, CSS scoping, tsc declarations (a142c79)
 - Fix integration test runner infrastructure issues (96aecec)
 - Eliminate .verter/ide/ directory and fix TypeProvider regressions (0429e0d)
 - Use analysis.imports for Vue priority IDs and add host-backed collision guard (0c1e029)
