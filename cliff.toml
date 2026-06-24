@@ -11,13 +11,15 @@ body = """
 trim = true
 # Producer-side redaction: a commit subject may name a local analysis-input
 # project. Replace any such private token with a neutral phrase so a regenerated
-# CHANGELOG.md never reintroduces it. The patterns deliberately avoid spelling a
-# token contiguously (a separator character class sits between the fragments) so
-# this config itself stays clean under the hermetic leak guard.
+# CHANGELOG.md never reintroduces it. Every fragment of a token is split by an
+# optional separator character class (`[-_ .]?`), so this config contains NO
+# contiguous, reconstructable private token while each regex still matches the real
+# token with or without an internal separator. The hermetic leak guard scans this
+# file, so nothing reconstructable (not even an example) may be committed here.
 postprocess = [
-  { pattern = "(?i)nexus[-_ .]?ui", replace = "a private component library" },
-  { pattern = "(?i)accio[-_ .]?research", replace = "a private workspace" },
-  { pattern = "(?i)judis[-_ .]?app", replace = "a private application" },
+  { pattern = "(?i)nex[-_ .]?us[-_ .]?ui", replace = "a private component library" },
+  { pattern = "(?i)acc[-_ .]?io[-_ .]?rese[-_ .]?arch", replace = "a private workspace" },
+  { pattern = "(?i)jud[-_ .]?is[-_ .]?app", replace = "a private application" },
 ]
 
 [git]

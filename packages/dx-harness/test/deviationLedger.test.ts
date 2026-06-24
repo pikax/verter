@@ -233,4 +233,59 @@ describe("deviation ledger schema", () => {
     expect(errors).toContain("missing:undecidedReason");
     expect(errors).toContain("missing:nextAction");
   });
+
+  // C-f: a conditionally-required evidence field present but EMPTY ("") must be
+  // rejected. JSON-Schema `required` is satisfied by an empty string, so the schema
+  // must additionally carry `minLength: 1` on every evidence field; the validator
+  // mirrors that (`hasString` requires a non-empty string).
+  it("rejects an empty-string anti-misclassification field (not just an absent one)", () => {
+    const bad = goodReferenceWrong();
+    bad.sourceOfTruth = ""; // present but empty
+    const errors = validateEntry(bad);
+    expect(errors).toContain("missing:sourceOfTruth");
+  });
+
+  it("rejects an UNDECIDED row whose reason/nextAction are empty strings", () => {
+    const bad: Json = {
+      id: "dev-0006",
+      workstream: "tsc",
+      class: "UNDECIDED",
+      genericReproFixture: "fixtures/generic/x.vue",
+      undecidedReason: "",
+      nextAction: "",
+      disposition: "open",
+      status: "draft",
+    };
+    const errors = validateEntry(bad);
+    expect(errors).toContain("missing:undecidedReason");
+    expect(errors).toContain("missing:nextAction");
+  });
+
+  it("the committed schema declares minLength:1 on every conditionally-required evidence field", () => {
+    const schema = JSON.parse(
+      readFileSync(joinCanonical(LEDGER_DIR, "replacement-deviations.schema.json"), "utf-8"),
+    ) as Json;
+    const props = (schema.$defs as Json).entry as Json;
+    const entryProps = props.properties as Record<string, Json>;
+    // Every string-typed evidence field that can be conditionally required must reject
+    // "" via minLength:1 — otherwise an empty value would satisfy `required`.
+    const guardedFields = [
+      "id",
+      "genericReproFixture",
+      "reference",
+      "oracleRuling",
+      "ownerCrate",
+      "regressionTest",
+      "independentRepro",
+      "sourceOfTruth",
+      "reviewerApproval",
+      "lockingAssertion",
+      "undecidedReason",
+      "nextAction",
+    ];
+    for (const f of guardedFields) {
+      expect(entryProps[f], `field ${f}`).toBeDefined();
+      expect(entryProps[f].minLength, `field ${f} must declare minLength:1`).toBe(1);
+    }
+  });
 });

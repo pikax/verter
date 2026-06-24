@@ -22,14 +22,27 @@ pub enum AnalysisInputError {
         /// The path we tried to read — PRIVATE, never formatted.
         path: std::path::PathBuf,
     },
-    /// The config bytes were not valid JSON, or did not match the schema.
+    /// The config bytes were not valid JSON.
     Parse {
         /// A class-level reason (never a path or raw source slice).
         reason: String,
     },
-    /// The config declared a project id that is not opaque (`^p[0-9]{4}$`).
+    /// The config's `schema` discriminant did not match the expected value.
+    /// Holds the EXPECTED discriminant only (a fixed public constant); the
+    /// rejected value is never echoed, so a hand-edited config cannot smuggle a
+    /// private string through the schema field into an error message.
+    SchemaMismatch {
+        /// The expected schema discriminant (a public constant).
+        expected: &'static str,
+    },
+    /// The config declared a project id that is not opaque (`^p[0-9]{4}$`). The
+    /// rejected id is retained PRIVATELY for the caller's narrow use and is never
+    /// formatted — a descriptive/private id can carry the project's identity, so it
+    /// must not leak into a log, panic, or CI transcript.
     InvalidProjectId {
-        /// The rejected id token (an id is never a path).
+        /// The rejected id token — PRIVATE, never formatted. (An id is never a
+        /// path, but a descriptive id is exactly the private identity this campaign
+        /// must not leak.)
         got: String,
     },
     /// Env/default-file loading was requested but the configured path was absent
@@ -48,11 +61,23 @@ impl AnalysisInputError {
         }
     }
 
+    /// The rejected project id this error retains, if any. PRIVATE: available only
+    /// to the narrow caller that must surface it out-of-band (never to
+    /// `Display`/`Debug`/`Serialize`), because a descriptive id is itself a private
+    /// identity.
+    pub fn rejected_project_id(&self) -> Option<&str> {
+        match self {
+            AnalysisInputError::InvalidProjectId { got } => Some(got.as_str()),
+            _ => None,
+        }
+    }
+
     /// A stable, path-free class label.
     fn class(&self) -> &'static str {
         match self {
             AnalysisInputError::Io { .. } => "io",
             AnalysisInputError::Parse { .. } => "parse",
+            AnalysisInputError::SchemaMismatch { .. } => "schema-mismatch",
             AnalysisInputError::InvalidProjectId { .. } => "invalid-project-id",
             AnalysisInputError::ConfigUnavailable => "config-unavailable",
         }
@@ -70,8 +95,21 @@ impl fmt::Display for AnalysisInputError {
             AnalysisInputError::Parse { reason } => {
                 write!(f, "analysis-input parse error: {reason}")
             }
-            AnalysisInputError::InvalidProjectId { got } => {
-                write!(f, "analysis-input invalid project id {got:?}")
+            AnalysisInputError::SchemaMismatch { expected } => {
+                write!(
+                    f,
+                    "analysis-input schema mismatch: config schema must be {expected:?}"
+                )
+            }
+            // The rejected id is NEVER echoed: a descriptive id is a private
+            // identity. We print the class + the expected shape only; the caller
+            // reads the rejected value via `rejected_project_id()` out-of-band.
+            AnalysisInputError::InvalidProjectId { .. } => {
+                write!(
+                    f,
+                    "analysis-input invalid project id (expected the form p + four \
+                     decimal digits; id <redacted>)"
+                )
             }
             AnalysisInputError::ConfigUnavailable => {
                 write!(f, "analysis-input config unavailable (path <redacted>)")

@@ -23,26 +23,52 @@ pub struct ProjectId(String);
 
 /// Why a candidate string is not a valid opaque [`ProjectId`].
 ///
-/// The message never echoes a private name verbatim beyond the rejected token
-/// itself (which the caller already holds), and the rejected token is only ever
-/// the id field — never a filesystem path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The rejected candidate is retained PRIVATELY for the caller's narrow use, but it
+/// is NEVER echoed by `Display` — a descriptive (non-opaque) id is exactly the
+/// private identity this campaign must keep out of logs, panics, and CI transcripts.
+/// The rejected token is only ever the id field, never a filesystem path. The
+/// caller reads the value out-of-band via [`ProjectIdError::rejected`].
+#[derive(Clone, PartialEq, Eq)]
 pub enum ProjectIdError {
     /// The candidate did not match `^p[0-9]{4}$`.
     Malformed {
-        /// The rejected candidate, for the caller's diagnostics.
+        /// The rejected candidate — PRIVATE, never formatted.
         got: String,
     },
+}
+
+impl ProjectIdError {
+    /// The rejected candidate, for the caller's narrow out-of-band use. Never
+    /// reached by `Display`/`Debug`.
+    pub fn rejected(&self) -> &str {
+        match self {
+            ProjectIdError::Malformed { got } => got.as_str(),
+        }
+    }
 }
 
 impl fmt::Display for ProjectIdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProjectIdError::Malformed { got } => write!(
+            // The rejected id is NEVER printed (it can be a descriptive private
+            // identity). Print the expected shape only.
+            ProjectIdError::Malformed { .. } => write!(
                 f,
-                "invalid opaque project id {got:?}: expected the form p followed by \
-                 exactly four decimal digits (e.g. p0001)"
+                "invalid opaque project id: expected the form p followed by exactly \
+                 four decimal digits (e.g. p0001)"
             ),
+        }
+    }
+}
+
+/// `Debug` mirrors `Display`'s redaction discipline — the rejected id is private
+/// and must not surface through a derived `Debug` either.
+impl fmt::Debug for ProjectIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProjectIdError::Malformed { .. } => {
+                f.write_str("ProjectIdError::Malformed { got: <redacted> }")
+            }
         }
     }
 }
@@ -152,10 +178,33 @@ mod tests {
         ];
         for bad in bads {
             let err = ProjectId::new(bad).expect_err("must reject non-opaque id");
-            match err {
+            // The rejected candidate is retained for the caller's narrow use…
+            assert_eq!(err.rejected(), bad);
+            match &err {
                 ProjectIdError::Malformed { got } => assert_eq!(got, bad),
             }
         }
+    }
+
+    #[test]
+    fn error_display_and_debug_never_echo_the_rejected_id() {
+        // The rejected id can be a descriptive private identity — it must not leak
+        // into Display OR Debug (only the out-of-band `rejected()` accessor sees it).
+        let descriptive = descriptive_id();
+        let err = ProjectId::new(&descriptive).expect_err("descriptive id rejected");
+        let shown = format!("{err}");
+        let debugged = format!("{err:?}");
+        assert!(
+            !shown.contains(&descriptive),
+            "Display leaked the rejected id: {shown}"
+        );
+        assert!(
+            !debugged.contains(&descriptive),
+            "Debug leaked the rejected id: {debugged}"
+        );
+        // The redaction marker is present in Debug; the accessor still exposes it.
+        assert!(debugged.contains("<redacted>"));
+        assert_eq!(err.rejected(), descriptive);
     }
 
     #[test]

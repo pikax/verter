@@ -66,20 +66,53 @@ describe("analysis config loader", () => {
     expect(cfg.projects[0].workstreams).toEqual(["ide", "tsc", "build"]);
   });
 
-  it("rejects a config whose project id is not opaque", () => {
-    const bad = GOOD_CONFIG.replace('"p0001"', `"${descriptiveId()}"`);
+  it("rejects a config whose project id is not opaque without echoing the id", () => {
+    const descriptive = descriptiveId();
+    const bad = GOOD_CONFIG.replace('"p0001"', `"${descriptive}"`);
     expect(() => parseAnalysisConfig(bad)).toThrow(AnalysisConfigError);
-    // The error never echoes a path.
+    // The error never echoes a path NOR the rejected descriptive id (itself a
+    // private identity).
     try {
       parseAnalysisConfig(bad);
     } catch (e) {
       expect(String(e)).not.toContain("/path/to");
+      expect(String(e)).not.toContain(descriptive);
+      expect(String(e)).toContain("<redacted>");
     }
   });
 
   it("rejects a wrong schema discriminant", () => {
     const bad = GOOD_CONFIG.replace(ANALYSIS_PROJECTS_SCHEMA, "verter.something-else.v9");
     expect(() => parseAnalysisConfig(bad)).toThrow(/schema must be/);
+  });
+
+  // C-c: the config mirrors the Rust private-field discipline — real paths live on
+  // private fields reachable only through narrow accessors, never as plain
+  // serializable public data, and serialization emits the opaque id only.
+  it("holds real paths privately and never serializes them", () => {
+    const cfg = parseAnalysisConfig(GOOD_CONFIG);
+    const project = cfg.projects[0];
+    // Paths are accessor METHODS (the I/O surface), not enumerable public data.
+    expect(project.root()).toBe("/path/to/project");
+    expect(project.tsconfig()).toBe("/path/to/project/tsconfig.json");
+    expect(cfg.checkerBin()).toBe("/path/to/tsgo");
+    // A stray JSON.stringify of the project / config leaks NO path byte.
+    const projectJson = JSON.stringify(project);
+    const cfgJson = JSON.stringify(cfg);
+    for (const json of [projectJson, cfgJson]) {
+      expect(json).not.toContain("/path/to");
+      expect(json).not.toContain("tsgo");
+    }
+    // The opaque id survives serialization (the safe identity).
+    expect(projectJson).toContain("p0001");
+    // The private root is NOT an own-enumerable property (it is a `#private` field).
+    expect(Object.keys(project)).not.toContain("root");
+    expect(Object.values(project)).not.toContain("/path/to/project");
+  });
+
+  it("idRootPairs yields the private roots for the redactor only", () => {
+    const cfg = parseAnalysisConfig(GOOD_CONFIG);
+    expect(cfg.idRootPairs()).toEqual([["p0001", "/path/to/project"]]);
   });
 });
 

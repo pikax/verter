@@ -11,14 +11,10 @@ description = "Neutral foundation for local-analysis-input config: opaque projec
 keywords = ["analysis", "redaction", "hermetic", "privacy"]
 categories = ["development-tools"]
 
-[features]
-# Gates env/default-file loading (reading a real on-disk analysis config). OFF by
-# default: the canonical `cargo nextest run --workspace` never reads the config.
-# Parsing from an explicit `&str`/`&Path` is always available, feature or not.
-local-analysis-corpus = []
+# This crate is intentionally filesystem-free (no `std::fs::`): it parses config
+# CONTENT a caller hands it and never reads disk. The file read lives in the
+# consumer that owns an allow-listed disk boundary, so there is no I/O feature gate.
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[dev-dependencies]

@@ -52,18 +52,22 @@
         },
         "reference": {
           "type": "string",
+          "minLength": 1,
           "description": "The reference tool + version the deviation was found against (e.g. 'vue-tsc 3.2.x')."
         },
         "oracleRuling": {
           "type": "string",
+          "minLength": 1,
           "description": "The oracle's ruling summary."
         },
         "ownerCrate": {
           "type": "string",
+          "minLength": 1,
           "description": "The lowest reusable owner crate a VERTER_BUG / HARNESS_OR_ORACLE_GAP fix lands in."
         },
         "regressionTest": {
           "type": "string",
+          "minLength": 1,
           "description": "The discriminating regression/locking test that pins the intended behavior."
         },
         "disposition": {
@@ -82,26 +86,32 @@
         },
         "independentRepro": {
           "type": "string",
+          "minLength": 1,
           "description": "An independent reproduction (not Verter's own projection). REQUIRED for every non-VERTER_BUG affirmative ruling."
         },
         "sourceOfTruth": {
           "type": "string",
+          "minLength": 1,
           "description": "A named spec / Vue runtime behavior / TS behavior / codex ruling — never 'because Verter says so'. REQUIRED for non-VERTER_BUG."
         },
         "reviewerApproval": {
           "type": "string",
+          "minLength": 1,
           "description": "Explicit reviewer approval. REQUIRED for non-VERTER_BUG."
         },
         "lockingAssertion": {
           "type": "string",
+          "minLength": 1,
           "description": "A regression assertion that LOCKS the intended behavior so it cannot silently drift. REQUIRED for non-VERTER_BUG."
         },
         "undecidedReason": {
           "type": "string",
+          "minLength": 1,
           "description": "Why the deviation is not yet ruled. REQUIRED when class == UNDECIDED."
         },
         "nextAction": {
           "type": "string",
+          "minLength": 1,
           "description": "The concrete next step to resolve an UNDECIDED. REQUIRED when class == UNDECIDED."
         }
       },

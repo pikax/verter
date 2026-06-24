@@ -28,24 +28,92 @@ export type ProjectKind = "vite" | "nuxt" | "lib";
 /** A campaign workstream. */
 export type Workstream = "ide" | "tsc" | "build";
 
-/** One analysis-input project (real paths included — kept off any emitted artifact). */
-export interface AnalysisProject {
-  /** The opaque id — the ONLY identity safe to emit. */
-  readonly id: string;
-  /** The project root (a private path; redact via the redactor before emitting). */
+/** The private path bytes of one project, held off the public surface. */
+interface ProjectPaths {
   readonly root: string;
   readonly tsconfig: string | null;
-  readonly kind: ProjectKind;
   readonly ambientDts: readonly string[];
   readonly vueTscBin: string | null;
-  readonly workstreams: readonly Workstream[];
 }
 
-/** The whole config. */
-export interface AnalysisProjects {
-  readonly schema: string;
-  readonly checkerBin: string | null;
-  readonly projects: readonly AnalysisProject[];
+/**
+ * One analysis-input project.
+ *
+ * Mirrors the Rust `AnalysisProject` private-field discipline: the opaque {@link id},
+ * {@link kind}, and {@link workstreams} are public + safe to emit; the real filesystem
+ * paths are PRIVATE — reachable only through the narrow accessors below (for the I/O
+ * layer / the redactor), never as plain serializable public data. `toJSON` emits the
+ * opaque id only, so a stray `JSON.stringify(project)` can never leak a path.
+ */
+export class AnalysisProject {
+  readonly #paths: ProjectPaths;
+
+  constructor(
+    readonly id: string,
+    readonly kind: ProjectKind,
+    readonly workstreams: readonly Workstream[],
+    paths: ProjectPaths,
+  ) {
+    this.#paths = paths;
+  }
+
+  /** The project root — a PRIVATE path, for the I/O layer / the redactor only. */
+  root(): string {
+    return this.#paths.root;
+  }
+  /** The tsconfig path, if declared — PRIVATE, I/O only. */
+  tsconfig(): string | null {
+    return this.#paths.tsconfig;
+  }
+  /** The generated ambient `.d.ts` paths — PRIVATE, fed to the checker only. */
+  ambientDts(): readonly string[] {
+    return this.#paths.ambientDts;
+  }
+  /** The project-pinned `vue-tsc` binary, if declared — PRIVATE, I/O only. */
+  vueTscBin(): string | null {
+    return this.#paths.vueTscBin;
+  }
+
+  /** Serialization emits the opaque id only — never a path byte. */
+  toJSON(): { id: string; kind: ProjectKind; workstreams: readonly Workstream[] } {
+    return { id: this.id, kind: this.kind, workstreams: this.workstreams };
+  }
+}
+
+/**
+ * The whole analysis-input config. Mirrors the Rust `AnalysisProjects`: the schema
+ * discriminant and projects are public; the pinned `checkerBin` is a PRIVATE path
+ * reachable only through {@link checkerBin}. `toJSON` omits every path.
+ */
+export class AnalysisProjects {
+  readonly #checkerBin: string | null;
+
+  constructor(
+    readonly schema: string,
+    checkerBin: string | null,
+    readonly projects: readonly AnalysisProject[],
+  ) {
+    this.#checkerBin = checkerBin;
+  }
+
+  /** The pinned checker binary path, if declared — PRIVATE, I/O only. */
+  checkerBin(): string | null {
+    return this.#checkerBin;
+  }
+
+  /**
+   * The opaque-id → real-root pairs, for building a {@link Redactor}. Returns the
+   * PRIVATE roots, so this is consumed only by the redactor constructor, never an
+   * emitter.
+   */
+  idRootPairs(): ReadonlyArray<readonly [string, string]> {
+    return this.projects.map((p) => [p.id, p.root()] as const);
+  }
+
+  /** Serialization emits opaque ids only — never a path byte. */
+  toJSON(): { schema: string; projects: ReadonlyArray<ReturnType<AnalysisProject["toJSON"]>> } {
+    return { schema: this.schema, projects: this.projects.map((p) => p.toJSON()) };
+  }
 }
 
 /** A load/parse/validation failure. Its message NEVER embeds a config path. */
@@ -66,11 +134,11 @@ function validateProject(raw: unknown, index: number): AnalysisProject {
   }
   const o = raw as Record<string, unknown>;
   const id = asString(o.id);
-  // Opaque id ENFORCED, not trusted: reject a descriptive id outright.
+  // Opaque id ENFORCED, not trusted: reject a descriptive id outright. The rejected
+  // id is NEVER echoed — a descriptive id is itself a private identity, so leaking it
+  // into an error message would defeat the opaque-id discipline.
   if (id === null || !OPAQUE_ID.test(id)) {
-    throw new AnalysisConfigError(
-      `projects[${index}].id must match ^p[0-9]{4}$ (got ${JSON.stringify(o.id)})`,
-    );
+    throw new AnalysisConfigError(`projects[${index}].id must match ^p[0-9]{4}$ (id <redacted>)`);
   }
   const root = asString(o.root);
   if (root === null) throw new AnalysisConfigError(`projects[${index}].root is required`);
@@ -93,15 +161,12 @@ function validateProject(raw: unknown, index: number): AnalysisProject {
         return s;
       })
     : [];
-  return {
-    id,
+  return new AnalysisProject(id, kind, workstreams, {
     root,
     tsconfig: asString(o.tsconfig),
-    kind,
     ambientDts,
     vueTscBin: asString(o.vueTscBin),
-    workstreams,
-  };
+  });
 }
 
 /**
@@ -125,7 +190,8 @@ export function parseAnalysisConfig(json: string): AnalysisProjects {
   }
   const projectsRaw = Array.isArray(o.projects) ? o.projects : [];
   const projects = projectsRaw.map((p, i) => validateProject(p, i));
-  return { schema: o.schema, checkerBin: asString(o.checkerBin), projects };
+  // The schema was validated equal above; store the canonical constant.
+  return new AnalysisProjects(ANALYSIS_PROJECTS_SCHEMA, asString(o.checkerBin), projects);
 }
 
 /**

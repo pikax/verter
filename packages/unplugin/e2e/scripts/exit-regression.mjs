@@ -53,9 +53,31 @@ function cleanDir(dir) {
 }
 
 async function runCommand(spec) {
-  cleanDir(spec.cleanupDir);
-
+  // A spec whose paths are env-derived (the external consumer) marks its output as
+  // redacted, so NO env-supplied path is ever logged — not via a cleanup error, an
+  // exception message, stdout, or stderr.
+  const redactOutput = Boolean(spec.redactExpectedOutput);
   const start = Date.now();
+  try {
+    cleanDir(spec.cleanupDir);
+  } catch (error) {
+    // A cleanup error can embed the (private) cleanup dir. For a redacted spec, do
+    // NOT swallow-and-continue (a stale `dist` could then make the expected-output
+    // check pass spuriously) — return a path-free FAILURE so the check fails closed.
+    if (!redactOutput) throw error;
+    return {
+      ok: false,
+      label: spec.label,
+      durationMs: Date.now() - start,
+      stdout: "",
+      stderr: "",
+      shortMessage:
+        "failed to clean the external output dir before the run (details suppressed to avoid logging a private path)",
+      timedOut: false,
+      redactOutput,
+    };
+  }
+
   let stdout = "";
   let stderr = "";
   let timedOut = false;
@@ -102,6 +124,7 @@ async function runCommand(spec) {
         stderr,
         shortMessage: `timed out after ${spec.timeoutMs}ms`,
         timedOut: true,
+        redactOutput,
       };
     }
 
@@ -114,18 +137,26 @@ async function runCommand(spec) {
         stderr,
         shortMessage: `exited with code ${exit.code}${exit.signal ? ` (signal: ${exit.signal})` : ""}`,
         timedOut: false,
+        redactOutput,
       };
     }
 
     if (spec.expectedOutput && !existsSync(spec.expectedOutput)) {
+      // A spec whose expected-output path is env-derived (the external consumer)
+      // sets `redactExpectedOutput` so the operator's private path is never logged;
+      // local fixtures keep their repo-relative path for a useful message.
+      const where = spec.redactExpectedOutput
+        ? "the configured external output dir"
+        : spec.expectedOutput;
       return {
         ok: false,
         label: spec.label,
         durationMs: Date.now() - start,
         stdout,
         stderr,
-        shortMessage: `expected output missing: ${spec.expectedOutput}`,
+        shortMessage: `expected output missing: ${where}`,
         timedOut: false,
+        redactOutput,
       };
     }
 
@@ -135,6 +166,7 @@ async function runCommand(spec) {
       durationMs: Date.now() - start,
       stdout,
       stderr,
+      redactOutput,
     };
   } catch (error) {
     clearTimeout(timeout);
@@ -144,8 +176,15 @@ async function runCommand(spec) {
       durationMs: Date.now() - start,
       stdout,
       stderr,
-      shortMessage: error instanceof Error ? error.message : String(error),
+      // The raw error message can embed the (private) external path; keep it
+      // path-free when this spec is redacted.
+      shortMessage: redactOutput
+        ? "the external command failed (details suppressed to avoid logging a private path)"
+        : error instanceof Error
+          ? error.message
+          : String(error),
       timedOut,
+      redactOutput,
     };
   }
 }
@@ -182,6 +221,15 @@ function printResult(result) {
 
   if (!result.ok) {
     console.log(`[exit-regression] ${result.label} error: ${result.shortMessage}`);
+    // For a redacted (env-path) spec, the external command's stdout/stderr can
+    // contain the operator's private path, so they are NOT echoed; the operator
+    // re-runs the external build directly to see its output.
+    if (result.redactOutput) {
+      console.log(
+        `[exit-regression] ${result.label}: command output suppressed (may contain a private path); re-run the external build directly to inspect it`,
+      );
+      return;
+    }
     if (result.stdout.trim()) {
       console.log(`[exit-regression] ${result.label} stdout:\n${result.stdout}`);
     }
@@ -239,6 +287,8 @@ async function runExternalLibFallback() {
     timeoutMs: externalLibTimeoutMs,
     cleanupDir: externalLibDistDir,
     expectedOutput: externalLibDistDir,
+    // The expected-output path is the operator's private external dir — never log it.
+    redactExpectedOutput: true,
   });
 }
 
@@ -275,14 +325,15 @@ async function main() {
   }
 
   if (!existsSync(externalLibPackageDir)) {
+    // Never log the env-supplied external path (it is the operator's private path).
     console.log(
-      `[exit-regression] external-lib validation skipped: ${externalLibPackageDir} not found`,
+      "[exit-regression] external-lib validation skipped: the configured external package dir was not found",
     );
     return;
   }
 
   console.log(
-    `[exit-regression] validating the original consumer repro at ${externalLibPackageDir}`,
+    "[exit-regression] validating the original consumer repro at the configured external package dir",
   );
 
   const externalResult = await runExternalLibFallback();

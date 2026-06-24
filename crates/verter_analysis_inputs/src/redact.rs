@@ -36,6 +36,145 @@ fn normalize(s: &str) -> String {
     out
 }
 
+/// True iff `c` can be inside a single path SEGMENT (between slashes) — used for
+/// name-segment validation. Mirrors the hermetic leak guard's `is_path_seg_char`
+/// EXACTLY (stops at whitespace, `/`, and the quote/angle-bracket terminators), so
+/// the redactor and the guard agree on what a name segment is.
+fn is_path_seg_char(c: char) -> bool {
+    !(c.is_whitespace() || matches!(c, '/' | '"' | '\'' | '<' | '>'))
+}
+
+/// True iff `c` can be inside a contiguous path RUN (a whole path, slashes included)
+/// when CONSUMING a confirmed private shape. A path in prose is bounded only by
+/// whitespace and quote/angle-bracket delimiters — NOT by `,`/`;`/`)`/`]`, which are
+/// LEGAL filename bytes. Consuming through them is FAIL-CLOSED: once the leading root
+/// is confirmed private, every following path byte (up to a true prose boundary) is
+/// private and must be swallowed, so no basename tail can survive.
+fn is_run_char(c: char) -> bool {
+    !(c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
+}
+
+/// True iff a shape may BEGIN at byte `start` of `norm`: a word boundary, i.e.
+/// start-of-string OR the preceding byte is not an ASCII word char. This mirrors the
+/// hermetic leak guard's `\b` / `(^|[^A-Za-z0-9_])` boundary so a repo-relative
+/// `src/Users/...` (where `/Users` is preceded by the `c` of `src`) or a mid-word
+/// `foox:/dev/...` is NOT a false-positive shape.
+fn boundary_ok(norm: &str, start: usize) -> bool {
+    if start == 0 {
+        return true;
+    }
+    // The byte immediately before `start`. `norm` is the (slash-normalized) text;
+    // `start` is always a char boundary here, so `start - 1` is the previous byte.
+    let prev = norm.as_bytes()[start - 1];
+    !(prev.is_ascii_alphanumeric() || prev == b'_')
+}
+
+/// The byte length of an unknown-root ABSOLUTE-path shape starting at byte `start`
+/// of the already slash-normalized `norm`, or `None` if no shape starts there. The
+/// shapes mirror the hermetic leak guard's producer-boundary net (including its
+/// word-boundary requirement):
+///
+/// - a Windows drive root into `Users/<seg>` or `dev/` (`x:/Users/…`, `x:/dev/…`),
+///   the drive letter at a word boundary
+/// - a POSIX home root (`/Users/<name>/…`, `/home/<name>/…`), the leading `/` at a
+///   word boundary
+/// - a `file:///Users/…` / `file:///home/…` URI
+///
+/// Neutral placeholders (`/path/to/…`, `/tmp/…`), repo-relative paths (incl.
+/// `src/Users/…`), and bare words are NOT shapes, so they pass through untouched.
+fn unknown_shape_len(norm: &str, start: usize) -> Option<usize> {
+    let rest = &norm[start..];
+    let lower = rest.to_ascii_lowercase();
+
+    // file:///Users/... or file:///home/... — matched on the MARKER directly, exactly
+    // as the hermetic leak guard's `absolute_path_shape` does (`file:///users/` or
+    // `file:///home/` present is itself the shape). The whole run is then consumed, so
+    // `file:///Users/alice` (no trailing slash) is redacted, not left verbatim.
+    for marker in ["file:///users/", "file:///home/"] {
+        if lower.starts_with(marker) {
+            return Some(shape_run_len(rest));
+        }
+    }
+
+    // Windows drive root: `x:/Users/<seg>` or `x:/dev/`, drive letter at a boundary.
+    let rb = rest.as_bytes();
+    if boundary_ok(norm, start)
+        && rb.len() >= 3
+        && rb[0].is_ascii_alphabetic()
+        && rb[1] == b':'
+        && rb[2] == b'/'
+    {
+        let after = &lower[3..];
+        if after.starts_with("dev/") {
+            return Some(shape_run_len(rest));
+        }
+        if after.starts_with("users/") {
+            // require a real name segment after `Users/`
+            if rest[3 + 6..].chars().next().is_some_and(is_path_seg_char) {
+                return Some(shape_run_len(rest));
+            }
+        }
+    }
+
+    // POSIX home root at this position: `/Users/<name>/` or `/home/<name>/`, the
+    // leading `/` at a word boundary (so `src/Users/…` is NOT matched here).
+    if boundary_ok(norm, start) {
+        for (kw, kwlen) in [("/users/", 7usize), ("/home/", 6usize)] {
+            if lower.starts_with(kw) {
+                let name = &rest[kwlen..];
+                // require a non-empty name segment terminated by `/`
+                if let Some(slash) = name.find('/') {
+                    if slash > 0 && name[..slash].chars().all(is_path_seg_char) {
+                        return Some(shape_run_len(rest));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// The byte length of the contiguous path run starting at the beginning of `s` — the
+/// whole confirmed-private path, consuming slashes and all legal filename bytes
+/// (incl. `,`/`;`/`)`/`]`) up to the first PROSE boundary (whitespace or a
+/// quote/angle bracket). This is what makes the redaction FAIL-CLOSED: a basename
+/// after a `,` (`/Users/a/My,Docs/Secret.ts`) is swallowed, not left dangling.
+fn shape_run_len(s: &str) -> usize {
+    s.char_indices()
+        .find(|&(_, c)| !is_run_char(c))
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
+/// Redact every unknown-root absolute-path SHAPE inside a verbatim text segment to
+/// the path-free `analysis://unknown` marker, leaving neutral text untouched. This
+/// is the FAIL-CLOSED net for a real private path under a root the redactor was not
+/// configured with — it must never ride a verbatim segment out unredacted.
+fn redact_unknown_shapes(norm_segment: &str) -> String {
+    let mut out = String::with_capacity(norm_segment.len());
+    let mut i = 0;
+    while i < norm_segment.len() {
+        match unknown_shape_len(norm_segment, i) {
+            Some(len) if len > 0 => {
+                out.push_str("analysis://unknown");
+                i += len;
+            }
+            _ => {
+                // Copy one whole char verbatim (indices from `char_indices` are
+                // always on UTF-8 boundaries).
+                let ch = norm_segment[i..]
+                    .chars()
+                    .next()
+                    .expect("i is a char boundary");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 /// The opaque file id for one project-relative path, plus the bookkeeping that
 /// assigns each distinct relative path a stable four-digit number.
 struct ProjectRoots {
@@ -137,8 +276,11 @@ impl Redactor {
     /// Redact every known-root occurrence inside an arbitrary string. Each match of
     /// a real root prefix (followed by an optional `/relative/path`) is replaced by
     /// the opaque virtual id, so neither the root NOR the relative remainder
-    /// survives. Text containing no known root passes through unchanged (the
-    /// caller's generic placeholders, `/tmp`, repo-relative paths are NOT touched).
+    /// survives. Neutral text (the caller's generic placeholders, `/tmp`,
+    /// repo-relative paths) passes through unchanged — BUT any UNKNOWN-root
+    /// absolute-path SHAPE in a verbatim segment is FAIL-CLOSED to
+    /// `analysis://unknown`, so a real private path under a root the redactor was
+    /// not configured with can never ride out unredacted.
     pub fn redact_value(&mut self, s: &str) -> String {
         // Work on the normalized form so a back-slashed root still matches, then
         // return the normalized-and-redacted string (callers compare normalized).
@@ -146,40 +288,57 @@ impl Redactor {
         let mut out = String::with_capacity(norm.len());
         let mut rest = norm.as_str();
 
-        'outer: while !rest.is_empty() {
-            // Try to match a known root at every position. We scan for the first
-            // index where any root begins.
+        while !rest.is_empty() {
+            // Find the EARLIEST match position across ALL roots. `self.roots` is
+            // sorted longest-first, so for a tie at the same position the most
+            // specific (longest) root wins — but the WINNER is decided by position
+            // first, never by root length alone. (The old "first root with any
+            // match" rule emitted everything before the LONGEST root's match
+            // verbatim, leaking a SHORTER root that appeared earlier in the string.)
+            let mut best: Option<(usize, &ProjectRoots)> = None;
             for r in &self.roots {
                 if let Some(pos) = rest.find(&r.norm_root) {
-                    // Emit text before the match verbatim.
-                    out.push_str(&rest[..pos]);
-                    let after_root = &rest[pos + r.norm_root.len()..];
-                    // Consume the relative remainder up to the first path-terminating
-                    // char (quote, whitespace, `<`, `>`, `)`, `]`, `,`, `;`, `:`).
-                    let rel_end = after_root
-                        .find(|c: char| {
-                            c.is_whitespace()
-                                || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | ',' | ';')
-                        })
-                        .unwrap_or(after_root.len());
-                    let rel_raw = &after_root[..rel_end];
-                    let rel = rel_raw.trim_start_matches('/');
-                    let id = r.id.as_str().to_string();
-                    let token = if rel.is_empty() {
-                        format!("analysis://{id}")
-                    } else {
-                        let n = self.file_number(&id, rel);
-                        let ext = Self::ext_of(rel);
-                        format!("analysis://{id}/file-{n:04}.{ext}")
-                    };
-                    out.push_str(&token);
-                    rest = &after_root[rel_end..];
-                    continue 'outer;
+                    match best {
+                        // strictly earlier position wins; equal position keeps the
+                        // earlier-iterated (longer) root because roots is sorted
+                        // longest-first.
+                        Some((bpos, _)) if pos >= bpos => {}
+                        _ => best = Some((pos, r)),
+                    }
                 }
             }
-            // No root anywhere in the remainder: emit it verbatim and finish.
-            out.push_str(rest);
-            break;
+
+            let Some((pos, r)) = best else {
+                // No known root anywhere in the remainder: fail-closed scan the
+                // whole remainder for unknown-root shapes, then finish.
+                out.push_str(&redact_unknown_shapes(rest));
+                break;
+            };
+
+            // Emit text before the match — fail-closed scanned for unknown shapes.
+            out.push_str(&redact_unknown_shapes(&rest[..pos]));
+            let after_root = &rest[pos + r.norm_root.len()..];
+            // Consume the WHOLE project-relative remainder (slashes + all legal
+            // filename bytes) up to the first PROSE boundary. Using `is_run_char`
+            // (not a narrower `,`/`;`/`)`/`]` set) is FAIL-CLOSED: a relative basename
+            // after a `,` (`/root/My,Docs/Secret.ts`) is folded into the single opaque
+            // file id instead of leaking as a leftover tail. The opaque output token
+            // is identical regardless of what the relative remainder contains.
+            let rel_end = after_root
+                .find(|c: char| !is_run_char(c))
+                .unwrap_or(after_root.len());
+            let rel_raw = &after_root[..rel_end];
+            let rel = rel_raw.trim_start_matches('/');
+            let id = r.id.as_str().to_string();
+            let token = if rel.is_empty() {
+                format!("analysis://{id}")
+            } else {
+                let n = self.file_number(&id, rel);
+                let ext = Self::ext_of(rel);
+                format!("analysis://{id}/file-{n:04}.{ext}")
+            };
+            out.push_str(&token);
+            rest = &after_root[rel_end..];
         }
         out
     }
@@ -281,6 +440,14 @@ mod tests {
             "/tmp/scratch.txt",
             "crates/verter_compiler/src/lib.rs",
             "see the docs at ./README.md",
+            // Repo-relative paths whose segments merely CONTAIN `users`/`home`/a
+            // drive-looking token must NOT be redacted: the leak guard's word
+            // boundary (`\b` / `(^|[^A-Za-z0-9_])`) is mirrored, so a `/Users` or
+            // `x:` not at a boundary is left alone.
+            "src/Users/widget.ts",
+            "crates/verter_lsp/src/Users.rs",
+            "packages/home/index.ts",
+            "myhome/users/x.ts",
         ] {
             assert_eq!(
                 r.redact_value(neutral),
@@ -300,5 +467,177 @@ mod tests {
         // Surrounding generic text survives.
         assert!(out.contains("error TS2304 at"));
         assert!(out.contains("cannot find name"));
+    }
+
+    // ── B-b: multi-root ordering. Two known roots; the SHORTER root appears
+    // EARLIER in the string. The old "first root with any match wins" rule emitted
+    // everything before the LONGEST root's match verbatim, leaking the shorter
+    // root. Both must be redacted regardless of order. ──
+
+    fn two_root_redactor() -> (Redactor, String, String) {
+        // `short` is a strict ancestor-shaped (shorter) root; `long` is a longer,
+        // unrelated root. They are NOT prefixes of each other.
+        let short = format!("/{}/{}/alpha", "d:", "dev");
+        let long = format!("/{}/{}/beta-corp/widgets", "d:", "dev");
+        let r = Redactor::new([
+            (
+                ProjectId::new("p0001").unwrap(),
+                std::path::PathBuf::from(&short),
+            ),
+            (
+                ProjectId::new("p0002").unwrap(),
+                std::path::PathBuf::from(&long),
+            ),
+        ]);
+        (r, short, long)
+    }
+
+    #[test]
+    fn redacts_all_known_roots_regardless_of_order_in_the_string() {
+        let (mut r, short, long) = two_root_redactor();
+        // SHORTER root first, LONGER root second.
+        let msg = format!("a {short}/src/A.vue then b {long}/src/B.vue end");
+        let out = r.redact_value(&msg);
+        assert!(!out.contains(&short), "shorter root leaked: {out}");
+        assert!(!out.contains(&long), "longer root leaked: {out}");
+        assert!(out.contains("analysis://p0001/file-"), "short→p0001: {out}");
+        assert!(out.contains("analysis://p0002/file-"), "long→p0002: {out}");
+        // The same holds with the LONGER root appearing first.
+        let msg2 = format!("x {long}/src/B.vue y {short}/src/A.vue z");
+        let out2 = r.redact_value(&msg2);
+        assert!(
+            !out2.contains(&short),
+            "shorter root leaked (order 2): {out2}"
+        );
+        assert!(
+            !out2.contains(&long),
+            "longer root leaked (order 2): {out2}"
+        );
+    }
+
+    #[test]
+    fn nested_root_still_wins_over_its_ancestor_at_the_same_position() {
+        // `ancestor` is a prefix of `nested`. A path under the nested root must
+        // redact to the nested project's id (most specific wins on a positional tie).
+        let ancestor = format!("/{}/{}/mono", "d:", "dev");
+        let nested = format!("{ancestor}/packages/ui");
+        let mut r = Redactor::new([
+            (
+                ProjectId::new("p0001").unwrap(),
+                std::path::PathBuf::from(&ancestor),
+            ),
+            (
+                ProjectId::new("p0002").unwrap(),
+                std::path::PathBuf::from(&nested),
+            ),
+        ]);
+        let out = r.redact_value(&format!("{nested}/src/Comp.vue"));
+        assert!(
+            out.starts_with("analysis://p0002/file-"),
+            "nested wins: {out}"
+        );
+        assert!(!out.contains(&ancestor), "ancestor root leaked: {out}");
+    }
+
+    // ── C-b: fail-closed for UNKNOWN-root absolute-path shapes. A real private path
+    // under a root the redactor was NOT configured with must NOT ride out verbatim. ──
+
+    #[test]
+    fn redact_value_fails_closed_on_unknown_root_absolute_path_shapes() {
+        let (mut r, _root) = redactor(); // configured only with the planted root
+                                         // Each of these is a private-SHAPED absolute path under no known root.
+        let secret_name = "Sekret";
+        let cases = [
+            format!("/Users/alice/proj/src/{secret_name}.vue"),
+            format!("/home/bob/app/src/{secret_name}.ts"),
+            format!("c:/dev/other-corp/{secret_name}.tsx"),
+            format!("c:/Users/carol/work/{secret_name}.vue"),
+            format!("file:///Users/dave/x/{secret_name}.ts"),
+        ];
+        for input in cases {
+            let out = r.redact_value(&input);
+            assert!(
+                out.contains("analysis://unknown"),
+                "unknown-root shape not failed-closed: {input} -> {out}"
+            );
+            assert!(
+                !out.to_lowercase().contains(&secret_name.to_lowercase()),
+                "private basename leaked through an unknown-root shape: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn fail_closed_on_bare_file_uri_home_no_trailing_slash() {
+        // The leak guard's `absolute_path_shape` matches `file:///users/` /
+        // `file:///home/` on the MARKER alone, so the redactor MUST too — a bare
+        // `file:///Users/<name>` (no further slash) must NOT ride out verbatim.
+        let (mut r, _root) = redactor();
+        for input in ["file:///Users/alice", "file:///home/bob"] {
+            let out = r.redact_value(input);
+            assert_eq!(
+                out, "analysis://unknown",
+                "bare file-URI home leaked: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn fail_closed_consumes_basename_after_a_comma_or_paren_no_tail_leak() {
+        // A legal filename byte (`,` `;` `)` `]`) MID-path must NOT split the run and
+        // leave a private basename tail. Both the unknown-shape path AND the
+        // known-root path must swallow the whole run.
+        let (mut r, root) = redactor();
+        let secret = "Sekret";
+        // unknown root with a comma in a segment
+        let out1 = r.redact_value(&format!("/Users/al/My,Docs/{secret}.ts"));
+        assert!(
+            !out1.to_lowercase().contains(&secret.to_lowercase()),
+            "comma-tail basename leaked (unknown): {out1}"
+        );
+        assert!(
+            !out1.contains("Docs"),
+            "rel-dir tail leaked (unknown): {out1}"
+        );
+        // unknown root with a `)` (e.g. inside a parenthesized message)
+        let out2 = r.redact_value(&format!("(/home/bo/a]b/{secret}.vue)"));
+        assert!(
+            !out2.to_lowercase().contains(&secret.to_lowercase()),
+            "bracket-tail basename leaked (unknown): {out2}"
+        );
+        // KNOWN root with a comma in a segment — folds into the opaque id, no tail.
+        let out3 = r.redact_value(&format!("{root}/My,Docs/{secret}.ts"));
+        assert!(
+            !out3.to_lowercase().contains(&secret.to_lowercase()),
+            "comma-tail basename leaked (known root): {out3}"
+        );
+        assert!(
+            !out3.contains("Docs"),
+            "rel-dir tail leaked (known): {out3}"
+        );
+        assert!(out3.contains("analysis://p0001/file-"));
+    }
+
+    #[test]
+    fn fail_closed_redaction_embedded_in_a_message_keeps_neutral_text() {
+        let (mut r, _root) = redactor();
+        let msg = "error TS2307 at /Users/eve/secret/main.ts: cannot find module";
+        let out = r.redact_value(msg);
+        assert!(!out.contains("/Users/eve"), "unknown root leaked: {out}");
+        assert!(!out.contains("secret"), "private segment leaked: {out}");
+        assert!(out.contains("analysis://unknown"));
+        // Neutral surrounding text survives.
+        assert!(out.contains("error TS2307 at"));
+        assert!(out.contains("cannot find module"));
+    }
+
+    #[test]
+    fn display_path_fails_closed_for_unknown_private_shape() {
+        let (mut r, _root) = redactor();
+        // An unknown-root private path → the path-free marker, never the raw path.
+        let shown = r.display_path("/Users/frank/app/src/Secret.vue");
+        assert_eq!(shown, "analysis://unknown");
+        assert!(!shown.contains("frank"));
+        assert!(!shown.contains("Secret"));
     }
 }

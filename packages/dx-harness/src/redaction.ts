@@ -26,6 +26,44 @@ function normalize(s: string): string {
   return out;
 }
 
+/** The path-free marker an unknown-root absolute-path shape is FAIL-CLOSED to. */
+const UNKNOWN_MARKER = "analysis://unknown";
+
+/**
+ * Unknown-root absolute-path SHAPES (over already slash-normalized text). Kept
+ * EQUIVALENT to the Rust `unknown_shape_len` and the hermetic leak guard's
+ * `absolute_path_shape` (same shapes, same word-boundary + trailing-slash rules):
+ *
+ * - a Windows drive root into `Users/<seg>` or `dev/` (`x:/Users/…`, `x:/dev/…`),
+ *   the drive letter at a word boundary (`\b`)
+ * - a POSIX home root `/(Users|home)/<name>/…` — leading `/` at a word boundary
+ *   (lookbehind) AND a trailing `/` after `<name>` (mirrors the guard, which
+ *   requires `/(users|home)/<name>/`), so a bare `/Users/name` last segment is NOT a
+ *   shape on EITHER side
+ * - a `file:///Users/…` / `file:///home/…` URI — matched on the MARKER directly
+ *   (exactly as the guard's `absolute_path_shape` does), so `file:///Users/alice`
+ *   with no trailing slash IS a shape (the whole run is then consumed)
+ *
+ * Each alternative consumes the contiguous path run so the basename never survives.
+ * The boundary rules keep neutral placeholders (`/path/to/…`, `/tmp/…`),
+ * repo-relative paths (incl. `src/Users/…`), and bare words OUT of scope.
+ */
+// Name segments are slash-bounded (`[^\s/"'<>]`, the guard's segment char); once a
+// shape is confirmed, its RUN consumes through every legal filename byte (incl.
+// `,`/`;`/`)`/`]`) up to a PROSE boundary (`[^\s"'<>]`), so a basename after a `,`
+// is swallowed — FAIL-CLOSED, and byte-for-byte equivalent to the Rust detector.
+const UNKNOWN_SHAPE =
+  /(?:file:\/\/\/(?:users|home)\/[^\s"'<>]*)|(?:\b[a-z]:\/(?:dev\/[^\s"'<>]*|users\/[^\s/"'<>][^\s"'<>]*))|(?:(?<![A-Za-z0-9_])\/(?:users|home)\/[^\s/"'<>]+\/[^\s"'<>]*)/gi;
+
+/**
+ * Redact every unknown-root absolute-path SHAPE inside a verbatim text segment to
+ * the path-free marker, leaving neutral text untouched. FAIL-CLOSED net for a real
+ * private path under a root the redactor was not configured with.
+ */
+function redactUnknownShapes(normSegment: string): string {
+  return normSegment.replace(UNKNOWN_SHAPE, UNKNOWN_MARKER);
+}
+
 /** One project's opaque id + normalized root (no trailing slash). */
 interface RootEntry {
   readonly id: string;
@@ -58,9 +96,9 @@ export class Redactor {
       .sort((a, b) => b.normRoot.length - a.normRoot.length);
   }
 
-  /** Build from a loaded config's `id → root` pairs. */
+  /** Build from a loaded config's `id → root` pairs (the config's private roots). */
   static fromConfig(config: AnalysisProjects): Redactor {
-    return new Redactor(config.projects.map((p) => [p.id, p.root] as const));
+    return new Redactor(config.idRootPairs());
   }
 
   private fileNumber(id: string, rel: string): number {
@@ -100,45 +138,67 @@ export class Redactor {
     return `analysis://${m.id}/file-${this.pad(n)}.${extOf(m.rel)}`;
   }
 
-  /** Opaque display form; an unknown-root path becomes `analysis://unknown`. */
+  /**
+   * Opaque display form. A path under a known root → its opaque file id; any other
+   * path → the path-free `analysis://unknown` marker (FAIL-CLOSED — the raw path is
+   * never returned, even for an unknown-root private shape).
+   */
   displayPath(realPath: string): string {
-    return this.sourceMapSource(realPath) ?? "analysis://unknown";
+    return this.sourceMapSource(realPath) ?? UNKNOWN_MARKER;
   }
 
   /**
    * Redact every known-root occurrence inside an arbitrary string. Each real root
    * prefix (plus its `/relative/path` remainder) becomes an opaque virtual id, so
-   * neither the root NOR the relative basename survives. Text with no known root
-   * passes through unchanged (generic placeholders, `/tmp`, repo-relative paths).
+   * neither the root NOR the relative basename survives. Neutral text (generic
+   * placeholders, `/tmp`, repo-relative paths) passes through unchanged — BUT any
+   * UNKNOWN-root absolute-path SHAPE in a verbatim segment is FAIL-CLOSED to
+   * `analysis://unknown`, so a private path under a root the redactor was not
+   * configured with can never ride out unredacted.
    */
   redactValue(s: string): string {
     const norm = normalize(s);
     let out = "";
     let rest = norm;
-    // Stop at a path-terminating character so we only consume the path token.
-    const terminator = /[\s"'<>)\],;]/;
-    outer: while (rest.length > 0) {
+    // Consume the WHOLE project-relative remainder up to a PROSE boundary only
+    // (whitespace / quote / angle bracket) — NOT `,`/`;`/`)`/`]`, which are legal
+    // filename bytes. This is FAIL-CLOSED (a relative basename after a `,` folds into
+    // the single opaque id instead of leaking) and mirrors the Rust `is_run_char`.
+    const terminator = /[\s"'<>]/;
+    while (rest.length > 0) {
+      // Find the EARLIEST match position across ALL roots. `this.roots` is sorted
+      // longest-first, so a tie at the same position keeps the most specific
+      // (longest) root — but the winner is decided by POSITION first. (The old
+      // "first root with any match" rule sliced everything before the LONGEST
+      // root's match verbatim, leaking a SHORTER root appearing earlier.)
+      let best: { at: number; r: RootEntry } | null = null;
       for (const r of this.roots) {
         const at = rest.indexOf(r.normRoot);
-        if (at >= 0) {
-          out += rest.slice(0, at);
-          const afterRoot = rest.slice(at + r.normRoot.length);
-          const term = afterRoot.search(terminator);
-          const relEnd = term < 0 ? afterRoot.length : term;
-          const relRaw = afterRoot.slice(0, relEnd);
-          const rel = relRaw.replace(/^\/+/, "");
-          if (rel === "") {
-            out += `analysis://${r.id}`;
-          } else {
-            const n = this.fileNumber(r.id, rel);
-            out += `analysis://${r.id}/file-${this.pad(n)}.${extOf(rel)}`;
-          }
-          rest = afterRoot.slice(relEnd);
-          continue outer;
+        if (at >= 0 && (best === null || at < best.at)) {
+          best = { at, r };
         }
       }
-      out += rest;
-      break;
+
+      if (best === null) {
+        // No known root in the remainder: fail-closed scan it for unknown shapes.
+        out += redactUnknownShapes(rest);
+        break;
+      }
+
+      // Text before the match — fail-closed scanned for unknown-root shapes.
+      out += redactUnknownShapes(rest.slice(0, best.at));
+      const afterRoot = rest.slice(best.at + best.r.normRoot.length);
+      const term = afterRoot.search(terminator);
+      const relEnd = term < 0 ? afterRoot.length : term;
+      const relRaw = afterRoot.slice(0, relEnd);
+      const rel = relRaw.replace(/^\/+/, "");
+      if (rel === "") {
+        out += `analysis://${best.r.id}`;
+      } else {
+        const n = this.fileNumber(best.r.id, rel);
+        out += `analysis://${best.r.id}/file-${this.pad(n)}.${extOf(rel)}`;
+      }
+      rest = afterRoot.slice(relEnd);
     }
     return out;
   }

@@ -65,9 +65,118 @@ describe("Redactor", () => {
       "/tmp/scratch.txt",
       "crates/verter_compiler/src/lib.rs",
       "analysis://p0001/file-0001.vue",
+      // Repo-relative paths whose segments merely CONTAIN users/home/a drive-looking
+      // token must NOT be redacted (the `\b`/lookbehind word boundary is mirrored).
+      "src/Users/widget.ts",
+      "crates/verter_lsp/src/Users.rs",
+      "packages/home/index.ts",
+      "myhome/users/x.ts",
     ]) {
       expect(r.redactValue(neutral)).toBe(neutral);
     }
+  });
+
+  // B-b: multi-root ordering. The SHORTER root appears EARLIER in the string; the
+  // old "first root with any match wins" rule sliced everything before the LONGER
+  // root verbatim, leaking the shorter root. Both must redact regardless of order.
+  function twoRootRedactor(): { r: Redactor; short: string; long: string } {
+    const short = `/${"d:"}/${"dev"}/alpha`;
+    const long = `/${"d:"}/${"dev"}/beta-corp/widgets`;
+    return {
+      r: new Redactor([
+        ["p0001", short],
+        ["p0002", long],
+      ]),
+      short,
+      long,
+    };
+  }
+
+  it("redacts all known roots regardless of order in the string", () => {
+    const { r, short, long } = twoRootRedactor();
+    const out = r.redactValue(`a ${short}/src/A.vue then b ${long}/src/B.vue end`);
+    expect(out).not.toContain(short);
+    expect(out).not.toContain(long);
+    expect(out).toContain("analysis://p0001/file-");
+    expect(out).toContain("analysis://p0002/file-");
+    const out2 = r.redactValue(`x ${long}/src/B.vue y ${short}/src/A.vue z`);
+    expect(out2).not.toContain(short);
+    expect(out2).not.toContain(long);
+  });
+
+  it("a nested root still wins over its ancestor at the same position", () => {
+    const ancestor = `/${"d:"}/${"dev"}/mono`;
+    const nested = `${ancestor}/packages/ui`;
+    const r = new Redactor([
+      ["p0001", ancestor],
+      ["p0002", nested],
+    ]);
+    const out = r.redactValue(`${nested}/src/Comp.vue`);
+    expect(out.startsWith("analysis://p0002/file-")).toBe(true);
+    expect(out).not.toContain(ancestor);
+  });
+
+  // C-b: fail-closed for UNKNOWN-root absolute-path shapes. A private path under a
+  // root the redactor was NOT configured with must never ride out verbatim.
+  it("redactValue fails closed on unknown-root absolute-path shapes", () => {
+    const r = redactor();
+    const secret = "Sekret";
+    const cases = [
+      `/Users/alice/proj/src/${secret}.vue`,
+      `/home/bob/app/src/${secret}.ts`,
+      `c:/dev/other-corp/${secret}.tsx`,
+      `c:/Users/carol/work/${secret}.vue`,
+      `file:///Users/dave/x/${secret}.ts`,
+    ];
+    for (const input of cases) {
+      const out = r.redactValue(input);
+      expect(out, `input ${input}`).toContain("analysis://unknown");
+      expect(out.toLowerCase()).not.toContain(secret.toLowerCase());
+    }
+  });
+
+  it("fail-closed consumes a basename after a comma/bracket with no tail leak", () => {
+    const r = redactor();
+    const secret = "Sekret";
+    // unknown root, comma in a segment
+    const out1 = r.redactValue(`/Users/al/My,Docs/${secret}.ts`);
+    expect(out1.toLowerCase()).not.toContain(secret.toLowerCase());
+    expect(out1).not.toContain("Docs");
+    // unknown root, bracket in a segment
+    const out2 = r.redactValue(`(/home/bo/a]b/${secret}.vue)`);
+    expect(out2.toLowerCase()).not.toContain(secret.toLowerCase());
+    // KNOWN root, comma in a segment → folds into the opaque id, no tail
+    const root = plantedRoot();
+    const out3 = r.redactValue(`${root}/My,Docs/${secret}.ts`);
+    expect(out3.toLowerCase()).not.toContain(secret.toLowerCase());
+    expect(out3).not.toContain("Docs");
+    expect(out3).toContain("analysis://p0001/file-");
+  });
+
+  it("fail-closed redaction embedded in a message keeps neutral text", () => {
+    const r = redactor();
+    const out = r.redactValue("error TS2307 at /Users/eve/secret/main.ts: cannot find module");
+    expect(out).not.toContain("/Users/eve");
+    expect(out).not.toContain("secret");
+    expect(out).toContain("analysis://unknown");
+    expect(out).toContain("error TS2307 at");
+    expect(out).toContain("cannot find module");
+  });
+
+  it("fails closed on a bare file:/// home URI with no trailing slash", () => {
+    // Mirrors the leak guard: `file:///users/`|`file:///home/` matched on the marker
+    // alone, so `file:///Users/alice` (no further slash) must redact, not survive.
+    const r = redactor();
+    for (const input of ["file:///Users/alice", "file:///home/bob"]) {
+      expect(r.redactValue(input)).toBe("analysis://unknown");
+    }
+  });
+
+  it("displayPath fails closed for an unknown-root private shape", () => {
+    const r = redactor();
+    const shown = r.displayPath("/Users/frank/app/src/Secret.vue");
+    expect(shown).toBe("analysis://unknown");
+    expect(shown).not.toContain("frank");
   });
 
   it("rewrites a source map's sources to opaque ids and omits sourcesContent", () => {

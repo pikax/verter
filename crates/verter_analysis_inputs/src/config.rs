@@ -239,9 +239,11 @@ impl fmt::Debug for AnalysisProjects {
     }
 }
 
-/// Parse a config from an explicit JSON string. ALWAYS available (no feature, no
-/// I/O): only env/default-FILE loading is gated. Validates opaque ids at the
-/// deserialization gate.
+/// Parse a config from an explicit JSON string. This crate is filesystem-free, so
+/// this is the only entry — a caller that owns a disk boundary reads the file and
+/// hands the bytes here. Validates opaque ids at the deserialization gate AND the
+/// `schema` discriminant: a config whose `schema` is not [`ANALYSIS_PROJECTS_SCHEMA`]
+/// is REJECTED (fail-closed) rather than silently accepted.
 pub fn parse_config(json: &str) -> Result<AnalysisProjects, crate::error::AnalysisInputError> {
     let wire: AnalysisProjectsWire = serde_json::from_str(json).map_err(|e| {
         // serde_json's error never embeds a filesystem path (it reports a JSON
@@ -250,6 +252,13 @@ pub fn parse_config(json: &str) -> Result<AnalysisProjects, crate::error::Analys
             reason: e.to_string(),
         }
     })?;
+    // Fail-closed schema validation: the discriminant must match exactly. A
+    // mismatched (or future/unknown) schema is rejected, never trusted.
+    if wire.schema != ANALYSIS_PROJECTS_SCHEMA {
+        return Err(crate::error::AnalysisInputError::SchemaMismatch {
+            expected: ANALYSIS_PROJECTS_SCHEMA,
+        });
+    }
     Ok(AnalysisProjects::from_wire(wire))
 }
 
@@ -287,14 +296,61 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_config_with_a_descriptive_id() {
+    fn rejects_a_config_with_a_wrong_schema_discriminant() {
+        // A well-formed config carrying the WRONG schema is rejected fail-closed —
+        // the parser does not silently accept an unknown/future schema.
+        let bad = GOOD.replace(ANALYSIS_PROJECTS_SCHEMA, "verter.something-else.v9");
+        let err = parse_config(&bad).expect_err("wrong schema must be rejected");
+        match &err {
+            crate::error::AnalysisInputError::SchemaMismatch { expected } => {
+                assert_eq!(*expected, ANALYSIS_PROJECTS_SCHEMA);
+            }
+            other => panic!("expected SchemaMismatch, got {other:?}"),
+        }
+        // The error names the EXPECTED discriminant, never the rejected one.
+        let shown = format!("{err}");
+        assert!(shown.contains(ANALYSIS_PROJECTS_SCHEMA));
+        assert!(
+            !shown.contains("something-else"),
+            "the rejected schema must not be echoed: {shown}"
+        );
+    }
+
+    #[test]
+    fn accepts_only_the_exact_schema_discriminant() {
+        // A near-miss (extra suffix) is still a mismatch — exact-match, not prefix.
+        let near = GOOD.replace(
+            ANALYSIS_PROJECTS_SCHEMA,
+            &format!("{ANALYSIS_PROJECTS_SCHEMA}x"),
+        );
+        assert!(parse_config(&near).is_err(), "near-miss schema is rejected");
+        // The canonical schema parses.
+        assert!(parse_config(GOOD).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_config_with_a_descriptive_id_without_echoing_it() {
         // The descriptive id is built from fragments so this SOURCE never spells a
         // real private project token contiguously (the hermetic guard scans it).
         let descriptive = format!("{}{}{}", "nex", "us", "-ui");
         let bad = GOOD.replace("\"p0001\"", &format!("\"{descriptive}\""));
         let err = parse_config(&bad).expect_err("descriptive id rejected");
+        let shown = format!("{err}");
+        let debugged = format!("{err:?}");
         // The parse-gate routes the id rejection through a path-free reason.
-        assert!(!format!("{err}").contains("/path/to"));
+        assert!(!shown.contains("/path/to"));
+        // CRITICAL: the rejected descriptive id (a private identity) must NOT appear
+        // in Display OR Debug — it flows through serde's custom-error chain, so this
+        // pins that the chain stays redacted. Assert the exact TOKEN is absent, not
+        // merely a `/path/to` shape.
+        assert!(
+            !shown.contains(&descriptive),
+            "Display leaked the rejected id token: {shown}"
+        );
+        assert!(
+            !debugged.contains(&descriptive),
+            "Debug leaked the rejected id token: {debugged}"
+        );
     }
 
     #[test]

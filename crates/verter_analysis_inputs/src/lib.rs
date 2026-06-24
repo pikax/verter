@@ -16,8 +16,10 @@
 //!   `analysis://<id>/file-<NNNN>.<ext>` virtual ids.
 //! - [`AnalysisInputError`] — a redacted error type whose `Display`/`Debug` never
 //!   print a raw path.
-//! - [`parse_config`] — always-available string parsing; FILE/env loading is gated
-//!   behind the `local-analysis-corpus` feature ([`loader`]).
+//! - [`parse_config`] — parses config CONTENT a caller hands it. This crate is
+//!   filesystem-free: it never reads a file. The consumer that owns an allow-listed
+//!   disk boundary (the TS dx-harness, or the future Rust analysis runner) reads the
+//!   file and feeds the bytes here. The shared env-var name lives in [`loader`].
 
 mod config;
 mod error;
