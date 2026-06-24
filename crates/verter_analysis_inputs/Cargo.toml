@@ -1,0 +1,24 @@
+[package]
+name = "verter_analysis_inputs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Neutral foundation for local-analysis-input config: opaque project ids, path-privacy types, and the producer-side redactor shared by analysis runners"
+keywords = ["analysis", "redaction", "hermetic", "privacy"]
+categories = ["development-tools"]
+
+[features]
+# Gates env/default-file loading (reading a real on-disk analysis config). OFF by
+# default: the canonical `cargo nextest run --workspace` never reads the config.
+# Parsing from an explicit `&str`/`&Path` is always available, feature or not.
+local-analysis-corpus = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]

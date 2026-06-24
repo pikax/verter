@@ -1,0 +1,33 @@
+{
+  "schema": "verter.analysis-projects.v1",
+  "checkerBin": "/path/to/pinned/tsgo",
+  "projects": [
+    {
+      "id": "p0001",
+      "root": "/path/to/project-root",
+      "tsconfig": "/path/to/project-root/tsconfig.json",
+      "kind": "vite",
+      "ambientDts": [],
+      "vueTscBin": null,
+      "workstreams": ["ide", "tsc", "build"]
+    },
+    {
+      "id": "p0002",
+      "root": "/path/to/another-project",
+      "tsconfig": null,
+      "kind": "nuxt",
+      "ambientDts": ["/path/to/another-project/.nuxt/components.d.ts"],
+      "vueTscBin": "/path/to/another-project/node_modules/.bin/vue-tsc",
+      "workstreams": ["tsc"]
+    },
+    {
+      "id": "p0003",
+      "root": "/path/to/component-library",
+      "tsconfig": "/path/to/component-library/tsconfig.json",
+      "kind": "lib",
+      "ambientDts": [],
+      "vueTscBin": null,
+      "workstreams": ["ide", "build"]
+    }
+  ]
+}

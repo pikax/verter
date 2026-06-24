@@ -3775,6 +3775,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_analysis_inputs"
+version = "0.0.1-beta.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "verter_audit"
 version = "0.0.1-beta.1"
 dependencies = [
