@@ -42,7 +42,10 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
+use verter_semantic::analysis::types::Hash16;
 use verter_session::VerterHost;
+
+use crate::carrier_cache::{EngineRecheckState, RegenKey};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
@@ -51,21 +54,31 @@ use crate::documents::DocumentRegistry;
 
 /// What kind of provider surface a snapshot represents.
 ///
-/// Only [`ProviderSurfaceKind::CarrierApi`] surfaces map a returned `{carrier}.ts`
-/// location back onto a `.vue` carrier, and `CarrierApi` is the ONLY kind
-/// production currently records/vouches (every record choke point synthesises a
-/// `CarrierApi` snapshot). The [`CarrierIde`](Self::CarrierIde),
-/// [`Shadow`](Self::Shadow), and [`Real`](Self::Real) variants are reserved for a
-/// future extension of the store to the full set of synced virtual paths; they are
-/// NOT yet wired to any record site, so the store is the complete authority over
-/// `CarrierApi` surfaces specifically (a captured snapshot is always `CarrierApi`).
+/// [`CarrierApi`](Self::CarrierApi) is the kind whose returned `{carrier}.ts`
+/// location maps back onto a carrier source for cross-file rename; the rename
+/// capture path ([`ProviderSurfaceStore::capture_current_carrier_api_set`]) is
+/// `CarrierApi`-specific by design (a non-`CarrierApi` `Current` path captures as
+/// `KnownNonMappable`). The [`CarrierIde`](Self::CarrierIde),
+/// [`CarrierBatch`](Self::CarrierBatch), [`Shadow`](Self::Shadow), and
+/// [`Real`](Self::Real) variants are recordable surfaces with the same
+/// generation-stamped / content-addressed identity and the extended
+/// project-bound cache columns (project owner, `map_hash`, regen key, engine-recheck state); the store is the
+/// SINGLE record of all provider content/maps/ownership across every role (no
+/// second store). They participate in the §2.7 split cache (regeneration skip +
+/// dependency-driven engine re-check) but are not part of the `CarrierApi`-only
+/// rename-mapping capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderSurfaceKind {
-    /// `{carrier}.tsx` IDE surface (template + script TSX projection).
+    /// `{carrier}.tsx` IDE surface (template + script TSX projection) — the
+    /// bare-import-probed interactive component identity.
     CarrierIde,
     /// `{carrier}.ts` macro-derived PUBLIC-API surface (the `$props`/`new(props?)`
     /// declaration a cross-file prop rename resolves against).
     CarrierApi,
+    /// The minimal-diagnostic batch carrier for the cold TSC surface (§2.7).
+    /// PROVISIONAL: kept as a distinct role only if a material cold-perf gain over
+    /// sharing [`CarrierIde`](Self::CarrierIde) is measured; otherwise merged.
+    CarrierBatch,
     /// A self-file shadow / rune-module surface.
     Shadow,
     /// A real, non-carrier source file synced verbatim.
@@ -86,6 +99,17 @@ impl ContentHash {
     #[must_use]
     pub fn of(content: &str) -> Self {
         ContentHash(blake3::hash(content.as_bytes()))
+    }
+
+    /// The first 16 bytes of the digest as a [`Hash16`] — the env-hash
+    /// representation the project-bound contract's `CarrierArtifact` carries. The
+    /// full 256-bit digest remains the store's internal fail-closed identity;
+    /// this truncation is only for the contract DTO's content-hash field.
+    #[must_use]
+    pub fn to_hash16(self) -> Hash16 {
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&self.0.as_bytes()[..16]);
+        out
     }
 }
 
@@ -120,6 +144,10 @@ pub struct ProviderSurfaceStamp {
     /// half of the diagnostic-oracle identity: a stale carrier source is a distinct
     /// capture even when the provider content is byte-identical.
     pub source_hash: ContentHash,
+    /// The `CodeTransform` source-map identity (§2.7). Part of the version-gate
+    /// identity: a `map_hash` change invalidates every cached MAPPED result keyed
+    /// by the old map. `[0; 16]` when the surface carries no source map.
+    pub map_hash: Hash16,
 }
 
 /// An immutable, fully self-contained capture of one synced provider surface.
@@ -153,6 +181,26 @@ pub struct ProviderSurfaceSnapshot {
     pub carrier_utf16_line_index: LineIndex,
     /// Content hash of `carrier_source`.
     pub source_hash: ContentHash,
+    /// The owning configured project (tsconfig URI) this surface is a member of
+    /// — the project-owner column. `None` for a surface recorded outside a
+    /// resolved [`ProjectBinding`](verter_session::external_ts::ProjectBinding)
+    /// (e.g. a legacy `CarrierApi` record that does not carry the project binding,
+    /// or a synthetic-scratch surface). The store carries the column so the
+    /// project-bound publish/overlay path is the single source of provider
+    /// content + maps + ownership (no second store).
+    pub project_owner: Option<Arc<str>>,
+    /// The self-content carrier-regeneration key (§2.7(a)): if unchanged, the
+    /// carrier text is byte-stable and need not be regenerated/re-sent. `None`
+    /// for surfaces recorded without the producer env dims (legacy `CarrierApi`
+    /// path). The regeneration-skip lever, distinct from the engine-recheck
+    /// decision below.
+    pub regen_key: Option<RegenKey>,
+    /// The dependency-driven engine-recheck state (§2.7(b)): the resolved import
+    /// signature + dependency-closure generation the surface was last published
+    /// under. The engine is re-notified when EITHER advances — NEVER suppressed by
+    /// carrier-text stability. `None` for surfaces recorded without dependency
+    /// data (legacy `CarrierApi` path).
+    pub engine_recheck: Option<EngineRecheckState>,
 }
 
 /// Inputs to [`ProviderSurfaceStore::record`] — the data captured for one synced
@@ -164,6 +212,49 @@ pub struct RecordSurface {
     pub provider_content: Arc<str>,
     pub source_map: Option<ProviderPositionMapper>,
     pub carrier_source: Arc<str>,
+    /// The `CodeTransform` source-map identity (§2.7). `[0; 16]` when the
+    /// surface carries no source map. Recorded into the stamp so a `map_hash`
+    /// change is a distinct capture.
+    pub map_hash: Hash16,
+    /// The owning configured project (tsconfig URI), if recorded under a resolved
+    /// project binding. `None` preserves the legacy (pre-live-contract) record
+    /// path.
+    pub project_owner: Option<Arc<str>>,
+    /// The self-content regeneration key (§2.7(a)), when the producer env dims are
+    /// in scope.
+    pub regen_key: Option<RegenKey>,
+    /// The dependency-driven engine-recheck state (§2.7(b)), when dependency data
+    /// is in scope.
+    pub engine_recheck: Option<EngineRecheckState>,
+}
+
+impl RecordSurface {
+    /// Build a `RecordSurface` for the legacy `CarrierApi` rename-mapping record
+    /// path — the surface kind/content/map the existing choke point already
+    /// captures, with the extended project-bound columns left unset (`None`/zero). Keeps the
+    /// many existing `CarrierApi` record sites unchanged while the live
+    /// project-bound publish path (which sets the new columns) lands downstream.
+    #[must_use]
+    pub fn carrier_api_legacy(
+        provider_path: String,
+        source_canonical: String,
+        provider_content: Arc<str>,
+        source_map: Option<ProviderPositionMapper>,
+        carrier_source: Arc<str>,
+    ) -> Self {
+        Self {
+            provider_path,
+            kind: ProviderSurfaceKind::CarrierApi,
+            source_canonical,
+            provider_content,
+            source_map,
+            carrier_source,
+            map_hash: [0u8; 16],
+            project_owner: None,
+            regen_key: None,
+            engine_recheck: None,
+        }
+    }
 }
 
 /// One per-path lifecycle state. A known virtual surface is EITHER live
@@ -287,6 +378,7 @@ impl ProviderSurfaceStore {
                 generation,
                 content_hash,
                 source_hash,
+                map_hash: surface.map_hash,
             },
             kind: surface.kind,
             source_canonical,
@@ -296,6 +388,9 @@ impl ProviderSurfaceStore {
             carrier_source: surface.carrier_source,
             carrier_utf16_line_index,
             source_hash,
+            project_owner: surface.project_owner,
+            regen_key: surface.regen_key,
+            engine_recheck: surface.engine_recheck,
         });
 
         // Publish the snapshot BEFORE pointing the lifecycle state at the new
@@ -502,6 +597,85 @@ impl ProviderSurfaceStore {
         current.stamp.generation == captured.stamp.generation
             || (current.stamp.content_hash == captured.stamp.content_hash
                 && current.stamp.source_hash == captured.stamp.source_hash)
+    }
+
+    /// The owning configured project (tsconfig URI) of `provider_path`'s CURRENT
+    /// surface — the project-owner column. `None` when the path has no current
+    /// snapshot, or its surface was recorded outside a resolved project binding.
+    /// The store is the SINGLE record of provider ownership; the project-bound
+    /// publish path reads this rather than a second ownership map.
+    #[must_use]
+    pub fn project_owner_of(&self, provider_path: &str) -> Option<Arc<str>> {
+        self.current_snapshot(provider_path)
+            .and_then(|s| s.project_owner.clone())
+    }
+
+    /// The CURRENT surface's `map_hash` for `provider_path`, or `None` if no
+    /// current snapshot OR the current surface carries no usable source map. The
+    /// mapped-result-cache identity (§2.7): a returned span mapped through a map
+    /// whose hash no longer matches the current surface must be dropped.
+    ///
+    /// FAIL CLOSED on a surface with no parsed source map: a snapshot whose
+    /// `source_map` is `None` (the map JSON was absent or failed to parse) has NO
+    /// usable mapper, so there is no map identity any cached mapped result could
+    /// be valid against — return `None` rather than a (possibly zero or stale)
+    /// `map_hash` that could falsely validate a mapped result against a missing
+    /// map.
+    #[must_use]
+    pub fn current_map_hash(&self, provider_path: &str) -> Option<Hash16> {
+        self.current_snapshot(provider_path).and_then(|s| {
+            // No usable mapper ⇒ no map identity to validate against (fail closed).
+            s.source_map.as_ref()?;
+            Some(s.stamp.map_hash)
+        })
+    }
+
+    /// Whether mapped results previously produced for `provider_path` under
+    /// `cached_map_hash` are still valid against the CURRENT surface's map
+    /// (§2.7). `false` (drop) when the path has no current snapshot or the
+    /// current `map_hash` differs — never remap a stale diagnostic through a new
+    /// map.
+    #[must_use]
+    pub fn mapped_results_valid(&self, provider_path: &str, cached_map_hash: Hash16) -> bool {
+        self.current_map_hash(provider_path)
+            .is_some_and(|live| crate::carrier_cache::mapped_results_valid(cached_map_hash, live))
+    }
+
+    /// Whether the carrier text for `provider_path` is regeneration-fresh against
+    /// `live` self-content env dims (§2.7(a)): `true` ⇒ reuse the cached carrier,
+    /// no re-codegen / re-send. `false` when the path has no current snapshot, the
+    /// current surface carries no regen key (legacy record), or any self-content
+    /// dimension changed. This is the (a) lever ONLY — it does NOT assert the
+    /// engine result is still valid (see [`Self::carrier_needs_engine_recheck`]).
+    #[must_use]
+    pub fn carrier_regeneration_is_fresh(&self, provider_path: &str, live: &RegenKey) -> bool {
+        self.current_snapshot(provider_path)
+            .and_then(|s| s.regen_key)
+            .is_some_and(|cached| RegenKey::carrier_regeneration_is_fresh(&cached, live))
+    }
+
+    /// Whether the engine MUST be re-notified to re-check `provider_path` given
+    /// the `live` dependency-driven recheck state (§2.7(b)). Returns `true` when
+    /// EITHER the resolved import signature changed OR the dependency-closure
+    /// generation advanced — NEVER suppressed by carrier-text stability. A path
+    /// with no current snapshot, or whose current surface carries no recheck state
+    /// (legacy record), conservatively returns `true` (re-check rather than risk a
+    /// stale result — fail toward correctness, the no-suppress invariant).
+    #[must_use]
+    pub fn carrier_needs_engine_recheck(
+        &self,
+        provider_path: &str,
+        live: &EngineRecheckState,
+    ) -> bool {
+        match self
+            .current_snapshot(provider_path)
+            .and_then(|s| s.engine_recheck)
+        {
+            Some(cached) => crate::carrier_cache::needs_engine_recheck(&cached, live),
+            // No recorded recheck state ⇒ we cannot prove the dependent is fresh
+            // ⇒ re-check (never suppress an engine re-check the design requires).
+            None => true,
+        }
     }
 
     /// The exact historical snapshot for `(provider_path, generation)`, if it was
@@ -915,17 +1089,35 @@ pub fn record_carrier_api_surface(
         // has no current generation, so a returned offset fails closed.
         return;
     };
+    let map_hash = source_map_json.map(hash16_of_str).unwrap_or([0u8; 16]);
     let source_map = source_map_json
         .and_then(|json| PositionMapper::from_json(json).ok())
         .map(ProviderPositionMapper::source_map);
-    store.record(RecordSurface {
-        provider_path: provider_path.to_string(),
-        kind: ProviderSurfaceKind::CarrierApi,
-        source_canonical: canonical_id.to_string(),
-        provider_content: Arc::from(api_code),
+    let mut surface = RecordSurface::carrier_api_legacy(
+        provider_path.to_string(),
+        canonical_id.to_string(),
+        Arc::from(api_code),
         source_map,
         carrier_source,
-    });
+    );
+    // The legacy `CarrierApi` rename-mapping record now also stamps the source-map
+    // identity (§2.7) so a map-only change is a distinct capture; the remaining
+    // project-bound columns (project owner, regen key, engine-recheck state) are set by
+    // the live project-bound publish path downstream.
+    surface.map_hash = map_hash;
+    store.record(surface);
+}
+
+/// Hash a string into a [`Hash16`] (the env-hash representation the contract
+/// uses). blake3 over the bytes, truncated to 16 — consistent with the store's
+/// [`ContentHash`] identity. Used to stamp the source-map identity (`map_hash`)
+/// from the map JSON.
+#[must_use]
+fn hash16_of_str(s: &str) -> Hash16 {
+    let digest = blake3::hash(s.as_bytes());
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest.as_bytes()[..16]);
+    out
 }
 
 /// Record an API-surface snapshot when only the synced `api_code` is in scope
@@ -953,6 +1145,79 @@ pub fn record_carrier_api_surface_code_only(
         api_code,
         owned_map.as_deref(),
     );
+}
+
+/// Inputs to [`record_carrier_surface`] — a published carrier surface of ANY role
+/// with its full project-bound cache columns. The project-bound publish path builds one
+/// per file in a snapshot.
+pub struct PublishedCarrierSurface<'a> {
+    pub provider_path: &'a str,
+    pub kind: ProviderSurfaceKind,
+    pub source_canonical: &'a str,
+    pub content: Arc<str>,
+    /// The `CodeTransform` source-map JSON. The recorded `map_hash` is DERIVED
+    /// from this same JSON inside the record choke (it is NOT a caller-supplied
+    /// field), so the stamped map identity and the stored mapper can never
+    /// disagree: a surface whose map JSON is absent or fails to parse gets a
+    /// `[0; 16]` map identity AND no stored mapper, and
+    /// [`ProviderSurfaceStore::current_map_hash`] then fails closed for it.
+    pub source_map_json: Option<&'a str>,
+    /// The owning configured project (tsconfig URI).
+    pub project_owner: Arc<str>,
+    /// The self-content regeneration key (§2.7(a)).
+    pub regen_key: RegenKey,
+    /// The dependency-driven engine-recheck state (§2.7(b)).
+    pub engine_recheck: EngineRecheckState,
+}
+
+/// Record a published carrier surface of ANY role (`CarrierIde` / `CarrierBatch`
+/// / `Shadow` / `Real`, or `CarrierApi`) under a fresh generation, with the full
+/// project-bound cache columns (project owner, `map_hash`, regen key, engine-recheck state).
+/// This is the project-bound publish-path choke point that WIRES the
+/// previously-reserved roles into the single store; the legacy
+/// [`record_carrier_api_surface`] path remains for the rename-mapping `CarrierApi`
+/// record sites that do not yet carry the project binding.
+///
+/// The carrier source captured for the mapped-into target is the surface's own
+/// canonical source (open buffer or host/VFS). A surface whose carrier source is
+/// unavailable is NOT recorded (a returned offset then fails closed), mirroring
+/// [`record_carrier_api_surface`].
+pub fn record_carrier_surface(
+    store: &ProviderSurfaceStore,
+    documents: Option<&DocumentRegistry>,
+    host: &VerterHost,
+    surface: PublishedCarrierSurface<'_>,
+) {
+    let Some(carrier_source) = resolve_carrier_source(documents, host, surface.source_canonical)
+    else {
+        return;
+    };
+    // Derive the map identity and the stored mapper from the SAME JSON, so they
+    // can never disagree. Only a map that actually PARSES contributes a non-zero
+    // `map_hash` AND a stored mapper; an absent/unparseable map yields `[0; 16]`
+    // and no mapper, and `current_map_hash` fails closed for it (§2.7 fail-closed
+    // map identity).
+    let parsed_mapper = surface
+        .source_map_json
+        .and_then(|json| PositionMapper::from_json(json).ok());
+    let map_hash = match (surface.source_map_json, &parsed_mapper) {
+        (Some(json), Some(_)) => hash16_of_str(json),
+        // No JSON, or JSON that failed to parse ⇒ no usable map identity.
+        _ => [0u8; 16],
+    };
+    let source_map = parsed_mapper.map(ProviderPositionMapper::source_map);
+    store.record(RecordSurface {
+        provider_path: surface.provider_path.to_string(),
+        kind: surface.kind,
+        source_canonical: surface.source_canonical.to_string(),
+        provider_content: surface.content,
+        source_map,
+        carrier_source,
+        map_hash,
+        project_owner: Some(surface.project_owner),
+        regen_key: Some(surface.regen_key),
+        engine_recheck: Some(surface.engine_recheck),
+    });
 }
 
 #[cfg(test)]

@@ -189,7 +189,7 @@ async fn sync_coordinator_closes_stale_owner_ids_when_owner_changes() {
 /// stays tracked and the assertion FAILS; after the fix it is forgotten.
 #[tokio::test]
 async fn close_stale_paths_forgets_closed_api_surface_in_store() {
-    use crate::provider_surface_store::{ProviderSurfaceKind, ProviderSurfaceStore, RecordSurface};
+    use crate::provider_surface_store::{ProviderSurfaceStore, RecordSurface};
 
     let mock = MockTypeProvider::new();
     let sync = ProjectSync::new(Arc::new(mock.clone()), ProjectSyncMode::FullProject);
@@ -197,16 +197,13 @@ async fn close_stale_paths_forgets_closed_api_surface_in_store() {
 
     // Record a CarrierApi snapshot under the API path → the store tracks it.
     let api_path = "/workspace/src/Child.vue.ts";
-    provider_surfaces.record(RecordSurface {
-        provider_path: api_path.to_string(),
-        kind: ProviderSurfaceKind::CarrierApi,
-        source_canonical: "/workspace/src/Child.vue".to_string(),
-        provider_content: Arc::from("declare const Child: { new(props?: { foo: string }): {} }"),
-        source_map: None,
-        carrier_source: Arc::from(
-            "<script setup lang=\"ts\">\ndefineProps<{ foo: string }>();\n</script>\n",
-        ),
-    });
+    provider_surfaces.record(RecordSurface::carrier_api_legacy(
+        api_path.to_string(),
+        "/workspace/src/Child.vue".to_string(),
+        Arc::from("declare const Child: { new(props?: { foo: string }): {} }"),
+        None,
+        Arc::from("<script setup lang=\"ts\">\ndefineProps<{ foo: string }>();\n</script>\n"),
+    ));
     assert!(
         provider_surfaces.is_tracked(api_path),
         "precondition: the recorded API surface is tracked before close"

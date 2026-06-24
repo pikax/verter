@@ -9,14 +9,13 @@ const VPATH: &str = "/src/Child.vue.ts";
 const CANONICAL: &str = "/src/Child.vue";
 
 fn record_surface(provider_content: &str, carrier_source: &str) -> RecordSurface {
-    RecordSurface {
-        provider_path: VPATH.to_string(),
-        kind: ProviderSurfaceKind::CarrierApi,
-        source_canonical: CANONICAL.to_string(),
-        provider_content: Arc::from(provider_content),
-        source_map: None,
-        carrier_source: Arc::from(carrier_source),
-    }
+    RecordSurface::carrier_api_legacy(
+        VPATH.to_string(),
+        CANONICAL.to_string(),
+        Arc::from(provider_content),
+        None,
+        Arc::from(carrier_source),
+    )
 }
 
 #[test]
@@ -360,19 +359,18 @@ fn assert_snapshot_context_maps_for_encoding(
     let source_map_json = builder.into_sourcemap().to_json_string();
 
     let store = ProviderSurfaceStore::new();
-    let snap = store.record(RecordSurface {
-        provider_path: VPATH.to_string(),
-        kind: ProviderSurfaceKind::CarrierApi,
-        source_canonical: CANONICAL.to_string(),
-        provider_content: Arc::from(api),
-        source_map: Some(
+    let snap = store.record(RecordSurface::carrier_api_legacy(
+        VPATH.to_string(),
+        CANONICAL.to_string(),
+        Arc::from(api),
+        Some(
             crate::documents::provider_projection::ProviderPositionMapper::source_map(
                 crate::documents::position_map::PositionMapper::from_json(&source_map_json)
                     .unwrap(),
             ),
         ),
-        carrier_source: Arc::from(carrier),
-    });
+        Arc::from(carrier),
+    ));
 
     let ctx = external_ide_context_from_snapshot(&snap, negotiated.clone())
         .expect("a snapshot with a source map must build a context");
@@ -756,14 +754,13 @@ fn distinct_paths_are_independent() {
     let store = ProviderSurfaceStore::new();
     let other = "/src/Other.vue.ts";
     store.record(record_surface("api child\n", "carrier child\n"));
-    store.record(RecordSurface {
-        provider_path: other.to_string(),
-        kind: ProviderSurfaceKind::CarrierApi,
-        source_canonical: "/src/Other.vue".to_string(),
-        provider_content: Arc::from("api other\n"),
-        source_map: None,
-        carrier_source: Arc::from("carrier other\n"),
-    });
+    store.record(RecordSurface::carrier_api_legacy(
+        other.to_string(),
+        "/src/Other.vue".to_string(),
+        Arc::from("api other\n"),
+        None,
+        Arc::from("carrier other\n"),
+    ));
 
     assert!(store.is_tracked(VPATH));
     assert!(store.is_tracked(other));
@@ -1203,19 +1200,18 @@ fn classify_ignores_live_mutation_after_capture_for_current_path() {
     let source_map_json = builder.into_sourcemap().to_json_string();
 
     let store = ProviderSurfaceStore::new();
-    store.record(RecordSurface {
-        provider_path: VPATH.to_string(),
-        kind: ProviderSurfaceKind::CarrierApi,
-        source_canonical: CANONICAL.to_string(),
-        provider_content: Arc::from(api),
-        source_map: Some(
+    store.record(RecordSurface::carrier_api_legacy(
+        VPATH.to_string(),
+        CANONICAL.to_string(),
+        Arc::from(api),
+        Some(
             crate::documents::provider_projection::ProviderPositionMapper::source_map(
                 crate::documents::position_map::PositionMapper::from_json(&source_map_json)
                     .unwrap(),
             ),
         ),
-        carrier_source: Arc::from(carrier),
-    });
+        Arc::from(carrier),
+    ));
 
     // Capture generation A (mappable, Current).
     let captured = store.capture_current_carrier_api_set();
@@ -1300,19 +1296,18 @@ fn build_foo_prop_snapshot() -> (
     let source_map_json = builder.into_sourcemap().to_json_string();
 
     let store = ProviderSurfaceStore::new();
-    let snap = store.record(RecordSurface {
-        provider_path: VPATH.to_string(),
-        kind: ProviderSurfaceKind::CarrierApi,
-        source_canonical: CANONICAL.to_string(),
-        provider_content: Arc::from(api),
-        source_map: Some(
+    let snap = store.record(RecordSurface::carrier_api_legacy(
+        VPATH.to_string(),
+        CANONICAL.to_string(),
+        Arc::from(api),
+        Some(
             crate::documents::provider_projection::ProviderPositionMapper::source_map(
                 crate::documents::position_map::PositionMapper::from_json(&source_map_json)
                     .unwrap(),
             ),
         ),
-        carrier_source: Arc::from(carrier),
-    });
+        Arc::from(carrier),
+    ));
     (snap, carrier, api, vue_foo_span)
 }
 
@@ -1408,5 +1403,258 @@ fn locate_prop_decl_range_fails_closed_on_unmapped_or_mismatched_span() {
     assert!(
         locate_prop_decl_range_in_carrier_api(&snap2, vue_foo_span, "barbaz").is_none(),
         "a name mismatch at the resolved range must fail closed"
+    );
+}
+
+// ──────────────────── extended cache columns + split cache wiring ────────────────────
+
+use crate::carrier_cache::{EngineRecheckState, RegenKey};
+
+fn block2_regen_key(source: u8) -> RegenKey {
+    RegenKey {
+        source_content_hash: [source; 16],
+        parse_env_hash: [0x10; 16],
+        compile_profile_hash: 7,
+        file_language_row_hash: [0x20; 16],
+        helper_runtime_version: 1,
+    }
+}
+
+fn block2_recheck(import_sig: u8, closure_gen: u64) -> EngineRecheckState {
+    block2_recheck_proj(import_sig, closure_gen, 1)
+}
+
+fn block2_recheck_proj(import_sig: u8, closure_gen: u64, project_gen: u64) -> EngineRecheckState {
+    EngineRecheckState {
+        import_signature_hash: [import_sig; 16],
+        closure_generation: closure_gen,
+        project_recheck_generation: project_gen,
+    }
+}
+
+fn block2_published(
+    provider_path: &str,
+    kind: ProviderSurfaceKind,
+    content: &str,
+    regen: RegenKey,
+    recheck: EngineRecheckState,
+) -> RecordSurface {
+    RecordSurface {
+        provider_path: provider_path.to_string(),
+        kind,
+        source_canonical: CANONICAL.to_string(),
+        provider_content: Arc::from(content),
+        source_map: None,
+        carrier_source: Arc::from("<source>\n"),
+        map_hash: [0x42; 16],
+        project_owner: Some(Arc::from("/tsconfig.json")),
+        regen_key: Some(regen),
+        engine_recheck: Some(recheck),
+    }
+}
+
+#[test]
+fn project_owner_column_is_recorded_and_readable() {
+    let store = ProviderSurfaceStore::new();
+    store.record(block2_published(
+        VPATH,
+        ProviderSurfaceKind::CarrierIde,
+        "ide\n",
+        block2_regen_key(0xAA),
+        block2_recheck(0x55, 5),
+    ));
+    assert_eq!(
+        store.project_owner_of(VPATH).as_deref(),
+        Some("/tsconfig.json"),
+        "the project-owner column is recorded and readable from the store"
+    );
+}
+
+#[test]
+fn legacy_carrier_api_record_has_no_project_owner() {
+    // The legacy rename-mapping CarrierApi record path leaves project owner unset
+    // (the live project-bound publish path sets it). It must not fabricate one.
+    let store = ProviderSurfaceStore::new();
+    store.record(record_surface("api v1\n", "carrier v1\n"));
+    assert!(
+        store.project_owner_of(VPATH).is_none(),
+        "a legacy CarrierApi record carries no project owner"
+    );
+}
+
+#[test]
+fn reserved_roles_are_recordable_and_round_trip_kind() {
+    // CarrierIde / CarrierBatch / Shadow / Real are now wired into the single
+    // store (no second store).
+    for (path, kind) in [
+        ("/src/A.vue.tsx", ProviderSurfaceKind::CarrierIde),
+        ("/src/A.vue.batch.tsx", ProviderSurfaceKind::CarrierBatch),
+        ("/src/A.svelte.ts", ProviderSurfaceKind::Shadow),
+        ("/src/real.ts", ProviderSurfaceKind::Real),
+    ] {
+        let store = ProviderSurfaceStore::new();
+        store.record(block2_published(
+            path,
+            kind,
+            "content\n",
+            block2_regen_key(0xAA),
+            block2_recheck(0x55, 5),
+        ));
+        let snap = store.current_snapshot(path).expect("recorded");
+        assert_eq!(
+            snap.kind, kind,
+            "the reserved role round-trips through the store"
+        );
+    }
+}
+
+#[test]
+fn map_hash_is_stamped_and_drives_mapped_result_validity() {
+    // A surface WITH a usable source map exposes its stamped map_hash and drives
+    // mapped-result validity. (current_map_hash fails closed for a no-map surface;
+    // that is covered separately by
+    // map_hash_is_none_for_a_surface_without_a_source_map_fail_closed.)
+    let store = ProviderSurfaceStore::new();
+    let map_json = r#"{"version":3,"sources":["Child.vue"],"names":[],"mappings":"AAAA"}"#;
+    let mapper = crate::documents::provider_projection::ProviderPositionMapper::source_map(
+        crate::documents::position_map::PositionMapper::from_json(map_json).unwrap(),
+    );
+    store.record(RecordSurface {
+        provider_path: VPATH.to_string(),
+        kind: ProviderSurfaceKind::CarrierIde,
+        source_canonical: CANONICAL.to_string(),
+        provider_content: Arc::from("ide\n"),
+        source_map: Some(mapper),
+        carrier_source: Arc::from("<source>\n"),
+        map_hash: [0x42; 16],
+        project_owner: Some(Arc::from("/tsconfig.json")),
+        regen_key: Some(block2_regen_key(0xAA)),
+        engine_recheck: Some(block2_recheck(0x55, 5)),
+    });
+    assert_eq!(
+        store.current_map_hash(VPATH),
+        Some([0x42; 16]),
+        "a surface with a usable mapper exposes its stamped map_hash"
+    );
+    assert!(
+        store.mapped_results_valid(VPATH, [0x42; 16]),
+        "matching map_hash keeps mapped results"
+    );
+    assert!(
+        !store.mapped_results_valid(VPATH, [0x43; 16]),
+        "a map_hash mismatch invalidates mapped results"
+    );
+}
+
+#[test]
+fn store_carrier_regeneration_skip_reuses_byte_stable_carrier() {
+    let store = ProviderSurfaceStore::new();
+    let regen = block2_regen_key(0xAA);
+    store.record(block2_published(
+        VPATH,
+        ProviderSurfaceKind::CarrierIde,
+        "ide\n",
+        regen,
+        block2_recheck(0x55, 5),
+    ));
+    // Same self-content env dims ⇒ regeneration-fresh (reuse cached carrier).
+    assert!(store.carrier_regeneration_is_fresh(VPATH, &regen));
+    // A source-content change ⇒ not fresh (must regenerate).
+    let changed = block2_regen_key(0xBB);
+    assert!(!store.carrier_regeneration_is_fresh(VPATH, &changed));
+}
+
+#[test]
+fn store_engine_recheck_fires_on_dependency_change_with_stable_carrier() {
+    // The store-level wiring of the dependency-change discriminator: a byte-stable carrier
+    // (regen fresh) whose dependency closure generation advanced STILL needs an
+    // engine re-check.
+    let store = ProviderSurfaceStore::new();
+    let regen = block2_regen_key(0xAA);
+    store.record(block2_published(
+        VPATH,
+        ProviderSurfaceKind::CarrierIde,
+        "ide\n",
+        regen,
+        block2_recheck(0x55, 10),
+    ));
+
+    // Carrier text is byte-stable.
+    assert!(store.carrier_regeneration_is_fresh(VPATH, &regen));
+
+    // Dependency .d.ts changed: same import signature, closure generation +1.
+    let live = block2_recheck(0x55, 11);
+    assert!(
+        store.carrier_needs_engine_recheck(VPATH, &live),
+        "a dependency change MUST re-check even with a byte-stable carrier "
+    );
+
+    // No change ⇒ no spurious re-check.
+    let same = block2_recheck(0x55, 10);
+    assert!(!store.carrier_needs_engine_recheck(VPATH, &same));
+}
+
+#[test]
+fn store_engine_recheck_is_conservative_without_recorded_state() {
+    // A legacy record (no recheck state) conservatively re-checks rather than
+    // risk a stale result — never suppress an engine re-check the design requires.
+    let store = ProviderSurfaceStore::new();
+    store.record(record_surface("api v1\n", "carrier v1\n"));
+    let live = block2_recheck(0x55, 10);
+    assert!(
+        store.carrier_needs_engine_recheck(VPATH, &live),
+        "no recorded recheck state ⇒ conservatively re-check"
+    );
+    // An unknown path also conservatively re-checks.
+    assert!(store.carrier_needs_engine_recheck("/unknown.vue.tsx", &live));
+}
+
+#[test]
+fn store_engine_recheck_fires_on_project_config_change_with_stable_carrier_and_deps() {
+    // The store-level project/env rail: a byte-stable carrier whose imports and
+    // dependency content closure are unchanged, but whose tsconfig/lib/paths env
+    // changed (project_recheck_generation advanced), STILL needs an engine
+    // re-check. A closure-generation-only state would miss this.
+    let store = ProviderSurfaceStore::new();
+    let regen = block2_regen_key(0xAA);
+    store.record(block2_published(
+        VPATH,
+        ProviderSurfaceKind::CarrierIde,
+        "ide\n",
+        regen,
+        block2_recheck_proj(0x55, 10, 1),
+    ));
+    // Same imports, same dependency closure, only the project config rail moved.
+    let live = block2_recheck_proj(0x55, 10, 2);
+    assert!(
+        store.carrier_needs_engine_recheck(VPATH, &live),
+        "a tsconfig/lib/paths change MUST re-check even with a byte-stable carrier \
+         and unchanged dependency closure"
+    );
+    // Truly nothing changed ⇒ no re-check.
+    assert!(!store.carrier_needs_engine_recheck(VPATH, &block2_recheck_proj(0x55, 10, 1)));
+}
+
+#[test]
+fn map_hash_is_none_for_a_surface_without_a_source_map_fail_closed() {
+    // F5: a surface recorded with NO source map has no usable mapper, so
+    // current_map_hash returns None and mapped_results_valid fails closed — never
+    // validate a cached mapped result against a missing map.
+    let store = ProviderSurfaceStore::new();
+    // block2_published records source_map: None.
+    store.record(block2_published(
+        VPATH,
+        ProviderSurfaceKind::CarrierIde,
+        "ide\n",
+        block2_regen_key(0xAA),
+        block2_recheck(0x55, 5),
+    ));
+    assert!(
+        store.current_map_hash(VPATH).is_none(),
+        "a surface with no parsed source map has no usable map identity (fail closed)"
+    );
+    assert!(
+        !store.mapped_results_valid(VPATH, [0x42; 16]),
+        "mapped_results_valid must fail closed when the current surface has no usable mapper"
     );
 }

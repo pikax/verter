@@ -5210,7 +5210,7 @@ fn merge_rename_not_virtual_path_with_real_backing_file_edits_in_place() {
 #[test]
 fn merge_rename_store_known_virtual_absent_from_capture_routes_virtual_drop_end_to_end() {
     use crate::provider_surface_store::{
-        classify_captured_api_surface, ProviderSurfaceKind, ProviderSurfaceStore, RecordSurface,
+        classify_captured_api_surface, ProviderSurfaceStore, RecordSurface,
     };
 
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
@@ -5227,14 +5227,13 @@ fn merge_rename_store_known_virtual_absent_from_capture_routes_virtual_drop_end_
     // Store knows VPATH as a virtual surface, then RETIRES it (close started) — the tombstone
     // persists because the close is not finalized (simulating a failed/dropped close_dts).
     let store = ProviderSurfaceStore::new();
-    store.record(RecordSurface {
-        provider_path: vpath.clone(),
-        kind: ProviderSurfaceKind::CarrierApi,
-        source_canonical: "/src/Child.vue".to_string(),
-        provider_content: Arc::from("declare const Child: {}\n"),
-        source_map: None,
-        carrier_source: Arc::from("<script setup>\n</script>\n"),
-    });
+    store.record(RecordSurface::carrier_api_legacy(
+        vpath.clone(),
+        "/src/Child.vue".to_string(),
+        Arc::from("declare const Child: {}\n"),
+        None,
+        Arc::from("<script setup>\n</script>\n"),
+    ));
     let _t = store.forget(&vpath);
     // Capture AFTER the retire → VPATH has no MAPPABLE snapshot (snapshot_for None), but it
     // is captured as KnownNonMappable (Closing at capture) so classify drops WITHOUT a live

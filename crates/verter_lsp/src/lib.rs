@@ -1,6 +1,8 @@
 pub mod analysis;
 pub mod audit_harness;
 pub mod capabilities;
+pub mod carrier_cache;
+pub mod carrier_registry;
 pub mod config;
 pub mod css;
 pub mod documents;
