@@ -123,7 +123,10 @@ mod tests {
         let shown = format!("{err}");
         let debugged = format!("{err:?}");
         assert!(!shown.contains(&needle), "Display leaked the path: {shown}");
-        assert!(!debugged.contains(&needle), "Debug leaked the path: {debugged}");
+        assert!(
+            !debugged.contains(&needle),
+            "Debug leaked the path: {debugged}"
+        );
         // The private accessor still exposes it for the narrow I/O layer.
         assert_eq!(err.private_path(), Some(path.as_path()));
     }

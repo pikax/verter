@@ -24,7 +24,10 @@ fn committed_example_parses_and_is_all_opaque() {
     let cfg = parse_config(&json).expect("the committed example must parse");
 
     assert!(cfg.schema_matches(), "example uses the shared schema");
-    assert!(!cfg.projects().is_empty(), "example carries at least one project");
+    assert!(
+        !cfg.projects().is_empty(),
+        "example carries at least one project"
+    );
 
     for project in cfg.projects() {
         let id = project.id().as_str();
@@ -36,6 +39,9 @@ fn committed_example_parses_and_is_all_opaque() {
             "opaque id tail must be digits: {id}"
         );
         // Kind is one of the known set (parsing would have failed otherwise).
-        matches!(project.kind(), ProjectKind::Vite | ProjectKind::Nuxt | ProjectKind::Lib);
+        matches!(
+            project.kind(),
+            ProjectKind::Vite | ProjectKind::Nuxt | ProjectKind::Lib
+        );
     }
 }

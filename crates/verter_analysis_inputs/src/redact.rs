@@ -214,10 +214,7 @@ mod tests {
     fn redactor() -> (Redactor, String) {
         let root = planted_root();
         let id = ProjectId::new("p0001").unwrap();
-        (
-            Redactor::new([(id, std::path::PathBuf::from(&root))]),
-            root,
-        )
+        (Redactor::new([(id, std::path::PathBuf::from(&root))]), root)
     }
 
     #[test]
@@ -240,7 +237,10 @@ mod tests {
         let p = format!("{root}/src/App.vue");
         let first = r.source_map_source(&p).expect("under a known root");
         let again = r.source_map_source(&p).expect("under a known root");
-        assert_eq!(first, again, "same path → same opaque id (stable numbering)");
+        assert_eq!(
+            first, again,
+            "same path → same opaque id (stable numbering)"
+        );
         assert_eq!(first, "analysis://p0001/file-0001.vue");
         // A different file gets the next number.
         let other = r
@@ -266,7 +266,10 @@ mod tests {
         let input = format!("{win}\\src\\Widget.vue");
         let out = r.redact_value(&input);
         assert!(out.starts_with("analysis://p0002/file-"));
-        assert!(!out.to_lowercase().contains("widget"), "basename leaked: {out}");
+        assert!(
+            !out.to_lowercase().contains("widget"),
+            "basename leaked: {out}"
+        );
     }
 
     #[test]
@@ -279,7 +282,11 @@ mod tests {
             "crates/verter_compiler/src/lib.rs",
             "see the docs at ./README.md",
         ] {
-            assert_eq!(r.redact_value(neutral), neutral, "neutral text changed: {neutral}");
+            assert_eq!(
+                r.redact_value(neutral),
+                neutral,
+                "neutral text changed: {neutral}"
+            );
         }
     }
 

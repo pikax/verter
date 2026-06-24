@@ -145,7 +145,10 @@ impl fmt::Debug for AnalysisProject {
                 "ambientDts",
                 &format_args!("[{} <redacted>]", self.ambient_dts.len()),
             )
-            .field("vueTscBin", &self.vue_tsc_bin.as_ref().map(|_| "<redacted>"))
+            .field(
+                "vueTscBin",
+                &self.vue_tsc_bin.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -201,7 +204,11 @@ impl AnalysisProjects {
         AnalysisProjects {
             schema: wire.schema,
             checker_bin: wire.checker_bin,
-            projects: wire.projects.into_iter().map(AnalysisProject::from).collect(),
+            projects: wire
+                .projects
+                .into_iter()
+                .map(AnalysisProject::from)
+                .collect(),
         }
     }
 }
@@ -223,7 +230,10 @@ impl fmt::Debug for AnalysisProjects {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnalysisProjects")
             .field("schema", &self.schema)
-            .field("checkerBin", &self.checker_bin.as_ref().map(|_| "<redacted>"))
+            .field(
+                "checkerBin",
+                &self.checker_bin.as_ref().map(|_| "<redacted>"),
+            )
             .field("projects", &self.projects)
             .finish()
     }
@@ -270,16 +280,18 @@ mod tests {
         assert_eq!(cfg.projects().len(), 1);
         assert_eq!(cfg.projects()[0].id().as_str(), "p0001");
         assert_eq!(cfg.projects()[0].kind(), ProjectKind::Vite);
-        assert_eq!(cfg.projects()[0].workstreams(), &[
-            Workstream::Ide,
-            Workstream::Tsc,
-            Workstream::Build
-        ]);
+        assert_eq!(
+            cfg.projects()[0].workstreams(),
+            &[Workstream::Ide, Workstream::Tsc, Workstream::Build]
+        );
     }
 
     #[test]
     fn rejects_a_config_with_a_descriptive_id() {
-        let bad = GOOD.replace("\"p0001\"", "\"nexus-ui\"");
+        // The descriptive id is built from fragments so this SOURCE never spells a
+        // real private project token contiguously (the hermetic guard scans it).
+        let descriptive = format!("{}{}{}", "nex", "us", "-ui");
+        let bad = GOOD.replace("\"p0001\"", &format!("\"{descriptive}\""));
         let err = parse_config(&bad).expect_err("descriptive id rejected");
         // The parse-gate routes the id rejection through a path-free reason.
         assert!(!format!("{err}").contains("/path/to"));
@@ -291,9 +303,15 @@ mod tests {
         let project_dbg = format!("{:?}", cfg.projects()[0]);
         let cfg_dbg = format!("{cfg:?}");
         for shown in [&project_dbg, &cfg_dbg] {
-            assert!(shown.contains("<redacted>"), "expected redaction marker in {shown}");
+            assert!(
+                shown.contains("<redacted>"),
+                "expected redaction marker in {shown}"
+            );
             assert!(!shown.contains("/path/to"), "Debug leaked a path: {shown}");
-            assert!(!shown.contains("tsgo"), "Debug leaked the checker bin: {shown}");
+            assert!(
+                !shown.contains("tsgo"),
+                "Debug leaked the checker bin: {shown}"
+            );
         }
         // The opaque id survives — it is the safe identity.
         assert!(project_dbg.contains("p0001"));

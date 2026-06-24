@@ -13,6 +13,30 @@
 
 export { canonicalizePath, joinCanonical, offsetToLineChar, type LineChar } from "./paths.js";
 
+// The local-analysis-input config loader + the `DX_HARNESS_EXTERNAL_CORPUS` hook.
+// Mirrors the Rust `verter_analysis_inputs` `verter.analysis-projects.v1` schema.
+export {
+  ANALYSIS_CORPUS_ENV,
+  ANALYSIS_PROJECTS_SCHEMA,
+  AnalysisConfigError,
+  loadAnalysisConfig,
+  parseAnalysisConfig,
+  resolveCorpusSource,
+  type AnalysisProject,
+  type AnalysisProjects,
+  type CorpusSource,
+  type ProjectKind,
+  type Workstream,
+} from "./analysisConfig.js";
+
+// The single producer-side redactor + the typed redacted-emitter wrappers.
+export {
+  Redactor,
+  redactSourceMap,
+  serializeRedactedJson,
+  serializeRedactedJsonl,
+} from "./redaction.js";
+
 export {
   AnchorError,
   addFileAnchors,

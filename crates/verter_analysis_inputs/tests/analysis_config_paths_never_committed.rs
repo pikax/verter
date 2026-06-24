@@ -97,9 +97,11 @@ fn is_path_seg_char(c: char) -> bool {
 }
 
 /// Generic private absolute-path shapes, over slash-normalized text:
-///   - `\b[A-Za-z]:/(Users/<seg>|dev)/`  — a Windows drive root into `Users/<name>` or `dev`
-///   - `(^|[^A-Za-z0-9_])/(Users|home)/<name>/` — a POSIX home/Users root
-///   - `file:///Users/...` and `file:///home/...`
+///
+/// - `\b[A-Za-z]:/(Users/<seg>|dev)/` — a Windows drive root into `Users/<name>` or `dev`
+/// - `(^|[^A-Za-z0-9_])/(Users|home)/<name>/` — a POSIX home/Users root
+/// - `file:///Users/...` and `file:///home/...`
+///
 /// Returns the first matched shape label, or `None`.
 fn absolute_path_shape(norm: &str) -> Option<&'static str> {
     let bytes = norm.as_bytes();
@@ -151,7 +153,9 @@ fn absolute_path_shape(norm: &str) -> Option<&'static str> {
     let mut search = 0;
     while search < lower.len() {
         // find next `/users/` or `/home/`
-        let users_at = lower[search..].find("/users/").map(|r| (search + r, 7usize));
+        let users_at = lower[search..]
+            .find("/users/")
+            .map(|r| (search + r, 7usize));
         let home_at = lower[search..].find("/home/").map(|r| (search + r, 6usize));
         let next = match (users_at, home_at) {
             (Some(a), Some(b)) => {
@@ -297,8 +301,8 @@ fn tracked_paths(root: &std::path::Path) -> Vec<String> {
 /// text artifact is still covered while a real binary is skipped.
 const TEXT_EXTS: &[&str] = &[
     "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "vue", "svelte", "json", "jsonl",
-    "map", "md", "mdx", "txt", "log", "yaml", "yml", "toml", "html", "css", "scss", "d.ts",
-    "snap", "csv",
+    "map", "md", "mdx", "txt", "log", "yaml", "yml", "toml", "html", "css", "scss", "d.ts", "snap",
+    "csv",
 ];
 
 /// Decide text vs binary by extension allowlist, then a NUL-byte sniff fallback.
@@ -522,8 +526,11 @@ fn leak_predicate_flags_planted_leaks_and_passes_clean_artifacts() {
     // The ledger files are shape-scanned too.
     let leaky_ledger = format!(r#"{{"note":"see C:/{dev}/thing/file.ts"}}"#);
     assert!(
-        scan_text_artifact("docs/arch/followups/replacement-deviations.json", &leaky_ledger)
-            .is_some(),
+        scan_text_artifact(
+            "docs/arch/followups/replacement-deviations.json",
+            &leaky_ledger
+        )
+        .is_some(),
         "a drive-root shape in the ledger must be flagged"
     );
 
@@ -538,7 +545,10 @@ fn leak_predicate_flags_planted_leaks_and_passes_clean_artifacts() {
         // a URI test fixture (like verter_lsp/src/uri.rs)
         ("crates/verter_lsp/src/uri.rs", synthetic_home),
         // a TS path-normalization spec (like engine-key.spec.ts)
-        ("packages/component-meta/src/runtime/engine-key.spec.ts", synthetic_drive.as_str()),
+        (
+            "packages/component-meta/src/runtime/engine-key.spec.ts",
+            synthetic_drive.as_str(),
+        ),
         // a doc with the dev's own machine path
         ("docs/some-report.md", synthetic_users),
     ] {
@@ -569,28 +579,41 @@ fn leak_predicate_flags_planted_leaks_and_passes_clean_artifacts() {
         "node_modules/.bin/tsgo",
     ] {
         assert_eq!(token_leak(clean), None, "token false-positive: {clean:?}");
-        assert_eq!(path_shape_leak(clean), None, "shape false-positive: {clean:?}");
+        assert_eq!(
+            path_shape_leak(clean),
+            None,
+            "shape false-positive: {clean:?}"
+        );
     }
     // A clean source map (opaque virtual sources, null sourcesContent) passes.
-    let clean_sourcemap =
-        r#"{"version":3,"sources":["analysis://p0001/file-0001.vue"],"sourcesContent":[null],"mappings":"AAAA"}"#;
+    let clean_sourcemap = r#"{"version":3,"sources":["analysis://p0001/file-0001.vue"],"sourcesContent":[null],"mappings":"AAAA"}"#;
     assert_eq!(scan_text_artifact("clean.map", clean_sourcemap), None);
 }
 
 #[test]
 fn is_shape_scanned_artifact_discriminates() {
     // Campaign / generated-artifact surfaces are shape-scanned.
-    assert!(is_shape_scanned_artifact("packages/dx-harness/out/dx-events.map"));
-    assert!(is_shape_scanned_artifact("packages/dx-harness/out/dx-events.jsonl"));
+    assert!(is_shape_scanned_artifact(
+        "packages/dx-harness/out/dx-events.map"
+    ));
+    assert!(is_shape_scanned_artifact(
+        "packages/dx-harness/out/dx-events.jsonl"
+    ));
     assert!(is_shape_scanned_artifact("some/snapshot.snap"));
-    assert!(is_shape_scanned_artifact("docs/arch/followups/replacement-deviations.json"));
-    assert!(is_shape_scanned_artifact("docs/arch/followups/replacement-deviations.md"));
+    assert!(is_shape_scanned_artifact(
+        "docs/arch/followups/replacement-deviations.json"
+    ));
+    assert!(is_shape_scanned_artifact(
+        "docs/arch/followups/replacement-deviations.md"
+    ));
     assert!(is_shape_scanned_artifact(&allowed_example_rel()));
     // General source / docs / path-fixtures are NOT.
     assert!(!is_shape_scanned_artifact("crates/verter_span/src/path.rs"));
     assert!(!is_shape_scanned_artifact("crates/verter_lsp/src/uri.rs"));
     assert!(!is_shape_scanned_artifact("docs/some-report.md"));
-    assert!(!is_shape_scanned_artifact("packages/component-meta/src/runtime/engine-key.spec.ts"));
+    assert!(!is_shape_scanned_artifact(
+        "packages/component-meta/src/runtime/engine-key.spec.ts"
+    ));
     assert!(!is_shape_scanned_artifact("CHANGELOG.md"));
     // The off-limits verter_session perf goldens are NOT shape-scanned (out of
     // scope for this block; signed-off follow-up for the verter_session owner).
@@ -652,7 +675,10 @@ fn gitignore_ignores_the_analysis_directory() {
             && !t.starts_with('!')
             && (t == format!("{dir_token}/") || t == format!("{dir_token}/*") || t == dir_token)
     });
-    assert!(has_ignore, ".gitignore must ignore the {dir_token}/ directory");
+    assert!(
+        has_ignore,
+        ".gitignore must ignore the {dir_token}/ directory"
+    );
 }
 
 #[test]
