@@ -42,6 +42,7 @@ fn baseline() -> (IdeProjectConfig, EnvHashInputs<'static>) {
     cfg.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/ws/proj".to_string()),
         paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
+        ..Default::default()
     };
     cfg.references = vec!["/ws/proj/tsconfig.refs.json".to_string()];
     cfg.membership = ProjectMembership::IncludeExclude {

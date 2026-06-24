@@ -33,6 +33,7 @@ fn build_host_with_single_project() -> (Arc<VerterHost>, &'static str) {
         compiler_options: IdeProjectCompilerOptions {
             base_url: Some("/projA".to_string()),
             paths: vec![("@/*".to_string(), vec!["./src/*".to_string()])],
+            ..Default::default()
         },
         references: vec![],
         membership: ProjectMembership::MatchAll,

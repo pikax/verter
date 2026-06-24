@@ -140,6 +140,28 @@ impl VirtualFileNaming {
             _ => None,
         }
     }
+
+    /// Every distinct-file IDE-carrier suffix this naming policy can produce,
+    /// in a stable order. This is the descriptor AUTHORITY for "which companion
+    /// path(s) could the IDE carrier live at" — a consumer that needs to detect
+    /// a real-file collision against the IDE carrier path must enumerate THESE,
+    /// never a hardcoded `.tsx`.
+    ///
+    /// - [`VirtualPathPolicy::Suffix`] → that one suffix (Svelte's `.tsx`).
+    /// - [`VirtualPathPolicy::JsxConditional`] → BOTH the `non_jsx` and `jsx`
+    ///   suffixes (Vue's `.tsx` AND `.jsx`), because the carrier lives at one or
+    ///   the other depending on the SFC's script lang, which is not known at
+    ///   ownership time.
+    /// - [`VirtualPathPolicy::SelfFile`] / [`VirtualPathPolicy::None`] → empty
+    ///   (no distinct companion file — the rune-module / no-projection case).
+    #[must_use]
+    pub fn ide_carrier_suffixes(&self) -> Vec<&'static str> {
+        match self.ide {
+            VirtualPathPolicy::Suffix(s) => vec![s],
+            VirtualPathPolicy::JsxConditional { jsx, non_jsx } => vec![non_jsx, jsx],
+            VirtualPathPolicy::SelfFile | VirtualPathPolicy::None => Vec::new(),
+        }
+    }
 }
 
 /// How a virtual surface (IDE or import-resolution) is named relative to a

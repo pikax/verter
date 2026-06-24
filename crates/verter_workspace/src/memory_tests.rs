@@ -388,6 +388,7 @@ fn resolve_import_via_tsconfig_paths() {
         compiler_options: IdeProjectCompilerOptions {
             base_url: Some("d:/project".to_string()),
             paths: vec![("@/*".to_string(), vec!["./src/*".to_string()])],
+            ..Default::default()
         },
         references: vec![],
         membership: ProjectMembership::MatchAll,

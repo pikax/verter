@@ -324,6 +324,112 @@ fn owner_selection_ignores_solution_style_root_membership() {
 }
 
 #[test]
+fn live_resolver_files_are_immune_to_exclude() {
+    // FIX 4: in the LIVE `IdeProjectConfig::matches_file` path, an explicitly
+    // listed `files` entry under an excluded directory must still be OWNED —
+    // `files` are immune to `exclude` (matching TS + the new `StaticMembershipSpec`).
+    //
+    // DISCRIMINATING: before FIX 4 the exclude check ran BEFORE the files check,
+    // so `Keep.vue` (under the excluded `src/excluded`) was wrongly rejected ⇒
+    // `owner_for_file` returned `None` (the red). After the fix the file is
+    // owned.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::IncludeExclude {
+            files: vec!["/workspace/src/excluded/Keep.vue".to_string()],
+            include: vec!["src/**/*".to_string()],
+            exclude: vec!["src/excluded".to_string()],
+        },
+    )]);
+
+    let owner = resolver.owner_for_file("/workspace/src/excluded/Keep.vue");
+    assert!(
+        owner.is_some(),
+        "an explicit `files` entry under an excluded dir must be OWNED \
+         (files are immune to exclude in the live resolver path)"
+    );
+    assert_eq!(
+        owner.unwrap().tsconfig_path.as_deref(),
+        Some("/workspace/tsconfig.json")
+    );
+
+    // Negative control: a NON-files file under the excluded dir is still excluded.
+    assert!(
+        resolver
+            .owner_for_file("/workspace/src/excluded/Other.vue")
+            .is_none(),
+        "a non-`files` file under the excluded dir stays excluded"
+    );
+}
+
+#[test]
+fn live_resolver_exclude_only_owns_default_include_minus_exclude() {
+    // FIX 1 (live path / path 2): an exclude-only config keeps the implicit
+    // default include MINUS excludes. The producer synthesizes the default
+    // include into the membership, so the LIVE resolver owns `src/Foo.vue` and
+    // `src/Foo.svelte` and REJECTS `dist/Foo.vue`. (This mirrors what the new
+    // spec / `StaticMembershipSpec::matches` produces — the two paths AGREE.)
+    //
+    // The membership shape here is exactly what `load_project_membership` +
+    // `spec_to_membership` round-trip to for `{"exclude":["dist"]}`: a default
+    // `**/*` include plus the user exclude.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::IncludeExclude {
+            files: Vec::new(),
+            include: vec!["**/*".to_string()],
+            exclude: vec!["dist".to_string()],
+        },
+    )]);
+
+    for ext in ["vue", "svelte"] {
+        let owned = format!("/workspace/src/Foo.{ext}");
+        assert!(
+            resolver.owner_for_file(&owned).is_some(),
+            "exclude-only (default include) must OWN `src/Foo.{ext}`"
+        );
+    }
+    assert!(
+        resolver.owner_for_file("/workspace/dist/Foo.vue").is_none(),
+        "exclude-only must REJECT `dist/Foo.vue` (under the exclude)"
+    );
+}
+
+#[test]
+fn live_resolver_explicit_empty_files_owns_nothing() {
+    // FIX 1 distinction (live path): an explicit `files: []` solution-style
+    // config (with only the TS-default excludes, no include) owns NOTHING but
+    // its references — it must NOT fall back to owning everything-not-excluded.
+    //
+    // DISCRIMINATING: before FIX 4 the `!exclude.is_empty()` fallback made this
+    // own every non-excluded file (because the TS-default exclude is non-empty)
+    // — the red. After the fix an empty-include + empty-files membership owns
+    // nothing.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::IncludeExclude {
+            files: Vec::new(),
+            include: Vec::new(),
+            // Only the TS-default excludes (what `membership_to_spec` fills for
+            // an explicit `files: []` with no user exclude).
+            exclude: vec!["node_modules/**".to_string()],
+        },
+    )]);
+
+    assert!(
+        resolver.owner_for_file("/workspace/src/App.vue").is_none(),
+        "an explicit `files: []` solution-style config must own NOTHING but references \
+         (no everything-not-excluded fallback)"
+    );
+}
+
+#[test]
 fn ambiguous_configured_owner_returns_none() {
     let resolver = ProjectResolver::new(vec![
         project(
@@ -830,6 +936,7 @@ fn resolve_tsconfig_paths_before_base_url() {
             "shared".to_string(),
             vec!["../generated/shared".to_string()],
         )],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader =
@@ -868,6 +975,7 @@ fn resolve_base_url_when_no_paths_match() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/workspace/src".to_string()),
         paths: Vec::new(),
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/shared.ts"]);
@@ -938,6 +1046,7 @@ fn resolve_project_references_after_local_tsconfig_options() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/workspace/packages/app/src".to_string()),
         paths: Vec::new(),
+        ..Default::default()
     };
     app_project.references = vec!["/workspace/packages/shared/tsconfig.json".to_string()];
 
@@ -950,6 +1059,7 @@ fn resolve_project_references_after_local_tsconfig_options() {
     shared_project.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/workspace/packages/shared/src".to_string()),
         paths: vec![("shared".to_string(), vec!["index".to_string()])],
+        ..Default::default()
     };
 
     let resolver = ProjectResolver::new(vec![app_project, shared_project]);
@@ -1595,6 +1705,7 @@ fn resolve_alias_requires_project_owner() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
@@ -1645,6 +1756,7 @@ fn resolve_tsconfig_paths_arbitrary_patterns() {
                 vec!["/workspace/node_modules/nuxt/dist/app/*".to_string()],
             ),
         ],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![p]);
     let reader = TestReader::with_files(&[
@@ -1717,6 +1829,7 @@ fn preferred_specifier_returns_tsconfig_alias() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
@@ -1742,6 +1855,7 @@ fn preferred_specifier_returns_none_when_no_match() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/other/Foo.vue"]);
@@ -1771,6 +1885,7 @@ fn preferred_specifier_prefers_shortest() {
                 vec!["/workspace/src/components/*".to_string()],
             ),
         ],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/components/Bar.vue"]);
@@ -1799,6 +1914,7 @@ fn preferred_specifier_round_trips() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
@@ -1835,6 +1951,7 @@ fn preferred_specifier_none_for_provider_paths() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
@@ -1870,6 +1987,7 @@ fn preferred_specifier_multi_target_first_wins() {
                 "/workspace/lib/*".to_string(),
             ],
         )],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue", "/workspace/lib/Foo.vue"]);
@@ -1902,6 +2020,7 @@ fn preferred_specifier_multi_target_shadowed() {
                 "/workspace/lib/*".to_string(),
             ],
         )],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     // Only lib/Bar.vue exists (NOT src/Bar.vue)
@@ -2971,6 +3090,7 @@ fn tsconfig_path_to_package_dir_respects_type_import_context() {
                     .to_string(),
             ],
         )],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![project]);
     let mut reader = TestReader::with_files(&[

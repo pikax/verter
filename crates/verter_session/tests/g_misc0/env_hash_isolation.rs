@@ -49,6 +49,7 @@ fn baseline_cfg() -> IdeProjectConfig {
     cfg.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/ws/proj".to_string()),
         paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
+        ..Default::default()
     };
     cfg.references = Vec::new();
     cfg.membership = ProjectMembership::MatchAll;

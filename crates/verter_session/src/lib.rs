@@ -154,6 +154,7 @@ pub(crate) mod fact_signature_helpers;
 pub use crate::fact_signature_helpers::ReadSetSignature;
 #[cfg(test)]
 mod error_propagation_lattice_tests;
+pub mod external_ts;
 pub mod file_artifact_store;
 mod hash;
 pub(crate) mod instant;

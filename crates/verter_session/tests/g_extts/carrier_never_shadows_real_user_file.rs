@@ -1,0 +1,108 @@
+//! Guard: `carrier_never_shadows_real_user_file` (ownership / `Ambiguous` half).
+//!
+//! The carrier-companion path (`{name}.vue.tsx` / `{name}.vue.jsx` /
+//! `{name}.svelte.tsx`) is in the USER namespace, not a Verter-reserved one.
+//! When a real user file already occupies that EXACT path, Verter must NEVER
+//! overlay-shadow it: the source is downgraded to `Ambiguous` (no external-TS
+//! binding) and Verter places no overlay. Asserted for `.vue` AND `.svelte`, and
+//! for EVERY descriptor-valid IDE carrier suffix the adapter's `VirtualFileNaming`
+//! authority yields — so Vue's `JsxConditional` `.jsx` companion is covered as
+//! well as `.tsx`.
+//!
+//! DISCRIMINATING: without the carrier-path conflict pass a clean owner would
+//! resolve to a `ProjectBinding` even when a real file sits at the carrier path;
+//! this guard asserts the `Ambiguous` downgrade instead. Against a hardcoded
+//! `.tsx`-only conflict probe, the `.jsx` companion case below stays a
+//! `ProjectBinding` (the bug) — the descriptor-derived probe is what makes it
+//! `Ambiguous`. (The per-engine overlay-placement half of this guard lands with
+//! the backends in a later block.)
+
+use verter_session::external_ts::{AmbiguityCause, ProjectResolution};
+use verter_session::framework::descriptor::built_in_descriptors;
+use verter_session::framework::VirtualFileNaming;
+
+use crate::shared::{carrier_exts, resolve_with};
+
+const TS: &str = "d:/ws/tsconfig.json";
+
+/// The descriptor-owned IDE carrier suffixes for a carrier extension (e.g.
+/// `"vue"`), via the `VirtualFileNaming` authority. Vue → `[".tsx", ".jsx"]`,
+/// Svelte → `[".tsx"]`. Never a hardcoded suffix list.
+fn ide_suffixes_for(carrier_ext: &str) -> Vec<&'static str> {
+    // The descriptor's carrier_language id is the bare carrier ext
+    // (`"vue"`/`"svelte"`).
+    built_in_descriptors()
+        .iter()
+        .filter(|d| {
+            d.carrier_language
+                .as_ref()
+                .is_some_and(|id| id.as_str() == carrier_ext)
+        })
+        .filter_map(|d| d.virtual_file_naming.as_ref())
+        .flat_map(VirtualFileNaming::ide_carrier_suffixes)
+        .collect()
+}
+
+#[test]
+fn carrier_never_shadows_real_user_file() {
+    let exts = carrier_exts();
+    assert!(
+        exts.iter().any(|e| e == "vue") && exts.iter().any(|e| e == "svelte"),
+        "this guard requires the built-in `.vue` AND `.svelte` carrier adapters; got {exts:?}"
+    );
+
+    for ext in &exts {
+        let source = format!("d:/ws/src/Foo.{ext}");
+
+        // Control: with NO real file at any carrier path, the source binds cleanly.
+        let clean = resolve_with(
+            &[
+                (TS, r#"{ "include": ["src/**/*"] }"#),
+                (source.as_str(), "// carrier"),
+            ],
+            &[TS],
+            &source,
+        );
+        assert!(
+            matches!(clean, ProjectResolution::ProjectBinding(_)),
+            "control: `Foo.{ext}` with no occupying file must bind cleanly (got {clean:?})"
+        );
+
+        // For EVERY descriptor-valid IDE carrier suffix (`.tsx`, and `.jsx` for a
+        // `JsxConditional` adapter like Vue): a real user file at that exact
+        // carrier path ⇒ Ambiguous, no shadowing.
+        let suffixes = ide_suffixes_for(ext);
+        assert!(
+            suffixes.contains(&".tsx"),
+            "every built-in carrier's IDE policy must yield the `.tsx` companion; \
+             `.{ext}` yielded {suffixes:?}"
+        );
+        for suffix in &suffixes {
+            let carrier_path = format!("d:/ws/src/Foo.{ext}{suffix}");
+            let conflicted = resolve_with(
+                &[
+                    (TS, r#"{ "include": ["src/**/*"] }"#),
+                    (source.as_str(), "// carrier"),
+                    (carrier_path.as_str(), "export const realUserFile = 1;"),
+                ],
+                &[TS],
+                &source,
+            );
+            assert_eq!(
+                conflicted,
+                ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+                "a real file at the descriptor-valid carrier path `Foo.{ext}{suffix}` must \
+                 downgrade `Foo.{ext}` to Ambiguous (Verter never overlay-shadows a real \
+                 user file)"
+            );
+        }
+    }
+
+    // Vue's `JsxConditional` policy MUST contribute a `.jsx` companion — the
+    // exact case the hardcoded-`.tsx` probe missed. Assert it explicitly so the
+    // JSX coverage cannot silently regress to `.tsx`-only.
+    assert!(
+        ide_suffixes_for("vue").contains(&".jsx"),
+        "Vue's JsxConditional IDE policy must yield a `.jsx` companion path"
+    );
+}

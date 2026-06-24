@@ -9,8 +9,8 @@ use rustc_hash::FxHashSet;
 use crate::canonical_path::CanonicalPath;
 use crate::membership::{
     typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,
+    SupportedExtensions,
 };
-use crate::normalized_glob::NormalizedGlob;
 use crate::resolver::{IdeProjectConfig, ProjectMembership, ProjectResolver};
 use crate::workspace_snapshot::{
     compare_project_precedence, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
@@ -83,7 +83,8 @@ pub fn build_workspace_snapshot(
             let compiler_options = load_compiler_options(ws, &entry.path);
             let raw_references = load_project_references(ws, &entry.path);
 
-            let spec = membership_to_spec(&project_root, &raw_membership);
+            let supported = supported_extensions_for(&compiler_options);
+            let spec = membership_to_spec(&project_root, &raw_membership, &supported);
             let materialized_files = materialize_from_spec(&spec, &project_root, Some(ws));
 
             let references = raw_references
@@ -194,36 +195,72 @@ pub fn build_workspace_snapshot_simple(
     }
 }
 
-/// Convert the old `ProjectMembership` enum to the new `StaticMembershipSpec`.
+/// The carrier extensions the live `LanguageRegistry` registers (`.vue`,
+/// `.svelte`, …) WITHOUT a leading dot, the framework-agnostic authority for
+/// `extraFileExtensions`-style membership. Never a hardcoded list.
+pub fn registry_carrier_extensions() -> Vec<String> {
+    verter_language::LanguageRegistry::global()
+        .carrier_extensions()
+        .iter()
+        .map(|e| (*e).to_string())
+        .collect()
+}
+
+/// Build the supported-extension set for a configured project from its parsed
+/// compiler options (for the `allowJs`/`checkJs` JS-family gate) and the
+/// registered carrier extensions.
+pub fn supported_extensions_for(
+    compiler_options: &crate::resolver::IdeProjectCompilerOptions,
+) -> SupportedExtensions {
+    SupportedExtensions::new(
+        compiler_options.js_is_member(),
+        &registry_carrier_extensions(),
+    )
+}
+
+/// Convert the old `ProjectMembership` enum to the new `StaticMembershipSpec`,
+/// applying the supported-extension expansion rule.
 ///
-/// Fills in TypeScript defaults when the old representation was `MatchAll`.
+/// Fills in TypeScript defaults when the old representation was `MatchAll`. A
+/// no-extension directory / bare-star include glob expands into one glob per
+/// supported extension; an extension-specific glob is kept verbatim; `files`
+/// are exact and immune; `exclude` is literal.
 pub fn membership_to_spec(
     project_root: &CanonicalPath,
     membership: &ProjectMembership,
+    supported: &SupportedExtensions,
 ) -> StaticMembershipSpec {
     match membership {
-        ProjectMembership::MatchAll => StaticMembershipSpec::with_typescript_defaults(project_root),
+        ProjectMembership::MatchAll => {
+            StaticMembershipSpec::with_supported_extension_defaults(project_root, supported)
+        }
         ProjectMembership::IncludeExclude {
             files,
             include,
             exclude,
         } => {
-            let files_cp: Vec<CanonicalPath> =
-                files.iter().map(|f| CanonicalPath::new(f)).collect();
-
-            let include_globs: Vec<NormalizedGlob> =
-                include.iter().map(|g| NormalizedGlob::new(g)).collect();
-
-            let exclude_globs: Vec<NormalizedGlob> = if exclude.is_empty() {
-                typescript_default_excludes(project_root)
+            let files_refs: Vec<&str> = files.iter().map(String::as_str).collect();
+            let include_refs: Vec<&str> = include.iter().map(String::as_str).collect();
+            if exclude.is_empty() {
+                // No explicit exclude → TS defaults (node_modules etc.).
+                let mut spec = StaticMembershipSpec::from_includes(
+                    project_root,
+                    &files_refs,
+                    &include_refs,
+                    &[],
+                    supported,
+                );
+                spec.exclude = typescript_default_excludes(project_root);
+                spec
             } else {
-                exclude.iter().map(|g| NormalizedGlob::new(g)).collect()
-            };
-
-            StaticMembershipSpec {
-                files: files_cp,
-                include: include_globs,
-                exclude: exclude_globs,
+                let exclude_refs: Vec<&str> = exclude.iter().map(String::as_str).collect();
+                StaticMembershipSpec::from_includes(
+                    project_root,
+                    &files_refs,
+                    &include_refs,
+                    &exclude_refs,
+                    supported,
+                )
             }
         }
     }
@@ -348,7 +385,8 @@ pub fn ownership_project_from_vfs_config(
 
     if let Some(ref tsconfig) = config.tsconfig_path {
         // Configured project
-        let spec = membership_to_spec(&root, &config.membership);
+        let supported = supported_extensions_for(&config.compiler_options);
+        let spec = membership_to_spec(&root, &config.membership, &supported);
         let materialized_files = materialize_from_spec(&spec, &root, None);
 
         OwnershipProject {

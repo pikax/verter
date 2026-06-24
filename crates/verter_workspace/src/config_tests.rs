@@ -415,6 +415,220 @@ fn membership_with_exclude() {
     }
 }
 
+#[test]
+fn exclude_only_carries_the_default_include() {
+    // FIX 1: a tsconfig with ONLY `exclude` (no `files`, no `include`) must keep
+    // TypeScript's implicit default `**/*` include MINUS the excludes. The
+    // producer (`load_project_membership_inner`) models the default include
+    // EXPLICITLY: when neither `files` nor `include` is present, the produced
+    // membership carries the default `{dir}/**/*` include glob.
+    //
+    // DISCRIMINATING: before FIX 1 an exclude-only config produced
+    // `IncludeExclude { include: [], .. }` (empty include) ⇒ it owned NOTHING;
+    // this asserts a NON-EMPTY default include is synthesized.
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.json"),
+        r#"{ "exclude": ["dist"] }"#,
+    )
+    .unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let membership = load_project_membership(&ws, &tsconfig_path);
+    match membership {
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            assert!(
+                files.is_empty(),
+                "an exclude-only config declares no `files`"
+            );
+            assert!(
+                !include.is_empty(),
+                "an exclude-only config must carry the implicit default `**/*` include \
+                 (was empty before the fix ⇒ owned nothing)"
+            );
+            assert!(
+                include.iter().any(|g| g.ends_with("/**/*")),
+                "the synthesized default include must be the `**/*` glob, got {include:?}"
+            );
+            assert!(!exclude.is_empty(), "the explicit exclude is preserved");
+        }
+        ProjectMembership::MatchAll => panic!("should be IncludeExclude (has an exclude key)"),
+    }
+}
+
+#[test]
+fn explicit_empty_files_does_not_synthesize_default_include() {
+    // FIX 1 distinction: an EXPLICIT `"files": []` (solution-style, owns
+    // nothing but its references) must stay DISTINCT from "no files key at all".
+    // `has_files` is true here, so NO default include is synthesized — the
+    // include stays empty (owns nothing but references).
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("tsconfig.json"), r#"{ "files": [] }"#).unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let membership = load_project_membership(&ws, &tsconfig_path);
+    match membership {
+        ProjectMembership::IncludeExclude { files, include, .. } => {
+            assert!(files.is_empty(), "explicit `files: []` is empty");
+            assert!(
+                include.is_empty(),
+                "an explicit `files: []` must NOT synthesize a default include \
+                 (it owns nothing but its references), got {include:?}"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("an explicit `files` key must produce IncludeExclude, not MatchAll")
+        }
+    }
+}
+
+/// Write `base.json` + `tsconfig.json` (which `extends` it) into a temp dir and
+/// return the produced membership for the child. Mirrors the single-file temp
+/// pattern above but exercises the `extends` inheritance path.
+fn membership_from_extends(base_body: &str, child_body: &str) -> ProjectMembership {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("base.json"), base_body).unwrap();
+    std::fs::write(tmp.path().join("tsconfig.json"), child_body).unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    load_project_membership(&ws, &tsconfig_path)
+}
+
+#[test]
+fn inherited_explicit_empty_files_does_not_synthesize_default_include() {
+    // An `extends` base that declares an EXPLICIT `"files": []` (solution-style,
+    // owns nothing but its references) must keep that distinction across
+    // inheritance: the child (which adds only `exclude`) must NOT synthesize a
+    // default `**/*` include and must own NOTHING but references.
+    //
+    // DISCRIMINATING: the inner recursion inherits only the files/include/exclude
+    // VECTORS, not whether an ancestor DECLARED `files`/`include`. A base with no
+    // membership keys inherits as `MatchAll` ⇒ `(empty, empty, empty)`, which is
+    // byte-indistinguishable from a base that declared `files: []`. So before the
+    // fix this WRONGLY synthesized `{dir}/**/*` and owned `src/Foo.vue`.
+    let membership = membership_from_extends(
+        r#"{ "files": [] }"#,
+        r#"{ "extends": "./base.json", "exclude": ["dist"] }"#,
+    );
+    match membership {
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            assert!(files.is_empty(), "inherited explicit `files: []` is empty");
+            assert!(
+                include.is_empty(),
+                "an inherited explicit `files: []` must NOT synthesize a default include \
+                 (it owns nothing but its references), got {include:?}"
+            );
+            assert!(
+                !exclude.is_empty(),
+                "the child's explicit exclude is preserved"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("an inherited explicit `files` key must produce IncludeExclude, not MatchAll")
+        }
+    }
+}
+
+#[test]
+fn inherited_explicit_empty_include_does_not_synthesize_default_include() {
+    // Sibling of the above for an inherited EXPLICIT `"include": []`. Same root
+    // cause, same fix: inherited declared-but-empty `include` must suppress the
+    // default-include synthesis.
+    let membership = membership_from_extends(
+        r#"{ "include": [] }"#,
+        r#"{ "extends": "./base.json", "exclude": ["dist"] }"#,
+    );
+    match membership {
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            assert!(files.is_empty(), "no files key anywhere in the chain");
+            assert!(
+                include.is_empty(),
+                "an inherited explicit `include: []` must NOT synthesize a default include \
+                 (it owns nothing but its references), got {include:?}"
+            );
+            assert!(
+                !exclude.is_empty(),
+                "the child's explicit exclude is preserved"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("an inherited explicit `include` key must produce IncludeExclude, not MatchAll")
+        }
+    }
+}
+
+#[test]
+fn inherited_real_include_still_owns_default_via_inheritance() {
+    // Regression guard for the fix: an `extends` base that declares a REAL
+    // (non-empty) `include` must still propagate that include to the child — the
+    // child does NOT synthesize a default include (the inherited include is the
+    // effective set), and the inherited include is what owns files.
+    let membership = membership_from_extends(
+        r#"{ "include": ["src"] }"#,
+        r#"{ "extends": "./base.json", "exclude": ["dist"] }"#,
+    );
+    match membership {
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            assert!(files.is_empty(), "no files key anywhere in the chain");
+            assert_eq!(
+                include.len(),
+                1,
+                "the inherited REAL `include` (`src`) is preserved, not replaced by a \
+                 synthesized default, got {include:?}"
+            );
+            assert!(
+                include[0].ends_with("/src/**/*"),
+                "the inherited include points at the base's `src` (the real declared \
+                 include, NOT the bare-`**/*` synthesized default), got {include:?}"
+            );
+            assert!(
+                !exclude.is_empty(),
+                "the child's explicit exclude is preserved"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("should be IncludeExclude (has an inherited include)")
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // load_project_references
 // ═══════════════════════════════════════════════════════════════════════════

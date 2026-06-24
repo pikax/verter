@@ -4443,6 +4443,12 @@ mod foundations_guards {
         "pub mod host_resolve_type_audit",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
+        // Project-bound external-TypeScript-engine contract: the
+        // provider-neutral three-layer seam (`ExternalTsProjectResolver` /
+        // `CarrierRegistry` / `EngineBackend`) in which a config-less op for a
+        // production carrier source is unrepresentable. Additive — the contract
+        // is defined but not yet wired live over the inferred LSP path.
+        "pub mod external_ts",
         // Fact-based cache architecture (R5, R6, R28, R29) — new
         // content-addressed file artifact store + per-file structural
         // hash, both consumed by tests and by future-stage host paths.
@@ -12753,7 +12759,7 @@ mod typed_ir_resolver_guards {
         ),
         (
             "crates/verter_workspace/src/resolver.rs",
-            84,
+            100,
             r#".contains("/node_modules/")"#,
         ),
     ];

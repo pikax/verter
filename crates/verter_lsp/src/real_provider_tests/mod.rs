@@ -35,6 +35,7 @@ mod completion_detail;
 mod definition;
 mod diagnostics;
 mod document_symbols;
+mod external_ts_baseline;
 mod hover;
 mod import_matrix;
 mod multi_fixture;

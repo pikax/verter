@@ -53,6 +53,7 @@ fn project_config(paths: Vec<(String, Vec<String>)>) -> VfsProjectConfig {
         compiler_options: IdeProjectCompilerOptions {
             base_url: Some(PROJECT_ROOT.to_string()),
             paths,
+            ..Default::default()
         },
         references: vec![],
         membership: ProjectMembership::MatchAll,

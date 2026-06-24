@@ -9937,6 +9937,7 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
     project.compiler_options = crate::project_resolver::IdeProjectCompilerOptions {
         base_url: Some(workspace_id.clone()),
         paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
+        ..Default::default()
     };
     host.configure_projects(vec![project.clone()]);
 

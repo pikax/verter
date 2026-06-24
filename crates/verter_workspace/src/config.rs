@@ -281,6 +281,22 @@ fn load_compiler_options_inner(
         compiler_options.base_url = Some(resolve_path_value(&tsconfig_dir, base_url));
     }
 
+    // `allowJs` / `checkJs` decide whether the JS family joins the project's
+    // supported-extension set. An explicit `false` overrides an inherited
+    // `true` (TS last-wins through the `extends` chain).
+    if let Some(allow_js) = raw_compiler_options
+        .get("allowJs")
+        .and_then(serde_json::Value::as_bool)
+    {
+        compiler_options.allow_js = allow_js;
+    }
+    if let Some(check_js) = raw_compiler_options
+        .get("checkJs")
+        .and_then(serde_json::Value::as_bool)
+    {
+        compiler_options.check_js = check_js;
+    }
+
     if let Some(paths) = raw_compiler_options
         .get("paths")
         .and_then(|value| value.as_object())
@@ -309,14 +325,68 @@ fn load_compiler_options_inner(
 
 /// Load project membership (files/include/exclude) from a tsconfig.json.
 pub fn load_project_membership(ws: &dyn WorkspaceRead, tsconfig_path: &str) -> ProjectMembership {
-    load_project_membership_inner(ws, tsconfig_path, 0).unwrap_or(ProjectMembership::MatchAll)
+    load_project_membership_inner(ws, tsconfig_path, 0)
+        .map(ResolvedMembership::into_membership)
+        .unwrap_or(ProjectMembership::MatchAll)
+}
+
+/// Internal membership carrier threaded through the `extends` recursion.
+///
+/// Unlike [`ProjectMembership`], this preserves whether `files`/`include` were
+/// ever DECLARED anywhere in the chain (`files_declared`/`include_declared`) —
+/// distinct from the inherited vectors merely being empty. The default-include
+/// synthesis keys off declared-ness, not emptiness: a no-keys base inherits as
+/// `MatchAll` (both flags false), while a base declaring `"files": []` /
+/// `"include": []` sets the corresponding flag true so the child does NOT
+/// synthesize a default include for a solution-style ancestor.
+struct ResolvedMembership {
+    files: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    /// `true` if a `files` key was present on this config or any ancestor.
+    files_declared: bool,
+    /// `true` if an `include` key was present on this config or any ancestor.
+    include_declared: bool,
+}
+
+impl ResolvedMembership {
+    /// A no-keys / unresolved config: match everything, nothing declared.
+    fn match_all() -> Self {
+        Self {
+            files: Vec::new(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+            files_declared: false,
+            include_declared: false,
+        }
+    }
+
+    fn into_membership(self) -> ProjectMembership {
+        // A `MatchAll` carrier is one with no membership keys anywhere AND no
+        // synthesized default include — i.e. all three vectors empty. The
+        // synthesis step below always populates `include` when nothing was
+        // declared, so the only way to reach here empty is genuinely no keys.
+        if !self.files_declared
+            && !self.include_declared
+            && self.files.is_empty()
+            && self.include.is_empty()
+            && self.exclude.is_empty()
+        {
+            return ProjectMembership::MatchAll;
+        }
+        ProjectMembership::IncludeExclude {
+            files: self.files,
+            include: self.include,
+            exclude: self.exclude,
+        }
+    }
 }
 
 fn load_project_membership_inner(
     ws: &dyn WorkspaceRead,
     tsconfig_path: &str,
     depth: u8,
-) -> Option<ProjectMembership> {
+) -> Option<ResolvedMembership> {
     if depth > MAX_TSCONFIG_EXTENDS_DEPTH {
         return None;
     }
@@ -331,7 +401,7 @@ fn load_project_membership_inner(
         .and_then(|value| value.as_str())
         .and_then(|extends| resolve_tsconfig_extends(ws, &tsconfig_dir, extends))
         .and_then(|base_path| load_project_membership_inner(ws, &base_path, depth + 1))
-        .unwrap_or(ProjectMembership::MatchAll);
+        .unwrap_or_else(ResolvedMembership::match_all);
 
     let has_files = json.get("files").is_some();
     let has_include = json.get("include").is_some();
@@ -341,20 +411,20 @@ fn load_project_membership_inner(
         return Some(inherited);
     }
 
-    let (mut files, mut include, mut exclude) = match inherited {
-        ProjectMembership::MatchAll => (Vec::new(), Vec::new(), Vec::new()),
-        ProjectMembership::IncludeExclude {
-            files,
-            include,
-            exclude,
-        } => (files, include, exclude),
-    };
+    let ResolvedMembership {
+        mut files,
+        mut include,
+        mut exclude,
+        mut files_declared,
+        mut include_declared,
+    } = inherited;
 
     if has_files {
         files = json_string_array(&json, "files")
             .into_iter()
             .map(|value| resolve_membership_path(&tsconfig_dir, &value, false))
             .collect();
+        files_declared = true;
     }
 
     if has_include {
@@ -362,6 +432,7 @@ fn load_project_membership_inner(
             .into_iter()
             .map(|value| resolve_membership_path(&tsconfig_dir, &value, true))
             .collect();
+        include_declared = true;
     }
 
     if has_exclude {
@@ -371,10 +442,31 @@ fn load_project_membership_inner(
             .collect();
     }
 
-    Some(ProjectMembership::IncludeExclude {
+    // Model TypeScript's implicit default include EXPLICITLY: when neither this
+    // config NOR any `extends` ancestor DECLARES `files` or `include`, the
+    // project's include is the default `{dir}/**/*` (filtered to supported
+    // extensions downstream by `membership_to_spec`), and `exclude` subtracts
+    // from it. This is what makes an exclude-only config (`{"exclude":["dist"]}`)
+    // own `{dir}/**` minus the excludes rather than nothing.
+    //
+    // The synthesis keys off DECLARED-ness, not emptiness. The absent-vs-explicit
+    // -empty distinction is preserved across inheritance: an explicit
+    // `"files": []` / `"include": []` — on this config OR any `extends` ancestor —
+    // sets `files_declared` / `include_declared`, so the default include is NOT
+    // synthesized. A solution-style config (here or inherited) keeps an empty
+    // include and owns nothing but its references. (Inheriting the empty VECTORS
+    // alone would be indistinguishable from a no-keys `MatchAll` ancestor — which
+    // is exactly why declared-ness is threaded separately.)
+    if !files_declared && !include_declared {
+        include = vec![resolve_membership_path(&tsconfig_dir, "**/*", true)];
+    }
+
+    Some(ResolvedMembership {
         files,
         include,
         exclude,
+        files_declared,
+        include_declared,
     })
 }
 
@@ -657,7 +749,11 @@ fn json_string_array(json: &serde_json::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-fn resolve_membership_path(tsconfig_dir: &str, value: &str, allow_directory_glob: bool) -> String {
+pub(crate) fn resolve_membership_path(
+    tsconfig_dir: &str,
+    value: &str,
+    allow_directory_glob: bool,
+) -> String {
     let normalized = if crate::resolver::is_absolute_specifier(value) {
         normalize_canonical_id(value)
     } else {

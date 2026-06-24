@@ -28,6 +28,22 @@ pub struct WorkspaceAlias {
 pub struct IdeProjectCompilerOptions {
     pub base_url: Option<String>,
     pub paths: Vec<(String, Vec<String>)>,
+    /// `compilerOptions.allowJs` — when set (or `checkJs`), `.js`/`.jsx`/
+    /// `.cjs`/`.mjs` join the project's supported-extension set.
+    pub allow_js: bool,
+    /// `compilerOptions.checkJs` — implies `allowJs` for membership purposes
+    /// (TypeScript treats `checkJs` as turning on JS type-checking, which
+    /// requires the JS files to be project members).
+    pub check_js: bool,
+}
+
+impl IdeProjectCompilerOptions {
+    /// Whether JavaScript files are project members (either `allowJs` or
+    /// `checkJs` is set).
+    #[must_use]
+    pub fn js_is_member(&self) -> bool {
+        self.allow_js || self.check_js
+    }
 }
 
 /// Membership filter for a tsconfig project.
@@ -95,10 +111,9 @@ impl IdeProjectConfig {
                 include,
                 exclude,
             } => {
-                if matches_any_pattern_for_root(&normalized_file, &self.root, exclude) {
-                    return false;
-                }
-
+                // `files` entries are ALWAYS members — immune to `exclude` —
+                // checked FIRST (matching TypeScript and
+                // `StaticMembershipSpec::matches`).
                 if files
                     .iter()
                     .map(|candidate| {
@@ -109,11 +124,20 @@ impl IdeProjectConfig {
                     return true;
                 }
 
-                if !include.is_empty() {
-                    return matches_any_pattern_for_root(&normalized_file, &self.root, include);
+                // `exclude` only filters what `include` finds.
+                if matches_any_pattern_for_root(&normalized_file, &self.root, exclude) {
+                    return false;
                 }
 
-                !exclude.is_empty()
+                // An empty `include` owns NOTHING (the solution-style /
+                // explicit-`files: []` case). TypeScript's implicit default
+                // include is modelled EXPLICITLY in the producer
+                // (`load_project_membership_inner`), so an exclude-only config
+                // already carries the default `**/*` include by the time
+                // membership reaches here — an empty include genuinely means
+                // "owns nothing but its `files`/references", never "everything
+                // not excluded".
+                matches_any_pattern_for_root(&normalized_file, &self.root, include)
             }
         }
     }
