@@ -1202,7 +1202,7 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
         "precondition: `ResolveDecl(Leaf)` must be cold before the raise"
     );
 
-    let materialized = dispatch.raise_and_reduce_with_context(
+    let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
         lowered,
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
@@ -1210,12 +1210,9 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
     // Terminal still expands: the consumed `['b']` segment runs in the
     // caller's `Expanded` mode and reduces to the concrete `number`.
     assert!(
-        matches!(
-            materialized.type_expr,
-            TypeExpr::Primitive(PrimitiveName::Number)
-        ),
+        matches!(materialized, TypeExpr::Primitive(PrimitiveName::Number)),
         "terminal `Root['a']['b']` must expand to the concrete `number`; got {:?}",
-        materialized.type_expr
+        materialized
     );
 
     // Intermediate stays Navigate-shallow: the raise reducer demoted the
@@ -15813,7 +15810,7 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
     // function-like wire decision: the constructor distinction is erased at the
     // query-time round-trip boundary, never surfaced as `semanticMiss`).
     let raised = dispatch
-        .materialize_output_type_expr(lowered)
+        .materialize_output_type_expr_for_test(lowered)
         .expect("function carrier must raise back to a TypeExpr");
     match &raised {
         TypeExpr::Function(func) => {
@@ -17141,7 +17138,7 @@ fn resolve_class_mech(host: &VerterHost, name: &str) -> verter_type_expr::TypeEx
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
-    host.project_node_to_type_expr(node)
+    host.project_node_to_type_expr_for_test(node)
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
 }
 
@@ -17901,7 +17898,7 @@ fn resolve_named_in(host: &VerterHost, canonical: &str, name: &str) -> verter_ty
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
-    host.project_node_to_type_expr(node)
+    host.project_node_to_type_expr_for_test(node)
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
 }
 

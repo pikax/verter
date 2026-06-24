@@ -53,12 +53,6 @@ pub(crate) fn encode_symbol_list(entries: &[FfiSymbolEntry]) -> Result<String, J
         .map_err(|e| JsValue::from_str(&format!("symbol list serialization error: {e}")))
 }
 
-/// Encode a `TypeExpr` to a JSON string.
-pub(crate) fn encode_type_expr(expr: &TypeExpr) -> Result<String, JsValue> {
-    serde_json::to_string(expr)
-        .map_err(|e| JsValue::from_str(&format!("type-expr serialization error: {e}")))
-}
-
 /// Encode a record into the optional `auditRecord` DTO slot,
 /// projecting the host carrier's mandatory record through the
 /// historical "null when audit is disabled / filtered" contract: only

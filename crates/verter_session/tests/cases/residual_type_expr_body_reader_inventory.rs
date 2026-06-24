@@ -719,10 +719,11 @@ const MIGRATED_FORBIDDEN_FIELD_MEMBERS: &[&str] = &["body", "type_annotation"];
 /// member-surface arm. This is the UNIVERSE of valid options, NOT the per-row
 /// requirement: each row names the EXACT subset that satisfies it via
 /// [`ReaderRow::required_hot_route`] (e.g. `lower_decl_body_to_node` requires
-/// `decl_body_hot_ref` ONLY — `materialize_member_surface_node` does not satisfy
-/// it). `materialize_member_surface_node` stays a valid option for a member-surface-
+/// `decl_body_hot_ref` ONLY — `materialize_member_surface_node_core` does not satisfy
+/// it). `materialize_member_surface_node_core` stays a valid option for a member-surface-
 /// route row. The auditor consults the ROW's own set, never this universe.
-const KNOWN_HOT_ROUTE_IDENTS: &[&str] = &["decl_body_hot_ref", "materialize_member_surface_node"];
+const KNOWN_HOT_ROUTE_IDENTS: &[&str] =
+    &["decl_body_hot_ref", "materialize_member_surface_node_core"];
 
 /// A `syn::visit::Visit` AST auditor over ONE anchored fn's body: structurally
 /// collects (a) every forbidden `TypeExpr`-body read — a `<expr>.body` /
@@ -1255,7 +1256,7 @@ struct ReaderRow {
     /// [`graph_backed_migrated_anchors_perform_no_typeexpr_body_read`] audit
     /// computes `routes_through_hot_accessor` against this per-row set, NOT a flat
     /// global list, so a row that must route through `decl_body_hot_ref` is NOT
-    /// satisfied by an unrelated graph-native arm (`materialize_member_surface_node`).
+    /// satisfied by an unrelated graph-native arm (`materialize_member_surface_node_core`).
     /// Empty `&[]` for every non-migrated row (the audit only consults it for
     /// `GraphBackedMigrated` anchors).
     required_hot_route: &'static [&'static str],
@@ -1278,7 +1279,7 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::GraphBackedMigrated,
         method_chain: false,
         // This anchor routes through `decl_body_hot_ref` SPECIFICALLY — the
-        // unrelated `materialize_member_surface_node` graph-native arm does NOT
+        // unrelated `materialize_member_surface_node_core` graph-native arm does NOT
         // satisfy it (the per-row requirement is exact, not the union of every
         // graph-native arm).
         required_hot_route: &["decl_body_hot_ref"],
@@ -2419,15 +2420,15 @@ fn audit_synthetic_migrated_body(body_src: &str, required_idents: &[&str]) -> Mi
 
 /// The required hot-route is judged PER-ROW, not against a flat global union: a
 /// body that routes ONLY through the unrelated graph-native arm
-/// `materialize_member_surface_node` is judged NOT-routed for the
+/// `materialize_member_surface_node_core` is judged NOT-routed for the
 /// `lower_decl_body_to_node` row, whose `required_hot_route` is `decl_body_hot_ref`
 /// ONLY. The SAME body IS judged routed for a row whose required set is
-/// `materialize_member_surface_node` — so the ident stays a valid required route
+/// `materialize_member_surface_node_core` — so the ident stays a valid required route
 /// for a member-surface-route row; it just does not satisfy THIS anchor.
 ///
 /// This discriminates the per-row mechanism from a flat-union audit: under a flat
-/// union `&["decl_body_hot_ref", "materialize_member_surface_node"]`, a
-/// `materialize_member_surface_node`-only body would be judged ROUTED for
+/// union `&["decl_body_hot_ref", "materialize_member_surface_node_core"]`, a
+/// `materialize_member_surface_node_core`-only body would be judged ROUTED for
 /// `lower_decl_body_to_node` (a too-broad accept). With the per-row set this case
 /// is NOT-routed, so the first assertion below FAILS against a flat-union audit and
 /// PASSES against the per-row audit.
@@ -2436,7 +2437,7 @@ fn migrated_route_requirement_is_per_row_not_a_flat_union() {
     // The body routes ONLY through the unrelated graph-native arm — it does NOT
     // call `decl_body_hot_ref`.
     const SURFACE_ONLY_BODY: &str =
-        "let n = engine.materialize_member_surface_node(cid, key)?; n.node()";
+        "let n = engine.materialize_member_surface_node_core(cid, key)?; n.node()";
 
     // The `lower_decl_body_to_node` row requires `decl_body_hot_ref` ONLY.
     let lower_decl_route = RESIDUAL_BODY_READERS
@@ -2453,26 +2454,26 @@ fn migrated_route_requirement_is_per_row_not_a_flat_union() {
     );
 
     // RED-on-flat-union / GREEN-on-per-row: judged against THIS row's required set,
-    // a `materialize_member_surface_node`-only body does NOT satisfy the route. A
+    // a `materialize_member_surface_node_core`-only body does NOT satisfy the route. A
     // flat-union audit would mark it ROUTED and this assertion would FAIL — that is
     // the discriminating property.
     let surface_only = audit_synthetic_migrated_body(SURFACE_ONLY_BODY, lower_decl_route);
     assert!(
         !surface_only.routes_through_hot_accessor,
         "per-row discrimination: a body that routes ONLY through \
-         `materialize_member_surface_node` must NOT satisfy the `lower_decl_body_to_node` row \
+         `materialize_member_surface_node_core` must NOT satisfy the `lower_decl_body_to_node` row \
          (whose required route is `decl_body_hot_ref` only). A flat-union audit would have \
          wrongly accepted it."
     );
 
     // Positive control: the SAME body IS judged routed for a row whose required
-    // set is `materialize_member_surface_node` — proving the ident is still a
+    // set is `materialize_member_surface_node_core` — proving the ident is still a
     // VALID required route, just not for this anchor.
     let surface_route_row =
-        audit_synthetic_migrated_body(SURFACE_ONLY_BODY, &["materialize_member_surface_node"]);
+        audit_synthetic_migrated_body(SURFACE_ONLY_BODY, &["materialize_member_surface_node_core"]);
     assert!(
         surface_route_row.routes_through_hot_accessor,
-        "the `materialize_member_surface_node` arm IS a valid required route for a \
+        "the `materialize_member_surface_node_core` arm IS a valid required route for a \
          member-surface-route row — the SAME body is judged routed when the row requires it"
     );
 
@@ -2486,17 +2487,17 @@ fn migrated_route_requirement_is_per_row_not_a_flat_union() {
         "a `decl_body_hot_ref`-only body satisfies the `lower_decl_body_to_node` required route"
     );
     let hot_for_surface =
-        audit_synthetic_migrated_body(HOT_REF_ONLY_BODY, &["materialize_member_surface_node"]);
+        audit_synthetic_migrated_body(HOT_REF_ONLY_BODY, &["materialize_member_surface_node_core"]);
     assert!(
         !hot_for_surface.routes_through_hot_accessor,
         "a `decl_body_hot_ref`-only body does NOT satisfy a row whose required route is \
-         `materialize_member_surface_node` — the per-row set is exact, not a union"
+         `materialize_member_surface_node_core` — the per-row set is exact, not a union"
     );
 
     // Structural sanity: every row's required route idents are drawn from the
     // KNOWN universe (no row can require an unknown ident), and the
     // `lower_decl_body_to_node` row deliberately requires a STRICT SUBSET of it
-    // (it omits `materialize_member_surface_node`).
+    // (it omits `materialize_member_surface_node_core`).
     for r in RESIDUAL_BODY_READERS {
         for ident in r.required_hot_route {
             assert!(
@@ -2509,9 +2510,9 @@ fn migrated_route_requirement_is_per_row_not_a_flat_union() {
         }
     }
     assert!(
-        KNOWN_HOT_ROUTE_IDENTS.contains(&"materialize_member_surface_node")
-            && !lower_decl_route.contains(&"materialize_member_surface_node"),
-        "`materialize_member_surface_node` is a KNOWN route but is deliberately EXCLUDED from the \
+        KNOWN_HOT_ROUTE_IDENTS.contains(&"materialize_member_surface_node_core")
+            && !lower_decl_route.contains(&"materialize_member_surface_node_core"),
+        "`materialize_member_surface_node_core` is a KNOWN route but is deliberately EXCLUDED from the \
          `lower_decl_body_to_node` row's required set — the per-row requirement is narrower than \
          the known universe"
     );

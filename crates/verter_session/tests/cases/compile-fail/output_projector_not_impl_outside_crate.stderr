@@ -1,0 +1,47 @@
+error[E0603]: module `project_semantic_dispatch` is private
+  --> tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs:27:22
+   |
+27 | impl verter_session::project_semantic_dispatch::output_materialization::OutputProjector
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^ private module           --------------- trait `OutputProjector` is not publicly re-exported
+   |
+note: the module `project_semantic_dispatch` is defined here
+  --> src/lib.rs
+   |
+   | pub(crate) mod project_semantic_dispatch;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0046]: not all trait items implemented, missing: `dispatch`
+  --> tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs:27:1
+   |
+27 | / impl verter_session::project_semantic_dispatch::output_materialization::OutputProjector
+28 | |     for ForeignSink
+   | |___________________^ missing `dispatch` in implementation
+   |
+   = help: implement the missing item: `fn dispatch(&self) -> &verter_session::project_semantic_dispatch::ProjectSemanticDispatch<'_> { todo!() }`
+
+error[E0277]: the trait bound `ForeignSink: verter_session::project_semantic_dispatch::output_materialization::projector::sealed::Sealed` is not satisfied
+  --> tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs:28:9
+   |
+28 |     for ForeignSink
+   |         ^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `verter_session::project_semantic_dispatch::output_materialization::projector::sealed::Sealed` is not implemented for `ForeignSink`
+  --> tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs:21:1
+   |
+21 | struct ForeignSink;
+   | ^^^^^^^^^^^^^^^^^^
+note: required by a bound in `verter_session::project_semantic_dispatch::output_materialization::projector::OutputProjector`
+  --> src/project_semantic_dispatch/output_materialization.rs
+   |
+   |     pub(crate) trait OutputProjector: sealed::Sealed {
+   |                                       ^^^^^^^^^^^^^^ required by this bound in `OutputProjector`
+   = note: `OutputProjector` is a "sealed trait", because to implement it you also need to implement `verter_session::project_semantic_dispatch::output_materialization::projector::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following types implement the trait:
+             verter_session::meta_resolve::projectors::output_sink::MetaResolveProjectorsOutputCap<'_, '_>
+             verter_session::meta_resolve::materialize::field_types::MetaResolveFieldTypesOutputCap<'_, '_>
+             verter_session::host_manage::component_meta_methods::HostManageComponentMetaOutputCap<'_, '_>
+             verter_session::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_>
+             verter_session::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap<'_, '_>
+             verter_session::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap<'_, '_>
+             verter_session::resolver_core::component_meta_query_engine::registry_decl::MetaQueryRegistryOutputCap<'_, '_>
+             verter_session::resolver_core::component_meta_query_engine::surface::MetaQuerySurfaceOutputCap<'_, '_>

@@ -63,3 +63,26 @@ fn no_typeexpr_compile_fail() {
     t.compile_fail("tests/cases/compile-fail/no_typeexpr_nested_owner_field.rs");
     t.pass("tests/cases/compile-fail/no_typeexpr_good_carrier.rs");
 }
+
+/// Out-of-crate half of the output-materialization fence: the sealed
+/// `OutputProjector` capability is `pub(crate)` (and sealed against its private
+/// `sealed::Sealed` supertrait), so an external crate cannot NAME the trait to
+/// write an `impl OutputProjector for X`. The `pub(crate)` visibility error IS
+/// the compile-fail — the public-API boundary documentation for the fence. The
+/// in-crate / owner-descendant cases are pinned by the crate-wide
+/// `assert_not_impl_any!` assertions in
+/// `src/project_semantic_dispatch/output_materialization_guards.rs` and the
+/// `output_projector_owner_registration_inventory` closed-leaf check.
+// `#[test]` is placed as the attribute immediately above `fn` (after the
+// `#[cfg_attr]` gate) so the R6 registry validity scanner's backward adjacency
+// walk reaches the test attribute without stopping on a multi-line
+// `#[cfg_attr(...)]` continuation line.
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
+#[test]
+fn output_projector_non_owner_impl_is_compiler_sealed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs");
+}

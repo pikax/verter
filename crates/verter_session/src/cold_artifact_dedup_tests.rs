@@ -150,7 +150,7 @@ fn warm_resolve_builds_nothing() {
         host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
     let cold_node = cold.expect("cold resolve must succeed");
     let cold_expr = host
-        .project_node_to_type_expr(cold_node)
+        .project_node_to_type_expr_for_test(cold_node)
         .expect("cold node must project");
 
     host.provenance().reset();
@@ -158,7 +158,7 @@ fn warm_resolve_builds_nothing() {
         host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
     let warm_node = warm.expect("warm resolve must succeed");
     let warm_expr = host
-        .project_node_to_type_expr(warm_node)
+        .project_node_to_type_expr_for_test(warm_node)
         .expect("warm node must project");
 
     let provenance = snap(&host);
@@ -203,7 +203,7 @@ fn clear_compile_cache_retains_fresh_indexed_ready() {
         host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
     let cold_node = cold.expect("cold resolve must succeed");
     let cold_expr = host
-        .project_node_to_type_expr(cold_node)
+        .project_node_to_type_expr_for_test(cold_node)
         .expect("cold node must project");
     assert!(
         host.project_type_store()
@@ -228,7 +228,7 @@ fn clear_compile_cache_retains_fresh_indexed_ready() {
         host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
     let warm_node = warm.expect("post-clear resolve must succeed");
     let warm_expr = host
-        .project_node_to_type_expr(warm_node)
+        .project_node_to_type_expr_for_test(warm_node)
         .expect("post-clear node must project");
 
     let provenance = snap(&host);

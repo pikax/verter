@@ -92,6 +92,16 @@ use crate::resolver_core::ResolverContext;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::semantic_query::SemanticNodeId;
 
+// The output-sink capabilities for this subtree are defined PER-SINK in the
+// exact output-SINK modules that project — NOT subtree-wide:
+// `MetaQuerySurfaceOutputCap` in `surface.rs` and `MetaQueryRegistryOutputCap`
+// in `registry_decl.rs` (each a single-file sink with no production
+// submodule). A subtree-wide cap
+// (`pub(in crate::resolver_core::component_meta_query_engine)`) would let any
+// sibling in this subtree mint it; terminal-sink minting (each mint scope's
+// whole reachable production module tree is output-only) makes the
+// output-materialization fence compiler-enforced.
+
 // Surface-projection helpers, prepared-substitution
 // machinery, and arc cache-key constructors live in the private
 // `surface` child module. The `pub(crate) use` block re-exports the
@@ -103,12 +113,27 @@ mod route_keys;
 mod shallow_preserve;
 mod surface;
 
+// The surface-PROJECTION helpers stay confined to this query-engine subtree:
+// `projected_surface_from_semantic_node` (raw `SemanticNodeId` → surface) and
+// `surface_view_to_projected_surface` (forgeable `&SurfaceView` → surface) are
+// the raw forgeable-input helpers; `projected_surface_to_type_expr` /
+// `projected_surface_to_expanded_shape` are their DTO-side companions. None are
+// re-exported (the `surface` module is private; in-subtree callers reach them
+// via `use super::surface::`). Out-of-subtree callers route through the
+// engine's sink-local methods (`dispatch_projected_surface_to_type_expr` /
+// `projected_expanded_shape_from_node` / the routed-surface methods).
 pub(crate) use surface::{
-    projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
-    projected_surface_to_type_expr, semantic_query_error_raw, surface_view_to_projected_surface,
-    type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
-    type_expr_is_expanded_surface, type_expr_root_is_unmaterialized_sentinel,
+    semantic_query_error_raw, type_expr_contains_semantic_miss,
+    type_expr_is_budget_exceeded_sentinel, type_expr_is_expanded_surface,
+    type_expr_root_is_unmaterialized_sentinel,
 };
+// Re-export ONLY the per-sink output capability TYPES so the
+// `output_materialization` owner module can name them for its explicit
+// `impl OutputProjector for <Cap>` registration pairs. The `new()`
+// CONSTRUCTORS stay leaf-private (`mint: pub(in …::{surface,registry_decl})`),
+// so these re-exports do NOT widen who can mint — only who can name the types.
+pub(crate) use registry_decl::MetaQueryRegistryOutputCap;
+pub(crate) use surface::MetaQuerySurfaceOutputCap;
 
 // Predicate/utility helpers (route-expr surface keys,
 // package-canonical predicates, prepared-decl shape predicates,
@@ -239,14 +264,14 @@ pub(crate) struct ObservedPreparedTypeDecl {
 /// plus the observed-version `Parse` fact. Re-reading the scope's
 /// *current* hash would be wrong: an edit landing in the race window
 /// between materialisation and this signature write-through would
-/// otherwise publish the stale `MaterializedTypeExpr` rooted by a
+/// otherwise publish the stale `MaterializedOutputTypeExpr` rooted by a
 /// fresh-looking current hash, which then validates on warm reads
 /// instead of missing.
 ///
 /// Returns `None` when the signature cannot be built strictly enough
 /// to admit the entry to the shared memo. A `None` result refuses
 /// cache admission only — the caller still returns the
-/// freshly-computed `MaterializedTypeExpr`. `None` is returned when:
+/// freshly-computed `MaterializedOutputTypeExpr`. `None` is returned when:
 ///
 /// - `observed_scope_syntactic_export_set` is a `Parse` fact for a
 ///   canonical other than the observed scope (caller-supplied

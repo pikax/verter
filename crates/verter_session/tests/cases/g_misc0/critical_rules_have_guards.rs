@@ -498,18 +498,169 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // flip): the listed component-meta consumers accept BOTH a
             // parser-produced `TypeExpr` and an already-lowered handle,
             // routing BOTH arms through the SAME dispatch (read-compat,
-            // ONE resolver). G-A forbids a reverse `materialize_type_expr`
-            // bridge in a hot handle arm (the single boundary stays an
-            // output seam); G-B is the per-inventory ordering gate (each
-            // hot carrier has a handle-native consumer BEFORE the producer
-            // flip; the verter_semantic prepared-wrapper payloads are
-            // recorded as crate-boundary-deferred, and a short-lived
+            // ONE resolver). G-A is now the STRUCTURAL
+            // `materialize_type_expr_is_not_production_visible` guard: the
+            // `materialize_type_expr(HotTypeRef)` reverse-handle harness is
+            // `#[cfg(test)]`-gated, so production cannot name it and a hot-arm
+            // reverse-bridge is a compile-time impossibility (replaces the
+            // deleted `no_hot_path_materialize_type_expr_bridge` line
+            // scanner). G-B is the per-inventory ordering gate (each hot
+            // carrier has a handle-native consumer BEFORE the producer flip;
+            // the verter_semantic prepared-wrapper payloads are recorded as
+            // crate-boundary-deferred, and a short-lived
             // absence-of-direct-reference tripwire asserts non-test
             // verter_session production source does not directly name the
             // deferred payload API (the four payload type names /
             // .target_args); it is an ordering tripwire, not a semantic
-            // dataflow proof).
-            "no_hot_path_materialize_type_expr_bridge",
+            // dataflow proof). The durable `SemanticNodeId -> TypeExpr`
+            // OUTPUT boundary is the sealed `OutputProjector` capability +
+            // sealed carriers whose inner `TypeExpr` lives in a deeply-private
+            // `carrier::payload` vault (so in safe Rust outside the vault there
+            // is no readable `TypeExpr` field; the residual trusted surface is
+            // the vault + registration source + guard deletion + unsafe), with
+            // the interim Kind-B `legacy_semantic_type_expr_bridge` pinned by
+            // `residual_output_materialization_bridge_no_new_kind_b_references`.
+            // The carrier-can't-name-`sealed` seal is COMPILER-enforced: `mod
+            // sealed` is PRIVATE (not `pub(super)`) inside `mod projector`, so a
+            // sibling `carrier`-side `impl projector::sealed::Sealed for HotCap`
+            // is `E0603` (module `sealed` is private) — pinned structurally by
+            // `sealed_module_is_private_not_pub_super`, with the topology guard
+            // as defense-in-depth.
+            // The fence SHAPE is pinned by mechanism-matched guards: the
+            // sanctioned sink set (explicit `impl OutputProjector` self-types +
+            // the matching `impl sealed::Sealed` self-types, no blanket seal
+            // impl) + the EXACT owner module topology (inline projector /
+            // projector::sealed / carrier / carrier::payload only, item-macro /
+            // include! / unknown-attribute / cfg_attr-proc-macro injection
+            // banned) by
+            // `output_projector_owner_registration_inventory`; the carrier/
+            // payload closed item/signature accessor allowlist (every fn
+            // returning TypeExpr cap-gated or exactly test-gated) by
+            // `output_carriers_have_no_inherent_typeexpr_escape_method`; the
+            // carrier/payload field privacy (regardless of spelled type) by
+            // `output_carrier_payload_fields_are_private`; the out-of-crate
+            // visibility boundary by
+            // `output_projector_non_owner_impl_is_compiler_sealed`; and the
+            // mintable `TestOutputCap` capability staying `#[cfg(test)]`-gated
+            // by `test_output_cap_not_visible_or_mintable_in_non_test_builds`
+            // (the carrier TRAIT escapes have an accidental-regression CANARY —
+            // NOT proof-complete; completeness is the payload vault — in the
+            // sibling `src/project_semantic_dispatch/output_materialization_guards.rs`).
+            // The output capability
+            // is minted PER-LEAF (not per-subtree) so a Kind-B bridge sibling
+            // sharing the subtree cannot mint it — pinned by
+            // `output_cap_mint_scope_is_per_leaf_not_subtree`. The
+            // COMPLEMENTARY input-authority hole at the Kind-A PUBLICATION
+            // boundary — a non-sink fn choosing a raw semantic-graph subject /
+            // forging a surface/member/signature wrapper and pairing it with a
+            // cursor to reverse-materialize a member `TypeExpr` — is closed by
+            // the sealed admitted-token chain
+            // (`meta_resolve::projectors::publication_authority`: the
+            // `ResolvedMacroPayload`/`ResolvedPayloadSurface`/`SurfaceMemberCandidate`/`AdmittedPublishedMember`
+            // tokens with private fields + a private `Seal`, minted only by the
+            // admission fns; plus the framework-surface `ResolvedVueSurface` +
+            // `SvelteResolvedSurface` tokens, gated by the sealed
+            // `ResolvedSurfaceAccess` trait whose supertrait seal is PRIVATE to
+            // `resolved_surface_access.rs` — a sibling `impl` is `E0603`, pinned
+            // defense-in-depth by
+            // `resolved_surface_access_impls_are_exactly_the_two_tokens`) as the
+            // COMPILER primary, and pinned by the STRUCTURAL cross-sink
+            // transitive guard `cross_sink_raw_authority_to_type_expr_boundary`
+            // (a structurally-complete — vs the old name-based pin — residual
+            // SUPPLEMENT behind the compiler primary, NOT a replacement) — it
+            // decides "TypeExpr-bearing" by FIELD-CLOSURE from `TypeExpr` over the
+            // type field graph (not a DTO-name list) and fails any reachable
+            // production fn across the registered PUBLICATION sinks (projectors,
+            // cache-key, framework-surface, query-engine surface) that pairs a
+            // forgeable raw-authority input with a `TypeExpr`-bearing output
+            // outside the closed sink-local allowlist. Genuinely structural:
+            // MODULE-QUALIFIED `(module, name)` `TypeDefId` identity carried
+            // through the closure graph by a CONSERVATIVE FAIL-CLOSED resolver
+            // (NOT an exhaustive Rust name resolver) that resolves a written
+            // reference ONLY by genuine PROOF — own-module-def, a genuine
+            // `pub`/`pub(crate)` re-export, a proven intra-crate `use`-binding
+            // chain, or a proven qualifier; an import that CLAIMS a local name and
+            // fails to resolve-by-proof yields `Unresolved` (NEVER a uniqueness
+            // fall-through); else `Unresolved`. A fully-qualified path is proven by
+            // a DIRECT suffix-or-equal module match (relative `crate`/`self`/`super`
+            // rebased onto the referencing module; `super` cannot escape above the
+            // crate root; a too-short ANCESTOR prefix is NOT a match; an UNROOTED
+            // first segment the file `use`-SHADOWS is re-resolved through the shadow,
+            // never trusted on its raw suffix), an EXACT-target `pub`/`pub(crate)`
+            // re-export (the TARGET module is the candidate's real home EXACTLY,
+            // never suffix slack, keyed by the normalized absolute written path), or
+            // a proven intra-crate `use`-binding chain (a module-scoped,
+            // intra-crate-only, non-glob, module/descendant-visibility, cycle-bounded
+            // use-binding PROOF graph). A UNIQUE name does NOT resolve a qualified
+            // path on uniqueness alone (a fabricated
+            // `external::AdmittedPublishedMember` qualifier stays `Unresolved`); an
+            // unqualified name resolves on the own module; else, if a `use` import
+            // CLAIMS the name, its TARGET is resolved BY PROOF and returned as-is (an
+            // import target that does not resolve leaves the name `Unresolved`
+            // immediately — `use crate::evil::AdmittedPublishedMember` does NOT bless
+            // the unique token); else a parent module's accessible `use`-binding
+            // chain may prove it; else, ONLY when no import claimed the name,
+            // exactly-one collected def with that name; a colliding name like the two
+            // `IndexSignature` defs is disambiguated into DISTINCT ids the same way;
+            // an unresolvable / forged-qualifier reference fails closed — with a
+            // fail-closed anti-vacuity rail over the `(module, name)`-keyed
+            // safe-input / construction-chain tokens; the dual-bearing defense is
+            // a DIRECT carve-out (a wrapper directly co-holding a
+            // resolution-authority seed stays forgeable) plus a TRANSITIVE
+            // soundness tripwire whose sanctioned-carrier exemption is QUALIFIED
+            // `(module, name)` (a wrong-module same-name token FIRES); BOTH the
+            // OUTPUT and INPUT sides are fail-closed on an unclassifiable ident,
+            // and the non-authority exemptions are QUALIFIER-AWARE — a Qualified
+            // `(module, name)` entry (anti-vacuity-checked) or a non-field-bearing
+            // CATEGORY entry carrying APPROVED qualified homes, matched against the
+            // `Unresolved` ref's PATH not its bare final segment (a forged
+            // `evil::Span` FIRES; a one-segment generic is benign; a one-segment
+            // trait-bound/external is exempt only with no same-name collected def);
+            // the safe-input set is SPLIT into policy-admitted tokens
+            // vs pre-admission construction-chain structs; the sink-fn collector
+            // is inline-mod-aware. The fence soundness is tripwired by
+            // `forgeable_input_fence_has_no_dual_bearing_type`.
+            // This is the Kind-A / PUBLICATION bar, NOT a claim that no
+            // raw-node→`TypeExpr` boundary remains anywhere: the named Kind-B
+            // raise-then-decide semantic-decision residual (the
+            // `legacy_semantic_type_expr_bridge` route through
+            // `execute_to_type_expr` /
+            // `project_slot_binding_member_with_terminal_id`) remains DEFERRED
+            // to the Kind-B graph-native conversion
+            // (docs/arch/parselower-design.md
+            // `Stage8-A4-kind-b-graph-native-conversion`) and is pinned by
+            // `residual_output_materialization_bridge_no_new_kind_b_references` +
+            // the entrypoint inventory
+            // `kind_b_raise_then_decide_entrypoints_pinned`. The admitted
+            // tokens' field privacy + seal are pinned by
+            // `admitted_tokens_have_private_fields_and_seal`, and the
+            // authority-callable scopes are no-`unsafe` (a transmute could
+            // fabricate a token) by `authority_scopes_contain_no_unsafe`. The
+            // carrier
+            // `_for_test` accessors are gated `#[cfg(any(test, feature =
+            // "test-support"))]` (production-unreachable in EVERY profile,
+            // never `debug_assertions`-present in debug) — pinned by
+            // `carrier_for_test_accessors_are_test_support_gated_not_debug_assertions`.
+            // The `pub(super)` shell raise seam returns a SEALED carrier so a
+            // dispatch sibling cannot launder — pinned by
+            // `raise_output_seam_returns_sealed_carrier_not_bare_type_expr`.
+            "materialize_type_expr_is_not_production_visible",
+            "residual_output_materialization_bridge_no_new_kind_b_references",
+            "sealed_module_is_private_not_pub_super",
+            "output_projector_owner_registration_inventory",
+            "output_carriers_have_no_inherent_typeexpr_escape_method",
+            "output_carrier_payload_fields_are_private",
+            "output_projector_non_owner_impl_is_compiler_sealed",
+            "test_output_cap_not_visible_or_mintable_in_non_test_builds",
+            "output_cap_mint_scope_is_per_leaf_not_subtree",
+            "cross_sink_raw_authority_to_type_expr_boundary",
+            "forgeable_input_fence_has_no_dual_bearing_type",
+            "admitted_tokens_have_private_fields_and_seal",
+            "resolved_surface_access_impls_are_exactly_the_two_tokens",
+            "kind_b_raise_then_decide_entrypoints_pinned",
+            "authority_scopes_contain_no_unsafe",
+            "carrier_for_test_accessors_are_test_support_gated_not_debug_assertions",
+            "raise_output_seam_returns_sealed_carrier_not_bare_type_expr",
             "stage4_carrier_inventory_handle_native_consumers_present",
             "stage4_deferred_carriers_have_no_session_resolution_consumer",
         ],

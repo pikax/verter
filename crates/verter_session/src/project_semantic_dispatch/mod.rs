@@ -92,6 +92,11 @@ pub(crate) mod carrier;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
 pub(crate) mod lower;
+pub(crate) mod output_materialization;
+// Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
+// guards for the output-materialization carrier escape fence. No runtime
+// consumer depends on it; it exists only for its `const _` build-time checks.
+mod output_materialization_guards;
 pub(crate) mod raise;
 pub(crate) mod relation;
 pub(crate) mod relation_predicates;
@@ -2234,7 +2239,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> CacheRead<QueryResult<TypeExpr>> {
         let read = self.execute_read(key.clone());
         let typed_value = match read.value {
-            QueryResult::Value(node) => match self.materialize_output_type_expr(node) {
+            QueryResult::Value(node) => match self.legacy_semantic_type_expr_bridge(node) {
                 Some(expr) => QueryResult::Value(expr),
                 None => QueryResult::Error(QueryError::Miss),
             },
@@ -2250,50 +2255,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Slot-binding-parameter type lowering for `defineSlots<T>()`.
-    /// Three-hop composition: `Navigate` to the slot member, read
-    /// `params[0].ty` from the slot value's `Function`, then project
-    /// the binding member off the param Object in the caller's mode.
-    /// Returns `QueryResult::Error(Miss)` when an intermediate hop
-    /// fails or the slot value is not a `Function`.
+    /// Slot-binding terminal-id variant for `defineSlots<T>()`. Three-hop
+    /// composition: `Navigate` to the slot member, read `params[0].ty` from the
+    /// slot value's `Function`, then project the binding member off the param
+    /// Object in the caller's mode — and expose the terminal `SemanticNodeId`
+    /// alongside the raised `TypeExpr`. Returns `QueryResult::Error(Miss)` when
+    /// an intermediate hop fails or the slot value is not a `Function`.
     ///
-    /// The plain (non-terminal-id) entry: the sole in-tree production
-    /// slot-binding consumer (`host_manage/eval_env.rs::fast_to_expansion`)
-    /// uses the [`Self::project_slot_binding_member_with_terminal_id`]
-    /// sibling because it must capture the terminal `SemanticNodeId` for the
-    /// audit record. This bare variant is retained as the symmetric crate
-    /// entry (and is policed as a boundary wrapper by
-    /// `no_hot_path_materialize_type_expr_bridge`); `#[allow(dead_code)]`
-    /// because no in-tree caller currently needs the id-less form.
-    #[allow(dead_code)]
-    pub(crate) fn project_slot_binding_member(
-        &self,
-        base: SemanticNodeId,
-        slot_name: &str,
-        binding_name: &str,
-        mode: ProjectionMode,
-    ) -> CacheRead<QueryResult<TypeExpr>> {
-        let read =
-            self.project_slot_binding_member_with_terminal_id(base, slot_name, binding_name, mode);
-        CacheRead {
-            value: match read.value {
-                QueryResult::Value((_id, expr)) => QueryResult::Value(expr),
-                QueryResult::Recursive(id) => QueryResult::Recursive(id),
-                QueryResult::Error(e) => QueryResult::Error(e),
-            },
-            dep_signature: read.dep_signature,
-            walker_diagnostics: read.walker_diagnostics,
-            cache_suppress: read.cache_suppress,
-            result_is_partial: read.result_is_partial,
-        }
-    }
-
-    /// Slot-binding terminal-id variant: same three-hop traversal as
-    /// [`Self::project_slot_binding_member`], plus exposes the terminal
-    /// `SemanticNodeId` alongside the raised `TypeExpr`. The audit-record
-    /// assembly in `compute_evaluated_types` consumes the production-path
-    /// identity directly (no audit-only re-lowering — per the
-    /// demand-driven reducer spec).
+    /// The sole in-tree production slot-binding consumer
+    /// (`host_manage/eval_env.rs::fast_to_expansion`) uses this variant because
+    /// the audit-record assembly in `compute_evaluated_types` consumes the
+    /// production-path terminal identity directly (no audit-only re-lowering —
+    /// per the demand-driven reducer spec).
     pub(crate) fn project_slot_binding_member_with_terminal_id(
         &self,
         base: SemanticNodeId,
@@ -2373,11 +2346,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .chain(binding_read.dep_signature.iter().cloned())
             .collect();
         let value = match binding_read.value {
-            QueryResult::Value(terminal_id) => match self.materialize_output_type_expr(terminal_id)
-            {
-                Some(expr) => QueryResult::Value((terminal_id, expr)),
-                None => QueryResult::Error(QueryError::Miss),
-            },
+            QueryResult::Value(terminal_id) => {
+                match self.legacy_semantic_type_expr_bridge(terminal_id) {
+                    Some(expr) => QueryResult::Value((terminal_id, expr)),
+                    None => QueryResult::Error(QueryError::Miss),
+                }
+            }
             QueryResult::Recursive(id) => QueryResult::Recursive(id),
             QueryResult::Error(e) => QueryResult::Error(e),
         };

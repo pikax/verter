@@ -228,20 +228,22 @@ fn shape_cache_db_replaces_split_caches() {
     }
 
     // The shape cache stores the runtime carrier
-    // `cache_runtime::CacheEntry<MaterializedTypeExpr>`, NOT a bespoke
+    // `cache_runtime::CacheEntry<MaterializedOutputTypeExpr>`, NOT a bespoke
     // `ShapeCacheEntry`: every validity rail (the fact signature, the
     // self-root canonicals, the compute-time generation) lives on the
     // shared cache-runtime entry. A regression reintroducing a bespoke
-    // per-cache carrier fails here.
+    // per-cache carrier fails here. (The payload carrier is the sealed
+    // `MaterializedOutputTypeExpr` — the output-materialization capability
+    // fence renamed the former all-`pub`-field `MaterializedTypeExpr`.)
     assert!(
-        src.contains("DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedTypeExpr>>>"),
+        src.contains("DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedOutputTypeExpr>>>"),
         "guard B.1: `ShapeCacheDb.entries` MUST store \
-         `Arc<CacheEntry<MaterializedTypeExpr>>` (the shared cache-runtime carrier).",
+         `Arc<CacheEntry<MaterializedOutputTypeExpr>>` (the shared cache-runtime carrier).",
     );
     assert!(
         !src.contains("pub struct ShapeCacheEntry"),
         "guard B.1: the bespoke `ShapeCacheEntry` carrier MUST be retired — the shape \
-         cache stores `cache_runtime::CacheEntry<MaterializedTypeExpr>`.",
+         cache stores `cache_runtime::CacheEntry<MaterializedOutputTypeExpr>`.",
     );
 
     // The legacy split caches MUST be retired (no public surface).
@@ -270,18 +272,22 @@ fn shape_cache_db_replaces_split_caches() {
 // ---------------------------------------------------------------------------
 #[test]
 fn peek_primitive_arms_admit_to_cache() {
-    let src = read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
+    // The admission helpers + the boundary-consuming functions that call them
+    // (`reduce_field_type_expr_with_mode`, `member_shape_peek_or_compute`) live
+    // in the terminal `output_sink` sink module.
+    let src =
+        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
 
     // The admission helpers must exist.
     assert!(
         src.contains("fn admit_type_expr_shape_if_possible"),
-        "guard B.2: `meta_resolve::projectors::mod` MUST define \
+        "guard B.2: `meta_resolve::projectors::output_sink` MUST define \
          `admit_type_expr_shape_if_possible` — the universal-caching admission \
          helper for the `reduce_field_type_expr` peek's `Leaf` / `BareCarrier` arms.",
     );
     assert!(
         src.contains("fn admit_member_shape_if_possible"),
-        "guard B.2: `meta_resolve::projectors::mod` MUST define \
+        "guard B.2: `meta_resolve::projectors::output_sink` MUST define \
          `admit_member_shape_if_possible` — the universal-caching admission \
          helper for `member_shape_peek_or_compute`'s gate-short-circuit + `Leaf` / \
          `BareCarrier` arms.",
@@ -651,8 +657,11 @@ fn ax_cursor_target_set() -> Vec<(&'static str, &'static str, &'static str)> {
             "pub(crate) fn project_options(",
         ),
         (
+            // `project_model` relocated into the terminal `output_sink` sink
+            // module (it raises a payload through the module-private boundary
+            // primitive); the cursor-descent invariant is anchored there.
             "project_model",
-            "crates/verter_session/src/meta_resolve/projectors/model.rs",
+            "crates/verter_session/src/meta_resolve/projectors/output_sink.rs",
             "pub(crate) fn project_model(",
         ),
     ]
@@ -746,8 +755,11 @@ fn ax_projectors_descend_published_member() {
             "pub(crate) fn project_options(",
         ),
         (
+            // `project_model` relocated into the terminal `output_sink` sink
+            // module (it raises a payload through the module-private boundary
+            // primitive); the cursor-descent invariant is anchored there.
             "project_model",
-            "crates/verter_session/src/meta_resolve/projectors/model.rs",
+            "crates/verter_session/src/meta_resolve/projectors/output_sink.rs",
             "pub(crate) fn project_model(",
         ),
     ];
@@ -779,13 +791,19 @@ fn ax_projectors_descend_published_member() {
 // ---------------------------------------------------------------------------
 #[test]
 fn ax_projector_uses_terminal_publication_mode() {
-    let src = read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
+    // The per-member publication site `surface_member_to_expanded_field`, the
+    // sink-private per-field reducer `reduce_field_type_expr_with_mode`, and the
+    // high-level published-field driver `reduce_published_field_types` all live
+    // in the terminal `output_sink` sink module (the only module that touches
+    // the reverse-materialization boundary).
+    let src =
+        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
     let body = extract_fn_body(&src, "pub(crate) fn surface_member_to_expanded_field(");
     assert!(
-        body.contains("member_cursor.terminal_publication_mode()"),
+        body.contains("admitted.cursor().terminal_publication_mode()"),
         "publication-mode guard: `surface_member_to_expanded_field` MUST derive \
          the per-member publication mode from \
-         `member_cursor.terminal_publication_mode()` — publishing a \
+         `admitted.cursor().terminal_publication_mode()` — publishing a \
          macro member at a carrier (`Navigate`) mode is the Rule-5 \
          depth-leak fix."
     );
@@ -797,24 +815,19 @@ fn ax_projector_uses_terminal_publication_mode() {
          depth leak. Use the cursor's publication mode."
     );
 
-    // The carrier-aware reducer must exist and the published-field
-    // second pass must reduce props/emits in `Navigate` carrier mode.
+    // The carrier-aware reducer must exist (now SINK-PRIVATE in `output_sink`)
+    // and the published-field second pass must reduce props/emits in `Navigate`
+    // carrier mode.
     assert!(
-        src.contains("pub(crate) fn reduce_field_type_expr_with_mode("),
+        src.contains("fn reduce_field_type_expr_with_mode("),
         "publication-mode guard: `reduce_field_type_expr_with_mode` (the \
-         carrier-aware field reducer) MUST exist."
+         carrier-aware field reducer, sink-private in `output_sink`) MUST exist."
     );
-    // `reduce_published_field_types` and
-    // `type_expr_contains_reducible_operator` live in the
-    // `published_reducer.rs` sibling module (split out from the
-    // retired `field_reduce.rs` so `projectors/mod.rs` stays under
-    // the no-oversize-files guard). The demand context owns
-    // carrier-stop; the second pass MUST still reduce props/emits in
-    // `Navigate` carrier mode.
-    let reducer_src = read_workspace_file(
-        "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
-    );
-    let second_pass = extract_fn_body(&reducer_src, "pub(crate) fn reduce_published_field_types(");
+    // `reduce_published_field_types` is the HIGH-LEVEL publication API on the
+    // `output_sink` sink module (it wraps the sink-private per-field reducer).
+    // The demand context owns carrier-stop; the second pass MUST still reduce
+    // props/emits in `Navigate` carrier mode.
+    let second_pass = extract_fn_body(&src, "pub(crate) fn reduce_published_field_types(");
     assert!(
         second_pass.contains("ProjectionMode::Navigate"),
         "publication-mode guard: `reduce_published_field_types` MUST reduce \
@@ -1030,16 +1043,23 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
         );
     }
 
-    // The migrated helpers live in the sibling `published_reducer`
-    // module — splitting them out keeps `projectors/mod.rs` under the
-    // workspace-wide `no_oversize_files` guard.
+    // The pure reducible-operator predicate lives in the sibling
+    // `published_reducer` module (no reverse-boundary access, so it stays a
+    // free-standing helper). The published-surface field-type driver
+    // `reduce_published_field_types` is the HIGH-LEVEL publication API and lives
+    // in the terminal `output_sink` sink module alongside the now-sink-private
+    // per-field reducer it wraps (`reduce_field_type_expr_with_mode`) — the sink
+    // is the ONLY module that touches the reverse-materialization boundary.
     let reducer_src = read_workspace_file(
         "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
     );
+    let output_sink_src =
+        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
     assert!(
-        reducer_src.contains("pub(crate) fn reduce_published_field_types("),
-        "name-predicate-retired guard: `projectors/published_reducer.rs` MUST host \
-         `reduce_published_field_types`."
+        output_sink_src.contains("pub(crate) fn reduce_published_field_types("),
+        "name-predicate-retired guard: `projectors/output_sink.rs` MUST host \
+         `reduce_published_field_types` (the high-level publication API; the \
+         per-field reducer it wraps is sink-private)."
     );
     assert!(
         reducer_src.contains("pub(crate) fn type_expr_contains_reducible_operator("),
@@ -1047,13 +1067,18 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
          `type_expr_contains_reducible_operator`."
     );
 
-    // The mod.rs MUST re-export both helpers so existing callers
-    // (`projectors/model.rs`, the post-projection driver) reach them
-    // through `super::*`.
+    // The mod.rs MUST re-export the helpers so existing callers reach the
+    // pure predicate (`published_reducer`) and the high-level publication APIs
+    // (`output_sink`) through `crate::meta_resolve::projectors::*`.
     assert!(
         mod_src.contains("pub(crate) use published_reducer::"),
         "name-predicate-retired guard: `projectors/mod.rs` MUST re-export the \
-         migrated helpers from the `published_reducer` sibling module."
+         reducible-operator predicate from the `published_reducer` sibling module."
+    );
+    assert!(
+        mod_src.contains("pub(crate) use output_sink::"),
+        "name-predicate-retired guard: `projectors/mod.rs` MUST re-export the \
+         high-level publication APIs from the `output_sink` sink module."
     );
 }
 

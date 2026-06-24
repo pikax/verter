@@ -331,7 +331,7 @@ fn raise_reduce_typeof_carrier_applies_instantiation_args() {
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
     let reduced = materialized
-        .node_id
+        .node_id()
         .expect("raise_and_reduce must carry the reduced node id for the typeof carrier");
 
     assert!(
@@ -436,7 +436,7 @@ fn raise_reduce_typeof_carrier_does_not_drop_path() {
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
     let reduced = materialized
-        .node_id
+        .node_id()
         .expect("raise_and_reduce must carry a node id for the path+args carrier");
 
     // The dropped-path reducer reduced to `typeof C` (an Object) and never
@@ -750,7 +750,7 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
     //    projected value path and the instantiation arg — it is NOT collapsed to
     //    the resolved signature.
     let plain = dispatch
-        .materialize_output_type_expr(carrier)
+        .materialize_output_type_expr_for_test(carrier)
         .expect("the typeof carrier must raise (shell-only) to an operator shape");
     match &plain {
         TypeExpr::TypeOf(value_ref) => {
@@ -787,12 +787,20 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
     // 2) Projection-output boundary: reduce-under-context THEN raise. The SAME
     //    carrier resolves `f`, applies `<string>`, and collapses to the
     //    instantiated `(x: string) => string`, which raises to a `Function`.
-    let materialized = dispatch.materialize_reduced_output_type_expr(
-        carrier,
-        ProjectionReductionContext::published(ProjectionMode::Expanded),
-    );
+    // Mint the `#[cfg(test)]` output capability to drive the reduce-then-
+    // raise boundary and read both the recorded node_id and the (sealed)
+    // type_expr payload.
+    let cap =
+        crate::project_semantic_dispatch::output_materialization::TestOutputCap::new(&dispatch);
+    let materialized = {
+        use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+        cap.materialize_reduced_output_type_expr(
+            carrier,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )
+    };
     let reduced_node = materialized
-        .node_id
+        .node_id()
         .expect("the reduce-then-raise boundary records the producing reduced node");
     assert_ne!(
         reduced_node, carrier,
@@ -816,7 +824,7 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
         Some(PrimitiveName::String),
         "the reduced signature's parameter is substituted to `string`"
     );
-    match &materialized.type_expr {
+    match materialized.type_expr(&cap) {
         TypeExpr::Function(_) => {}
         other => panic!(
             "materialize_reduced_output_type_expr MUST reduce THEN raise: `typeof f<string>` \
@@ -824,7 +832,7 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
         ),
     }
     assert!(
-        !matches!(&materialized.type_expr, TypeExpr::TypeOf(_)),
+        !matches!(materialized.type_expr(&cap), TypeExpr::TypeOf(_)),
         "the projection boundary must NOT leave the operator un-reduced as `TypeExpr::TypeOf` — \
          that would mean it skipped the reduce step"
     );

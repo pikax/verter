@@ -27,5 +27,12 @@ pub(crate) use field_types::{
     type_expr_has_package_backed_object_like_root_with_fence,
     type_expr_materialize_reduction_context, type_expr_materializer_context,
 };
+// Re-export ONLY the per-sink output capability TYPE so the
+// `output_materialization` owner module can name it for its explicit
+// `impl OutputProjector for MetaResolveFieldTypesOutputCap` registration pair.
+// The `new()` CONSTRUCTOR stays sink-private
+// (`mint: pub(in crate::meta_resolve::materialize::field_types)`), so this
+// re-export does NOT widen who can mint — only who can name the type.
+pub(crate) use field_types::MetaResolveFieldTypesOutputCap;
 
 pub(crate) use macro_shapes::collect_type_expr_ref_names;

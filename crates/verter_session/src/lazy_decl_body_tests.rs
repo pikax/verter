@@ -214,7 +214,7 @@ fn content_edit_invalidates_decl_body_memo() {
         .resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded))
         .expect("cold resolve must succeed");
     let cold_expr = host
-        .project_node_to_type_expr(cold)
+        .project_node_to_type_expr_for_test(cold)
         .expect("cold node must project");
     let cold_repr = format!("{cold_expr:?}");
     assert!(
@@ -236,7 +236,7 @@ fn content_edit_invalidates_decl_body_memo() {
         .resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded))
         .expect("post-edit resolve must succeed");
     let warm_expr = host
-        .project_node_to_type_expr(warm)
+        .project_node_to_type_expr_for_test(warm)
         .expect("post-edit node must project");
     let warm_repr = format!("{warm_expr:?}");
     assert!(
@@ -584,7 +584,7 @@ fn overlay_decl_body_never_serves_base_read() {
         .resolve_named_symbol(canonical, "Shared", &[], Some(ProjectionMode::Expanded))
         .expect("base resolve must succeed");
     let base_expr = host
-        .project_node_to_type_expr(base_node)
+        .project_node_to_type_expr_for_test(base_node)
         .expect("base node must project");
     let base_repr = format!("{base_expr:?}");
     assert!(

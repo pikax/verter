@@ -42,6 +42,7 @@ mod integration_test_layout_guard;
 mod oracle_driver;
 mod oracle_query_specs_shared;
 mod oracle_tsgo_forbidden;
+mod output_projector_residual_guards;
 mod parse_sfc_chokepoint_guard;
 mod residual_type_expr_body_reader_inventory;
 mod svelte_compiler_block1;

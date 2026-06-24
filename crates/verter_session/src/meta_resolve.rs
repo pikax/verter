@@ -27,6 +27,20 @@ use crate::types::ProjectionMode;
 
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
+// The output-sink capabilities for this subtree are defined PER-SINK in the
+// exact output-SINK modules that legitimately project — NOT subtree-wide:
+// `MetaResolveProjectorsOutputCap` in the dedicated TERMINAL sink submodule
+// `projectors::output_sink` (re-exported at `projectors::` for the owner impl
+// to name — extracted so the parent `projectors`' non-sink helpers cannot
+// mint), and `MetaResolveFieldTypesOutputCap` in `materialize/field_types.rs`.
+// `pub(in P)` grants the mint to `P` and every module at-or-under it, so each
+// cap's mint scope is a TERMINAL sink whose whole reachable production module
+// tree is output-only: a subtree-wide cap (`pub(in crate::meta_resolve)`), OR a
+// non-sink helper reachable under a sink's mint scope, would let the Kind-B
+// bridge sibling `meta_resolve::dispatch_helpers` (or that helper) mint it and
+// bypass `legacy_semantic_type_expr_bridge`, making the fence convention-based;
+// terminal-sink minting makes it compiler-enforced.
+
 // sub-module split — siblings live in `crates/verter_session/src/meta_resolve/`.
 // The shell re-exports the moved `pub(crate)` surface so existing
 // `crate::meta_resolve::*` paths keep working without callsite churn.
@@ -79,9 +93,9 @@ pub(crate) use dep_signature::{
 pub(crate) use dep_signature::accumulate_dispatch_dep_signature;
 pub(crate) use dispatch_helpers::{
     instantiate_local_generic_ref_via_dispatch, lower_and_project_to_expanded_via_host_threaded,
-    pick_via_dispatch_pick_node, project_expr_class_a_via_dispatch,
-    project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_via_host_threaded,
-    project_expr_surface_shape_via_host_threaded, project_type_surface_expr_via_host_threaded,
+    project_expr_class_a_via_dispatch, project_expr_class_a_via_dispatch_threaded,
+    project_expr_surface_expr_via_host_threaded, project_expr_surface_shape_via_host_threaded,
+    project_type_surface_expr_via_host_threaded,
 };
 // Test-only re-export — exercised by the kept dispatch-route-helper
 // coverage tests (`project_route_surface_expr_pick_*` in the engine

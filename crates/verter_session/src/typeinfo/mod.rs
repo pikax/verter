@@ -50,6 +50,18 @@ pub mod surface;
 pub mod symbol_inventory;
 pub mod types;
 
+// The output-sink capabilities for this subtree are defined PER-SINK in the
+// exact output-SINK modules that project — NOT subtree-wide:
+// `TypeinfoRaiseOutputCap` in `raise.rs`, `TypeinfoVueSurfaceOutputCap` in
+// `framework_surface/vue_exec/` (whose whole reachable scope — `vue_exec` +
+// its `normalize` child — is output-only, so the single cap is correct), and
+// `TypeinfoSvelteSurfaceOutputCap` in `framework_surface/svelte_exec.rs` (whose
+// only submodule is a `#[cfg(test)]` test module). A subtree-wide cap
+// (`pub(in crate::typeinfo)`) would let any `typeinfo` sibling (e.g. a future
+// `framework_surface::executor` raise-then-decide site) mint it; terminal-sink
+// minting (each mint scope's whole reachable production module tree is
+// output-only) makes the output-materialization fence compiler-enforced.
+
 /// Bounded number of times a typeinfo query-returner re-reads the base
 /// store view trying to settle on a proven-[`crate::resolver_store::StoreViewRead::Current`]
 /// snapshot under churn before reporting a non-current miss.

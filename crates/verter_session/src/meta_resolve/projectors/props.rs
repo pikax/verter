@@ -16,9 +16,10 @@ use crate::resolver_core::ResolverContext;
 use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
 
-use super::{
-    read_surface_members, resolve_macro_payload, resolve_payload_surface,
-    surface_member_to_expanded_field,
+use super::output_sink::surface_member_to_expanded_field;
+use super::publication_authority::{
+    admit_published_member, read_surface_member_candidates, resolve_macro_payload,
+    resolve_payload_surface, AdmittedPublishedMember,
 };
 
 pub(crate) fn project_props(
@@ -44,14 +45,23 @@ pub(crate) fn project_props(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // Admit members under the cursor and emit
-    // `MemberEdgeProvenance::PublishedField` origin edges for every
-    // admitted name BEFORE dispatch drops, so the Rule-5 compliance
-    // validator can attest that every published member is a declared
-    // surface member.
-    let admitted: Vec<_> = {
+    // Resolve the payload + surface through the publication-authority token
+    // API, enumerate candidates, and ADMIT each under the cursor. Admission
+    // applies the public-visibility filter, the derived-kind/cursor match, the
+    // `descend_published_member` gate, AND records the
+    // `MemberEdgeProvenance::PublishedField` origin edge BEFORE the dispatch
+    // drops — so the Rule-5 compliance validator can attest that every
+    // published member is a declared surface member.
+    //
+    // Ref-carrier surfaces (cross-file generic payloads like
+    // `defineProps<AccordionProps<T>>()`) lower to a `SemanticNodeData::Ref`
+    // shell where `read_surface_members` returns empty, so admission (and its
+    // edge record) fires ZERO times. The orchestrator's
+    // [`crate::meta_resolve::materialize::macro_shapes::record_published_field_edges_for_macro_shape`]
+    // covers Ref carriers via the cross-file-resolved `shape.value.properties`.
+    let admitted: Vec<(AdmittedPublishedMember<'_>, _, _, _)> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
-        let payload_node = match resolve_macro_payload(
+        let payload = match resolve_macro_payload(
             &dispatch,
             owner,
             file,
@@ -61,75 +71,36 @@ pub(crate) fn project_props(
             MacroExpansionKind::DefineProps,
             diag_sink,
         ) {
-            Some(node) => node,
+            Some(payload) => payload,
             None => return Vec::new(),
         };
 
-        let surface_node = match resolve_payload_surface(
+        let surface = match resolve_payload_surface(
             &dispatch,
-            payload_node,
-            macro_index,
+            &payload,
             MacroExpansionKind::DefineProps,
-            // Props payload surface carries macro-T own-body provenance
-            // so the DeclPlaceholder unwrap stamps own-body members
-            // `declared_in_macro_type_arg = true` (by design).
-            super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineProps),
             diag_sink,
         ) {
-            Some(node) => node,
+            Some(surface) => surface,
             None => return Vec::new(),
         };
 
-        let members = read_surface_members(ctx, surface_node);
-        members
+        read_surface_member_candidates(ctx, &surface)
             .into_iter()
-            // Publication-boundary visibility filter: the shared surface RECORDS
-            // non-public class members (the keep-all `native_props` carrier reads
-            // the full set), but Vue does NOT publish `private` / `protected`
-            // class fields as props. Filter to Public-only here, where surface
-            // members become published `ExpandedField`s. Every non-class origin
-            // is `Public`, so this is a no-op for interface / type-literal /
-            // mapped surfaces.
-            .filter(|member| member.visibility.is_public())
-            .filter_map(|member| {
-                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                // Emit `PublishedField` origin edges for every
-                // member the projector admits onto the macro
-                // surface. PublishedField is the SEMANTIC
-                // PROVENANCE rail — it records the producer's raw
-                // truth without downstream-projection filtering.
-                // `PublishedSurfacePolicy::{Compat, Refined}`
-                // consumers read the Native graph and apply their
-                // own structural filters (Vue intrinsics,
-                // `onX`-shadows-emit, global-attrs).
-                //
-                // Ref-carrier surfaces (cross-file generic payloads
-                // like `defineProps<AccordionProps<T>>()`) lower
-                // to a `SemanticNodeData::Ref` shell where
-                // `read_surface_members` returns empty, so this
-                // emit fires ZERO times. The orchestrator's
-                // [`crate::meta_resolve::materialize::macro_shapes::record_published_field_edges_for_macro_shape`]
-                // covers Ref carriers via the cross-file-resolved
-                // `shape.value.properties`.
-                dispatch.record_published_field_edge(
-                    owner,
-                    surface_node,
-                    member.value,
-                    &member.name,
-                );
+            .filter_map(|candidate| {
                 let analyzed = mac
                     .prop_fields
                     .iter()
-                    .find(|p| p.name == member.name.as_ref());
+                    .find(|p| p.name == candidate.member().name.as_ref());
                 let raw_type = analyzed.and_then(|p| p.type_annotation.clone());
                 let shallow_type_expr = analyzed.and_then(|p| p.type_expr.clone());
                 let shallow_type_expr_scope = analyzed.and_then(|p| p.type_expr_scope.clone());
+                let admitted = admit_published_member(candidate, &cursor, &dispatch)?;
                 Some((
-                    member,
+                    admitted,
                     raw_type,
                     shallow_type_expr,
                     shallow_type_expr_scope,
-                    member_cursor,
                 ))
             })
             .collect()
@@ -137,15 +108,14 @@ pub(crate) fn project_props(
     admitted
         .into_iter()
         .map(
-            |(member, raw_type, shallow_type_expr, shallow_type_expr_scope, member_cursor)| {
+            |(admitted, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
                 surface_member_to_expanded_field(
                     query_engine,
                     file,
-                    &member,
+                    &admitted,
                     raw_type,
                     shallow_type_expr,
                     shallow_type_expr_scope,
-                    member_cursor,
                 )
             },
         )

@@ -68,7 +68,7 @@ pub static MATERIALIZE_MEMO_PEEKS: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE_MEMO_HITS: AtomicU64 = AtomicU64::new(0);
 
 /// Publishes (write-throughs) into the host-owned `MaterializeMemoDb`
-/// after a fresh raise+reduce produces a new MaterializedTypeExpr.
+/// after a fresh raise+reduce produces a new MaterializedOutputTypeExpr.
 pub static MATERIALIZE_MEMO_PUBLISHES: AtomicU64 = AtomicU64::new(0);
 
 /// Family-memo (SemanticGraphStore) cold/warm splits as observed at

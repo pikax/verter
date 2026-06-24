@@ -4187,6 +4187,7 @@ dependencies = [
  "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
+ "verter_session",
  "verter_session_oracle_macro",
  "verter_span",
  "verter_type_expr",

@@ -7,15 +7,25 @@
 //! ONE resolver. Two invariants protect that work and its ordering
 //! against the later (breaking) producer wiring:
 //!
-//! - **G-A: no reverse `materialize_type_expr` bridge in a hot handle
-//!   arm.** A `HotTypeRef` is ALREADY the lowered node; a handle arm
-//!   must reduce it directly, never materialise it back to a `TypeExpr`
-//!   and re-lower. The single reverse boundary `materialize_type_expr`
-//!   is permitted ONLY at the public-DTO / output / compat seams (an
-//!   explicit, rationale-bearing allowlist). This is the SCOPED
-//!   precursor to the later global fence
-//!   `hot_path_never_calls_materialize_type_expr` (enabled last, when
-//!   the transitional allowlists reach zero).
+//! - **G-A: the `materialize_type_expr(HotTypeRef)` reverse-handle
+//!   boundary is TEST-ONLY (not production-visible).** A `HotTypeRef` is
+//!   ALREADY the lowered node; a handle arm must reduce it directly, never
+//!   materialise it back to a `TypeExpr` and re-lower. The
+//!   `materialize_type_expr(HotTypeRef)` harness is `#[cfg(test)]`-gated,
+//!   so production code cannot name it and a hot-arm reverse-bridge is a
+//!   compile-time impossibility. G-A is now a STRUCTURAL `syn` guard
+//!   (`materialize_type_expr_is_not_production_visible`) that asserts the
+//!   single `fn materialize_type_expr` definition carries a `cfg(test)`
+//!   gate — it REPLACES the former source LINE scanner
+//!   (`no_hot_path_materialize_type_expr_bridge`, deleted). It is a
+//!   DIFFERENT invariant from the output-materialization capability fence:
+//!   the durable `SemanticNodeId -> TypeExpr` OUTPUT boundary is the sealed
+//!   `OutputProjector` capability + sealed carriers (compiler-enforced; see
+//!   `project_semantic_dispatch/output_materialization.rs`), and the named
+//!   interim Kind-B `legacy_semantic_type_expr_bridge` is pinned by the
+//!   separate `output_projector_residual_guards`. The global fence
+//!   `hot_path_never_calls_materialize_type_expr` stays deferred to a later
+//!   block.
 //!
 //! - **G-B: per-inventory ordering.** Each listed hot carrier has a
 //!   handle-native consumer present in the production tree BEFORE the
@@ -85,7 +95,11 @@ fn production_src_files() -> Vec<(String, String)> {
 }
 
 // ===========================================================================
-// G-A — no reverse `materialize_type_expr` bridge in a hot handle arm.
+// G-A — the `materialize_type_expr(HotTypeRef)` reverse-handle boundary is
+// TEST-ONLY (structural `#[cfg(test)]`-gating guard). This is a DIFFERENT
+// invariant from the output-materialization capability fence (the sealed
+// `OutputProjector`) and from the Kind-B `legacy_semantic_type_expr_bridge`
+// residual (pinned by `output_projector_residual_guards`).
 // ===========================================================================
 
 /// Whether `c` is an identifier-continuation character.
@@ -102,129 +116,6 @@ fn is_ident_boundary_before(c: Option<char>) -> bool {
         None => true,
         Some(c) => !is_ident_char(c),
     }
-}
-
-/// Returns `true` when a source line REFERENCES the EXACT
-/// `materialize_type_expr` boundary as a non-definition use — the WHOLE
-/// identifier (a non-identifier char before AND after it, so
-/// `materialize_type_expr_until_stable` / `xmaterialize_type_expr` do NOT
-/// match), where that occurrence is not the boundary DEFINITION (`fn `
-/// right before the identifier). Detection is REFERENCE-based, not
-/// call-based: a bare reference with no following `(` — method-item
-/// indirection like `let f = Dispatch::materialize_type_expr;` — is a
-/// hit, as is `*out = self.materialize_type_expr(h);`. The line is
-/// scanned for EVERY occurrence, so a
-/// `fn materialize_type_expr_bridge(...) { self.materialize_type_expr(h) }`
-/// line — exempt on its def-looking prefix — is still caught on the inner
-/// reference. Line comments (`//`, `///`) are not code: a whole `//`-led
-/// line is skipped, and a trailing `//` comment is stripped before
-/// matching (a `::` path is NOT a `//`, so `Dispatch::materialize_type_expr`
-/// survives the strip). The trailing-comment strip is string-literal-aware:
-/// it cuts at the first `//` that is NOT inside a double-quoted string, so a
-/// `//` inside a literal (e.g. `"http://x"`) does not hide a real reference
-/// that follows it on the same line. LIMITATION: only double-quoted string
-/// literals are modeled — raw strings (`r#"..."#`), byte strings (`b"..."`),
-/// and char literals (`'"'`) are NOT, so a `//` after one of those corner
-/// cases could be mis-stripped; the common `"http://"` case IS handled.
-fn line_references_materialize_boundary(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("//") {
-        return false;
-    }
-    // Strip a trailing line comment so a `// ... materialize_type_expr`
-    // note on a code line is not a reference. The strip is
-    // string-literal-aware: it cuts at the first `//` that is NOT inside a
-    // double-quoted string, so a `//` inside a literal (e.g. `"http://x"`)
-    // does not hide a real reference that follows it on the same line.
-    let comment_start = {
-        let bytes = line.as_bytes();
-        let mut in_string = false;
-        let mut found = None;
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if b == b'"' {
-                // Toggle on every `"` whose immediately-preceding char is
-                // not a backslash (a simple, sufficient rule for this
-                // guard — see the doc comment's documented limitation).
-                let escaped = i > 0 && bytes[i - 1] == b'\\';
-                if !escaped {
-                    in_string = !in_string;
-                }
-            } else if !in_string && b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-                found = Some(i);
-                break;
-            }
-            i += 1;
-        }
-        found
-    };
-    let code = match comment_start {
-        Some(pos) => &line[..pos],
-        None => line,
-    };
-    const ID: &str = "materialize_type_expr";
-    let bytes = code.as_bytes();
-    let mut search = 0usize;
-    while let Some(rel) = code[search..].find(ID) {
-        let start = search + rel;
-        let end = start + ID.len();
-        search = end;
-        // Whole-identifier boundary on the left: a different longer
-        // identifier (suffix/prefix) is not the boundary.
-        let before = code[..start].chars().next_back();
-        if !is_ident_boundary_before(before) {
-            continue;
-        }
-        // Whole-identifier boundary on the right: the next char must NOT
-        // be an identifier char (so `materialize_type_expr_until_stable` —
-        // an identifier continuation — is not the boundary identifier).
-        if let Some(nc) = bytes.get(end).map(|b| *b as char) {
-            if is_ident_char(nc) {
-                continue;
-            }
-        }
-        // Is this occurrence the DEFINITION (`fn` immediately before the
-        // identifier)? The single boundary definition is the permitted
-        // reverse seam; a definition is not a consumer. Any other
-        // reference — call OR bare method-item reference — is a hit.
-        let prefix = code[..start].trim_end();
-        if prefix.ends_with("fn") {
-            continue;
-        }
-        return true;
-    }
-    false
-}
-
-/// Every production-source REFERENCE site of the `materialize_type_expr`
-/// boundary, INCLUDING inside the boundary's own file. The boundary
-/// definition line itself is excluded (it is a declaration, not a
-/// consumer-side reference).
-fn materialize_boundary_reference_sites() -> Vec<String> {
-    let mut hits = Vec::new();
-    for (rel, src) in production_src_files() {
-        for (i, line) in src.lines().enumerate() {
-            if line_references_materialize_boundary(line) {
-                hits.push(format!("{rel}:{}: {}", i + 1, line.trim()));
-            }
-        }
-    }
-    hits
-}
-
-#[test]
-fn no_hot_path_materialize_type_expr_bridge() {
-    let hits = materialize_boundary_reference_sites();
-    assert!(
-        hits.is_empty(),
-        "G-A: `materialize_type_expr` is REFERENCED in production source (outside its own boundary \
-         DEFINITION) — a handle arm must reduce the node DIRECTLY through the dispatch, never \
-         materialise it back to a `TypeExpr` and re-lower, and must never take a method-item \
-         reference to the reverse boundary. The reverse boundary is output/compat only; it has NO \
-         production reference until the later output-fence stage. Offending sites:\n{}",
-        hits.join("\n")
-    );
 }
 
 /// Count the EXACT boundary-definition sites (`fn materialize_type_expr(`
@@ -270,111 +161,454 @@ fn g_a_exactly_one_boundary_definition_in_raise() {
     );
 }
 
+/// Whether the `attrs` gate the item OUT of EVERY non-test build — i.e. the
+/// `cfg` predicate ENTAILS the `test` flag (it cannot be satisfied unless
+/// `test` is set). This is STRICTER than "names `test` somewhere": only a cfg
+/// that is `false` in every build where `test` is unset counts.
+///
+/// Entailment (does `cfg(P)` hold ⟹ `test` is set?):
+/// - `test`                      → YES (it IS `test`).
+/// - `all(A, B, …)`              → YES iff ANY arm entails `test` (the
+///   conjunction is `false` whenever that arm is `false`, i.e. when `test`
+///   is unset).
+/// - `any(A, B, …)`              → YES iff EVERY arm entails `test` (the
+///   disjunction can still be `true` with `test` unset if any arm can be).
+///   So `any(test, debug_assertions)` does NOT entail `test` —
+///   `debug_assertions` is ON in ordinary debug builds, making the item
+///   PRODUCTION-REACHABLE there. This is the load-bearing fix: the old
+///   classifier counted any `test`-naming predicate as gated, blessing the
+///   debug-build hole.
+/// - anything else (`feature=…`, `debug_assertions`, `not(…)`, a bare other
+///   ident) → NO.
+///
+/// Token-tree / `syn::Meta` inspection of the `cfg(...)` argument;
+/// comment/string-blind by construction (a `syn` attribute carries no comment
+/// or string-literal tokens that could spoof the `test` ident).
+///
+/// `pub(crate)` so the OutputProjector residual-guard module
+/// (`output_projector_residual_guards`) reuses this ONE rigorous entailment
+/// classifier rather than forking a second, cruder substring matcher — the
+/// carrier `_for_test` gate guard and the OutputProjector impl-inventory both
+/// need "does this cfg ENTAIL test", and divergent classifiers diverge.
+pub(crate) fn attrs_have_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let syn::Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        cfg_tokens_entail_test(list.tokens.clone())
+    })
+}
+
+/// Recursive entailment check over a `cfg(...)` predicate's token stream. See
+/// [`attrs_have_cfg_test`] for the entailment rules. The stream is the inside
+/// of one predicate: a bare `test` ident, an `all(...)` / `any(...)` /
+/// `not(...)` head + parenthesised group, or some other predicate (`feature =
+/// "x"`, `debug_assertions`).
+///
+/// `pub(crate)` — shared with `output_projector_residual_guards` (see
+/// [`attrs_have_cfg_test`]).
+pub(crate) fn cfg_tokens_entail_test(tokens: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    let toks: Vec<TokenTree> = tokens.into_iter().collect();
+    // Bare `test` (the whole predicate is just the `test` ident).
+    if toks.len() == 1 {
+        if let TokenTree::Ident(id) = &toks[0] {
+            return id == "test";
+        }
+        return false;
+    }
+    // `all(...)` / `any(...)` / `not(...)`: head ident + a single Group.
+    if toks.len() == 2 {
+        if let (TokenTree::Ident(head), TokenTree::Group(g)) = (&toks[0], &toks[1]) {
+            let arms = split_top_level_comma(g.stream());
+            return match head.to_string().as_str() {
+                // Conjunction is false when ANY entailing arm is false ⇒
+                // entails test iff ANY arm entails test.
+                "all" => arms.into_iter().any(cfg_tokens_entail_test),
+                // Disjunction can be true with test unset unless EVERY arm
+                // requires test ⇒ entails test iff EVERY arm entails test.
+                "any" => !arms.is_empty() && arms.into_iter().all(cfg_tokens_entail_test),
+                // `not(test)` is satisfied when test is UNSET ⇒ does not
+                // entail test; any other `not(...)` likewise does not.
+                _ => false,
+            };
+        }
+    }
+    // `feature = "x"`, `debug_assertions`, or any other shape: does not entail test.
+    false
+}
+
+/// Split a token stream on TOP-LEVEL commas (commas not nested inside a
+/// `()` group), returning each comma-separated predicate as its own stream.
+/// Nested groups (`any(a, b)`) stay intact within one arm.
+///
+/// `pub(crate)` — shared with `output_projector_residual_guards` (see
+/// [`attrs_have_cfg_test`]).
+pub(crate) fn split_top_level_comma(
+    stream: proc_macro2::TokenStream,
+) -> Vec<proc_macro2::TokenStream> {
+    use proc_macro2::{TokenStream, TokenTree};
+    let mut out: Vec<TokenStream> = Vec::new();
+    let mut cur: Vec<TokenTree> = Vec::new();
+    for tt in stream {
+        match &tt {
+            TokenTree::Punct(p) if p.as_char() == ',' => {
+                out.push(cur.drain(..).collect());
+            }
+            _ => cur.push(tt),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur.into_iter().collect());
+    }
+    out
+}
+
+/// A single sanctioned `cfg(...)` arm for the
+/// [`cfg_is_exactly_test_or_test_support`] EXACT recogniser: either the bare
+/// `test` ident or the `feature = "test-support"` predicate. Anything else
+/// (`unix`, `debug_assertions`, `feature = "prod"`, a nested `all`/`any`) is
+/// production-satisfiable and is NOT an allowed arm.
+fn cfg_arm_is_test_or_test_support(tokens: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    let toks: Vec<TokenTree> = tokens.into_iter().collect();
+    // Bare `test`.
+    if toks.len() == 1 {
+        if let TokenTree::Ident(id) = &toks[0] {
+            return id == "test";
+        }
+        return false;
+    }
+    // `feature = "test-support"` — three tokens: ident `feature`, `=`, a
+    // string-literal whose value is exactly `test-support`.
+    if toks.len() == 3 {
+        if let (TokenTree::Ident(key), TokenTree::Punct(eq), TokenTree::Literal(lit)) =
+            (&toks[0], &toks[1], &toks[2])
+        {
+            if key == "feature" && eq.as_char() == '=' {
+                // The literal's string value (strip the surrounding quotes).
+                let lit_str = lit.to_string();
+                return lit_str == "\"test-support\"";
+            }
+        }
+    }
+    false
+}
+
+/// Whether a `cfg(...)` predicate's INNER token stream is EXACTLY one of the
+/// two sanctioned production-UNREACHABLE shapes:
+///   - `test` (the bare predicate), or
+///   - `any(test, feature = "test-support")` — order-insensitive on the two
+///     arms, but with EXACTLY those two arms and nothing else.
+///
+/// This is STRICTER than [`cfg_tokens_entail_test`] entailment on purpose:
+/// entailment ACCEPTS `all(test, unix)` (genuinely test-only) but REJECTS
+/// `any(test, feature = "test-support")` (the `feature` arm does not entail
+/// `test`), which is the legitimate dev-/integration-binary gate. The carrier
+/// `_for_test` accessor invariant is the canonical narrow gate ONLY — so a
+/// disjunction carrying ANY extra production-satisfiable arm (`unix`,
+/// `debug_assertions`, another `feature`) FAILS here. Token-tree parsed, never
+/// substring-matched, so a reordered-but-valid `any(feature = "test-support",
+/// test)` is accepted and a widened `any(test, feature = "test-support",
+/// unix)` is rejected.
+///
+/// `pub(crate)` — shared with `output_projector_residual_guards` (see
+/// [`attrs_have_cfg_test`]).
+pub(crate) fn cfg_is_exactly_test_or_test_support(tokens: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    let toks: Vec<TokenTree> = tokens.clone().into_iter().collect();
+    // Bare `test`.
+    if toks.len() == 1 {
+        if let TokenTree::Ident(id) = &toks[0] {
+            return id == "test";
+        }
+        return false;
+    }
+    // `any( <arms> )`: head ident `any` + a single Group.
+    if toks.len() == 2 {
+        if let (TokenTree::Ident(head), TokenTree::Group(g)) = (&toks[0], &toks[1]) {
+            if head == "any" {
+                let arms = split_top_level_comma(g.stream());
+                // EXACTLY two arms, one `test` and one `feature =
+                // "test-support"` (order-insensitive). Any third arm, a
+                // duplicate, or a non-sanctioned arm fails.
+                if arms.len() != 2 {
+                    return false;
+                }
+                let mut saw_test = false;
+                let mut saw_feature = false;
+                for arm in &arms {
+                    let arm_toks: Vec<TokenTree> = arm.clone().into_iter().collect();
+                    let is_bare_test = arm_toks.len() == 1
+                        && matches!(&arm_toks[0], TokenTree::Ident(id) if id == "test");
+                    if is_bare_test {
+                        saw_test = true;
+                    } else if cfg_arm_is_test_or_test_support(arm.clone()) {
+                        // The non-`test` sanctioned arm is the
+                        // `feature = "test-support"` predicate.
+                        saw_feature = true;
+                    } else {
+                        // A production-satisfiable / unrecognised arm.
+                        return false;
+                    }
+                }
+                return saw_test && saw_feature;
+            }
+        }
+    }
+    false
+}
+
+/// Find every `fn materialize_type_expr` (the EXACT identifier, not a
+/// prefix like `materialize_type_expr_until_stable`) defined as a method in
+/// `raise.rs`, returning each one's `#[cfg(test)]` gating verdict. Walks
+/// the `syn` AST — inherent impl methods at file scope and inside inline
+/// modules — so a relocation into a nested `mod` is still seen. Returns the
+/// `(is_cfg_test)` flag per definition.
+fn materialize_type_expr_def_cfg_test_flags(src: &str) -> Vec<bool> {
+    use syn::visit::Visit;
+    struct V {
+        flags: Vec<bool>,
+    }
+    impl<'ast> Visit<'ast> for V {
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            if f.sig.ident == "materialize_type_expr" {
+                self.flags.push(attrs_have_cfg_test(&f.attrs));
+            }
+            syn::visit::visit_impl_item_fn(self, f);
+        }
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            if f.sig.ident == "materialize_type_expr" {
+                self.flags.push(attrs_have_cfg_test(&f.attrs));
+            }
+            syn::visit::visit_item_fn(self, f);
+        }
+    }
+    let file = syn::parse_file(src).expect("parse raise.rs as a syn file");
+    let mut v = V { flags: Vec::new() };
+    v.visit_file(&file);
+    v.flags
+}
+
 #[test]
-fn g_a_self_test_scanner_discriminates() {
-    // The detector must (a) fire on a real call, including a space-split
-    // call and a call INSIDE the boundary's own file, (b) fire on a bare
-    // (no-paren) method-item reference, (c) fire on a `*`-prefixed code
-    // line, (d) skip the boundary DEFINITION, and (e) skip comments.
-    assert!(
-        line_references_materialize_boundary("    let t = dispatch.materialize_type_expr(handle);"),
-        "self-test: a direct `materialize_type_expr(` call MUST be a hit"
+fn materialize_type_expr_is_not_production_visible() {
+    // STRUCTURAL G-A (replaces the deleted line scanner). The
+    // `materialize_type_expr(HotTypeRef)` reverse-handle boundary is a
+    // TEST-ONLY harness: it must be `#[cfg(test)]`-gated so it is NOT
+    // present in production / release builds, and therefore cannot be a
+    // reverse-`materialize` re-lower path in any hot handle arm. We assert
+    // STRUCTURALLY (via `syn`) that every `fn materialize_type_expr`
+    // definition carries a `cfg(test)` gate — a future un-gating (making it
+    // production-visible) fails here, which is the structural successor to
+    // the old "no production reference" source scan. Once production cannot
+    // name the boundary, a production reverse-bridge is a compile-time
+    // impossibility, so no call-site scanner is needed.
+    const RAISE_REL: &str = "src/project_semantic_dispatch/raise.rs";
+    let src = read_rel(RAISE_REL);
+    let flags = materialize_type_expr_def_cfg_test_flags(&src);
+    assert_eq!(
+        flags.len(),
+        1,
+        "G-A: expected EXACTLY ONE `fn materialize_type_expr` method definition in {RAISE_REL}; \
+         found {} — a second definition would create an un-audited boundary",
+        flags.len()
     );
     assert!(
-        line_references_materialize_boundary(
-            "    let t = dispatch.materialize_type_expr (handle);"
-        ),
-        "self-test: a space-split `materialize_type_expr (` call MUST be a hit"
+        flags[0],
+        "G-A (STRUCTURAL): `fn materialize_type_expr` in {RAISE_REL} MUST be `#[cfg(test)]`-gated \
+         so it is not production-visible — an un-gated definition would re-introduce a \
+         production reverse-`materialize` boundary that a hot handle arm could call. Gate it with \
+         `#[cfg(test)]` (or move its production use onto the sealed `OutputProjector` capability)."
     );
-    assert!(
-        line_references_materialize_boundary("    self.materialize_type_expr"),
-        "self-test: a bare reference (paren on a following line) MUST be a hit — a future hot \
-         bridge cannot evade by line-splitting"
+}
+
+#[test]
+fn materialize_type_expr_not_production_visible_self_test_discriminates() {
+    // The classifier the structural guard relies on must FIRE on a
+    // production-visible (un-gated) definition and PASS the `#[cfg(test)]`
+    // form — proving it would catch a regression that un-gates the
+    // boundary.
+    // PASS: the cfg-test form (post-fence shape).
+    let gated = r#"
+        impl<'a> ProjectSemanticDispatch<'a> {
+            #[cfg(test)]
+            pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
+                self.output_shell_raise(handle.node()).unwrap()
+            }
+        }
+    "#;
+    let gated_flags = materialize_type_expr_def_cfg_test_flags(gated);
+    assert_eq!(
+        gated_flags,
+        vec![true],
+        "self-test: a `#[cfg(test)]` def MUST classify as gated"
     );
-    // P2 EVASION 1: a `*`-prefixed CODE line (`*out = ...`) MUST be caught
-    // — the old detector skipped any `*`-led line, letting this evade.
-    assert!(
-        line_references_materialize_boundary("    *out = self.materialize_type_expr(handle);"),
-        "self-test: a `*`-prefixed CODE line that calls the boundary MUST be a hit — a leading \
-         `*` is dereference syntax here, not a comment marker"
+
+    // PASS: an `all(test, …)` form ENTAILS test (false in every non-test
+    // build), so it classifies as gated.
+    let all_gated = r#"
+        impl<'a> ProjectSemanticDispatch<'a> {
+            #[cfg(all(test, feature = "x"))]
+            fn materialize_type_expr(&self, h: HotTypeRef) -> TypeExpr { todo!() }
+        }
+    "#;
+    assert_eq!(
+        materialize_type_expr_def_cfg_test_flags(all_gated),
+        vec![true],
+        "self-test: a `cfg(all(test, …))` def MUST classify as gated (it entails test)"
     );
-    // P2 EVASION 2: method-item indirection — a bare reference with NO
-    // immediate `(` — MUST be caught. The old call-only detector required
-    // a following paren, letting this evade.
-    assert!(
-        line_references_materialize_boundary(
-            "    let f = ProjectSemanticDispatch::materialize_type_expr;"
-        ),
-        "self-test: a method-item reference with NO immediate `(` MUST be a hit — reference-based \
-         detection forbids taking the reverse boundary as a function item"
+
+    // FIRE (RED): a `cfg(any(test, debug_assertions))` form does NOT entail
+    // test — `debug_assertions` is ON in ordinary debug builds, so the item
+    // is PRODUCTION-REACHABLE there. It MUST classify as NOT test-gated. This
+    // is the load-bearing fix for the debug-build blind spot the review found:
+    // the old classifier blessed this `any(...)` widening as gated, so a
+    // contributor widening the boundary from `cfg(test)` to
+    // `cfg(any(test, debug_assertions))` (debug-build-present) would have kept
+    // the guard GREEN.
+    let any_test_debug = r#"
+        impl<'a> ProjectSemanticDispatch<'a> {
+            #[cfg(any(test, debug_assertions))]
+            fn materialize_type_expr(&self, h: HotTypeRef) -> TypeExpr { todo!() }
+        }
+    "#;
+    assert_eq!(
+        materialize_type_expr_def_cfg_test_flags(any_test_debug),
+        vec![false],
+        "self-test: a `cfg(any(test, debug_assertions))` def MUST classify as NOT test-gated — it \
+         is production-reachable in ordinary debug builds; the structural fence would otherwise \
+         miss a debug-build-present widening regression"
     );
-    // P1 EVASION: a `//`-bearing STRING LITERAL before a real reference
-    // MUST NOT hide it — the trailing-comment strip is string-literal-aware
-    // (the old naive `find("//")` truncated at the `//` inside `"http://x"`
-    // and missed the real method-item reference after it).
-    assert!(
-        line_references_materialize_boundary(
-            "    let _url = \"http://x\"; let f = ProjectSemanticDispatch::materialize_type_expr;"
-        ),
-        "self-test: a `//`-bearing STRING LITERAL before a real reference MUST NOT hide it — the \
-         comment strip is string-literal-aware"
+
+    // FIRE (RED): a production-visible (un-gated) definition must classify
+    // as NOT gated — the structural guard would otherwise miss an un-gating
+    // regression.
+    let ungated = r#"
+        impl<'a> ProjectSemanticDispatch<'a> {
+            pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
+                self.output_shell_raise(handle.node()).unwrap()
+            }
+        }
+    "#;
+    assert_eq!(
+        materialize_type_expr_def_cfg_test_flags(ungated),
+        vec![false],
+        "self-test: a production-visible (un-gated) def MUST classify as NOT gated — the \
+         structural fence would otherwise miss a visibility-widening regression"
     );
-    assert!(
-        !line_references_materialize_boundary("    pub(crate) fn materialize_type_expr(&self) {"),
-        "self-test: the boundary DEFINITION line MUST NOT be a hit"
+
+    // FIRE (RED): a `cfg(feature = "x")` gate that does NOT name `test`
+    // must classify as NOT test-gated (production-reachable under that
+    // feature).
+    let feature_only = r#"
+        impl<'a> ProjectSemanticDispatch<'a> {
+            #[cfg(feature = "oracle-gen")]
+            fn materialize_type_expr(&self, h: HotTypeRef) -> TypeExpr { todo!() }
+        }
+    "#;
+    assert_eq!(
+        materialize_type_expr_def_cfg_test_flags(feature_only),
+        vec![false],
+        "self-test: a feature-only `cfg` that does not name `test` MUST classify as NOT \
+         test-gated"
     );
+}
+
+#[test]
+fn cfg_is_exactly_test_or_test_support_self_test_discriminates() {
+    // The EXACT recogniser (the carrier `_for_test` gate invariant) must
+    // ACCEPT only the two canonical narrow production-unreachable shapes and
+    // REJECT a disjunction carrying ANY extra production-satisfiable arm. It
+    // is parsed (token-tree), not substring-matched, so a reordered-but-valid
+    // form is accepted and a widened form is rejected.
+    //
+    // Build the inner predicate token stream directly from source so the
+    // recogniser sees exactly what `attr.meta` (a `Meta::List`) would carry.
+    fn inner(src: &str) -> proc_macro2::TokenStream {
+        // `src` is the FULL attribute, e.g. `#[cfg(any(test, feature = "x"))]`.
+        let file: syn::File = syn::parse_str(&format!("{src}\nfn __probe() {{}}"))
+            .expect("parse synthetic cfg attribute");
+        let func = file
+            .items
+            .iter()
+            .find_map(|it| match it {
+                syn::Item::Fn(f) if f.sig.ident == "__probe" => Some(f),
+                _ => None,
+            })
+            .expect("find __probe fn");
+        let attr = func
+            .attrs
+            .iter()
+            .find(|a| a.path().is_ident("cfg"))
+            .expect("find cfg attr");
+        match &attr.meta {
+            syn::Meta::List(list) => list.tokens.clone(),
+            _ => panic!("cfg attr is not a Meta::List"),
+        }
+    }
+
+    // PASS: bare `cfg(test)`.
     assert!(
-        !line_references_materialize_boundary(
-            "/// round-trips through `materialize_type_expr` here"
-        ),
-        "self-test: a doc-comment reference MUST NOT be a hit"
+        cfg_is_exactly_test_or_test_support(inner("#[cfg(test)]")),
+        "self-test: `#[cfg(test)]` MUST be accepted by the EXACT recogniser"
     );
+    // PASS: `cfg(any(test, feature = "test-support"))`.
     assert!(
-        !line_references_materialize_boundary(
-            "    // materialize_type_expr(handle) would be a reverse bridge here"
-        ),
-        "self-test: a line-comment reference MUST NOT be a hit"
+        cfg_is_exactly_test_or_test_support(inner("#[cfg(any(test, feature = \"test-support\"))]")),
+        "self-test: `#[cfg(any(test, feature = \"test-support\"))]` MUST be accepted"
     );
+    // PASS: order-insensitive — `cfg(any(feature = "test-support", test))`.
     assert!(
-        !line_references_materialize_boundary(
-            "    foo(handle); // see materialize_type_expr for the reverse seam"
-        ),
-        "self-test: a TRAILING line-comment reference on a code line MUST NOT be a hit — the \
-         `//`-to-EOL comment is stripped before matching"
+        cfg_is_exactly_test_or_test_support(inner("#[cfg(any(feature = \"test-support\", test))]")),
+        "self-test: arm order MUST NOT matter — `any(feature = \"test-support\", test)` is the \
+         same predicate and MUST be accepted (token-tree parsed, not substring-ordered)"
     );
-    // ANTI-EVASION: a same-line `fn materialize_type_expr_bridge(...) {
-    // self.materialize_type_expr(h) }` — exempt on its def-looking
-    // prefix — MUST still be caught on the inner real reference. This is
-    // the prefixed-name-definition evasion the def-exemption must not allow.
+
+    // FIRE (RED): `cfg(any(test, feature = "test-support", unix))` — the
+    // `unix` arm is TRUE on Unix production builds, so the gate is
+    // production-visible there. The OLD substring matcher accepted it.
     assert!(
-        line_references_materialize_boundary(
-            "    fn materialize_type_expr_bridge(&self, h: H) { self.materialize_type_expr(h) }"
-        ),
-        "self-test: a prefixed-name fake definition that wraps a REAL `materialize_type_expr` \
-         reference MUST be caught on the inner reference — the def-exemption matches the EXACT \
-         identifier only"
+        !cfg_is_exactly_test_or_test_support(inner(
+            "#[cfg(any(test, feature = \"test-support\", unix))]"
+        )),
+        "self-test: `#[cfg(any(test, feature = \"test-support\", unix))]` MUST be REJECTED — the \
+         `unix` arm makes it production-visible on Unix; the substring matcher's hole"
     );
-    // A DIFFERENT identifier that merely shares the prefix must NOT be a
-    // hit (no false positive) — neither the suffixed call nor the
-    // production `materialize_type_expr_until_stable` instrumentation name.
+    // FIRE (RED): `cfg(any(test, feature = "test-support", feature = "prod"))`.
     assert!(
-        !line_references_materialize_boundary("    let x = self.materialize_type_expr_other(h);"),
-        "self-test: `materialize_type_expr_other` is a DIFFERENT identifier and MUST NOT be a hit"
+        !cfg_is_exactly_test_or_test_support(inner(
+            "#[cfg(any(test, feature = \"test-support\", feature = \"prod\"))]"
+        )),
+        "self-test: a third `feature = \"prod\"` arm MUST be REJECTED — it is production-satisfiable"
     );
+    // FIRE (RED): `cfg(any(test, debug_assertions))` — the debug-build hole.
     assert!(
-        !line_references_materialize_boundary(
-            "    let materialize_type_expr_until_stable_calls = 0;"
-        ),
-        "self-test: `materialize_type_expr_until_stable_calls` is a DIFFERENT identifier and MUST \
-         NOT be a hit"
+        !cfg_is_exactly_test_or_test_support(inner("#[cfg(any(test, debug_assertions))]")),
+        "self-test: `#[cfg(any(test, debug_assertions))]` MUST be REJECTED — `debug_assertions` is \
+         ON in ordinary debug builds"
     );
-    // The real boundary definition (whole identifier) must NOT be a hit
-    // even with a generic clause.
+    // FIRE (RED): a non-canonical `feature = "test-support"` ALONE (no test
+    // arm) — production-reachable when the feature is enabled in a non-test
+    // build is impossible by the self-edge, but it is not the canonical gate
+    // and entailment is not the contract here; the EXACT recogniser requires
+    // BOTH arms in the disjunction form.
     assert!(
-        !line_references_materialize_boundary(
-            "    pub(crate) fn materialize_type_expr<T>(&self) -> T {"
-        ),
-        "self-test: the generic boundary definition MUST NOT be a hit"
+        !cfg_is_exactly_test_or_test_support(inner("#[cfg(feature = \"test-support\")]")),
+        "self-test: a lone `#[cfg(feature = \"test-support\")]` (no `test` arm) MUST be REJECTED — \
+         the canonical narrow gate is bare `test` or `any(test, feature = \"test-support\")`"
+    );
+    // FIRE (RED): `all(test, feature = "test-support")` is genuinely test-only
+    // but is NOT the canonical narrow carrier gate shape — the EXACT
+    // recogniser is intentionally stricter than entailment.
+    assert!(
+        !cfg_is_exactly_test_or_test_support(inner(
+            "#[cfg(all(test, feature = \"test-support\"))]"
+        )),
+        "self-test: `#[cfg(all(test, …))]` MUST be REJECTED by the EXACT recogniser — the carrier \
+         gate is the canonical narrow shape, not an arbitrary test-entailing conjunction"
     );
 }
 
@@ -681,20 +915,25 @@ const STAGE4_CARRIER_INVENTORY: &[InventoryRow] = &[
         status: SeamStatus::HandleNative,
         witness: &[(
             "src/resolver_core/component_meta_query_engine/registry_decl.rs",
-            "fn materialize_member_surface_node",
+            "fn materialize_member_surface_node_core",
         )],
         reason: "the member-surface node-core reduces an already-lowered registry/member body \
-                 node through the dispatch; the TypeExpr arm lowers-then-delegates to it",
+                 node through the dispatch; the TypeExpr arm lowers-then-delegates to it. The \
+                 node-core is module-private (a forgeable SemanticNodeId never crosses the \
+                 query-engine boundary); out-of-subtree production callers reach the surface \
+                 through the demand APIs (materialize_pick_member_surface / project_expr_surface_shape)",
     },
     InventoryRow {
         seam: "owner collection body",
         status: SeamStatus::HandleNative,
         witness: &[(
             "src/resolver_core/component_meta_query_engine/registry_decl.rs",
-            "fn owner_collection_surface_from_node",
+            "fn materialize_member_surface_node_core",
         )],
         reason: "the owner-collection handle arm reduces a body node through the shared \
-                 member-surface node-core without touching the TypeExpr-keyed OwnerCollectionDb",
+                 member-surface node-core (owner-collection scope axis, nested = false) without \
+                 touching the TypeExpr-keyed OwnerCollectionDb; the thin owner-collection \
+                 pass-through wrapper folded into the node-core itself",
     },
     InventoryRow {
         seam: "registry symbolic-alias root classification",

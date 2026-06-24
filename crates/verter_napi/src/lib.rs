@@ -2477,11 +2477,14 @@ impl NapiVerterHost {
                 .resolve_named_symbol_with_audit(&canonical_id, &name, &arc_args, resolve_mode)
                 .into_parts();
             let (resolved, error) = typeinfo::split_resolve_outcome(outcome);
+            // The session-owned bytes facade encodes the `TypeExpr` to wire
+            // JSON internally (the reverse materialization runs through the
+            // sealed output capability inside `verter_session`); the FFI
+            // adapter only wraps the bytes in a `Buffer`.
             let type_expr_buf = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr(node_id)
-                    .map(|expr| typeinfo::encode_type_expr(&expr))
-                    .transpose()?,
+                    .project_node_to_type_expr_json_bytes(node_id)
+                    .map(Buffer::from),
                 None => None,
             };
             let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
@@ -2512,11 +2515,13 @@ impl NapiVerterHost {
         catch_panic(std::panic::AssertUnwindSafe(move || {
             let (outcome, record) = host.evaluate_type_expression_with_audit(req).into_parts();
             let (resolved, error) = typeinfo::split_resolve_outcome(outcome);
+            // Bytes facade: the `TypeExpr` is wire-encoded inside
+            // `verter_session` through the sealed output capability; the FFI
+            // adapter only wraps the bytes in a `Buffer`.
             let type_expr_buf = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr(node_id)
-                    .map(|expr| typeinfo::encode_type_expr(&expr))
-                    .transpose()?,
+                    .project_node_to_type_expr_json_bytes(node_id)
+                    .map(Buffer::from),
                 None => None,
             };
             let audit_buf = typeinfo::encode_stored_audit_record(&record)?;

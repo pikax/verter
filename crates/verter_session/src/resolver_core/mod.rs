@@ -77,10 +77,17 @@ pub use component_meta::{
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
+// The surface-projection helpers (`projected_surface_from_semantic_node`,
+// `surface_view_to_projected_surface`, `projected_surface_to_type_expr`,
+// `projected_surface_to_expanded_shape`) are intentionally NOT re-exported from
+// `resolver_core`: the raw `SemanticNodeId` / `&SurfaceView` → surface
+// projection stays confined to the query-engine subtree (in-subtree callers
+// reach them via `super::surface::`; out-of-subtree callers route through the
+// engine's sink-local methods `dispatch_projected_surface_to_type_expr` /
+// `projected_expanded_shape_from_node` / the routed-surface methods).
 pub(crate) use component_meta_query_engine::{
-    projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
-    projected_surface_to_type_expr, type_expr_contains_semantic_miss,
-    type_expr_is_expanded_surface, type_expr_root_is_unmaterialized_sentinel,
+    type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
+    type_expr_root_is_unmaterialized_sentinel,
 };
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{

@@ -15,6 +15,17 @@ use crate::resolver_core::{
 use crate::types::*;
 use crate::VerterHost;
 
+// The output-sink capability for this subtree is defined in the EXACT
+// output-SINK module that projects — `HostManageComponentMetaOutputCap` in
+// `host_manage/component_meta_methods.rs` (whose only submodule is a
+// `#[cfg(test)]` test module, so its whole reachable PRODUCTION scope is that
+// one sink) — NOT subtree-wide. A subtree-wide cap
+// (`pub(in crate::host_manage)`) would let the Kind-B bridge sibling
+// `host_manage::eval_env` (`fast_to_expansion`) mint it and bypass
+// `legacy_semantic_type_expr_bridge`; terminal-sink minting (the mint scope's
+// whole reachable production module tree is output-only) makes the fence
+// compiler-enforced.
+
 // ──────────────────────────────────────────────────────────────────────────
 // private sub-modules under `host_manage/`. Public
 // surface remains rooted at `crate::host_manage::*`; siblings are

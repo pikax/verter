@@ -64,7 +64,7 @@ use std::sync::Arc;
 use verter_type_expr::TypeExpr;
 
 use crate::fact_signature_helpers::empty_fact_signature;
-use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{
     FactVersionRef, MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration,
@@ -376,15 +376,15 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
 fn materialized(
     marker: &str,
     dep_signature: crate::semantic_query::DepSignature,
-) -> MaterializedTypeExpr {
-    MaterializedTypeExpr {
-        node_id: None,
-        type_expr: TypeExpr::Unknown {
+) -> MaterializedOutputTypeExpr {
+    MaterializedOutputTypeExpr::from_type_expr_for_test(
+        None,
+        TypeExpr::Unknown {
             raw: marker.to_string(),
         },
         dep_signature,
-        result_is_partial: false,
-    }
+        false,
+    )
 }
 
 fn empty_dep_signature() -> crate::semantic_query::DepSignature {
@@ -501,7 +501,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
          names an untracked keyed canonical",
     );
     assert!(
-        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the rejected entry must not bubble its stale materialized expression",
     );
 }
@@ -561,7 +561,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
          self-root names an untracked keyed canonical",
     );
     assert!(
-        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the rejected entry must not bubble its stale materialized expression",
     );
 }
@@ -639,7 +639,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
          whose self-root names an untracked keyed canonical",
     );
     assert!(
-        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the rejected entry must not bubble its stale materialized expression",
     );
 
@@ -784,7 +784,7 @@ fn type_expr_whole_classifies_synthetic_carrier_confinement() {
 /// keyed scope canonical is unchanged.
 ///
 /// Discriminating property: the entry is keyed on `scope` but its
-/// `MaterializedTypeExpr.dep_signature` lists an observed dependency
+/// `MaterializedOutputTypeExpr.dep_signature` lists an observed dependency
 /// `dep` (`dep != scope`). The entry is cold-published with the EXACT
 /// signature the production producer records —
 /// [`engine_fact_signature_for_materialize_memo`], the named helper
@@ -866,7 +866,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
         })
         .expect("cold publish succeeds");
     assert!(
-        matches!(&primed.type_expr, TypeExpr::Unknown { raw } if raw == "stale"),
+        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "stale"),
         "fixture invariant: cold publish stores the primed materialized expression",
     );
 
@@ -903,7 +903,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
          the entry valid and serve stale.",
     );
     assert!(
-        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the rejected warm entry must not bubble its stale materialized expression",
     );
 }
@@ -1510,7 +1510,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
          stale.",
     );
     assert!(
-        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the rejected warm entry must not bubble its stale materialized expression",
     );
 }
@@ -1527,7 +1527,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
 /// be unsound — no fact can detect a content edit to that file — so
 /// [`engine_fact_signature_for_materialize_memo`] returns `None` and
 /// the publish site declines to insert the entry. The freshly-computed
-/// `MaterializedTypeExpr` is still returned to the caller; only the
+/// `MaterializedOutputTypeExpr` is still returned to the caller; only the
 /// shared-cache admission is refused.
 ///
 /// This test was previously
@@ -1665,7 +1665,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
          is no warm hit to short-circuit it",
     );
     assert!(
-        matches!(&value.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&value.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the refused-admission path still returns the freshly-computed value to the \
          caller — user-visible request output is unaffected",
     );
@@ -1791,7 +1791,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
         })
         .expect("cold publish succeeds");
     assert!(
-        matches!(&primed.type_expr, TypeExpr::Unknown { raw } if raw == "stale"),
+        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "stale"),
         "fixture invariant: cold publish stores the primed materialised expression",
     );
     assert_eq!(
@@ -1837,7 +1837,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
          entry valid and serve stale.",
     );
     assert!(
-        matches!(&warm.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&warm.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the rejected warm entry must not bubble its stale materialised expression",
     );
 }
@@ -1860,7 +1860,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
 /// `H1`, not the current `H2`:
 ///
 /// - A producer that re-reads `dep`'s current content hash emits `H2`.
-///   The stale `MaterializedTypeExpr` would then be published rooted by
+///   The stale `MaterializedOutputTypeExpr` would then be published rooted by
 ///   a fresh-looking current hash and would VALIDATE on every warm read
 ///   — the staleness is permanently masked.
 /// - A producer that preserves the observed hash emits `H1`. A warm
@@ -1962,7 +1962,7 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
         "MaterializeMemoDb's producer MUST preserve the OBSERVED WholeHash (H1) the \
          materialiser recorded for a DepVersion::WholeHash dependency — it must NOT \
          re-read the dependency's current content hash. Emitting the current hash (H2) \
-         would publish the stale MaterializedTypeExpr rooted by a fresh-looking hash \
+         would publish the stale MaterializedOutputTypeExpr rooted by a fresh-looking hash \
          that validates on every warm read, permanently masking an edit landing in the \
          materialise -> write-through race window.",
     );
@@ -2080,7 +2080,7 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
         "engine_fact_signature_for_materialize_memo MUST root the keyed scope's self-root \
          FileWholeHash on the caller-supplied OBSERVED hash — it must NOT re-read the \
          scope's current content. Emitting the current hash publishes the stale \
-         MaterializedTypeExpr rooted by a fresh-looking hash that validates on every warm \
+         MaterializedOutputTypeExpr rooted by a fresh-looking hash that validates on every warm \
          read, masking an edit in the materialise -> write-through race window.",
     );
     assert_ne!(
@@ -2217,7 +2217,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
          hit instead.",
     );
     assert!(
-        matches!(&value.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&value.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the rejected race-window entry must not bubble its stale materialised expression",
     );
 }
@@ -3344,7 +3344,7 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
          is no warm hit to short-circuit it",
     );
     assert!(
-        matches!(&value.type_expr, TypeExpr::Unknown { raw } if raw == "recomputed"),
+        matches!(&value.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "recomputed"),
         "the refused-admission path still returns the freshly-computed value to the caller",
     );
 }
@@ -3598,9 +3598,9 @@ fn materialize_memo_publish_site_degrades_on_none_scope_observation() {
     // The degraded path still returns a freshly-computed value.
     assert!(
         matches!(
-            &materialized.type_expr,
+            &materialized.type_expr_for_test(),
             TypeExpr::Ref { name, .. } if name.as_ref() == "Probe"
-        ) || !matches!(&materialized.type_expr, TypeExpr::Unknown { .. }),
+        ) || !matches!(&materialized.type_expr_for_test(), TypeExpr::Unknown { .. }),
         "the degraded publish path still returns a freshly-computed value to the caller",
     );
 
@@ -5381,12 +5381,12 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
     let outcome = db.get_or_compute(&key, ctx, || {
         host.project_type_store().bump_project_generation();
         Some((
-            MaterializedTypeExpr {
-                node_id: None,
-                type_expr: TypeExpr::Unknown { raw: String::new() },
-                dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                result_is_partial: false,
-            },
+            MaterializedOutputTypeExpr::from_type_expr_for_test(
+                None,
+                TypeExpr::Unknown { raw: String::new() },
+                Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                false,
+            ),
             empty_fact_signature(),
         ))
     });
@@ -5484,14 +5484,12 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         || {
             bump();
             Some((
-                MaterializedTypeExpr {
-                    node_id: None,
-                    type_expr: TypeExpr::Unknown { raw: String::new() },
-                    dep_signature: Arc::from(
-                        [] as [(Arc<str>, crate::semantic_query::DepVersion); 0]
-                    ),
-                    result_is_partial: false,
-                },
+                MaterializedOutputTypeExpr::from_type_expr_for_test(
+                    None,
+                    TypeExpr::Unknown { raw: String::new() },
+                    Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                    false,
+                ),
                 empty_fact_signature(),
             ))
         },
@@ -5917,16 +5915,18 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     let context = ProjectionReductionContext::published(mode);
 
     // Two DISTINCT members (different name + optionality) over the SAME
-    // `.value`. Keys built through the sole production constructor.
+    // `.value`. Keys built through the `#[cfg(test)]` raw member ctor (the
+    // production path keys from an admitted publication token; this probe
+    // asserts the subject identity, not admission).
     let member_a = shape_member("alpha", shared_value);
     let mut member_b = shape_member("beta", shared_value);
     member_b.optional = true;
-    let key_a = ShapeCacheKey::surface_member_value_whole_with_context(
+    let key_a = ShapeCacheKey::surface_member_value_whole_with_context_raw(
         Arc::<str>::from(c),
         &member_a,
         context,
     );
-    let key_b = ShapeCacheKey::surface_member_value_whole_with_context(
+    let key_b = ShapeCacheKey::surface_member_value_whole_with_context_raw(
         Arc::<str>::from(c),
         &member_b,
         context,
@@ -5949,7 +5949,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
         })
         .expect("member A primes a warm entry");
     assert!(
-        matches!(&primed.type_expr, TypeExpr::Unknown { raw } if raw == "alpha-shape"),
+        matches!(&primed.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "alpha-shape"),
         "fixture invariant: the primed entry carries member A's shape",
     );
     assert_eq!(
@@ -5977,7 +5977,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
          that share a value node onto ONE warm entry, not split per member name/metadata",
     );
     assert!(
-        matches!(&sibling.type_expr, TypeExpr::Unknown { raw } if raw == "alpha-shape"),
+        matches!(&sibling.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "alpha-shape"),
         "the sibling must receive member A's WARM shape (`alpha-shape`), not recompute \
          its own — proving the collapse onto one entry",
     );
@@ -5990,7 +5990,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // NEGATIVE / discriminating: a member with a DIFFERENT `.value` node
     // must NOT collapse — it keys a disjoint entry and runs its cold closure.
     let member_other = shape_member("alpha", SemanticNodeId(99));
-    let key_other = ShapeCacheKey::surface_member_value_whole_with_context(
+    let key_other = ShapeCacheKey::surface_member_value_whole_with_context_raw(
         Arc::<str>::from(c),
         &member_other,
         context,
@@ -6024,13 +6024,15 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // ---- Production-seam exercise ----
     // Drive the REAL per-member peek/compute path through the production
     // helper `surface_member_to_expanded_field` (which calls
-    // `member_shape_peek_or_compute` at projectors/mod.rs:1381) so the
+    // `member_shape_peek_or_compute` in the `output_sink` sink module) so the
     // sibling-collapse is asserted through the production seam, not only the
     // directly-built key. A fresh scope keeps the seam's own admitted entries
     // disjoint from the directly-keyed entries above.
     use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
-    use crate::meta_resolve::projectors::surface_member_to_expanded_field;
+    use crate::meta_resolve::projectors::output_sink::surface_member_to_expanded_field;
+    use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
     use crate::resolver_core::ComponentMetaQueryEngine;
+    use crate::semantic_query::DeclIdentity;
 
     let seam_scope = "/member_value_eq/seam_scope.ts";
     upsert(&host, seam_scope, "export type SeamProbe = number;\n");
@@ -6041,26 +6043,34 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
 
     // A whole-surface `Props` cursor publishes at `Expanded` (matches the
     // constructor-level `mode` above), so the seam's per-member reduction
-    // context aligns with the keys exercised above.
+    // context aligns with the keys exercised above. The production seam now
+    // consumes a policy-admitted token; the cache-rail probe builds the token
+    // directly via the `#[cfg(test)]` test ctor with synthetic member + cursor
+    // values (it asserts the per-member cache subject, not admission policy).
     let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
     let seam_shared = SemanticNodeId(73);
     let seam_member_a = shape_member("seamAlpha", seam_shared);
     let mut seam_member_b = shape_member("seamBeta", seam_shared);
     seam_member_b.optional = true;
     let seam_member_other = shape_member("seamAlpha", SemanticNodeId(88));
+    let seam_owner = DeclIdentity {
+        canonical_id: std::sync::Arc::from(seam_scope),
+        whole_hash: Default::default(),
+        decl_name: std::sync::Arc::from("<sfc-script-setup>"),
+    };
 
     let mut engine = ComponentMetaQueryEngine::new(&host);
 
     // First member admits one entry through the production seam.
-    let _field_a = surface_member_to_expanded_field(
-        &mut engine,
-        seam_scope,
-        &seam_member_a,
-        None,
-        None,
-        None,
+    let admitted_a = AdmittedPublishedMember::admitted_for_test(
+        seam_owner.clone(),
+        seam_shared,
+        seam_member_a,
         projection.cursor(),
+        PublishedSurfaceKind::Props,
     );
+    let _field_a =
+        surface_member_to_expanded_field(&mut engine, seam_scope, &admitted_a, None, None, None);
     let after_seam_a = seam_db.live_count();
     assert_eq!(
         after_seam_a,
@@ -6071,15 +6081,15 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
 
     // The sibling sharing `.value` MUST collapse onto member A's entry — the
     // production peek hits it, so the cache does NOT grow.
-    let _field_b = surface_member_to_expanded_field(
-        &mut engine,
-        seam_scope,
-        &seam_member_b,
-        None,
-        None,
-        None,
+    let admitted_b = AdmittedPublishedMember::admitted_for_test(
+        seam_owner.clone(),
+        seam_shared,
+        seam_member_b,
         projection.cursor(),
+        PublishedSurfaceKind::Props,
     );
+    let _field_b =
+        surface_member_to_expanded_field(&mut engine, seam_scope, &admitted_b, None, None, None);
     assert_eq!(
         seam_db.live_count(),
         seam_baseline + 1,
@@ -6090,14 +6100,20 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     );
 
     // A different-`.value` member admits a disjoint entry through the seam.
+    let admitted_other = AdmittedPublishedMember::admitted_for_test(
+        seam_owner,
+        SemanticNodeId(88),
+        seam_member_other,
+        projection.cursor(),
+        PublishedSurfaceKind::Props,
+    );
     let _field_other = surface_member_to_expanded_field(
         &mut engine,
         seam_scope,
-        &seam_member_other,
+        &admitted_other,
         None,
         None,
         None,
-        projection.cursor(),
     );
     assert_eq!(
         seam_db.live_count(),
@@ -6170,7 +6186,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     let mode = ProjectionMode::Expanded;
     let context = ProjectionReductionContext::published(mode);
     let member = shape_member("crossViewMember", value);
-    let key = ShapeCacheKey::surface_member_value_whole_with_context(
+    let key = ShapeCacheKey::surface_member_value_whole_with_context_raw(
         Arc::<str>::from(c),
         &member,
         context,
@@ -6210,7 +6226,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
         })
         .expect("same-overlay-view read returns the primed value");
     assert!(
-        matches!(&overlay_same_view.type_expr, TypeExpr::Unknown { raw } if raw == "overlay-shape"),
+        matches!(&overlay_same_view.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "overlay-shape"),
         "the same-overlay-view warm hit must return the OVERLAY-primed shape \
          (`overlay-shape`), proving the entry was admitted under the overlay view",
     );
@@ -6233,7 +6249,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
          read MUST mismatch and recompute cold — never warm-hit the overlay entry.",
     );
     assert!(
-        matches!(&base_read.type_expr, TypeExpr::Unknown { raw } if raw == "base-shape"),
+        matches!(&base_read.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "base-shape"),
         "the base read must surface its OWN recomputed shape (`base-shape`), never the \
          overlay entry's `overlay-shape`",
     );
@@ -6266,7 +6282,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
          recompute is vacuous.",
     );
     assert!(
-        matches!(&base_same_view.type_expr, TypeExpr::Unknown { raw } if raw == "base-shape"),
+        matches!(&base_same_view.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "base-shape"),
         "the same-base-view warm hit must return the admitted BASE shape \
          (`base-shape`, from direction 1's base recompute), proving the entry is \
          admitted + reusable under the base view",
@@ -6292,7 +6308,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
          mismatch the base-rooted entry and recompute cold.",
     );
     assert!(
-        matches!(&overlay_read.type_expr, TypeExpr::Unknown { raw } if raw == "overlay-shape-2"),
+        matches!(&overlay_read.type_expr_for_test(), TypeExpr::Unknown { raw } if raw == "overlay-shape-2"),
         "the overlay read must surface its OWN recomputed shape (`overlay-shape-2`), \
          never a base-rooted entry's value",
     );

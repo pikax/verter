@@ -13,9 +13,11 @@ use crate::resolver_core::ResolverContext;
 use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
 
-use super::{
-    read_surface_members, resolve_macro_payload, resolve_payload_surface_with_scope,
-    surface_member_to_expanded_field, PayloadSurfaceScope,
+use super::macro_payload_substrate::PayloadSurfaceScope;
+use super::output_sink::surface_member_to_expanded_field;
+use super::publication_authority::{
+    admit_published_member, read_surface_member_candidates, resolve_macro_payload,
+    resolve_payload_surface_with_scope, AdmittedPublishedMember,
 };
 
 pub(crate) fn project_emits(
@@ -37,11 +39,11 @@ pub(crate) fn project_emits(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // See `project_props` for the PublishedField
-    // origin-edge emit rationale.
-    let admitted: Vec<_> = {
+    // See `project_props` for the PublishedField origin-edge rationale —
+    // recorded uniformly inside `admit_published_member`.
+    let admitted: Vec<(AdmittedPublishedMember<'_>, _, _, _)> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
-        let payload_node = match resolve_macro_payload(
+        let payload = match resolve_macro_payload(
             &dispatch,
             owner,
             file,
@@ -51,7 +53,7 @@ pub(crate) fn project_emits(
             MacroExpansionKind::DefineEmits,
             diag_sink,
         ) {
-            Some(node) => node,
+            Some(payload) => payload,
             None => return Vec::new(),
         };
 
@@ -65,47 +67,33 @@ pub(crate) fn project_emits(
         // set publishes without forcing the inheritance reducer onto
         // an `Expanded`-only escape hatch. Non-conditional payloads
         // pass through to the default single-dispatch path verbatim.
-        let surface_node = match resolve_payload_surface_with_scope(
+        let surface = match resolve_payload_surface_with_scope(
             &dispatch,
-            payload_node,
-            macro_index,
+            &payload,
             MacroExpansionKind::DefineEmits,
             PayloadSurfaceScope::EmitClassMacroObject,
             diag_sink,
         ) {
-            Some(node) => node,
+            Some(surface) => surface,
             None => return Vec::new(),
         };
 
-        let members = read_surface_members(ctx, surface_node);
-        members
+        read_surface_member_candidates(ctx, &surface)
             .into_iter()
-            // Publication-boundary visibility filter (mirrors props): a
-            // non-public class member is not a published emit. Every non-class
-            // origin is `Public`, so this is a no-op for the common
-            // type-literal / interface emit surfaces.
-            .filter(|member| member.visibility.is_public())
-            .filter_map(|member| {
-                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                dispatch.record_published_field_edge(
-                    owner,
-                    surface_node,
-                    member.value,
-                    &member.name,
-                );
+            .filter_map(|candidate| {
                 let analyzed = mac
                     .emit_fields
                     .iter()
-                    .find(|e| e.name == member.name.as_ref());
+                    .find(|e| e.name == candidate.member().name.as_ref());
                 let raw_type = analyzed.and_then(|e| e.payload_type.clone());
                 let shallow_type_expr = analyzed.and_then(|e| e.payload_expr.clone());
                 let shallow_type_expr_scope = analyzed.and_then(|e| e.payload_expr_scope.clone());
+                let admitted = admit_published_member(candidate, &cursor, &dispatch)?;
                 Some((
-                    member,
+                    admitted,
                     raw_type,
                     shallow_type_expr,
                     shallow_type_expr_scope,
-                    member_cursor,
                 ))
             })
             .collect()
@@ -113,15 +101,14 @@ pub(crate) fn project_emits(
     admitted
         .into_iter()
         .map(
-            |(member, raw_type, shallow_type_expr, shallow_type_expr_scope, member_cursor)| {
+            |(admitted, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
                 surface_member_to_expanded_field(
                     query_engine,
                     file,
-                    &member,
+                    &admitted,
                     raw_type,
                     shallow_type_expr,
                     shallow_type_expr_scope,
-                    member_cursor,
                 )
             },
         )

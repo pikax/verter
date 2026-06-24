@@ -729,57 +729,6 @@ pub(crate) fn decompose_indexed_access_chain_node(
 // barrel-routed declarations, so the shared walker (the merge / heritage
 // / Omit composition) is the place to fix any compound-root gap.
 
-/// Class D — Pick route-target via dispatch's `execute_pick`, yielding the
-/// Pick result `SemanticNodeId` (node-native).
-///
-/// Resolves `symbol_name` to a base `SemanticNodeId` (via Class A
-/// lowering on a bare `Ref` of the symbol), then dispatches
-/// `Pick<base, key_set>` through the dispatch's `execute_pick` helper
-/// (which routes through `build_builtin_utility` Pick arm at
-/// `build.rs:870`).
-///
-/// Returns `Some(node)` — the settled Pick result graph node — when the
-/// dispatch produces a non-recursive, non-error projection. It does NOT
-/// raise the node to a `TypeExpr`: the §1a fence keeps the Pick route
-/// node-native so the caller drives the node-native member-surface core
-/// (`materialize_member_surface_node`) directly, instead of raising the
-/// Pick to a `TypeExpr` and re-feeding it into the lower-then-delegate
-/// `TypeExpr` arm (a materialize-then-decide round-trip).
-///
-/// Caller pattern (per the engine's `project_route_surface_expr` Pick
-/// fallback): use the result node as a route surface via
-/// `materialize_member_surface_node`; fall back to the raw
-/// registry-candidate path on miss.
-pub(crate) fn pick_via_dispatch_pick_node(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-    members: &[String],
-) -> Option<crate::semantic_query::SemanticNodeId> {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, QueryResult};
-
-    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx());
-    let symbol_ref = verter_type_expr::TypeExpr::Ref {
-        name: Arc::from(symbol_name),
-        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-    };
-    // Bare-Ref base for the Pick builtin is an intermediate hop;
-    // the Pick result is the terminal demand.
-    let base = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        &symbol_ref,
-        ProjectionMode::Navigate,
-    )?;
-
-    let members_arc: Vec<Arc<str>> = members.iter().map(|s| Arc::from(s.as_str())).collect();
-    let result = dispatch.execute_pick(base, &members_arc, ProjectionMode::Expanded);
-    match result {
-        QueryResult::Value(id) => Some(id),
-        QueryResult::Recursive(_) | QueryResult::Error(_) => None,
-    }
-}
-
 /// Class D — generic-Ref instantiation via dispatch.
 ///
 /// Matches a `TypeExpr::Ref { name, type_arguments }` with non-empty
@@ -831,7 +780,7 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
         expr,
         ProjectionMode::Expanded,
     )?;
-    let raised = dispatch.materialize_output_type_expr(lowered)?;
+    let raised = dispatch.legacy_semantic_type_expr_bridge(lowered)?;
     // Callers use `.unwrap_or_else(|| original.clone())`, so a no-op
     // (raised == expr) must surface as `None` to preserve the caller's
     // own fallback path. A miss-shaped raise (Unknown/Opaque) likewise
@@ -865,12 +814,13 @@ pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_type_expr::TypeExpr> {
-    use crate::resolver_core::projected_surface_to_type_expr;
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    let surface = engine.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
-    projected_surface_to_type_expr(&surface)
+    // The raw `SurfaceView` / `SemanticNodeId` projection is confined to the
+    // query-engine sink; this host-threaded wrapper reaches it ONLY through the
+    // engine's sink-local composition method.
+    engine.dispatch_projected_surface_to_type_expr(scope_canonical_id, symbol_name)
 }
 
 pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
@@ -878,67 +828,14 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::component_meta_registry::{
-        component_meta_registry_public_indexed_access_route,
-        component_meta_registry_public_utility_route,
-    };
-    use crate::resolver_core::{
-        projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
-    };
-    use crate::semantic_query::{
-        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
-        SemanticQueryOutput,
-    };
-
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
-        .or_else(|| component_meta_registry_public_utility_route(expr))
-    {
-        if let Some(projected) =
-            engine.dispatch_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
-        {
-            return Some(
-                verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected),
-            );
-        }
-    }
-    if let Some(shape) = engine.project_direct_utility_surface_shape(scope_canonical_id, expr) {
-        return Some(shape);
-    }
-    let ctx = engine.ctx();
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Intermediate-base lowering is `Navigate`; the terminal
-    // `ProjectPath { .., Shallow }` carries the publication demand.
-    let base = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        expr,
-        ProjectionMode::Navigate,
-    )?;
-    let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
-        dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
-            base,
-            path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Shallow,
-            ),
-        })
-    else {
-        return None;
-    };
-    let surface = projected_surface_from_semantic_node(ctx, node)?;
-    let shape = projected_surface_to_expanded_shape(&surface);
-    // An index-signature-only surface (`{ [k: string]: string }`) is a
-    // genuine props surface — `defineProps<{ [k: string]: string }>()` admits
-    // every string key. Admitting it here lets the owner-local root gate (which
-    // already counts index signatures) see a non-empty shape; gating on
-    // properties / call-signatures alone would drop an index-sig-only root.
-    (!shape.properties.is_empty()
-        || !shape.call_signatures.is_empty()
-        || !shape.index_signatures.is_empty())
-    .then_some(shape)
+    // The `expr -> lower -> ProjectPath -> node -> shape` resolution lives behind
+    // the query-engine demand API: the caller passes a scope + `&TypeExpr`, never
+    // a resolved node, so the raw `SemanticNodeId`-to-surface projection stays
+    // confined to the query-engine sink (the forgeable node never crosses here).
+    engine.project_expr_to_surface_shape(scope_canonical_id, expr)
 }
 
 pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(
@@ -1135,76 +1032,51 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
 }
 
 #[cfg(test)]
-mod pick_node_signature_tests {
-    //! §1a fence proof (compile-level ONLY): the Pick route helper
-    //! `pick_via_dispatch_pick_node` yields a graph `SemanticNodeId`, NOT a
-    //! raised `TypeExpr`. The materialize-then-decide path — raise Pick to a
-    //! `TypeExpr` and re-feed it into `materialize_member_surface_expr` — is
-    //! GONE: the helper no longer raises, so its only caller drives
-    //! `materialize_member_surface_node` (node-native) directly.
+mod pick_demand_api_signature_tests {
+    //! Boundary-closure proof (compile-level ONLY): the routed-Pick member
+    //! surface is reached through the query-engine DEMAND API
+    //! `ComponentMetaQueryEngine::materialize_pick_member_surface`, which takes
+    //! a scope + root symbol + member keys and returns the materialised
+    //! `Option<TypeExpr>` — it accepts NO `SemanticNodeId` and exposes none.
     //!
-    //! The node-native swap is asserted at COMPILE LEVEL only, by the
-    //! `pick_helper_returns_a_graph_node_not_a_raised_type_expr` signature
-    //! test below: it coerces the helper to a fn pointer returning
-    //! `Option<SemanticNodeId>`, which type-checks only if the helper's real
-    //! signature matches. It FAILS to compile against the pre-change tree
-    //! (where the helper was `pick_via_dispatch_pick_helper` returning
-    //! `Option<TypeExpr>`) — both because the name does not exist and because
-    //! the return type would not unify with `Option<SemanticNodeId>`. That
-    //! compile-level signature assertion is the SOLE guard that the swap did
-    //! not regress to a raised `TypeExpr`.
+    //! The Pick dispatch + node-core materialisation happen INTERNALLY inside
+    //! the demand API, so a forgeable `SemanticNodeId` never crosses the
+    //! query-engine boundary. The prior shape — a `pick_via_dispatch_pick_node`
+    //! helper that returned a bare `SemanticNodeId` for an out-of-subtree caller
+    //! to feed into `materialize_member_surface_node` — is GONE.
     //!
-    //! There is NO functional test exercising this helper today. The
-    //! `.or_else(|| pick_via_dispatch_pick_node(...))` Pick fallback in
-    //! `host_manage/component_meta_methods.rs` is CURRENTLY UNREACHABLE
-    //! through the in-tree Pick routes: it runs only when `properties` is
-    //! empty, but the per-member loop unconditionally pushes a property for
-    //! every member (a raw `IndexedAccess` fallback when nothing better is
-    //! found), so `properties` is empty iff `members` is empty — and every
-    //! `RouteDemand::Pick` producer REJECTS an empty key set
-    //! (`shallow_file_state.rs`, `graph_predicates.rs`). So no real Pick
-    //! route reaches this helper, and there is no functional test that drives
-    //! `pick_via_dispatch_pick_node` -> `materialize_member_surface_node`
-    //! (an empirical probe panic at the helper's head fired ZERO times across
-    //! the `verter_session` test suite).
-    //!
-    //! Error-arm behaviour difference (for the future reader, when this
-    //! fallback becomes reachable): the OLD `materialize_member_surface_expr`
-    //! NEVER returned `None` — on a miss it published the raised shell — so
-    //! the caller always got a member surface back; the NEW
-    //! `materialize_member_surface_node` returns `None` on
-    //! `MaterializeOutcome::Error`, and the caller then falls through to the
-    //! registry-candidate path instead. This error arm is currently
-    //! unreachable for the same reason as the fallback itself.
-    //!
-    //! DEFERRED: a durable body-level guard (one that fails closed on any
-    //! re-added raise inside `pick_via_dispatch_pick_node`) and a real
-    //! route-only-Pick functional test that actually drives this helper
-    //! belong with the later fence/guard work — NOT added here (a
-    //! body-scanning scanner is out of this block's scope, and a test that
-    //! cannot reach the code would be non-discriminating).
+    //! Asserted at COMPILE LEVEL by coercing the demand API to a fn pointer
+    //! whose parameters are exactly `(scope, symbol, members, nested)` and whose
+    //! return is `Option<TypeExpr>`. The coercion type-checks only if the real
+    //! signature matches; a return of `Option<SemanticNodeId>` (the leaking
+    //! node-returning shape) would fail to unify here. This is the successor of
+    //! the §1a fence: no node crosses the boundary because the boundary API
+    //! resolves it internally.
 
     #[test]
-    fn pick_helper_returns_a_graph_node_not_a_raised_type_expr() {
-        // Coerce the helper to a fn pointer whose return type is EXACTLY
-        // `Option<SemanticNodeId>`. The coercion type-checks only if the
-        // helper's real signature matches; a `-> Option<TypeExpr>` helper
-        // (the old materialize-then-decide shape) would fail to unify here.
-        // This coercion genuinely FAILS to compile against the pre-change
-        // tree (old name / old return type) — it is the compile-level
-        // discriminator. (The prior `assert_ne!(TypeId, TypeId)` line was
-        // tautological — two distinct types are always distinct regardless
-        // of the code under test — and was removed; this fn-pointer coercion
-        // is the SOLE guard that the swap did not regress to a raised
-        // `TypeExpr`. There is NO functional test driving this helper today —
-        // the `.or_else` Pick fallback is currently unreachable; see the
-        // module `//!` comment above.)
-        let _proof: for<'a, 'b> fn(
-            &'b mut crate::resolver_core::ComponentMetaQueryEngine<'a>,
-            &str,
-            &str,
-            &[String],
-        ) -> Option<crate::semantic_query::SemanticNodeId> = super::pick_via_dispatch_pick_node;
-        let _ = _proof;
+    fn pick_demand_api_takes_no_node_and_returns_a_type_expr() {
+        // A monomorphic shim whose signature is the boundary contract:
+        // `(scope, symbol, members, nested) -> Option<TypeExpr>`, NO
+        // `SemanticNodeId` in or out. Binding the method to this shim
+        // type-checks only if the real demand-API signature matches; a
+        // node-returning `Option<SemanticNodeId>` shape (the leaking form)
+        // would fail to unify here. This is the successor of the §1a fence.
+        fn _proof(
+            engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+            scope: &str,
+            symbol: &str,
+            members: &[String],
+            nested: bool,
+        ) -> Option<verter_type_expr::TypeExpr> {
+            engine.materialize_pick_member_surface(scope, symbol, members, nested)
+        }
+        let _ = _proof
+            as fn(
+                &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+                &str,
+                &str,
+                &[String],
+                bool,
+            ) -> Option<verter_type_expr::TypeExpr>;
     }
 }

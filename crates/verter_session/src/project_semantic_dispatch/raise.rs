@@ -18,11 +18,17 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::TypeExpr;
 
+// Re-export the sealed output carriers so the existing
+// `crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr`
+// reference path the per-member publication projectors thread stays
+// stable. The TYPES are the single canonical sealed carriers defined in
+// `super::output_materialization`; this is a name re-export of the one
+// owner type (NOT a second definition / dual path).
+pub(crate) use super::output_materialization::{MaterializedOutputTypeExpr, OutputTypeExpr};
 use super::ProjectSemanticDispatch;
 use crate::instant::Instant;
 use crate::resolver_core::component_meta_query_engine::{
-    projected_surface_to_type_expr, semantic_query_error_raw, surface_view_to_projected_surface,
-    SEMANTIC_OBJECT_SURFACE,
+    semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
 };
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, OptionalityMod, PathSegment,
@@ -255,6 +261,141 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.raise_node_to_type_expr_inner(node, &mut active)
     }
 
+    /// Reconstruct an Object [`TypeExpr`] from a [`SurfaceView`], raising each
+    /// member / signature value through THIS raiser.
+    ///
+    /// The canonical `SemanticNodeId → TypeExpr` raiser owns this reconstruction
+    /// directly (rather than delegating to the query-engine's
+    /// `surface_view_to_projected_surface` + `projected_surface_to_type_expr`,
+    /// which are confined to the query-engine subtree). It is a STRUCTURAL
+    /// reconstruction — `SurfaceView → ObjectExpr` — not type resolution; the
+    /// member values raise through the SAME shared resolver
+    /// ([`Self::raise_node_to_type_expr`]) the prior path used.
+    ///
+    /// **Per-member cycle isolation:** each member / signature value is raised
+    /// with a FRESH cycle set ([`Self::raise_node_to_type_expr`] starts an empty
+    /// `active`), exactly as the prior path did (via
+    /// `materialize_output_type_expr` → `output_shell_raise_sealed` →
+    /// `raise_node_to_type_expr`). Threading this Object node's incoming `active`
+    /// set across members would diverge: a diamond where the same node backs two
+    /// members would short-circuit the second member to a cycle sentinel. So the
+    /// incoming `active` is deliberately NOT threaded here — equivalent to the
+    /// prior fresh-per-member behaviour.
+    ///
+    /// Returns `None` when the surface yields no representable members (mirrors
+    /// `projected_surface_to_type_expr`); the empty-`{}` case is handled by the
+    /// caller before reaching here.
+    fn raise_surface_view_to_object_type_expr(&self, surface: &SurfaceView) -> Option<TypeExpr> {
+        use verter_type_expr::{
+            FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
+            ObjectProperty, PrimitiveName,
+        };
+
+        // Raise each member value through THIS raiser (fresh cycle set), with the
+        // same `SEMANTIC_SURFACE_MEMBER` raise-failure sentinel the prior
+        // `surface_view_to_projected_surface` path used.
+        let raise_member = |node: SemanticNodeId| -> TypeExpr {
+            self.raise_node_to_type_expr(node)
+                .unwrap_or(TypeExpr::Unknown {
+                    raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                })
+        };
+
+        // Single-call-signature fast path (mirrors
+        // `projected_surface_to_type_expr`): a surface with no members, no
+        // construct signatures, no index signature, and exactly one call
+        // signature IS that call signature's `TypeExpr` (not wrapped in an
+        // object).
+        if surface.members.is_empty()
+            && surface.construct_signatures.is_empty()
+            && !surface.has_index_signature
+            && surface.call_signatures.len() == 1
+        {
+            return Some(raise_member(surface.call_signatures[0]));
+        }
+
+        let mut properties: Vec<ObjectMember> = Vec::new();
+        for member in surface.members.iter() {
+            let ty = raise_member(member.value);
+            // Reconstruct via `with_visibility` so a non-public class member
+            // survives with its true accessibility (leak-prevention +
+            // `native_props` fidelity), carrying the member's real OXC spans.
+            if member.is_method {
+                if let TypeExpr::Function(function) = &ty {
+                    properties.push(ObjectMember::Method(MethodSignature::with_visibility(
+                        member.name.as_ref().to_string(),
+                        (**function).clone(),
+                        member.optional,
+                        member.visibility,
+                        member.spans,
+                    )));
+                    continue;
+                }
+            }
+            properties.push(ObjectMember::Property(ObjectProperty::with_visibility(
+                member.name.as_ref().to_string(),
+                ty,
+                member.optional,
+                member.readonly,
+                member.visibility,
+                member.spans,
+            )));
+        }
+
+        for signature in surface.call_signatures.iter() {
+            if let TypeExpr::Function(function) = &raise_member(*signature) {
+                properties.push(ObjectMember::CallSignature(FunctionExpr::with_spans(
+                    function.parameters.clone(),
+                    function.return_type.clone(),
+                    function.type_parameters.clone(),
+                    function.spans,
+                )));
+            }
+        }
+
+        for signature in surface.construct_signatures.iter() {
+            if let TypeExpr::Function(function) = &raise_member(*signature) {
+                properties.push(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+                    function.parameters.clone(),
+                    function.return_type.clone(),
+                    function.type_parameters.clone(),
+                    function.spans,
+                )));
+            }
+        }
+
+        // A REAL `[k: K]: V` index signature (sourced from an OXC declaration
+        // site) re-emits its declared key/value shape AND its real spans.
+        for signature in surface.index_signatures.iter() {
+            properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
+                "key".to_string(),
+                raise_member(signature.key_type),
+                raise_member(signature.value_type),
+                signature.readonly,
+                signature.spans,
+            )));
+        }
+
+        // The synthetic open-surface placeholder ONLY when the surface is
+        // GENUINELY OPEN (`has_index_signature` set, no concrete signature
+        // carried). No single OXC site, so its spans stay `None` by design.
+        if surface.has_index_signature && surface.index_signatures.is_empty() {
+            properties.push(ObjectMember::IndexSignature(IndexSignature::synthetic(
+                "key".to_string(),
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::Unknown {
+                    raw: "projectedOpenSurface".to_string(),
+                },
+                false,
+            )));
+        }
+
+        if properties.is_empty() {
+            return None;
+        }
+        Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
+    }
+
     fn raise_node_to_type_expr_inner(
         &self,
         node: SemanticNodeId,
@@ -374,12 +515,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         properties: Vec::new(),
                     }))
                 } else {
-                    projected_surface_to_type_expr(&surface_view_to_projected_surface(
-                        self.ctx, surface,
-                    ))
-                    .unwrap_or(TypeExpr::Unknown {
-                        raw: SEMANTIC_OBJECT_SURFACE.to_string(),
-                    })
+                    // Reconstruct the Object body from the `SurfaceView` using THIS
+                    // raiser's own member raising (fresh cycle set per member,
+                    // matching the prior `surface_view_to_projected_surface` →
+                    // `materialize_output_type_expr` path). No cross-module call into
+                    // the query-engine surface projector.
+                    self.raise_surface_view_to_object_type_expr(surface)
+                        .unwrap_or(TypeExpr::Unknown {
+                            raw: SEMANTIC_OBJECT_SURFACE.to_string(),
+                        })
                 }
             }
             SemanticNodeData::MergedDecl { contributors } => {
@@ -751,61 +895,117 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// live graph store. It is deliberately NOT folded into an `Unknown`-sentinel
     /// here so callers can map a miss to whatever their own output contract
     /// requires.
-    // The named output boundary for output adapters / diagnostics / compat
-    // exporters and the publication projectors that hold a `SemanticNodeId`:
-    // the plain SHELL raise (no operator reduction). The single output/compat
-    // seams route through this; the raw `raise_node_to_type_expr` primitive
-    // stays module-private.
-    pub(crate) fn materialize_output_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
+    // Raise-side SHELL seam (no operator reduction). `pub(super)` — the
+    // [`OutputProjector`] capability's `materialize_output_type_expr`
+    // boundary method (in `super::output_materialization`) calls this. The
+    // raw `raise_node_to_type_expr` primitive stays MODULE-PRIVATE; this is
+    // the only out-of-module shell-raise reach.
+    //
+    // It hands back a SEALED [`OutputTypeExpr`] carrier, NEVER a bare
+    // [`TypeExpr`]. That is the structural fence: a `project_semantic_dispatch`
+    // SIBLING module (e.g. `mod.rs`, `evaluate.rs`) can reach this `pub(super)`
+    // seam, but the value it gets back is a sealed carrier it CANNOT unwrap
+    // (the inner `TypeExpr` is capability-gated via
+    // [`OutputTypeExpr::into_type_expr`], and a sibling cannot mint an
+    // `OutputProjector`). So no `pub(super)` seam ever yields a raw
+    // `TypeExpr` to a non-capability holder — closing the bare-delegator
+    // laundering hole. `None` is the miss signal.
+    pub(super) fn output_shell_raise_sealed(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<super::output_materialization::OutputTypeExpr> {
+        self.raise_node_to_type_expr(node)
+            .map(super::output_materialization::OutputTypeExpr::from_raise)
+    }
+
+    /// INTERIM Kind-B reverse-raise bridge — NOT an output sink, NOT
+    /// fenced.
+    ///
+    /// The Kind-B sites raise a graph `node` back to a bare [`TypeExpr`]
+    /// and then SEMANTICALLY DECIDE on it mid-flight (the
+    /// `execute_to_type_expr` route fixpoint applies
+    /// `type_expr_contains_semantic_miss` / `type_expr_is_expanded_surface`
+    /// to the raised expr; `instantiate_local_generic_ref_via_dispatch`
+    /// compares `raised == *expr`; `fast_to_expansion` builds an
+    /// `ExpandedNormalizedExpr`). They are control-flow consumers of the
+    /// raised `TypeExpr`, not publication sinks, so they do NOT route
+    /// through the sealed [`OutputProjector`] capability. This bridge gives
+    /// them the SAME raise they performed before the output-materialization
+    /// fence — functionally identical, returning a bare `Option<TypeExpr>`
+    /// (NOT a sealed carrier).
+    ///
+    /// This is the sanctioned interim bridge. The Kind-B graph-native
+    /// conversion — operating on `SemanticNodeId` / typed-IR (node-domain
+    /// predicates, a route fixpoint that progresses on node identity) — is
+    /// the end-state that retires it (tracked in
+    /// `docs/arch/parselower-design.md`). Until then the
+    /// `output_projector_residual_guards` scanner pins this exact reference
+    /// set so NO NEW Kind-B bridge sites are introduced. It delegates to
+    /// the still-module-private `raise_node_to_type_expr` shell primitive
+    /// (no new public boundary is re-added).
+    ///
+    /// [`OutputProjector`]: super::output_materialization::OutputProjector
+    pub(crate) fn legacy_semantic_type_expr_bridge(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<TypeExpr> {
         self.raise_node_to_type_expr(node)
     }
 
-    /// Materializes `node` after applying the supplied projection
-    /// reduction context; callers must pass the EXACT output/materialization
-    /// reduction context for that publication surface.
+    /// Test-only `HotTypeRef`-shaped wrapper over the raise-side shell
+    /// delegator, kept so the carrier round-trip tests can drive
+    /// materialisation from a `HotTypeRef` handle. Production callers hold a
+    /// [`SemanticNodeId`] and go through the sealed [`OutputProjector`]
+    /// capability boundary; this helper exists ONLY under test (the
+    /// structural guard `materialize_type_expr_is_not_production_visible`
+    /// asserts it is `#[cfg(test)]`-gated and not production-visible).
     ///
-    /// The context is taken explicitly (rather than narrowed to a mode or wrapped
-    /// in an output-only newtype) because the production projection callers build
-    /// and own their reduction context — the real output path legitimately uses
-    /// `structural_transit_with_mode` and the published-macro-type-arg context,
-    /// not a single "published" mode — and the lower-level
-    /// [`Self::raise_and_reduce_with_context`] stays the context primitive this
-    /// boundary names for output use.
-    ///
-    /// Reduction runs FIRST, then the reduced node is raised to a
-    /// [`TypeExpr`], so an operator-shape node (`IndexedAccess` / `Conditional`
-    /// / `Mapped` / `KeyOf` / `TypeOf`) is collapsed to the type it resolves to
-    /// before it is raised — distinct from the shell-only
-    /// [`Self::materialize_output_type_expr`], which raises operators
-    /// un-reduced.
-    ///
-    /// Returns the full [`MaterializedTypeExpr`]: the producing reduced
-    /// `node_id`, the raised `type_expr`, the accumulated `dep_signature`, and
-    /// the `result_is_partial` flag — the publication-surface output contract
-    /// the per-member projector consumes.
-    // The per-member publication-projector boundary: reduce-then-raise for
-    // the output/materialization surfaces (delegates straight to
-    // `raise_and_reduce_with_context`).
-    pub(crate) fn materialize_reduced_output_type_expr(
-        &self,
-        node: SemanticNodeId,
-        context: ProjectionReductionContext,
-    ) -> MaterializedTypeExpr {
-        self.raise_and_reduce_with_context(node, context)
-    }
-
-    /// Test-only `HotTypeRef`-shaped wrapper over
-    /// [`Self::materialize_output_type_expr`], kept so the carrier round-trip
-    /// tests can drive materialisation from a `HotTypeRef` handle. Production
-    /// callers hold a [`SemanticNodeId`] and go through the plain output
-    /// boundary directly; this helper exists only under test.
+    /// [`OutputProjector`]: super::output_materialization::OutputProjector
     #[cfg(test)]
     #[must_use]
     pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
-        self.materialize_output_type_expr(handle.node())
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_output_type_expr(handle.node())
+            .map(|carrier| carrier.into_type_expr(&cap))
             .unwrap_or(TypeExpr::Unknown {
                 raw: "<materialize miss>".to_string(),
             })
+    }
+
+    /// Test-only plain SHELL-raise that returns the unwrapped `TypeExpr`
+    /// (rather than a sealed carrier) so the carrier round-trip / reduction
+    /// suites can assert on the projected `TypeExpr`. Mints the
+    /// `#[cfg(test)]` test capability internally and unwraps — tests never
+    /// hold the capability/carrier. `#[cfg(test)]`-gated; not a production
+    /// path.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn materialize_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<TypeExpr> {
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_output_type_expr(node)
+            .map(|carrier| carrier.into_type_expr(&cap))
+    }
+
+    /// Test-only REDUCE-then-raise that returns the unwrapped `TypeExpr`
+    /// from the sealed `MaterializedOutputTypeExpr` carrier. Mints the
+    /// `#[cfg(test)]` test capability internally. `#[cfg(test)]`-gated; not
+    /// a production path.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn materialize_reduced_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> TypeExpr {
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_reduced_output_type_expr(node, context)
+            .into_type_expr(&cap)
     }
 
     fn index_key_to_type_expr(
@@ -858,39 +1058,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.execute_via_cold_build_helper(key)
     }
 
-    /// Reduce a [`SemanticNodeId`] by dispatching the appropriate
-    /// [`SemanticQueryKey`] for each operator-shape encountered in the
-    /// graph subtree, then raise the fully-reduced graph node to a
-    /// [`TypeExpr`].
-    ///
-    /// Operates GRAPH-NATIVE: walks [`SemanticNodeData`] via the
-    /// graph's `node_data`, dispatches per shape, interns reduced
-    /// shells via [`crate::semantic_query_memo::SemanticGraphStore::intern_preserving_scope`].
-    /// No re-lowering of raised TypeExpr subtrees.
-    ///
-    /// `mode` is threaded into nested dispatches and determines whether
-    /// `DeclRef` / `InstantiationRef` reduce eagerly (Expanded) or stay
-    /// terminal (Navigate).
-    ///
-    /// Returns a [`MaterializedTypeExpr`] carrying the producing
-    /// `SemanticNodeId`, the raised `TypeExpr`, and the accumulated
-    /// `DepSignature`.
-    ///
-    /// Test-only `Published(mode)`-default convenience wrapper over
-    /// [`Self::raise_and_reduce_with_context`]; the dispatch reducer tests
-    /// drive it with a bare [`ProjectionMode`]. Production reduce-then-raise
-    /// callers go through [`Self::materialize_reduced_output_type_expr`] /
-    /// [`Self::raise_and_reduce_with_context`] with an explicit
-    /// [`ProjectionReductionContext`].
-    #[cfg(test)]
-    pub(crate) fn raise_and_reduce(
-        &self,
-        node: SemanticNodeId,
-        mode: ProjectionMode,
-    ) -> MaterializedTypeExpr {
-        self.raise_and_reduce_with_context(node, ProjectionReductionContext::published(mode))
-    }
-
     /// Context-explicit reduce-then-raise reducer (demand-driven reducer
     /// spec).
     ///
@@ -908,7 +1075,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> MaterializedTypeExpr {
+    ) -> MaterializedOutputTypeExpr {
         let mut state = ReduceState::default();
         let reduced = self.reduce_graph_node_iterative(node, context, &mut state);
         let type_expr = self
@@ -917,12 +1084,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 raw: "<raise miss after reduction>".to_string(),
             });
         let result_is_partial = state.result_is_partial;
-        MaterializedTypeExpr {
-            node_id: Some(reduced),
-            type_expr,
-            dep_signature: state.into_dep_signature(),
+        MaterializedOutputTypeExpr::from_parts(
+            Some(reduced),
+            OutputTypeExpr::from_raise(type_expr),
+            state.into_dep_signature(),
             result_is_partial,
-        }
+        )
     }
 
     /// Top-down demand-driven graph reducer
@@ -2234,41 +2401,14 @@ fn rebuild_function(
     ))
 }
 
-/// Materialization-grade result returned by
-/// [`ProjectSemanticDispatch::materialize_reduced_output_type_expr`] /
-/// [`ProjectSemanticDispatch::raise_and_reduce_with_context`] and the
-/// session-layer `materialize_*` wrapper.
-///
-/// The session-layer caller `materialize_component_meta_type_expr_until_stable`
-/// returns this struct.
-///
-/// - `node_id`: `Some(id)` for dispatch-produced entries; `None` for
-///   synthetic / inline-annotation entries that bypass the dispatch
-///   path. Captured at materialization time for `SurfaceNodeIdentities`
-///   population.
-/// - `type_expr`: the raised final form.
-/// - `dep_signature`: accumulated fence signatures from all dispatch
-///   calls inside reduction. Session merges into
-///   `ResolvedComponentMetaState.fact_versions` before publish.
-#[derive(Debug, Clone)]
-pub struct MaterializedTypeExpr {
-    pub node_id: Option<SemanticNodeId>,
-    pub type_expr: TypeExpr,
-    pub dep_signature: DepSignature,
-    /// `true` when ANY semantic-dispatch read consumed by the reducer
-    /// returned a PARTIAL value (`result_is_partial` — projection-budget
-    /// exhaustion, cancellation, same-path recursion, or a walker
-    /// fatal/pathological diagnostic). Callers that publish the
-    /// materialized result into a downstream shared cache (e.g. the
-    /// per-field cache in `field_types.rs`, the projector second pass)
-    /// must propagate this bit so the final-result `ComponentMetaResultDb`
-    /// admission gate observes it and refuses to warm a partial. A benign
-    /// non-cacheable nested read (`cache_suppress` without `result_is_partial`
-    /// — ReturnOnly / overflow / unrootable self-root) does NOT set this:
-    /// a complete-but-non-cacheable result MUST still be allowed to warm
-    /// the component-meta result.
-    pub result_is_partial: bool,
-}
+// The materialization-grade result of the reduce-then-raise boundary is
+// the sealed [`MaterializedOutputTypeExpr`] carrier
+// (`super::output_materialization`): a private inner sealed `type_expr`
+// payload (capability-gated unwrap) plus the readable facts-rail metadata
+// (`node_id` / `dep_signature` / `result_is_partial`). The all-`pub`-field
+// `MaterializedTypeExpr` struct that previously lived here is retired —
+// handing back a bare `TypeExpr` field at the boundary was the laundering
+// surface the output-materialization capability fence closes.
 
 // Accumulator for `raise_and_reduce_with_context`; reached in production
 // through the reduce-then-raise output boundary from the per-member
@@ -5179,12 +5319,15 @@ mod tests {
         let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: type_param });
 
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let materialized = dispatch.raise_and_reduce(keyof, ProjectionMode::Expanded);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            keyof,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
 
         assert!(
-            matches!(materialized.type_expr, TypeExpr::KeyOf(_)),
+            matches!(materialized, TypeExpr::KeyOf(_)),
             "open keyof over type parameter must survive raise_and_reduce, got {:?}",
-            materialized.type_expr
+            materialized
         );
     }
 
@@ -5203,12 +5346,15 @@ mod tests {
         let alias = graph.intern_node(SemanticNodeData::Alias(primitive));
 
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let materialized = dispatch.raise_and_reduce(alias, ProjectionMode::Expanded);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            alias,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
 
         assert!(
-            matches!(materialized.type_expr, TypeExpr::Primitive(_)),
+            matches!(materialized, TypeExpr::Primitive(_)),
             "alias to primitive must reduce to that primitive, got {:?}",
-            materialized.type_expr
+            materialized
         );
     }
 
@@ -5229,9 +5375,12 @@ mod tests {
         });
 
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let materialized = dispatch.raise_and_reduce(template, ProjectionMode::Expanded);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            template,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
 
-        match &materialized.type_expr {
+        match &materialized {
             TypeExpr::Unknown { raw } => {
                 assert!(
                     raw.contains("template literal"),
@@ -5263,9 +5412,12 @@ mod tests {
         });
 
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let materialized = dispatch.raise_and_reduce(decl_ref, ProjectionMode::Navigate);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            decl_ref,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
 
-        match &materialized.type_expr {
+        match &materialized {
             TypeExpr::Ref {
                 name,
                 type_arguments,

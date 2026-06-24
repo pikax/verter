@@ -19,8 +19,22 @@ use super::{
     BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
     SEMANTIC_SURFACE_MEMBER,
 };
+use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
+
+crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+    /// The component-meta query-engine SURFACE projector's output-sink
+    /// capability. The surface projector here holds this to materialize a
+    /// graph node into a sealed output carrier and unwrap it. Its constructor
+    /// is visible ONLY within
+    /// `crate::resolver_core::component_meta_query_engine::surface` — NOT the
+    /// whole query-engine subtree — so no query-engine sibling can mint it
+    /// (planted `MetaQuerySurfaceOutputCap::new` outside this leaf is
+    /// `E0624`).
+    pub(crate) struct MetaQuerySurfaceOutputCap;
+    mint: pub(in crate::resolver_core::component_meta_query_engine::surface)
+}
 
 pub(crate) fn projected_surface_from_semantic_node(
     ctx: &dyn ResolverContext,
@@ -98,13 +112,19 @@ pub(crate) fn surface_view_to_projected_surface(
     surface: &SurfaceView,
 ) -> ProjectedSurface {
     let dispatch = ctx.dispatch();
+    // Mint the surface-projector output capability (constructor visible only
+    // within `crate::resolver_core::component_meta_query_engine::surface`):
+    // this projector is a true publication sink, so it materializes graph
+    // nodes into sealed output carriers and unwraps them via the capability.
+    let cap = MetaQuerySurfaceOutputCap::new(&dispatch);
     let members = surface
         .members
         .iter()
         .map(|member| ProjectedMember {
             name: member.name.as_ref().to_string(),
-            ty: dispatch
+            ty: cap
                 .materialize_output_type_expr(member.value)
+                .map(|raised| raised.into_type_expr(&cap))
                 .unwrap_or(TypeExpr::Unknown {
                     raw: SEMANTIC_SURFACE_MEMBER.to_string(),
                 }),
@@ -129,12 +149,18 @@ pub(crate) fn surface_view_to_projected_surface(
     let call_signatures = surface
         .call_signatures
         .iter()
-        .filter_map(|signature| dispatch.materialize_output_type_expr(*signature))
+        .filter_map(|signature| {
+            cap.materialize_output_type_expr(*signature)
+                .map(|raised| raised.into_type_expr(&cap))
+        })
         .collect();
     let construct_signatures = surface
         .construct_signatures
         .iter()
-        .filter_map(|signature| dispatch.materialize_output_type_expr(*signature))
+        .filter_map(|signature| {
+            cap.materialize_output_type_expr(*signature)
+                .map(|raised| raised.into_type_expr(&cap))
+        })
         .collect();
     // Graph `SurfaceView::index_signatures` carries the declared key/value
     // nodes + real OXC spans + the declaration file. Raise the key/value nodes
@@ -147,13 +173,15 @@ pub(crate) fn surface_view_to_projected_surface(
             use verter_semantic::analysis::type_solver::query_engine::ProjectedIndexSignature;
             ProjectedIndexSignature {
                 key_name: "key".to_string(),
-                key_type: dispatch
+                key_type: cap
                     .materialize_output_type_expr(signature.key_type)
+                    .map(|raised| raised.into_type_expr(&cap))
                     .unwrap_or(TypeExpr::Unknown {
                         raw: SEMANTIC_SURFACE_MEMBER.to_string(),
                     }),
-                value_type: dispatch
+                value_type: cap
                     .materialize_output_type_expr(signature.value_type)
+                    .map(|raised| raised.into_type_expr(&cap))
                     .unwrap_or(TypeExpr::Unknown {
                         raw: SEMANTIC_SURFACE_MEMBER.to_string(),
                     }),

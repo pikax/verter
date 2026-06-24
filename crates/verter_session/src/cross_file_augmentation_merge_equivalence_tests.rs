@@ -221,7 +221,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         }
 
         let projected = host
-            .project_node_to_type_expr(node)
+            .project_node_to_type_expr_for_test(node)
             .unwrap_or_else(|| panic!("the merged `Foo` must project in {mode:?}"));
         let dispatch_surface = object_member_surface(&projected);
         assert_eq!(
@@ -253,7 +253,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         ),
     }
     let alias_projected = host
-        .project_node_to_type_expr(alias_node)
+        .project_node_to_type_expr_for_test(alias_node)
         .expect("the aliased merged surface must project");
     let alias_surface = object_member_surface(&alias_projected);
     assert_eq!(

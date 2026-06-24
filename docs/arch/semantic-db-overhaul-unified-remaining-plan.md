@@ -2576,9 +2576,9 @@ divergence (`(props?: mapped): string` vs vcm's arrow form).
   (`crossorigin?: object`, …) — is a cross-file member value-collapse on the SAME
   routed resolution surface as XP.1 and is carried under XP.1's umbrella with its own
   acceptance test; it is NOT this row.
-- **Owner files:** `meta_resolve::projectors` (`reduce_field_type_expr_with_mode` —
-  why a directly-declared imported alias materialises instead of staying a `Ref`;
-  contrast the heritage path that stays shallow).
+- **Owner files:** `meta_resolve::projectors::output_sink` (`reduce_field_type_expr_with_mode` —
+  the sink-private per-field reducer; why a directly-declared imported alias materialises
+  instead of staying a `Ref`; contrast the heritage path that stays shallow).
 - **Acceptance (discriminating):** `Alert.avatar` publishes `AvatarProps` shallow
   (matching `Button.avatar` and vcm), with a negative assertion against expansion; a
   hermetic fixture (a component directly declaring `x?: ImportedAlias`) FAILS pre-fix

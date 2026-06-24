@@ -79,7 +79,7 @@ fn materialize(host: &VerterHost, data: SemanticNodeData) -> TypeExpr {
     let node = graph.intern_node(data);
     let dispatch = ProjectSemanticDispatch::new(host);
     dispatch
-        .materialize_output_type_expr(node)
+        .materialize_output_type_expr_for_test(node)
         .unwrap_or(TypeExpr::Unknown {
             raw: "<materialize miss>".to_string(),
         })
@@ -124,7 +124,7 @@ fn materialize_bare_ref_round_trips_type_args() {
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch
-        .materialize_output_type_expr(node)
+        .materialize_output_type_expr_for_test(node)
         .expect("carrier must raise through the plain output boundary");
     match &expr {
         TypeExpr::Ref {
@@ -168,7 +168,7 @@ fn materialize_typeof_round_trips_type_args() {
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch
-        .materialize_output_type_expr(node)
+        .materialize_output_type_expr_for_test(node)
         .expect("carrier must raise through the plain output boundary");
     match &expr {
         TypeExpr::TypeOf(value_ref) => {
@@ -204,7 +204,7 @@ fn materialize_import_type_round_trips() {
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch
-        .materialize_output_type_expr(node)
+        .materialize_output_type_expr_for_test(node)
         .expect("carrier must raise through the plain output boundary");
 
     match &expr {
@@ -269,7 +269,7 @@ fn materialize_tuple_preserves_element_rest_flag() {
     });
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch
-        .materialize_output_type_expr(node)
+        .materialize_output_type_expr_for_test(node)
         .expect("carrier must raise through the plain output boundary");
 
     match &expr {
@@ -308,7 +308,7 @@ fn materialize_constructor_type_preserves_ctor_ness() {
     let node = graph.intern_node(SemanticNodeData::ConstructorType { signature });
     let dispatch = ProjectSemanticDispatch::new(&host);
     let expr = dispatch
-        .materialize_output_type_expr(node)
+        .materialize_output_type_expr_for_test(node)
         .expect("carrier must raise through the plain output boundary");
 
     // Must round-trip as a CONSTRUCTOR type, not a plain function — the
@@ -392,7 +392,7 @@ fn hot_type_ref_harness_matches_plain_output_boundary() {
 
     let via_harness = dispatch.materialize_type_expr(HotTypeRef::new(node));
     let via_plain = dispatch
-        .materialize_output_type_expr(node)
+        .materialize_output_type_expr_for_test(node)
         .expect("the bare-ref carrier raises through the plain boundary");
 
     // Both routes land the same `Ref { name: "Foo" }` — the harness wrapper is
@@ -413,7 +413,9 @@ fn hot_type_ref_harness_matches_plain_output_boundary() {
     // miss-unwrap behavior (the only behavior it adds over the plain boundary).
     let absent = SemanticNodeId(u64::MAX);
     assert!(
-        dispatch.materialize_output_type_expr(absent).is_none(),
+        dispatch
+            .materialize_output_type_expr_for_test(absent)
+            .is_none(),
         "an un-interned node ordinal must miss the plain boundary"
     );
     assert!(

@@ -936,6 +936,156 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     );
 }
 
+/// Analyze the `dispatch_projected_surface_to_type_expr` ENGINE METHOD body in
+/// `registry_decl.rs` (the sink-local composition the root-surface bridge
+/// delegates to) and return a violation per structural deviation. The method
+/// MUST be exactly `dispatch_projected_surface(...)` + `projected_surface_to_type_expr(...)`
+/// composed once each, with NO fallback / rescue / retired token — a future
+/// prepared-decl fallback moved INTO this method body (rather than the bridge)
+/// would otherwise slip past the bridge-only scan.
+///
+/// Parameterised over the source so the self-test drives it with synthetic
+/// method bodies. `forbidden_method_extra` are the method-call names that, if
+/// they appear in the body, are a deviation (the rescue / `.or_else` escape);
+/// `retired_tokens` is the same retired-symbol set the bridge bans.
+fn dispatch_to_type_expr_method_violations(src: &str, retired_tokens: &[&str]) -> Vec<String> {
+    use syn::visit::Visit;
+    use syn::{Expr, ExprCall, ExprMethodCall};
+
+    const METHOD: &str = "dispatch_projected_surface_to_type_expr";
+    // The ONLY calls the composition body may make.
+    const ALLOWED_METHOD_CALLS: &[&str] = &["dispatch_projected_surface"];
+    const ALLOWED_FREE_CALLS: &[&str] = &["projected_surface_to_type_expr", "Some", "Ok", "Err"];
+
+    let Ok(file) = syn::parse_file(src) else {
+        return vec![format!(
+            "could not parse source for `{METHOD}` body analysis"
+        )];
+    };
+
+    struct MethodFinder<'a> {
+        method: &'a str,
+        body: Option<syn::Block>,
+    }
+    impl<'ast> Visit<'ast> for MethodFinder<'_> {
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            if f.sig.ident == self.method {
+                self.body = Some(f.block.clone());
+            }
+            syn::visit::visit_impl_item_fn(self, f);
+        }
+        // A free-fn form (the self-test plants one) is also accepted.
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            if f.sig.ident == self.method {
+                self.body = Some((*f.block).clone());
+            }
+            syn::visit::visit_item_fn(self, f);
+        }
+    }
+    let mut finder = MethodFinder {
+        method: METHOD,
+        body: None,
+    };
+    syn::visit::Visit::visit_file(&mut finder, &file);
+    let Some(block) = finder.body else {
+        return vec![format!(
+            "engine method `{METHOD}` not found in registry_decl.rs — the FIX-4 anchor moved"
+        )];
+    };
+
+    struct CallCollector<'a> {
+        method_calls: Vec<String>,
+        free_calls: Vec<String>,
+        retired_hits: Vec<String>,
+        retired_tokens: &'a [&'a str],
+    }
+    impl<'ast> Visit<'ast> for CallCollector<'_> {
+        fn visit_expr_method_call(&mut self, mc: &'ast ExprMethodCall) {
+            self.method_calls.push(mc.method.to_string());
+            syn::visit::visit_expr_method_call(self, mc);
+        }
+        fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+            if let Expr::Path(p) = call.func.as_ref() {
+                if let Some(last) = p.path.segments.last() {
+                    self.free_calls.push(last.ident.to_string());
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
+            let id = seg.ident.to_string();
+            if self.retired_tokens.contains(&id.as_str()) {
+                self.retired_hits.push(id);
+            }
+            syn::visit::visit_path_segment(self, seg);
+        }
+    }
+    let mut c = CallCollector {
+        method_calls: Vec::new(),
+        free_calls: Vec::new(),
+        retired_hits: Vec::new(),
+        retired_tokens,
+    };
+    c.visit_block(&block);
+
+    let mut violations = Vec::new();
+    // Exactly one `dispatch_projected_surface` method call.
+    let dispatch_calls = c
+        .method_calls
+        .iter()
+        .filter(|m| m.as_str() == "dispatch_projected_surface")
+        .count();
+    if dispatch_calls != 1 {
+        violations.push(format!(
+            "`{METHOD}` body must call `dispatch_projected_surface` EXACTLY once (the sole \
+             root-surface authority); found {dispatch_calls}. Method calls: {:?}",
+            c.method_calls
+        ));
+    }
+    // Exactly one `projected_surface_to_type_expr` converter call.
+    let converter_calls = c
+        .free_calls
+        .iter()
+        .filter(|m| m.as_str() == "projected_surface_to_type_expr")
+        .count();
+    if converter_calls != 1 {
+        violations.push(format!(
+            "`{METHOD}` body must call `projected_surface_to_type_expr` EXACTLY once (the surface→\
+             expr converter); found {converter_calls}. Free calls: {:?}",
+            c.free_calls
+        ));
+    }
+    // No method call outside the allowed set (`.or_else(...)`, a re-added
+    // `cached_prepared_root_surface()` rescue, any other engine-method escape).
+    for m in &c.method_calls {
+        if !ALLOWED_METHOD_CALLS.contains(&m.as_str()) {
+            violations.push(format!(
+                "`{METHOD}` body makes a non-approved method call `.{m}(...)` — the composition must \
+                 be `dispatch_projected_surface` + `projected_surface_to_type_expr` ALONE, no \
+                 `.or_else(...)` fallback / rescue. Approved methods: {ALLOWED_METHOD_CALLS:?}."
+            ));
+        }
+    }
+    // No free call outside the allowed set (a helper-indirection hiding a rescue).
+    for f in &c.free_calls {
+        if !ALLOWED_FREE_CALLS.contains(&f.as_str()) {
+            violations.push(format!(
+                "`{METHOD}` body calls non-approved free function `{f}(...)` — routing through any \
+                 other helper can hide a prepared-decl fallback. Approved: {ALLOWED_FREE_CALLS:?}."
+            ));
+        }
+    }
+    // No retired / forbidden token anywhere in the body.
+    for hit in &c.retired_hits {
+        violations.push(format!(
+            "`{METHOD}` body references retired/forbidden token `{hit}` — a prepared-decl \
+             root-surface rescue must NOT move into this engine method; fix the shared walker \
+             instead."
+        ));
+    }
+    violations
+}
+
 /// The surviving root-surface bridge
 /// (`project_type_surface_expr_via_host_threaded`) resolves a root symbol's
 /// surface through the shared dispatch surface projector ALONE. The
@@ -949,6 +1099,13 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
 /// shape/prepared bridges (`project_type_surface_shape_via_host_threaded`,
 /// `project_prepared_type_surface_{expr,shape}_via_host_threaded`) must not
 /// reappear anywhere in `dispatch_helpers.rs` (absence assertion below).
+///
+/// It ALSO inspects the `dispatch_projected_surface_to_type_expr` ENGINE METHOD
+/// BODY in `registry_decl.rs` (the sink-local composition the bridge delegates
+/// to): exactly one `dispatch_projected_surface` + one
+/// `projected_surface_to_type_expr`, no fallback / rescue / retired token — so a
+/// prepared-decl fallback moved INTO that method body (rather than the bridge)
+/// is caught too.
 #[test]
 fn root_surface_bridges_carry_no_prepared_decl_fallback() {
     use syn::visit::Visit;
@@ -962,29 +1119,30 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
         "project_prepared_type_surface_expr_via_host_threaded",
         "project_prepared_type_surface_shape_via_host_threaded",
     ];
-    // The ONLY method calls a bridge body may make. `dispatch_projected_surface`
-    // is the sole root-surface authority (asserted to appear exactly once);
+    // The ONLY method calls a bridge body may make.
+    // `dispatch_projected_surface_to_type_expr` is the sink-local composition
+    // that IS the sole root-surface authority — it internally resolves through
+    // `dispatch_projected_surface` (exactly once) + the
+    // `projected_surface_to_type_expr` converter, both now confined to the
+    // query-engine subtree (the raw `SurfaceView` / `SemanticNodeId` projection
+    // is sink-local; out-of-subtree bridges reach it ONLY through this engine
+    // method). It is asserted to appear exactly once;
     // `projection_op_budget_exhausted` is the cooperative budget guard. Any
     // OTHER method call (`.or_else(...)`, `engine.cached_prepared_root_surface(...)`,
     // an `engine.<other>()` rescue, …) is a structural deviation and FAILS.
     const ALLOWED_METHOD_CALLS: [&str; 2] = [
-        "dispatch_projected_surface",
+        "dispatch_projected_surface_to_type_expr",
         "projection_op_budget_exhausted",
     ];
-    // The ONLY free-function / variant-constructor calls a bridge body may
-    // make: the two thin surface→shape/expr converters, plus the std enum
-    // constructors (`Some` / `Ok` / `Err`) that wrap the converter result.
-    // Variant constructors are structurally inert — they cannot hide a rescue —
-    // so they are approved. Any OTHER free-fn call (including a local helper
-    // introduced to hide a `cached_prepared_root_surface` rescue behind an
-    // indirection) is a structural deviation and FAILS.
-    const ALLOWED_FREE_CALLS: [&str; 5] = [
-        "projected_surface_to_type_expr",
-        "projected_surface_to_expanded_shape",
-        "Some",
-        "Ok",
-        "Err",
-    ];
+    // The ONLY free-function / variant-constructor calls a bridge body may make:
+    // the std enum constructors (`Some` / `Ok` / `Err`). Variant constructors
+    // are structurally inert — they cannot hide a rescue — so they are approved.
+    // The surface converters are NO LONGER called directly here (they fused into
+    // the `dispatch_projected_surface_to_type_expr` sink-local method); any
+    // free-fn call (including a local helper introduced to hide a
+    // `cached_prepared_root_surface` rescue behind an indirection) is a
+    // structural deviation and FAILS.
+    const ALLOWED_FREE_CALLS: [&str; 3] = ["Some", "Ok", "Err"];
     const FORBIDDEN_TOKEN: &str = "cached_prepared_root_surface";
 
     let src = read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
@@ -1054,18 +1212,21 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
              merge / heritage / Omit functions), NOT by re-adding the rescue."
         );
 
-        // (2) Exactly one `dispatch_projected_surface` call — dispatch is the
-        //     sole root-surface authority. Zero would mean the bridge stopped
-        //     resolving through dispatch; more than one is an unexpected shape.
+        // (2) Exactly one `dispatch_projected_surface_to_type_expr` call — the
+        //     sink-local composition that IS the sole root-surface authority
+        //     (it resolves through `dispatch_projected_surface` internally). Zero
+        //     would mean the bridge stopped resolving through dispatch; more than
+        //     one is an unexpected shape.
         let dispatch_calls = collector
             .method_calls
             .iter()
-            .filter(|m| m.as_str() == "dispatch_projected_surface")
+            .filter(|m| m.as_str() == "dispatch_projected_surface_to_type_expr")
             .count();
         assert_eq!(
             dispatch_calls, 1,
-            "Stage 4-disp: `{bridge_name}` must call `dispatch_projected_surface` \
-             EXACTLY once (the sole root-surface authority); found \
+            "Stage 4-disp: `{bridge_name}` must call \
+             `dispatch_projected_surface_to_type_expr` EXACTLY once (the sink-local \
+             composition over the sole root-surface authority); found \
              {dispatch_calls}. Method calls observed: {:?}",
             collector.method_calls
         );
@@ -1140,6 +1301,93 @@ fn root_surface_bridges_carry_no_prepared_decl_fallback() {
              never by re-adding the walker bridge."
         );
     }
+
+    // The sink-local composition body: the bridge calls
+    // `dispatch_projected_surface_to_type_expr` (asserted above), which lives in
+    // `registry_decl.rs` and IS the sole root-surface authority. Inspect ITS
+    // method body so a prepared-decl fallback cannot hide there (the bridge-only
+    // scan would still pass). It must be exactly `dispatch_projected_surface` +
+    // `projected_surface_to_type_expr`, no rescue / retired token.
+    let registry_src = read_workspace_file(
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs",
+    );
+    let method_violations = dispatch_to_type_expr_method_violations(&registry_src, &RETIRED_TOKENS);
+    assert!(
+        method_violations.is_empty(),
+        "`dispatch_projected_surface_to_type_expr` engine-method-body violation(s) — a \
+         prepared-decl root-surface rescue must not move into the sink-local composition \
+         method:\n{}",
+        method_violations.join("\n")
+    );
+}
+
+#[test]
+fn dispatch_to_type_expr_method_body_self_test_discriminates() {
+    const RETIRED: &[&str] = &[
+        "cached_prepared_root_surface",
+        "project_prepared_type_surface_expr_via_host_threaded",
+    ];
+
+    // GREEN: the exact composition — one `dispatch_projected_surface` + one
+    // `projected_surface_to_type_expr`, nothing else.
+    let good = r#"
+        impl E {
+            pub(crate) fn dispatch_projected_surface_to_type_expr(
+                &mut self, scope: &str, symbol: &str,
+            ) -> Option<TypeExpr> {
+                let surface = self.dispatch_projected_surface(scope, symbol)?;
+                projected_surface_to_type_expr(&surface)
+            }
+        }
+    "#;
+    assert!(
+        dispatch_to_type_expr_method_violations(good, RETIRED).is_empty(),
+        "self-test: the exact composition body MUST pass; got: {:?}",
+        dispatch_to_type_expr_method_violations(good, RETIRED)
+    );
+
+    // RED: a `cached_prepared_root_surface` fallback planted in the method body.
+    let fallback = r#"
+        impl E {
+            fn dispatch_projected_surface_to_type_expr(&mut self, scope: &str, symbol: &str) -> Option<TypeExpr> {
+                let surface = self.dispatch_projected_surface(scope, symbol)
+                    .or_else(|| self.cached_prepared_root_surface(scope, symbol))?;
+                projected_surface_to_type_expr(&surface)
+            }
+        }
+    "#;
+    let v = dispatch_to_type_expr_method_violations(fallback, RETIRED);
+    assert!(
+        v.iter().any(
+            |m| m.contains("cached_prepared_root_surface") || m.contains("non-approved method")
+        ),
+        "self-test: a `cached_prepared_root_surface` fallback in the method body MUST FIRE; \
+         got: {v:?}"
+    );
+
+    // RED: a missing `dispatch_projected_surface` call (the body stopped routing
+    // through dispatch).
+    let no_dispatch = r#"
+        impl E {
+            fn dispatch_projected_surface_to_type_expr(&mut self, scope: &str, symbol: &str) -> Option<TypeExpr> {
+                let surface = self.cached_prepared_root_surface(scope, symbol)?;
+                projected_surface_to_type_expr(&surface)
+            }
+        }
+    "#;
+    let v = dispatch_to_type_expr_method_violations(no_dispatch, RETIRED);
+    assert!(
+        v.iter().any(|m| m.contains("EXACTLY once")),
+        "self-test: a body missing the `dispatch_projected_surface` call MUST FIRE; got: {v:?}"
+    );
+
+    // RED: the method missing entirely (anchor moved).
+    let missing = "impl E { fn other(&self) {} }";
+    let v = dispatch_to_type_expr_method_violations(missing, RETIRED);
+    assert!(
+        v.iter().any(|m| m.contains("not found")),
+        "self-test: a missing method MUST FIRE the anchor-moved violation; got: {v:?}"
+    );
 }
 
 /// The component-meta RESOLUTION PATH never re-introduces the retired eager
@@ -14230,14 +14478,19 @@ mod content_pinned_artifact_read_guards {
 
 #[test]
 fn surface_member_field_consults_member_shape_cache_before_round_trip() {
-    let source = read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
+    // `surface_member_to_expanded_field` is the HIGH-LEVEL publication API on
+    // the terminal `output_sink` sink module (it unwraps a sealed carrier
+    // through the module-private boundary primitive and returns an
+    // `ExpandedField` DTO), so the peek-before-raise contract is anchored there.
+    let source =
+        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
 
     // Extract the surface_member_to_expanded_field body via brace
     // matching from the signature marker through the function close.
     let fn_marker = "pub(crate) fn surface_member_to_expanded_field(";
     let fn_start = source
         .find(fn_marker)
-        .expect("surface_member_to_expanded_field must exist in projectors/mod.rs");
+        .expect("surface_member_to_expanded_field must exist in projectors/output_sink.rs");
     // Find the opening brace of the function body.
     let open_brace_offset = source[fn_start..]
         .find(") -> ExpandedField {")
@@ -15858,7 +16111,7 @@ mod single_resolution_engine_guards {
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            438,
+            467,
             "fn read_surface_members(",
         ),
         (
@@ -21236,6 +21489,65 @@ fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
     );
 }
 
+/// Whether a NAMED fn's PARAMETER types mention `type_name` — SIGNATURE-SCOPED,
+/// not a whole-file substring. Parses `src`, visits every free fn / impl method
+/// named `fn_name`, and returns true iff ANY of THAT fn's parameter type token
+/// streams contains `type_name` as an ident. (A whole-file
+/// `src.contains("AdmittedPublishedMember")` would hold because the token name
+/// appears in many places; this restricts the check to the fn's own params, so
+/// a by-value `from_surface_member(member: SemanticNodeId)` does NOT pass merely
+/// because the token name appears elsewhere in the file.)
+fn named_fn_param_mentions_type(src: &str, fn_name: &str, type_name: &str) -> bool {
+    use quote::ToTokens;
+    struct V<'a> {
+        fn_name: &'a str,
+        type_name: &'a str,
+        found: bool,
+    }
+    impl<'a> V<'a> {
+        fn check(&mut self, sig: &syn::Signature) {
+            if sig.ident != self.fn_name {
+                return;
+            }
+            for input in &sig.inputs {
+                if let syn::FnArg::Typed(pat) = input {
+                    let mentions = pat.ty.to_token_stream().into_iter().any(|tt| match tt {
+                        proc_macro2::TokenTree::Ident(id) => id == self.type_name,
+                        _ => false,
+                    }) || pat
+                        .ty
+                        .to_token_stream()
+                        .to_string()
+                        .contains(self.type_name);
+                    if mentions {
+                        self.found = true;
+                    }
+                }
+            }
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V<'_> {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            self.check(&f.sig);
+            syn::visit::visit_item_fn(self, f);
+        }
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            self.check(&f.sig);
+            syn::visit::visit_impl_item_fn(self, f);
+        }
+    }
+    let Ok(file) = syn::parse_file(src) else {
+        return false;
+    };
+    let mut v = V {
+        fn_name,
+        type_name,
+        found: false,
+    };
+    syn::visit::Visit::visit_file(&mut v, &file);
+    v.found
+}
+
 /// The regular member-shape cache subject is a SEALED graph-instance memo,
 /// not a free `SemanticNodeId` query-identity loophole. The subject's
 /// equivalence class is "the EXACT settled graph node that is a component
@@ -21252,18 +21564,22 @@ fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
 ///       newtype `MemberShapeNodeSubject`, NOT a bare `SemanticNodeId`
 ///       (a bare `SemanticNodeId` field would be externally spreadable);
 ///   (b) the sealed newtype `MemberShapeNodeSubject(SemanticNodeId)` exists
-///       and its sanctioned constructor `from_surface_member` reads a
-///       `&SurfaceMember` (so the public-to-crate path is member-value-only,
-///       not arbitrary-node);
+///       and its sanctioned production constructor `from_surface_member` reads
+///       a policy-admitted `&AdmittedPublishedMember` token in ITS OWN
+///       SIGNATURE (signature-scoped, not a whole-file name match), so the
+///       public-to-crate path is admitted-member-value-only, not arbitrary-node
+///       (the `#[cfg(test)]` `from_surface_member_raw(&SurfaceMember)` is the
+///       only surviving raw-member form);
 ///   (c) the production key constructor is the narrow
-///       `surface_member_value_whole_with_context`, taking a `&SurfaceMember`
-///       — and the retired arbitrary-`SemanticNodeId` production constructor
-///       `semantic_node_whole_with_context` is ABSENT from production
-///       (its only surviving form is the explicitly test-named
+///       `surface_member_value_whole_with_context`, taking a
+///       `&AdmittedPublishedMember` — and the retired arbitrary-`SemanticNodeId`
+///       production constructor `semantic_node_whole_with_context` is ABSENT
+///       from production (its only surviving form is the explicitly test-named
 ///       `member_value_node_whole_for_test`);
-///   (d) `member_shape_peek_or_compute` takes the member by reference
-///       (`member: &SurfaceMember`), not a bare `SemanticNodeId`, so the
-///       caller cannot route an arbitrary node through the cache.
+///   (d) `member_shape_peek_or_compute`'s OWN SIGNATURE takes the policy-admitted
+///       `&AdmittedPublishedMember` token (signature-scoped), not a bare
+///       `SemanticNodeId`, so the caller cannot route an arbitrary node through
+///       the cache.
 #[test]
 fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
     let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
@@ -21302,36 +21618,42 @@ fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
         "the sealed newtype `MemberShapeNodeSubject` (the structural seal over \
          the member's `SurfaceMember.value` graph node) must exist"
     );
-    // The newtype's sanctioned constructor reads a `&SurfaceMember` — the
-    // public-to-crate construction is member-value-only, not arbitrary-node.
-    // Discriminating (mirrors pin (d)): the whitespace-normalized signature
-    // must show `from_surface_member` actually taking a `&...SurfaceMember`
-    // PARAMETER. A by-value `from_surface_member(member: SemanticNodeId)` (or
-    // any non-`&SurfaceMember` form) must FAIL this check — so the broad
-    // name-only `src.contains("fn from_surface_member")` fallback is gone.
-    let nt_ws = src.split_whitespace().collect::<Vec<_>>().join(" ");
-    let signature_takes_member_ref = |normalized: &str| {
-        normalized.contains("from_surface_member(member: &crate::semantic_query::SurfaceMember")
-            || normalized.contains("from_surface_member(member: &SurfaceMember")
-            || normalized
-                .contains("from_surface_member (member: &crate::semantic_query::SurfaceMember")
-            || normalized.contains("from_surface_member (member: &SurfaceMember")
-    };
+    // The newtype's sanctioned production constructor reads a policy-admitted
+    // `&AdmittedPublishedMember` token — construction is admitted-member-value-
+    // only, strictly TIGHTER than the prior `&SurfaceMember` (an unadmitted
+    // member can no longer be routed through the sealed subject). A
+    // `#[cfg(test)]` `from_surface_member_raw(&SurfaceMember)` is the only
+    // surviving raw-member form.
+    //
+    // SIGNATURE-SCOPED: the check inspects `from_surface_member`'s OWN parameter
+    // types, NOT a whole-file substring. The prior
+    // `src.contains("fn from_surface_member") && src.contains("AdmittedPublishedMember")`
+    // collapsed to a name-only match because the token name appears in many
+    // places — a by-value `from_surface_member(member: SemanticNodeId)` would
+    // have passed merely because `AdmittedPublishedMember` occurs ELSEWHERE in
+    // the file. Now the ctor's OWN params must mention the member-value-bound
+    // token (or the raw `SurfaceMember` form); a by-value `SemanticNodeId`
+    // param FAILS.
+    let ctor_takes_admitted_member =
+        named_fn_param_mentions_type(&src, "from_surface_member", "AdmittedPublishedMember");
+    let ctor_takes_surface_member_ref =
+        named_fn_param_mentions_type(&src, "from_surface_member", "SurfaceMember");
     assert!(
-        signature_takes_member_ref(&nt_ws),
-        "the sealed newtype must expose `from_surface_member(member: &SurfaceMember)` \
-         as the sanctioned member-value constructor — a by-value or wrong-type \
-         signature (e.g. `from_surface_member(member: SemanticNodeId)`) must NOT \
-         satisfy the seal"
+        ctor_takes_admitted_member || ctor_takes_surface_member_ref,
+        "the sealed newtype must expose `from_surface_member(&AdmittedPublishedMember)` \
+         (the admitted-member-value production constructor) IN ITS OWN SIGNATURE — a by-value or \
+         wrong-type signature (e.g. `from_surface_member(member: SemanticNodeId)`) must NOT \
+         satisfy the seal even when `AdmittedPublishedMember` appears elsewhere in the file"
     );
 
-    // (c) The narrow production key constructor takes a `&SurfaceMember`, and
-    //     the retired arbitrary-`SemanticNodeId` production constructor is gone.
+    // (c) The narrow production key constructor takes a policy-admitted
+    //     `&AdmittedPublishedMember`, and the retired arbitrary-`SemanticNodeId`
+    //     production constructor is gone.
     assert!(
         src.contains("fn surface_member_value_whole_with_context"),
         "the narrow production key constructor \
          `ShapeCacheKey::surface_member_value_whole_with_context(scope, \
-         &SurfaceMember, ctx)` must exist — it is the SOLE production \
+         &AdmittedPublishedMember, ctx)` must exist — it is the SOLE production \
          construction path for the member-shape subject"
     );
     // The retired generic constructor that accepts an ARBITRARY `SemanticNodeId`
@@ -21348,24 +21670,38 @@ fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
          explicitly-named `member_value_node_whole_for_test`"
     );
 
-    // (d) The production peek/compute helper takes the member BY REFERENCE,
-    //     not a bare `SemanticNodeId` — so an arbitrary node cannot be routed
-    //     through the cache subject.
+    // (d) The production peek/compute helper takes the policy-admitted token BY
+    //     REFERENCE, not a bare `SemanticNodeId` — so an arbitrary / unadmitted
+    //     node cannot be routed through the cache subject.
+    //     `member_shape_peek_or_compute` lives in the terminal `output_sink`
+    //     sink module (it raises through the module-private boundary primitive)
+    //     and reads `admitted.member().value` for the sealed subject key.
+    //
+    //     SIGNATURE-SCOPED (matching (b)): the check inspects
+    //     `member_shape_peek_or_compute`'s OWN parameter types, NOT a whole-file
+    //     substring — the prior `proj_ws.contains("AdmittedPublishedMember")`
+    //     held because the token name appears all over `output_sink.rs`.
     let projectors =
-        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/mod.rs");
-    let proj_ws = projectors.split_whitespace().collect::<Vec<_>>().join(" ");
+        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
     assert!(
-        proj_ws.contains("fn member_shape_peek_or_compute"),
+        named_fn_param_mentions_type(&projectors, "member_shape_peek_or_compute", "_")
+            || projectors.contains("fn member_shape_peek_or_compute"),
         "guard must find `member_shape_peek_or_compute`"
     );
+    let peek_takes_admitted = named_fn_param_mentions_type(
+        &projectors,
+        "member_shape_peek_or_compute",
+        "AdmittedPublishedMember",
+    );
+    let peek_takes_surface_member =
+        named_fn_param_mentions_type(&projectors, "member_shape_peek_or_compute", "SurfaceMember");
     assert!(
-        proj_ws.contains("member : & crate :: semantic_query :: SurfaceMember")
-            || proj_ws.contains("member: &crate::semantic_query::SurfaceMember")
-            || proj_ws.contains("member : & SurfaceMember")
-            || proj_ws.contains("member: &SurfaceMember"),
-        "`member_shape_peek_or_compute` must take `member: &SurfaceMember` (the \
-         member-value path), not a bare `SemanticNodeId` — so the caller \
-         cannot route an arbitrary node through the sealed shape subject"
+        peek_takes_admitted || peek_takes_surface_member,
+        "`member_shape_peek_or_compute` must take a policy-admitted \
+         `&AdmittedPublishedMember` token (the admitted-member-value path) IN ITS OWN SIGNATURE, \
+         not a bare `SemanticNodeId` — so the caller cannot route an arbitrary / unadmitted node \
+         through the sealed shape subject (a whole-file `AdmittedPublishedMember` occurrence no \
+         longer satisfies this)"
     );
 
     // Self-discrimination: the variant-keys-on-newtype check trips if a bare
@@ -21386,29 +21722,78 @@ fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
         "scanner self-test: a planted production `fn semantic_node_whole` must \
          be detected"
     );
-    // Self-discrimination for the strengthened (b): a by-value / wrong-type
-    // `from_surface_member` signature must NOT satisfy the seal (the old broad
-    // name-only fallback would have accepted it; the new check rejects it).
-    let planted_byval =
-        "impl S { fn from_surface_member(member: SemanticNodeId) -> Self { Self(member) } }";
-    let planted_byval_ws = planted_byval
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(
-        !signature_takes_member_ref(&planted_byval_ws),
-        "scanner self-test: a by-value `from_surface_member(member: SemanticNodeId)` \
-         must FAIL the `&SurfaceMember`-parameter check (the seal requires the \
-         member-value path, not an arbitrary node)"
+    // Self-discrimination for the SIGNATURE-SCOPED (b): the CRITICAL case the
+    // strengthening fixes — a by-value `from_surface_member(member:
+    // SemanticNodeId)` WITH `AdmittedPublishedMember` present ELSEWHERE in the
+    // file must FAIL the combined (b) predicate. The OLD whole-file
+    // `contains("fn from_surface_member") && contains("AdmittedPublishedMember")`
+    // would have PASSED it (the token name appears in the unrelated struct);
+    // the signature-scoped check inspects only the ctor's OWN params.
+    let byval_with_token_elsewhere = r#"
+        // An UNRELATED admitted-token mention elsewhere in the file.
+        struct Unrelated { field: AdmittedPublishedMember }
+        impl S {
+            fn from_surface_member(member: SemanticNodeId) -> Self { Self(member) }
+        }
+    "#;
+    let combined_b = named_fn_param_mentions_type(
+        byval_with_token_elsewhere,
+        "from_surface_member",
+        "AdmittedPublishedMember",
+    ) || named_fn_param_mentions_type(
+        byval_with_token_elsewhere,
+        "from_surface_member",
+        "SurfaceMember",
     );
-    // And the real member-ref form must still PASS the same predicate.
-    let planted_ref =
-        "impl S { fn from_surface_member(member: &SurfaceMember) -> Self { Self(member.value) } }";
-    let planted_ref_ws = planted_ref.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        signature_takes_member_ref(&planted_ref_ws),
-        "scanner self-test: a `from_surface_member(member: &SurfaceMember)` form \
-         must satisfy the seal check"
+        !combined_b,
+        "scanner self-test: a by-value `from_surface_member(member: SemanticNodeId)` MUST FAIL the \
+         combined (b) predicate even when `AdmittedPublishedMember` appears ELSEWHERE in the file — \
+         the check is signature-scoped, not a whole-file name match"
+    );
+    // The real admitted-member form PASSES the signature-scoped check.
+    let admitted_form = r#"
+        impl S {
+            fn from_surface_member(
+                member: &crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember<'_>,
+            ) -> Self { Self(member.member().value) }
+        }
+    "#;
+    assert!(
+        named_fn_param_mentions_type(
+            admitted_form,
+            "from_surface_member",
+            "AdmittedPublishedMember"
+        ),
+        "scanner self-test: the real `from_surface_member(&AdmittedPublishedMember)` form MUST \
+         satisfy the signature-scoped (b) check"
+    );
+    // The `#[cfg(test)]` raw `&SurfaceMember` form also satisfies it (the raw
+    // ctor name differs, but the member-value-bound check accepts a SurfaceMember
+    // param on `from_surface_member` too — both are member-value-bound).
+    let surface_member_form =
+        "impl S { fn from_surface_member(member: &SurfaceMember) -> Self { Self(member.value) } }";
+    assert!(
+        named_fn_param_mentions_type(surface_member_form, "from_surface_member", "SurfaceMember"),
+        "scanner self-test: a `from_surface_member(member: &SurfaceMember)` form must satisfy the \
+         signature-scoped member-value check"
+    );
+    // And the signature-scoped helper does NOT cross fn boundaries: a DIFFERENT
+    // fn taking the token does not make `from_surface_member` pass.
+    let wrong_fn_takes_token = r#"
+        impl S {
+            fn other(member: &AdmittedPublishedMember) {}
+            fn from_surface_member(member: SemanticNodeId) -> Self { Self(member) }
+        }
+    "#;
+    assert!(
+        !named_fn_param_mentions_type(
+            wrong_fn_takes_token,
+            "from_surface_member",
+            "AdmittedPublishedMember"
+        ),
+        "scanner self-test: the helper must NOT credit `from_surface_member` for a token param on a \
+         DIFFERENT fn (signature-scoped, per-fn)"
     );
 }
 

@@ -70,6 +70,8 @@ mod semantic_graph_signature_builder_provenance;
 mod slot_binding_graph_matrix_import_ref;
 #[path = "g_misc1/slot_binding_graph_matrix_route_surface.rs"]
 mod slot_binding_graph_matrix_route_surface;
+#[path = "g_misc1/test_support_feature_off_in_default_build.rs"]
+mod test_support_feature_off_in_default_build;
 #[path = "g_misc1/ts_bindings.rs"]
 mod ts_bindings;
 #[path = "g_misc1/whole_hash_migration_audit.rs"]

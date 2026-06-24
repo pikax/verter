@@ -142,7 +142,7 @@ pub(crate) fn resolve_expr(
         .into_parts();
     let node = outcome.ok().flatten();
     let expr = host
-        .project_node_to_type_expr(node.unwrap_or_else(|| panic!("{name} must resolve")))
+        .project_node_to_type_expr_for_test(node.unwrap_or_else(|| panic!("{name} must resolve")))
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"));
     (expr, record)
 }
@@ -202,7 +202,7 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
         other => panic!("empty-path Shallow projection of {name} failed: {other:?}"),
     };
     dispatch
-        .materialize_output_type_expr(terminal)
+        .materialize_output_type_expr_for_test(terminal)
         .unwrap_or_else(|| panic!("{name} empty-path Shallow surface must project to TypeExpr"))
 }
 
@@ -223,7 +223,9 @@ pub(crate) fn evaluate_expr(
         .into_parts();
     let node = outcome.ok().flatten();
     let expr = host
-        .project_node_to_type_expr(node.unwrap_or_else(|| panic!("{expression} must resolve")))
+        .project_node_to_type_expr_for_test(
+            node.unwrap_or_else(|| panic!("{expression} must resolve")),
+        )
         .unwrap_or_else(|| panic!("{expression} resolved node must project to TypeExpr"));
     (expr, record)
 }

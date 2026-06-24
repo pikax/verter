@@ -23,9 +23,10 @@ use crate::resolver_core::ResolverContext;
 use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
 
-use super::{
-    read_surface_members, resolve_macro_payload, resolve_payload_surface,
-    surface_member_to_expanded_field,
+use super::output_sink::surface_member_to_expanded_field;
+use super::publication_authority::{
+    admit_published_member, read_surface_member_candidates, resolve_macro_payload,
+    resolve_payload_surface,
 };
 
 pub(crate) fn project_slots(
@@ -47,11 +48,11 @@ pub(crate) fn project_slots(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // See `project_props` for the PublishedField
-    // origin-edge emit rationale.
-    let admitted: Vec<_> = {
+    // See `project_props` for the PublishedField origin-edge rationale —
+    // recorded uniformly inside `admit_published_member`.
+    let admitted = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
-        let payload_node = match resolve_macro_payload(
+        let payload = match resolve_macro_payload(
             &dispatch,
             owner,
             file,
@@ -61,45 +62,24 @@ pub(crate) fn project_slots(
             MacroExpansionKind::DefineSlots,
             diag_sink,
         ) {
-            Some(node) => node,
+            Some(payload) => payload,
             None => return Vec::new(),
         };
 
-        let surface_node = match resolve_payload_surface(
+        let surface = match resolve_payload_surface(
             &dispatch,
-            payload_node,
-            macro_index,
+            &payload,
             MacroExpansionKind::DefineSlots,
-            // Slots are structural — `declared_in_macro_type_arg` is a
-            // props-axis concern and is always `false` for slot members.
-            // Routed through the single-source-of-truth helper (which maps
-            // DefineSlots → Structural) rather than hardcoding the value.
-            super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineSlots),
             diag_sink,
         ) {
-            Some(node) => node,
+            Some(surface) => surface,
             None => return Vec::new(),
         };
 
-        let members = read_surface_members(ctx, surface_node);
-        members
+        read_surface_member_candidates(ctx, &surface)
             .into_iter()
-            // Publication-boundary visibility filter (mirrors props): a
-            // non-public class member is not a published slot. Every non-class
-            // origin is `Public`, so this is a no-op for the common
-            // type-literal / interface slot surfaces.
-            .filter(|member| member.visibility.is_public())
-            .filter_map(|member| {
-                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                dispatch.record_published_field_edge(
-                    owner,
-                    surface_node,
-                    member.value,
-                    &member.name,
-                );
-                Some((member, member_cursor))
-            })
-            .collect()
+            .filter_map(|candidate| admit_published_member(candidate, &cursor, &dispatch))
+            .collect::<Vec<_>>()
     };
     // Slot fields don't carry a payload-style raw_type per member;
     // their parser-side annotation lives on bindings. The slot
@@ -108,16 +88,8 @@ pub(crate) fn project_slots(
     // structure via its own slot_fields traversal.
     admitted
         .into_iter()
-        .map(|(member, member_cursor)| {
-            surface_member_to_expanded_field(
-                query_engine,
-                file,
-                &member,
-                None,
-                None,
-                None,
-                member_cursor,
-            )
+        .map(|admitted| {
+            surface_member_to_expanded_field(query_engine, file, &admitted, None, None, None)
         })
         .collect()
 }

@@ -65,6 +65,10 @@ pub(crate) enum PublishedSurfaceKind {
     Slots,
     Exposed,
     Model,
+    /// `defineOptions({ ... })` / `defineOptions<T>()` — the component
+    /// options surface. The options projector publishes a real surface;
+    /// this is its own published-surface discriminant.
+    Options,
     /// The component-meta type registry walker — sees imported
     /// types reachable from the published surface.
     Registry,

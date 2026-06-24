@@ -11,6 +11,7 @@
 mod executor;
 mod graph_export;
 pub mod plan;
+pub(crate) mod resolved_surface_access;
 pub mod results;
 pub(crate) mod scope;
 pub(crate) mod svelte_exec;
