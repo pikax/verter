@@ -7,14 +7,14 @@
 //! the shared workspace import resolver behave across:
 //!
 //!  - `import_core_bundler`     — `module: preserve` / `moduleResolution: bundler`
-//!                                / `verbatimModuleSyntax`: relative / alias /
-//!                                baseUrl / named / namespace / barrel forms.
+//!    / `verbatimModuleSyntax`: relative / alias /
+//!    baseUrl / named / namespace / barrel forms.
 //!  - `import_nodenext_packages`— `nodenext` + a vendored package with `exports`
-//!                                and package `#imports`.
+//!    and package `#imports`.
 //!  - `import_refs_monorepo`    — composite project references (cross-project
-//!                                component carrier).
+//!    component carrier).
 //!  - `import_syntax_passthrough`— TS 6/7 syntax (import attributes, `import
-//!                                defer`, deprecated `assert`, isolatedDeclarations).
+//!    defer`, deprecated `assert`, isolatedDeclarations).
 //!
 //! Assertion strategy (per the scope consult):
 //!  - hover substring (a stable UNIQUE prop name) for static VALUE imports that
