@@ -170,6 +170,36 @@ impl ImportBindingMap {
         self.map.get(name).and_then(|(_, api)| *api)
     }
 
+    /// True iff `name` resolves to a RUNTIME (non-type-only) Vue import binding
+    /// classified as `api`. A `import type { defineAsyncComponent }` (or a
+    /// per-specifier `import { type defineAsyncComponent }`) is type-only — it
+    /// has no runtime value — so it must NOT satisfy a runtime-value gate, even
+    /// though the classifier tags it with a `vue_api`.
+    fn is_runtime_vue_api(
+        &self,
+        imports: &[AnalyzedImport],
+        name: &str,
+        api: VueApiClassification,
+    ) -> bool {
+        let Some((idx, binding_api)) = self.map.get(name) else {
+            return false;
+        };
+        if *binding_api != Some(api) {
+            return false;
+        }
+        let import = &imports[*idx];
+        if import.is_type_only {
+            return false;
+        }
+        // Per-specifier type-only (`import { type X }`) is tracked on the binding.
+        !import
+            .bindings
+            .iter()
+            .find(|b| b.name == name)
+            .map(|b| b.is_type_only)
+            .unwrap_or(false)
+    }
+
     /// Iterate over all entries: (local_name, (import_index, vue_api)).
     fn iter(&self) -> impl Iterator<Item = (&String, &(usize, Option<VueApiClassification>))> {
         self.map.iter()
@@ -1185,11 +1215,37 @@ fn classify_initializer(
                 let is_reactive = vue_api.map(is_reactivity_api).unwrap_or(false);
                 let reactivity_kind = classify_reactivity_kind(vue_api, callee_name);
 
+                // A `defineAsyncComponent(() => import('./X.vue'))` declares a
+                // component whose carrier is the dynamically-imported `.vue`.
+                // Capture the statically-resolvable specifier so the template
+                // converter can carrier-link a `<X>` tag bound to this binding.
+                //
+                // Gate strictly on the callee resolving to the IMPORTED, RUNTIME
+                // (non-type-only) Vue `defineAsyncComponent` binding, NOT the
+                // name-based macro fallback above: `defineAsyncComponent` is a
+                // real runtime import (unlike the compiler macros), so a local
+                // function, a non-Vue import, or a `import type { ... }` binding
+                // named `defineAsyncComponent` must NOT mint a carrier link.
+                let callee_is_vue_async_component = import_map.is_runtime_vue_api(
+                    imports,
+                    callee_name,
+                    VueApiClassification::DefineAsyncComponent,
+                );
+                let async_component_source = if callee_is_vue_async_component {
+                    call.arguments
+                        .first()
+                        .and_then(|arg| arg.as_expression())
+                        .and_then(async_component_loader_specifier)
+                } else {
+                    None
+                };
+
                 return (
                     Some(BindingInitializer::FunctionCall {
                         callee: callee_name.to_string(),
                         callee_import_source,
                         vue_api,
+                        async_component_source,
                     }),
                     is_reactive,
                     reactivity_kind,
@@ -1247,6 +1303,140 @@ fn classify_initializer(
             ReactivityKind::None,
         ),
         _ => (Some(BindingInitializer::Other), false, ReactivityKind::None),
+    }
+}
+
+/// Extract the statically-resolvable carrier specifier from a
+/// `defineAsyncComponent` argument.
+///
+/// Supports the common loader forms, all typed-IR (no source/string
+/// heuristics):
+///   - `() => import('./X.vue')`            (arrow, expression body)
+///   - `async () => await import('./X.vue')` (arrow with `await`)
+///   - `() => { return import('./X.vue') }`  (arrow/function, block body)
+///   - `{ loader: () => import('./X.vue') }` (options object `loader`)
+///
+/// Returns the import specifier ONLY when it is a single static string
+/// literal; a dynamic/templated/non-literal target yields `None` (no
+/// carrier link).
+fn async_component_loader_specifier(arg: &Expression<'_>) -> Option<String> {
+    match arg {
+        // Arrow loader: `() => import('X')` (expression body) or
+        // `() => { return import('X') }` (block body). The two body shapes are
+        // NOT interchangeable — see `arrow_body_import_specifier`.
+        Expression::ArrowFunctionExpression(arrow) => {
+            arrow_body_import_specifier(arrow.expression, &arrow.body)
+        }
+        // `function () { return import('X') }` — always a block body, so only a
+        // `return` of the import counts.
+        Expression::FunctionExpression(func) => {
+            func.body.as_deref().and_then(block_body_return_import)
+        }
+        // Options object: `{ loader: () => import('X') }` (key may be a plain or
+        // quoted identifier). JS evaluates properties in source order, so the
+        // EFFECTIVE loader is the LAST explicit static `loader` property. An
+        // OVERRIDE HAZARD after that last explicit `loader` makes the effective
+        // loader undecidable — bail to `None`. Hazards: a spread (`...rest` may
+        // carry `loader`) OR a computed key (`[k]` may evaluate to `"loader"`).
+        // A hazard BEFORE the last explicit `loader` is overridden by it, so it
+        // is harmless. A static non-`loader` key is never a hazard.
+        Expression::ObjectExpression(obj) => {
+            let mut last_loader: Option<String> = None;
+            let mut last_loader_idx: Option<usize> = None;
+            let mut last_hazard_idx: Option<usize> = None;
+            for (idx, prop) in obj.properties.iter().enumerate() {
+                match prop {
+                    ObjectPropertyKind::ObjectProperty(prop) => {
+                        // A computed key (`[expr]`) may evaluate to "loader".
+                        if prop.computed {
+                            last_hazard_idx = Some(idx);
+                            continue;
+                        }
+                        let is_loader = match &prop.key {
+                            PropertyKey::StaticIdentifier(id) => id.name == "loader",
+                            PropertyKey::StringLiteral(lit) => lit.value == "loader",
+                            _ => false,
+                        };
+                        if is_loader {
+                            last_loader = async_component_loader_specifier(&prop.value);
+                            last_loader_idx = Some(idx);
+                        }
+                    }
+                    ObjectPropertyKind::SpreadProperty(_) => last_hazard_idx = Some(idx),
+                }
+            }
+            match (last_loader_idx, last_hazard_idx) {
+                // A spread / computed key AFTER the last explicit `loader` may
+                // override it.
+                (Some(loader_idx), Some(hazard_idx)) if hazard_idx > loader_idx => None,
+                _ => last_loader,
+            }
+        }
+        // Unwrap a parenthesized loader argument: `((() => import('X')))`.
+        Expression::ParenthesizedExpression(paren) => {
+            async_component_loader_specifier(&paren.expression)
+        }
+        _ => None,
+    }
+}
+
+/// Find the `import('literal')` specifier a loader arrow body RETURNS.
+///
+/// The body shape is significant — this prevents a false positive where
+/// `() => { import('./Side.vue'); return Other; }` would otherwise link the
+/// side-effect import:
+///   - expression-bodied arrow (`() => import('X')`): OXC wraps the single
+///     implicitly-returned expression as the body's lone `ExpressionStatement`
+///     — accept it;
+///   - block-bodied arrow (`() => { … }`): ONLY a `return import('X')` counts,
+///     never a bare `import('X')` expression statement.
+///
+/// Unwraps `await`/parentheses; typed-IR only.
+fn arrow_body_import_specifier(
+    is_expression_body: bool,
+    body: &FunctionBody<'_>,
+) -> Option<String> {
+    if is_expression_body {
+        return body.statements.iter().find_map(|stmt| match stmt {
+            Statement::ExpressionStatement(expr_stmt) => {
+                import_expression_specifier(&expr_stmt.expression)
+            }
+            _ => None,
+        });
+    }
+    block_body_return_import(body)
+}
+
+/// Find a `return import('literal')` in a block body. A bare `import('literal')`
+/// expression statement does NOT count (it is not the loader's return value).
+/// Unwraps `await`/parentheses; typed-IR only.
+fn block_body_return_import(body: &FunctionBody<'_>) -> Option<String> {
+    // Only capture a PROVABLY-DETERMINISTIC block loader: the block's FIRST
+    // statement is `return import('literal')`. Any preceding statement (a
+    // conditional `if (flag) return import(...)`, a branch, a side effect, …)
+    // makes the returned carrier runtime-dependent or ambiguous — bail rather
+    // than mint a deterministic carrier link from a non-deterministic loader.
+    match body.statements.first()? {
+        Statement::ReturnStatement(ret) => {
+            ret.argument.as_ref().and_then(import_expression_specifier)
+        }
+        _ => None,
+    }
+}
+
+/// Extract the static string specifier of an `import('literal')` expression,
+/// unwrapping `await` / parentheses. `None` for any non-static target.
+fn import_expression_specifier(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::ImportExpression(import) => match &import.source {
+            Expression::StringLiteral(lit) => Some(lit.value.to_string()),
+            _ => None,
+        },
+        Expression::AwaitExpression(aw) => import_expression_specifier(&aw.argument),
+        Expression::ParenthesizedExpression(paren) => {
+            import_expression_specifier(&paren.expression)
+        }
+        _ => None,
     }
 }
 

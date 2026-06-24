@@ -1020,6 +1020,194 @@ fn resolve_package_imports_from_nearest_package_json() {
 }
 
 #[test]
+fn resolve_package_imports_subpath_substitutes_js_specifier_to_ts_sibling() {
+    // `nodenext` extension rewrite: a `.js` import specifier resolves to its
+    // `.ts` sibling. The fixture maps `#internal/*` -> `./src/internal/*` and the
+    // consumer imports `#internal/InternalComp.js`; the real file is
+    // `InternalComp.ts`, so the resolver must substitute `.js` -> `.ts`.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&["/workspace/src/internal/InternalComp.ts"]);
+    reader.add_file(
+        "/workspace/package.json",
+        r##"{
+                "imports": {
+                    "#internal/*": "./src/internal/*"
+                }
+            }"##,
+    );
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "#internal/InternalComp.js".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("a `#imports` subpath with a `.js` specifier must resolve to its `.ts` sibling");
+
+    assert_eq!(
+        resolved.source_id,
+        "/workspace/src/internal/InternalComp.ts"
+    );
+    assert_eq!(resolved.resolution_kind, ResolutionKind::PackageImports);
+}
+
+#[test]
+fn resolve_relative_js_specifier_substitutes_to_ts_sibling() {
+    // The extension rewrite is general (not `#imports`-specific): a relative
+    // `./x.js` import resolves to `./x.ts` when only the `.ts` sibling exists.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/mod.ts"]);
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "./mod.js".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("a relative `.js` specifier must resolve to its `.ts` sibling");
+
+    assert_eq!(resolved.source_id, "/workspace/src/mod.ts");
+}
+
+#[test]
+fn resolve_js_specifier_prefers_source_ts_over_colocated_dts() {
+    // TS extension substitution: when BOTH `./x.ts` and `./x.d.ts` exist, a
+    // `./x.js` specifier resolves to the SOURCE `./x.ts`, not the declaration.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/mod.ts", "/workspace/src/mod.d.ts"]);
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "./mod.js".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("a relative `.js` specifier must resolve");
+
+    assert_eq!(
+        resolved.source_id, "/workspace/src/mod.ts",
+        "the source `.ts` sibling must win over a co-located `.d.ts` for a `.js` specifier"
+    );
+}
+
+#[test]
+fn sfc_src_attr_js_does_not_substitute_to_ts_sibling() {
+    // An SFC `src="./setup.js"` reads the LITERAL file bytes — it is NOT TS
+    // import resolution. When both `setup.js` and `setup.ts` exist it MUST
+    // resolve to the literal `.js`, never substitute to `.ts`.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/setup.js", "/workspace/src/setup.ts"]);
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.vue".to_string(),
+                specifier: "./setup.js".to_string(),
+                kind: ResolveRequestKind::SfcSrcAttr,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("an SFC `src=\"./setup.js\"` must resolve to the literal file");
+
+    assert_eq!(
+        resolved.source_id, "/workspace/src/setup.js",
+        "an SFC `src=` must NOT substitute `.js` -> `.ts` (reads literal bytes)"
+    );
+}
+
+#[test]
+fn sfc_src_attr_js_does_not_substitute_to_ts_even_when_js_absent() {
+    // An SFC `src="./setup.js"` is a LITERAL file reference, not TS import
+    // resolution — the `.js` -> `.ts` extension rewrite never applies. With only
+    // `setup.ts` present (no `setup.js`), the `src` does NOT resolve to the
+    // `.ts` sibling: it stays unresolved (a missing-file `src=`), distinguishing
+    // the literal-bytes semantics from import substitution.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/setup.ts"]);
+
+    let resolved = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/src/App.vue".to_string(),
+            specifier: "./setup.js".to_string(),
+            kind: ResolveRequestKind::SfcSrcAttr,
+            phase: ResolvePhase::CodegenBlocker,
+        },
+    );
+
+    assert!(
+        resolved.is_none(),
+        "an SFC `src=\"./setup.js\"` must NOT substitute to the `.ts` sibling \
+         (literal file reference, not TS import resolution); got: {resolved:?}"
+    );
+}
+
+#[test]
+fn esm_import_js_still_substitutes_to_ts_when_js_absent() {
+    // Contrast with the SFC src case: an ESM IMPORT `./setup.js` DOES substitute
+    // to the `.ts` sibling (TS file-extension-substitution).
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/setup.ts"]);
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "./setup.js".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("an ESM import `./setup.js` must substitute to its `.ts` sibling");
+
+    assert_eq!(resolved.source_id, "/workspace/src/setup.ts");
+}
+
+#[test]
 fn resolve_package_exports_prefers_types_for_root_imports() {
     let resolver = ProjectResolver::new(vec![project(
         "/workspace",

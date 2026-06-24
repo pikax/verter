@@ -1034,6 +1034,11 @@ fn probe_path(reader: &dyn crate::traits::WorkspaceRead, base: &str) -> Option<S
         if let Some(resolved) = resolve_existing_path(reader, &base) {
             return Some(resolved);
         }
+        // NOTE: the `nodenext` `.js`->`.ts` extension rewrite is NOT applied
+        // here. It is a TYPESCRIPT-IMPORT-resolution rule and is applied only in
+        // `probe_path_for_context` for import-like request kinds — never for an
+        // SFC `src=` attribute (which reads the literal file bytes) and never
+        // for a `types`/`typings` manifest probe (already declaration paths).
     } else {
         for extension in probe_extensions() {
             let candidate = format!("{base}{extension}");
@@ -1059,6 +1064,18 @@ fn probe_path_for_context(
     ctx: ResolutionContext,
 ) -> Option<String> {
     let normalized = normalize_canonical_id(base);
+    // TS file-extension-substitution for an explicit JS-family IMPORT specifier
+    // prefers the SOURCE sibling (`./x.js` -> `./x.ts`) over a co-located
+    // declaration file, so the source-`.ts`/`.tsx` sibling is tried BEFORE the
+    // `.d.ts` companion. This is a TYPESCRIPT-IMPORT rule, so it applies ONLY to
+    // import-like kinds — NEVER to an SFC `src=` attribute (`<script
+    // src="./setup.js">` reads the literal file bytes; substituting `.ts` would
+    // change which external file is consumed).
+    if ctx.kind != ResolveRequestKind::SfcSrcAttr {
+        if let Some(resolved) = resolve_ts_source_sibling(reader, &normalized) {
+            return Some(resolved);
+        }
+    }
     if prefers_declaration_files(ctx) {
         if let Some(resolved) = resolve_declaration_companion(reader, &normalized) {
             return Some(resolved);
@@ -1164,6 +1181,42 @@ fn resolve_declaration_companion(
     for companion_ext in companion_exts {
         let companion = format!("{stem}{companion_ext}");
         if let Some(resolved) = resolve_existing_path(reader, &companion) {
+            return Some(resolved);
+        }
+    }
+
+    None
+}
+
+/// TypeScript's `nodenext` extension rewrite: a JS-family runtime specifier
+/// resolves to its TypeScript SOURCE sibling (`./x.js` -> `./x.ts`). Maps the
+/// runtime extension to its source siblings only (`.ts`/`.tsx`/`.mts`/`.cts`;
+/// `.jsx` -> `.tsx`); the `.d.*` declaration companion is a SEPARATE, lower
+/// fallback handled by `resolve_declaration_companion`, so the source sibling
+/// always wins when both exist (matching TS file-extension-substitution).
+/// Returns the first existing source sibling, or `None`.
+fn resolve_ts_source_sibling(
+    reader: &dyn crate::traits::WorkspaceRead,
+    candidate: &str,
+) -> Option<String> {
+    let normalized = normalize_canonical_id(candidate);
+    let (runtime_ext, source_exts): (&str, &[&str]) = if normalized.ends_with(".mjs") {
+        (".mjs", &[".mts"])
+    } else if normalized.ends_with(".cjs") {
+        (".cjs", &[".cts"])
+    } else if normalized.ends_with(".jsx") {
+        (".jsx", &[".tsx"])
+    } else if normalized.ends_with(".js") {
+        (".js", &[".ts", ".tsx"])
+    } else {
+        return None;
+    };
+
+    let stem = normalized.strip_suffix(runtime_ext)?;
+
+    for source_ext in source_exts {
+        let sibling = format!("{stem}{source_ext}");
+        if let Some(resolved) = resolve_existing_path(reader, &sibling) {
             return Some(resolved);
         }
     }

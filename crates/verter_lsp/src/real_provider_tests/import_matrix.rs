@@ -104,56 +104,47 @@ real_provider_test!(
             type_import.is_type_only,
             "`import type {{ OnlyAType }}` must be classified type-only"
         );
-        // CHARACTERIZED TRACKED DEFECT (discriminating, asserted UNCONDITIONALLY —
-        // App.vue has a `<template>`): the script-imports carrier-linkage map does
-        // NOT exclude type-only bindings, so a rendered `<OnlyAType>` is CURRENTLY
-        // carrier-linked to its `import type` source (`import_source =
-        // Some("./types")`) even though the import is correctly flagged type-only
-        // above. Per the carrier-IDE/typed-IR rule a `import type {...}` must NEVER
-        // be carrier-linked as a value component, so the DESIRED state is
-        // `import_source = None`; that desired negative is the `#[ignore]`'d
-        // companion `type_only_import_is_not_carrier_linked_*` (which FAILS today
-        // and PASSES once the carrier-linkage map filters type-only bindings). This
-        // test pins the current linkage so the gap is explicit, not silent, and so
-        // it FAILS the moment Verter is fixed — at which point promote the
-        // companion to a live assert.
+        // Per the carrier-IDE/typed-IR rule a `import type {...}` must NEVER be
+        // carrier-linked as a value component: the script-imports carrier-linkage
+        // map filters type-only bindings, so a rendered `<OnlyAType>` (an
+        // intentional misuse) carries `import_source = None` even though the tag is
+        // recorded as a template usage. Asserted UNCONDITIONALLY (App.vue has a
+        // `<template>`) so a regression that re-links the type-only binding FAILS.
+        // The full desired-behavior assertion is the
+        // `type_only_import_is_not_carrier_linked_*` companion.
         let template = analysis
             .template
             .as_ref()
             .expect("App.vue should have a <template>");
-        assert!(
-            template
-                .components
-                .iter()
-                .any(|c| c.name == "OnlyAType" && c.import_source.as_deref() == Some("./types")),
-            "characterized tracked defect: a rendered `<OnlyAType>` is CURRENTLY \
-             carrier-linked to its `import type` source (the carrier-linkage map \
-             does not filter type-only bindings) — if this now reads None, the \
-             defect is fixed: promote `type_only_import_is_not_carrier_linked_*`; \
+        // Assert the rendered `<OnlyAType>` tag IS recorded as a usage first (so
+        // the negative below is not vacuous if the tag ever disappears), then
+        // assert it is NOT carrier-linked.
+        let only_a_type = template
+            .components
+            .iter()
+            .find(|c| c.name == "OnlyAType")
+            .expect("the rendered `<OnlyAType>` tag must be recorded as a template component usage");
+        assert_eq!(
+            only_a_type.import_source, None,
+            "a type-only import (`import type {{ OnlyAType }}`) must NEVER be \
+             carrier-linked as a value component (import_source must stay None); \
              got: {:?}",
-            template
-                .components
-                .iter()
-                .filter(|c| c.name == "OnlyAType")
-                .map(|c| (&c.name, &c.import_source))
-                .collect::<Vec<_>>()
+            only_a_type.import_source
         );
     }
 );
 
-// TRACKED GAP: a type-only import (`import type { OnlyAType } from './types'`)
-// rendered as a template tag (`<OnlyAType :typeFieldOnly="1" />`) IS wrongly
-// carrier-linked as a value component today — the script-imports carrier-linkage
-// map built for the template converter does not exclude type-only bindings, so
-// the `<OnlyAType>` template-component usage carries
-// `import_source = Some("./types")`. Per the carrier-IDE / typed-IR rule a
-// `import type {...}` must NEVER be carrier-linked as a value component (the
-// import IS correctly flagged `is_type_only`, but the linkage map ignores that),
-// so the DESIRED `import_source` is None. This asserts that DESIRED non-linkage
-// so it FAILS today and PASSES once the carrier-linkage map filters type-only
-// bindings. The current (wrong) linkage is pinned by `import_core_bundler`'s
-// type-only block. Discriminating, not a stub.
-#[ignore = "tracked gap: a type-only import rendered as a tag is wrongly carrier-linked as a value component (carrier-linkage map does not filter type-only bindings; import_source=Some instead of None)"]
+// A type-only import (`import type { OnlyAType } from './types'`) rendered as a
+// template tag (`<OnlyAType :typeFieldOnly="1" />`) must NOT be carrier-linked as
+// a value component. The script-imports carrier-linkage map built for the
+// template converter (`template_converter_inputs`) filters type-only bindings
+// (mirroring `compile_fact_emission::binding_is_value`), so the `<OnlyAType>`
+// template-component usage carries `import_source = None` even though the import
+// IS correctly flagged `is_type_only`. Per the carrier-IDE / typed-IR rule a
+// `import type {...}` is never a value component. Discriminating: asserts the
+// resolved non-linkage; a regression that re-adds the type-only binding to the
+// linkage map FAILS. The current correct linkage is also pinned by
+// `import_core_bundler`'s type-only block.
 #[tokio::test(flavor = "multi_thread")]
 async fn type_only_import_is_not_carrier_linked_as_value_component_tsserver() {
     let Some(session) = crate::test_harness::TestSessionBuilder::new(
@@ -187,31 +178,54 @@ async fn type_only_import_is_not_carrier_linked_as_value_component_tsserver() {
         .template
         .as_ref()
         .expect("App.vue should have a <template>");
-    let only_a_type_link = template
+    // The `<OnlyAType>` tag IS rendered (intentional misuse) so it MUST be
+    // recorded as a template-component usage — assert presence first so the test
+    // discriminates "recorded-but-unlinked" from "disappeared entirely" (a
+    // vanished tag would otherwise pass a bare `import_source == None` check).
+    let only_a_type = template
         .components
         .iter()
         .find(|c| c.name == "OnlyAType")
-        .and_then(|c| c.import_source.clone());
+        .expect("the rendered `<OnlyAType>` tag must be recorded as a template component usage");
     assert_eq!(
-        only_a_type_link, None,
+        only_a_type.import_source, None,
         "a type-only import (`import type {{ OnlyAType }}`) must NEVER be \
          carrier-linked as a value component (import_source must stay None); \
-         got: {only_a_type_link:?}"
+         got: {:?}",
+        only_a_type.import_source
     );
     session.shutdown().await;
 }
 
-// TRACKED GAP: a namespaced component tag (`<widgets.WidgetFromStar>`, reached
-// via `import * as widgets from './widgets'`) does NOT resolve to its carrier's
-// props. The tag is recorded in the template-component analysis with
-// `import_source = None` (no link to a carrier), and hover at the tag returns the
-// namespace import binding (`import { widgets } from './widgets'`), not the
-// component's props. Supporting it requires resolving a dotted component tag
-// through its namespace binding to the member's carrier — an IDE-codegen +
-// analysis change, not an import-resolver change. This test asserts the DESIRED
-// behavior (props resolve) so it FAILS today and PASSES once namespaced tags are
-// supported; it is discriminating, not a stub.
-#[ignore = "tracked gap: namespaced component tag <ns.Comp> does not resolve to the member carrier's props (analysis records import_source=None)"]
+// TRACKED GAP (ESCALATED — genuinely architectural, two coupled sub-gaps):
+// a namespaced component tag (`<widgets.WidgetFromStar>`, reached via
+// `import * as widgets from './widgets'`) does NOT resolve to its carrier's
+// props. Two distinct pieces are involved:
+//
+//   (1) IDE-TSX codegen ALREADY emits the dotted tag VERBATIM as a valid JSX
+//       member-expression element (`<widgets.WidgetFromStar baseUrlOnly={3} />`)
+//       — empirically verified — so a provider DOES type-check the member access
+//       through the namespace import. The codegen half is NOT the blocker.
+//
+//   (2) The blockers are: (a) the template-component analysis records the dotted
+//       tag with `import_source = None` (no carrier link), because resolving a
+//       dotted tag's carrier requires following the namespace binding
+//       (`widgets` -> `./widgets`) and then resolving the MEMBER
+//       (`WidgetFromStar`) THROUGH the barrel re-export to its carrier
+//       (`BaseUrlComp.vue`) at template-conversion time — a cross-file
+//       barrel-member resolution that `template_converter_inputs` has no host
+//       resolver access for today; and (b) this hover probes the NAMESPACE
+//       segment (`<` + 1 lands on `widgets`), where even a correct provider
+//       surfaces the namespace type, not the member's props — so satisfying the
+//       test additionally needs either a re-aimed hover target or a codegen
+//       mapping that routes the whole dotted tag to the member carrier.
+//
+// Both pieces need a design decision (carrier-linkage semantics for namespace
+// members + the hover/codegen mapping for the dotted-tag region); not a
+// contained single-site fix. Left `#[ignore]`'d per the escalation policy. This
+// test asserts the DESIRED behavior (props resolve) so it stays discriminating
+// once the gap is designed and closed; it is not a stub.
+#[ignore = "ESCALATED architectural gap: namespaced component tag <ns.Comp> carrier-linkage needs cross-file barrel-member resolution at template-conversion + a dotted-tag hover/codegen mapping decision (IDE-TSX already emits valid JSX member-expr; analysis import_source=None)"]
 #[tokio::test(flavor = "multi_thread")]
 async fn namespaced_component_tag_resolves_member_props_tsgo() {
     let Some(session) =
@@ -251,7 +265,7 @@ async fn namespaced_component_tag_resolves_member_props_tsgo() {
 // asserts the DESIRED behavior (no TS2307 for the `@/` module) so it FAILS
 // today on tgo and PASSES once tgo's carrier-diagnostics program is configured
 // with the project's path mappings; it is discriminating, not a stub.
-#[ignore = "tracked gap: tgo carrier-diagnostics program does not resolve tsconfig @/ path aliases (emits TS2307 where hover resolves)"]
+#[ignore = "ESCALATED tgo-provider-program gap: tgo's pull-diagnostics program for the carrier .tsx omits the tsconfig `paths` mapping the hover program has (emits TS2307 for @/ where hover + tsserver-diagnostics resolve it) — a tgo provider program-construction wiring issue in the TypeProvider layer, not a Verter-owned analysis/codegen/resolver fix"]
 #[tokio::test(flavor = "multi_thread")]
 async fn tgo_carrier_diagnostics_resolve_path_alias_tsgo() {
     let Some(session) =
@@ -302,12 +316,12 @@ async fn tgo_carrier_diagnostics_resolve_path_alias_tsgo() {
 /// IS Verter resolving the package, not the TS provider. The tsserver hover is a
 /// secondary end-to-end signal that the resolved carrier also surfaces props.
 ///
-/// The package `imports` map (`#internal/*`) is a known partial: the shared
-/// resolver does NOT populate `resolved_canonical_id` for package.json `#imports`
-/// subpaths. That gap is its own desired-behavior `#[ignore]`'d companion
-/// (`nodenext_package_imports_subpath_populates_resolved_canonical_id_tsserver`)
-/// which asserts the DESIRED `Some(..)` so it fails today; here we assert the
-/// CURRENT `None` so the characterization is explicit, not silent.
+/// The package `imports` map (`#internal/*`) is also resolved: the shared
+/// resolver populates `resolved_canonical_id` for package.json `#imports`
+/// subpaths (with the `nodenext` `.js` -> `.ts` extension rewrite). The full
+/// desired-behavior assertion is the
+/// `nodenext_package_imports_subpath_populates_resolved_canonical_id_tsserver`
+/// companion; here we assert the same `Some(..)` inline.
 ///
 /// Tsserver-only: the nodenext+package-`exports` program shape is exercised on
 /// the configured tsserver project. (A tgo companion gap test characterizes the
@@ -347,19 +361,20 @@ async fn import_nodenext_packages_tsserver() {
         "Verter's shared resolver must be package.json-`exports`-aware and populate \
          resolved_canonical_id for the `@pkg/ui` \".\" entry; got None"
     );
-    // CHARACTERIZED PARTIAL: the `#internal/*` (`#imports`) subpath is NOT
-    // populated by the shared resolver today. Asserting the current None makes the
-    // gap explicit; the desired `Some(..)` lives in the `#[ignore]`'d companion.
+    // The `#internal/*` (`#imports`) subpath IS populated by the shared resolver:
+    // the package.json `imports` map resolves `#internal/InternalComp.js` and the
+    // `nodenext` extension rewrite substitutes `.js` -> the `.ts` sibling, so the
+    // canonical id is `Some(..)`. The full desired-behavior assertion is the
+    // `nodenext_package_imports_subpath_populates_*` companion.
     let internal_import = analysis
         .imports
         .iter()
         .find(|i| i.source == "#internal/InternalComp.js")
         .expect("the `#internal/InternalComp.js` import should be analyzed");
     assert!(
-        internal_import.resolved_canonical_id.is_none(),
-        "characterized gap: the shared resolver does NOT populate resolved_canonical_id \
-         for a package.json `#imports` subpath; got Some — promote the \
-         `#[ignore]`'d companion to a real assert"
+        internal_import.resolved_canonical_id.is_some(),
+        "the shared resolver must populate resolved_canonical_id for a package.json \
+         `#imports` subpath (`#internal/*`, `.js` -> `.ts` extension rewrite); got None"
     );
 
     // SECONDARY (end-to-end): once the provider is warm, the resolved package
@@ -380,15 +395,14 @@ async fn import_nodenext_packages_tsserver() {
     session.shutdown().await;
 }
 
-// TRACKED GAP: Verter's shared workspace resolver does NOT populate
+// Verter's shared workspace resolver populates
 // `AnalyzedImport.resolved_canonical_id` for a package.json `#imports` subpath
-// (`#internal/*`). The provider still resolves the subpath (so hover/props work
-// — see `import_nodenext_packages_tsserver`), but Verter-owned carrier features
-// keyed on the canonical id (dependency tracking, go-to-definition via the
-// resolver) do not target it. This asserts the DESIRED `Some(..)` so it FAILS
-// today and PASSES once the shared resolver becomes package.json-`#imports`-aware
-// for canonical-id population. Discriminating, not a stub.
-#[ignore = "tracked gap: shared resolver does not populate resolved_canonical_id for package.json #imports subpaths"]
+// (`#internal/*` -> `./src/internal/*`, with the `nodenext` `.js` -> `.ts`
+// extension rewrite resolving `InternalComp.js` to its `.ts` sibling), so
+// Verter-owned carrier features keyed on the canonical id (dependency tracking,
+// go-to-definition via the resolver) target it. Discriminating: a regression
+// that drops `#imports` canonical-id population — or the extension rewrite —
+// FAILS.
 #[tokio::test(flavor = "multi_thread")]
 async fn nodenext_package_imports_subpath_populates_resolved_canonical_id_tsserver() {
     let _root = crate::test_harness::materialize_pkg_ui("import_nodenext_packages");
@@ -737,17 +751,17 @@ real_provider_test!(
     }
 );
 
-// TRACKED GAP: a `defineAsyncComponent(() => import('./Comp.vue'))` is NOT
-// DISCOVERED by Verter as a carrier-linked template component — the
-// template-component analysis records the `<Lazy>` usage with
-// `import_source = None`, so Verter-owned carrier features (auto-import,
-// go-to-definition into the carrier, rename spanning the carrier) do not target
-// it. (The provider still INFERS the props via TS, so plain hover happens to
-// show them — which is exactly why this test keys on the Verter-owned carrier
-// LINKAGE, not on provider-inferred hover.) This asserts the DESIRED linkage
-// (`import_source = Some(".../DirectComp.vue")`) so it FAILS today and PASSES
-// once async-component discovery is supported. Discriminating, not a stub.
-#[ignore = "tracked gap: defineAsyncComponent(() => import('./Comp.vue')) is not discovered as a carrier-linked template component (analysis import_source=None)"]
+// A `defineAsyncComponent(() => import('./Comp.vue'))` IS discovered by Verter
+// as a carrier-linked template component: the analyzer captures the static
+// loader specifier on the binding initializer (`async_component_source`) and the
+// template converter surfaces it in the carrier-linkage map, so the `<Lazy>`
+// usage carries `import_source = Some("./DirectComp.vue")` — Verter-owned carrier
+// features (auto-import, go-to-definition into the carrier, rename spanning the
+// carrier) now target it. This keys on the Verter-owned carrier LINKAGE (not
+// provider-inferred hover, which always showed the props via TS). Discriminating:
+// a regression that drops async-component loader capture FAILS. A BARE arrow
+// (`() => import(...)`) without `defineAsyncComponent` stays unlinked — pinned by
+// `import_core_bundler_edge`.
 #[tokio::test(flavor = "multi_thread")]
 async fn dynamic_import_component_is_carrier_linked_tsserver() {
     let Some(session) = crate::test_harness::TestSessionBuilder::new(

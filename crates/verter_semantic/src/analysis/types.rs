@@ -938,6 +938,15 @@ pub enum BindingInitializer {
         callee: String,
         callee_import_source: Option<String>,
         vue_api: Option<VueApiClassification>,
+        /// When the call is `defineAsyncComponent(() => import('./X.vue'))`
+        /// (`vue_api == DefineAsyncComponent`), the statically-resolvable
+        /// dynamic-import specifier of the wrapped component carrier
+        /// (`"./X.vue"`). `None` for every other call, and for an async
+        /// component whose import target is not a single static literal.
+        /// Carries the carrier-linkage source so the template converter can
+        /// link a `<X>` tag bound to this binding to its `.vue` carrier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        async_component_source: Option<String>,
     },
     /// Created by a literal: `const x = 42`
     Literal { kind: LiteralKind },

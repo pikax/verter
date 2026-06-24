@@ -35,6 +35,11 @@ export interface BindingInitializer {
     callee: string;
     calleeImportSource: string | null;
     vueApi: string | null;
+    /**
+     * For `defineAsyncComponent(() => import('./X.vue'))`, the static carrier
+     * specifier of the wrapped component. Absent for every other call.
+     */
+    asyncComponentSource?: string;
   };
   Literal?: { kind: string };
   Reference?: { name: string };
