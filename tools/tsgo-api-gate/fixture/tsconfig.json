@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@spike/shared": ["./packages/shared/lib/index.d.ts"],
+      "verterjsx/jsx-runtime": ["./vendor/verterjsx/jsx-runtime.d.ts"]
+    },
+    "jsx": "react-jsx",
+    "jsxImportSource": "verterjsx",
+    "types": ["verter-global-types"],
+    "typeRoots": ["./vendor"],
+    "composite": false
+  },
+  "references": [{ "path": "./packages/shared" }],
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}
