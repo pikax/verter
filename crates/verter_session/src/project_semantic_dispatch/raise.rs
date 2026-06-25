@@ -27,13 +27,9 @@ use verter_type_expr::TypeExpr;
 pub(crate) use super::output_materialization::{MaterializedOutputTypeExpr, OutputTypeExpr};
 use super::ProjectSemanticDispatch;
 use crate::instant::Instant;
-use crate::resolver_core::component_meta_query_engine::{
-    semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
-};
 use crate::semantic_query::{
-    DepSignature, IndexKey, MapperKey, OptionalityMod, PathSegment,
-    PrimitiveKind as SemanticPrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
-    QueryResult, ReadonlyMod, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
+    DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
+    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
 };
 // `HotTypeRef` is only referenced by the test-only `materialize_type_expr`
@@ -261,615 +257,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.raise_node_to_type_expr_inner(node, &mut active)
     }
 
-    /// Reconstruct an Object [`TypeExpr`] from a [`SurfaceView`], raising each
-    /// member / signature value through THIS raiser.
-    ///
-    /// The canonical `SemanticNodeId → TypeExpr` raiser owns this reconstruction
-    /// directly (rather than delegating to the query-engine's
-    /// `surface_view_to_projected_surface` + `projected_surface_to_type_expr`,
-    /// which are confined to the query-engine subtree). It is a STRUCTURAL
-    /// reconstruction — `SurfaceView → ObjectExpr` — not type resolution; the
-    /// member values raise through the SAME shared resolver
-    /// ([`Self::raise_node_to_type_expr`]) the prior path used.
-    ///
-    /// **Per-member cycle isolation:** each member / signature value is raised
-    /// with a FRESH cycle set ([`Self::raise_node_to_type_expr`] starts an empty
-    /// `active`), exactly as the prior path did (via
-    /// `materialize_output_type_expr` → `output_shell_raise_sealed` →
-    /// `raise_node_to_type_expr`). Threading this Object node's incoming `active`
-    /// set across members would diverge: a diamond where the same node backs two
-    /// members would short-circuit the second member to a cycle sentinel. So the
-    /// incoming `active` is deliberately NOT threaded here — equivalent to the
-    /// prior fresh-per-member behaviour.
-    ///
-    /// Returns `None` when the surface yields no representable members (mirrors
-    /// `projected_surface_to_type_expr`); the empty-`{}` case is handled by the
-    /// caller before reaching here.
-    fn raise_surface_view_to_object_type_expr(&self, surface: &SurfaceView) -> Option<TypeExpr> {
-        use verter_type_expr::{
-            FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
-            ObjectProperty, PrimitiveName,
-        };
-
-        // Raise each member value through THIS raiser (fresh cycle set), with the
-        // same `SEMANTIC_SURFACE_MEMBER` raise-failure sentinel the prior
-        // `surface_view_to_projected_surface` path used.
-        let raise_member = |node: SemanticNodeId| -> TypeExpr {
-            self.raise_node_to_type_expr(node)
-                .unwrap_or(TypeExpr::Unknown {
-                    raw: SEMANTIC_SURFACE_MEMBER.to_string(),
-                })
-        };
-
-        // Single-call-signature fast path (mirrors
-        // `projected_surface_to_type_expr`): a surface with no members, no
-        // construct signatures, no index signature, and exactly one call
-        // signature IS that call signature's `TypeExpr` (not wrapped in an
-        // object).
-        if surface.members.is_empty()
-            && surface.construct_signatures.is_empty()
-            && !surface.has_index_signature
-            && surface.call_signatures.len() == 1
-        {
-            return Some(raise_member(surface.call_signatures[0]));
-        }
-
-        let mut properties: Vec<ObjectMember> = Vec::new();
-        for member in surface.members.iter() {
-            let ty = raise_member(member.value);
-            // Reconstruct via `with_visibility` so a non-public class member
-            // survives with its true accessibility (leak-prevention +
-            // `native_props` fidelity), carrying the member's real OXC spans.
-            if member.is_method {
-                if let TypeExpr::Function(function) = &ty {
-                    properties.push(ObjectMember::Method(MethodSignature::with_visibility(
-                        member.name.as_ref().to_string(),
-                        (**function).clone(),
-                        member.optional,
-                        member.visibility,
-                        member.spans,
-                    )));
-                    continue;
-                }
-            }
-            properties.push(ObjectMember::Property(ObjectProperty::with_visibility(
-                member.name.as_ref().to_string(),
-                ty,
-                member.optional,
-                member.readonly,
-                member.visibility,
-                member.spans,
-            )));
-        }
-
-        for signature in surface.call_signatures.iter() {
-            if let TypeExpr::Function(function) = &raise_member(*signature) {
-                properties.push(ObjectMember::CallSignature(FunctionExpr::with_spans(
-                    function.parameters.clone(),
-                    function.return_type.clone(),
-                    function.type_parameters.clone(),
-                    function.spans,
-                )));
-            }
-        }
-
-        for signature in surface.construct_signatures.iter() {
-            if let TypeExpr::Function(function) = &raise_member(*signature) {
-                properties.push(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
-                    function.parameters.clone(),
-                    function.return_type.clone(),
-                    function.type_parameters.clone(),
-                    function.spans,
-                )));
-            }
-        }
-
-        // A REAL `[k: K]: V` index signature (sourced from an OXC declaration
-        // site) re-emits its declared key/value shape AND its real spans.
-        for signature in surface.index_signatures.iter() {
-            properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
-                "key".to_string(),
-                raise_member(signature.key_type),
-                raise_member(signature.value_type),
-                signature.readonly,
-                signature.spans,
-            )));
-        }
-
-        // The synthetic open-surface placeholder ONLY when the surface is
-        // GENUINELY OPEN (`has_index_signature` set, no concrete signature
-        // carried). No single OXC site, so its spans stay `None` by design.
-        if surface.has_index_signature && surface.index_signatures.is_empty() {
-            properties.push(ObjectMember::IndexSignature(IndexSignature::synthetic(
-                "key".to_string(),
-                TypeExpr::Primitive(PrimitiveName::String),
-                TypeExpr::Unknown {
-                    raw: "projectedOpenSurface".to_string(),
-                },
-                false,
-            )));
-        }
-
-        if properties.is_empty() {
-            return None;
-        }
-        Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
-    }
-
     fn raise_node_to_type_expr_inner(
         &self,
         node: SemanticNodeId,
         active: &mut FxHashSet<SemanticNodeId>,
     ) -> Option<TypeExpr> {
-        let data = super::node_data_for(self.ctx, node)?;
-        Some(match data.as_ref() {
-            SemanticNodeData::Primitive(kind) => semantic_primitive_to_type_expr(*kind),
-            SemanticNodeData::Literal(value) => TypeExpr::Literal(value.clone()),
-            SemanticNodeData::Alias(target) => {
-                if !active.insert(node) {
-                    return Some(TypeExpr::Unknown {
-                        raw: "semanticAliasCycle".to_string(),
-                    });
-                }
-                let result = self.raise_node_to_type_expr_inner(*target, active);
-                active.remove(&node);
-                return result;
-            }
-            SemanticNodeData::Union(members) => TypeExpr::Union(std::sync::Arc::from(
-                members
-                    .iter()
-                    .filter_map(|member| self.raise_node_to_type_expr_inner(*member, active))
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            )),
-            SemanticNodeData::Intersection(members) => {
-                // Drop empty-object arms from the Intersection
-                // projection. `Id<T> = {} & { [P in keyof T]: T[P] }`
-                // and similar helper patterns lower to
-                // `Intersection([empty_object, mapped_object])`; the
-                // empty arm contributes nothing semantically
-                // (`{} & X ≡ X`) but would leak through as a
-                // `TypeExpr::Unknown { raw: SEMANTIC_OBJECT_SURFACE }`
-                // sentinel which breaks callers that expect a pure
-                // Object at the projection boundary. Dropping the
-                // semantically-vacuous arm here collapses `{} & X → X`
-                // so imported-helper UI bindings materialise cleanly
-                // instead of nested in
-                // `Intersection([Unknown, Object])`.
-                let mut arms: Vec<TypeExpr> = members
-                    .iter()
-                    .filter_map(|member| self.raise_node_to_type_expr_inner(*member, active))
-                    .filter(|arm| !matches!(arm, TypeExpr::Unknown { raw } if raw == SEMANTIC_OBJECT_SURFACE))
-                    // `{} & X ≡ X` — the representable empty object (the
-                    // Object arm below raises empty surfaces first-class)
-                    // is equally vacuous inside an intersection. Known
-                    // divergence: for a NULLISH X the pinned tsgo reduces
-                    // `{} & null` / `{} & undefined` to `never`, while this
-                    // projection-boundary filter collapses them to the
-                    // nullish arm. The correct home for that reduction is
-                    // the semantic intersection reducer, not this raise
-                    // boundary — tracked as debt, predating the first-class
-                    // empty-object raise (the retired sentinel filter
-                    // collapsed the same way).
-                    .filter(|arm| !matches!(arm, TypeExpr::Object(object) if object.properties.is_empty()))
-                    .collect();
-                if arms.is_empty() {
-                    // Every arm was vacuous (`{} & {}`): fall back to the
-                    // representable empty object — a zero-arm
-                    // `Intersection([])` is not a publishable shape.
-                    TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
-                        properties: Vec::new(),
-                    }))
-                } else if arms.len() == 1 {
-                    arms.pop().unwrap()
-                } else {
-                    TypeExpr::Intersection(std::sync::Arc::from(arms.into_boxed_slice()))
-                }
-            }
-            SemanticNodeData::Array { element, readonly } => TypeExpr::Array {
-                element: std::sync::Arc::new(self.raise_node_to_type_expr_inner(*element, active)?),
-                readonly: *readonly,
-            },
-            SemanticNodeData::Tuple { elements, readonly } => {
-                use verter_type_expr::TupleElement;
-
-                TypeExpr::Tuple {
-                    elements: std::sync::Arc::from(
-                        elements
-                            .iter()
-                            .filter_map(|element| {
-                                Some(TupleElement {
-                                    label: element
-                                        .label
-                                        .as_ref()
-                                        .map(|label| label.as_ref().to_string()),
-                                    ty: self
-                                        .raise_node_to_type_expr_inner(element.value, active)?,
-                                    optional: element.optional,
-                                    rest: element.rest,
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    ),
-                    readonly: *readonly,
-                }
-            }
-            SemanticNodeData::Object(surface) => {
-                // A genuinely EMPTY surface (no members, no signatures, no
-                // index signature) is the representable empty object `{}`
-                // — `Pick<T, never>`, `Omit<T, keyof T>`,
-                // `NonNullable<unknown>` all reduce to it. Raise it as a
-                // zero-property `TypeExpr::Object` instead of the
-                // `SEMANTIC_OBJECT_SURFACE` sentinel (the sentinel marks a
-                // surface the projection cannot REPRESENT, which an empty
-                // object is not). The intersection vacuous-arm rule above
-                // drops empty-object arms the same way it drops the
-                // sentinel, so `{} & X ≡ X` is preserved.
-                if surface.members.is_empty()
-                    && surface.call_signatures.is_empty()
-                    && surface.construct_signatures.is_empty()
-                    && !surface.has_index_signature
-                {
-                    TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
-                        properties: Vec::new(),
-                    }))
-                } else {
-                    // Reconstruct the Object body from the `SurfaceView` using THIS
-                    // raiser's own member raising (fresh cycle set per member,
-                    // matching the prior `surface_view_to_projected_surface` →
-                    // `materialize_output_type_expr` path). No cross-module call into
-                    // the query-engine surface projector.
-                    self.raise_surface_view_to_object_type_expr(surface)
-                        .unwrap_or(TypeExpr::Unknown {
-                            raw: SEMANTIC_OBJECT_SURFACE.to_string(),
-                        })
-                }
-            }
-            SemanticNodeData::MergedDecl { contributors } => {
-                // Peer-merge the same-name interface contributors into one
-                // surface (member union + ordered method overload groups) and
-                // raise the merged object.
-                let merged = self.reduce_merged_decl(contributors);
-                return self.raise_node_to_type_expr_inner(merged, active);
-            }
-            // DeclPlaceholder lowers to a TypeExpr::Ref shell.
-            SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => TypeExpr::Ref {
-                name: std::sync::Arc::clone(name),
-                type_arguments: verter_type_expr::empty_type_args(),
-            },
-            SemanticNodeData::Conditional {
-                check,
-                extends,
-                true_branch_ref,
-                false_branch_ref,
-                ..
-            } => TypeExpr::Conditional {
-                check: std::sync::Arc::new(self.raise_node_to_type_expr_inner(*check, active)?),
-                extends: std::sync::Arc::new(self.raise_node_to_type_expr_inner(*extends, active)?),
-                true_type: std::sync::Arc::new(
-                    self.raise_node_to_type_expr_inner(*true_branch_ref, active)?,
-                ),
-                false_type: std::sync::Arc::new(
-                    self.raise_node_to_type_expr_inner(*false_branch_ref, active)?,
-                ),
-            },
-            SemanticNodeData::TemplateLiteral {
-                quasis,
-                expressions,
-            } => TypeExpr::TemplateLiteral {
-                quasis: quasis
-                    .iter()
-                    .map(|quasi| quasi.as_ref().to_string())
-                    .collect(),
-                expressions: std::sync::Arc::from(
-                    expressions
-                        .iter()
-                        .filter_map(|expr| self.raise_node_to_type_expr_inner(*expr, active))
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
-            },
-            SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
-                self.raise_node_to_type_expr_inner(*base, active)?,
-            )),
-            SemanticNodeData::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
-                object: std::sync::Arc::new(self.raise_node_to_type_expr_inner(*object, active)?),
-                index: std::sync::Arc::new(self.index_key_to_type_expr(index, active)?),
-            },
-            SemanticNodeData::Mapped { mapper, .. } => TypeExpr::Mapped {
-                // Presentational projection: look up the binder node
-                // by `mapper.parameter_node` and read its
-                // `display_name` for the projected
-                // `TypeExpr::Mapped { parameter }` field. The
-                // semantic-graph interner dedups only
-                // structurally-identical binders, so the
-                // representative's `display_name` is well-defined.
-                parameter: match super::node_data_for(self.ctx, mapper.parameter_node).as_deref() {
-                    Some(SemanticNodeData::TypeParam { display_name, .. }) => {
-                        display_name.as_ref().to_string()
-                    }
-                    _ => String::new(),
-                },
-                source: std::sync::Arc::new(
-                    match super::node_data_for(self.ctx, mapper.key_space)?.as_ref() {
-                        SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
-                            self.raise_node_to_type_expr_inner(*base, active)?,
-                        )),
-                        _ => self.raise_node_to_type_expr_inner(mapper.key_space, active)?,
-                    },
-                ),
-                value: std::sync::Arc::new(
-                    self.raise_node_to_type_expr_inner(mapper.value_expr, active)?,
-                ),
-                optional: match mapper.optionality {
-                    OptionalityMod::Add => verter_type_expr::MappedModifier::Add,
-                    OptionalityMod::Remove => verter_type_expr::MappedModifier::Remove,
-                    OptionalityMod::Keep => verter_type_expr::MappedModifier::None,
-                },
-                readonly: match mapper.readonly {
-                    ReadonlyMod::Add => verter_type_expr::MappedModifier::Add,
-                    ReadonlyMod::Remove => verter_type_expr::MappedModifier::Remove,
-                    ReadonlyMod::Keep => verter_type_expr::MappedModifier::None,
-                },
-                name_type: match mapper.name_remap {
-                    Some(node) => Some(std::sync::Arc::new(
-                        self.raise_node_to_type_expr_inner(node, active)?,
-                    )),
-                    None => None,
-                },
-            },
-            SemanticNodeData::TypeOf(_) => {
-                let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
-                let type_args = data.carrier_type_args();
-                let mut segments = value_root
-                    .name
-                    .split('.')
-                    .map(|segment| segment.to_string())
-                    .collect::<Vec<_>>();
-                segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
-                // Raise the instantiation-expression args back onto the
-                // projected `ValueRef.type_args` so `typeof C.make<string>`
-                // round-trips its arguments. A miss on any arg becomes the
-                // `<raise miss>` placeholder so the outer typeof still
-                // constructs (mirrors the `ImportType` arm).
-                let raised_args: Vec<TypeExpr> = type_args
-                    .iter()
-                    .map(|id| {
-                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
-                            TypeExpr::Unknown {
-                                raw: "<raise miss>".to_string(),
-                            },
-                        )
-                    })
-                    .collect();
-                TypeExpr::TypeOf(verter_type_expr::ValueRef {
-                    path: segments,
-                    type_args: raised_args,
-                })
-            }
-            SemanticNodeData::TypeParam {
-                display_name,
-                constraint,
-                default,
-                ..
-            } => {
-                // Project `constraint` / `default` back to `TypeExpr`
-                // so the round-trip preserves the declaration shape.
-                // The `active` visited set guards against cyclic
-                // constraint graphs: when a TypeParam's constraint or
-                // default transitively reaches this same node, return
-                // `None` from the recursion and drop the field rather
-                // than looping.
-                //
-                // The projected `TypeExpr::TypeParameter.name` uses
-                // `display_name` — the human-readable parameter name.
-                // `decl` / `param_index` are identity discriminators
-                // for structural interning and do not appear in the
-                // projected `TypeExpr` shape.
-                if !active.insert(node) {
-                    return Some(TypeExpr::Unknown {
-                        raw: "semanticTypeParamCycle".to_string(),
-                    });
-                }
-                let constraint_expr = constraint
-                    .as_ref()
-                    .and_then(|c| self.raise_node_to_type_expr_inner(*c, active))
-                    .map(std::sync::Arc::new);
-                let default_expr = default
-                    .as_ref()
-                    .and_then(|d| self.raise_node_to_type_expr_inner(*d, active))
-                    .map(std::sync::Arc::new);
-                active.remove(&node);
-                TypeExpr::TypeParameter(verter_type_expr::TypeParam {
-                    name: display_name.as_ref().to_string(),
-                    constraint: constraint_expr,
-                    default: default_expr,
-                })
-            }
-            SemanticNodeData::Infer { name } => TypeExpr::Infer {
-                name: name.as_ref().to_string(),
-            },
-            SemanticNodeData::Opaque(err) => match err {
-                QueryError::RecursiveRef { name } => {
-                    TypeExpr::recursive_ref(name.as_ref(), Vec::new())
-                }
-                _ => TypeExpr::Unknown {
-                    raw: semantic_query_error_raw(err),
-                },
-            },
-            SemanticNodeData::VueMacroElements(_) => TypeExpr::Unknown {
-                raw: "VueMacroElements".to_string(),
-            },
-            // Canonical Function shape
-            // converts back to `TypeExpr::Function`. Session 4 lowered
-            // `TypeExpr::Function` → `SemanticNodeData::Function`; this
-            // conversion completes the round-trip so alias bodies that
-            // include function types (`(() => T)` branches) survive
-            // dispatch-only projection without emitting `semanticFunction`
-            // sentinels.
-            SemanticNodeData::Function {
-                params,
-                return_type,
-                type_parameters,
-                signature_span,
-                return_type_span,
-            } => {
-                use verter_type_expr::{FunctionExpr, FunctionParam, FunctionSpans, TypeParam};
-                let parameters: Vec<FunctionParam> = params
-                    .iter()
-                    .filter_map(|p| {
-                        Some(FunctionParam::with_span(
-                            p.name.as_ref().map(|n| n.as_ref().to_string()),
-                            self.raise_node_to_type_expr_inner(p.ty, active)?,
-                            p.optional,
-                            p.rest,
-                            // Carry the graph parameter's span back to the IR.
-                            p.span,
-                            // The TS-annotation-presence fact is a lowering-time
-                            // input to JSDoc `@param` precedence; it is consumed
-                            // ONLY by `enrich_params_and_return_with_jsdoc` at
-                            // build time, before any graph round-trip. A raised
-                            // function is the post-enrichment semantic form and is
-                            // never re-enriched, so the graph node does not carry
-                            // the fact and `false` is the correct, inert value.
-                            false,
-                        ))
-                    })
-                    .collect();
-                let return_ty = self
-                    .raise_node_to_type_expr_inner(*return_type, active)
-                    .map(std::sync::Arc::new);
-                let type_params: Vec<TypeParam> = type_parameters
-                    .iter()
-                    .map(|tp| TypeParam {
-                        name: tp.name.as_ref().to_string(),
-                        constraint: tp
-                            .constraint
-                            .and_then(|c| self.raise_node_to_type_expr_inner(c, active))
-                            .map(std::sync::Arc::new),
-                        default: tp
-                            .default
-                            .and_then(|d| self.raise_node_to_type_expr_inner(d, active))
-                            .map(std::sync::Arc::new),
-                    })
-                    .collect();
-                // Carry the graph Function node's signature / return spans back
-                // to the IR (round-trip provenance preservation).
-                TypeExpr::Function(std::sync::Arc::new(FunctionExpr::with_spans(
-                    parameters,
-                    return_ty,
-                    type_params,
-                    FunctionSpans {
-                        signature: *signature_span,
-                        return_type: *return_type_span,
-                    },
-                )))
-            }
-            // Lazy carriers. DeclRef raises to a
-            // bare `Ref { name }` with empty type arguments. Identity
-            // (`canonical_id + whole_hash`) is encoded in the interning
-            // scope, not in the projected TypeExpr — that's the lossy
-            // direction of the Navigate-mode lazy lowering.
-            SemanticNodeData::DeclRef { identity } => TypeExpr::Ref {
-                name: std::sync::Arc::clone(&identity.decl_name),
-                type_arguments: verter_type_expr::empty_type_args(),
-            },
-            // InstantiationRef raises to `Ref { name, type_arguments: [...] }`.
-            // A miss on any arg raise becomes `Unknown { raw: "<raise
-            // miss>" }` so the outer Ref still constructs (vs. failing
-            // the whole raise which would lose the application shape).
-            SemanticNodeData::InstantiationRef { base, args } => {
-                let raised_args: Vec<TypeExpr> = args
-                    .iter()
-                    .map(|id| {
-                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
-                            TypeExpr::Unknown {
-                                raw: "<raise miss>".to_string(),
-                            },
-                        )
-                    })
-                    .collect();
-                TypeExpr::Ref {
-                    name: std::sync::Arc::clone(&base.decl_name),
-                    type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
-                }
-            }
-            // Unresolved bare-name carrier → `Ref { name, type_arguments }`
-            // (the shallow-by-default published shape). `scope` is value-side
-            // resolution context, not part of the projected shape. The
-            // structurally-lowered `type_args` raise back onto
-            // `Ref.type_arguments` so `Foo<Arg>` round-trips its arguments;
-            // an empty slice raises to the bare `Foo` case. A miss on any
-            // arg becomes the `<raise miss>` placeholder so the outer
-            // reference still constructs (mirrors the `ImportType` arm).
-            SemanticNodeData::BareRef(_) => {
-                let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
-                let type_args = data.carrier_type_args();
-                let raised_args: Vec<TypeExpr> = type_args
-                    .iter()
-                    .map(|id| {
-                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
-                            TypeExpr::Unknown {
-                                raw: "<raise miss>".to_string(),
-                            },
-                        )
-                    })
-                    .collect();
-                TypeExpr::Ref {
-                    name: std::sync::Arc::clone(name),
-                    type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
-                }
-            }
-            // Unresolved dynamic-import carrier → `TypeExpr::ImportType`.
-            // A miss on any type-arg raise becomes the `<raise miss>`
-            // placeholder so the outer import-type still constructs.
-            SemanticNodeData::ImportType(_) => {
-                let (specifier, qualifier, typeof_query) =
-                    data.import_type_head().expect("ImportType carrier head");
-                let type_args = data.carrier_type_args();
-                let raised_args: Vec<TypeExpr> = type_args
-                    .iter()
-                    .map(|id| {
-                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
-                            TypeExpr::Unknown {
-                                raw: "<raise miss>".to_string(),
-                            },
-                        )
-                    })
-                    .collect();
-                TypeExpr::ImportType {
-                    specifier: std::sync::Arc::clone(specifier),
-                    qualifier: std::sync::Arc::clone(qualifier),
-                    typeof_query,
-                    type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
-                }
-            }
-            // Raw-fallback carrier → `TypeExpr::Unknown { raw }` (the
-            // round-trip of the only carrier that holds raw type text).
-            SemanticNodeData::RawFallback { raw } => TypeExpr::Unknown {
-                raw: raw.as_ref().to_string(),
-            },
-            // Constructor-type carrier → `TypeExpr::ConstructorType`. The
-            // signature interns a `Function` node; rewrap its raised
-            // `FunctionExpr` as a constructor type. Any non-function shape
-            // (malformed carrier) is preserved as raised rather than
-            // fabricated.
-            SemanticNodeData::ConstructorType { signature } => {
-                let raised = self.raise_node_to_type_expr_inner(*signature, active)?;
-                if let TypeExpr::Function(func) = &raised {
-                    TypeExpr::ConstructorType(std::sync::Arc::clone(func))
-                } else {
-                    raised
-                }
-            }
-            // Synthetic-binding carrier → `TypeExpr::SyntheticSlotBinding`.
-            // Re-hydrate the full carrier key by re-attaching the value-side
-            // `value_node` provenance ordinal to the content-free identity.
-            SemanticNodeData::SyntheticBinding { id, value_node } => {
-                TypeExpr::SyntheticSlotBinding(std::sync::Arc::new(id.to_carrier_key(*value_node)))
-            }
-        })
+        // Thin delegate to the single shared raised-shape traversal
+        // (`raise_node_to_type_expr_core_impl`, owner-local in this module). This
+        // wrapper holds NO `SemanticNodeData` match of its own — the one
+        // exhaustive `SemanticNodeData -> TypeExpr` traversal is private to
+        // `raise`, so the raiser and the node-domain facts projection (which view
+        // its output via the legacy `TypeExpr` predicates) cannot drift. There is
+        // exactly ONE traversal; anti-drift is structural.
+        raise_node_to_type_expr_core_impl(self, node, active)
     }
 
     /// Plain shell-only output-materialisation boundary: project a
@@ -1006,18 +406,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let cap = TestOutputCap::new(self);
         cap.materialize_reduced_output_type_expr(node, context)
             .into_type_expr(&cap)
-    }
-
-    fn index_key_to_type_expr(
-        &self,
-        index: &IndexKey,
-        active: &mut FxHashSet<SemanticNodeId>,
-    ) -> Option<TypeExpr> {
-        Some(match index {
-            IndexKey::String(text) => TypeExpr::string_literal(text.as_ref()),
-            IndexKey::Number(number) => TypeExpr::number_literal(number.get() as f64),
-            IndexKey::TypeNode(node) => self.raise_node_to_type_expr_inner(*node, active)?,
-        })
     }
 
     /// `execute` variant that returns the full [`CacheRead`].
@@ -5185,8 +4573,995 @@ fn instantiation_base_is_resolvable(
     false
 }
 
-fn semantic_primitive_to_type_expr(kind: SemanticPrimitiveKind) -> TypeExpr {
+// =====================================================================
+// Node-domain raised-shape decision surface (owner-local, dormant).
+//
+// `SemanticNodeId -> TypeExpr` raising (the shell-only structural conversion
+// `raise_node_to_type_expr_core_impl` above-the-tests in THIS module) and the
+// NODE-DOMAIN classifiers that decide "does the raised shape contain a dispatch
+// miss / is it an open deferred surface / can it be shell-raised at all" share
+// ONE top-level `SemanticNodeData` node-kind traversal — the private
+// `raise_node_to_type_expr_core_impl`. The classifiers derive their
+// `RaisedShapeFacts` from the produced raised `TypeExpr` via the EXACT
+// `TypeExpr` predicates the legacy Kind-B sites applied to the raised value
+// (`type_expr_contains_semantic_miss` / `type_expr_is_expanded_surface`), so the
+// facts are a pure VIEW of the one traversal's output and CANNOT drift from the
+// raiser. Anti-drift is STRUCTURAL: there is exactly one traversal fn, owner-
+// local to `raise`; the facts are `legacy_predicate ∘ raise(node)`; nothing to
+// seal across a module boundary.
+//
+// INTERNAL-CONSISTENCY, NOT INDEPENDENCE. The parity tests
+// (`super::raised_shape_tests`) prove `classifier_fact ≡ legacy_TypeExpr_predicate
+// ∘ raise_node_to_type_expr_core_impl`. The raiser's ABSOLUTE output is pinned
+// independently by the raise / materialization suite (`materialize_type_expr` /
+// `materialize_output_type_expr_for_test` carrier-materialize tests); the parity
+// tests then prove the facts are a faithful view OF that pinned output.
+//
+// The node-domain classifiers + equality primitive are the graph-native decision
+// surface for the later Kind-B graph-native conversion. Their production wiring
+// is FENCED by the zero-production-caller guard
+// `node_domain_readiness_primitives_have_zero_production_callers` (in
+// `verter_session`'s test cases): they have no production caller, the Kind-B
+// sites stay on the interim `legacy_semantic_type_expr_bridge`, and the parity
+// tests exercise them.
+// =====================================================================
+
+/// Facts about the shape a node raises to, derived from the produced raised
+/// `TypeExpr` (via the legacy `TypeExpr` predicates) — a pure view of the one
+/// shared traversal's output, never a second `SemanticNodeData` walk.
+//
+// Node-domain readiness primitive. Its production wiring is fenced by
+// `node_domain_readiness_primitives_have_zero_production_callers`: no production
+// caller exists, so the non-test dead-code lint fires (test usage does not
+// satisfy it). Suppress it for the non-test build only — the guard, not the attr,
+// is the architectural fence; the attr only silences the lint while the item is
+// genuinely callable-but-unwired.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers; exercised by the \
+                  parity tests"
+    )
+)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RaisedShapeFacts {
+    /// `true` for every node the projection produces a value for — i.e.
+    /// `raise(node).is_some()`. (The whole projection returns `None` when the
+    /// raise would be `None`; a `Some(facts)` therefore always has
+    /// `can_shell_raise == true`.)
+    pub(crate) can_shell_raise: bool,
+    /// `dispatch_route_expr_is_materialized(raise(node))`: `true` when the
+    /// raised shape contains NO unmaterialised sentinel anywhere a value can
+    /// appear.
+    pub(crate) materialized: bool,
+    /// `type_expr_is_expanded_surface(raise(node))`: `false` only when the
+    /// raised root (recursing through `Union`/`Intersection`) is an open
+    /// deferred shell (`KeyOf`/`IndexedAccess`/`Mapped`/`TypeOf`/`Conditional`).
+    pub(crate) expanded_surface: bool,
+}
+
+impl RaisedShapeFacts {
+    /// Derive the facts of an already-built raised `TypeExpr`.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "node-domain readiness primitive, fenced by \
+                      node_domain_readiness_primitives_have_zero_production_callers"
+        )
+    )]
+    #[must_use]
+    fn from_raised(expr: &TypeExpr) -> Self {
+        use crate::resolver_core::component_meta_query_engine::{
+            type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
+        };
+        Self {
+            can_shell_raise: true,
+            // `materialized == !contains_semantic_miss` — i.e.
+            // `dispatch_route_expr_is_materialized(raise(node))`. We route
+            // through the `pub(crate)` `type_expr_contains_semantic_miss`
+            // (its negation) rather than the `pub(super)` recogniser so no
+            // visibility widening is needed; the two are definitionally equal.
+            materialized: !type_expr_contains_semantic_miss(expr),
+            expanded_surface: type_expr_is_expanded_surface(expr),
+        }
+    }
+}
+
+/// Project `node` to its [`RaisedShapeFacts`]. `None` when the whole raise
+/// would be `None`.
+///
+/// Runs the single shared traversal ([`raise_node_to_type_expr_core_impl`]) and
+/// views its output through the legacy `TypeExpr` predicates, so the facts
+/// encode the raiser's ACTUAL output shape — not the raw graph kind.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers"
+    )
+)]
+#[must_use]
+fn project(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> Option<RaisedShapeFacts> {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let mut active = FxHashSet::default();
+    raise_node_to_type_expr_core_impl(&dispatch, node, &mut active)
+        .map(|expr| RaisedShapeFacts::from_raised(&expr))
+}
+
+/// `true` when `node` can be shell-raised to a `TypeExpr` at all
+/// (`raise(node).is_some()`), capturing the `?`-propagation `None` positions.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers"
+    )
+)]
+#[must_use]
+pub(crate) fn node_can_shell_raise(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    // `project` returns `Some` exactly when the raise is `Some`, with
+    // `can_shell_raise == true`; a `None` is the unraisable case.
+    project(ctx, node).is_some_and(|facts| facts.can_shell_raise)
+}
+
+/// Node-domain equivalent of
+/// `type_expr_contains_semantic_miss(raise(node))`. A whole-raise `None`
+/// counts as a miss (`true`) — matching how the consuming Kind-B sites treat a
+/// `None` raise (unusable / fall back).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers"
+    )
+)]
+#[must_use]
+pub(crate) fn node_contains_semantic_miss_legacy_equivalent(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    match project(ctx, node) {
+        Some(facts) => !facts.materialized,
+        None => true,
+    }
+}
+
+/// Node-domain equivalent of `type_expr_is_expanded_surface(raise(node))`. A
+/// whole-raise `None` is `false` (no surface to be open).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers"
+    )
+)]
+#[must_use]
+pub(crate) fn node_is_expanded_surface_legacy_equivalent(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    match project(ctx, node) {
+        Some(facts) => facts.expanded_surface,
+        None => false,
+    }
+}
+
+/// Raised-shape equality between two nodes: `Some(true)`/`Some(false)` when
+/// BOTH nodes raise to `Some`, `None` when EITHER raise is `None`.
+///
+/// Matches derived-`TypeExpr` `PartialEq` of the two raised shapes EXACTLY
+/// (`raised_shape_eq_nodes(ctx, a, b) == Some(raise(a) == raise(b))` when both
+/// raise `Some`). Raw `SemanticNodeId` equality is NOT behaviour-preserving
+/// (carriers drop identity on raise: different `DeclRef`/`BareRef`/`TypeParam`
+/// nodes can raise to equal shapes and vice-versa), so the raised-shape
+/// [`RaisedShapeKey`] — not the node id — is the comparison subject.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers"
+    )
+)]
+#[must_use]
+pub(crate) fn raised_shape_eq_nodes(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    a: SemanticNodeId,
+    b: SemanticNodeId,
+) -> Option<bool> {
+    // Provably-exact fast path: the same node id raises to the same shape.
+    // Still gated on raisability so the `None`-when-unraisable contract holds
+    // (an unraisable node must yield `None`, not `Some(true)`).
+    if a == b {
+        return node_can_shell_raise(ctx, a).then_some(true);
+    }
+    let key_a = raised_shape_key(ctx, a)?;
+    let key_b = raised_shape_key(ctx, b)?;
+    Some(key_a == key_b)
+}
+
+/// Raised-shape equality between a node and a `TypeExpr`: `Some(bool)` when the
+/// node raises to `Some`, `None` when the raise is `None`.
+///
+/// `raised_shape_eq_node_type_expr(ctx, node, e) == Some(raise(node).as_ref()
+/// == Some(&e))` whenever the raise is `Some`.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers"
+    )
+)]
+#[must_use]
+pub(crate) fn raised_shape_eq_node_type_expr(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<bool> {
+    let node_key = raised_shape_key(ctx, node)?;
+    Some(node_key == RaisedShapeKey::of_type_expr(expr))
+}
+
+/// Project `node` to its raised-shape comparison key, via the same core
+/// traversal. `None` when the raise would be `None`.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers"
+    )
+)]
+#[must_use]
+fn raised_shape_key(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> Option<RaisedShapeKey> {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let mut active = FxHashSet::default();
+    raise_node_to_type_expr_core_impl(&dispatch, node, &mut active)
+        .map(|expr| RaisedShapeKey::of_type_expr(&expr))
+}
+
+// =====================================================================
+// Raised-shape comparison key.
+//
+// `RaisedShapeKey` is the structural identity of a raised `TypeExpr` under
+// `TypeExpr`'s derived `PartialEq` — including the presentation payloads the
+// raiser emits (names, type args, mapped modifiers, object members,
+// visibility, spans, function spans, the synthetic-carrier key INCLUDING
+// `value_node`, raw strings). The canonical, provably-exact realisation of
+// "the structural identity a `TypeExpr` has under `PartialEq`" IS a `TypeExpr`
+// whose own `PartialEq` is that relation; the key wraps it and compares by
+// that derived `PartialEq`.
+//
+// This is NOT materialise-then-compare at the CALLER: a caller never builds two
+// `TypeExpr`s to diff. The key is produced once per node by the SAME core
+// traversal (no extra raise beyond the one the projection already runs), and
+// the comparison is the structural `==` the legacy Kind-B sites performed on
+// the raised values — exactly the relation the equality primitive must
+// preserve. A future step may hash-cons the key behind this type; that is a
+// representation change, not a behaviour change.
+// =====================================================================
+
+/// The raised-shape comparison key — the `PartialEq` identity of the raised
+/// `TypeExpr`.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain readiness primitive, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers"
+    )
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RaisedShapeKey(TypeExpr);
+
+impl RaisedShapeKey {
+    /// The key of an already-built `TypeExpr` (the raise oracle's output, or a
+    /// caller-supplied comparand).
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "node-domain readiness primitive, fenced by \
+                      node_domain_readiness_primitives_have_zero_production_callers"
+        )
+    )]
+    #[must_use]
+    fn of_type_expr(expr: &TypeExpr) -> Self {
+        Self(expr.clone())
+    }
+}
+
+// =====================================================================
+// The single shared `SemanticNodeData -> TypeExpr` traversal.
+//
+// This is the SOLE exhaustive `SemanticNodeData` match that raises a node to a
+// `TypeExpr` (`raise_node_to_type_expr_core_impl`). `raise_node_to_type_expr_inner`
+// (the production raiser, above) reaches it directly — owner-local, no permit, no
+// cross-module hop; the facts projection above runs it directly too. The arm
+// bodies are the historical raiser verbatim — the byte-identity contract. Being
+// module-private (`fn`, no visibility kw), it is OUTSIDE the raise.rs output-seam
+// fence's public/restricted collector by construction.
+// =====================================================================
+
+/// The shared bare-`TypeExpr` raise core: the SOLE exhaustive `SemanticNodeData`
+/// match that raises a node to a `TypeExpr` (shell-only structural conversion).
+/// `None` when the node — or a node required while raising it — is unavailable
+/// from the live graph store, OR when a `?`-propagating child position raises to
+/// `None`.
+///
+/// Cycle protection via the per-call `active` visited set. PRIVATE (module-only):
+/// reached by `raise_node_to_type_expr_inner` (the production raiser), `project` /
+/// `raised_shape_key` (the facts/key projection), its own recursion, and the
+/// index/surface helpers.
+fn raise_node_to_type_expr_core_impl(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+) -> Option<TypeExpr> {
+    use std::sync::Arc;
+
+    use crate::resolver_core::component_meta_query_engine::{
+        semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE,
+    };
+    use crate::semantic_query::{OptionalityMod, QueryError, ReadonlyMod, SemanticNodeData};
+
+    let ctx = dispatch.ctx;
+    let data = super::node_data_for(ctx, node)?;
+    Some(match data.as_ref() {
+        SemanticNodeData::Primitive(kind) => semantic_primitive_to_type_expr(*kind),
+        SemanticNodeData::Literal(value) => TypeExpr::Literal(value.clone()),
+        SemanticNodeData::Alias(target) => {
+            if !active.insert(node) {
+                return Some(TypeExpr::Unknown {
+                    raw: "semanticAliasCycle".to_string(),
+                });
+            }
+            let result = raise_node_to_type_expr_core_impl(dispatch, *target, active);
+            active.remove(&node);
+            return result;
+        }
+        SemanticNodeData::Union(members) => TypeExpr::Union(std::sync::Arc::from(
+            members
+                .iter()
+                .filter_map(|member| raise_node_to_type_expr_core_impl(dispatch, *member, active))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )),
+        SemanticNodeData::Intersection(members) => {
+            // Drop empty-object arms from the Intersection
+            // projection. `Id<T> = {} & { [P in keyof T]: T[P] }`
+            // and similar helper patterns lower to
+            // `Intersection([empty_object, mapped_object])`; the
+            // empty arm contributes nothing semantically
+            // (`{} & X ≡ X`) but would leak through as a
+            // `TypeExpr::Unknown { raw: SEMANTIC_OBJECT_SURFACE }`
+            // sentinel which breaks callers that expect a pure
+            // Object at the projection boundary. Dropping the
+            // semantically-vacuous arm here collapses `{} & X → X`
+            // so imported-helper UI bindings materialise cleanly
+            // instead of nested in
+            // `Intersection([Unknown, Object])`.
+            let mut arms: Vec<TypeExpr> = members
+                .iter()
+                .filter_map(|member| raise_node_to_type_expr_core_impl(dispatch, *member, active))
+                .filter(|arm| !matches!(arm, TypeExpr::Unknown { raw } if raw == SEMANTIC_OBJECT_SURFACE))
+                // `{} & X ≡ X` — the representable empty object (the
+                // Object arm below raises empty surfaces first-class)
+                // is equally vacuous inside an intersection. Known
+                // divergence: for a NULLISH X the pinned tsgo reduces
+                // `{} & null` / `{} & undefined` to `never`, while this
+                // projection-boundary filter collapses them to the
+                // nullish arm. The correct home for that reduction is
+                // the semantic intersection reducer, not this raise
+                // boundary — tracked as debt, predating the first-class
+                // empty-object raise (the retired sentinel filter
+                // collapsed the same way).
+                .filter(|arm| !matches!(arm, TypeExpr::Object(object) if object.properties.is_empty()))
+                .collect();
+            if arms.is_empty() {
+                // Every arm was vacuous (`{} & {}`): fall back to the
+                // representable empty object — a zero-arm
+                // `Intersection([])` is not a publishable shape.
+                TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
+                    properties: Vec::new(),
+                }))
+            } else if arms.len() == 1 {
+                arms.pop().unwrap()
+            } else {
+                TypeExpr::Intersection(std::sync::Arc::from(arms.into_boxed_slice()))
+            }
+        }
+        SemanticNodeData::Array { element, readonly } => TypeExpr::Array {
+            element: std::sync::Arc::new(raise_node_to_type_expr_core_impl(
+                dispatch, *element, active,
+            )?),
+            readonly: *readonly,
+        },
+        SemanticNodeData::Tuple { elements, readonly } => {
+            use verter_type_expr::TupleElement;
+
+            TypeExpr::Tuple {
+                elements: std::sync::Arc::from(
+                    elements
+                        .iter()
+                        .filter_map(|element| {
+                            Some(TupleElement {
+                                label: element
+                                    .label
+                                    .as_ref()
+                                    .map(|label| label.as_ref().to_string()),
+                                ty: raise_node_to_type_expr_core_impl(
+                                    dispatch,
+                                    element.value,
+                                    active,
+                                )?,
+                                optional: element.optional,
+                                rest: element.rest,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+                readonly: *readonly,
+            }
+        }
+        SemanticNodeData::Object(surface) => {
+            // A genuinely EMPTY surface (no members, no signatures, no
+            // index signature) is the representable empty object `{}`
+            // — `Pick<T, never>`, `Omit<T, keyof T>`,
+            // `NonNullable<unknown>` all reduce to it. Raise it as a
+            // zero-property `TypeExpr::Object` instead of the
+            // `SEMANTIC_OBJECT_SURFACE` sentinel (the sentinel marks a
+            // surface the projection cannot REPRESENT, which an empty
+            // object is not). The intersection vacuous-arm rule above
+            // drops empty-object arms the same way it drops the
+            // sentinel, so `{} & X ≡ X` is preserved.
+            if surface.members.is_empty()
+                && surface.call_signatures.is_empty()
+                && surface.construct_signatures.is_empty()
+                && !surface.has_index_signature
+            {
+                TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
+                    properties: Vec::new(),
+                }))
+            } else {
+                // Reconstruct the Object body from the `SurfaceView` using the
+                // shared core's own member raising (fresh cycle set per member,
+                // matching the prior `surface_view_to_projected_surface` →
+                // `materialize_output_type_expr` path). No cross-module call into
+                // the query-engine surface projector.
+                raise_surface_view_to_object_type_expr_core(dispatch, surface).unwrap_or(
+                    TypeExpr::Unknown {
+                        raw: SEMANTIC_OBJECT_SURFACE.to_string(),
+                    },
+                )
+            }
+        }
+        SemanticNodeData::MergedDecl { contributors } => {
+            // Peer-merge the same-name interface contributors into one
+            // surface (member union + ordered method overload groups) and
+            // raise the merged object.
+            let merged = super::walk::reduce_merged_decl_with_graph(dispatch.graph(), contributors);
+            return raise_node_to_type_expr_core_impl(dispatch, merged, active);
+        }
+        // DeclPlaceholder lowers to a TypeExpr::Ref shell.
+        SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => TypeExpr::Ref {
+            name: std::sync::Arc::clone(name),
+            type_arguments: verter_type_expr::empty_type_args(),
+        },
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            ..
+        } => TypeExpr::Conditional {
+            check: std::sync::Arc::new(raise_node_to_type_expr_core_impl(
+                dispatch, *check, active,
+            )?),
+            extends: std::sync::Arc::new(raise_node_to_type_expr_core_impl(
+                dispatch, *extends, active,
+            )?),
+            true_type: std::sync::Arc::new(raise_node_to_type_expr_core_impl(
+                dispatch,
+                *true_branch_ref,
+                active,
+            )?),
+            false_type: std::sync::Arc::new(raise_node_to_type_expr_core_impl(
+                dispatch,
+                *false_branch_ref,
+                active,
+            )?),
+        },
+        SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions,
+        } => TypeExpr::TemplateLiteral {
+            quasis: quasis
+                .iter()
+                .map(|quasi| quasi.as_ref().to_string())
+                .collect(),
+            expressions: std::sync::Arc::from(
+                expressions
+                    .iter()
+                    .filter_map(|expr| raise_node_to_type_expr_core_impl(dispatch, *expr, active))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+        },
+        SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
+            raise_node_to_type_expr_core_impl(dispatch, *base, active)?,
+        )),
+        SemanticNodeData::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
+            object: std::sync::Arc::new(raise_node_to_type_expr_core_impl(
+                dispatch, *object, active,
+            )?),
+            index: std::sync::Arc::new(index_key_to_type_expr_core(dispatch, index, active)?),
+        },
+        SemanticNodeData::Mapped { mapper, .. } => TypeExpr::Mapped {
+            // Presentational projection: look up the binder node
+            // by `mapper.parameter_node` and read its
+            // `display_name` for the projected
+            // `TypeExpr::Mapped { parameter }` field. The
+            // semantic-graph interner dedups only
+            // structurally-identical binders, so the
+            // representative's `display_name` is well-defined.
+            parameter: match super::node_data_for(ctx, mapper.parameter_node).as_deref() {
+                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
+                    display_name.as_ref().to_string()
+                }
+                _ => String::new(),
+            },
+            source: std::sync::Arc::new(
+                match super::node_data_for(ctx, mapper.key_space)?.as_ref() {
+                    SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
+                        raise_node_to_type_expr_core_impl(dispatch, *base, active)?,
+                    )),
+                    _ => raise_node_to_type_expr_core_impl(dispatch, mapper.key_space, active)?,
+                },
+            ),
+            value: std::sync::Arc::new(raise_node_to_type_expr_core_impl(
+                dispatch,
+                mapper.value_expr,
+                active,
+            )?),
+            optional: match mapper.optionality {
+                OptionalityMod::Add => verter_type_expr::MappedModifier::Add,
+                OptionalityMod::Remove => verter_type_expr::MappedModifier::Remove,
+                OptionalityMod::Keep => verter_type_expr::MappedModifier::None,
+            },
+            readonly: match mapper.readonly {
+                ReadonlyMod::Add => verter_type_expr::MappedModifier::Add,
+                ReadonlyMod::Remove => verter_type_expr::MappedModifier::Remove,
+                ReadonlyMod::Keep => verter_type_expr::MappedModifier::None,
+            },
+            name_type: match mapper.name_remap {
+                Some(node) => Some(std::sync::Arc::new(raise_node_to_type_expr_core_impl(
+                    dispatch, node, active,
+                )?)),
+                None => None,
+            },
+        },
+        SemanticNodeData::TypeOf(_) => {
+            let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+            let type_args = data.carrier_type_args();
+            let mut segments = value_root
+                .name
+                .split('.')
+                .map(|segment| segment.to_string())
+                .collect::<Vec<_>>();
+            segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
+            // Raise the instantiation-expression args back onto the
+            // projected `ValueRef.type_args` so `typeof C.make<string>`
+            // round-trips its arguments. A miss on any arg becomes the
+            // `<raise miss>` placeholder so the outer typeof still
+            // constructs (mirrors the `ImportType` arm).
+            let raised_args: Vec<TypeExpr> = type_args
+                .iter()
+                .map(|id| {
+                    raise_node_to_type_expr_core_impl(dispatch, *id, active).unwrap_or(
+                        TypeExpr::Unknown {
+                            raw: "<raise miss>".to_string(),
+                        },
+                    )
+                })
+                .collect();
+            TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: segments,
+                type_args: raised_args,
+            })
+        }
+        SemanticNodeData::TypeParam {
+            display_name,
+            constraint,
+            default,
+            ..
+        } => {
+            // Project `constraint` / `default` back to `TypeExpr`
+            // so the round-trip preserves the declaration shape.
+            // The `active` visited set guards against cyclic
+            // constraint graphs: when a TypeParam's constraint or
+            // default transitively reaches this same node, return
+            // `None` from the recursion and drop the field rather
+            // than looping.
+            //
+            // The projected `TypeExpr::TypeParameter.name` uses
+            // `display_name` — the human-readable parameter name.
+            // `decl` / `param_index` are identity discriminators
+            // for structural interning and do not appear in the
+            // projected `TypeExpr` shape.
+            if !active.insert(node) {
+                return Some(TypeExpr::Unknown {
+                    raw: "semanticTypeParamCycle".to_string(),
+                });
+            }
+            let constraint_expr = constraint
+                .as_ref()
+                .and_then(|c| raise_node_to_type_expr_core_impl(dispatch, *c, active))
+                .map(std::sync::Arc::new);
+            let default_expr = default
+                .as_ref()
+                .and_then(|d| raise_node_to_type_expr_core_impl(dispatch, *d, active))
+                .map(std::sync::Arc::new);
+            active.remove(&node);
+            TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+                name: display_name.as_ref().to_string(),
+                constraint: constraint_expr,
+                default: default_expr,
+            })
+        }
+        SemanticNodeData::Infer { name } => TypeExpr::Infer {
+            name: name.as_ref().to_string(),
+        },
+        SemanticNodeData::Opaque(err) => match err {
+            QueryError::RecursiveRef { name } => TypeExpr::recursive_ref(name.as_ref(), Vec::new()),
+            _ => TypeExpr::Unknown {
+                raw: semantic_query_error_raw(err),
+            },
+        },
+        SemanticNodeData::VueMacroElements(_) => TypeExpr::Unknown {
+            raw: "VueMacroElements".to_string(),
+        },
+        // Canonical Function shape
+        // converts back to `TypeExpr::Function`. Session 4 lowered
+        // `TypeExpr::Function` → `SemanticNodeData::Function`; this
+        // conversion completes the round-trip so alias bodies that
+        // include function types (`(() => T)` branches) survive
+        // dispatch-only projection without emitting `semanticFunction`
+        // sentinels.
+        SemanticNodeData::Function {
+            params,
+            return_type,
+            type_parameters,
+            signature_span,
+            return_type_span,
+        } => {
+            use verter_type_expr::{FunctionExpr, FunctionParam, FunctionSpans, TypeParam};
+            let parameters: Vec<FunctionParam> = params
+                .iter()
+                .filter_map(|p| {
+                    Some(FunctionParam::with_span(
+                        p.name.as_ref().map(|n| n.as_ref().to_string()),
+                        raise_node_to_type_expr_core_impl(dispatch, p.ty, active)?,
+                        p.optional,
+                        p.rest,
+                        // Carry the graph parameter's span back to the IR.
+                        p.span,
+                        // The TS-annotation-presence fact is a lowering-time
+                        // input to JSDoc `@param` precedence; it is consumed
+                        // ONLY by `enrich_params_and_return_with_jsdoc` at
+                        // build time, before any graph round-trip. A raised
+                        // function is the post-enrichment semantic form and is
+                        // never re-enriched, so the graph node does not carry
+                        // the fact and `false` is the correct, inert value.
+                        false,
+                    ))
+                })
+                .collect();
+            let return_ty = raise_node_to_type_expr_core_impl(dispatch, *return_type, active)
+                .map(std::sync::Arc::new);
+            let type_params: Vec<TypeParam> = type_parameters
+                .iter()
+                .map(|tp| TypeParam {
+                    name: tp.name.as_ref().to_string(),
+                    constraint: tp
+                        .constraint
+                        .and_then(|c| raise_node_to_type_expr_core_impl(dispatch, c, active))
+                        .map(std::sync::Arc::new),
+                    default: tp
+                        .default
+                        .and_then(|d| raise_node_to_type_expr_core_impl(dispatch, d, active))
+                        .map(std::sync::Arc::new),
+                })
+                .collect();
+            // Carry the graph Function node's signature / return spans back
+            // to the IR (round-trip provenance preservation).
+            TypeExpr::Function(std::sync::Arc::new(FunctionExpr::with_spans(
+                parameters,
+                return_ty,
+                type_params,
+                FunctionSpans {
+                    signature: *signature_span,
+                    return_type: *return_type_span,
+                },
+            )))
+        }
+        // Lazy carriers. DeclRef raises to a
+        // bare `Ref { name }` with empty type arguments. Identity
+        // (`canonical_id + whole_hash`) is encoded in the interning
+        // scope, not in the projected TypeExpr — that's the lossy
+        // direction of the Navigate-mode lazy lowering.
+        SemanticNodeData::DeclRef { identity } => TypeExpr::Ref {
+            name: std::sync::Arc::clone(&identity.decl_name),
+            type_arguments: verter_type_expr::empty_type_args(),
+        },
+        // InstantiationRef raises to `Ref { name, type_arguments: [...] }`.
+        // A miss on any arg raise becomes `Unknown { raw: "<raise
+        // miss>" }` so the outer Ref still constructs (vs. failing
+        // the whole raise which would lose the application shape).
+        SemanticNodeData::InstantiationRef { base, args } => {
+            let raised_args: Vec<TypeExpr> = args
+                .iter()
+                .map(|id| {
+                    raise_node_to_type_expr_core_impl(dispatch, *id, active).unwrap_or(
+                        TypeExpr::Unknown {
+                            raw: "<raise miss>".to_string(),
+                        },
+                    )
+                })
+                .collect();
+            TypeExpr::Ref {
+                name: std::sync::Arc::clone(&base.decl_name),
+                type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
+            }
+        }
+        // Unresolved bare-name carrier → `Ref { name, type_arguments }`
+        // (the shallow-by-default published shape). `scope` is value-side
+        // resolution context, not part of the projected shape. The
+        // structurally-lowered `type_args` raise back onto
+        // `Ref.type_arguments` so `Foo<Arg>` round-trips its arguments;
+        // an empty slice raises to the bare `Foo` case. A miss on any
+        // arg becomes the `<raise miss>` placeholder so the outer
+        // reference still constructs (mirrors the `ImportType` arm).
+        SemanticNodeData::BareRef(_) => {
+            let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
+            let type_args = data.carrier_type_args();
+            let raised_args: Vec<TypeExpr> = type_args
+                .iter()
+                .map(|id| {
+                    raise_node_to_type_expr_core_impl(dispatch, *id, active).unwrap_or(
+                        TypeExpr::Unknown {
+                            raw: "<raise miss>".to_string(),
+                        },
+                    )
+                })
+                .collect();
+            TypeExpr::Ref {
+                name: std::sync::Arc::clone(name),
+                type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
+            }
+        }
+        // Unresolved dynamic-import carrier → `TypeExpr::ImportType`.
+        // A miss on any type-arg raise becomes the `<raise miss>`
+        // placeholder so the outer import-type still constructs.
+        SemanticNodeData::ImportType(_) => {
+            let (specifier, qualifier, typeof_query) =
+                data.import_type_head().expect("ImportType carrier head");
+            let type_args = data.carrier_type_args();
+            let raised_args: Vec<TypeExpr> = type_args
+                .iter()
+                .map(|id| {
+                    raise_node_to_type_expr_core_impl(dispatch, *id, active).unwrap_or(
+                        TypeExpr::Unknown {
+                            raw: "<raise miss>".to_string(),
+                        },
+                    )
+                })
+                .collect();
+            TypeExpr::ImportType {
+                specifier: std::sync::Arc::clone(specifier),
+                qualifier: std::sync::Arc::clone(qualifier),
+                typeof_query,
+                type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
+            }
+        }
+        // Raw-fallback carrier → `TypeExpr::Unknown { raw }` (the
+        // round-trip of the only carrier that holds raw type text).
+        SemanticNodeData::RawFallback { raw } => TypeExpr::Unknown {
+            raw: raw.as_ref().to_string(),
+        },
+        // Constructor-type carrier → `TypeExpr::ConstructorType`. The
+        // signature interns a `Function` node; rewrap its raised
+        // `FunctionExpr` as a constructor type. Any non-function shape
+        // (malformed carrier) is preserved as raised rather than
+        // fabricated.
+        SemanticNodeData::ConstructorType { signature } => {
+            let raised = raise_node_to_type_expr_core_impl(dispatch, *signature, active)?;
+            if let TypeExpr::Function(func) = &raised {
+                TypeExpr::ConstructorType(std::sync::Arc::clone(func))
+            } else {
+                raised
+            }
+        }
+        // Synthetic-binding carrier → `TypeExpr::SyntheticSlotBinding`.
+        // Re-hydrate the full carrier key by re-attaching the value-side
+        // `value_node` provenance ordinal to the content-free identity.
+        SemanticNodeData::SyntheticBinding { id, value_node } => {
+            TypeExpr::SyntheticSlotBinding(Arc::new(id.to_carrier_key(*value_node)))
+        }
+    })
+}
+
+/// Raise an [`IndexKey`] used as an `IndexedAccess` index back to a
+/// `TypeExpr` — the index-key arm of the shared traversal (string / number
+/// literals raise directly; a `TypeNode` recurses through the core).
+fn index_key_to_type_expr_core(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    index: &crate::semantic_query::IndexKey,
+    active: &mut FxHashSet<SemanticNodeId>,
+) -> Option<TypeExpr> {
+    use crate::semantic_query::IndexKey;
+    Some(match index {
+        IndexKey::String(text) => TypeExpr::string_literal(text.as_ref()),
+        IndexKey::Number(number) => TypeExpr::number_literal(number.get() as f64),
+        IndexKey::TypeNode(node) => raise_node_to_type_expr_core_impl(dispatch, *node, active)?,
+    })
+}
+
+/// Reconstruct an Object [`TypeExpr`] from a [`SurfaceView`] — the non-empty
+/// `Object` arm of the shared traversal.
+///
+/// A STRUCTURAL reconstruction (`SurfaceView -> ObjectExpr`), not type
+/// resolution: each member / signature value raises through the shared core
+/// with a FRESH cycle set (a fresh `active` per member), exactly as the prior
+/// `materialize_output_type_expr -> output_shell_raise_sealed ->
+/// raise_node_to_type_expr` path did. Threading the Object node's incoming
+/// `active` across members would diverge (a diamond where the same node backs
+/// two members would short-circuit the second to a cycle sentinel), so the
+/// fresh-per-member set is deliberate. A member whose value misses becomes the
+/// `SEMANTIC_SURFACE_MEMBER` sentinel. Returns `None` when the surface yields no
+/// representable members (the empty-`{}` case is handled by the caller).
+fn raise_surface_view_to_object_type_expr_core(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    surface: &crate::semantic_query::SurfaceView,
+) -> Option<TypeExpr> {
+    use std::sync::Arc;
+
+    use verter_type_expr::{
+        FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
+        PrimitiveName,
+    };
+
+    use crate::resolver_core::component_meta_query_engine::SEMANTIC_SURFACE_MEMBER;
+
+    // Raise each member value through the shared core with a FRESH cycle set
+    // (fresh `active`), with the `SEMANTIC_SURFACE_MEMBER` raise-failure sentinel
+    // the prior path used.
+    let raise_member = |node: SemanticNodeId| -> TypeExpr {
+        let mut active = FxHashSet::default();
+        raise_node_to_type_expr_core_impl(dispatch, node, &mut active).unwrap_or(
+            TypeExpr::Unknown {
+                raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+            },
+        )
+    };
+
+    // Single-call-signature fast path: a surface with no members, no construct
+    // signatures, no index signature, and exactly one call signature IS that
+    // call signature's `TypeExpr` (not wrapped in an object).
+    if surface.members.is_empty()
+        && surface.construct_signatures.is_empty()
+        && !surface.has_index_signature
+        && surface.call_signatures.len() == 1
+    {
+        return Some(raise_member(surface.call_signatures[0]));
+    }
+
+    let mut properties: Vec<ObjectMember> = Vec::new();
+    for member in surface.members.iter() {
+        let ty = raise_member(member.value);
+        // Reconstruct via `with_visibility` so a non-public class member survives
+        // with its true accessibility (leak-prevention + `native_props`
+        // fidelity), carrying the member's real OXC spans.
+        if member.is_method {
+            if let TypeExpr::Function(function) = &ty {
+                properties.push(ObjectMember::Method(MethodSignature::with_visibility(
+                    member.name.as_ref().to_string(),
+                    (**function).clone(),
+                    member.optional,
+                    member.visibility,
+                    member.spans,
+                )));
+                continue;
+            }
+        }
+        properties.push(ObjectMember::Property(ObjectProperty::with_visibility(
+            member.name.as_ref().to_string(),
+            ty,
+            member.optional,
+            member.readonly,
+            member.visibility,
+            member.spans,
+        )));
+    }
+
+    for signature in surface.call_signatures.iter() {
+        if let TypeExpr::Function(function) = &raise_member(*signature) {
+            properties.push(ObjectMember::CallSignature(FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function.return_type.clone(),
+                function.type_parameters.clone(),
+                function.spans,
+            )));
+        }
+    }
+
+    for signature in surface.construct_signatures.iter() {
+        if let TypeExpr::Function(function) = &raise_member(*signature) {
+            properties.push(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function.return_type.clone(),
+                function.type_parameters.clone(),
+                function.spans,
+            )));
+        }
+    }
+
+    // A REAL `[k: K]: V` index signature (sourced from an OXC declaration site)
+    // re-emits its declared key/value shape AND its real spans.
+    for signature in surface.index_signatures.iter() {
+        properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
+            "key".to_string(),
+            raise_member(signature.key_type),
+            raise_member(signature.value_type),
+            signature.readonly,
+            signature.spans,
+        )));
+    }
+
+    // The synthetic open-surface placeholder ONLY when the surface is GENUINELY
+    // OPEN (`has_index_signature` set, no concrete signature carried). No single
+    // OXC site, so its spans stay `None` by design.
+    if surface.has_index_signature && surface.index_signatures.is_empty() {
+        properties.push(ObjectMember::IndexSignature(IndexSignature::synthetic(
+            "key".to_string(),
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Unknown {
+                raw: "projectedOpenSurface".to_string(),
+            },
+            false,
+        )));
+    }
+
+    if properties.is_empty() {
+        return None;
+    }
+    Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
+}
+
+/// Map a semantic [`PrimitiveKind`](crate::semantic_query::PrimitiveKind) to its
+/// `TypeExpr::Primitive` — the `Primitive` arm of the shared traversal.
+fn semantic_primitive_to_type_expr(kind: crate::semantic_query::PrimitiveKind) -> TypeExpr {
     use verter_type_expr::PrimitiveName;
+
+    use crate::semantic_query::PrimitiveKind as SemanticPrimitiveKind;
 
     TypeExpr::Primitive(match kind {
         SemanticPrimitiveKind::String => PrimitiveName::String,

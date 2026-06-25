@@ -90,6 +90,141 @@ crate::project_semantic_dispatch::output_materialization::define_output_capabili
     mint: pub(in crate::host_manage::component_meta_methods)
 }
 
+/// A session-local node-bearing expansion result: the produced
+/// [`SemanticNodeId`] plus the cache metadata the expansion carries, held in
+/// NODE-DOMAIN so the expansion branch never materialises a `TypeExpr`
+/// mid-flight. Distinct from
+/// [`ExpandedNormalizedExpr`](verter_semantic::analysis::type_expand::ExpandedNormalizedExpr),
+/// which OWNS a `TypeExpr` — that materialised form is produced ONLY at the sink
+/// by [`materialize_node_bearing_expansion`].
+///
+/// The macro-argument-type expansion branch (`compute_evaluated_types_*` in
+/// `host_manage::eval_env`) is a Kind-B bridge site that today raises the
+/// produced node to a `TypeExpr` mid-flight via
+/// `legacy_semantic_type_expr_bridge` and wraps it in `ExpandedNormalizedExpr`.
+/// The node-domain replacement carries this artifact instead and defers the
+/// node→`TypeExpr` materialisation to the facade below.
+///
+/// `NodeBearingExpansion` is the node-domain artifact the node-domain expansion
+/// CALLER (the eval_env expansion branch) constructs and threads; this facade
+/// is the materialisation SINK, not the facts consumer. Its production wiring is
+/// fenced by the zero-production-caller guard
+/// `node_domain_readiness_primitives_have_zero_production_callers`: the eval_env
+/// expansion raises stay on the interim bridge, so this artifact + facade have
+/// no production caller and are exercised by the facade parity test. See
+/// [`materialize_node_bearing_expansion`] for the authorized-owner
+/// capability-threading point the node-domain expansion caller uses.
+// Node-bearing expansion artifact + materialisation facade, fenced by the
+// zero-production-caller guard
+// `node_domain_readiness_primitives_have_zero_production_callers`: no production
+// caller exists (the eval_env expansion raises stay on the interim bridge), so
+// the non-test dead-code lint fires (test usage does not satisfy it). Suppress
+// it for the non-test build only; the facade parity test proves they are live
+// and byte-equal to the bridge path. The guard, not the attr, is the
+// architectural fence.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-bearing expansion artifact, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers; exercised by the \
+                  facade parity test"
+    )
+)]
+#[derive(Debug, Clone)]
+pub(crate) struct NodeBearingExpansion {
+    /// The produced expansion node (the `ProjectPath` / lower+resolve result).
+    pub(crate) node: crate::semantic_query::SemanticNodeId,
+    /// The accumulated dependency signature observed while producing `node`.
+    /// Facts-rail metadata the node-domain expansion caller folds into its
+    /// `fact_versions` at the call site — carried ON the artifact, not consumed
+    /// by this facade.
+    pub(crate) dep_signature: crate::semantic_query::DepSignature,
+    /// `true` when producing `node` returned a PARTIAL value (budget /
+    /// cancellation / same-path recursion). Carried so the node-domain expansion
+    /// caller's admission gate refuses to warm a partial — folded by that
+    /// caller, not by this facade.
+    pub(crate) result_is_partial: bool,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-bearing expansion artifact constructor, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers; exercised by the \
+                  facade parity test"
+    )
+)]
+impl NodeBearingExpansion {
+    /// Construct the artifact from its parts (the expansion node + cache
+    /// metadata). Kept minimal: a node-domain producer (the eval_env expansion
+    /// branch) supplies a `SemanticNodeId` it already holds — no `TypeExpr`.
+    #[must_use]
+    pub(crate) fn new(
+        node: crate::semantic_query::SemanticNodeId,
+        dep_signature: crate::semantic_query::DepSignature,
+        result_is_partial: bool,
+    ) -> Self {
+        Self {
+            node,
+            dep_signature,
+            result_is_partial,
+        }
+    }
+}
+
+/// Materialisation facade: the SINGLE place a [`NodeBearingExpansion`] becomes
+/// an [`ExpandedNormalizedExpr`](verter_semantic::analysis::type_expand::ExpandedNormalizedExpr).
+///
+/// This fn lives in `host_manage::component_meta_methods` — the AUTHORIZED owner
+/// of [`HostManageComponentMetaOutputCap`] — and mints that capability INTERNALLY
+/// to materialise the artifact's node into a sealed output carrier and unwrap it.
+/// The Kind-B bridge sibling `host_manage::eval_env` CANNOT mint the capability
+/// (the cap's `mint: pub(in crate::host_manage::component_meta_methods)` scope
+/// makes a planted `HostManageComponentMetaOutputCap::new` in eval_env an
+/// `E0624`), so a node-domain expansion caller INVOKES this facade (a
+/// `pub(crate)` fn) to materialise its `NodeBearingExpansion` — it never mints a
+/// capability and never raises a `TypeExpr` mid-flight. This is the
+/// authorized-owner threading point.
+///
+/// Returns the same `ExpandedNormalizedExpr { expr }` the interim bridge would
+/// produce for the same node (the capability's `materialize_output_type_expr`
+/// routes through the identical shell-raise the bridge uses), and `None` on a
+/// whole-raise miss — mirroring the bridge's `None` arm, where the eval_env
+/// caller falls back to its `parsed` expr.
+///
+/// The facade materialises the artifact's `.node` to `ExpandedNormalizedExpr`;
+/// it is the materialisation SINK, NOT the facts consumer. The artifact's
+/// `dep_signature` / `result_is_partial` are facts-rail metadata the node-domain
+/// expansion caller folds into its admission / `fact_versions` at the call site
+/// — this facade neither reads nor folds them.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-bearing expansion materialisation facade, fenced by \
+                  node_domain_readiness_primitives_have_zero_production_callers; exercised by the \
+                  facade parity test"
+    )
+)]
+#[must_use]
+pub(crate) fn materialize_node_bearing_expansion(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    artifact: &NodeBearingExpansion,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedNormalizedExpr> {
+    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+    // Mint the component-meta host-method output capability (constructor visible
+    // only within this authorized owner module) and materialise the node into a
+    // sealed carrier, then unwrap it — the sole node→`TypeExpr` materialisation
+    // for the expansion branch, performed at the sink.
+    let cap = HostManageComponentMetaOutputCap::new(dispatch);
+    let expr = cap
+        .materialize_output_type_expr(artifact.node)?
+        .into_type_expr(&cap);
+    Some(verter_semantic::analysis::type_expand::ExpandedNormalizedExpr { expr })
+}
+
 impl VerterHost {
     /// Single host-backed resolver API for cross-file component-meta enrichment.
     ///
@@ -3840,3 +3975,7 @@ pub(crate) fn pick_member_route_should_skip_callable_descent_impl(
 #[cfg(test)]
 #[path = "component_meta_callable_descent_tests.rs"]
 mod callable_descent_predicate_tests;
+
+#[cfg(test)]
+#[path = "component_meta_node_bearing_expansion_tests.rs"]
+mod node_bearing_expansion_tests;

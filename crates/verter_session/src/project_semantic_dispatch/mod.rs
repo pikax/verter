@@ -98,6 +98,7 @@ pub(crate) mod output_materialization;
 // consumer depends on it; it exists only for its `const _` build-time checks.
 mod output_materialization_guards;
 pub(crate) mod raise;
+pub(crate) mod raise_sentinel;
 pub(crate) mod relation;
 pub(crate) mod relation_predicates;
 pub(crate) mod substitute;
@@ -2658,3 +2659,6 @@ mod carrier_head_resolution_tests;
 
 #[cfg(test)]
 mod mapped_key_domain_carrier_tests;
+
+#[cfg(test)]
+mod raised_shape_tests;

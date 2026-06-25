@@ -207,23 +207,11 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
             // (exact matches) or by `semantic_query_error_raw` (prefix
             // matches for parameterised errors) must round-trip to
             // "not materialised" so the dispatch-first path falls back
-            // to `owner_engine` for fuller expansion.
-            let is_exact_sentinel = matches!(
-                raw.as_str(),
-                SEMANTIC_MISS
-                    | SEMANTIC_OBJECT_SURFACE
-                    | SEMANTIC_SURFACE_MEMBER
-                    | "semanticAliasCycle"
-                    | "semanticFunction"
-                    | "VueMacroElements"
-                    | "projectedOpenSurface"
-            );
-            let is_prefix_sentinel = raw.starts_with("materialize:")
-                || raw.starts_with("unsupportedIntrinsic(")
-                || raw.starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX)
-                || raw.starts_with("unstableState(")
-                || raw.starts_with("aliasCycle(");
-            !is_exact_sentinel && !is_prefix_sentinel
+            // to `owner_engine` for fuller expansion. The sentinel set
+            // is owned by the shared `raise_sentinel` classifier so the
+            // node-domain raised-shape projection and this `TypeExpr`
+            // recogniser can never disagree on the spelling.
+            !crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel(raw)
         }
         TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
             members.iter().all(dispatch_route_expr_is_materialized)
