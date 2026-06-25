@@ -517,9 +517,10 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // sealed carriers whose inner `TypeExpr` lives in a deeply-private
             // `carrier::payload` vault (so in safe Rust outside the vault there
             // is no readable `TypeExpr` field; the residual trusted surface is
-            // the vault + registration source + guard deletion + unsafe), with
-            // the interim Kind-B `legacy_semantic_type_expr_bridge` pinned by
-            // `residual_output_materialization_bridge_no_new_kind_b_references`.
+            // the vault + registration source + guard deletion + unsafe). The
+            // retired interim Kind-B `legacy_semantic_type_expr_bridge` is gone
+            // (its absence tripwired by the tombstone
+            // `retired_kind_b_bridge_symbol_absent_from_production_source`).
             // The carrier-can't-name-`sealed` seal is COMPILER-enforced: `mod
             // sealed` is PRIVATE (not `pub(super)`) inside `mod projector`, so a
             // sibling `carrier`-side `impl projector::sealed::Sealed for HotCap`
@@ -620,18 +621,16 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // vs pre-admission construction-chain structs; the sink-fn collector
             // is inline-mod-aware. The fence soundness is tripwired by
             // `forgeable_input_fence_has_no_dual_bearing_type`.
-            // This is the Kind-A / PUBLICATION bar, NOT a claim that no
-            // raw-node→`TypeExpr` boundary remains anywhere: the named Kind-B
-            // raise-then-decide semantic-decision residual (the
-            // `legacy_semantic_type_expr_bridge` route through
-            // `execute_to_type_expr` /
-            // `project_slot_binding_member_with_terminal_id`) remains DEFERRED
-            // to the Kind-B graph-native conversion
-            // (docs/arch/parselower-design.md
-            // `Stage8-A4-kind-b-graph-native-conversion`) and is pinned by
-            // `residual_output_materialization_bridge_no_new_kind_b_references` +
-            // the entrypoint inventory
-            // `kind_b_raise_then_decide_entrypoints_pinned`. The admitted
+            // This is the Kind-A / PUBLICATION bar. The Kind-B raise-then-decide
+            // residual is RETIRED: the interim `legacy_semantic_type_expr_bridge`
+            // is deleted, every Kind-B caller now decides on the node-domain
+            // `RaisedShapeFacts` / interned `RaisedShapeKey` (no mid-flight
+            // `SemanticNodeId -> TypeExpr` raise), and the single publication
+            // `TypeExpr` is materialised once at a registered output sink through
+            // the sealed `OutputProjector`. The absence of the retired bridge
+            // symbol is tripwired by the lean tombstone
+            // `retired_kind_b_bridge_symbol_absent_from_production_source`. The
+            // admitted
             // tokens' field privacy + seal are pinned by
             // `admitted_tokens_have_private_fields_and_seal`, and the
             // authority-callable scopes are no-`unsafe` (a transmute could
@@ -645,7 +644,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // dispatch sibling cannot launder — pinned by
             // `raise_output_seam_returns_sealed_carrier_not_bare_type_expr`.
             "materialize_type_expr_is_not_production_visible",
-            "residual_output_materialization_bridge_no_new_kind_b_references",
+            "retired_kind_b_bridge_symbol_absent_from_production_source",
             "sealed_module_is_private_not_pub_super",
             "output_projector_owner_registration_inventory",
             "output_carriers_have_no_inherent_typeexpr_escape_method",
@@ -657,7 +656,6 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "forgeable_input_fence_has_no_dual_bearing_type",
             "admitted_tokens_have_private_fields_and_seal",
             "resolved_surface_access_impls_are_exactly_the_two_tokens",
-            "kind_b_raise_then_decide_entrypoints_pinned",
             "authority_scopes_contain_no_unsafe",
             "carrier_for_test_accessors_are_test_support_gated_not_debug_assertions",
             "raise_output_seam_returns_sealed_carrier_not_bare_type_expr",

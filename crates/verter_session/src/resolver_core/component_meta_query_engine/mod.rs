@@ -123,10 +123,17 @@ mod surface;
 // engine's sink-local methods (`dispatch_projected_surface_to_type_expr` /
 // `projected_expanded_shape_from_node` / the routed-surface methods).
 pub(crate) use surface::{
+    instantiate_local_generic_ref_published, lower_and_project_to_expanded_published,
+    project_class_a_terminal_published, project_expr_surface_expr_published,
     semantic_query_error_raw, type_expr_contains_semantic_miss,
-    type_expr_is_budget_exceeded_sentinel, type_expr_is_expanded_surface,
-    type_expr_root_is_unmaterialized_sentinel,
+    type_expr_is_budget_exceeded_sentinel, type_expr_root_is_unmaterialized_sentinel,
 };
+// `type_expr_is_expanded_surface` survives only as the `#[cfg(test)]` parity
+// ORACLE the raised-shape suite compares the bottom-up `expanded_surface` fact
+// against (production gates read the node-domain fact via `shape_engine`), so
+// its re-export is test-only.
+#[cfg(test)]
+pub(crate) use surface::type_expr_is_expanded_surface;
 // Re-export ONLY the per-sink output capability TYPES so the
 // `output_materialization` owner module can name them for its explicit
 // `impl OutputProjector for <Cap>` registration pairs. The `new()`

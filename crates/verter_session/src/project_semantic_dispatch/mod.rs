@@ -69,7 +69,7 @@ use crate::semantic_query::{
     SemanticQueryValueTag, SignatureRef, SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
-use verter_type_expr::{PrimitiveName, TypeExpr};
+use verter_type_expr::PrimitiveName;
 
 // Module tree. The sub-modules are `pub(crate)` so external callers see only
 // the `ProjectSemanticDispatch` struct / trait impl, while each module owns one
@@ -2081,20 +2081,17 @@ pub(crate) fn node_data_for(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Dispatch helpers (NON-variant; compose existing variants
-// + read sidecars). These are the 3 helpers that replace the 3 originally
-// proposed `SemanticQueryKey` variants per the §0 binding amendment
-// (`MaterializeSurface`, `ResolvePublicInstance`, `ResolveFallthroughSurface`)
-// + 1 extra utility helper (`execute_to_type_expr`).
+// Dispatch helpers (NON-variant; compose existing variants + read sidecars).
 //
-// Per §0 amendment: these are NON-variant — `ProjectSemanticDispatch` does
-// not gain new variants; instead, it exposes plain methods that compose
-// existing dispatchers and read the
-// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar at
-// `verter_semantic/src/analysis/component_meta.rs:83-110`.
-//
-// **No callsite changes in this commit** — callsite migrations (4a/4b/4c
-// classes A/B/C, 5/6/7/8/9 classes D + R) land in 5d-5f.
+// These are plain `ProjectSemanticDispatch` methods, NOT new
+// `SemanticQueryKey` variants: the surface materialisation, public-instance
+// resolution, and fallthrough-surface resolution are expressed by composing
+// the existing dispatchers (`ProjectPath` / `Instantiate`) and reading the
+// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar
+// (`verter_semantic/src/analysis/component_meta.rs`), so the query taxonomy
+// stays closed while these helpers thread the composition. The single
+// publication `TypeExpr` is materialised at the registered surface sink, never
+// mid-flight here.
 // ──────────────────────────────────────────────────────────────────────────
 
 /// `__builtin__` type-space slot for the `Pick` utility.
@@ -2224,57 +2221,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ))
     }
 
-    /// `execute_read(key)` + `raise_node_to_type_expr` in one call,
-    /// returning the full `CacheRead` so `dep_signature` is
-    /// preserved for the caller's fence merge. A lossy
-    /// `Option<TypeExpr>` return would erase the dep-signature and
-    /// break the fence-merge contract, so this helper hands the
-    /// `CacheRead` through instead.
-    ///
-    /// Used by trampoline conversions and consumer migrations that
-    /// need a `TypeExpr` for downstream `ComponentMetaAnalysis` field
-    /// shape consumption.
-    pub(crate) fn execute_to_type_expr(
-        &self,
-        key: &SemanticQueryKey,
-    ) -> CacheRead<QueryResult<TypeExpr>> {
-        let read = self.execute_read(key.clone());
-        let typed_value = match read.value {
-            QueryResult::Value(node) => match self.legacy_semantic_type_expr_bridge(node) {
-                Some(expr) => QueryResult::Value(expr),
-                None => QueryResult::Error(QueryError::Miss),
-            },
-            QueryResult::Recursive(id) => QueryResult::Recursive(id),
-            QueryResult::Error(e) => QueryResult::Error(e),
-        };
-        CacheRead {
-            value: typed_value,
-            dep_signature: read.dep_signature,
-            walker_diagnostics: read.walker_diagnostics,
-            cache_suppress: read.cache_suppress,
-            result_is_partial: read.result_is_partial,
-        }
-    }
-
     /// Slot-binding terminal-id variant for `defineSlots<T>()`. Three-hop
     /// composition: `Navigate` to the slot member, read `params[0].ty` from the
     /// slot value's `Function`, then project the binding member off the param
-    /// Object in the caller's mode — and expose the terminal `SemanticNodeId`
-    /// alongside the raised `TypeExpr`. Returns `QueryResult::Error(Miss)` when
-    /// an intermediate hop fails or the slot value is not a `Function`.
+    /// Object in the caller's mode — and expose the terminal `SemanticNodeId`.
+    /// Returns `QueryResult::Error(Miss)` when an intermediate hop fails, the
+    /// slot value is not a `Function`, or the terminal node is not shell-raisable
+    /// (the same miss the former mid-flight raise produced for an unraisable
+    /// terminal).
+    ///
+    /// NODE-DOMAIN: hands back the terminal `SemanticNodeId`; the component-meta
+    /// output owner materialises it later at the sealed sink inside its
+    /// `expand_slot_binding_output` demand method — eval_env never receives a
+    /// raised `TypeExpr` here.
     ///
     /// The sole in-tree production slot-binding consumer
-    /// (`host_manage/eval_env.rs::fast_to_expansion`) uses this variant because
-    /// the audit-record assembly in `compute_evaluated_types` consumes the
-    /// production-path terminal identity directly (no audit-only re-lowering —
-    /// per the demand-driven reducer spec).
+    /// (`host_manage/component_meta_methods.rs::expand_slot_binding_output`, the
+    /// sink-owned demand method the eval_env slot-binding branch drives) uses this
+    /// variant because the audit-record assembly in `compute_evaluated_types`
+    /// consumes the production-path terminal identity directly (no audit-only
+    /// re-lowering — per the demand-driven reducer spec).
     pub(crate) fn project_slot_binding_member_with_terminal_id(
         &self,
         base: SemanticNodeId,
         slot_name: &str,
         binding_name: &str,
         mode: ProjectionMode,
-    ) -> CacheRead<QueryResult<(SemanticNodeId, TypeExpr)>> {
+    ) -> CacheRead<QueryResult<SemanticNodeId>> {
         // Hop 1: Navigate to the slot member off the macro payload base.
         let slot_path: Arc<[PathSegment]> =
             Arc::from(vec![PathSegment::Member(Arc::from(slot_name))].into_boxed_slice());
@@ -2348,9 +2321,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .collect();
         let value = match binding_read.value {
             QueryResult::Value(terminal_id) => {
-                match self.legacy_semantic_type_expr_bridge(terminal_id) {
-                    Some(expr) => QueryResult::Value((terminal_id, expr)),
-                    None => QueryResult::Error(QueryError::Miss),
+                // A non-shell-raisable terminal node maps to the SAME `Error(Miss)`
+                // the former mid-flight raise produced for an unraisable node —
+                // node-domain, no `TypeExpr` materialised here. Reuse `self` (the
+                // active dispatcher) rather than building a fresh one.
+                if crate::project_semantic_dispatch::raise::node_can_shell_raise_with_dispatch(
+                    self,
+                    terminal_id,
+                ) {
+                    QueryResult::Value(terminal_id)
+                } else {
+                    QueryResult::Error(QueryError::Miss)
                 }
             }
             QueryResult::Recursive(id) => QueryResult::Recursive(id),

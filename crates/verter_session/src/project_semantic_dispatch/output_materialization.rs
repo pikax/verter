@@ -102,11 +102,18 @@
 //! sibling can REACH these `pub(super)` seams but cannot unwrap the returned
 //! carrier without a capability.
 //!
-//! Kind-B sites (raise-then-SEMANTICALLY-DECIDE mid-flight — NOT sinks)
-//! do NOT route through this capability; they use the explicit interim
-//! [`super::legacy_semantic_type_expr_bridge`], which is functionally
-//! identical to the pre-fence behaviour and is the residual the
-//! `output_projector_residual_guards` scanner pins.
+//! The former Kind-B raise-then-decide sites (which once raised a node to a
+//! bare `TypeExpr` mid-flight to make a semantic decision) are RETIRED: every
+//! Kind-B caller now decides on the node-domain `RaisedShapeFacts` / interned
+//! `RaisedShapeKey` (no mid-flight raise), and the single publication `TypeExpr`
+//! is materialised ONCE at a registered output sink through this capability —
+//! the demand-bound surface adapters
+//! ([`super::super::resolver_core::component_meta_query_engine::surface`]) and
+//! the sink-owned macro-output expansion demand methods
+//! (`host_manage::component_meta_methods::expand_define_model_output` /
+//! `expand_generic_project_path_output` / `expand_slot_binding_output`), which
+//! resolve a closed semantic demand internally and materialise the produced node
+//! at the module-private sealed sink.
 
 use verter_type_expr::TypeExpr;
 

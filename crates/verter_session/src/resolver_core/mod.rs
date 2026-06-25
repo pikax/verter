@@ -86,8 +86,9 @@ pub use component_meta_query_engine::ComponentMetaQueryEngine;
 // engine's sink-local methods `dispatch_projected_surface_to_type_expr` /
 // `projected_expanded_shape_from_node` / the routed-surface methods).
 pub(crate) use component_meta_query_engine::{
-    type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
-    type_expr_root_is_unmaterialized_sentinel,
+    instantiate_local_generic_ref_published, lower_and_project_to_expanded_published,
+    project_class_a_terminal_published, project_expr_surface_expr_published,
+    type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
 };
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{

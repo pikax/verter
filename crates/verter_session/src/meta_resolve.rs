@@ -36,10 +36,10 @@ pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 // `pub(in P)` grants the mint to `P` and every module at-or-under it, so each
 // cap's mint scope is a TERMINAL sink whose whole reachable production module
 // tree is output-only: a subtree-wide cap (`pub(in crate::meta_resolve)`), OR a
-// non-sink helper reachable under a sink's mint scope, would let the Kind-B
-// bridge sibling `meta_resolve::dispatch_helpers` (or that helper) mint it and
-// bypass `legacy_semantic_type_expr_bridge`, making the fence convention-based;
-// terminal-sink minting makes it compiler-enforced.
+// non-sink helper reachable under a sink's mint scope, would let the non-sink
+// sibling `meta_resolve::dispatch_helpers` (or that helper) mint the cap and
+// launder a bare `TypeExpr`, making the fence convention-based; terminal-sink
+// minting makes it compiler-enforced.
 
 // sub-module split — siblings live in `crates/verter_session/src/meta_resolve/`.
 // The shell re-exports the moved `pub(crate)` surface so existing

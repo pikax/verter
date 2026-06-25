@@ -617,19 +617,19 @@ fn cfg_is_exactly_test_or_test_support_self_test_discriminates() {
 /// leading whitespace trimmed. There is exactly one such definition (the
 /// invariant guard `semantic_node_to_type_expr_has_exactly_one_path`
 /// independently asserts the count); this reads it back for the
-/// visibility check below. The `_inner` recursion helper is a DIFFERENT
-/// identifier (`fn raise_node_to_type_expr_inner(`), excluded by the
-/// trailing `(` whole-identifier boundary.
+/// visibility check below. The trailing `(` is a whole-identifier
+/// boundary, so any `..._suffix(` variant of the same name stem is a
+/// DIFFERENT identifier and is NOT matched.
 fn raise_primitive_definition_line() -> String {
     const RAISE_REL: &str = "src/project_semantic_dispatch/raise.rs";
     let src = read_rel(RAISE_REL);
     let mut found: Option<String> = None;
     for line in src.lines() {
         // The EXACT definition: `fn raise_node_to_type_expr(` — the char
-        // right after the identifier must be `(`, so the `_inner` helper
-        // (`fn raise_node_to_type_expr_inner(`) is NOT matched.
+        // right after the identifier must be `(`, so any `..._suffix(`
+        // variant of the same name stem is NOT matched.
         if let Some(pos) = line.find("fn raise_node_to_type_expr(") {
-            // Guard against a hypothetical `..._inner(` that happens to
+            // Guard against a hypothetical `..._suffix(` that happens to
             // contain the substring: the matched run must be immediately
             // followed by `(` (it is, by construction of the needle), and
             // the char before `fn` (if any) must be whitespace so a

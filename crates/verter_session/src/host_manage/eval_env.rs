@@ -944,10 +944,8 @@ impl VerterHost {
                         // lowering miss, projection unknown, raise
                         // failed) emit a structured trace event and
                         // fall back to symbolic preservation.
-                        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
                         use crate::semantic_query::{
-                            PathSegment as SemanticPathSegment, ProjectionMode, QueryResult,
-                            SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+                            PathSegment as SemanticPathSegment, ProjectionMode,
                         };
                         use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
 
@@ -1050,53 +1048,50 @@ impl VerterHost {
                                 Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
                             ) {
                                 if macro_type_arg.is_some() {
-                                    let dispatch = ProjectSemanticDispatch::new(engine.ctx());
-                                    // Read the macro arg's mode-neutral mirror
-                                    // handle (the ONE producer) and resolve it
-                                    // through the shared dispatch at this
-                                    // demand's mode (`Expanded` — the model
-                                    // value type IS the field's type). A
-                                    // different DEMAND on the same handle, not
-                                    // a second lowering of the macro arg.
-                                    if let Some(base_id) =
-                                        crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                                            engine.ctx(),
-                                            canonical,
-                                            ctx.macro_index,
-                                        )
-                                        .map(|handle| {
-                                            dispatch.resolve_hot_handle_at_mode(
-                                                handle,
-                                                ProjectionMode::Expanded,
-                                            )
-                                        })
-                                    {
-                                        // Capture
-                                        // production node id for the audit
-                                        // record (replaces the retired
-                                        // audit-only re-lowering sidecar).
-                                        produced_node_id = Some(base_id);
-                                        if let Some(raised) =
-                                            dispatch.legacy_semantic_type_expr_bridge(base_id)
-                                        {
-                                            ExpansionResult::exact_concrete(
-                                                ExpandedNormalizedExpr { expr: raised },
-                                            )
-                                        } else {
-                                            // Lowering succeeded but raise
-                                            // failed — fall back to `parsed`
-                                            // (already the model's type).
+                                    // Sink-owned demand: the model value type IS
+                                    // the field's type, so the sink resolves the
+                                    // macro-argument carrier head at `Expanded`
+                                    // INTERNALLY and materialises at the sealed
+                                    // sink. The eval_env branch passes ONLY the
+                                    // closed demand (resolver ctx + owner
+                                    // canonical + macro index) — never a raw node.
+                                    use crate::host_manage::component_meta_methods::DefineModelOutputExpansion;
+                                    match crate::host_manage::component_meta_methods::expand_define_model_output(
+                                        engine.ctx(),
+                                        canonical,
+                                        ctx.macro_index,
+                                    ) {
+                                        DefineModelOutputExpansion::Materialized {
+                                            produced_node_id: id,
+                                            normalized,
+                                        } => {
+                                            // Capture production node id for the
+                                            // audit record (the carrier head).
+                                            produced_node_id = Some(id);
+                                            ExpansionResult::exact_concrete(normalized)
+                                        }
+                                        DefineModelOutputExpansion::RaiseMiss {
+                                            produced_node_id: id,
+                                        } => {
+                                            // Lowering succeeded but raise failed —
+                                            // fall back to `parsed` (already the
+                                            // model's type). `produced_node_id` is
+                                            // still captured for audit parity.
+                                            produced_node_id = Some(id);
                                             ExpansionResult::exact_concrete(
                                                 ExpandedNormalizedExpr {
                                                     expr: parsed.clone(),
                                                 },
                                             )
                                         }
-                                    } else {
-                                        // Lowering miss — fall back to `parsed`.
-                                        ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
-                                            expr: parsed.clone(),
-                                        })
+                                        DefineModelOutputExpansion::CarrierMiss => {
+                                            // Lowering miss — fall back to `parsed`.
+                                            ExpansionResult::exact_concrete(
+                                                ExpandedNormalizedExpr {
+                                                    expr: parsed.clone(),
+                                                },
+                                            )
+                                        }
                                     }
                                 } else {
                                     // No `parsed_type_argument` — fall back to
@@ -1121,7 +1116,6 @@ impl VerterHost {
                                         preserve_parsed_symbolically()
                                     }
                                     (false, Some(macro_type_arg)) => {
-                                        let dispatch = ProjectSemanticDispatch::new(engine.ctx());
                                         // Issue #3 — selective carrier-mode demotion.
                                         // Path-precise contract (`/type-resolution`):
                                         // when the carrier is a named `Ref` (e.g.
@@ -1132,8 +1126,8 @@ impl VerterHost {
                                         // terminal hop. Lower the carrier in
                                         // `Navigate` mode so the shell expands
                                         // only as much as navigation needs; the
-                                        // terminal `ProjectPath` query below runs
-                                        // in `Expanded` and owns the full
+                                        // terminal `ProjectPath` query inside the
+                                        // sink runs in `Expanded` and owns the full
                                         // expansion of the requested member.
                                         //
                                         // For compound carriers (anonymous object
@@ -1143,6 +1137,9 @@ impl VerterHost {
                                         // and depend on slow-path `Expanded`
                                         // resolution to instantiate the body
                                         // correctly — keep `Expanded` for those.
+                                        // This carrier-mode decision is a pure
+                                        // typed-IR predicate, computed here and
+                                        // passed to the sink as a closed scalar.
                                         let carrier_lower_mode = {
                                             use verter_type_expr::TypeExpr;
                                             // Mirror the shallow_preserve helper's
@@ -1160,65 +1157,18 @@ impl VerterHost {
                                                 ProjectionMode::Expanded
                                             }
                                         };
-                                        // Read the macro arg's mode-neutral
-                                        // mirror handle (the ONE producer) and
-                                        // resolve it through the shared dispatch
-                                        // at `carrier_lower_mode` (a different
-                                        // DEMAND on the same handle, never a
-                                        // second lowering of the macro arg).
-                                        let lowered =
-                                            crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                                                engine.ctx(),
-                                                canonical,
-                                                ctx.macro_index,
-                                            )
-                                            .map(
-                                                |handle| {
-                                                    dispatch.resolve_hot_handle_at_mode(
-                                                        handle,
-                                                        carrier_lower_mode,
-                                                    )
-                                                },
-                                            );
-                                        match lowered {
-                                            None => {
-                                                component_meta_trace_custom!(
-                                        "macro_projection_failover",
-                                        format!(
-                                            "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
-                                            ctx.macro_index, ctx.kind,
-                                        ),
-                                    );
-                                                preserve_parsed_symbolically()
-                                            }
-                                            Some(base_id) => {
-                                                // slot-binding-parameter
-                                                // type lowering migrates from the engine's
-                                                // analysis path to dispatch via the
-                                                // `ResolveMacroPayload` variant +
-                                                // `MaterializeSurface { Slots }` codepath.
-                                                //
-                                                // The closure dispatched
-                                                // `ProjectPath { base, [Member(slot),
-                                                // Member(binding)], Expanded }` directly,
-                                                // but the walker emits `Opaque(Miss)` when
-                                                // it reaches the slot's `Function` value
-                                                // with `Member(binding)` remaining (per
-                                                // `walk.rs` Function arm at the catch-all
-                                                // `opaque_miss` fall-through). The slot
-                                                // value's bindings live inside the
-                                                // function's first-parameter Object, not
-                                                // as a direct member of the Function.
-                                                //
-                                                // routes slot-binding lowering
-                                                // through the new helper
-                                                // `project_slot_binding_member` which
-                                                // composes existing variants to descend
-                                                // through `Function` -> `params[0].ty`
-                                                // -> `Member(binding)`. This closes the
-                                                // `slot_shapes` seed and the
-                                                // `fixture_slots_typed` deferred fixture.
-                                                if matches!(
+                                        use crate::host_manage::component_meta_methods::MacroPathOutputExpansion;
+                                        // slot-binding-parameter type lowering goes
+                                        // through dispatch via the
+                                        // `ResolveMacroPayload` variant +
+                                        // `MaterializeSurface { Slots }` codepath:
+                                        // the sink composes existing variants to
+                                        // descend `Function` -> `params[0].ty` ->
+                                        // `Member(binding)` (the slot value's
+                                        // bindings live inside the function's
+                                        // first-parameter Object, not as a direct
+                                        // member of the Function).
+                                        if matches!(
                                             ctx.kind,
                                             verter_semantic::analysis::type_eval_build::FieldKind::SlotBinding
                                         ) {
@@ -1229,6 +1179,10 @@ impl VerterHost {
                                             // Member(binding)]. Anything else is
                                             // a closure-emission contract
                                             // violation; fall back to symbolic.
+                                            // The path-shape destructure is the
+                                            // closure-emission contract check; it
+                                            // stays here and only the destructured
+                                            // names cross into the sink.
                                             let mut iter = ctx.output_path.iter();
                                             match (iter.next(), iter.next(), iter.next()) {
                                                 (
@@ -1236,34 +1190,47 @@ impl VerterHost {
                                                     Some(MacroPathSegment::Member(binding)),
                                                     None,
                                                 ) => {
-                                                    //
-                                                    // terminal-id variant
-                                                    // exposes the production
-                                                    // SemanticNodeId so the
-                                                    // audit record captures
-                                                    // identity from the
-                                                    // dispatch path (no
-                                                    // audit-only re-lower).
-                                                    let slot_binding = dispatch
-                                                        .project_slot_binding_member_with_terminal_id(
-                                                            base_id,
-                                                            slot.as_ref(),
-                                                            binding.as_ref(),
-                                                            ProjectionMode::Expanded,
-                                                        );
-                                                    match slot_binding.value {
-                                                        QueryResult::Value((
-                                                            terminal_id,
-                                                            raised,
-                                                        )) => {
-                                                            produced_node_id = Some(terminal_id);
+                                                    // Sink-owned demand: the sink
+                                                    // lowers the carrier head at
+                                                    // `carrier_lower_mode`, descends
+                                                    // the slot-binding terminal at
+                                                    // `Expanded`, and materialises at
+                                                    // the sealed sink. Only closed
+                                                    // inputs cross (resolver ctx +
+                                                    // owner canonical + macro index +
+                                                    // carrier mode + slot/binding
+                                                    // names) — never a raw node.
+                                                    match crate::host_manage::component_meta_methods::expand_slot_binding_output(
+                                                        engine.ctx(),
+                                                        canonical,
+                                                        ctx.macro_index,
+                                                        carrier_lower_mode,
+                                                        slot.as_ref(),
+                                                        binding.as_ref(),
+                                                    ) {
+                                                        MacroPathOutputExpansion::Materialized {
+                                                            produced_node_id: id,
+                                                            normalized,
+                                                        } => {
+                                                            produced_node_id = Some(id);
                                                             ExpansionResult::exact_concrete(
-                                                                ExpandedNormalizedExpr {
-                                                                    expr: raised,
-                                                                },
+                                                                normalized,
                                                             )
                                                         }
-                                                        _ => {
+                                                        MacroPathOutputExpansion::RaiseMiss {
+                                                            produced_node_id: id,
+                                                        } => {
+                                                            produced_node_id = Some(id);
+                                                            component_meta_trace_custom!(
+                                                                "macro_projection_failover",
+                                                                format!(
+                                                                    "macro_index={} field_kind={:?} reason=slot_binding_raise_miss",
+                                                                    ctx.macro_index, ctx.kind,
+                                                                ),
+                                                            );
+                                                            preserve_parsed_symbolically()
+                                                        }
+                                                        MacroPathOutputExpansion::ProjectionMiss => {
                                                             component_meta_trace_custom!(
                                                                 "macro_projection_failover",
                                                                 format!(
@@ -1273,9 +1240,32 @@ impl VerterHost {
                                                             );
                                                             preserve_parsed_symbolically()
                                                         }
+                                                        MacroPathOutputExpansion::CarrierMiss => {
+                                                            component_meta_trace_custom!(
+                                                                "macro_projection_failover",
+                                                                format!(
+                                                                    "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
+                                                                    ctx.macro_index, ctx.kind,
+                                                                ),
+                                                            );
+                                                            preserve_parsed_symbolically()
+                                                        }
                                                     }
                                                 }
                                                 _ => {
+                                                    // Dead emitter-contract safety
+                                                    // net: the SlotBinding emitter
+                                                    // (`type_eval_build.rs`) ALWAYS
+                                                    // emits exactly
+                                                    // `[Member(slot), Member(binding)]`,
+                                                    // so this arm is unreachable on
+                                                    // real emitter output — the
+                                                    // path-shape check runs before
+                                                    // the sink's carrier-lower (vs
+                                                    // after, in the former inline
+                                                    // path) only on input the emitter
+                                                    // cannot produce, so the trace
+                                                    // ordering is unobservable.
                                                     component_meta_trace_custom!(
                                                         "macro_projection_failover",
                                                         format!(
@@ -1287,62 +1277,79 @@ impl VerterHost {
                                                 }
                                             }
                                         } else {
-                                        let dispatch_path: std::sync::Arc<[SemanticPathSegment]> =
-                                            std::sync::Arc::from(
-                                                ctx.output_path
-                                                    .iter()
-                                                    .map(|seg| match seg {
-                                                        MacroPathSegment::Member(name) => {
-                                                            SemanticPathSegment::Member(
-                                                                std::sync::Arc::clone(name),
-                                                            )
-                                                        }
-                                                    })
-                                                    .collect::<Vec<_>>(),
-                                            );
-                                        let projected =
-                                            dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
-                                                base: base_id,
-                                                path: dispatch_path,
-                                                context: crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-                                            });
-                                        match projected {
-                                            QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => {
-                                                //
-                                                // capture production node
-                                                // id for the audit record
-                                                // before raise.
-                                                produced_node_id = Some(node_id);
-                                                match dispatch.legacy_semantic_type_expr_bridge(node_id) {
-                                                    Some(raised) => {
-                                                        ExpansionResult::exact_concrete(
-                                                            ExpandedNormalizedExpr { expr: raised },
-                                                        )
-                                                    }
-                                                    None => {
-                                                        component_meta_trace_custom!(
+                                            // Convert the macro output_path to the
+                                            // semantic path segments the terminal
+                                            // `ProjectPath` demand needs (member
+                                            // names only — a closed demand input,
+                                            // not a node).
+                                            let dispatch_path: std::sync::Arc<[SemanticPathSegment]> =
+                                                std::sync::Arc::from(
+                                                    ctx.output_path
+                                                        .iter()
+                                                        .map(|seg| match seg {
+                                                            MacroPathSegment::Member(name) => {
+                                                                SemanticPathSegment::Member(
+                                                                    std::sync::Arc::clone(name),
+                                                                )
+                                                            }
+                                                        })
+                                                        .collect::<Vec<_>>(),
+                                                );
+                                            // Sink-owned demand: the sink lowers the
+                                            // carrier head at `carrier_lower_mode`,
+                                            // projects the terminal path at
+                                            // `Expanded`, and materialises at the
+                                            // sealed sink. Only closed inputs cross
+                                            // (resolver ctx + owner canonical + macro
+                                            // index + carrier mode + the member path)
+                                            // — never a raw node.
+                                            match crate::host_manage::component_meta_methods::expand_generic_project_path_output(
+                                                engine.ctx(),
+                                                canonical,
+                                                ctx.macro_index,
+                                                carrier_lower_mode,
+                                                dispatch_path,
+                                            ) {
+                                                MacroPathOutputExpansion::Materialized {
+                                                    produced_node_id: id,
+                                                    normalized,
+                                                } => {
+                                                    produced_node_id = Some(id);
+                                                    ExpansionResult::exact_concrete(normalized)
+                                                }
+                                                MacroPathOutputExpansion::RaiseMiss {
+                                                    produced_node_id: id,
+                                                } => {
+                                                    produced_node_id = Some(id);
+                                                    component_meta_trace_custom!(
                                                         "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=raise_failed",
                                                             ctx.macro_index, ctx.kind,
                                                         ),
                                                     );
-                                                        preserve_parsed_symbolically()
-                                                    }
+                                                    preserve_parsed_symbolically()
                                                 }
-                                            }
-                                            _ => {
-                                                component_meta_trace_custom!(
-                                                "macro_projection_failover",
-                                                format!(
-                                                    "macro_index={} field_kind={:?} reason=projection_unknown",
-                                                    ctx.macro_index, ctx.kind,
-                                                ),
-                                            );
-                                                preserve_parsed_symbolically()
-                                            }
-                                        }
-                                        }
+                                                MacroPathOutputExpansion::ProjectionMiss => {
+                                                    component_meta_trace_custom!(
+                                                        "macro_projection_failover",
+                                                        format!(
+                                                            "macro_index={} field_kind={:?} reason=projection_unknown",
+                                                            ctx.macro_index, ctx.kind,
+                                                        ),
+                                                    );
+                                                    preserve_parsed_symbolically()
+                                                }
+                                                MacroPathOutputExpansion::CarrierMiss => {
+                                                    component_meta_trace_custom!(
+                                                        "macro_projection_failover",
+                                                        format!(
+                                                            "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
+                                                            ctx.macro_index, ctx.kind,
+                                                        ),
+                                                    );
+                                                    preserve_parsed_symbolically()
+                                                }
                                             }
                                         }
                                     }

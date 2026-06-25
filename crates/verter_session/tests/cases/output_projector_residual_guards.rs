@@ -23,14 +23,15 @@
 //! These guards pin the EXACT shape of that trusted surface, each with the
 //! mechanism that MATCHES it:
 //!
-//! 1. `residual_output_materialization_bridge_no_new_kind_b_references` —
-//!    the interim Kind-B `legacy_semantic_type_expr_bridge` is a
-//!    crate-visible (`pub(crate)`) non-sealed path. Rust visibility cannot
-//!    distinguish the sanctioned historical Kind-B reference set from a NEW
-//!    same-visibility hot reference, so this `syn` structural scanner pins
-//!    the EXACT sanctioned reference set and bans any new one (until the
-//!    Kind-B graph-native conversion — the end-state that retires the
-//!    bridge — lands and it is deleted).
+//! 1. `retired_kind_b_bridge_symbol_absent_from_production_source` — the
+//!    interim Kind-B `legacy_semantic_type_expr_bridge` (a former crate-visible
+//!    `pub(crate)` non-sealed raw `SemanticNodeId -> TypeExpr` delegator) is
+//!    RETIRED by the Kind-B graph-native conversion: every Kind-B caller now
+//!    decides on the node-domain `RaisedShapeFacts` / interned `RaisedShapeKey`,
+//!    and the single publication `TypeExpr` is materialised once at a registered
+//!    output sink through the sealed `OutputProjector`. No compiler mechanism
+//!    can assert "this deleted name never returns", so this lean ABSENCE
+//!    tripwire bans the retired spelling from production source.
 //!
 //! 2. The fence-SHAPE guards — each pins one facet of the trusted vault /
 //!    registration surface the compiler cannot express:
@@ -89,13 +90,8 @@
 //!      the trybuild fixture `output_projector_not_impl_outside_crate.rs`
 //!      (`output_projector_non_owner_impl_is_compiler_sealed`).
 //!
-//! ```text
-//! scanner_invariant: residual_output_materialization_bridge_no_new_kind_b_references
-//! scanner_justification: legacy_semantic_type_expr_bridge is an explicit interim non-sealed Kind-B path; Rust visibility cannot pin the exact sanctioned historical reference set.
-//! mechanism_ruling: structural-confinement-first — the sealed OutputProjector capability is the primary (compiler-enforced); this scanner is the bounded residual for the interim Kind-B bridge that the compiler cannot express. The bridge is retained only until the Kind-B graph-native conversion lands (tracked in docs/arch/parselower-design.md); no new Kind-B bridge sites.
-//! hardening_rounds: 0
-//! hardening_history: initial syn/token-tree structural detector; no prior spelling hardening.
-//! ```
+//! The tombstone's full record block lives on the
+//! `retired_kind_b_bridge_symbol_absent_from_production_source` guard below.
 //!
 //! Every `syn` `#[test]` guard here ships a paired self-test proving it
 //! discriminates (fires on a synthetic violation, passes on the known-good
@@ -104,7 +100,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use proc_macro2::TokenStream;
 use quote::ToTokens;
 use walkdir::WalkDir;
 
@@ -162,810 +157,132 @@ fn production_src_files() -> Vec<(String, String)> {
 }
 
 // ===========================================================================
-// (1) Kind-B bridge no-new-reference scanner.
+// Kind-B bridge TOMBSTONE (absence tripwire).
+//
+// The interim Kind-B reverse-raise bridge `legacy_semantic_type_expr_bridge`
+// and the `execute_to_type_expr` / `project_slot_binding_member_with_terminal_id`
+// raise-then-decide entrypoints were RETIRED by the Kind-B graph-native
+// conversion: every Kind-B caller now decides on the node-domain
+// `RaisedShapeFacts` / interned `RaisedShapeKey` (no mid-flight
+// `SemanticNodeId -> TypeExpr` raise), and the single publication `TypeExpr` is
+// materialised ONCE at a registered output sink through the sealed
+// `OutputProjector` capability.
+//
+// The PRIMARY confinement is structural: there is no `pub(crate)` (or wider)
+// raw `SemanticNodeId -> TypeExpr` surface — the module-private
+// `raise_node_to_type_expr` is reached only through the sealed `OutputProjector`
+// seam (`raise_node_to_type_expr_primitive_is_module_private` pins its
+// visibility) and the `#[cfg(test)]` oracle
+// (`materialize_type_expr_is_not_production_visible` pins that). This tombstone
+// is the only ADDED safeguard: a lean ABSENCE tripwire that the retired bridge
+// symbol never returns to production source.
 // ===========================================================================
 
-const BRIDGE_IDENT: &str = "legacy_semantic_type_expr_bridge";
+const RETIRED_BRIDGE_IDENT: &str = "legacy_semantic_type_expr_bridge";
 
-/// The KIND of a reference to the bridge identifier, so the allowlist can
-/// pin definitions, method calls, path calls, and bare references
-/// separately (a bare method-item reference / alias is the laundering
-/// escape the brief calls out: `let f = …bridge; f(…)`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum RefKind {
-    /// `fn legacy_semantic_type_expr_bridge(…)` definition.
-    Definition,
-    /// `recv.legacy_semantic_type_expr_bridge(…)` method call.
-    MethodCall,
-    /// `Path::legacy_semantic_type_expr_bridge(…)` path call, OR a bare
-    /// path reference (`use …`, fn-item reference, const fn pointer). Any
-    /// NON-method-call appearance of the identifier as a path/ident token.
-    PathOrBareRef,
-    /// The identifier appears as a token inside a macro invocation's body.
-    MacroToken,
+/// Whether `c` continues a Rust identifier.
+fn is_bridge_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// One sanctioned reference site: `(file, fn-name-or-context, kind)`. The
-/// occurrence count is carried in the collected map's value.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct BridgeSite {
-    file: String,
-    /// The enclosing item name (the `fn` the reference sits in), or
-    /// `<definition>` for the definition site, or `<file-scope>` for a
-    /// file-scope reference (e.g. a `use`).
-    context: String,
-    kind: RefKind,
+/// Count whole-identifier occurrences of `needle` in `src` (word-boundary
+/// matched so a longer identifier containing the needle is NOT counted).
+fn whole_ident_occurrences(src: &str, needle: &str) -> usize {
+    let bytes = src.as_bytes();
+    let nlen = needle.len();
+    let mut count = 0usize;
+    let mut from = 0usize;
+    while let Some(rel) = src[from..].find(needle) {
+        let start = from + rel;
+        let end = start + nlen;
+        let before_ok = start
+            .checked_sub(1)
+            .map(|i| !is_bridge_ident_char(bytes[i] as char))
+            .unwrap_or(true);
+        let after_ok = src[end..]
+            .chars()
+            .next()
+            .map(|c| !is_bridge_ident_char(c))
+            .unwrap_or(true);
+        if before_ok && after_ok {
+            count += 1;
+        }
+        from = end;
+    }
+    count
 }
 
-/// `syn` visitor that records every reference to [`BRIDGE_IDENT`] —
-/// COMMENT/STRING-BLIND by construction (a `syn` AST / token stream carries
-/// no comment tokens, and a string/char literal is a `Lit`, never an
-/// `Ident`). It descends inline modules and into macro token trees.
-struct BridgeRefCollector {
-    file: String,
-    /// Current enclosing-fn name stack (for the `context` anchor).
-    fn_stack: Vec<String>,
-    sites: Vec<BridgeSite>,
-}
-
-impl BridgeRefCollector {
-    fn context(&self) -> String {
-        self.fn_stack
-            .last()
-            .cloned()
-            .unwrap_or_else(|| "<file-scope>".to_string())
-    }
-
-    /// Scan a macro token stream for the bridge identifier, ignoring
-    /// literals (a raw/byte/char/string literal is a `Literal` token, never
-    /// an `Ident`, so bridge text inside a string is NOT a hit).
-    fn scan_macro_tokens(&mut self, tokens: &TokenStream) {
-        for tt in tokens.clone() {
-            match tt {
-                proc_macro2::TokenTree::Ident(id) => {
-                    if id == BRIDGE_IDENT {
-                        self.sites.push(BridgeSite {
-                            file: self.file.clone(),
-                            context: self.context(),
-                            kind: RefKind::MacroToken,
-                        });
-                    }
-                }
-                proc_macro2::TokenTree::Group(g) => self.scan_macro_tokens(&g.stream()),
-                _ => {}
-            }
-        }
-    }
-
-    /// Does this path's final segment name the bridge identifier?
-    fn path_is_bridge(path: &syn::Path) -> bool {
-        path.segments
-            .last()
-            .map(|s| s.ident == BRIDGE_IDENT)
-            .unwrap_or(false)
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for BridgeRefCollector {
-    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-        let is_def = f.sig.ident == BRIDGE_IDENT;
-        if is_def {
-            self.sites.push(BridgeSite {
-                file: self.file.clone(),
-                context: "<definition>".to_string(),
-                kind: RefKind::Definition,
-            });
-        }
-        self.fn_stack.push(f.sig.ident.to_string());
-        syn::visit::visit_impl_item_fn(self, f);
-        self.fn_stack.pop();
-    }
-
-    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-        let is_def = f.sig.ident == BRIDGE_IDENT;
-        if is_def {
-            self.sites.push(BridgeSite {
-                file: self.file.clone(),
-                context: "<definition>".to_string(),
-                kind: RefKind::Definition,
-            });
-        }
-        self.fn_stack.push(f.sig.ident.to_string());
-        syn::visit::visit_item_fn(self, f);
-        self.fn_stack.pop();
-    }
-
-    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
-        if mc.method == BRIDGE_IDENT {
-            self.sites.push(BridgeSite {
-                file: self.file.clone(),
-                context: self.context(),
-                kind: RefKind::MethodCall,
-            });
-        }
-        syn::visit::visit_expr_method_call(self, mc);
-    }
-
-    fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
-        if Self::path_is_bridge(&p.path) {
-            self.sites.push(BridgeSite {
-                file: self.file.clone(),
-                context: self.context(),
-                kind: RefKind::PathOrBareRef,
-            });
-        }
-        syn::visit::visit_expr_path(self, p);
-    }
-
-    fn visit_use_path(&mut self, u: &'ast syn::UsePath) {
-        // A `use …::legacy_semantic_type_expr_bridge` (import / alias /
-        // re-export) names the identifier as the LAST tree segment.
-        if u.ident == BRIDGE_IDENT {
-            self.sites.push(BridgeSite {
-                file: self.file.clone(),
-                context: "<use-import>".to_string(),
-                kind: RefKind::PathOrBareRef,
-            });
-        }
-        syn::visit::visit_use_path(self, u);
-    }
-
-    fn visit_use_name(&mut self, u: &'ast syn::UseName) {
-        if u.ident == BRIDGE_IDENT {
-            self.sites.push(BridgeSite {
-                file: self.file.clone(),
-                context: "<use-import>".to_string(),
-                kind: RefKind::PathOrBareRef,
-            });
-        }
-        syn::visit::visit_use_name(self, u);
-    }
-
-    fn visit_use_rename(&mut self, u: &'ast syn::UseRename) {
-        // `use …bridge as alias;` — the source ident is the laundering
-        // escape (aliasing the call set). Record the SOURCE ident.
-        if u.ident == BRIDGE_IDENT {
-            self.sites.push(BridgeSite {
-                file: self.file.clone(),
-                context: "<use-rename>".to_string(),
-                kind: RefKind::PathOrBareRef,
-            });
-        }
-        syn::visit::visit_use_rename(self, u);
-    }
-
-    fn visit_macro(&mut self, m: &'ast syn::Macro) {
-        self.scan_macro_tokens(&m.tokens);
-        syn::visit::visit_macro(self, m);
-    }
-}
-
-/// Collect every production reference to the bridge identifier, grouped by
-/// `(BridgeSite -> occurrence count)`.
-fn collect_bridge_references() -> BTreeMap<BridgeSite, usize> {
-    let mut counts: BTreeMap<BridgeSite, usize> = BTreeMap::new();
+/// TOMBSTONE: the retired Kind-B bridge symbol `legacy_semantic_type_expr_bridge`
+/// appears NOWHERE in production `verter_session` source — no definition, no
+/// call, no path reference, no re-export.
+///
+/// ```text
+/// scanner_invariant: retired_kind_b_bridge_symbol_absent_from_production_source
+/// scanner_justification: no compiler mechanism can assert "this deleted name never returns to production"; the bridge was a `pub(crate)` raw `SemanticNodeId -> TypeExpr` delegator now removed, and a re-introduction under the SAME name would re-open the mid-flight reverse-raise laundering surface. The PRIMARY confinement is structural (privacy on the module-private `raise_node_to_type_expr` + the sealed `OutputProjector` carriers + the `#[cfg(test)]` oracle gate), pinned by `raise_node_to_type_expr_primitive_is_module_private` and `materialize_type_expr_is_not_production_visible`; this tombstone is only an ABSENCE tripwire for the one retired spelling.
+/// mechanism_ruling: structural-confinement-first, lean-safeguards — the structural confinement (privacy + the sealed `OutputProjector` carriers) is the primary; the interim Kind-B reference-pinning scanners were retired and replaced by this single absence tripwire, NOT broadened into a closed-inventory scanner.
+/// hardening_rounds: 0
+/// hardening_history: this single absence tripwire replaces three retired interim guards — the two bridge-reference pins (`residual_output_materialization_bridge_no_new_kind_b_references`, `kind_b_raise_then_decide_entrypoints_pinned`) and the dormant readiness fence (`node_domain_readiness_primitives_have_zero_production_callers`); no spelling-hardening rounds.
+/// ```
+#[test]
+fn retired_kind_b_bridge_symbol_absent_from_production_source() {
+    let mut offenders: Vec<String> = Vec::new();
     for (rel, src) in production_src_files() {
-        let file = match syn::parse_file(&src) {
-            Ok(f) => f,
-            Err(_) => continue, // non-parseable file (e.g. generated): skip
-        };
-        let mut collector = BridgeRefCollector {
-            file: rel.clone(),
-            fn_stack: Vec::new(),
-            sites: Vec::new(),
-        };
-        syn::visit::Visit::visit_file(&mut collector, &file);
-        for site in collector.sites {
-            *counts.entry(site).or_insert(0) += 1;
+        let n = whole_ident_occurrences(&src, RETIRED_BRIDGE_IDENT);
+        if n > 0 {
+            offenders.push(format!("{rel} ({n}x)"));
         }
     }
-    counts
+    assert!(
+        offenders.is_empty(),
+        "TOMBSTONE: the retired Kind-B bridge `{RETIRED_BRIDGE_IDENT}` must NOT exist in production \
+         source (it was removed by the Kind-B graph-native conversion; the node-domain decision API \
+         + the sealed OutputProjector sink replace it). Re-introduction would re-open the mid-flight \
+         reverse-raise laundering surface. Offending files: {offenders:?}"
+    );
 }
 
-/// The EXACT sanctioned reference set for `legacy_semantic_type_expr_bridge`
-/// (the sanctioned interim Kind-B path, retained only until the Kind-B
-/// graph-native conversion retires it). Each
-/// row: `(file, context, kind, expected_count)`. Any reference NOT in this
-/// set — or a count drift on a pinned row — fails the guard (a NEW Kind-B
-/// bridge site, the D3 residual the compiler cannot express).
-fn sanctioned_bridge_sites() -> BTreeMap<BridgeSite, usize> {
-    let rows: &[(&str, &str, RefKind, usize)] = &[
-        // The single definition (the still-private-primitive delegator).
-        (
-            "src/project_semantic_dispatch/raise.rs",
-            "<definition>",
-            RefKind::Definition,
-            1,
-        ),
-        // The `execute_to_type_expr` route-fixpoint raise.
-        (
-            "src/project_semantic_dispatch/mod.rs",
-            "execute_to_type_expr",
-            RefKind::MethodCall,
-            1,
-        ),
-        // The slot-binding terminal-id raise.
-        (
-            "src/project_semantic_dispatch/mod.rs",
-            "project_slot_binding_member_with_terminal_id",
-            RefKind::MethodCall,
-            1,
-        ),
-        // `instantiate_local_generic_ref_via_dispatch` (threaded-route helper).
-        (
-            "src/meta_resolve/dispatch_helpers.rs",
-            "instantiate_local_generic_ref_via_dispatch",
-            RefKind::MethodCall,
-            1,
-        ),
-        // The `fast_to_expansion` expansion path (the enclosing host method
-        // is `compute_evaluated_types_from_owner_context_with_ctx`) — two
-        // raise sites (the model-payload base and the produced node id).
-        (
-            "src/host_manage/eval_env.rs",
-            "compute_evaluated_types_from_owner_context_with_ctx",
-            RefKind::MethodCall,
-            2,
-        ),
-    ];
-    rows.iter()
-        .map(|(file, ctx, kind, count)| {
-            (
-                BridgeSite {
-                    file: (*file).to_string(),
-                    context: (*ctx).to_string(),
-                    kind: *kind,
-                },
-                *count,
-            )
-        })
-        .collect()
-}
-
+/// Self-test: the tombstone's whole-identifier matcher DISCRIMINATES — it
+/// counts the bare symbol, ignores a longer identifier that merely CONTAINS it,
+/// and ignores an unrelated name. (Proves the absence assertion would actually
+/// FIRE on a re-introduction rather than pass vacuously.)
 #[test]
-fn residual_output_materialization_bridge_no_new_kind_b_references() {
-    let observed = collect_bridge_references();
-    let sanctioned = sanctioned_bridge_sites();
-
-    // (a) No NEW / unsanctioned reference site (or a count drift): every
-    // observed site must be in the sanctioned set with the SAME count.
-    let mut unexpected: Vec<String> = Vec::new();
-    for (site, count) in &observed {
-        match sanctioned.get(site) {
-            Some(expected) if expected == count => {}
-            Some(expected) => unexpected.push(format!(
-                "{}::{} [{:?}] — count drift: observed {count}, sanctioned {expected}",
-                site.file, site.context, site.kind
-            )),
-            None => unexpected.push(format!(
-                "{}::{} [{:?}] — NEW unsanctioned bridge reference (x{count})",
-                site.file, site.context, site.kind
-            )),
-        }
-    }
-    assert!(
-        unexpected.is_empty(),
-        "D3 residual: `{BRIDGE_IDENT}` is the interim Kind-B reverse-raise path (retained only \
-         until the Kind-B graph-native conversion retires it); NO new reference may be \
-         introduced. Route new output sinks through the \
-         sealed `OutputProjector` capability instead, and do the Kind-B graph-native conversion \
-         as the Kind-B graph-native conversion. Offending references:\n{}",
-        unexpected.join("\n")
-    );
-
-    // (b) Anti-vacuity: every sanctioned site must still EXIST (a removed
-    // bridge site means the Kind-B graph-native conversion may have already run, or a refactor silently
-    // dropped a Kind-B path — either way this pin is stale and must be
-    // re-baselined deliberately, not left asserting a phantom set).
-    let mut missing: Vec<String> = Vec::new();
-    for (site, expected) in &sanctioned {
-        match observed.get(site) {
-            Some(count) if count == expected => {}
-            Some(count) => missing.push(format!(
-                "{}::{} [{:?}] — count drift: sanctioned {expected}, observed {count}",
-                site.file, site.context, site.kind
-            )),
-            None => missing.push(format!(
-                "{}::{} [{:?}] — sanctioned site MISSING (x{expected})",
-                site.file, site.context, site.kind
-            )),
-        }
-    }
-    assert!(
-        missing.is_empty(),
-        "D3 residual ANTI-VACUITY: a sanctioned `{BRIDGE_IDENT}` reference is gone. If the \
-         Kind-B graph-native conversion \
-         removed the Kind-B path, delete the corresponding row from `sanctioned_bridge_sites()` \
-         (and, when the set is empty, delete the bridge + this guard). Do NOT leave a phantom \
-         pin. Missing:\n{}",
-        missing.join("\n")
-    );
-}
-
-#[test]
-fn bridge_scanner_self_test_discriminates() {
-    // The collector must (a) be comment/string-blind, (b) catch a real
-    // method call, (c) catch a path-call / bare fn-item reference, (d)
-    // catch a `use` alias (the laundering escape), and (e) catch a macro
-    // token. We drive it on synthetic sources directly.
-    fn scan(src: &str) -> Vec<BridgeSite> {
-        let file = syn::parse_file(src).expect("parse synthetic source");
-        let mut c = BridgeRefCollector {
-            file: "<synthetic>".to_string(),
-            fn_stack: Vec::new(),
-            sites: Vec::new(),
-        };
-        syn::visit::Visit::visit_file(&mut c, &file);
-        c.sites
-    }
-
-    // (a) BLIND: bridge text in a line comment, a block comment, and a
-    // string/char literal MUST NOT be a hit. (Outer delimiter is `r##` so
-    // the INNER `r#"…"#` raw-string literal in the fixture does not close
-    // it.)
-    let blind = r##"
-        fn unrelated() {
-            // legacy_semantic_type_expr_bridge in a line comment
-            /* legacy_semantic_type_expr_bridge in a block comment */
-            let _s = "legacy_semantic_type_expr_bridge in a string";
-            let _r = r#"legacy_semantic_type_expr_bridge in a raw string"#;
-            let _c = 'x';
-            println!("legacy_semantic_type_expr_bridge in a format string");
-        }
-    "##;
-    assert!(
-        scan(blind).is_empty(),
-        "self-test: bridge text in comments / string / raw-string literals MUST NOT be a hit \
-         (comment/string-blind by construction)"
-    );
-
-    // (b) RED: a real method call is a hit.
-    let method = r#"
-        fn caller(d: &D) { let _ = d.legacy_semantic_type_expr_bridge(node); }
-    "#;
-    let m = scan(method);
-    assert!(
-        m.iter().any(|s| s.kind == RefKind::MethodCall && s.context == "caller"),
-        "self-test: a real `.legacy_semantic_type_expr_bridge(…)` method call MUST be a hit; got {m:?}"
-    );
-
-    // (c) RED: a bare fn-item reference (no immediate call) is a hit — the
-    // `let f = Path::…bridge; f(…)` laundering escape.
-    let bare = r#"
-        fn caller(d: &D) { let f = D::legacy_semantic_type_expr_bridge; f(d, node); }
-    "#;
-    let b = scan(bare);
-    assert!(
-        b.iter().any(|s| s.kind == RefKind::PathOrBareRef),
-        "self-test: a bare fn-item reference (no immediate call) MUST be a hit — it launders the \
-         call set; got {b:?}"
-    );
-
-    // (d) RED: a `use … as alias` import is a hit (aliasing the call set).
-    let aliased = r#"
-        use crate::project_semantic_dispatch::raise::legacy_semantic_type_expr_bridge as sneaky;
-        fn caller() { let _ = sneaky; }
-    "#;
-    let a = scan(aliased);
-    assert!(
-        a.iter()
-            .any(|s| s.kind == RefKind::PathOrBareRef && s.context == "<use-rename>"),
-        "self-test: a `use …bridge as alias` import MUST be a hit; got {a:?}"
-    );
-
-    // (e) RED: the identifier inside a macro token tree is a hit.
-    let in_macro = r#"
-        fn caller(d: &D) { some_macro!(d.legacy_semantic_type_expr_bridge(node)); }
-    "#;
-    let mac = scan(in_macro);
-    assert!(
-        mac.iter().any(|s| s.kind == RefKind::MacroToken),
-        "self-test: the bridge identifier inside a macro token tree MUST be a hit; got {mac:?}"
-    );
-
-    // NEGATIVE: a DIFFERENT identifier sharing a prefix MUST NOT be a hit.
-    let prefixed = r#"
-        fn caller(d: &D) { let _ = d.legacy_semantic_type_expr_bridge_other(node); }
-    "#;
-    assert!(
-        scan(prefixed).is_empty(),
-        "self-test: `legacy_semantic_type_expr_bridge_other` is a DIFFERENT identifier and MUST \
-         NOT be a hit"
-    );
-}
-
-#[test]
-fn bridge_sanctioned_set_is_exactly_observed() {
-    // Cross-check: the live observed set EQUALS the sanctioned set exactly.
-    // This is the discriminating positive proof that the pin reflects the
-    // real tree (a hand-edited allowlist that drifted from reality fails
-    // here even if both directional checks above somehow passed).
-    let observed = collect_bridge_references();
-    let sanctioned = sanctioned_bridge_sites();
+fn retired_kind_b_bridge_tombstone_self_test_discriminates() {
+    // The bare symbol as a call / path / definition is COUNTED.
     assert_eq!(
-        observed, sanctioned,
-        "the observed `{BRIDGE_IDENT}` reference set must EQUAL the sanctioned set exactly"
+        whole_ident_occurrences(
+            "self.legacy_semantic_type_expr_bridge(node)",
+            RETIRED_BRIDGE_IDENT
+        ),
+        1,
+        "self-test: a bare bridge call MUST be counted"
     );
-}
-
-// scanner_invariant: kind_b_raise_then_decide_entrypoints_pinned
-// scanner_justification: the `sanctioned_bridge_sites()` scanner pins the bridge REFERENCES (the `legacy_semantic_type_expr_bridge` calls INSIDE the Kind-B methods), but NOT new CALLERS of the raw-node entrypoints `execute_to_type_expr` / `project_slot_binding_member_with_terminal_id`, nor their VISIBILITY — a new crate-internal caller (or a widening to `pub`) would broaden the Kind-B raw-node→TypeExpr residual WITHOUT tripping the bridge-reference scanner. This entrypoint inventory pins the two methods' visibility (`pub(crate)`, fail on widening) + their EXACT production caller set across EVERY caller spelling (method call, UFCS / path call, bare fn-item reference, `use` import / rename, macro token — the same forms the bridge-reference scanner already covers). It is a residual the compiler cannot express: the Kind-B residual is DEFERRED to the Kind-B graph-native conversion (docs/arch/parselower-design.md `Stage8-A4-kind-b-graph-native-conversion`), so until it lands these entrypoints must not grow new callers. CLAIM SCOPE (honest): this pin enforces a caller-SET + visibility pin over the two named entrypoints — it is NOT a proof that no NEW Kind-B raise-then-decide ROUTE could be introduced (a brand-new raw-node→TypeExpr entrypoint method would need its own row). The structurally-PREFERRED mechanism (a sealed zero-sized permit type per sanctioned caller, or deleting the bridge) is part of the 8-A4 Kind-B graph-native conversion; this scanner is the second-best interim pin while the residual is deferred.
-// mechanism_ruling: 8a3-guard-mechanism-consult-2026-06-24 (Kind-B caller pin kept-as-scanner; UFCS / function-item / use-alias coverage is bounded spelling-hardening)
-// hardening_rounds: 1
-// hardening_history: adoption — added alongside the bridge-reference scanner so the raw-node ENTRYPOINT surface (callers + visibility), not only the bridge references, is pinned for the deferred Kind-B residual. The single bounded spelling-hardening increment (hardening_rounds now one) extended the caller counter from `.method(…)` only to the full bridge-scanner caller-form set (UFCS / path call `Type::method(…)`, bare fn-item reference, `use` import / rename, macro token), so a UFCS-spelled caller can no longer broaden the deferred residual untripped. Bounded spelling-hardening (the compiler-rework / sealed-permit close is the deferred Kind-B graph-native disposition).
-
-/// One Kind-B raw-node→`TypeExpr` entrypoint to pin: a `ProjectSemanticDispatch`
-/// method that takes a caller-supplied raw subject (a `SemanticNodeId` base or
-/// any `SemanticQueryKey`), raises it through the interim
-/// `legacy_semantic_type_expr_bridge`, and SEMANTICALLY DECIDES on the raised
-/// `TypeExpr` — the documented Kind-B residual deferred to 8-A4. The fix keeps
-/// these from silently growing new callers (in ANY spelling) / widening
-/// visibility while deferred. It does NOT prove no NEW entrypoint could appear —
-/// a fresh raw-node→`TypeExpr` route would need its own row here.
-struct KindBEntrypoint {
-    /// The method name (matched on a `.method(` call site and the `fn` def).
-    method: &'static str,
-    /// The sanctioned production caller set: `file (crate-relative)` -> exact
-    /// method-call-site count. A NEW caller file, or a count drift, fails.
-    sanctioned_callers: &'static [(&'static str, usize)],
-}
-
-/// The pinned Kind-B entrypoints + their CURRENT production caller set
-/// (verified against the live tree). The id-less `project_slot_binding_member`
-/// is DELETED (was dead — no production caller), so only the terminal-id variant
-/// remains; its sole caller is `eval_env.rs::fast_to_expansion`.
-fn kind_b_entrypoints() -> &'static [KindBEntrypoint] {
-    &[
-        KindBEntrypoint {
-            method: "execute_to_type_expr",
-            sanctioned_callers: &[("src/meta_resolve/dispatch_helpers.rs", 3)],
-        },
-        KindBEntrypoint {
-            method: "project_slot_binding_member_with_terminal_id",
-            sanctioned_callers: &[("src/host_manage/eval_env.rs", 1)],
-        },
-    ]
-}
-
-/// The crate-relative file that DEFINES the Kind-B entrypoints (their `fn` items
-/// live on the `ProjectSemanticDispatch` impl here). Visibility is read from the
-/// `fn` definitions in this file; call sites in this file are the definition's
-/// own surface and are NOT counted as external callers (today there are none —
-/// the id-less wrapper that called the terminal-id variant was deleted).
-const KIND_B_DEF_REL: &str = "src/project_semantic_dispatch/mod.rs";
-
-/// A `syn` visitor counting EVERY reference to a Kind-B entrypoint `method` in a
-/// file, matching the rigor of [`BridgeRefCollector`] so a caller cannot evade
-/// the pin by spelling the call differently. COMMENT/STRING-BLIND by
-/// construction (a `syn` AST / token stream carries no comment tokens; a
-/// string/char literal is a `Lit`, never an `Ident`). It catches, by matching
-/// the method as the FINAL path segment:
-///   - a `.method(…)` method call (`ExprMethodCall`);
-///   - a UFCS / path call `Type::method(…)` / `Self::method(…)` — represented as
-///     an `ExprCall` whose callee is an `ExprPath` ending in `method`, caught
-///     via the `ExprPath` visit (the callee is a single path visited once, so it
-///     is NOT double-counted with the `ExprCall`);
-///   - a bare function-item reference `let f = Type::method;` (`ExprPath`, no
-///     immediate call — the laundering escape `f(d, k)`);
-///   - a `use …::method` / `use …::method as alias` import (the alias-laundering
-///     escape, naming the method as the last `use`-tree segment);
-///   - the method identifier inside a macro token tree.
-struct KindBCallerCollector {
-    method: String,
-    count: usize,
-}
-
-impl KindBCallerCollector {
-    /// Does this path's FINAL segment name the pinned method?
-    fn path_is_method(&self, path: &syn::Path) -> bool {
-        path.segments
-            .last()
-            .map(|s| s.ident == self.method.as_str())
-            .unwrap_or(false)
-    }
-
-    fn scan_macro_tokens(&mut self, tokens: &TokenStream) {
-        for tt in tokens.clone() {
-            match tt {
-                proc_macro2::TokenTree::Ident(id) => {
-                    if id == self.method.as_str() {
-                        self.count += 1;
-                    }
-                }
-                proc_macro2::TokenTree::Group(g) => self.scan_macro_tokens(&g.stream()),
-                _ => {}
-            }
-        }
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for KindBCallerCollector {
-    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
-        if mc.method == self.method.as_str() {
-            self.count += 1;
-        }
-        syn::visit::visit_expr_method_call(self, mc);
-    }
-
-    fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
-        // A UFCS call `T::method(args)` is an `ExprCall` whose `func` is exactly
-        // this `ExprPath`; a bare fn-item reference `let f = T::method;` is also
-        // an `ExprPath`. Both land here (visited once), so both forms count
-        // without double-counting against `visit_expr_call`.
-        if self.path_is_method(&p.path) {
-            self.count += 1;
-        }
-        syn::visit::visit_expr_path(self, p);
-    }
-
-    fn visit_use_path(&mut self, u: &'ast syn::UsePath) {
-        if u.ident == self.method.as_str() {
-            self.count += 1;
-        }
-        syn::visit::visit_use_path(self, u);
-    }
-
-    fn visit_use_name(&mut self, u: &'ast syn::UseName) {
-        if u.ident == self.method.as_str() {
-            self.count += 1;
-        }
-        syn::visit::visit_use_name(self, u);
-    }
-
-    fn visit_use_rename(&mut self, u: &'ast syn::UseRename) {
-        // `use …method as alias;` — the SOURCE ident is the laundering escape.
-        if u.ident == self.method.as_str() {
-            self.count += 1;
-        }
-        syn::visit::visit_use_rename(self, u);
-    }
-
-    fn visit_macro(&mut self, m: &'ast syn::Macro) {
-        self.scan_macro_tokens(&m.tokens);
-        syn::visit::visit_macro(self, m);
-    }
-}
-
-/// Collect, per production file, the COUNT of references to `method` (every
-/// caller form above), EXCLUDING the definition file (its own internal use is
-/// not an external caller). `syn`-based, so comments / strings never count.
-fn kind_b_caller_counts(method: &str) -> BTreeMap<String, usize> {
-    let mut out = BTreeMap::new();
-    for (rel, src) in production_src_files() {
-        if rel == KIND_B_DEF_REL {
-            continue; // the definition file's own surface
-        }
-        let Ok(file) = syn::parse_file(&src) else {
-            continue;
-        };
-        let mut c = KindBCallerCollector {
-            method: method.to_string(),
-            count: 0,
-        };
-        syn::visit::Visit::visit_file(&mut c, &file);
-        if c.count > 0 {
-            out.insert(rel, c.count);
-        }
-    }
-    out
-}
-
-/// The visibility of the `fn <method>` definition in the [`KIND_B_DEF_REL`]
-/// file, as a normalized string (`pub`, `pub(crate)`, `pub(super)`,
-/// `pub(in …)`, or `private`). `None` if the fn is not found (anti-vacuity).
-fn kind_b_entrypoint_visibility(file: &syn::File, method: &str) -> Option<String> {
-    fn vis_str(vis: &syn::Visibility) -> String {
-        match vis {
-            syn::Visibility::Public(_) => "pub".to_string(),
-            syn::Visibility::Inherited => "private".to_string(),
-            syn::Visibility::Restricted(r) => {
-                if r.path.is_ident("crate") {
-                    "pub(crate)".to_string()
-                } else if r.path.is_ident("super") {
-                    "pub(super)".to_string()
-                } else if r.path.is_ident("self") {
-                    "private".to_string()
-                } else {
-                    format!("pub(in {})", quote::quote!(#r).to_string().replace(' ', ""))
-                }
-            }
-        }
-    }
-    struct V {
-        method: String,
-        vis: Option<String>,
-    }
-    impl<'ast> syn::visit::Visit<'ast> for V {
-        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-            if f.sig.ident == self.method.as_str() {
-                self.vis = Some(vis_str(&f.vis));
-            }
-            syn::visit::visit_impl_item_fn(self, f);
-        }
-    }
-    let mut v = V {
-        method: method.to_string(),
-        vis: None,
-    };
-    syn::visit::Visit::visit_file(&mut v, file);
-    v.vis
-}
-
-#[test]
-fn kind_b_raise_then_decide_entrypoints_pinned() {
-    // The Kind-B raw-node→TypeExpr residual is DEFERRED to the Kind-B
-    // graph-native conversion (docs/arch/parselower-design.md). Until it lands,
-    // these entrypoints must stay `pub(crate)` and must not grow new production
-    // callers in ANY spelling (method call / UFCS path call / bare fn-item ref /
-    // `use` import-rename / macro token) — else the residual broadens untripped
-    // by the bridge-reference scanner. This pins the caller SET + visibility of
-    // the two named entrypoints; it is NOT a proof that no NEW Kind-B
-    // raise-then-decide route could be introduced (the sealed-permit / bridge
-    // deletion is the 8-A4 close).
-    let def_file = syn::parse_file(&read_rel(KIND_B_DEF_REL))
-        .unwrap_or_else(|e| panic!("parse {KIND_B_DEF_REL}: {e}"));
-
-    let mut violations: Vec<String> = Vec::new();
-    for ep in kind_b_entrypoints() {
-        // (a) Visibility pin: must be EXACTLY `pub(crate)` (a widening to `pub`
-        // exports the raw-node entrypoint to off-crate consumers).
-        match kind_b_entrypoint_visibility(&def_file, ep.method) {
-            Some(vis) if vis == "pub(crate)" => {}
-            Some(vis) => violations.push(format!(
-                "Kind-B entrypoint `{}` visibility is `{vis}` — MUST stay `pub(crate)` (a widening \
-                 exports the raw-node→TypeExpr residual; close it via the Kind-B graph-native \
-                 conversion instead of widening)",
-                ep.method
-            )),
-            None => violations.push(format!(
-                "anti-vacuity: Kind-B entrypoint `{}` `fn` definition NOT FOUND in {KIND_B_DEF_REL} \
-                 — it was renamed / moved without updating this pin",
-                ep.method
-            )),
-        }
-
-        // (b) Caller pin: the production method-call-site set must EQUAL the
-        // sanctioned set (a NEW caller file, or a count drift, fails).
-        let observed = kind_b_caller_counts(ep.method);
-        let sanctioned: BTreeMap<String, usize> = ep
-            .sanctioned_callers
-            .iter()
-            .map(|(f, c)| ((*f).to_string(), *c))
-            .collect();
-        if observed != sanctioned {
-            violations.push(format!(
-                "Kind-B entrypoint `{}` production caller set drifted — observed {observed:?}, \
-                 sanctioned {sanctioned:?}. A NEW caller broadens the deferred Kind-B residual; \
-                 route it through the shared resolver / publication-authority chain, or land the \
-                 Kind-B graph-native conversion. If a caller was legitimately removed, re-baseline \
-                 `kind_b_entrypoints()` deliberately.",
-                ep.method
-            ));
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "Kind-B raw-node→`TypeExpr` entrypoint pin violation(s):\n{}",
-        violations.join("\n")
-    );
-}
-
-#[test]
-fn kind_b_entrypoint_pin_self_test_discriminates() {
-    // (a) Visibility reader discriminates pub(crate) vs a widening to pub.
-    let crate_vis = r#"
-        impl D {
-            pub(crate) fn execute_to_type_expr(&self, k: &K) -> R { todo!() }
-        }
-    "#;
-    let f = syn::parse_file(crate_vis).expect("parse crate-vis");
     assert_eq!(
-        kind_b_entrypoint_visibility(&f, "execute_to_type_expr").as_deref(),
-        Some("pub(crate)"),
-        "self-test: a `pub(crate)` entrypoint reads as `pub(crate)`"
-    );
-    let widened = r#"
-        impl D {
-            pub fn execute_to_type_expr(&self, k: &K) -> R { todo!() }
-        }
-    "#;
-    let f = syn::parse_file(widened).expect("parse widened");
-    assert_eq!(
-        kind_b_entrypoint_visibility(&f, "execute_to_type_expr").as_deref(),
-        Some("pub"),
-        "self-test: a WIDENED `pub` entrypoint reads as `pub` (≠ pub(crate)), so the guard fires"
-    );
-
-    // (b) Caller counter discriminates a call from a same-named non-call and is
-    // comment/string-blind. Drives the REAL [`KindBCallerCollector`] (the
-    // production counter) so the self-test exercises the exact code the guard
-    // runs — it must match the rigor of the bridge-reference scanner (method
-    // call + UFCS / path call + bare fn-item ref + `use` import / rename + macro
-    // token), not just `.method(…)`.
-    let scan = |src: &str| -> usize {
-        let file = syn::parse_file(src).expect("parse caller-src");
-        let mut c = KindBCallerCollector {
-            method: "execute_to_type_expr".to_string(),
-            count: 0,
-        };
-        syn::visit::Visit::visit_file(&mut c, &file);
-        c.count
-    };
-    // Two real method calls + a comment + a string mentioning the name.
-    let with_calls = r##"
-        fn caller(d: &D) {
-            // execute_to_type_expr in a comment
-            let _s = "execute_to_type_expr in a string";
-            let _a = d.execute_to_type_expr(&k1);
-            let _b = d.execute_to_type_expr(&k2);
-        }
-    "##;
-    assert_eq!(
-        scan(with_calls),
+        whole_ident_occurrences(
+            "fn legacy_semantic_type_expr_bridge(&self) {}\nx.legacy_semantic_type_expr_bridge();",
+            RETIRED_BRIDGE_IDENT
+        ),
         2,
-        "self-test: exactly the TWO real method calls count (comment + string blind)"
+        "self-test: a definition + a call MUST both count"
     );
-    // A NEW method-call caller (count 1) differs from a sanctioned
-    // ZERO-for-that-file → the set-equality check in the guard fires.
-    let new_caller = r#"
-        fn other(d: &D) { let _ = d.execute_to_type_expr(&k); }
-    "#;
+    // A LONGER identifier merely CONTAINING the needle is NOT counted.
     assert_eq!(
-        scan(new_caller),
-        1,
-        "self-test: a new caller site is counted (a fresh file with count 1 breaks set-equality)"
-    );
-    // RED — UFCS / path call: `ProjectSemanticDispatch::execute_to_type_expr(&d, &k)`
-    // is an `ExprCall` whose callee path ends in the method. The old
-    // method-call-only counter MISSED this (returned 0); the rigor-matched
-    // collector MUST count it as a caller (matched as the final path segment).
-    let ufcs_call = r#"
-        fn other(d: &D) { let _ = ProjectSemanticDispatch::execute_to_type_expr(&d, &k); }
-    "#;
-    assert_eq!(
-        scan(ufcs_call),
-        1,
-        "self-test: a UFCS / path call `Type::execute_to_type_expr(…)` MUST be counted (the \
-         method-call-only counter missed it); counted ONCE (callee path visited once, no \
-         double-count vs the enclosing call)"
-    );
-    // RED — bare function-item reference: `let f = Type::execute_to_type_expr; f(&d, &k);`
-    // launders the call set behind an indirection. MUST be counted.
-    let bare_ref = r#"
-        fn other(d: &D) { let f = ProjectSemanticDispatch::execute_to_type_expr; f(&d, &k); }
-    "#;
-    assert_eq!(
-        scan(bare_ref),
-        1,
-        "self-test: a bare fn-item reference `let f = Type::execute_to_type_expr;` MUST be counted \
-         (it launders the caller set)"
-    );
-    // RED — `use … as alias` import names the method as the last `use`-tree
-    // segment (the alias-laundering escape). MUST be counted.
-    let use_rename = r#"
-        use crate::project_semantic_dispatch::ProjectSemanticDispatch::execute_to_type_expr as sneaky;
-        fn other(d: &D) { let _ = sneaky(&d, &k); }
-    "#;
-    assert!(
-        scan(use_rename) >= 1,
-        "self-test: a `use …execute_to_type_expr as alias` import MUST be counted (alias laundering)"
-    );
-    // RED — the method identifier inside a macro token tree.
-    let in_macro = r#"
-        fn other(d: &D) { some_macro!(d.execute_to_type_expr(&k)); }
-    "#;
-    assert!(
-        scan(in_macro) >= 1,
-        "self-test: the entrypoint identifier inside a macro token tree MUST be counted"
-    );
-    // NEGATIVE — a DIFFERENT identifier sharing a prefix MUST NOT count.
-    let prefixed = r#"
-        fn other(d: &D) { let _ = d.execute_to_type_expr_other(&k); }
-    "#;
-    assert_eq!(
-        scan(prefixed),
+        whole_ident_occurrences(
+            "x.legacy_semantic_type_expr_bridge_v2()",
+            RETIRED_BRIDGE_IDENT
+        ),
         0,
-        "self-test: `execute_to_type_expr_other` is a DIFFERENT identifier and MUST NOT count"
+        "self-test: a longer identifier containing the needle MUST NOT count"
+    );
+    assert_eq!(
+        whole_ident_occurrences("xlegacy_semantic_type_expr_bridge", RETIRED_BRIDGE_IDENT),
+        0,
+        "self-test: a leading-prefixed identifier MUST NOT count"
+    );
+    // An unrelated identifier is NOT counted.
+    assert_eq!(
+        whole_ident_occurrences("let raise_node_to_type_expr = 1;", RETIRED_BRIDGE_IDENT),
+        0,
+        "self-test: an unrelated identifier MUST NOT count"
     );
 }
 
@@ -2836,21 +2153,19 @@ fn output_carrier_payload_fields_self_test_discriminates() {
 // computed structurally from source, not spelled.
 // ===========================================================================
 
-/// The sanctioned Kind-B reverse-raise bridge modules — the COMPLETE caller
-/// set of `legacy_semantic_type_expr_bridge` (they obtain a bare `TypeExpr`
-/// through that interim non-sealed path, NOT a sealed capability). For the
-/// fence to hold, NO output cap's `pub(in P)` mint scope `P` may be an
-/// ANCESTOR-OR-EQUAL of any of these modules — because `pub(in P)` is callable
-/// from `P` AND every module at-or-under `P`, so a bridge module that is a
-/// DESCENDANT-OR-EQUAL of a mint scope could call the cap's `new` and launder
-/// the carrier. (This is the direction-CORRECT reachability the prior guard
-/// inverted.)
+/// Representative NON-SINK modules used by the mint-scope reachability self-test
+/// below. For the fence to hold, NO output cap's `pub(in P)` mint scope `P` may
+/// be an ANCESTOR-OR-EQUAL of a non-sink module — because `pub(in P)` is
+/// callable from `P` AND every module at-or-under `P`, so a non-sink module that
+/// is a DESCENDANT-OR-EQUAL of a mint scope could call the cap's `new` and
+/// launder the carrier.
 ///
-/// The set is the three modules that actually call the bridge:
-/// `meta_resolve::dispatch_helpers` (dispatch_helpers.rs), `host_manage::eval_env`
-/// (eval_env.rs), and `project_semantic_dispatch` itself (the `mod.rs` route
-/// fixpoint + slot-binding raises). The third was MISSING from the prior set —
-/// a `pub(in crate::project_semantic_dispatch)` widening would have slipped.
+/// These three were the Kind-B reverse-raise callers (now RETIRED — every
+/// Kind-B caller decides on the node-domain facts/key and the publication
+/// `TypeExpr` is materialised at a registered sink), but they remain real
+/// non-sink modules and so are a valid reachability sample:
+/// `meta_resolve::dispatch_helpers`, `host_manage::eval_env`, and
+/// `project_semantic_dispatch` itself.
 const KIND_B_BRIDGE_MODULES: &[&str] = &[
     "crate :: meta_resolve :: dispatch_helpers",
     "crate :: host_manage :: eval_env",
@@ -2890,7 +2205,15 @@ const KIND_B_BRIDGE_MODULES: &[&str] = &[
 const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
     (
         "HostManageComponentMetaOutputCap",
-        &["crate :: host_manage :: component_meta_methods"],
+        &[
+            "crate :: host_manage :: component_meta_methods",
+            // The sink-owned macro-output expansion demand API — a descendant of
+            // the mint scope whose whole reachable production scope is output-only
+            // (it mints the cap INTERNALLY in `materialize_admitted_expansion_node`
+            // + materialises; its only other submodule is the `#[cfg(test)]` parity
+            // suite). A genuine co-sink for this cap, NOT a non-sink helper.
+            "crate :: host_manage :: component_meta_methods :: macro_output_expansion",
+        ],
     ),
     (
         "MetaQueryRegistryOutputCap",
@@ -3438,10 +2761,10 @@ fn output_cap_mint_scope_self_test_discriminates() {
          scope MUST FIRE the default-deny reachable-tree check; got: {v:?}"
     );
 
-    // FIRE (RED): a cap WIDENED so its mint scope reaches a Kind-B bridge module
+    // FIRE (RED): a cap WIDENED so its mint scope reaches a NON-SINK module
     // (the projectors cap re-widened to the `meta_resolve` subtree root, whose
-    // reachable tree includes the Kind-B bridge `meta_resolve::dispatch_helpers`
-    // — a non-sink module). The reachable-tree check FIRES on the bridge module.
+    // reachable tree includes the non-sink `meta_resolve::dispatch_helpers`).
+    // The reachable-tree check FIRES on the non-sink module.
     let widened: Vec<CapMintScope> = sanctioned
         .iter()
         .map(|s| {
@@ -3471,7 +2794,7 @@ fn output_cap_mint_scope_self_test_discriminates() {
             .any(|m| m.contains("MetaResolveProjectorsOutputCap")
                 && m.contains("crate :: meta_resolve :: dispatch_helpers")
                 && m.contains("NOT a sanctioned output SINK")),
-        "self-test: a mint scope whose reachable tree includes the Kind-B bridge \
+        "self-test: a mint scope whose reachable tree includes the non-sink \
          `meta_resolve::dispatch_helpers` MUST FIRE the reachable-tree check; got: {v:?}"
     );
 
@@ -3883,20 +3206,19 @@ fn carrier_for_test_gate_self_test_discriminates() {
 // `Option<OutputTypeExpr>` the sibling cannot unwrap without a capability
 // (proven by the DEBUG planted-exploit: the sibling call compiles, but
 // `carrier.into_type_expr()` is E0061 — the capability arg is mandatory). The
-// COMPILER cannot express "no `pub`/`pub(…)` fn in this module returns a bare
-// `TypeExpr` raised from a node except the sanctioned
-// `legacy_semantic_type_expr_bridge`". This guard pins that COMPREHENSIVELY:
+// COMPILER cannot express "NO `pub`/`pub(…)` fn in this module returns a bare
+// `TypeExpr` raised from a node". With the interim Kind-B bridge RETIRED there is
+// no sanctioned exception. This guard pins that COMPREHENSIVELY:
 //   (a) the removed bare delegators `output_shell_raise` /
-//       `output_reduce_then_raise` do NOT exist;
+//       `output_reduce_then_raise` AND the retired Kind-B bridge
+//       `legacy_semantic_type_expr_bridge` do NOT exist;
 //   (b) `output_shell_raise_sealed` returns the SEALED `Option<OutputTypeExpr>`;
-//   (c) EVERY non-test public/restricted fn (inherent method OR free fn) whose
-//       RETURN type mentions `TypeExpr` is EXACTLY the sanctioned interim
-//       `legacy_semantic_type_expr_bridge` (the Kind-B bridge, `Option<TypeExpr>`)
-//       — any OTHER `pub`/`pub(…)` `-> …TypeExpr…` fn is a re-opened bare-raise
-//       laundering seam. (The still-private shell primitives
-//       `raise_node_to_type_expr{,_inner}` + the private free fn
-//       `semantic_primitive_to_type_expr` are module-private, so they are NOT
-//       public/restricted and correctly excluded.)
+//   (c) NO non-test public/restricted fn (inherent method OR free fn) whose
+//       RETURN type mentions `TypeExpr` may exist — any `pub`/`pub(…)`
+//       `-> …TypeExpr…` fn is a re-opened bare-raise laundering seam. (The
+//       still-private shell primitive `raise_node_to_type_expr` + the private
+//       free fn `semantic_primitive_to_type_expr` are module-private, so they
+//       are NOT public/restricted and correctly excluded.)
 // The scan is ALIAS-AWARE: a raise.rs `type X = …TypeExpr…` alias would let a
 // restricted fn return `&X` instead of `&TypeExpr`; such an alias is collected
 // and a return mentioning it is treated as TypeExpr-bearing. This is a
@@ -3904,10 +3226,6 @@ fn carrier_for_test_gate_self_test_discriminates() {
 // ===========================================================================
 
 const RAISE_REL: &str = "src/project_semantic_dispatch/raise.rs";
-
-/// The sanctioned interim Kind-B bridge — the ONE non-test public/restricted
-/// raise.rs fn allowed to return a bare `TypeExpr`.
-const SANCTIONED_BARE_TYPE_EXPR_FN: &str = "legacy_semantic_type_expr_bridge";
 
 /// One public/restricted raise.rs fn: `(name, is_test_gated, return_token_str)`.
 /// Collected for both inherent methods and free fns; private (no-visibility)
@@ -4102,15 +3420,21 @@ fn raise_return_is_type_expr_bearing(
 
 /// The comprehensive raise.rs bare-TypeExpr-return violation set, factored out
 /// so the self-test can feed it a synthetic raise-like file. Empty ⇒ the seam
-/// is sealed: no public/restricted raise fn returns a bare `TypeExpr` except
-/// the sanctioned bridge, and `output_shell_raise_sealed` returns the carrier.
+/// is sealed: NO public/restricted raise fn returns a bare `TypeExpr` (the
+/// interim Kind-B bridge is RETIRED — there is no longer any sanctioned
+/// exception), and `output_shell_raise_sealed` returns the carrier.
 fn raise_bare_type_expr_violations(file: &syn::File) -> Vec<String> {
     let sigs = raise_public_fn_sigs(file);
     let alias_names = raise_type_expr_alias_names(file);
     let mut violations = Vec::new();
 
-    // (a) Removed bare delegators must NOT exist.
-    for removed in ["output_shell_raise", "output_reduce_then_raise"] {
+    // (a) Removed bare delegators must NOT exist — including the RETIRED Kind-B
+    // bridge `legacy_semantic_type_expr_bridge`.
+    for removed in [
+        "output_shell_raise",
+        "output_reduce_then_raise",
+        "legacy_semantic_type_expr_bridge",
+    ] {
         if sigs.iter().any(|s| s.name == removed) {
             violations.push(format!(
                 "the bare raise delegator `{removed}` must NOT exist — it handed a \
@@ -4120,8 +3444,9 @@ fn raise_bare_type_expr_violations(file: &syn::File) -> Vec<String> {
         }
     }
 
-    // (c) Every non-test public/restricted fn returning a TypeExpr-bearing type
-    // must be EXACTLY the sanctioned bridge.
+    // (c) NO non-test public/restricted fn may return a TypeExpr-bearing type —
+    // the reverse-raise output seam hands back a SEALED carrier, and the retired
+    // Kind-B bridge is gone (no sanctioned bare-`TypeExpr` exception remains).
     for s in &sigs {
         if s.is_test_gated {
             continue; // test harnesses (materialize_type_expr, *_for_test) excluded
@@ -4129,15 +3454,12 @@ fn raise_bare_type_expr_violations(file: &syn::File) -> Vec<String> {
         if !raise_return_is_type_expr_bearing(&s.ret_tokens, &alias_names) {
             continue;
         }
-        if s.name == SANCTIONED_BARE_TYPE_EXPR_FN {
-            continue; // the sanctioned interim Kind-B bridge
-        }
         violations.push(format!(
             "`{}` is a non-test public/restricted raise.rs fn returning a `TypeExpr`-bearing type \
-             (`{}`) — only the sanctioned interim Kind-B bridge `{SANCTIONED_BARE_TYPE_EXPR_FN}` \
-             may return a bare `TypeExpr`; route any new output sink through the sealed \
-             `OutputProjector` capability (a sealed `OutputTypeExpr` / `MaterializedOutputTypeExpr` \
-             carrier), never a bare reverse-raise seam",
+             (`{}`) — NO public/restricted raise.rs fn may return a bare `TypeExpr` (the interim \
+             Kind-B bridge is retired); route any output sink through the sealed `OutputProjector` \
+             capability (a sealed `OutputTypeExpr` / `MaterializedOutputTypeExpr` carrier), never a \
+             bare reverse-raise seam",
             s.name,
             normalize_mod_path(&s.ret)
         ));
@@ -4156,8 +3478,8 @@ fn raise_output_seam_returns_sealed_carrier_not_bare_type_expr() {
     assert!(
         violations.is_empty(),
         "STRUCTURAL FENCE [P1-C / P2]: a raise.rs boundary returns a bare `TypeExpr` — the \
-         reverse-raise output seam must hand back a SEALED carrier (or be the sanctioned interim \
-         Kind-B bridge):\n{}",
+         reverse-raise output seam must hand back a SEALED carrier, and the retired Kind-B bridge \
+         leaves no sanctioned bare-`TypeExpr` exception:\n{}",
         violations.join("\n")
     );
 
@@ -4202,8 +3524,8 @@ fn raise_output_seam_self_test_discriminates() {
     "#;
     assert!(
         violations(sneaky).iter().any(|m| m.contains("`sneaky`")),
-        "self-test: a NEW `pub(crate) fn sneaky(&self) -> Option<TypeExpr>` MUST fire — only the \
-         sanctioned bridge may return a bare `TypeExpr`; got {:?}",
+        "self-test: a NEW `pub(crate) fn sneaky(&self) -> Option<TypeExpr>` MUST fire — NO \
+         public/restricted raise.rs fn may return a bare `TypeExpr`; got {:?}",
         violations(sneaky)
     );
 
@@ -4299,11 +3621,32 @@ fn raise_output_seam_self_test_discriminates() {
         violations(transitive)
     );
 
-    // PASS: the sanctioned bridge + the sealed seam + a PRIVATE shell primitive
-    // produce ZERO violations. (`raise_node_to_type_expr` has no visibility
-    // modifier → module-private → excluded; the bridge is the one allowed bare
-    // return; the sealed seam returns the carrier; the test harness is
-    // `#[cfg(test)]`-gated → excluded.)
+    // FIRE (RED): a RE-INTRODUCED `pub(crate) fn legacy_semantic_type_expr_bridge`
+    // — the retired Kind-B bridge — fires both as a removed-delegator (a) and as
+    // a bare-`TypeExpr` return (c).
+    let readded_bridge = r#"
+        impl D {
+            pub(crate) fn legacy_semantic_type_expr_bridge(
+                &self, node: SemanticNodeId,
+            ) -> Option<TypeExpr> {
+                self.raise_node_to_type_expr(node)
+            }
+        }
+    "#;
+    assert!(
+        violations(readded_bridge)
+            .iter()
+            .any(|m| m.contains("legacy_semantic_type_expr_bridge")),
+        "self-test: a re-introduced `legacy_semantic_type_expr_bridge` MUST fire (the retired \
+         Kind-B bridge); got {:?}",
+        violations(readded_bridge)
+    );
+
+    // PASS: the sealed seam + a PRIVATE shell primitive produce ZERO violations.
+    // (`raise_node_to_type_expr` has no visibility modifier → module-private →
+    // excluded; the sealed seam returns the carrier; the test harness is
+    // `#[cfg(test)]`-gated → excluded.) The retired Kind-B bridge is ABSENT — no
+    // sanctioned bare-`TypeExpr` return remains.
     let good = r#"
         impl D {
             fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> { None }
@@ -4311,11 +3654,6 @@ fn raise_output_seam_self_test_discriminates() {
                 &self, node: SemanticNodeId,
             ) -> Option<super::output_materialization::OutputTypeExpr> {
                 self.raise_node_to_type_expr(node).map(OutputTypeExpr::from_raise)
-            }
-            pub(crate) fn legacy_semantic_type_expr_bridge(
-                &self, node: SemanticNodeId,
-            ) -> Option<TypeExpr> {
-                self.raise_node_to_type_expr(node)
             }
             #[cfg(test)]
             pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
@@ -4328,8 +3666,8 @@ fn raise_output_seam_self_test_discriminates() {
     "#;
     assert!(
         violations(good).is_empty(),
-        "self-test: the sanctioned bridge + sealed seam + private shell primitive + private free \
-         fn + test-gated harness MUST pass with ZERO violations; got {:?}",
+        "self-test: the sealed seam + private shell primitive + private free fn + test-gated \
+         harness (and NO Kind-B bridge) MUST pass with ZERO violations; got {:?}",
         violations(good)
     );
 
@@ -4781,15 +4119,14 @@ fn test_output_cap_gate_self_test_discriminates() {
 // per-macro projectors, the projector cache-key layer, the framework-surface
 // resolution/normalize sink, and the query-engine surface projector), via the
 // sealed admitted-token chain (the compiler primary) + this structural cross-
-// sink scanner. It is NOT a claim that NO raw-node → `TypeExpr` boundary remains
-// anywhere: the named Kind-B raise-then-decide semantic-decision residual (the
-// `legacy_semantic_type_expr_bridge` route reached through `execute_to_type_expr`
-// / `project_slot_binding_member_with_terminal_id`) is DEFERRED to the Kind-B
-// graph-native conversion (docs/arch/parselower-design.md
-// `Stage8-A4-kind-b-graph-native-conversion`) and pinned separately by
-// `residual_output_materialization_bridge_no_new_kind_b_references` +
-// `kind_b_raise_then_decide_entrypoints_pinned`. Those Kind-B sites are NOT
-// publication sinks and are intentionally outside this guard's scan.
+// sink scanner. The former Kind-B raise-then-decide residual (the
+// `legacy_semantic_type_expr_bridge` route through `execute_to_type_expr` /
+// `project_slot_binding_member_with_terminal_id`) is RETIRED: every Kind-B
+// caller decides on the node-domain facts/key, and the demand-bound publication
+// adapters take a `&TypeExpr` demand (not a forgeable node), materialising once
+// at a registered sink — so they are not raw-authority boundaries here. The
+// absence of the retired bridge symbol is tripwired by
+// `retired_kind_b_bridge_symbol_absent_from_production_source`.
 //
 // Replaces the prior name-based single-file `output_sink` closed-allowlist
 // boundary check. Across the registered output sinks above this guard
@@ -4914,16 +4251,17 @@ fn test_output_cap_gate_self_test_discriminates() {
 //   - INLINE-MOD-AWARE: the sink-fn collector qualifies an inline-`mod` fn under
 //     `<file>::inner` (a module-path stack), so a `(module, fn)` allowlist entry
 //     is precise per inline submodule.
-// SCOPE: this is the Kind-A / PUBLICATION boundary, NOT a claim that no
-// raw-node→`TypeExpr` boundary remains ANYWHERE — the named Kind-B
-// raise-then-decide residual is deferred to 8-A4 and pinned separately (see the
-// `kind_b_raise_then_decide_entrypoints_pinned` section above).
+// SCOPE: this is the Kind-A / PUBLICATION boundary. The former Kind-B
+// raise-then-decide residual is RETIRED — its callers decide on the node-domain
+// facts/key and materialise once at a registered sink; the retired bridge
+// symbol's absence is tripwired by the tombstone
+// `retired_kind_b_bridge_symbol_absent_from_production_source`.
 //
 // scanner_invariant: cross_sink_raw_authority_to_typeexpr
 // scanner_justification: the transitive DTO-content + forgeable-input PAIRING across multiple sink modules is not expressible as a single Rust visibility / type-state check — the sealed admitted-token chain (private fields + private Seal) is the compiler primary, this scanner is the residual cross-module pairing supplement.
 // mechanism_ruling: 8a3-binding-ruling-2026-06-24
 // hardening_rounds: 0
-// hardening_history: adoption — replaces the name-based fix5 closed-allowlist output_sink boundary guard with a structural field-closure cross-sink transitive guard. STRUCTURAL REFINEMENT (NOT a hardening round, NOT spelling additions — the guard was made genuinely structural + fail-closed per the guard-mechanism ruling 8a3-guard-mechanism-consult-2026-06-24). A FOLLOW-UP STRUCTURAL-CORRECTNESS refinement then carried GENUINE module-qualified `(module, name)` `TypeDefId` identity through the closure graph with a CONSERVATIVE FAIL-CLOSED resolver, REPLACING the prior final-segment matching (which the prior claim called "module-qualified" but implemented only as bare-final-segment with a side `def_modules` index, so the two `IndexSignature` defs MERGED): the two `IndexSignature` defs are now DISTINCT ids; the safe-input collision check became pure anti-vacuity (the bearing-gated same-name carve-out was deleted); the dual-bearing tripwire seed side went TRANSITIVE while the forgeable carve-out stays DIRECT; and the non-authority input exemptions became qualified + anti-vacuity-checked. A LATER structural-correctness completion then closed three residual fail-OPEN spots a follow-up review found, where the qualified-identity model was claimed but not yet enforced on a bare-name / unique-name basis: (1) the qualified-path resolver arm resolved a UNIQUE final-segment candidate purely by uniqueness, ignoring the written qualifier — now a qualified path direct-matches only when the candidate's module is a suffix-or-equal of the qualifier OR is a proven `pub`/`pub(crate)` re-export of it (a cross-file re-export index + relative-qualifier normalization keep genuine re-exports resolving); (2) the input/output completeness category exemptions matched by BARE final segment — now QUALIFIER-AWARE (the category carries approved homes; a multi-segment ref must match one, a one-segment trait-bound/external is exempt only with no same-name collected def); (3) the dual-bearing tripwire's sanctioned-carrier exemption matched by BARE name — now the QUALIFIED `policy_admitted_safe_input_ids ∪ sealed_construction_chain_ids` set. A FINAL identity-correctness completion then closed the four remaining resolver-permissiveness spots a follow-up review found, where the "conservative fail-closed / module-qualified" claim was not yet fully true: (a) a too-short ANCESTOR prefix was accepted as a direct qualifier match (`crate::X` prefix-matched a deep real module) — direct matching is now SUFFIX-OR-EQUAL only, so ancestor-shortened / relative re-export references resolve through the proven `pub`/`pub(crate)` re-export rail ALONE (now genuinely load-bearing, keyed by the NORMALIZED absolute written path so a `super::…` re-export reference resolves); (b) a unique import whose target was external/unprovable fell through to the unique-collected-def shortcut (`use external::X as AdmittedPublishedMember` blessed the sanctioned token by uniqueness) — the import-shadow now PRESERVES the Unresolved import path; (c) the re-export index recorded ANY `Restricted` visibility incl `pub(self)`/`pub(in …)` — now `pub`/`pub(crate)` ONLY (a narrow scoped re-export is not a crate-wide proof other modules can write); (d) a `super` could pop the crate root, leaving a loosely-matching bare path — `super` now fails closed before escaping above the root. A SUBSEQUENT follow-up review found the resolver STILL resolved unproven identities in three same-class spots, all defense-in-depth (the production sealed-token primary is sound and untouched): (1) the import-shadow arm, after an import target failed to resolve, fell through to a UNIQUENESS shortcut for an intra-crate NON-RENAMED import (so a forged `use crate::evil::AdmittedPublishedMember` still resolved to the unique real token); (2) the re-export prover compared the re-export TARGET module by SUFFIX-or-equal (so a single-segment `pub use publication_authority::X` proved any `…::publication_authority` home); (3) an UNROOTED qualifier was accepted on a raw suffix without consulting the file's `use`-index (so a `use`-shadowed first segment, `use crate::other as publication_authority` then `publication_authority::X`, resolved to the safe token). These tightened the common paths: the resolver resolves a written reference by own-module-def, a genuine `pub`/`pub(crate)` re-export, a proven intra-crate `use`-binding chain (a module-scoped use-binding graph — narrow, intra-crate-only, non-glob, module/descendant-visibility, cycle-bounded; an unsupported `use` form contributes no binding => Unresolved), or a proven (suffix-or-equal DIRECT, EXACT-target re-export) qualifier; the uniqueness fall-through after an unresolved UNIQUE import is removed; the re-export TARGET match is EXACT; and an unrooted qualifier whose first segment the file `use`-shadows is re-resolved through the shadow. The genuine private chain (`registry_decl`'s `super::ResolvedTypeDeclaration` through the parent module's private `use`) resolves by PROOF; the forged `crate::evil::AdmittedPublishedMember` (a rooted qualifier naming no def-home) stays Unresolved. TERMINAL DISPOSITION (architect ruling `8a3i2-consult-8020-terminal`, 2026-06-24): this is an 80/20 fail-closed identity classifier for the current production reference shapes, NOT a complete Rust name resolver, and it CLEARS the acceptance bar for its defense-in-depth role behind the compiler-enforced sealed-token primary. Four residual forged shapes are ACCEPTED debt (cfg/cfg_attr-gated `use` indexed without active-cfg eval; ambiguous multi-import falling through to global uniqueness; unrooted-unshadowed raw-suffix match; no-import bare-unique global-uniqueness) — adversarial relative to this crate's common production sink-token references (each sanctioned token is uniquely named), recorded in `docs/arch/output-projector-residual-guard-debt.md`; no further incremental resolver-hardening passes are run for this guard. hardening_rounds stays 0 (identity-correctness work, not spelling/evasion increments).
+// hardening_history: adoption — replaces the name-based fix5 closed-allowlist output_sink boundary guard with a structural field-closure cross-sink transitive guard. STRUCTURAL REFINEMENT (NOT a hardening round, NOT spelling additions — the guard was made genuinely structural + fail-closed per the guard-mechanism ruling 8a3-guard-mechanism-consult-2026-06-24). A FOLLOW-UP STRUCTURAL-CORRECTNESS refinement then carried GENUINE module-qualified `(module, name)` `TypeDefId` identity through the closure graph with a CONSERVATIVE FAIL-CLOSED resolver, REPLACING the prior final-segment matching (which the prior claim called "module-qualified" but implemented only as bare-final-segment with a side `def_modules` index, so the two `IndexSignature` defs MERGED): the two `IndexSignature` defs are now DISTINCT ids; the safe-input collision check became pure anti-vacuity (the bearing-gated same-name carve-out was deleted); the dual-bearing tripwire seed side went TRANSITIVE while the forgeable carve-out stays DIRECT; and the non-authority input exemptions became qualified + anti-vacuity-checked. A LATER structural-correctness completion then closed three residual fail-OPEN spots a follow-up review found, where the qualified-identity model was claimed but not yet enforced on a bare-name / unique-name basis: (1) the qualified-path resolver arm resolved a UNIQUE final-segment candidate purely by uniqueness, ignoring the written qualifier — now a qualified path direct-matches only when the candidate's module is a suffix-or-equal of the qualifier OR is a proven `pub`/`pub(crate)` re-export of it (a cross-file re-export index + relative-qualifier normalization keep genuine re-exports resolving); (2) the input/output completeness category exemptions matched by BARE final segment — now QUALIFIER-AWARE (the category carries approved homes; a multi-segment ref must match one, a one-segment trait-bound/external is exempt only with no same-name collected def); (3) the dual-bearing tripwire's sanctioned-carrier exemption matched by BARE name — now the QUALIFIED `policy_admitted_safe_input_ids ∪ sealed_construction_chain_ids` set. A FINAL identity-correctness completion then closed the four remaining resolver-permissiveness spots a follow-up review found, where the "conservative fail-closed / module-qualified" claim was not yet fully true: (a) a too-short ANCESTOR prefix was accepted as a direct qualifier match (`crate::X` prefix-matched a deep real module) — direct matching is now SUFFIX-OR-EQUAL only, so ancestor-shortened / relative re-export references resolve through the proven `pub`/`pub(crate)` re-export rail ALONE (now genuinely load-bearing, keyed by the NORMALIZED absolute written path so a `super::…` re-export reference resolves); (b) a unique import whose target was external/unprovable fell through to the unique-collected-def shortcut (`use external::X as AdmittedPublishedMember` blessed the sanctioned token by uniqueness) — the import-shadow now PRESERVES the Unresolved import path; (c) the re-export index recorded ANY `Restricted` visibility incl `pub(self)`/`pub(in …)` — now `pub`/`pub(crate)` ONLY (a narrow scoped re-export is not a crate-wide proof other modules can write); (d) a `super` could pop the crate root, leaving a loosely-matching bare path — `super` now fails closed before escaping above the root. A SUBSEQUENT follow-up review found the resolver STILL resolved unproven identities in three same-class spots, all defense-in-depth (the production sealed-token primary is sound and untouched): (1) the import-shadow arm, after an import target failed to resolve, fell through to a UNIQUENESS shortcut for an intra-crate NON-RENAMED import (so a forged `use crate::evil::AdmittedPublishedMember` still resolved to the unique real token); (2) the re-export prover compared the re-export TARGET module by SUFFIX-or-equal (so a single-segment `pub use publication_authority::X` proved any `…::publication_authority` home); (3) an UNROOTED qualifier was accepted on a raw suffix without consulting the file's `use`-index (so a `use`-shadowed first segment, `use crate::other as publication_authority` then `publication_authority::X`, resolved to the safe token). These tightened the common paths: the resolver resolves a written reference by own-module-def, a genuine `pub`/`pub(crate)` re-export, a proven intra-crate `use`-binding chain (a module-scoped use-binding graph — narrow, intra-crate-only, non-glob, module/descendant-visibility, cycle-bounded; an unsupported `use` form contributes no binding => Unresolved), or a proven (suffix-or-equal DIRECT, EXACT-target re-export) qualifier; the uniqueness fall-through after an unresolved UNIQUE import is removed; the re-export TARGET match is EXACT; and an unrooted qualifier whose first segment the file `use`-shadows is re-resolved through the shadow. The genuine private chain (`registry_decl`'s `super::ResolvedTypeDeclaration` through the parent module's private `use`) resolves by PROOF; the forged `crate::evil::AdmittedPublishedMember` (a rooted qualifier naming no def-home) stays Unresolved. TERMINAL DISPOSITION (architect ruling `8a3i2-consult-8020-terminal`, 2026-06-24): this is an 80/20 fail-closed identity classifier for the current production reference shapes, NOT a complete Rust name resolver, and it CLEARS the acceptance bar for its defense-in-depth role behind the compiler-enforced sealed-token primary. Four residual forged shapes are ACCEPTED debt (cfg/cfg_attr-gated `use` indexed without active-cfg eval; ambiguous multi-import falling through to global uniqueness; unrooted-unshadowed raw-suffix match; no-import bare-unique global-uniqueness) — adversarial relative to this crate's common production sink-token references (each sanctioned token is uniquely named), recorded in `docs/arch/output-projector-residual-guard-debt.md`; no further incremental resolver-hardening passes are run for this guard. hardening_rounds stays 0 (identity-correctness work, not spelling/evasion increments). A COVERAGE-COMPLETENESS fix (architect ruling `facade-ruling-consult-2026-06-25`) then closed an incompleteness where `SANCTIONED_SINK_MODULES` listed `component_meta_methods` (and `typeinfo::raise`) as sinks but the manual `SINK_SCAN_PREFIXES` list OMITTED them, so the collector silently skipped their files. The scanned sink prefixes now DERIVE from `SANCTIONED_SINK_MODULES` (`sink_scan_prefixes` = the normalized mint-scope paths ∪ the intentionally-broader `SUPPLEMENTAL_SINK_SCAN_ROOTS`), and an anti-vacuity assertion fails if any sanctioned sink is ever uncovered by the scan set — removing the manual duplicate list, NOT adding spelling cases (hardening_rounds stays 0).
 // ===========================================================================
 
 /// Output-authority SEEDs as MODULE-QUALIFIED `(module, name)` IDs: a return /
@@ -5089,10 +4427,28 @@ fn name_index_with_seed_ids(base: &NameDefIndex) -> NameDefIndex {
     idx
 }
 
-/// Module-path prefixes (`::`-joined) of the registered output sinks this guard
-/// scans. A production `.rs` file whose module path (derived from its
-/// crate-relative path) starts with one of these prefixes is in scope.
-const SINK_SCAN_PREFIXES: &[&str] = &[
+/// INTENTIONALLY-BROADER supplemental scan roots — module-path prefixes
+/// (`::`-joined) the cross-sink guard scans IN ADDITION to the
+/// `SANCTIONED_SINK_MODULES`-derived set, because the boundary surface they
+/// guard is wider than a single sanctioned mint-scope module:
+/// - `crate::meta_resolve::projectors` is broader than the sanctioned
+///   `…::projectors::output_sink` (the projector pipeline above the sink).
+/// - `crate::meta_resolve::materialize` is broader than the sanctioned
+///   `…::materialize::field_types`.
+/// - `crate::typeinfo::framework_surface` is broader than the sanctioned
+///   `…::svelte_exec` / `…::vue_exec`.
+/// - `crate::resolver_core::component_meta_query_engine` is broader than the
+///   sanctioned `…::registry_decl` / `…::surface`.
+/// - `crate::component_meta_caches` and `crate::project_semantic_dispatch::raise`
+///   are not themselves sanctioned mint-scope modules but host the raiser /
+///   cache surface the cross-sink pairing must cover.
+///
+/// The EFFECTIVE scan set is [`sink_scan_prefixes`] = this list ∪ the
+/// `SANCTIONED_SINK_MODULES` mint-scope paths (so adding a new sanctioned sink
+/// automatically scans its own module, and the
+/// `every_sanctioned_sink_is_covered_by_scan_set` anti-vacuity assertion FAILS if
+/// a sanctioned sink is ever neither derived nor under a supplemental root).
+const SUPPLEMENTAL_SINK_SCAN_ROOTS: &[&str] = &[
     "crate::meta_resolve::projectors",
     "crate::meta_resolve::materialize",
     "crate::component_meta_caches",
@@ -5100,6 +4456,40 @@ const SINK_SCAN_PREFIXES: &[&str] = &[
     "crate::resolver_core::component_meta_query_engine",
     "crate::project_semantic_dispatch::raise",
 ];
+
+/// Normalise a ` :: `-spaced mint-scope path (the `SANCTIONED_SINK_MODULES`
+/// storage spelling, e.g. `crate :: host_manage :: component_meta_methods`) to
+/// the `::`-joined module-path spelling [`module_path_for_rel`] produces (e.g.
+/// `crate::host_manage::component_meta_methods`), so prefix comparisons against a
+/// file's derived module path are spelling-stable.
+fn mint_scope_to_module_path(mint_scope: &str) -> String {
+    normalize_mod_path(mint_scope).replace(" :: ", "::")
+}
+
+/// The EFFECTIVE module-path prefixes the cross-sink guard scans: the
+/// `SANCTIONED_SINK_MODULES` mint-scope paths (DERIVED, normalized to `crate::…`)
+/// UNIONED with [`SUPPLEMENTAL_SINK_SCAN_ROOTS`]. Deriving the sanctioned-sink
+/// set from the inventory (rather than a manually duplicated prefix list) closes
+/// the falsely-complete hole where a sanctioned sink module
+/// (`component_meta_methods`, `typeinfo::raise`) was listed as a sink but never
+/// scanned, so the collector silently skipped its files.
+///
+/// A production `.rs` file whose module path starts with one of these prefixes is
+/// in scope.
+fn sink_scan_prefixes() -> Vec<String> {
+    let mut prefixes: Vec<String> = SUPPLEMENTAL_SINK_SCAN_ROOTS
+        .iter()
+        .map(|p| (*p).to_string())
+        .collect();
+    for (_cap, mint_scopes) in SANCTIONED_SINK_MODULES {
+        for mint_scope in *mint_scopes {
+            prefixes.push(mint_scope_to_module_path(mint_scope));
+        }
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
 
 /// Closed allowlist of the GENUINE sink-local APIs that legitimately pair a
 /// forgeable raw-authority input with a `TypeExpr`-bearing output. Keyed
@@ -5112,27 +4502,20 @@ const SINK_SCAN_PREFIXES: &[&str] = &[
 /// chain depends on. A NEW non-allowlisted fn pairing forgeable authority with
 /// a TypeExpr output FIRES default-deny.
 const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
-    // The canonical `SemanticNodeId → TypeExpr` raiser + its sealed-carrier seam
-    // and the interim Kind-B bridge (both pinned by their own guards).
+    // The canonical `SemanticNodeId → TypeExpr` raiser (the shell primitive that
+    // delegates to the shared `shape_engine` fold) + the fold's materialisation
+    // entry it delegates to + its sealed-carrier seam.
     (
         "crate::project_semantic_dispatch::raise",
         "raise_node_to_type_expr",
     ),
     (
-        "crate::project_semantic_dispatch::raise",
-        "raise_node_to_type_expr_inner",
-    ),
-    (
-        "crate::project_semantic_dispatch::raise",
-        "raise_surface_view_to_object_type_expr",
+        "crate::project_semantic_dispatch::raise::shape_engine::materialize",
+        "fold_to_type_expr",
     ),
     (
         "crate::project_semantic_dispatch::raise",
         "output_shell_raise_sealed",
-    ),
-    (
-        "crate::project_semantic_dispatch::raise",
-        "legacy_semantic_type_expr_bridge",
     ),
     (
         "crate::project_semantic_dispatch::raise",
@@ -5149,6 +4532,18 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
     (
         "crate::project_semantic_dispatch::raise",
         "materialize_reduced_output_type_expr_for_test",
+    ),
+    // The typeinfo FFI-facade `SemanticNodeId → TypeExpr` test/oracle-gen raiser:
+    // a sink-local raiser in the sanctioned `crate::typeinfo::raise` sink that
+    // mints the sealed `TypeinfoRaiseOutputCap` INTERNALLY and unwraps the carrier
+    // (tests never hold the cap). Gated `#[cfg(any(test, feature = "oracle-gen"))]`
+    // — NOT a production reverse-materialization path; the production sibling
+    // (`project_node_to_type_expr_json_bytes`) returns wire BYTES, not a `TypeExpr`,
+    // so it is not a bearing-output boundary. Surfaced once the derived scan set
+    // covered `crate::typeinfo::raise` (a previously-uncovered sanctioned sink).
+    (
+        "crate::typeinfo::raise",
+        "project_node_to_type_expr_for_test",
     ),
     // The query-engine surface projector — sink-internal, confined to the
     // `component_meta_query_engine` subtree (the forgeable input is the leak the
@@ -5664,6 +5059,15 @@ fn type_def_source_files() -> Vec<(String, String)> {
         (
             "../verter_semantic/src/analysis/type_solver/prepared.rs",
             "verter_semantic::analysis::type_solver::prepared",
+        ),
+        // `ResolvedTypeAnalysis { type_expr: TypeExpr, … }` is a TypeExpr-BEARING
+        // DTO threaded as a `&mut Vec<…>` out-param of the registry-append sink fn
+        // (`append_component_meta_registry_entries`); reading its home lets the
+        // closure classify it as bearing. The newly-scanned `component_meta_methods`
+        // surfaced it once the falsely-complete scan-prefix hole closed.
+        (
+            "../verter_semantic/src/analysis/component_meta.rs",
+            "verter_semantic::analysis::component_meta",
         ),
     ];
     for (rel, module_base) in EXTERNAL {
@@ -7119,10 +6523,11 @@ fn collect_sink_fn_sigs(name_to_ids: &NameDefIndex) -> Vec<SinkFnSig> {
     // def.
     let reexports = collect_reexport_index();
     let use_bindings = collect_use_binding_index();
+    let scan_prefixes = sink_scan_prefixes();
     let mut out = Vec::new();
     for (rel, src) in production_src_files() {
         let module_path = module_path_for_rel(&rel);
-        if !SINK_SCAN_PREFIXES
+        if !scan_prefixes
             .iter()
             .any(|p| module_path == *p || module_path.starts_with(&format!("{p}::")))
         {
@@ -7831,6 +7236,19 @@ const KNOWN_NON_DTO_OUTPUT_IDENTS: &[(&str, NonAuthorityCategory)] = &[
         "Value",
         NonAuthorityCategory::GenericOrAssocOrStd(&["Self"]),
     ),
+    // The `RaisedShapeAlgebra` trait's associated-type returns (`Self::Out` /
+    // `Self::Fn` / `Self::Member` in the shared `shape_engine` fold). At the
+    // TRAIT declaration these are generic placeholders the field-closure cannot
+    // resolve; the CONCRETE algebra impls (`MaterializeTypeExprAlg::* -> TypeExpr`
+    // bearing, `RaisedShapeAlg::* -> RaisedShapeResult` non-bearing) are scanned
+    // on their own merits and take folded children, NOT a forgeable
+    // `SemanticNodeId`. Exempted ONLY under the `Self::` qualifier.
+    ("Out", NonAuthorityCategory::GenericOrAssocOrStd(&["Self"])),
+    ("Fn", NonAuthorityCategory::GenericOrAssocOrStd(&["Self"])),
+    (
+        "Member",
+        NonAuthorityCategory::GenericOrAssocOrStd(&["Self"]),
+    ),
     (
         "Discriminant",
         NonAuthorityCategory::GenericOrAssocOrStd(&["std::mem", "core::mem", "Self"]),
@@ -7891,6 +7309,59 @@ fn non_dto_output_category(name: &str) -> Option<NonAuthorityCategory> {
         .map(|(_, c)| *c)
 }
 
+/// INTRA-CRATE DTOs whose written reference resolves through a MULTI-HOP
+/// `pub type` alias + `pub use` re-export chain the 80/20 fail-closed resolver
+/// deliberately does NOT follow (per the TERMINAL DISPOSITION — no further
+/// resolver-hardening), so the bare reference stays `Unresolved` even though a
+/// real same-name def IS collected. Each entry pairs the bare name with its REAL
+/// `(module)` def home. Applies to BOTH the output and the input completeness
+/// rails (a `&mut Vec<…>` out-param is counted on both).
+///
+/// The exemption is NOT a bare-name blessing (which the collision rule forbids):
+/// [`ident_is_aliased_non_bearing`] exempts the unresolved ref ONLY when the
+/// UNIQUE collected def at the approved home EXISTS (anti-vacuity) AND is
+/// structurally NON-BEARING (verified against the live `typeexpr_bearing` set) —
+/// so a future edit that makes the real def TypeExpr-bearing FAILS the
+/// completeness check loudly instead of silently passing. This closes the
+/// newly-surfaced `component_meta_methods` `ResolvedTypeRegistryMeta`
+/// (`{ name: String, declaration: ResolvedTypeDeclaration }`, non-bearing,
+/// referenced via `crate::meta_resolve` → `component_meta_request_impl` alias →
+/// `crate::resolver_core` → `component_meta` struct) on both rails.
+const INTRA_CRATE_REEXPORT_ALIASED_NON_BEARING_DTOS: &[(&str, &str)] = &[(
+    "ResolvedTypeRegistryMeta",
+    "crate::resolver_core::component_meta",
+)];
+
+/// Whether an UNRESOLVED bare ident is a known intra-crate alias-chained
+/// NON-BEARING DTO ([`INTRA_CRATE_REEXPORT_ALIASED_NON_BEARING_DTOS`]): the unique
+/// collected def at its approved home EXISTS and is NOT in the `typeexpr_bearing`
+/// set. Returns `false` for a resolved ref (classified by its id), an unknown
+/// name, a missing home def (anti-vacuity — a stale entry FAILS), or a def that IS
+/// bearing (fail-closed — a bearing wrapper is never blessed). Used on both the
+/// output and input completeness rails.
+fn ident_is_aliased_non_bearing(
+    tref: &TypeRef,
+    name_to_ids: &NameDefIndex,
+    typeexpr_bearing: &std::collections::BTreeSet<TypeDefId>,
+) -> bool {
+    let TypeRef::Unresolved { final_segment, .. } = tref else {
+        return false;
+    };
+    let Some((_, home)) = INTRA_CRATE_REEXPORT_ALIASED_NON_BEARING_DTOS
+        .iter()
+        .find(|(n, _)| *n == final_segment.as_str())
+    else {
+        return false;
+    };
+    let home_id = TypeDefId::new(*home, final_segment);
+    // Anti-vacuity: the approved-home def must actually be collected.
+    let exists = name_to_ids
+        .get(final_segment)
+        .is_some_and(|ids| ids.contains(&home_id));
+    // Fail-closed: only exempt when the REAL def is structurally non-bearing.
+    exists && !typeexpr_bearing.contains(&home_id)
+}
+
 /// FAIL-CLOSED completeness: collect every OUTPUT / `&mut`-out-param PascalCase
 /// ident a (non-test, non-module-private) sink fn returns that is NOT
 /// classifiable — neither RESOLVED to a concrete `TypeDefId` (the field-closure
@@ -7904,6 +7375,7 @@ fn non_dto_output_category(name: &str) -> Option<NonAuthorityCategory> {
 fn unclassifiable_output_idents(
     sigs: &[SinkFnSig],
     name_to_ids: &NameDefIndex,
+    typeexpr_bearing: &std::collections::BTreeSet<TypeDefId>,
 ) -> Vec<(String, String)> {
     let container: std::collections::BTreeSet<&str> =
         KNOWN_CONTAINER_OUTPUT_IDENTS.iter().copied().collect();
@@ -7939,6 +7411,12 @@ fn unclassifiable_output_idents(
                 if non_authority_category_exempts(tref, category, name_to_ids) {
                     continue;
                 }
+            }
+            // Intra-crate alias-chained NON-BEARING DTO whose multi-hop
+            // `pub type`/`pub use` chain the 80/20 resolver does not follow —
+            // exempt ONLY when the real collected def exists and is non-bearing.
+            if ident_is_aliased_non_bearing(tref, name_to_ids, typeexpr_bearing) {
+                continue;
             }
             out.push((format!("{}::{}", sig.module_path, sig.name), id.to_string()));
         }
@@ -8152,19 +7630,37 @@ const KNOWN_NON_AUTHORITY_INPUT_IDENTS: &[KnownNonAuthorityInput] = &[
         "StoreView",
         NonAuthorityCategory::SealedTraitBound(&["crate::resolver_core"]),
     ),
+    // `SessionView` is a `pub trait crate::session_view::SessionView: Send + Sync`,
+    // taken as a `&dyn SessionView` overlay-view bound — NOT a struct the collector
+    // indexes, and a session-overlay view trait is not a forgeable raw-surface
+    // input. Surfaced once `component_meta_methods` entered the scan set
+    // (`view_bound_cold_seed`). Approved trait home so a QUALIFIED
+    // `crate::session_view::SessionView` matches; a bare `&dyn SessionView` matches
+    // iff no same-name struct is collected.
+    KnownNonAuthorityInput::Category(
+        "SessionView",
+        NonAuthorityCategory::SealedTraitBound(&["crate::session_view"]),
+    ),
     // `ProjectionDispatch` / `ResolverContext` / `ExecutorResolveCtx` /
     // `RequestStoreView` are external / sealed-trait resolution contexts.
-    // `ResolverContext` is a sealed `pub trait crate::resolver_core::
-    // ResolverContext` (written `crate::resolver_core::ResolverContext` /
-    // `super::super::ResolverContext`); the others have no read-root struct def
-    // (or resolve when collected) so only the unqualified-no-collision arm applies.
+    // `ResolverContext` is a sealed `pub trait` DEFINED at
+    // `crate::resolver_core::resolver_context::ResolverContext` and re-exported at
+    // `crate::resolver_core` (written either as the deep def path — the form the
+    // newly-scanned `component_meta_methods` uses on `compute_component_meta_state_*`
+    // and the `expand_*_output` demand methods — or the re-export path /
+    // `super::super::ResolverContext`); both homes are approved. The others have no
+    // read-root struct def (or resolve when collected) so only the
+    // unqualified-no-collision arm applies.
     KnownNonAuthorityInput::Category(
         "ProjectionDispatch",
         NonAuthorityCategory::ExternalNonAuthority(&[]),
     ),
     KnownNonAuthorityInput::Category(
         "ResolverContext",
-        NonAuthorityCategory::SealedTraitBound(&["crate::resolver_core"]),
+        NonAuthorityCategory::SealedTraitBound(&[
+            "crate::resolver_core",
+            "crate::resolver_core::resolver_context",
+        ]),
     ),
     KnownNonAuthorityInput::Category(
         "ExecutorResolveCtx",
@@ -8392,6 +7888,13 @@ fn unclassifiable_input_idents(
                     continue;
                 }
             }
+            // Intra-crate alias-chained NON-BEARING DTO appearing as a `&mut Vec<…>`
+            // out-param (also counted on the input rail) — exempt ONLY when the real
+            // collected def exists and is non-bearing (symmetric with the output
+            // rail). A non-bearing out-param Vec carries no forgeable authority.
+            if ident_is_aliased_non_bearing(tref, name_to_ids, typeexpr_bearing) {
+                continue;
+            }
             out.push((format!("{}::{}", sig.module_path, sig.name), id.to_string()));
         }
     }
@@ -8407,9 +7910,10 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
     // in place every reachable forgeable-input → TypeExpr boundary AT THOSE
     // Kind-A publication sinks is either routed through a token (input is no
     // longer a forgeable seed) or on the closed sink-local allowlist. The Kind-B
-    // raise-then-decide residual (`legacy_semantic_type_expr_bridge` route) is
-    // deferred to 8-A4 and pinned separately (see the section header) — it is
-    // not a publication sink and is intentionally outside this scan.
+    // raise-then-decide residual is RETIRED — every Kind-B caller decides on the
+    // node-domain facts/key and the demand-bound publication adapters take a
+    // `&TypeExpr` demand (NOT a forgeable node), materialising at a registered
+    // sink, so they are not flagged here.
     let (defs, name_to_ids) = collect_type_defs();
     let bearing = typeexpr_bearing_closure(&defs);
     let forgeable = forgeable_authority_closure(&defs, &bearing);
@@ -8526,6 +8030,36 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
              of the closure prevents every wrapper of it from being marked forgeable)"
         );
     }
+    // ANTI-VACUITY (coverage-completeness): EVERY sanctioned sink mint-scope
+    // module must be COVERED by the effective scan set — some scan prefix is an
+    // ancestor-or-equal of its `crate::…` module path. The scan set DERIVES the
+    // sanctioned-sink paths from `SANCTIONED_SINK_MODULES` (so this holds by
+    // construction), but the assertion fails LOUDLY if a future edit reverts to a
+    // manually duplicated prefix list that omits a sanctioned sink — the
+    // falsely-complete hole this fix closed (`component_meta_methods` /
+    // `typeinfo::raise` were sanctioned sinks the old manual list never scanned).
+    {
+        let scan_prefixes = sink_scan_prefixes();
+        let mut uncovered: Vec<String> = Vec::new();
+        for (_cap, mint_scopes) in SANCTIONED_SINK_MODULES {
+            for mint_scope in *mint_scopes {
+                let module_path = mint_scope_to_module_path(mint_scope);
+                let covered = scan_prefixes
+                    .iter()
+                    .any(|p| module_path == *p || module_path.starts_with(&format!("{p}::")));
+                if !covered {
+                    uncovered.push(module_path);
+                }
+            }
+        }
+        assert!(
+            uncovered.is_empty(),
+            "anti-vacuity: every SANCTIONED_SINK_MODULES mint-scope module must be covered by the \
+             cross-sink scan set (so the cross-sink raw-authority guard is not falsely complete). \
+             Uncovered sanctioned sink module(s): {uncovered:?}. The scan set must DERIVE from \
+             SANCTIONED_SINK_MODULES (see `sink_scan_prefixes`), never a manual prefix list."
+        );
+    }
     let sigs = collect_sink_fn_sigs(&name_to_ids);
     assert!(
         !sigs.is_empty(),
@@ -8538,7 +8072,7 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
     // UNRESOLVED PascalCase output ident is a TypeExpr-bearing WRAPPER DTO defined
     // OUTSIDE the read file set treated as a non-bearing leaf (or an ambiguous
     // bare name) — the silent under-classification this fails loudly on.
-    let unclassifiable = unclassifiable_output_idents(&sigs, &name_to_ids);
+    let unclassifiable = unclassifiable_output_idents(&sigs, &name_to_ids, &bearing);
     assert!(
         unclassifiable.is_empty(),
         "STRUCTURAL closure completeness violation(s) — a sink fn returns a PascalCase output type \
@@ -8591,6 +8125,10 @@ fn unclassifiable_output_idents_self_test_discriminates() {
     // EMPTY fixture index: the only resolvable names are seeds (`ExpandedField`)
     // via the seed merge; an unread wrapper stays `Unresolved`.
     let fixture: NameDefIndex = BTreeMap::new();
+    // No alias-chained-non-bearing exemption applies to these synthetic idents
+    // (none is in `INTRA_CRATE_REEXPORT_ALIASED_NON_BEARING_OUTPUTS`), so an empty
+    // bearing set is sufficient — the new arm is a no-op for this self-test.
+    let empty_bearing: std::collections::BTreeSet<TypeDefId> = std::collections::BTreeSet::new();
     let mk = |name: &str, outputs: &[&str], mut_out: &[&str], module_private: bool| -> SinkFnSig {
         let sig = synthetic_sig(
             &fixture,
@@ -8612,12 +8150,13 @@ fn unclassifiable_output_idents_self_test_discriminates() {
     // classifiable.
     let green = mk("ok", &["Vec", "ExpandedField", "bool", "T"], &[], false);
     assert!(
-        unclassifiable_output_idents(&[green], &fixture).is_empty(),
+        unclassifiable_output_idents(&[green], &fixture, &empty_bearing).is_empty(),
         "self-test: a fn returning only classifiable idents (resolved DTO + container + primitive + \
          generic param) MUST pass; got: {:?}",
         unclassifiable_output_idents(
             &[mk("ok", &["Vec", "ExpandedField", "bool", "T"], &[], false)],
-            &fixture
+            &fixture,
+            &empty_bearing
         )
     );
 
@@ -8645,7 +8184,7 @@ fn unclassifiable_output_idents_self_test_discriminates() {
         ..qualified_external
     };
     assert!(
-        unclassifiable_output_idents(&[qualified_external], &fixture).is_empty(),
+        unclassifiable_output_idents(&[qualified_external], &fixture, &empty_bearing).is_empty(),
         "self-test: a known non-DTO external written under its approved qualified home \
          (`verter_span::Span`) MUST be classifiable (qualifier-aware exemption)"
     );
@@ -8655,7 +8194,7 @@ fn unclassifiable_output_idents_self_test_discriminates() {
     // under-classified bearing-wrapper-defined-in-an-unread-crate case the
     // fail-closed check catches.
     let red = mk("leak", &["Option", "UnreadWrapperDto"], &[], false);
-    let v = unclassifiable_output_idents(&[red], &fixture);
+    let v = unclassifiable_output_idents(&[red], &fixture, &empty_bearing);
     assert!(
         v.iter().any(|(f, id)| f.contains("leak") && id == "UnreadWrapperDto"),
         "self-test: an UNREAD PascalCase output DTO (`UnreadWrapperDto`) MUST FIRE the fail-closed \
@@ -8683,7 +8222,7 @@ fn unclassifiable_output_idents_self_test_discriminates() {
         test_gated: false,
         module_private: false,
     };
-    let v = unclassifiable_output_idents(&[forged_external], &fixture);
+    let v = unclassifiable_output_idents(&[forged_external], &fixture, &empty_bearing);
     assert!(
         v.iter()
             .any(|(f, id)| f.contains("leak_forged_external") && id == "Span"),
@@ -8694,7 +8233,7 @@ fn unclassifiable_output_idents_self_test_discriminates() {
 
     // RED: an unread wrapper in a `&mut` OUT-param channel also fires.
     let red_outparam = mk("mutate", &[], &["UnreadOutParamDto"], false);
-    let v = unclassifiable_output_idents(&[red_outparam], &fixture);
+    let v = unclassifiable_output_idents(&[red_outparam], &fixture, &empty_bearing);
     assert!(
         v.iter().any(|(_, id)| id == "UnreadOutParamDto"),
         "self-test: an UNREAD `&mut` out-param DTO MUST FIRE the completeness check; got: {v:?}"
@@ -8704,8 +8243,72 @@ fn unclassifiable_output_idents_self_test_discriminates() {
     // cross the boundary).
     let private = mk("private_leak", &["UnreadWrapperDto"], &[], true);
     assert!(
-        unclassifiable_output_idents(&[private], &fixture).is_empty(),
+        unclassifiable_output_idents(&[private], &fixture, &empty_bearing).is_empty(),
         "self-test: a module-private fn's outputs MUST be dropped from the completeness check"
+    );
+}
+
+#[test]
+fn aliased_non_bearing_exemption_self_test_discriminates() {
+    // The intra-crate alias-chained NON-BEARING exemption
+    // (`ident_is_aliased_non_bearing`) must be a fail-closed, def-verified
+    // exemption — NOT a bare-name blessing. Exercise all three arms with the real
+    // entry `ResolvedTypeRegistryMeta` @ `crate::resolver_core::component_meta`.
+    let name = "ResolvedTypeRegistryMeta";
+    let home = "crate::resolver_core::component_meta";
+    let home_id = TypeDefId::new(home, name);
+    let aliased_ref = TypeRef::Unresolved {
+        from_module: "crate::host_manage::component_meta_methods".to_string(),
+        path: vec![name.to_string()],
+        final_segment: name.to_string(),
+    };
+
+    // (1) GREEN exemption: the approved-home def EXISTS and is NON-BEARING.
+    let mut index: NameDefIndex = BTreeMap::new();
+    index
+        .entry(name.to_string())
+        .or_default()
+        .insert(home_id.clone());
+    let non_bearing: std::collections::BTreeSet<TypeDefId> = std::collections::BTreeSet::new();
+    assert!(
+        ident_is_aliased_non_bearing(&aliased_ref, &index, &non_bearing),
+        "the unresolved aliased ref MUST be exempted when its approved-home def exists and is \
+         non-bearing"
+    );
+
+    // (2) FAIL-CLOSED on bearing: the SAME def, but now in the bearing set, must
+    // NOT be exempted (a future edit making the real def TypeExpr-bearing fires).
+    let bearing: std::collections::BTreeSet<TypeDefId> = std::iter::once(home_id.clone()).collect();
+    assert!(
+        !ident_is_aliased_non_bearing(&aliased_ref, &index, &bearing),
+        "a bearing same-name def MUST NOT be blessed by the aliased-non-bearing exemption \
+         (fail-closed)"
+    );
+
+    // (3) ANTI-VACUITY: a missing approved-home def (a stale entry) must NOT be
+    // exempted — the exemption requires the real def to actually be collected.
+    let empty_index: NameDefIndex = BTreeMap::new();
+    assert!(
+        !ident_is_aliased_non_bearing(&aliased_ref, &empty_index, &non_bearing),
+        "a missing approved-home def MUST NOT be exempted (anti-vacuity)"
+    );
+
+    // (4) An UNKNOWN name (not in the alias list) is never exempted by this rule.
+    let other_ref = TypeRef::Unresolved {
+        from_module: "crate::host_manage::component_meta_methods".to_string(),
+        path: vec!["SomeUnknownDto".to_string()],
+        final_segment: "SomeUnknownDto".to_string(),
+    };
+    assert!(
+        !ident_is_aliased_non_bearing(&other_ref, &index, &non_bearing),
+        "an ident not in INTRA_CRATE_REEXPORT_ALIASED_NON_BEARING_DTOS is never exempted here"
+    );
+
+    // (5) A RESOLVED ref is classified by its id, never this category.
+    let resolved_ref = TypeRef::Resolved(home_id);
+    assert!(
+        !ident_is_aliased_non_bearing(&resolved_ref, &index, &non_bearing),
+        "a resolved ref is classified by its id, not the aliased-non-bearing category"
     );
 }
 

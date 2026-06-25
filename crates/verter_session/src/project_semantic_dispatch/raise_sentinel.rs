@@ -1,7 +1,7 @@
 //! Shared owner of the unmaterialised-`Unknown { raw }` sentinel spelling.
 //!
-//! `raise_node_to_type_expr_inner` emits a small fixed set of
-//! `TypeExpr::Unknown { raw }` sentinel strings when dispatch cannot
+//! The shared `shape_engine::fold_node` materialisation algebra emits a small
+//! fixed set of `TypeExpr::Unknown { raw }` sentinel strings when dispatch cannot
 //! materialise a node (an unrepresentable surface, an alias cycle, a Vue
 //! macro placeholder, a budget-exceeded carrier, …). Two surfaces classify
 //! that spelling: the `TypeExpr`-domain recogniser

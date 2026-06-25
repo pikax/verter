@@ -14485,27 +14485,26 @@ fn execute_omit_dispatches_through_instantiate_omit_builtin() {
     );
 }
 
-/// `execute_to_type_expr` lowers a successful `QueryResult::Value`
-/// through `raise_node_to_type_expr` and preserves the dep_signature
-/// — a lossy `Option<TypeExpr>` return shape would drop the
-/// dep_signature on the floor and is NOT used here.
+/// `execute_read` returns the full `CacheRead<QueryResult<SemanticNodeId>>`
+/// preserving the dep_signature — the node-domain read the Kind-B sink adapters
+/// gate on. A lossy `Option<SemanticNodeId>` return shape would drop the
+/// dep_signature on the floor and is NOT used.
 #[test]
-fn execute_to_type_expr_preserves_dep_signature_on_success() {
+fn execute_read_preserves_dep_signature_on_success() {
     let host = host();
     upsert_ts(&host, "/w/types.ts", "export type Foo = { x: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     // ResolveDecl carries a real dep_signature anchored to /w/types.ts.
     let key = SemanticQueryKey::ResolveDecl(resolve_decl_key("/w/types.ts", "Foo"));
-    let read = dispatch.execute_to_type_expr(&key);
+    let read = dispatch.execute_read(key);
 
     // Discriminating: the dep_signature MUST contain at least one
-    // entry. Pre-fix-removing-dep_signature: the helper would
-    // discard the signature returning `Option<TypeExpr>`. Post-fix:
-    // the signature flows through to the caller intact.
+    // entry. A lossy return shape would discard the signature; here the
+    // signature flows through to the caller intact.
     assert!(
         !read.dep_signature.is_empty(),
-        "execute_to_type_expr must preserve dep_signature; got empty"
+        "execute_read must preserve dep_signature; got empty"
     );
     let names: Vec<String> = read
         .dep_signature

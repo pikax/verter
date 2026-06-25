@@ -34,8 +34,8 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::raise::{
     node_can_shell_raise, node_contains_semantic_miss_legacy_equivalent,
-    node_is_expanded_surface_legacy_equivalent, raised_shape_eq_node_type_expr,
-    raised_shape_eq_nodes,
+    node_is_expanded_surface_legacy_equivalent, node_raised_shape_facts, node_raised_shape_for_eq,
+    raised_shape_eq_node_type_expr, raised_shape_eq_nodes,
 };
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta_query_engine::{
@@ -102,6 +102,46 @@ fn assert_classifier_parity(host: &VerterHost, node: SemanticNodeId, label: &str
         oracle.is_some(),
         "[{label}] node_can_shell_raise must equal raise(node).is_some() (oracle = {oracle:?})"
     );
+
+    // FACTS-ONLY vs FULL-FOLD parity: the facts the FACTS-ONLY algebra
+    // (`node_raised_shape_facts` -> RaisedFactsAlg, no key interning) produces
+    // MUST byte-equal the facts the KEY-bearing algebra
+    // (`node_raised_shape_for_eq` -> RaisedShapeAlg) produces for the SAME node.
+    // Both build their per-arm facts through the SHARED `summary` layer, so any
+    // drift between the two algebras (a divergent fact/tag formula in one) fails
+    // here. `node_raised_shape_for_eq` always returns `Some(true)` for
+    // `eq_to_expr` against the node's own raise, so the facts are what we assert.
+    let facts_only = node_raised_shape_facts(host, node);
+    match (&oracle, facts_only) {
+        (Some(e), Some(facts_only)) => {
+            let full = node_raised_shape_for_eq(host, node, e)
+                .expect("a raisable node yields a combined facts+eq projection");
+            assert_eq!(
+                (
+                    facts_only.materialized,
+                    facts_only.expanded_surface,
+                    facts_only.can_shell_raise
+                ),
+                (
+                    full.facts.materialized,
+                    full.facts.expanded_surface,
+                    full.facts.can_shell_raise
+                ),
+                "[{label}] FACTS-ONLY algebra facts must equal KEY-bearing algebra facts \
+                 (shared summary layer) (oracle = {oracle:?})"
+            );
+            assert!(
+                full.eq_to_expr,
+                "[{label}] node_raised_shape_for_eq(node, raise(node)).eq_to_expr must be true"
+            );
+        }
+        (None, None) => {}
+        _ => panic!(
+            "[{label}] facts-only raisability must agree with the oracle (oracle = {oracle:?}, \
+             facts_only.is_some() = {})",
+            facts_only.is_some()
+        ),
+    }
 
     // Equality of the node against its OWN raised `TypeExpr`: must be
     // `Some(true)` whenever the raise is `Some` (a node always equals its own
@@ -1506,6 +1546,127 @@ fn raised_shape_eq_node_type_expr_negative_some_false_discriminates() {
 }
 
 #[test]
+fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partialeq() {
+    // REGRESSION (FINDING 1): the interned `RaisedShapeKey` must be EXACTLY
+    // `TypeExpr::PartialEq`-equivalent. `verter_type_expr::FunctionParam`'s
+    // hand-written `PartialEq`/`Eq`/`Hash` DELIBERATELY EXCLUDES
+    // `has_ts_annotation` (a transient lowering-time gate, not semantic
+    // identity). The raised mirror (`RaisedFunctionParam`) must exclude it too,
+    // or the key would distinguish a field `TypeExpr::PartialEq` ignores —
+    // falsely reading a no-op as "changed" at the `surface.rs` route gates
+    // (`lower_and_project_to_expanded_published` :104 / `instantiate_local_
+    // generic_ref_published` :261).
+    //
+    // The node side ALWAYS raises `has_ts_annotation: false` (the materializer
+    // hardcodes it; `build_raised_function` hardcodes it). So the divergence
+    // triggers when the INPUT `TypeExpr` carries `has_ts_annotation: true` (any
+    // annotated function param). This test builds exactly that pair and asserts
+    // the key compare AGREES with `TypeExpr::PartialEq`.
+    //
+    // Before the hand-written-eq fix this asserts `Some(false)` (RED); after, it
+    // asserts `Some(true)` (GREEN). The existing parity fixtures all use
+    // `FunctionParam::synthetic` → `has_ts_annotation: false`, so they never
+    // exercised the mismatch — that gap is why the bug shipped.
+    //
+    // NOTE: `SemanticNodeData::Function` uses the GRAPH param
+    // (`semantic_query::FunctionParam`, already imported at the top); the input
+    // `TypeExpr::Function` uses the IR param (`verter_type_expr::FunctionParam`).
+    // They are distinct types — alias the IR ones to keep both in scope.
+    use verter_type_expr::{
+        FunctionExpr as IrFunctionExpr, FunctionParam as IrFunctionParam, TypeExpr,
+    };
+
+    let host = host();
+    let graph = graph_of(&host);
+
+    let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+    // `(a: string) => number` — the node side. Its param raises with
+    // `has_ts_annotation: false` (synthetic param → false; materializer/algebra
+    // both hardcode false).
+    let func_node = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("a")),
+                string_id,
+                false,
+                false,
+            )]
+            .into_boxed_slice(),
+        ),
+        return_type: number_id,
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+
+    // The oracle shape the node raises to (param `has_ts_annotation: false`).
+    let oracle = raise_oracle(&host, func_node).expect("function node raises");
+
+    // The EXTERNAL input `TypeExpr`: the SAME `(a: string) => number` shape but
+    // its param carries `has_ts_annotation: true` (an annotated param). Built
+    // with `with_span(.., true)`; span `None` and default function spans so it
+    // is otherwise byte-for-byte the oracle's shape.
+    let expr_annotation_true = TypeExpr::Function(Arc::new(IrFunctionExpr::synthetic(
+        vec![IrFunctionParam::with_span(
+            Some("a".to_string()),
+            TypeExpr::Primitive(PrimitiveName::String),
+            false,
+            false,
+            None,
+            true, // <-- the ONLY difference from the node-raised shape
+        )],
+        Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+        Vec::new(),
+    )));
+
+    // PREMISE: the `has_ts_annotation: true` input IS `TypeExpr::PartialEq`-equal
+    // to the node's raised shape (the field is excluded from `FunctionParam`'s
+    // hand-written eq). If this premise broke, the test would not be testing the
+    // bug.
+    assert_eq!(
+        oracle, expr_annotation_true,
+        "PREMISE: TypeExpr::PartialEq must IGNORE has_ts_annotation — the annotated \
+         input equals the node's raised shape (oracle = {oracle:?})"
+    );
+
+    // The FIX: the key compare must AGREE with `TypeExpr::PartialEq` ⇒ Some(true).
+    // (Pre-fix, the derived `RaisedFunctionParam` distinguishes the field ⇒
+    // Some(false), and the route gate falsely reads "changed".)
+    assert_eq!(
+        raised_shape_eq_node_type_expr(&host, func_node, &expr_annotation_true),
+        Some(true),
+        "raised_shape_eq_node_type_expr must IGNORE has_ts_annotation exactly like \
+         TypeExpr::PartialEq: a node raising a param (has_ts_annotation=false) vs a \
+         PartialEq-equal input whose param has has_ts_annotation=true must be Some(true)"
+    );
+
+    // DISCRIMINATION GUARD: prove the key compare still SEPARATES a genuine
+    // change (a different param TYPE), so the Some(true) above is not a blanket
+    // "always equal" — `(a: number) => number` must NOT raise-equal the node ⇒
+    // Some(false).
+    let expr_changed_param_ty = TypeExpr::Function(Arc::new(IrFunctionExpr::synthetic(
+        vec![IrFunctionParam::with_span(
+            Some("a".to_string()),
+            TypeExpr::Primitive(PrimitiveName::Number), // <-- real shape change
+            false,
+            false,
+            None,
+            true,
+        )],
+        Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+        Vec::new(),
+    )));
+    assert_eq!(
+        raised_shape_eq_node_type_expr(&host, func_node, &expr_changed_param_ty),
+        Some(false),
+        "a real param-TYPE change (string -> number) must still be Some(false) — proves \
+         the has_ts_annotation Some(true) is field-exclusion, not a blanket true"
+    );
+}
+
+#[test]
 fn raise_oracle_payload_shape_preserves_recursed_children() {
     // The leaf-vs-recursion fixtures assert PREDICATE parity (the miss predicate
     // treats a raised TemplateLiteral / TypeParameter / Ref-carrier as a LEAF),
@@ -1664,4 +1825,121 @@ fn decl_identity_unscoped(canonical_id: &str, name: &str) -> DeclIdentity {
         whole_hash: [0u8; 16],
         decl_name: Arc::from(name),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Union NO-collapse edges — the easy-to-get-wrong subtlety BOTH codex legs
+// flagged: the raiser's `Union` arm `filter_map`s its members and NEVER
+// collapses, so `Union([A])` stays a union and an empty `Union([])` stays an
+// empty union. The bottom-up fold must preserve this EXACTLY (a collapse would
+// diverge from the materialize-then-predicate oracle). Each routes through
+// `assert_classifier_parity` so it discriminates against the oracle, plus a
+// DIRECT oracle shape assertion pinning the no-collapse.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parity_union_no_collapse_single_and_empty() {
+    let host = host();
+    let graph = graph_of(&host);
+
+    // `Union([A])` — a single-member union — stays a `Union`, NOT collapsed to A.
+    let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let single = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![str_id].into_boxed_slice(),
+    )));
+    assert_classifier_parity(&host, single, "union-single-member");
+    match raise_oracle(&host, single) {
+        Some(TypeExpr::Union(ref members)) => assert_eq!(
+            members.len(),
+            1,
+            "Union([A]) must stay a single-member Union (NO collapse to A)"
+        ),
+        other => panic!("Union([String]) must raise to a Union, got {other:?}"),
+    }
+    // The node-domain equality agrees the single-member union equals itself
+    // (its raised shape), proving the bottom-up key built the un-collapsed union.
+    assert_eq!(
+        raised_shape_eq_node_type_expr(
+            &host,
+            single,
+            &TypeExpr::Union(Arc::from(
+                vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice()
+            ))
+        ),
+        Some(true),
+        "the bottom-up key of Union([String]) must equal Union([String]) (un-collapsed)"
+    );
+    // ...and is NOT equal to the bare member `String` (a collapse bug would make
+    // these equal).
+    assert_eq!(
+        raised_shape_eq_node_type_expr(&host, single, &TypeExpr::Primitive(PrimitiveName::String)),
+        Some(false),
+        "Union([String]) must NOT equal the bare String (a collapse-to-single bug would make \
+         these equal)"
+    );
+
+    // An empty `Union([])` stays an empty union (NO empty→sentinel).
+    let empty = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        Vec::<SemanticNodeId>::new().into_boxed_slice(),
+    )));
+    assert_classifier_parity(&host, empty, "union-empty");
+    match raise_oracle(&host, empty) {
+        Some(TypeExpr::Union(ref members)) => assert!(
+            members.is_empty(),
+            "empty Union([]) must stay an empty Union (NO empty→sentinel)"
+        ),
+        other => panic!("empty Union([]) must raise to an empty Union, got {other:?}"),
+    }
+
+    // A `Union([A, miss])` DROPS the missing arm (filter_map) — `Union([A])`.
+    let absent = SemanticNodeId(u64::MAX);
+    let with_drop = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![str_id, absent].into_boxed_slice(),
+    )));
+    assert_classifier_parity(&host, with_drop, "union-drop-missing-arm");
+    match raise_oracle(&host, with_drop) {
+        Some(TypeExpr::Union(ref members)) => assert_eq!(
+            members.len(),
+            1,
+            "Union([String, <absent>]) must DROP the absent arm (filter_map) → Union([String])"
+        ),
+        other => panic!("expected a Union, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type-level fence: the interned `RaisedShapeKey` does NOT own a `TypeExpr`.
+// This FAILS on the former materialize-then-predicate tree (where
+// `RaisedShapeKey(TypeExpr)` wrapped a full `TypeExpr`, so `size_of` was the
+// large `TypeExpr` enum size) and PASSES on the interned-structural-key tree
+// (a `u32` intern id). The interned key replaces `TypeExpr`'s `PartialEq` in
+// the node-domain decision surface, so it must NOT own a materialised
+// `TypeExpr` — this is the architecture-fence half of that property.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn raised_shape_key_is_an_interned_id_not_a_typeexpr() {
+    use super::raise::RaisedShapeKey;
+
+    // The interned key is a tiny id (a `u32` newtype), NOT a `TypeExpr`-owning
+    // wrapper. `TypeExpr` is a large multi-variant enum (Arc-heavy); a key that
+    // OWNED one would be at least pointer-sized and far larger than 4 bytes.
+    assert_eq!(
+        std::mem::size_of::<RaisedShapeKey>(),
+        std::mem::size_of::<u32>(),
+        "RaisedShapeKey must be an interned id (u32-sized), NOT own a TypeExpr — a \
+         `RaisedShapeKey(TypeExpr)` would be `size_of::<TypeExpr>()` bytes ({} here), far larger \
+         than {} (u32)",
+        std::mem::size_of::<TypeExpr>(),
+        std::mem::size_of::<u32>(),
+    );
+    // Belt-and-braces: the key is strictly smaller than a `TypeExpr` (the
+    // former wrapper would be `>=` it).
+    assert!(
+        std::mem::size_of::<RaisedShapeKey>() < std::mem::size_of::<TypeExpr>(),
+        "RaisedShapeKey ({} bytes) must be strictly smaller than TypeExpr ({} bytes) — it interns \
+         an id, it does not own the materialised shape",
+        std::mem::size_of::<RaisedShapeKey>(),
+        std::mem::size_of::<TypeExpr>(),
+    );
 }
