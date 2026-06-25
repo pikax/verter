@@ -610,6 +610,41 @@ impl ProviderSurfaceStore {
             .and_then(|s| s.project_owner.clone())
     }
 
+    /// Every CURRENT (`Current`-state) provider path whose surface is owned by the
+    /// configured project `project` (its recorded `project_owner` equals
+    /// `project`). The store is the SINGLE record of provider ownership, so this is
+    /// the authoritative project-scoped surface set — the project-bound sync layer
+    /// captures it BEFORE a request so a multi-file result can be validated against
+    /// every project surface, not only the queried file (no second ownership map).
+    ///
+    /// ATOMICITY: the lifecycle read guard is held for the whole scan, and each
+    /// `Current` path's snapshot is resolved UNDER THAT SAME GUARD (sound because
+    /// [`Self::record`] publishes the snapshot into `snapshots` BEFORE pointing the
+    /// lifecycle state at its generation). A `Closing` path is excluded (it has no
+    /// current snapshot). Result order is unspecified; callers compare by set
+    /// membership, not order.
+    #[must_use]
+    pub fn current_project_surface_paths(&self, project: &str) -> Vec<Arc<str>> {
+        let lifecycle = self.inner.lifecycle.read();
+        let mut out: Vec<Arc<str>> = Vec::new();
+        for (path, state) in lifecycle.paths.iter() {
+            let ProviderPathState::Current { generation } = state else {
+                continue;
+            };
+            if let Some(entry) = self.inner.snapshots.get(&(Arc::clone(path), *generation)) {
+                if entry
+                    .value()
+                    .project_owner
+                    .as_deref()
+                    .is_some_and(|owner| owner == project)
+                {
+                    out.push(Arc::clone(path));
+                }
+            }
+        }
+        out
+    }
+
     /// The CURRENT surface's `map_hash` for `provider_path`, or `None` if no
     /// current snapshot OR the current surface carries no usable source map. The
     /// mapped-result-cache identity (§2.7): a returned span mapped through a map

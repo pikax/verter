@@ -7,6 +7,7 @@ pub mod config;
 pub mod css;
 pub mod documents;
 pub mod extension_provider;
+pub mod external_ts_sync;
 pub mod features;
 pub mod project_resolver;
 pub mod provider_surface_store;

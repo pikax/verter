@@ -119,6 +119,33 @@ impl ProjectBinding {
             self.env_dims,
         )
     }
+
+    /// Construct a binding directly for downstream-crate TESTS that need a resolved
+    /// binding without standing up a full `WorkspaceSnapshot` + `WorkspaceRead`
+    /// resolver. Gated behind the `test-util` feature (enabled only by downstream
+    /// crates' `[dev-dependencies]`), so it is UNAVAILABLE in a normal production
+    /// build: production code obtains a binding ONLY from
+    /// [`WorkspaceProjectResolver::resolve`] (the resolution gate), preserving the
+    /// `provider_op_requires_resolved_project` witness discipline. This is a
+    /// test-only seam, not a production path.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new_for_test(
+        workspace_root: impl Into<Arc<str>>,
+        tsconfig_uri: impl Into<Arc<str>>,
+        ts_version: impl Into<Arc<str>>,
+        env_dims: EnvDims,
+        references: Vec<Arc<str>>,
+    ) -> Self {
+        Self::new(
+            workspace_root.into(),
+            tsconfig_uri.into(),
+            ts_version.into(),
+            env_dims,
+            references,
+        )
+    }
 }
 
 /// The synthetic-scratch binding for untitled buffers / files outside any

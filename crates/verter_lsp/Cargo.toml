@@ -62,6 +62,11 @@ path = "src/main.rs"
 futures-util = "0.3.32"
 paste = "1.0.15"
 tempfile = "3.27"
+# Enables `verter_session`'s `test-util` feature for THIS crate's tests only
+# (the project-bound external-TS sync tests mint a `ProjectBinding` via
+# `ProjectBinding::new_for_test`). A dev-dependency, so the feature is never in a
+# production build — the witness discipline holds outside tests.
+verter_session = { path = "../verter_session", features = ["session_metrics", "test-util"] }
 # Used by `tests/editor_liveness_guards.rs` to AST-parse the LSP provider-sync
 # source so the delegated-stale-close detector is robust against multiline call
 # spans, bare-local stale sets, and aliased delegation (a line-based scan is
