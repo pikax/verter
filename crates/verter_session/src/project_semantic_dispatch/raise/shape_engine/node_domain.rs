@@ -21,7 +21,10 @@ use super::{
     RaisedShapeResult, RaisedShapeSummary, RaisedTerm, RaisedTupleElement, RaisedTypeParam,
     ShapeInterner,
 };
-use crate::resolver_core::component_meta_query_engine::SEMANTIC_OBJECT_SURFACE;
+use crate::resolver_core::component_meta_query_engine::{
+    semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE,
+};
+use crate::semantic_query::QueryError;
 
 // ===========================================================================
 // Shared summary-constructor layer — the SINGLE source of the per-arm
@@ -66,6 +69,35 @@ mod summary {
         let materialized =
             !crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel(raw);
         let tag = if raw == SEMANTIC_OBJECT_SURFACE {
+            FactShapeTag::ObjectSurfaceSentinel
+        } else {
+            FactShapeTag::Other
+        };
+        summary(materialized, true, tag)
+    }
+
+    /// A TYPED resolver-control sentinel (`Opaque(QueryError)` reaching the
+    /// reverse boundary, or a converted `fold_node` control arm): the
+    /// node-domain counterpart of [`unknown`], but classified DIRECTLY from the
+    /// typed [`QueryError`] via the shared sentinel authority instead of
+    /// re-spelling a raw string. `materialized` comes from the domain-neutral
+    /// `query_error_is_unmaterialized_sentinel`; the `tag` is mapped HERE — this
+    /// is where [`FactShapeTag`] lives — from the domain-neutral
+    /// `query_error_is_object_surface_sentinel` predicate, exactly mirroring the
+    /// `raw == SEMANTIC_OBJECT_SURFACE` tag rule [`unknown`] applies (the
+    /// `UnrepresentableSurface` carrier round-trips to that spelling natively, and
+    /// a text-bearing `Other("semanticObjectSurface")` payload round-trips to it
+    /// via the predicate's delegation — both tag `ObjectSurfaceSentinel`, exactly
+    /// as the raw rule would). Both predicates are held byte-for-byte in agreement
+    /// with the raw recogniser `unknown` uses (the no-drift contract), so this
+    /// path and the raw-string path classify a sentinel identically.
+    /// `expanded_surface` is always `true`, exactly as `unknown` passes.
+    pub(super) fn opaque_sentinel(err: &crate::semantic_query::QueryError) -> RaisedShapeSummary {
+        use crate::project_semantic_dispatch::raise_sentinel::{
+            query_error_is_object_surface_sentinel, query_error_is_unmaterialized_sentinel,
+        };
+        let materialized = !query_error_is_unmaterialized_sentinel(err);
+        let tag = if query_error_is_object_surface_sentinel(err) {
             FactShapeTag::ObjectSurfaceSentinel
         } else {
             FactShapeTag::Other
@@ -309,6 +341,15 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
     }
     fn unknown(&mut self, raw: Arc<str>) -> RaisedShapeResult {
         let summary = summary::unknown(&raw);
+        self.result(RaisedTerm::Unknown { raw }, summary)
+    }
+    fn opaque_sentinel(&mut self, err: &QueryError) -> RaisedShapeResult {
+        // The interned STRUCTURAL key is the same `Unknown { raw }` the
+        // materializer produces (byte-identical raw, so node-vs-`TypeExpr`
+        // equality is preserved); the SUMMARY is classified from the typed
+        // variant via the shared authority.
+        let summary = summary::opaque_sentinel(err);
+        let raw: Arc<str> = Arc::from(semantic_query_error_raw(err));
         self.result(RaisedTerm::Unknown { raw }, summary)
     }
     fn recursive_ref(&mut self, name: Arc<str>) -> RaisedShapeResult {
@@ -713,6 +754,9 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     }
     fn unknown(&mut self, raw: Arc<str>) -> RaisedShapeSummary {
         summary::unknown(&raw)
+    }
+    fn opaque_sentinel(&mut self, err: &QueryError) -> RaisedShapeSummary {
+        summary::opaque_sentinel(err)
     }
     fn recursive_ref(&mut self, _name: Arc<str>) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
@@ -1149,5 +1193,151 @@ fn function_expr_to_raised(
         type_parameters,
         signature_span: function.spans.signature,
         return_type_span: function.spans.return_type,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summary;
+    use super::FactShapeTag;
+    use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
+    use crate::semantic_query::QueryError;
+
+    /// The TYPED node-domain summary constructor (`summary::opaque_sentinel`)
+    /// must yield the SAME FULL summary — `materialized` fact, `expanded_surface`,
+    /// AND `FactShapeTag` — the LEGACY raw-string node-domain path
+    /// (`summary::unknown` over the variant's `semantic_query_error_raw`) produced,
+    /// for the FULL `_ => opaque_sentinel`-reachable variant set the `fold_node`
+    /// `Opaque(err)` arm routes (every variant EXCEPT `RecursiveRef` and
+    /// `DeclPlaceholder`, which hit the earlier `recursive_ref` / `reference`
+    /// sub-arms and are covered by the agreement test in `raise_sentinel.rs`),
+    /// INCLUDING the `Other`-sentinel-text carrier. This is the node-domain
+    /// anti-drift guard discharging the `Opaque`-arm behaviour-preservation
+    /// obligation: a typed classification that disagreed with the raw-string
+    /// classification would fail here.
+    ///
+    /// DISCRIMINATING on BOTH the `materialized` text-bearing delegation
+    /// (`Other("semanticMiss")` — pre-delegation the typed `materialized` fact
+    /// diverged from the legacy raw fact) AND the `tag` text-bearing delegation
+    /// (`Other("semanticObjectSurface")` — the payload that tags
+    /// `ObjectSurfaceSentinel` via the raw rule; reverting the tag-predicate
+    /// delegation back to `Other(_) => false` makes `typed.tag` report `Other`
+    /// while the legacy raw rule reports `ObjectSurfaceSentinel`, so the `tag`
+    /// assertion below FAILS for it).
+    #[test]
+    fn opaque_sentinel_summary_matches_legacy_unknown_summary() {
+        // The full `_ => opaque_sentinel`-reachable set the `Opaque(err)` arm
+        // routes (RecursiveRef + DeclPlaceholder hit earlier sub-arms ⇒ excluded).
+        // Includes the recognised prefix-sentinel `UnsupportedIntrinsic` (its raw
+        // `unsupportedIntrinsic(<name>)` is unmaterialised via the
+        // `unsupportedIntrinsic(` prefix, tag `Other`) and both adversarial
+        // text-bearing carriers the delegation covers: `Other("semanticMiss")`
+        // (the `materialized` drift case) and `Other("semanticObjectSurface")`
+        // (the `tag` drift case).
+        let reachable = [
+            QueryError::Miss,
+            QueryError::UnsupportedIntrinsic {
+                name: std::sync::Arc::from("FixtureIntrinsic"),
+            },
+            QueryError::BudgetExceeded(
+                crate::resolver_core::shallow_file_state::BudgetExceededFailure {
+                    domain:
+                        crate::resolver_core::shallow_file_state::BudgetDomain::ProjectionOperation,
+                    limit: 1,
+                    actual: 2,
+                    context: "opaque-sentinel summary fixture".to_string(),
+                },
+            ),
+            QueryError::UnstableState { attempts: 3 },
+            QueryError::AliasCycle {
+                chain: std::sync::Arc::from(
+                    vec![std::sync::Arc::from("A"), std::sync::Arc::from("B")].into_boxed_slice(),
+                ),
+            },
+            QueryError::ValueDomainMismatch {
+                expected: crate::semantic_query::SemanticQueryValueTag::TypeNode,
+                actual: crate::semantic_query::SemanticQueryValueTag::Relation,
+            },
+            QueryError::RaiseAliasCycle,
+            QueryError::TypeParamCycle,
+            QueryError::RaiseMiss,
+            QueryError::UnrepresentableSurface,
+            QueryError::UnrepresentableSurfaceMember,
+            QueryError::VueMacroElementsPlaceholder,
+            QueryError::Other(std::sync::Arc::from("semanticMiss")),
+            QueryError::Other(std::sync::Arc::from("semanticObjectSurface")),
+            QueryError::Other(std::sync::Arc::from("budgetExceeded(x)")),
+            QueryError::Other(std::sync::Arc::from("genuinely free text")),
+        ];
+        for variant in reachable {
+            let typed = summary::opaque_sentinel(&variant);
+            let legacy = summary::unknown(&semantic_query_error_raw(&variant));
+            assert_eq!(
+                typed.facts.materialized, legacy.facts.materialized,
+                "materialized fact drift for {variant:?}"
+            );
+            assert_eq!(typed.tag, legacy.tag, "tag drift for {variant:?}");
+            // `opaque_sentinel` mirrors `unknown`'s always-expanded surface —
+            // asserted as PARITY (both are always `true`, so a hardcoded
+            // `assert!(typed...)` would pass too, but comparing to `legacy`
+            // matches the FULL-summary parity claim and catches a future edit
+            // that diverged either side's `expanded_surface` formula).
+            assert_eq!(
+                typed.facts.expanded_surface, legacy.facts.expanded_surface,
+                "expanded_surface drift for {variant:?}"
+            );
+        }
+
+        // Concretely pin the `tag` discriminator: `Other("semanticObjectSurface")`
+        // raises to the SEMANTIC_OBJECT_SURFACE spelling, so BOTH the typed summary
+        // and the legacy raw rule must tag it `ObjectSurfaceSentinel` (the carrier
+        // the intersection reducer drops). A reverted tag-predicate delegation
+        // would tag it `Other` and fail the loop's `tag` assertion above.
+        let object_surface_text = summary::opaque_sentinel(&QueryError::Other(
+            std::sync::Arc::from("semanticObjectSurface"),
+        ));
+        assert_eq!(
+            object_surface_text.tag,
+            FactShapeTag::ObjectSurfaceSentinel,
+            "Other(\"semanticObjectSurface\") must tag ObjectSurfaceSentinel via the text-bearing \
+             delegation (this is the tag-drift case the fixture previously omitted)"
+        );
+    }
+
+    /// Pin the concrete `(materialized, tag)` outcomes so a regression that
+    /// flipped a single variant's classification is caught directly (not only
+    /// via the parity loop). Derived first-hand from the raw recogniser:
+    /// `semanticObjectSurface` / `semanticAliasCycle` / `semanticSurfaceMember`
+    /// / `VueMacroElements` are recognised sentinels ⇒ NOT materialized;
+    /// `<raise miss>` and `semanticTypeParamCycle` are deliberately NOT in the
+    /// recogniser ⇒ materialized. Only the object-surface sentinel tags
+    /// `ObjectSurfaceSentinel`.
+    #[test]
+    fn opaque_sentinel_summary_pins_exact_materialized_and_tag() {
+        let surface = summary::opaque_sentinel(&QueryError::UnrepresentableSurface);
+        assert!(!surface.facts.materialized);
+        assert_eq!(surface.tag, FactShapeTag::ObjectSurfaceSentinel);
+
+        let surface_member = summary::opaque_sentinel(&QueryError::UnrepresentableSurfaceMember);
+        assert!(!surface_member.facts.materialized);
+        assert_eq!(surface_member.tag, FactShapeTag::Other);
+
+        let alias_cycle = summary::opaque_sentinel(&QueryError::RaiseAliasCycle);
+        assert!(!alias_cycle.facts.materialized);
+        assert_eq!(alias_cycle.tag, FactShapeTag::Other);
+
+        let vue = summary::opaque_sentinel(&QueryError::VueMacroElementsPlaceholder);
+        assert!(!vue.facts.materialized);
+        assert_eq!(vue.tag, FactShapeTag::Other);
+
+        // `<raise miss>` is NOT a recognised sentinel ⇒ materialized = true.
+        let raise_miss = summary::opaque_sentinel(&QueryError::RaiseMiss);
+        assert!(raise_miss.facts.materialized);
+        assert_eq!(raise_miss.tag, FactShapeTag::Other);
+
+        // `semanticTypeParamCycle` is NOT a recognised sentinel ⇒ materialized.
+        let tp_cycle = summary::opaque_sentinel(&QueryError::TypeParamCycle);
+        assert!(tp_cycle.facts.materialized);
+        assert_eq!(tp_cycle.tag, FactShapeTag::Other);
     }
 }

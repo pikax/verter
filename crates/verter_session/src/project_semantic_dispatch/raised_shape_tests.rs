@@ -45,7 +45,7 @@ use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailu
 use crate::semantic_query::{
     DeclIdentity, FunctionParam, IndexKey, IndexSignature, MapperKey, MapperKind, NodeScopeId,
     OptionalityMod, PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData,
-    SemanticNodeId, SurfaceMember, SurfaceView, TypeParamDecl, ValueRootKey,
+    SemanticNodeId, SemanticQueryValueTag, SurfaceMember, SurfaceView, TypeParamDecl, ValueRootKey,
 };
 use crate::{CompileErrorPolicy, HostConfig, VerterHost};
 
@@ -277,6 +277,250 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
     assert!(
         node_contains_semantic_miss_legacy_equivalent(&host, vue),
         "VueMacroElements raises to the `VueMacroElements` sentinel ⇒ semantic miss"
+    );
+}
+
+/// BEHAVIOUR-PRESERVATION across the typed-sentinel swap: the converted
+/// `fold_node` arms (here, the Vue-macro-elements arm + the surface-member
+/// fallback) must raise to the BYTE-IDENTICAL legacy `Unknown { raw }` AND drive
+/// the SAME downstream materialised/miss decision the old hardcoded literal did —
+/// end-to-end through the real graph fixtures, not just at the algebra entry
+/// point. This pins that the swap did not change observable output for these
+/// arms; it does NOT by itself prove every site was swapped. The SWAP
+/// DISCRIMINATION (no bare control-sentinel literal survives at the converted
+/// sites) lives in the tombstone `converted_sites_have_no_bare_control_sentinel_literal`
+/// (`carrier_materialize_tests.rs`), and the no-drift agreement between the typed
+/// authority and the raw recogniser lives in
+/// `query_error_sentinel_classification_agrees_with_raw_recogniser`
+/// (`raise_sentinel.rs`). Each assertion here is exact (a producer emitting a
+/// different/empty spelling, or losing the `type_expr_contains_semantic_miss`
+/// verdict, fails).
+#[test]
+fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision() {
+    use crate::resolver_core::component_meta_query_engine::{
+        type_expr_contains_semantic_miss, SEMANTIC_SURFACE_MEMBER,
+    };
+
+    let host = host();
+    let graph = graph_of(&host);
+
+    // VueMacroElements arm (a CONVERTED producer site): raises EXACTLY to
+    // `Unknown { raw: "VueMacroElements" }` and that spelling is a recognised
+    // sentinel ⇒ contains a semantic miss.
+    let vue = graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
+        verter_compiler::utils::oxc::script::type_surface::ResolvedElements::default(),
+    )));
+    let vue_raised = raise_oracle(&host, vue).expect("VueMacroElements must raise to Some");
+    assert_eq!(
+        vue_raised,
+        TypeExpr::Unknown {
+            raw: "VueMacroElements".to_string(),
+        },
+        "the converted VueMacroElements arm must raise byte-identical to the legacy sentinel"
+    );
+    assert!(
+        type_expr_contains_semantic_miss(&vue_raised),
+        "the VueMacroElements sentinel must still read as a semantic miss"
+    );
+
+    // Surface-member fallback (the CONVERTED `fold_member` miss arm): an object
+    // whose member value node is unraisable hits the `SEMANTIC_SURFACE_MEMBER`
+    // fallback. Pin the member's raised `raw` and the object-level miss verdict.
+    let unraisable_member = SemanticNodeId(u64::MAX);
+    let obj_with_unraisable_member = graph.intern_node(SemanticNodeData::Object(object_surface(
+        &[("broken", unraisable_member)],
+    )));
+    let obj_raised = raise_oracle(&host, obj_with_unraisable_member)
+        .expect("an object with one (unraisable-valued) member still raises to Some");
+    let member_raw = match &obj_raised {
+        TypeExpr::Object(object) => {
+            let property = object
+                .properties
+                .iter()
+                .find_map(|m| match m {
+                    verter_type_expr::ObjectMember::Property(p) if p.name == "broken" => {
+                        Some(&p.ty)
+                    }
+                    _ => None,
+                })
+                .expect("the `broken` member must survive into the projected surface");
+            match property {
+                TypeExpr::Unknown { raw } => raw.clone(),
+                other => panic!("the unraisable member must fall back to Unknown, got {other:?}"),
+            }
+        }
+        other => panic!("expected an object surface, got {other:?}"),
+    };
+    assert_eq!(
+        member_raw, SEMANTIC_SURFACE_MEMBER,
+        "the converted surface-member fallback must use the byte-identical SEMANTIC_SURFACE_MEMBER spelling"
+    );
+    assert!(
+        type_expr_contains_semantic_miss(&obj_raised),
+        "an object whose member fell back to the surface-member sentinel contains a semantic miss"
+    );
+}
+
+/// The `fold_node` `Opaque(err)` arm routes the typed `QueryError` through the
+/// typed `opaque_sentinel` algebra entry (not a string round-trip). The MATERIALIZE
+/// path must still emit the byte-identical legacy `Unknown { raw: semantic_query_error_raw(err) }`,
+/// and the NODE-DOMAIN path (via `assert_classifier_parity`) must keep the SAME
+/// materialised / miss verdict the materialised oracle does — for the full
+/// `_ => opaque_sentinel`-reachable set the arm routes (every `Opaque` variant
+/// EXCEPT `RecursiveRef` / `DeclPlaceholder`, which hit the earlier
+/// `recursive_ref` / `reference` sub-arms and whose classification is covered by
+/// the agreement test in `raise_sentinel.rs`).
+///
+/// DISCRIMINATING on the text-bearing delegation on BOTH facts:
+/// - `materialized`: an `Opaque(Other("semanticMiss"))` raises (materialize) to
+///   `Unknown { raw: "semanticMiss" }`, which the oracle reads AS a semantic
+///   miss; the node-domain classifier reaches the same verdict ONLY because the
+///   typed authority delegates text-bearing payloads to the raw recogniser.
+///   Reverting that delegation (`Other(_) => false`) makes the node-domain
+///   summary report `materialized = true` (NOT a miss) while the oracle reports a
+///   miss — `assert_classifier_parity` then FAILS for this case.
+/// - `tag` (end-to-end): an `Opaque(Other("semanticObjectSurface"))` raises to
+///   `Unknown { raw == SEMANTIC_OBJECT_SURFACE }`, which the MATERIALISE algebra's
+///   `is_object_surface_sentinel` (raw-based) drops from an intersection. The
+///   node-domain algebra drops it only because its `tag` is
+///   `ObjectSurfaceSentinel`; reverting the tag-predicate delegation
+///   (`Other(_) => false` in `query_error_is_object_surface_sentinel`) tags it
+///   `Other`, so the node-domain `Intersection` KEEPS the arm while the oracle
+///   drops it — `assert_classifier_parity` + the `raised_shape_eq_nodes`
+///   collapse-equality assertion below then FAIL. This is the end-to-end tag
+///   drift the parity fixture previously omitted.
+/// The prefix-text `Opaque(Other("budgetExceeded(x)"))` and the benign
+/// `Opaque(Other("free text"))` round out the adversarial set.
+#[test]
+fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain_verdict() {
+    use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
+
+    let host = host();
+    let graph = graph_of(&host);
+
+    // The `_ => opaque_sentinel`-reachable set the converted `Opaque(err)` arm
+    // routes (the two specialised sub-arms — `RecursiveRef` → `recursive_ref` and
+    // the earlier `Opaque(DeclPlaceholder)` → `reference` shell — raise to
+    // `RecursiveRef` / `Ref` and are NOT this arm's responsibility; the typed
+    // authority's classification of those carriers is covered by the agreement
+    // test in `raise_sentinel.rs`). Across the materialisation classes: a
+    // recognised exact sentinel (`Miss`), the recognised prefix sentinels
+    // (`UnsupportedIntrinsic` → `unsupportedIntrinsic(<name>)`, `BudgetExceeded`),
+    // the unmaterialised producer-control carriers
+    // (`UnstableState`, `AliasCycle`, `RaiseAliasCycle`, `UnrepresentableSurface`,
+    // `UnrepresentableSurfaceMember`, `VueMacroElementsPlaceholder`), the
+    // MATERIALISED producer placeholders (`TypeParamCycle`, `RaiseMiss`,
+    // `ValueDomainMismatch`), the adversarial text-bearing sentinel
+    // (`Other("semanticMiss")`) + object-surface-spelling (`Other("semanticObjectSurface")`)
+    // + prefix-text (`Other("budgetExceeded(x)")`), and a benign non-sentinel
+    // (`Other("free text")`).
+    let variants = [
+        QueryError::Miss,
+        QueryError::UnsupportedIntrinsic {
+            name: Arc::from("FixtureIntrinsic"),
+        },
+        QueryError::BudgetExceeded(BudgetExceededFailure {
+            domain: BudgetDomain::ProjectionOperation,
+            limit: 2000,
+            actual: 2001,
+            context: "opaque-arm fixture".to_string(),
+        }),
+        QueryError::UnstableState { attempts: 3 },
+        QueryError::AliasCycle {
+            chain: Arc::from(vec![Arc::from("A"), Arc::from("B")].into_boxed_slice()),
+        },
+        QueryError::ValueDomainMismatch {
+            expected: SemanticQueryValueTag::TypeNode,
+            actual: SemanticQueryValueTag::Relation,
+        },
+        QueryError::RaiseAliasCycle,
+        QueryError::TypeParamCycle,
+        QueryError::RaiseMiss,
+        QueryError::UnrepresentableSurface,
+        QueryError::UnrepresentableSurfaceMember,
+        QueryError::VueMacroElementsPlaceholder,
+        QueryError::Other(Arc::from("semanticMiss")),
+        QueryError::Other(Arc::from("semanticObjectSurface")),
+        QueryError::Other(Arc::from("budgetExceeded(x)")),
+        QueryError::Other(Arc::from("free text")),
+    ];
+
+    for variant in variants {
+        let node = graph.intern_node(SemanticNodeData::Opaque(variant.clone()));
+
+        // MATERIALIZE path: byte-identical to the legacy `unknown(semantic_query_error_raw(err))`.
+        let raised = raise_oracle(&host, node).expect("an Opaque(err) node raises to Some");
+        assert_eq!(
+            raised,
+            TypeExpr::Unknown {
+                raw: semantic_query_error_raw(&variant),
+            },
+            "the Opaque({variant:?}) arm must materialise byte-identical to the legacy \
+             Unknown {{ raw: semantic_query_error_raw(err) }}"
+        );
+
+        // NODE-DOMAIN path: every classifier equals the materialised oracle's
+        // verdict. For `Other(\"semanticMiss\")` this only holds because the
+        // typed authority delegates text-bearing payloads to the raw recogniser.
+        assert_classifier_parity(&host, node, &format!("opaque-arm-{variant:?}"));
+    }
+
+    // Concretely pin the discriminating `materialized` case so a reverted
+    // delegation surfaces here (not only via the loop): the materialised oracle
+    // reads `Opaque(Other("semanticMiss"))` as a semantic miss, and the
+    // node-domain classifier must agree.
+    let adversarial = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
+        "semanticMiss",
+    ))));
+    assert!(
+        node_contains_semantic_miss_legacy_equivalent(&host, adversarial),
+        "Opaque(Other(\"semanticMiss\")) must read as a semantic miss in the node domain \
+         (the text-bearing delegation); a reverted delegation would report NOT-a-miss here"
+    );
+
+    // END-TO-END `tag` discrimination for `Opaque(Other("semanticObjectSurface"))`:
+    // the materialise oracle drops the SEMANTIC_OBJECT_SURFACE arm from an
+    // intersection (raw-based `is_object_surface_sentinel`), so
+    // `Intersection(Other("semanticObjectSurface"), RealObject)` collapses to
+    // `RealObject`. The node-domain algebra drops the arm only via its
+    // `ObjectSurfaceSentinel` tag — which the text-bearing delegation now
+    // produces. `assert_classifier_parity` (oracle vs node-domain) + the
+    // collapse-equality below therefore HOLD with the delegation and FAIL if it is
+    // reverted (node-domain keeps the arm → a 2-arm Intersection that does NOT
+    // raise equal to the lone real object).
+    let real_member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let real_obj = graph.intern_node(SemanticNodeData::Object(object_surface(&[(
+        "kept",
+        real_member,
+    )])));
+    let object_surface_sentinel_arm = graph.intern_node(SemanticNodeData::Opaque(
+        QueryError::Other(Arc::from("semanticObjectSurface")),
+    ));
+    // Sanity: the lone arm raises to the object-surface sentinel ⇒ a semantic miss
+    // (it IS the arm we expect the intersection to drop).
+    assert!(
+        node_contains_semantic_miss_legacy_equivalent(&host, object_surface_sentinel_arm),
+        "Opaque(Other(\"semanticObjectSurface\")) raises to the SEMANTIC_OBJECT_SURFACE sentinel \
+         ⇒ a semantic miss"
+    );
+    let inter_sentinel_real = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![object_surface_sentinel_arm, real_obj].into_boxed_slice(),
+    )));
+    assert_classifier_parity(
+        &host,
+        inter_sentinel_real,
+        "intersection-object-surface-text-and-real",
+    );
+    assert_eq!(
+        raised_shape_eq_nodes(&host, inter_sentinel_real, real_obj),
+        Some(true),
+        "(Other(\"semanticObjectSurface\") & RealObject) must drop the object-surface-sentinel arm \
+         (via the text-bearing tag delegation) and collapse EQUAL to the real object; a reverted \
+         tag delegation keeps the arm and breaks this collapse"
+    );
+    assert!(
+        !node_contains_semantic_miss_legacy_equivalent(&host, inter_sentinel_real),
+        "the sentinel-arm-dropped intersection collapses to the real object ⇒ materialized"
     );
 }
 

@@ -11,8 +11,10 @@ use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, Primitive
 
 use super::super::ProjectSemanticDispatch;
 use super::{fold_node, FoldedFunction, FoldedTupleElement, RaisedShapeAlgebra};
-use crate::resolver_core::component_meta_query_engine::SEMANTIC_OBJECT_SURFACE;
-use crate::semantic_query::SemanticNodeId;
+use crate::resolver_core::component_meta_query_engine::{
+    semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE,
+};
+use crate::semantic_query::{QueryError, SemanticNodeId};
 
 // ===========================================================================
 // Algebra 1 — `MaterializeTypeExprAlg` (Out = TypeExpr).
@@ -46,6 +48,15 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
     fn unknown(&mut self, raw: Arc<str>) -> TypeExpr {
         TypeExpr::Unknown {
             raw: raw.as_ref().to_string(),
+        }
+    }
+    fn opaque_sentinel(&mut self, err: &QueryError) -> TypeExpr {
+        // Byte-for-byte the legacy `Unknown { raw }` string the old hardcoded
+        // literal emitted: the materializer is the `TypeExpr`-output domain, so
+        // a typed control sentinel re-materialises through the single
+        // `semantic_query_error_raw` mapping (the round-trip authority).
+        TypeExpr::Unknown {
+            raw: semantic_query_error_raw(err),
         }
     }
     fn recursive_ref(&mut self, name: Arc<str>) -> TypeExpr {
@@ -324,4 +335,60 @@ pub(in crate::project_semantic_dispatch) fn fold_to_type_expr(
 ) -> Option<TypeExpr> {
     let mut alg = MaterializeTypeExprAlg;
     fold_node(&mut alg, dispatch, node, active)
+}
+
+#[cfg(test)]
+mod tests {
+    use verter_type_expr::TypeExpr;
+
+    use super::{MaterializeTypeExprAlg, RaisedShapeAlgebra};
+    use crate::resolver_core::component_meta_query_engine::{
+        semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
+    };
+    use crate::semantic_query::QueryError;
+
+    /// The typed `opaque_sentinel` algebra entry point on the materializer must
+    /// produce the BYTE-IDENTICAL `TypeExpr::Unknown { raw }` the legacy
+    /// hardcoded `alg.unknown(Arc::from("literal"))` produced — for every typed
+    /// control-sentinel variant. This pins that routing a sentinel through the
+    /// typed entry point is byte-equivalent to the old raw-literal construction
+    /// (the materialization byte-identity contract for the swap).
+    #[test]
+    fn opaque_sentinel_materializes_byte_identical_legacy_raw() {
+        // (variant, the exact legacy raw string the old literal emitted)
+        let cases: &[(QueryError, &str)] = &[
+            (QueryError::RaiseAliasCycle, "semanticAliasCycle"),
+            (QueryError::TypeParamCycle, "semanticTypeParamCycle"),
+            (QueryError::RaiseMiss, "<raise miss>"),
+            (QueryError::UnrepresentableSurface, SEMANTIC_OBJECT_SURFACE),
+            (
+                QueryError::UnrepresentableSurfaceMember,
+                SEMANTIC_SURFACE_MEMBER,
+            ),
+            (QueryError::VueMacroElementsPlaceholder, "VueMacroElements"),
+        ];
+
+        for (variant, expected_raw) in cases {
+            let mut alg = MaterializeTypeExprAlg;
+            let produced = alg.opaque_sentinel(variant);
+            // The typed entry point is byte-equal to the old literal …
+            assert_eq!(
+                produced,
+                TypeExpr::Unknown {
+                    raw: (*expected_raw).to_string(),
+                },
+                "opaque_sentinel({variant:?}) must materialize Unknown {{ raw: {expected_raw:?} }}"
+            );
+            // … and equal to what `semantic_query_error_raw` maps the variant to
+            // (the round-trip authority), proving the entry point routes through
+            // that single mapping rather than a private literal.
+            assert_eq!(
+                produced,
+                TypeExpr::Unknown {
+                    raw: semantic_query_error_raw(variant),
+                },
+                "opaque_sentinel({variant:?}) must agree with semantic_query_error_raw"
+            );
+        }
+    }
 }

@@ -36,9 +36,6 @@ use verter_span::Span;
 use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr};
 
 use super::super::ProjectSemanticDispatch;
-use crate::resolver_core::component_meta_query_engine::{
-    semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE, SEMANTIC_SURFACE_MEMBER,
-};
 use crate::semantic_query::{
     IndexKey, OptionalityMod, QueryError, ReadonlyMod, SemanticNodeData, SemanticNodeId,
     SurfaceView,
@@ -391,6 +388,20 @@ trait RaisedShapeAlgebra {
     fn literal(&mut self, value: LiteralValue) -> Self::Out;
     fn infer(&mut self, name: Arc<str>) -> Self::Out;
     fn unknown(&mut self, raw: Arc<str>) -> Self::Out;
+    /// A TYPED resolver-control sentinel reaching the reverse boundary (an
+    /// alias / type-param cycle, a sub-result raise miss, an unrepresentable
+    /// surface or surface member, a Vue-macro-elements placeholder) — AND every
+    /// other `Opaque(QueryError)` node (`Miss`, `Other(...)`, `BudgetExceeded`,
+    /// `DeclPlaceholder`, …) reaching the `fold_node` `Opaque` conduit, since the
+    /// input there is a typed `QueryError`, not a raw carrier. The materializer
+    /// maps it through `semantic_query_error_raw` to the byte-identical legacy
+    /// `Unknown { raw }` string; the node-domain algebras classify it directly
+    /// from the typed [`QueryError`] via the shared sentinel authority — so a
+    /// control sentinel never has to be spelled as a raw string to make a
+    /// materialisation / tag decision. Distinct from [`Self::unknown`], which
+    /// stays for strings that arrive RAW (the `RawFallback` carrier and
+    /// externally-interned `Unknown` nodes).
+    fn opaque_sentinel(&mut self, err: &QueryError) -> Self::Out;
     fn recursive_ref(&mut self, name: Arc<str>) -> Self::Out;
     /// A bare `Ref { name, type_arguments }` shell (also the `DeclPlaceholder`
     /// / `DeclRef` shell with empty args, and the `BareRef`/`InstantiationRef`
@@ -557,7 +568,7 @@ fn fold_node<A: RaisedShapeAlgebra>(
         SemanticNodeData::Literal(value) => alg.literal(value.clone()),
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
-                return Some(alg.unknown(Arc::from("semanticAliasCycle")));
+                return Some(alg.opaque_sentinel(&QueryError::RaiseAliasCycle));
             }
             let result = fold_node(alg, dispatch, *target, active);
             active.remove(&node);
@@ -620,7 +631,7 @@ fn fold_node<A: RaisedShapeAlgebra>(
                 alg.empty_object()
             } else {
                 fold_surface_view(alg, dispatch, surface)
-                    .unwrap_or_else(|| alg.unknown(Arc::from(SEMANTIC_OBJECT_SURFACE)))
+                    .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurface))
             }
         }
         SemanticNodeData::MergedDecl { contributors } => {
@@ -706,7 +717,7 @@ fn fold_node<A: RaisedShapeAlgebra>(
                 .iter()
                 .map(|id| {
                     fold_node(alg, dispatch, *id, active)
-                        .unwrap_or_else(|| alg.unknown(Arc::from("<raise miss>")))
+                        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::RaiseMiss))
                 })
                 .collect();
             alg.type_of(segments, raised_args)
@@ -718,7 +729,7 @@ fn fold_node<A: RaisedShapeAlgebra>(
             ..
         } => {
             if !active.insert(node) {
-                return Some(alg.unknown(Arc::from("semanticTypeParamCycle")));
+                return Some(alg.opaque_sentinel(&QueryError::TypeParamCycle));
             }
             let constraint_out = constraint
                 .as_ref()
@@ -732,9 +743,19 @@ fn fold_node<A: RaisedShapeAlgebra>(
         SemanticNodeData::Infer { name } => alg.infer(Arc::clone(name)),
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name } => alg.recursive_ref(Arc::clone(name)),
-            _ => alg.unknown(Arc::from(semantic_query_error_raw(err).as_str())),
+            // The input is a typed `QueryError`, not a raw carrier — route it
+            // through the typed `opaque_sentinel` entry (BORROWED — no clone on
+            // this hot traversal arm) instead of round-tripping it to a string and
+            // re-deriving the materialised/tag facts. The materialize algebra still
+            // emits the byte-identical `Unknown { raw: semantic_query_error_raw(err)
+            // }`; the node-domain algebras classify directly from the typed
+            // variant, held in agreement with the raw recogniser by the no-drift
+            // contract.
+            _ => alg.opaque_sentinel(err),
         },
-        SemanticNodeData::VueMacroElements(_) => alg.unknown(Arc::from("VueMacroElements")),
+        SemanticNodeData::VueMacroElements(_) => {
+            alg.opaque_sentinel(&QueryError::VueMacroElementsPlaceholder)
+        }
         SemanticNodeData::Function {
             params,
             return_type,
@@ -763,7 +784,7 @@ fn fold_node<A: RaisedShapeAlgebra>(
                 .iter()
                 .map(|id| {
                     fold_node(alg, dispatch, *id, active)
-                        .unwrap_or_else(|| alg.unknown(Arc::from("<raise miss>")))
+                        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::RaiseMiss))
                 })
                 .collect();
             alg.reference(Arc::clone(&base.decl_name), raised_args)
@@ -775,7 +796,7 @@ fn fold_node<A: RaisedShapeAlgebra>(
                 .iter()
                 .map(|id| {
                     fold_node(alg, dispatch, *id, active)
-                        .unwrap_or_else(|| alg.unknown(Arc::from("<raise miss>")))
+                        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::RaiseMiss))
                 })
                 .collect();
             alg.reference(Arc::clone(name), raised_args)
@@ -788,7 +809,7 @@ fn fold_node<A: RaisedShapeAlgebra>(
                 .iter()
                 .map(|id| {
                     fold_node(alg, dispatch, *id, active)
-                        .unwrap_or_else(|| alg.unknown(Arc::from("<raise miss>")))
+                        .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::RaiseMiss))
                 })
                 .collect();
             alg.import_type(
@@ -891,7 +912,7 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
     ) -> A::Out {
         let mut active = FxHashSet::default();
         fold_node(alg, dispatch, node, &mut active)
-            .unwrap_or_else(|| alg.unknown(Arc::from(SEMANTIC_SURFACE_MEMBER)))
+            .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember))
     }
 
     // Single-call-signature fast path: a surface with no members, no construct

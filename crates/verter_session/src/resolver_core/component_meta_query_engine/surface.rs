@@ -358,7 +358,7 @@ pub(crate) fn surface_view_to_projected_surface(
                 .materialize_output_type_expr(member.value)
                 .map(|raised| raised.into_type_expr(&cap))
                 .unwrap_or(TypeExpr::Unknown {
-                    raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                    raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
                 }),
             optional: member.optional,
             readonly: member.readonly,
@@ -409,13 +409,13 @@ pub(crate) fn surface_view_to_projected_surface(
                     .materialize_output_type_expr(signature.key_type)
                     .map(|raised| raised.into_type_expr(&cap))
                     .unwrap_or(TypeExpr::Unknown {
-                        raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                        raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
                     }),
                 value_type: cap
                     .materialize_output_type_expr(signature.value_type)
                     .map(|raised| raised.into_type_expr(&cap))
                     .unwrap_or(TypeExpr::Unknown {
-                        raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                        raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
                     }),
                 readonly: signature.readonly,
                 spans: signature.spans,
