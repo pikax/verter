@@ -389,6 +389,7 @@ fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision(
 ///   drops it — `assert_classifier_parity` + the `raised_shape_eq_nodes`
 ///   collapse-equality assertion below then FAIL. This is the end-to-end tag
 ///   drift the parity fixture previously omitted.
+///
 /// The prefix-text `Opaque(Other("budgetExceeded(x)"))` and the benign
 /// `Opaque(Other("free text"))` round out the adversarial set.
 #[test]

@@ -1,8 +1,6 @@
 //! Parity tests for the MODULE-PRIVATE node-domain expansion artifact +
 //! materialisation sink ([`AdmittedExpansionNode`] +
-//! [`materialize_admitted_expansion_node`]) and the sink-owned demand API
-//! ([`expand_define_model_output`], [`expand_generic_project_path_output`],
-//! [`expand_slot_binding_output`]).
+//! [`materialize_admitted_expansion_node`]) and the sink-owned demand API.
 //!
 //! The sink is the SINGLE place a node-domain expansion artifact becomes an
 //! `ExpandedNormalizedExpr`, materialising via the authorized-owner
@@ -14,9 +12,17 @@
 //! submodule of `macro_output_expansion`, so it can reach the module-private
 //! items to pin the sink's byte-equality against the shell-raise ORACLE
 //! (`materialize_output_type_expr_for_test`, the sealed `OutputProjector` shell
-//! raise the sink itself routes through) — so the eval_env expansion callers that
-//! route the demand API are behaviour-preserving — and that the `None`-miss arm
-//! matches the oracle's `None` arm.
+//! raise the sink itself routes through) — and that the `None`-miss arm matches
+//! the oracle's `None` arm.
+//!
+//! Of the three sink-owned demand methods, only [`expand_define_model_output`]
+//! is pinned DIRECTLY here — byte-equal to the shell-raise oracle of its
+//! surfaced produced node — proving the demand method drives a real internal
+//! resolution and reproduces the former node-bearing path exactly.
+//! [`expand_generic_project_path_output`] and [`expand_slot_binding_output`] are
+//! exercised end-to-end through their `eval_env` callers plus the corpus gate
+//! (not re-pinned here with a heavy direct unit test); this file's direct
+//! coverage is the artifact/sink parity plus the `defineModel` demand round-trip.
 
 use std::sync::Arc;
 
@@ -24,7 +30,7 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::{materialize_admitted_expansion_node, AdmittedExpansionNode};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{PrimitiveKind, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query::{DepVersion, PrimitiveKind, SemanticNodeData, SemanticNodeId};
 use crate::VerterHost;
 
 /// The shell-raise ORACLE for `node` — the `#[cfg(test)]` materialization
@@ -135,12 +141,33 @@ fn sink_none_miss_matches_oracle_none() {
 fn node_bearing_artifact_preserves_node_and_metadata() {
     // The artifact carries the node + cache metadata in node-domain (no
     // `TypeExpr`). This pins the constructor stores the fields a node-domain
-    // expansion caller folds into `fact_versions` / the admission gate.
-    let dep: crate::semantic_query::DepSignature = Arc::from(Vec::new().into_boxed_slice());
+    // expansion caller folds into `fact_versions` / the admission gate. The
+    // `dep_signature` is built NON-EMPTY and its full content asserted, so a
+    // constructor that DROPS / zeroes `dep_signature` (rather than storing the
+    // arg verbatim) FAILS — an empty-signature round-trip would not discriminate
+    // a field-dropping ctor.
+    let dep: crate::semantic_query::DepSignature = Arc::from(vec![(
+        Arc::<str>::from("dep-a"),
+        DepVersion::WholeHash([7u8; 16]),
+    )]);
     let artifact = AdmittedExpansionNode::new(SemanticNodeId(7), Arc::clone(&dep), true);
     assert_eq!(artifact.node, SemanticNodeId(7), "node round-trips");
     assert!(artifact.result_is_partial, "partial flag round-trips");
-    assert_eq!(artifact.dep_signature.len(), 0, "dep signature round-trips");
+    assert_eq!(
+        artifact.dep_signature.len(),
+        1,
+        "dep signature round-trips its entries"
+    );
+    assert_eq!(
+        artifact.dep_signature[0].0.as_ref(),
+        "dep-a",
+        "dep entry name round-trips"
+    );
+    assert_eq!(
+        artifact.dep_signature[0].1,
+        DepVersion::WholeHash([7u8; 16]),
+        "dep entry version round-trips"
+    );
 
     // Discrimination: a Primitive node materialises to exactly its primitive
     // expr through the sink (proves the sink is not a constant / stub).

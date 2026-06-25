@@ -3,15 +3,24 @@
 //! The shared `shape_engine::fold_node` materialisation algebra emits a small
 //! fixed set of `TypeExpr::Unknown { raw }` sentinel strings when dispatch cannot
 //! materialise a node (an unrepresentable surface, an alias cycle, a Vue
-//! macro placeholder, a budget-exceeded carrier, …). Two surfaces classify
-//! that spelling: the `TypeExpr`-domain recogniser
-//! [`dispatch_route_expr_is_materialized`](crate::resolver_core::component_meta_query_engine::dispatch_route_expr_is_materialized)
-//! reaches the SINGLE classifier here DIRECTLY, and the node-domain
-//! raised-shape projection (owner-local in [`super::raise`]) reaches it
-//! TRANSITIVELY — through `dispatch_route_expr_is_materialized` (the
-//! node-domain projection raises to a `TypeExpr` and classifies it via that
-//! recogniser, not by calling the classifier itself). So the spelling has
-//! exactly one owner and can never drift between the two surfaces.
+//! macro placeholder, a budget-exceeded carrier, …). Two classification
+//! surfaces share this owner — one RAW, one TYPED — and there is no
+//! raise-to-`TypeExpr`-then-classify round-trip on the typed path:
+//! - The `TypeExpr`-domain recogniser
+//!   [`dispatch_route_expr_is_materialized`](crate::resolver_core::component_meta_query_engine::dispatch_route_expr_is_materialized)
+//!   classifies a raised `Unknown { raw }` STRING via the raw recogniser
+//!   [`raw_is_unmaterialized_sentinel`] DIRECTLY.
+//! - The node-domain raised-shape projection (owner-local in [`super::raise`],
+//!   the `summary::opaque_sentinel` fn in `raise::shape_engine::node_domain`)
+//!   classifies on the TYPED [`QueryError`] variant DIRECTLY — via the typed
+//!   authorities [`query_error_is_unmaterialized_sentinel`] /
+//!   [`query_error_is_object_surface_sentinel`] defined below — never by raising
+//!   the error to a `TypeExpr` and re-spelling it.
+//!
+//! The raw recogniser and the typed authorities are held BYTE-FOR-BYTE in
+//! agreement by the no-drift contract test in this file, so the two surfaces
+//! classify a sentinel identically and the spelling has exactly one owner and
+//! can never drift.
 //!
 //! The set is the EXACT spelling `dispatch_route_expr_is_materialized`
 //! historically inlined: the three [`SEMANTIC_MISS`] / [`SEMANTIC_OBJECT_SURFACE`]
@@ -34,18 +43,21 @@ use crate::semantic_query::QueryError;
 /// `TypeExpr::Unknown { raw }` as UNMATERIALISED (a dispatch miss the
 /// dispatch-first path falls back to `owner_engine` for).
 ///
-/// This is the single shared owner of the sentinel set:
-/// [`dispatch_route_expr_is_materialized`](crate::resolver_core::component_meta_query_engine::dispatch_route_expr_is_materialized)
-/// calls this DIRECTLY, and the node-domain raised-shape projection (owner-local
-/// in [`super::raise`]) reaches it TRANSITIVELY through that recogniser, so the
-/// spelling has exactly one home.
-///
 /// This recogniser is the authority for strings that arrive RAW — externally
 /// interned `Unknown` nodes (`RawFallback`), the prefix-bearing carriers, and
-/// any text without a typed [`QueryError`] source. For a string that DOES have
-/// a `QueryError` source, [`query_error_is_unmaterialized_sentinel`] is the
-/// typed authority and is held byte-for-byte in agreement with this recogniser
-/// (the no-drift contract is test-pinned below).
+/// any text without a typed [`QueryError`] source. The `TypeExpr`-domain
+/// [`dispatch_route_expr_is_materialized`](crate::resolver_core::component_meta_query_engine::dispatch_route_expr_is_materialized)
+/// classifies a raised spelling through this recogniser DIRECTLY.
+///
+/// The node-domain raised-shape projection's TYPED [`QueryError`] path does NOT
+/// round-trip through this raw recogniser: it classifies on the typed variant
+/// directly via [`query_error_is_unmaterialized_sentinel`] (the typed authority).
+/// (Its raw-input arm — a genuinely-raw `Unknown { raw }` node with no typed
+/// source — does reach this recogniser, exactly as the `TypeExpr`-domain caller
+/// above; that is a raw classification, not a raise-then-classify round-trip.)
+/// The typed authority is held byte-for-byte in agreement with this recogniser
+/// by the no-drift contract test pinned below — so the spelling has exactly one
+/// home across the raw and typed surfaces.
 #[must_use]
 pub(crate) fn raw_is_unmaterialized_sentinel(raw: &str) -> bool {
     let is_exact_sentinel = matches!(

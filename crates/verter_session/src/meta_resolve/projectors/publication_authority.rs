@@ -475,3 +475,107 @@ pub(crate) fn admit_published_member<'a>(
         _seal: Seal,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    //! Direct discrimination of the two NEGATIVE admission gates in
+    //! [`admit_published_member`] — visibility (gate 1) and derived-kind /
+    //! cursor match (gate 2). These gates are redundant defense-in-depth behind
+    //! the compile-time [`Seal`] and the upstream `is_public()` enumeration
+    //! filter, so the corpus / end-to-end meta suite does NOT exercise a
+    //! constant-return regression on them. This module lives IN the authority
+    //! module so it can mint the private [`Seal`] and build a
+    //! [`SurfaceMemberCandidate`] directly. Both gates early-return BEFORE
+    //! `descend_published_member` / `record_published_field_edge`, so neither
+    //! test needs a real descendable surface — a synthetic candidate + a
+    //! whole-surface cursor suffice.
+
+    use super::*;
+    use crate::meta_resolve::projection_demand::SurfaceProjection;
+    use crate::VerterHost;
+    use verter_type_expr::MemberVisibility;
+
+    /// Build a minimal synthetic [`SurfaceMember`] with the given visibility.
+    /// `value`/`spans`/`declaration_origin` are inert for the gate decisions
+    /// (both gates short-circuit before any node materialisation).
+    fn member_with_visibility(visibility: MemberVisibility) -> SurfaceMember {
+        SurfaceMember {
+            name: Arc::from("foo"),
+            value: SemanticNodeId(0),
+            optional: false,
+            readonly: false,
+            is_method: false,
+            visibility,
+            spans: Default::default(),
+            declaration_origin: None,
+            declared_in_macro_type_arg: false,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
+        }
+    }
+
+    /// A minimal synthetic owner identity for the candidate.
+    fn synthetic_owner() -> DeclIdentity {
+        DeclIdentity {
+            canonical_id: Arc::from("/Test.vue"),
+            whole_hash: Default::default(),
+            decl_name: Arc::from("Test"),
+        }
+    }
+
+    /// Gate (1) — a NON-public member is refused with `None`. The cursor's
+    /// surface MATCHES the candidate kind (`Props`), so ONLY the visibility gate
+    /// can reject: this discriminates the `!is_public()` early return. A
+    /// constant-`Some` tamper, or removing the visibility gate, FAILS here.
+    #[test]
+    fn admit_published_member_refuses_non_public_member() {
+        let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+
+        // Surface kind == candidate kind, so gate (2) passes; only gate (1) acts.
+        let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
+        let cursor = projection.cursor();
+
+        let candidate = SurfaceMemberCandidate {
+            owner: synthetic_owner(),
+            surface_node: SemanticNodeId(0),
+            member: member_with_visibility(MemberVisibility::Private),
+            kind: PublishedSurfaceKind::Props,
+            _seal: Seal,
+        };
+
+        assert!(
+            admit_published_member(candidate, &cursor, &dispatch).is_none(),
+            "a non-public (private) member must be refused at the visibility gate even when the \
+             cursor surface matches the candidate kind",
+        );
+    }
+
+    /// Gate (2) — a kind MISMATCH between the candidate's derived kind (`Props`)
+    /// and the descending cursor's surface (`Emits`) is refused with `None`. The
+    /// member is PUBLIC, so gate (1) passes; this discriminates the
+    /// `cursor.surface != &candidate.kind` check. Removing that check FAILS here.
+    #[test]
+    fn admit_published_member_refuses_surface_kind_mismatch() {
+        let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+
+        // Cursor surface (`Emits`) deliberately disagrees with the candidate
+        // kind (`Props`); the public member clears gate (1) so only gate (2) acts.
+        let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Emits);
+        let cursor = projection.cursor();
+
+        let candidate = SurfaceMemberCandidate {
+            owner: synthetic_owner(),
+            surface_node: SemanticNodeId(0),
+            member: member_with_visibility(MemberVisibility::Public),
+            kind: PublishedSurfaceKind::Props,
+            _seal: Seal,
+        };
+
+        assert!(
+            admit_published_member(candidate, &cursor, &dispatch).is_none(),
+            "a public member whose derived kind (Props) disagrees with the descending cursor's \
+             surface (Emits) must be refused at the derived-kind/cursor-match gate",
+        );
+    }
+}

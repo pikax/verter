@@ -21,9 +21,12 @@
 //!   DIFFERENT invariant from the output-materialization capability fence:
 //!   the durable `SemanticNodeId -> TypeExpr` OUTPUT boundary is the sealed
 //!   `OutputProjector` capability + sealed carriers (compiler-enforced; see
-//!   `project_semantic_dispatch/output_materialization.rs`), and the named
-//!   interim Kind-B `legacy_semantic_type_expr_bridge` is pinned by the
-//!   separate `output_projector_residual_guards`. The global fence
+//!   `project_semantic_dispatch/output_materialization.rs`), and the former
+//!   Kind-B `legacy_semantic_type_expr_bridge` is RETIRED — its
+//!   re-introduction is tripwired by the tombstone
+//!   `retired_kind_b_bridge_symbol_absent_from_production_source` in the
+//!   separate `output_projector_residual_guards` (which asserts the symbol's
+//!   ABSENCE from production source). The global fence
 //!   `hot_path_never_calls_materialize_type_expr` stays deferred to a later
 //!   block.
 //!
@@ -98,8 +101,10 @@ fn production_src_files() -> Vec<(String, String)> {
 // G-A — the `materialize_type_expr(HotTypeRef)` reverse-handle boundary is
 // TEST-ONLY (structural `#[cfg(test)]`-gating guard). This is a DIFFERENT
 // invariant from the output-materialization capability fence (the sealed
-// `OutputProjector`) and from the Kind-B `legacy_semantic_type_expr_bridge`
-// residual (pinned by `output_projector_residual_guards`).
+// `OutputProjector`) and from the RETIRED Kind-B `legacy_semantic_type_expr_bridge`,
+// whose re-introduction is tripwired by the tombstone
+// `retired_kind_b_bridge_symbol_absent_from_production_source` in
+// `output_projector_residual_guards` (which asserts the symbol's ABSENCE).
 // ===========================================================================
 
 /// Whether `c` is an identifier-continuation character.
