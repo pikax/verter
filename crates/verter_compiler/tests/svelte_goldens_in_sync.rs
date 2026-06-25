@@ -963,3 +963,327 @@ fn coverage_guard_discriminates_an_orphan_golden() {
         "the coverage failure must name the ORPHAN golden; got {violations:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CODE-POSITION REGEX-LITERAL INVARIANT (tracked under D-19) — the golden-side
+// JS normalizer (`scripts/svelte-golden-lib.mjs::normalizeModuleForComparison`
+// + the Rust mirror `normalize_module_for_comparison`) is NOT a JS lexer and
+// would mangle a code-position REGEX LITERAL (collapse internal whitespace,
+// mis-read `//` as a line comment). The comparator-side `RegExpLiteral.raw`
+// axis is correct, so this is a golden-DATA limitation, not a comparator bug,
+// and it does NOT reproduce while the corpus carries ZERO code-position regex
+// literals. The guard below PINS that invariant: a future official Svelte
+// client golden that introduces a code-position regex literal FAILS it,
+// forcing a lexer-backed normalizer before that golden is accepted.
+// ---------------------------------------------------------------------------
+
+/// A value-ending character: after one of these (an identifier/number char or a
+/// closing bracket), a `/` is DIVISION, not the start of a regex literal. The
+/// keyword exception (an identifier char whose preceding word is an
+/// expression-context keyword like `return`) is applied by the caller against
+/// the tracked previous word — see [`first_code_position_regex_literal`].
+fn is_value_ending(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$' || matches!(c, ')' | ']' | '}')
+}
+
+/// The expression-context keywords after which a `/` begins a regex literal (the
+/// keyword precedes an EXPRESSION, so the slash is not division). Mirrors the
+/// well-known regex-vs-division previous-token rule; a value-keyword
+/// (`this`/`true`/`false`/`null`/`super`) is deliberately ABSENT — after one of
+/// those a `/` is division. This is the bounded previous-token check the
+/// architect ruled acceptable for the corpus guard.
+fn is_expression_context_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "return"
+            | "typeof"
+            | "instanceof"
+            | "in"
+            | "of"
+            | "do"
+            | "else"
+            | "delete"
+            | "void"
+            | "new"
+            | "throw"
+            | "yield"
+            | "await"
+            | "case"
+    )
+}
+
+/// Scan a regex BODY starting just after an opening `/` (at index `start`). A
+/// regex body ends at the first UNESCAPED `/` that is NOT inside a `[...]`
+/// character class (where `/` is literal). Returns the index of the closing `/`
+/// (so `code[open..=close]` is the `/.../` literal sans flags), or `None` if no
+/// closing `/` is reached before EOL/EOF (then the opening `/` was NOT a regex —
+/// a regex literal cannot span a raw newline). `chars` is the char vector,
+/// `start` the index of the first body char.
+fn scan_regex_body_end(chars: &[char], start: usize) -> Option<usize> {
+    let n = chars.len();
+    let mut i = start;
+    let mut in_class = false;
+    while i < n {
+        let c = chars[i];
+        match c {
+            // A raw newline terminates the line WITHOUT a close — not a regex.
+            '\n' => return None,
+            '\\' => {
+                // Escape: skip the escaped char (a `\/`, `\[`, `\]`, etc. is literal).
+                i += 2;
+                continue;
+            }
+            '[' => {
+                in_class = true;
+                i += 1;
+            }
+            ']' => {
+                in_class = false;
+                i += 1;
+            }
+            '/' if !in_class => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Detect the FIRST CODE-POSITION regex literal in `code` and return its
+/// `/.../`-fragment (sans flags), or `None` if there is none. "Code position"
+/// means OUTSIDE strings, template TEXT, `${}` interpolations are scanned as
+/// code, line comments (`//`), and block comments (`/* */`). The scanner mirrors
+/// the `normalize_module_for_comparison` state machine (template-frame `${}`
+/// depth, string/comment states) PLUS a previous-token check: a `/` begins a
+/// regex only when the previous significant token allows it (start-of-input, an
+/// operator/punctuator, or an expression-context keyword) — after a value-ending
+/// token a `/` is DIVISION. The check is intentionally bounded (no full
+/// division/regex disambiguation): it is SOUND enough to answer "is there a
+/// regex literal at all" over machine-generated Svelte client JS and MUST NOT
+/// false-positive on the committed corpus.
+fn first_code_position_regex_literal(code: &str) -> Option<String> {
+    let chars: Vec<char> = code.chars().collect();
+    let n = chars.len();
+    // Template-literal frames: each tracks the `${}` interpolation depth
+    // (0 = in template TEXT). Mirrors `normalize_module_for_comparison`.
+    let mut tmpl: Vec<i32> = Vec::new();
+    // The previous significant (non-whitespace, non-comment, code-position)
+    // character, and the previous identifier WORD (reset on any non-identifier
+    // significant char). Both persist across whitespace.
+    let mut prev_significant: Option<char> = None;
+    let mut prev_word = String::new();
+    let mut i = 0;
+    while i < n {
+        // Inside template TEXT (frame depth 0): everything is masked text until
+        // `` ` `` (close) or `${` (enter interpolation = code). A `/` here is
+        // template text, never a regex.
+        let in_tmpl_text = tmpl.last().copied() == Some(0);
+        if in_tmpl_text {
+            let ch = chars[i];
+            if ch == '\\' {
+                i += 2;
+                continue;
+            }
+            if ch == '`' {
+                tmpl.pop();
+                // A template literal is a VALUE — after the closing backtick a
+                // `/` is division.
+                prev_significant = Some('`');
+                prev_word.clear();
+                i += 1;
+                continue;
+            }
+            if ch == '$' && i + 1 < n && chars[i + 1] == '{' {
+                *tmpl.last_mut().unwrap() = 1;
+                // Entering interpolation is entering CODE — `${` opens an
+                // expression position, so a following `/` is regex-allowed.
+                prev_significant = Some('{');
+                prev_word.clear();
+                i += 2;
+                continue;
+            }
+            // Template TEXT — masked.
+            i += 1;
+            continue;
+        }
+        let ch = chars[i];
+        let next = if i + 1 < n { chars[i + 1] } else { '\0' };
+        // Line comment — masked to EOL.
+        if ch == '/' && next == '/' {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment — masked to `*/`.
+        if ch == '/' && next == '*' {
+            i += 2;
+            while i < n && !(chars[i] == '*' && i + 1 < n && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        // String literal — masked to the closing quote.
+        if ch == '\'' || ch == '"' {
+            let quote = ch;
+            i += 1;
+            while i < n && chars[i] != quote {
+                if chars[i] == '\\' {
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            if i < n {
+                i += 1;
+            }
+            // A string is a VALUE — after it a `/` is division.
+            prev_significant = Some(quote);
+            prev_word.clear();
+            continue;
+        }
+        // Template literal open — push a TEXT frame.
+        if ch == '`' {
+            tmpl.push(0);
+            i += 1;
+            continue;
+        }
+        // `${}` interpolation brace bookkeeping (we are in interpolation CODE
+        // when the top frame depth > 0).
+        if let Some(depth) = tmpl.last_mut() {
+            if *depth > 0 {
+                if ch == '{' {
+                    *depth += 1;
+                    prev_significant = Some('{');
+                    prev_word.clear();
+                    i += 1;
+                    continue;
+                }
+                if ch == '}' {
+                    *depth -= 1;
+                    // Leaving an inner brace; `}` is treated as value-ending.
+                    prev_significant = Some('}');
+                    prev_word.clear();
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        // Whitespace — does NOT reset the previous-token state (a regex can be
+        // preceded by whitespace, e.g. `return /re/`).
+        if ch.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        // A code-position `/` that is neither `//` nor `/*` (handled above): it
+        // is a regex literal IFF the previous token allows a regex here.
+        if ch == '/' {
+            let regex_allowed = match prev_significant {
+                None => true,
+                Some(p) if is_value_ending(p) => {
+                    // After a value-ending char a `/` is division — UNLESS the
+                    // value-ending char closes an expression-context KEYWORD
+                    // (e.g. `return`/`typeof`), in which case it is a regex.
+                    (p.is_ascii_alphanumeric() || p == '_' || p == '$')
+                        && is_expression_context_keyword(&prev_word)
+                }
+                Some(_) => true,
+            };
+            if regex_allowed {
+                if let Some(close) = scan_regex_body_end(&chars, i + 1) {
+                    let frag: String = chars[i..=close].iter().collect();
+                    return Some(frag);
+                }
+            }
+            // Not a regex (division, or no closing `/`): `/` is an operator, so
+            // the NEXT `/` is again regex-allowed.
+            prev_significant = Some('/');
+            prev_word.clear();
+            i += 1;
+            continue;
+        }
+        // An identifier character extends the current word.
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' {
+            prev_word.push(ch);
+            prev_significant = Some(ch);
+            i += 1;
+            continue;
+        }
+        // Any other significant char (operator/punctuator) resets the word and
+        // becomes the previous significant token.
+        prev_significant = Some(ch);
+        prev_word.clear();
+        i += 1;
+    }
+    None
+}
+
+#[test]
+fn code_position_regex_detector_discriminates() {
+    // Detected (code-position regex):
+    assert!(first_code_position_regex_literal("var r = /a  b/;").is_some());
+    assert!(first_code_position_regex_literal("if (x) return /foo/g.test(s);").is_some());
+    assert!(first_code_position_regex_literal("const re = /a\\/b/;").is_some());
+    // NOT detected (the corpus shapes — must stay clean):
+    assert!(
+        first_code_position_regex_literal("var h = $.from_html(`<div></div>`);").is_none(),
+        "closing tag in template"
+    );
+    assert!(
+        first_code_position_regex_literal("import {x} from './foo.js';").is_none(),
+        "path in string"
+    );
+    assert!(
+        first_code_position_regex_literal("var s = 'a/b/c';").is_none(),
+        "slashes in string"
+    );
+    assert!(
+        first_code_position_regex_literal("var q = `a ${b/c} d`;").is_none(),
+        "division in interpolation"
+    );
+    assert!(
+        first_code_position_regex_literal("// a/b/c comment").is_none(),
+        "slashes in line comment"
+    );
+    assert!(
+        first_code_position_regex_literal("var n = a / b / c;").is_none(),
+        "division, not regex"
+    );
+}
+
+#[test]
+fn committed_client_goldens_carry_no_code_position_regex_literal() {
+    // INVARIANT (tracked under D-19): the golden-side JS normalizer
+    // (`scripts/svelte-golden-lib.mjs::normalizeModuleForComparison` + the Rust mirror
+    // `normalize_module_for_comparison`) is NOT a JS lexer and would mangle a code-position REGEX
+    // LITERAL (collapse internal whitespace / mis-read `//`). The comparator-side `RegExpLiteral.raw`
+    // axis is correct, so this is a golden-DATA limitation, not a comparator bug. It does not
+    // reproduce while the corpus has ZERO code-position regex literals. This guard PINS that: if a
+    // future official Svelte client golden introduces a code-position regex literal, this FAILS,
+    // forcing a lexer-backed normalizer before that golden is accepted.
+    let mut offenders: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    for path in collect_golden_paths(&goldens_dir()) {
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let golden: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let Some(cm) = golden.get("clientModule").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        scanned += 1;
+        if let Some(frag) = first_code_position_regex_literal(cm) {
+            offenders.push(format!("{}: {}", path.display(), frag));
+        }
+    }
+    assert!(
+        scanned > 0,
+        "no committed client golden carried a `clientModule` to scan — the corpus must be committed \
+         so this invariant is non-vacuous"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a committed client golden now carries a CODE-POSITION regex literal — the golden-side \
+         normalizer mangles regex literals (D-19). Replace `normalizeModuleForComparison` (+ the Rust \
+         mirror) with a lexer-backed implementation before accepting these goldens:\n{}",
+        offenders.join("\n")
+    );
+}

@@ -424,7 +424,7 @@ export function normalizeModuleForComparison(code) {
     const ch = masked[i];
     const next = i + 1 < n ? masked[i + 1] : "";
 
-    // Line / block comments are dropped entirely (cosmetic).
+    // Line / block comments are dropped from clientModule; semantic-comment conformance MUST BE represented by a separate raw-derived oracle (the current fixture normalizer strips comments; that gap is tracked by svelte-native-compiler-plan.md §8 D-19).
     if (ch === "/" && next === "/") {
       while (i < n && masked[i] !== "\n") i += 1;
       continue;

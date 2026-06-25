@@ -262,6 +262,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Compiled-Output Conformance",
+        &[
+            "svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs",
+            "no_compiled_output_cosmetic_reprinter_path",
+        ],
+    ),
+    (
         "Fallthrough / Root Inheritance",
         &[
             "fallthrough_recomputes_from_runtime_subnodes_after_top_level_node_clear",

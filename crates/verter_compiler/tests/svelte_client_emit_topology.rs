@@ -7,7 +7,11 @@
 //! skeletons + fragment flag, and the delegated event set), and compares it to the
 //! COMMITTED official golden JSON (regenerated from the pinned `svelte@5.56.3` by
 //! `scripts/gen-svelte-goldens.mjs`). It is BEHAVIOR/topology parity, NOT byte
-//! identity — variable names, whitespace, and walk-strategy details are not pinned.
+//! identity — whitespace and walk-strategy details are not pinned. Local IDENTIFIER
+//! SPELLINGS, however, ARE structural for this comparator (`expr_sig` signs `Id(name)`
+//! and `binding_sig` signs the binding name), so a consistent alpha-rename FAILS — the
+//! oracle does not implement scope-aware alpha-equivalence, so it must not silently
+//! pass a rename it cannot prove is a behavior-preserving private binding.
 //!
 //! Hermetic: the only inputs are the vendored fixtures + the committed goldens, so
 //! the gate runs with no live `svelte` present. The golden is the oracle; a
@@ -729,8 +733,10 @@ fn parses_as_js(code: &str) -> bool {
 // ─────────────────────────────────────────────────────────────────────────────
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, BindingPattern, Declaration, Expression, FormalParameters,
-    ObjectPropertyKind, PropertyKey, Statement, VariableDeclarationKind,
+    Argument, ArrayExpressionElement, BindingPattern, Class, ClassElement, Declaration, Decorator,
+    Directive, Expression, ForStatementInit, ForStatementLeft, FormalParameters, FunctionBody,
+    ImportDeclarationSpecifier as IDS, ModuleExportName as MEN, ObjectPropertyKind, PropertyKey,
+    Statement, SwitchCase, VariableDeclarationKind,
 };
 
 /// Peel every transparent `ParenthesizedExpression` wrapper, returning the inner node.
@@ -798,24 +804,159 @@ fn strip_debug_noise(debug: &str) -> String {
     out
 }
 
-// COMPARATOR SCOPE — the `expr_sig` / `params_sig` / `module_sig` family is COMPLETE for the
-// Svelte client subset emitted TODAY: every axis that any currently-accepted surface can emit is
-// encoded (including param ORDER, optional-chain flags, member/computed shape, call-arg spread,
-// literal forms). A cluster of behavior-bearing axes is intentionally NOT yet encoded because no
-// accepted surface emits them — each is UNREACHABLE today (the emitter refuses the source that
-// would produce it):
-//   - FormalParameter.initializer (param default `(a = 1)`) — every emitter would emit it only
-//     from an author `<script>` function / `$derived` / a param-bearing handler, all refused.
-//   - async / generator bits (`r#async` / `generator` on functions) — author async/generator
-//     fns are refused (top-level fns reject as `InstanceScriptItem`).
-//   - ObjectProperty `kind` / `method` / `computed` / `shorthand` (method-vs-fn-value, computed
-//     `__proto__`) — esoteric object-property edges no accepted author expr reaches.
-//   - the discriminant-only statement/declaration fallback (`for` / `while` / `throw` / `switch`
-//     / `try` collapse to `Stmt(discriminant)`) — author `<script>` control-flow is refused.
-// The always-emitted import axis is independently pinned by `emitted_imports_ok` at both gate
-// sites. CONTRACT: the first block that ADMITS any of these surfaces (5c+) MUST encode the
-// matching axis in the SAME change — the comparator is the gate's oracle, so a dropped axis that
-// becomes REACHABLE is a silent false-PASS. (Tracked: svelte-native-compiler-plan.md §8 D-17.)
+// COMPARATOR SCOPE — the `program_sig` / `expr_sig` / `params_sig` / `binding_sig` / `stmt_sig` /
+// `function_body_sig` family encodes every expression / parameter / binding / object-property /
+// statement axis a source-preserved author expression or function body can carry: param ORDER and
+// param DEFAULTS (`FormalParameter.initializer`), recursive destructuring binding defaults
+// (`binding_sig`'s `ObjectPattern`/`ArrayPattern`/`AssignmentPattern` arms route each default through
+// the paren-transparent `expr_sig`), function `r#async` / `generator` bits, the full object-property
+// shape (`ObjectProperty.{kind,method,computed,shorthand}` plus key + value), optional-chain flags,
+// member/computed shape, call-arg spread, literal forms, the full per-specifier import KIND /
+// imported-name / local-name PLUS import `phase` + `with`-clause attributes, the full
+// `ExportNamedDeclaration` surface (inline declaration / specifiers / re-export source / export-kind /
+// `with`-clause), `ExportAllDeclaration` (source / namespace rename / export-kind / `with`-clause),
+// the program `hashbang`, the strict-mode-reachable ordinary-JS statement set (control-flow: `for` /
+// `for-in` / `for-of` / `while` / `do-while` / `switch` / `try`/`catch`/`finally` / `throw` /
+// `break` / `continue` / `labeled` / `debugger` / `empty` / class declarations; a `WithStatement` arm
+// is also encoded but `with` is INVALID under `SourceType::mjs()` (module/strict), so that arm is
+// unreachable for emitted mjs and DEFENSIVE-ONLY — it proves nothing about emitted output), the
+// `FunctionBody.directives` AND `Program.directives` directive prologues, a bounded class skeleton
+// (`class_sig` / `class_element_sig` — a method signs the COMPLETE runtime shape
+// kind + static + computed + ASYNC + GENERATOR + key + PARAMS + body; class-level AND per-member
+// decorators are ENCODED via `decorators_sig`, see `class_sig`), and the client-reachable EXPRESSION
+// residuals (`ClassExpression` → `class_sig`, `YieldExpression`, dynamic `ImportExpression`,
+// `MetaProperty` — `import.meta` / `new.target`, `PrivateInExpression`, `Super`). The
+// in-contract SEMANTIC-COMMENT boundary is ENFORCED on RAW module pairs by the semantic-comment
+// signature layered alongside the AST signature (`conformance_sig` → `comment_sig`): tool-consumed /
+// framework-significant comments — PURE-family (`/*@__PURE__*/`), license/preserve (`/*! … */`),
+// source-map (`//# sourceURL=` / `//# sourceMappingURL=` and the legacy `//@ …` forms), TS-directives
+// (triple-slash references, `@ts-check`/`@ts-nocheck`/`@ts-ignore`/`@ts-expect-error`), and JSDoc —
+// are compared as an OCCURRENCE-PATH multiset (each comment keyed by its deterministic AST
+// occurrence path + `pos=Leading|Trailing`, so a drop / corruption / MOVE — even between
+// structurally-identical positions — FAILS), while NON-SEMANTIC comments (`// note`, `/* note */`,
+// unknown `@foo`) remain a WAIVED cosmetic axis (dropped from the signature). The occurrence path is
+// produced by a GENERIC OXC child-span anchor walker (`CommentAnchorIndex`, an `oxc_ast_visit::Visit`
+// impl) and is deterministic and collision-resistant over the NORMALIZED comparator view
+// (`CommentAnchorIndex` indexes statements by the same empty-filtered logical view as
+// `statements_sig`, node-types the segments, and gives comments attached to normalized-away empty
+// statements an explicit synthetic `empty_gap[<logical>.<empty_ordinal>]` anchor); a future anchor
+// collapse inside that normalized view is a comparator bug. `CommentAnchorIndex` walks top-level
+// `Program.directives` and `program.body`; descendants are reached through the generic
+// `oxc_ast_visit::Visit` walker, including `FunctionBody.directives` and every nested statement list
+// (the `visit_statements` override applies the same empty-filtered normalization there). A future
+// semantic-comment anchor collapse inside those walked nodes is a comparator bug, not D-17 debt.
+//
+// GOLDEN-SIDE ORACLE CAVEAT — the `comment_sig` enforcement above is proven on RAW inputs by the
+// discrimination guard `svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs`,
+// but the COMMITTED FIXTURE goldens (`*.client.json`) serialize `clientModule` through
+// `scripts/svelte-golden-lib.mjs::normalizeModuleForComparison`, which DROPS every JS comment. So at
+// the two fixture gate sites (`emitted_client_topology_matches_official_goldens`,
+// `emitted_codegen_corpus_matches_official_goldens`) the GOLDEN side's `comment_sig` is ALWAYS
+// EMPTY — the fixture gate does NOT yet prove official-POSITIVE semantic-comment preservation (an
+// official semantic comment Verter dropped would compare EQUAL because the golden was stripped at
+// generation). This is a golden-DATA oracle gap, NOT a comparator-logic gap. (Tracked:
+// svelte-native-compiler-plan.md §8 D-19.)
+//
+// GOLDEN-SIDE REGEX-LITERAL NOTE — the same `normalizeModuleForComparison` (and its Rust mirror
+// `normalize_module_for_comparison`) is NOT a JS lexer and would mangle whitespace / `//` inside a
+// code-position REGEX LITERAL baked into a committed golden. The comparator-side `RegExpLiteral.raw`
+// axis (see `expr_sig`'s `Expression::RegExpLiteral` arm) is CORRECT and in-contract; the gap is
+// purely golden-DATA. The committed corpus currently contains ZERO code-position regex literals, so
+// there is no current false-pass; the invariant is PINNED by
+// `svelte_goldens_in_sync::committed_client_goldens_carry_no_code_position_regex_literal` (it FAILS
+// if a future golden introduces one, forcing the lexer-backed normalizer fix at that point).
+// (Tracked: svelte-native-compiler-plan.md §8 D-19.)
+//
+// REACHABLE axes NOW ENCODED above (each reachable through a source-preserved author expression, so
+// dropping them was a silent structural false-PASS risk, not an unreachable surface): the
+// object-property axes (`ObjectProperty.{kind,method,computed,shorthand}`), parameter defaults
+// (`FormalParameter.initializer`), function `r#async` / `generator` bits, named-export function
+// BODIES (`decl_sig`'s `Declaration::FunctionDeclaration` arm signs `body={function_body_sig(...)}`,
+// matching the `Statement::FunctionDeclaration` and `ExportDefaultFn` arms), recursive destructuring
+// binding defaults via `binding_sig` (the `ObjectPattern`/`ArrayPattern`/`AssignmentPattern` arms
+// route each default through the paren-transparent `expr_sig`, and `assignment_target_sig` does the
+// same for assignment-EXPRESSION destructuring targets), the strict-mode-reachable ordinary-JS
+// statement set (`for` / `for-in` / `for-of` / `while` / `do-while` / `switch` /
+// `try`/`catch`/`finally` / `throw` / `break` / `continue` / `labeled` / `debugger` / `empty` / class
+// declarations; the `WithStatement` arm is encoded but `with` is invalid under `SourceType::mjs()` so
+// it is unreachable/defensive-only), the module import/export ORACLE family (import `phase` +
+// `with`-clause attributes, the full `ExportNamedDeclaration` surface, `ExportAllDeclaration`, the
+// program `hashbang`),
+// the `FunctionBody.directives` AND `Program.directives` directive prologues (via `function_body_sig`
+// / `program_sig`), a BOUNDED class skeleton (`class_sig` / `class_element_sig` — a method signs the
+// COMPLETE runtime shape kind + static + computed + ASYNC + GENERATOR + key + PARAMS + body, each
+// sub-part reducing to an existing terminal helper; the TS-only method axes are stripped before emit
+// and class-level AND per-member decorators are ENCODED via `decorators_sig`), and the
+// client-reachable EXPRESSION residuals (`ClassExpression` → the same `class_sig`;
+// `YieldExpression` — `delegate` + arg;
+// `ImportExpression` — dynamic `import()` source/options/phase; `MetaProperty` — `import.meta` /
+// `new.target`; `PrivateInExpression` — `#x in obj`; `Super`). Every new statement / expression
+// sub-part routes through an existing terminal helper (`expr_sig` / `binding_sig` / `params_sig` /
+// `class_sig` / `assignment_target_sig` / `decl_var_sig` / `statements_sig` / `function_body_sig`);
+// the only NEW primitive leaves are directive text and labels. A stray no-op `EmptyStatement` (`;`)
+// in a statement LIST is filtered by `statements_sig` (printer-dropped cosmetic no-op) AND the
+// comment-anchor index mirrors that filter (a filtered empty gets a synthetic
+// `empty_gap[<logical>.<empty_ordinal>]` anchor — see
+// `CommentAnchorIndex::normalize_statement_list`); an `EmptyStatement` in a REQUIRED child
+// position (loop/if/with/labeled body) stays signed via `stmt_sig` (behavior-bearing) and is never
+// filtered. `class_sig` encodes `Class.r#type`, decorators, id, super-class, and the runtime-bearing
+// members (method kind/static/computed/async/generator/params/body, property/accessor key+value,
+// static blocks) for `SourceType::mjs()`-parseable emitted classes; TS-only member axes
+// (abstract/accessor-type/index-signature) are stripped pre-emit and ignored.
+//
+// MODULE IMPORT/EXPORT is an ORACLE family, NOW ENCODED (NOT a residual): OFFICIAL Svelte client
+// output CAN contain module-script imports/exports — the `matrix/module_import_export` golden carries
+// a `clientModule` with `import {base} from "./base.js"; … export const VERSION = 1;` — so the
+// comparator (the gate's oracle) MUST compare these forms correctly even though native Verter
+// currently REFUSES `<script module>` in this branch (so `module_import_export` is NOT yet a gated
+// `SUPPORTED_MATRIX` slug; it enters the gate only when native module-script emission opens). The
+// encoded axes: `ImportDeclaration` `phase` + `with`-clause attributes; the full
+// `ExportNamedDeclaration` surface (inline declaration / specifier list / re-export source /
+// export-kind / `with`-clause), including specifier-only `export { a as x } from "m"`;
+// `ExportAllDeclaration` (source / namespace rename / export-kind / `with`-clause); the program
+// `hashbang`.
+//
+// REMAINING structural gaps (honest residual): genuinely TS/module-only declaration/statement forms
+// that are NOT parseable under `SourceType::mjs()` (e.g. `TSTypeAliasDeclaration`,
+// `TSInterfaceDeclaration`, `TSEnumDeclaration`, `TSModuleDeclaration`, `TSImportEqualsDeclaration`,
+// `TSExportAssignment`) collapse to the discriminant-only `Stmt(discriminant)` / `Decl(discriminant)`
+// fallback (restricted to TS/module-only forms, NOT ordinary control-flow and NOT the import/export
+// family). The separate golden-DATA semantic-comment gap (the fixture goldens are comment-stripped at
+// generation) is tracked as D-19, NOT here. The class skeleton, the client-reachable EXPRESSION
+// surface, and the module import/export family are NO LONGER residual (all encoded). The expression
+// `other =>` fallback is an EXPLICITLY-CLASSIFIED conservative fallback over only the TS-only wrappers
+// / JSX / V8-intrinsic forms — none parseable under `SourceType::mjs()` — NOT a generic
+// remaining-kind catch-all. DECORATORS are ENCODED, NOT a residual: OXC parses
+// ECMAScript decorators under `SourceType::mjs()` (verified — the parse succeeds with errors=0), the runtime
+// strips TS but NOT decorators, and a decorated class/member in a source-preserved `{@html}`/dynamic
+// value is byte-copied to emitted client JS, so `class_sig` (class-level) and each `class_element_sig`
+// member arm (per-member) sign `decorators` via `decorators_sig` through the paren-transparent
+// `expr_sig`. The always-emitted import axis is independently pinned by `emitted_imports_ok` at both
+// gate sites.
+//
+// BASIS: the comparator is the gate's ORACLE, so it must compare ANY official output correctly — it
+// is NOT scoped to what native Verter currently emits. The module import/export family is encoded for
+// exactly this reason (official client output can carry module-script imports/exports per the
+// `module_import_export` golden), even though native Verter refuses `<script module>` in this branch.
+// The ONLY remaining discriminant-only collapse is the genuinely TS/module-only declaration/statement
+// set that does not parse under `SourceType::mjs()`; if a source-preserved construct outside that set
+// reached emitted client output and the comparator dropped its axis, two bodies that differ only
+// below the gap would compare equal — a silent structural false-PASS. The semantic-comment anchor is
+// deterministic and collision-resistant over the NORMALIZED comparator view (`CommentAnchorIndex`
+// indexes statements by the same empty-filtered logical view as `statements_sig`, node-types the
+// segments, and gives comments attached to normalized-away empty statements an explicit synthetic
+// `empty_gap[<logical>.<empty_ordinal>]` anchor): `CommentAnchorIndex` walks top-level
+// `Program.directives` and `program.body` and every nested statement list; descendants are reached
+// through the generic `oxc_ast_visit::Visit` walker, including `FunctionBody.directives`. A future
+// anchor collapse inside that normalized view is a comparator bug, not D-17 debt.
+//
+// CONTRACT: the owner change that makes any listed residual family accepted-positive must either
+// prove it is refused with explicit fail-closed tests, OR encode that family structurally in the SAME
+// change, reusing `program_sig` / `expr_sig` / `params_sig` / `binding_sig` / `decl_var_sig` /
+// `statements_sig` / `function_body_sig` for nested structure and adding a discriminator test per
+// newly covered family. (Tracked: svelte-native-compiler-plan.md §8 D-17 — this comment is the mirror
+// that row requires; it must NOT
+// claim any remaining axis is unreachable.)
 //
 /// The canonical paren-insensitive STRUCTURAL signature of an expression. Two expressions that
 /// differ ONLY by redundant parens produce the SAME signature; any other structural difference
@@ -843,13 +984,21 @@ fn expr_sig(expr: &Expression) -> String {
             r.raw.as_ref().map(|r| r.as_str()).unwrap_or("")
         ),
         Expression::TemplateLiteral(t) => {
-            // Quasis (raw text, byte-exact) interleaved with the expression signatures of the
-            // `${…}` parts. Both the literal TEXT and the interpolated expressions are
-            // significant.
+            // An UNTAGGED template's COOKED value is its RUNTIME string — the escape representation in
+            // the raw text is a cosmetic carrier (exactly like a `StringLiteral`, which signs cooked
+            // `.value`, and the directive cooked-value treatment). So sign the COOKED value per quasi;
+            // `cooked` is `None` only for an UNCOOKABLE escape (lone surrogate / bad escape), a
+            // distinct behavior-relevant case — fall back to a raw marker there so two
+            // differently-uncookable templates stay distinct. The interpolated `${…}` expressions are
+            // signed through the paren-transparent `expr_sig`. Both the cooked literal value and the
+            // interpolated expressions are significant.
             let quasis: Vec<String> = t
                 .quasis
                 .iter()
-                .map(|q| format!("{:?}", q.value.raw.as_str()))
+                .map(|q| match &q.value.cooked {
+                    Some(cooked) => format!("{:?}", cooked.as_str()),
+                    None => format!("raw:{:?}", q.value.raw.as_str()),
+                })
                 .collect();
             let exprs: Vec<String> = t.expressions.iter().map(expr_sig).collect();
             format!(
@@ -973,7 +1122,23 @@ fn expr_sig(expr: &Expression) -> String {
                 .iter()
                 .map(|p| match p {
                     ObjectPropertyKind::ObjectProperty(op) => {
-                        format!("{}:{}", property_key_sig(&op.key), expr_sig(&op.value))
+                        // Encode EVERY behavior-bearing object-property axis, not just key:value.
+                        // `kind` (init/get/set), `method`, `computed`, and `shorthand` are all
+                        // SEMANTIC: a getter `{ get x(){} }`, a method `{ x(){} }`, and a value
+                        // `{ x: () => {} }` are distinct runtime shapes; `shorthand` is not cosmetic
+                        // (`{ __proto__ }` shorthand vs `{ __proto__: __proto__ }` differ in proto
+                        // semantics). Object literals are source-preserved (an author object inside a
+                        // `{@html}` / dynamic-attr / class/style value is byte-copied by the emitter),
+                        // so all four axes are reachable.
+                        format!(
+                            "prop(kind={:?},method={},computed={},shorthand={},key={},value={})",
+                            op.kind,
+                            op.method,
+                            op.computed,
+                            op.shorthand,
+                            property_key_sig(&op.key),
+                            expr_sig(&op.value)
+                        )
                     }
                     ObjectPropertyKind::SpreadProperty(sp) => {
                         format!("...{}", expr_sig(&sp.argument))
@@ -987,41 +1152,61 @@ fn expr_sig(expr: &Expression) -> String {
             // The arrow body: either a single expression (an `() => EXPR`) or a block of
             // statements. Both forms are encoded so a body shape change is caught.
             let body = if a.expression {
-                // An expression body is one ExpressionStatement in the function body.
+                // An expression body is one ExpressionStatement in the function body (no directive
+                // prologue is possible in an expression-body arrow).
                 a.body
                     .statements
                     .first()
                     .map(|s| stmt_sig(s))
                     .unwrap_or_else(|| "<empty>".to_string())
             } else {
-                statements_sig(&a.body.statements)
+                // A block-body arrow can carry a `FunctionBody.directives` prologue, so sign the full
+                // function body (ordered directives + ordered statements).
+                function_body_sig(&a.body)
             };
+            // `r#async` is SEMANTIC (`async () => 1` returns a Promise; `() => 1` returns `1`).
+            // Arrows can never be generators, so only the async bit applies here. Reachable via
+            // source-preserved function literals in dynamic values.
             format!(
-                "Arrow(params={},expr={},body={})",
-                params, a.expression, body
+                "Arrow(async={},params={},expr={},body={})",
+                a.r#async, params, a.expression, body
             )
         }
         Expression::FunctionExpression(f) => {
+            // `r#async` and `generator` are both SEMANTIC (`async function(){}` returns a Promise;
+            // `function*(){}` returns an iterator). Reachable via source-preserved function literals.
             format!(
-                "Fn(name={},params={},body={})",
+                "Fn(async={},generator={},name={},params={},body={})",
+                f.r#async,
+                f.generator,
                 f.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
                 params_sig(&f.params),
                 f.body
                     .as_ref()
-                    .map(|b| statements_sig(&b.statements))
+                    .map(|b| function_body_sig(b))
                     .unwrap_or_default()
             )
         }
         Expression::ThisExpression(_) => "This".to_string(),
         Expression::TaggedTemplateExpression(t) => {
-            // `tag`fragment`…`` — the tag callee + the template quasis (byte-exact text) and
-            // interpolated expressions. Span-FREE so the same tagged template at different byte
-            // offsets compares EQUAL.
+            // `tag`fragment`…`` — the tag callee + the template quasis and interpolated expressions.
+            // A TAGGED template's tag function observes BOTH `strings` (cooked) and `strings.raw`, so
+            // for a tagged template the RAW escape representation IS in-contract (unlike an untagged
+            // template, whose raw is cosmetic) — sign BOTH `raw` and `cooked` per quasi so a raw-only
+            // OR a cooked-only difference is caught. (`cooked` is `None` for an uncookable escape — the
+            // tag sees `undefined` for that cooked slot, a distinct case, marked `<none>`.) Span-FREE so
+            // the same tagged template at different byte offsets compares EQUAL.
             let quasis: Vec<String> = t
                 .quasi
                 .quasis
                 .iter()
-                .map(|q| format!("{:?}", q.value.raw.as_str()))
+                .map(|q| {
+                    let cooked = match &q.value.cooked {
+                        Some(c) => format!("{:?}", c.as_str()),
+                        None => "<none>".to_string(),
+                    };
+                    format!("raw:{:?}/cooked:{cooked}", q.value.raw.as_str())
+                })
                 .collect();
             let exprs: Vec<String> = t.quasi.expressions.iter().map(expr_sig).collect();
             format!(
@@ -1069,11 +1254,60 @@ fn expr_sig(expr: &Expression) -> String {
             }
             other => format!("Chain(?{:?})", std::mem::discriminant(other)),
         },
-        // Any remaining expression kind (a class / yield / JSX / import / TS wrapper / …) is
-        // not part of the emitted client subset. Fall back to the span-stripped Debug —
-        // CONSERVATIVE: it FAILS on any STRUCTURAL difference (a false-PASS is impossible)
-        // while ignoring span/node-id position noise (so a structurally-identical unhandled
-        // node at a different byte offset still compares equal).
+        // ── Client-reachable expression forms reached through a source-preserved `{@html}`/
+        // dynamic-value function body the value emitter byte-copies. Each routes its sub-parts
+        // through an existing terminal helper (`class_sig` / `expr_sig`), so it is paren-transparent
+        // and FAILS on any in-contract structural difference. The pre-fix `other =>` Debug fallback
+        // collapsed these — a false-PASS (a dropped structural axis Debug does not print) AND a
+        // false-FAIL (a cosmetic paren Debug DOES print) risk this closes.
+        //
+        // A class EXPRESSION routes through the (params/async/generator-complete) `class_sig`, closing
+        // both the cosmetic-paren false-FAIL (`var C = class { m(){ return (x); } }`) and the
+        // method-shape false-PASS for class expressions.
+        Expression::ClassExpression(c) => class_sig(c),
+        // `yield <arg>` / `yield* <arg>` — the `delegate` bit (delegation iterates the operand) is
+        // semantics-bearing; the argument is paren-transparent via `expr_sig`. Client-reachable
+        // through generator function literals.
+        Expression::YieldExpression(y) => format!(
+            "Yield(delegate={},arg={})",
+            y.delegate,
+            y.argument
+                .as_ref()
+                .map(expr_sig)
+                .unwrap_or_else(|| "<none>".into())
+        ),
+        // Dynamic `import(<source>, <options>)` — ordinary source-preservable JS. The source and
+        // options are paren-transparent via `expr_sig`; the import `phase` (source/defer) is
+        // semantics-bearing.
+        Expression::ImportExpression(i) => format!(
+            "Import(source={},options={},phase={:?})",
+            expr_sig(&i.source),
+            i.options
+                .as_ref()
+                .map(expr_sig)
+                .unwrap_or_else(|| "<none>".into()),
+            i.phase
+        ),
+        // `import.meta` / `new.target` — DISTINCT meta-properties with different runtime meaning.
+        Expression::MetaProperty(m) => format!("Meta({}.{})", m.meta.name, m.property.name),
+        // `#x in obj` brand check — ordinary JS inside class bodies; the private-field identifier is
+        // semantics-bearing, the operand is paren-transparent via `expr_sig`.
+        Expression::PrivateInExpression(p) => {
+            format!("PrivateIn(#{} in {})", p.left.name, expr_sig(&p.right))
+        }
+        // `super` — reachable inside class methods; a bare leaf signed EXPLICITLY (not Debug), so a
+        // `super.x` vs `this.x` member object difference is encoded.
+        Expression::Super(_) => "Super".to_string(),
+        // EXPLICITLY-CLASSIFIED conservative fallback — NOT a generic "remaining kind" catch-all. The
+        // ONLY expression forms that reach here are the TS-only wrappers (`TSAsExpression` /
+        // `TSInstantiationExpression` / `TSNonNullExpression` / `TSSatisfiesExpression` /
+        // `TSTypeAssertion`), JSX (`JSXElement` / `JSXFragment`), and the V8-intrinsic
+        // (`V8IntrinsicExpression`). NONE is present in accepted Svelte client JS: TypeScript is
+        // stripped before client emit, JSX is not the Svelte client surface, and — decisively — under
+        // the comparator's `SourceType::mjs()` parse NONE of them is even parseable in a successfully
+        // emitted module (`parses_as_js` / `conformance_sig` reject a torn module before signing). The
+        // span-stripped Debug here is a conservative classification of an unreachable surface, NOT a
+        // behavioral check — these forms are NOT claimed to be behaviorally compared.
         other => format!("Other({})", strip_debug_noise(&format!("{:?}", other))),
     }
 }
@@ -1132,8 +1366,17 @@ fn simple_target_sig(target: &oxc_ast::ast::SimpleAssignmentTarget) -> String {
     }
 }
 
-/// The signature of an assignment target (a simple identifier/member, or a destructuring
-/// pattern — encoded via span-stripped Debug, which never appears in the emitted client subset).
+/// The canonical structural signature of an ASSIGNMENT TARGET — a simple identifier/member OR a
+/// destructuring pattern. Reachable through a source-preserved assignment EXPRESSION
+/// (`({a, b} = x)`), which the emitter byte-copies, so the destructuring arms are encoded
+/// RECURSIVELY and PAREN-TRANSPARENTLY (mirroring `binding_sig`), not via Debug: an
+/// `ObjectAssignmentTarget` is its ORDERED property list, an `ArrayAssignmentTarget` is its ORDERED
+/// elements (a `None` element is an array `hole`), and an `AssignmentTargetWithDefault` default
+/// (`{ a = 1 } = x`) signs its `init` (an `Expression`) via the paren-transparent `expr_sig`, so a
+/// redundant paren around a destructuring-assignment default compares EQUAL while a reorder /
+/// rename / default change stays distinct. Only the remaining TS-cast wrapper variants
+/// (`TSAsExpression` / `TSSatisfiesExpression` / `TSNonNullExpression` / `TSTypeAssertion`) keep a
+/// span-stripped Debug fallback — they are not destructuring and not the reachable cosmetic family.
 fn assignment_target_sig(target: &oxc_ast::ast::AssignmentTarget) -> String {
     use oxc_ast::ast::AssignmentTarget as T;
     match target {
@@ -1151,17 +1394,152 @@ fn assignment_target_sig(target: &oxc_ast::ast::AssignmentTarget) -> String {
         T::PrivateFieldExpression(m) => {
             format!("Private({}.#{})", expr_sig(&m.object), m.field.name)
         }
+        T::ArrayAssignmentTarget(a) => {
+            let elems: Vec<String> = a
+                .elements
+                .iter()
+                .map(|e| {
+                    e.as_ref()
+                        .map(assignment_target_maybe_default_sig)
+                        .unwrap_or_else(|| "hole".to_string())
+                })
+                .collect();
+            let rest = a
+                .rest
+                .as_ref()
+                .map(|r| assignment_target_sig(&r.target))
+                .unwrap_or_else(|| "<none>".to_string());
+            format!("ArrPat(elems=[{}],rest={})", elems.join(","), rest)
+        }
+        T::ObjectAssignmentTarget(o) => {
+            let props: Vec<String> = o
+                .properties
+                .iter()
+                .map(assignment_target_property_sig)
+                .collect();
+            let rest = o
+                .rest
+                .as_ref()
+                .map(|r| assignment_target_sig(&r.target))
+                .unwrap_or_else(|| "<none>".to_string());
+            format!("ObjPat(props=[{}],rest={})", props.join(","), rest)
+        }
+        // The remaining TS-cast wrapper variants (`TSAsExpression` / `TSSatisfiesExpression` /
+        // `TSNonNullExpression` / `TSTypeAssertion`) are not destructuring and not the reachable
+        // cosmetic family — a span-stripped Debug fallback is fine for them.
         other => format!("Target({})", strip_debug_noise(&format!("{:?}", other))),
     }
 }
 
-/// The signature of a binding pattern (the declared name(s) of a `var`/`let`/`const`).
+/// The signature of an `AssignmentTargetMaybeDefault` (an array element or an object property's
+/// binding). The `AssignmentTargetWithDefault` arm signs the default `init` (an `Expression`) via
+/// the paren-transparent `expr_sig`; every other variant is an inherited plain `AssignmentTarget`
+/// re-dispatched through `assignment_target_sig`.
+fn assignment_target_maybe_default_sig(m: &oxc_ast::ast::AssignmentTargetMaybeDefault) -> String {
+    use oxc_ast::ast::AssignmentTargetMaybeDefault as M;
+    match m {
+        M::AssignmentTargetWithDefault(d) => format!(
+            "Default(left={},right={})",
+            assignment_target_sig(&d.binding),
+            expr_sig(&d.init)
+        ),
+        // The inherited plain-`AssignmentTarget` variants share `AssignmentTarget`'s discriminants;
+        // re-dispatch through `assignment_target_sig` (an unexpected non-inherited variant — none
+        // exists today — degrades to the `?` token rather than a panic).
+        other => other
+            .as_assignment_target()
+            .map(assignment_target_sig)
+            .unwrap_or_else(|| "?".to_string()),
+    }
+}
+
+/// The signature of ONE `AssignmentTargetProperty` of an object destructuring assignment target —
+/// the shorthand-identifier form (`{ a }` / `{ a = 1 }`) or the renamed form (`{ a: b }` /
+/// `{ a: b = 1 }`). The shorthand `init` (`{ a = 1 } = x`) and the renamed binding's default are
+/// both paren-transparent via `expr_sig` / `assignment_target_maybe_default_sig`.
+fn assignment_target_property_sig(p: &oxc_ast::ast::AssignmentTargetProperty) -> String {
+    use oxc_ast::ast::AssignmentTargetProperty as P;
+    match p {
+        P::AssignmentTargetPropertyIdentifier(id) => {
+            let init = id
+                .init
+                .as_ref()
+                .map(expr_sig)
+                .unwrap_or_else(|| "<none>".to_string());
+            format!("propId(binding={},init={})", id.binding.name, init)
+        }
+        P::AssignmentTargetPropertyProperty(pp) => {
+            format!(
+                "propKV(computed={},key={},binding={})",
+                pp.computed,
+                property_key_sig(&pp.name),
+                assignment_target_maybe_default_sig(&pp.binding)
+            )
+        }
+    }
+}
+
+/// The canonical structural signature of a BINDING PATTERN — the declared name(s) of a
+/// `var`/`let`/`const` declarator OR a function/arrow parameter. The encoding is RECURSIVE and
+/// PAREN-TRANSPARENT: a `BindingIdentifier` is its name; an `ObjectPattern` is its ORDERED property
+/// list (each property's `computed`/`shorthand` flags, key via `property_key_sig`, value via
+/// `binding_sig`) plus a rest marker; an `ArrayPattern` is its ORDERED elements (each via
+/// `binding_sig`, a `None` element is an array `hole`) plus a rest marker; an `AssignmentPattern`
+/// default (`{ a = 1 }`) signs its `left` via `binding_sig` and its `right` (an `Expression`) via the
+/// paren-transparent `expr_sig`, so a redundant paren around a destructuring default (`{ a = (1) }`)
+/// compares EQUAL to the bare one while a reorder / rename / default drop / default-value change
+/// stays distinct. Reachable: an author destructuring pattern in a source-preserved value position
+/// (a `{@html}` / dynamic-value arrow the emitter byte-copies) carries these defaults/parens, so a
+/// Debug fallback that does not peel the paren wrapper was a cosmetic false-FAIL.
 fn binding_sig(pattern: &BindingPattern) -> String {
     match pattern {
         BindingPattern::BindingIdentifier(id) => format!("name:{}", id.name),
-        // Destructuring / defaults / rest — encoded via span-stripped Debug (the emitted client
-        // decls are simple `var name = …`, so these do not appear; Debug is the fallback).
-        other => format!("pat:{}", strip_debug_noise(&format!("{:?}", other))),
+        BindingPattern::ObjectPattern(o) => {
+            let props: Vec<String> = o
+                .properties
+                .iter()
+                .map(|p| {
+                    format!(
+                        "prop(computed={},shorthand={},key={},value={})",
+                        p.computed,
+                        p.shorthand,
+                        property_key_sig(&p.key),
+                        binding_sig(&p.value)
+                    )
+                })
+                .collect();
+            let rest = o
+                .rest
+                .as_ref()
+                .map(|r| binding_sig(&r.argument))
+                .unwrap_or_else(|| "<none>".to_string());
+            format!("ObjPat(props=[{}],rest={})", props.join(","), rest)
+        }
+        BindingPattern::ArrayPattern(a) => {
+            let elems: Vec<String> = a
+                .elements
+                .iter()
+                .map(|e| {
+                    e.as_ref()
+                        .map(binding_sig)
+                        .unwrap_or_else(|| "hole".to_string())
+                })
+                .collect();
+            let rest = a
+                .rest
+                .as_ref()
+                .map(|r| binding_sig(&r.argument))
+                .unwrap_or_else(|| "<none>".to_string());
+            format!("ArrPat(elems=[{}],rest={})", elems.join(","), rest)
+        }
+        BindingPattern::AssignmentPattern(d) => {
+            // The default initializer is an `Expression` → paren-transparent `expr_sig`.
+            format!(
+                "Default(left={},right={})",
+                binding_sig(&d.left),
+                expr_sig(&d.right)
+            )
+        }
     }
 }
 
@@ -1176,15 +1554,297 @@ fn params_sig(params: &FormalParameters) -> String {
     let mut parts: Vec<String> = params
         .items
         .iter()
-        .map(|p| binding_sig(&p.pattern))
+        .map(|p| {
+            // The DEFAULT initializer (`(a = 1)`) is SEMANTIC — `(a = 1)`, `(a = 2)`, and `(a)`
+            // bind different values when the argument is `undefined`. Encode the default expression
+            // (via `expr_sig`) when present, and an explicit `<none>` marker when absent so a
+            // dropped/added default is caught. Reachable via source-preserved function literals
+            // (`{@html () => …}`, dynamic-value arrows) the emitter byte-copies.
+            let init = p
+                .initializer
+                .as_ref()
+                .map(|e| expr_sig(e))
+                .unwrap_or_else(|| "<none>".to_string());
+            format!("{},init={}", binding_sig(&p.pattern), init)
+        })
         .collect();
     if let Some(rest) = &params.rest {
-        parts.push(format!(
-            "...{}",
-            strip_debug_noise(&format!("{:?}", rest.rest))
-        ));
+        // The rest binding (`...rest`) is a `BindingRestElement { argument: BindingPattern }` →
+        // encode its pattern recursively (paren-transparent, like every other binding) rather than
+        // via Debug, so a rest destructuring default/paren stays consistent with the rest of the sig.
+        parts.push(format!("...{}", binding_sig(&rest.rest.argument)));
     }
     format!("[{}]", parts.join(","))
+}
+
+/// The structural signature of a `ModuleExportName` (the `imported` side of a named import
+/// specifier). Distinguishes the identifier/reference/string forms and their names, so a different
+/// imported symbol from the same module is a divergence.
+fn module_export_name_sig(name: &MEN<'_>) -> String {
+    match name {
+        MEN::IdentifierName(n) => format!("Id({:?})", n.name.as_str()),
+        MEN::IdentifierReference(n) => format!("Ref({:?})", n.name.as_str()),
+        MEN::StringLiteral(s) => format!("Str({:?})", s.value),
+    }
+}
+
+/// The structural signature of ONE import specifier — the specifier KIND (named / default /
+/// namespace), its imported-name, and its local binding name. A namespace import and a named
+/// import with the same source + count are now DISTINCT (`Namespace(*)` vs `Named(...)`), and an
+/// imported-name or local-name drift over the same source is caught. The rule treats imports as
+/// STRUCTURAL, so all three sub-axes are encoded.
+fn import_specifier_sig(spec: &IDS<'_>) -> String {
+    match spec {
+        IDS::ImportSpecifier(s) => format!(
+            "Named(kind={:?},imported={},local={:?})",
+            s.import_kind,
+            module_export_name_sig(&s.imported),
+            s.local.name.as_str()
+        ),
+        IDS::ImportDefaultSpecifier(s) => {
+            format!(
+                "Default(imported=default,local={:?})",
+                s.local.name.as_str()
+            )
+        }
+        IDS::ImportNamespaceSpecifier(s) => {
+            format!("Namespace(imported=*,local={:?})", s.local.name.as_str())
+        }
+    }
+}
+
+/// One import attribute (`type: "json"`): the key (identifier OR string) + the cooked string value.
+fn import_attribute_sig(a: &oxc_ast::ast::ImportAttribute<'_>) -> String {
+    let key = match &a.key {
+        oxc_ast::ast::ImportAttributeKey::Identifier(id) => id.name.as_str().to_string(),
+        oxc_ast::ast::ImportAttributeKey::StringLiteral(s) => format!("{:?}", s.value),
+    };
+    format!("{}={:?}", key, a.value.value)
+}
+
+/// A `with { ... }` / `assert { ... }` clause: the keyword + ordered attributes. `None` → `<none>`.
+/// The import-attribute family is an ORACLE axis: official Svelte client output can carry
+/// module-script imports/exports, so the comparator must compare a `with`-clause keyword + each
+/// attribute key/value even though native Verter currently refuses `<script module>`.
+fn with_clause_sig(w: &Option<oxc_allocator::Box<'_, oxc_ast::ast::WithClause<'_>>>) -> String {
+    match w {
+        None => "<none>".to_string(),
+        Some(w) => format!(
+            "{:?}[{}]",
+            w.keyword,
+            w.with_entries
+                .iter()
+                .map(import_attribute_sig)
+                .collect::<Vec<_>>()
+                .join(";")
+        ),
+    }
+}
+
+/// One export specifier (`a as value`): export-kind + local + exported (both via
+/// `module_export_name_sig`). A specifier-only export (`export { a as value }`, no inline
+/// declaration) is signed through this so a local/exported/kind drift FAILS.
+fn export_specifier_sig(s: &oxc_ast::ast::ExportSpecifier<'_>) -> String {
+    format!(
+        "kind={:?},local={},exported={}",
+        s.export_kind,
+        module_export_name_sig(&s.local),
+        module_export_name_sig(&s.exported)
+    )
+}
+
+/// The structural signature of ONE directive-prologue entry (`"use strict";`). Only the COOKED
+/// value (`expression.value`) is in contract; the raw carrier formatting — quote style (`"use
+/// strict"` vs `'use strict'`) and escape representation (`"\x75se strict"` vs `"use strict"`) — is
+/// cosmetic the official printer normalizes, so the raw token (`directive`) is NOT signed. A
+/// dropped / added / re-text-ed directive still diverges because the cooked value differs (e.g.
+/// `"use strict"` flips strict mode and differs from `"use asm"`).
+fn directive_sig(d: &Directive) -> String {
+    format!("Dir(value={:?})", d.expression.value)
+}
+
+/// The ORDERED directive prologue of a function/program body. Directive ORDER and CONTENT are both
+/// significant.
+fn directives_sig(dirs: &oxc_allocator::Vec<'_, Directive<'_>>) -> String {
+    format!(
+        "[{}]",
+        dirs.iter().map(directive_sig).collect::<Vec<_>>().join(";")
+    )
+}
+
+/// The structural signature of a `FunctionBody` — its ORDERED directive prologue
+/// (`FunctionBody.directives`) AND its ORDERED statement list. The directive half is the axis the
+/// pre-fix sign sites (`statements_sig(&body.statements)` only) DROPPED, so a directive-bearing
+/// source-preserved arrow/function body (`() => { "use strict"; … }` byte-copied by the value
+/// emitter) collapsed with an absent/different prologue — a structural false-PASS this closes.
+fn function_body_sig(body: &FunctionBody) -> String {
+    format!(
+        "dirs={},stmts={}",
+        directives_sig(&body.directives),
+        statements_sig(&body.statements)
+    )
+}
+
+/// The structural signature of a `for` statement's init slot. A `VariableDeclaration` init signs
+/// through `decl_var_sig`; an expression init (an inherited `Expression` variant) signs through the
+/// paren-transparent `expr_sig`; an absent init signs `<none>`.
+fn for_init_sig(init: &Option<ForStatementInit>) -> String {
+    match init {
+        None => "<none>".to_string(),
+        Some(ForStatementInit::VariableDeclaration(d)) => decl_var_sig(d.kind, &d.declarations),
+        Some(other) => other
+            .as_expression()
+            .map(expr_sig)
+            .unwrap_or_else(|| "?".to_string()),
+    }
+}
+
+/// The structural signature of a `for-in` / `for-of` left slot. A `VariableDeclaration` left signs
+/// through `decl_var_sig`; an assignment-target left (an inherited `AssignmentTarget` variant) signs
+/// through the paren-transparent `assignment_target_sig`.
+fn for_left_sig(left: &ForStatementLeft) -> String {
+    match left {
+        ForStatementLeft::VariableDeclaration(d) => decl_var_sig(d.kind, &d.declarations),
+        other => other
+            .as_assignment_target()
+            .map(assignment_target_sig)
+            .unwrap_or_else(|| "?".to_string()),
+    }
+}
+
+/// The structural signature of ONE `switch` case — its test (`None` = the `default` arm) plus its
+/// ORDERED consequent statement list.
+fn switch_case_sig(c: &SwitchCase) -> String {
+    format!(
+        "case(test={},cons={})",
+        c.test
+            .as_ref()
+            .map(expr_sig)
+            .unwrap_or_else(|| "default".into()),
+        statements_sig(&c.consequent)
+    )
+}
+
+/// A BOUNDED structural skeleton of a class — its name, super-class (paren-transparent `expr_sig`),
+/// and ordered member skeletons. CONSERVATIVE structural encoding by design: it signs the
+/// behavior-bearing member skeleton — for a method, the COMPLETE runtime shape
+/// (kind + static + computed + async + generator + key + params + body) — and STOPS there. It does
+/// NOT open a member-type expansion, and it does NOT sign the TS-only method axes (abstract /
+/// override / optional / accessibility / type-params / return-type / this-param / definite /
+/// readonly / declare), which are stripped before client emit. Each signed sub-part reduces to an
+/// existing terminal helper (`expr_sig` / `property_key_sig` / `params_sig` / `function_body_sig` /
+/// `statements_sig`). Reachable via a class expression/declaration inside a source-preserved
+/// arrow/function body the value emitter byte-copies.
+///
+/// DECORATORS are ENCODED (class-level here via `decorators_sig`, per-member in `class_element_sig`).
+/// This is REACHABLE, not fail-closed: OXC parses ECMAScript decorators under the comparator's
+/// `SourceType::mjs()` parse (verified — the parse succeeds with errors=0, so `conformance_sig` signs a
+/// decorated class structurally rather than refusing it), the Svelte runtime strips TS but NOT
+/// decorators, and the value-expression refusal set does NOT refuse decorators/classes — so a decorated
+/// class in a source-preserved `{@html}`/dynamic value is byte-copied to emitted client JS, where the
+/// decorator executes and can alter runtime behavior. The class skeleton therefore covers decorators.
+///
+/// `Class.r#type` (`ClassDeclaration` vs `ClassExpression`) IS signed: it is behavior-bearing at
+/// `export default` — `export default class C {}` binds `C` in module scope while
+/// `export default (class C {})` is a class EXPRESSION whose `C` is visible only inside the class body
+/// (so a later `var y = C` throws). The TS-only member axes (the `MethodDefinition` abstract flag, the
+/// `AccessorProperty` accessor-type, index signatures) are stripped before client emit and are
+/// ignored — they are not runtime-bearing for emitted JS.
+fn class_sig(c: &Class) -> String {
+    format!(
+        "Class(type={:?},decorators={},name={},super={},members=[{}])",
+        c.r#type,
+        decorators_sig(&c.decorators),
+        c.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
+        c.super_class
+            .as_ref()
+            .map(expr_sig)
+            .unwrap_or_else(|| "<none>".into()),
+        c.body
+            .body
+            .iter()
+            .map(class_element_sig)
+            .collect::<Vec<_>>()
+            .join(";")
+    )
+}
+
+/// The ordered signature of a decorator list. Each decorator is its expression signed through the
+/// paren-transparent `expr_sig` (a decorator IS an expression — `@foo`, `@foo.bar`, `@foo(arg)`), so a
+/// redundant paren in a decorator argument is cosmetic-EQUAL while a different decorator
+/// expression/name/argument is a behavioral divergence (the decorator executes and can alter runtime
+/// behavior). Order is significant (decorators apply bottom-up). An empty list signs `[]`. Reachable:
+/// OXC parses ECMAScript decorators in plain `SourceType::mjs()` (verified), the Svelte runtime strips TS
+/// but NOT decorators, and a decorated class in a source-preserved `{@html}`/dynamic value is
+/// byte-copied to emitted client JS.
+fn decorators_sig(decorators: &oxc_allocator::Vec<'_, Decorator<'_>>) -> String {
+    format!(
+        "[{}]",
+        decorators
+            .iter()
+            .map(|d| expr_sig(&d.expression))
+            .collect::<Vec<_>>()
+            .join(";")
+    )
+}
+
+/// The structural skeleton of ONE class member — NOT a full member-type expansion (the closure
+/// boundary). A METHOD signs the COMPLETE runtime shape
+/// (kind + static + computed + async + generator + key + params + body); property/accessor/static-block
+/// arms have no params/async/generator. Each sub-part reduces to an existing terminal helper
+/// (`property_key_sig` / `params_sig` / `function_body_sig` / `expr_sig` / `statements_sig`). The
+/// only TS-only member form (`TSIndexSignature`) is an explicitly-classified marker, NOT a generic
+/// discriminant collapse. The TS-only method axes (abstract / override / optional / accessibility /
+/// type-params / return-type / this-param / definite / readonly / declare) are stripped before client
+/// emit and are safely ignored. DECORATORS are ENCODED (each member arm signs `decorators` via
+/// `decorators_sig` through the paren-transparent `expr_sig`): OXC parses ECMAScript decorators under the
+/// comparator's `SourceType::mjs()` parse (verified), the runtime strips TS but NOT decorators, and a
+/// decorated member in a source-preserved class body is byte-copied to emitted client JS — reachable.
+fn class_element_sig(el: &ClassElement) -> String {
+    match el {
+        ClassElement::StaticBlock(b) => format!("static_block({})", statements_sig(&b.body)),
+        ClassElement::MethodDefinition(m) => format!(
+            "method(decorators={},kind={:?},static={},computed={},async={},generator={},key={},params={},body={})",
+            decorators_sig(&m.decorators),
+            m.kind,
+            m.r#static,
+            m.computed,
+            m.value.r#async,
+            m.value.generator,
+            property_key_sig(&m.key),
+            params_sig(&m.value.params),
+            m.value
+                .body
+                .as_ref()
+                .map(|b| function_body_sig(b))
+                .unwrap_or_default()
+        ),
+        ClassElement::PropertyDefinition(p) => format!(
+            "prop(decorators={},static={},computed={},key={},value={})",
+            decorators_sig(&p.decorators),
+            p.r#static,
+            p.computed,
+            property_key_sig(&p.key),
+            p.value
+                .as_ref()
+                .map(expr_sig)
+                .unwrap_or_else(|| "<none>".into())
+        ),
+        ClassElement::AccessorProperty(a) => format!(
+            "accessor(decorators={},static={},computed={},key={},value={})",
+            decorators_sig(&a.decorators),
+            a.r#static,
+            a.computed,
+            property_key_sig(&a.key),
+            a.value
+                .as_ref()
+                .map(expr_sig)
+                .unwrap_or_else(|| "<none>".into())
+        ),
+        // TS-only member form: an explicitly-classified marker (NOT accepted client-positive today;
+        // a TS index signature has no client runtime surface). NOT a generic discriminant collapse.
+        ClassElement::TSIndexSignature(_) => "ts_index_sig".to_string(),
+    }
 }
 
 /// The canonical structural signature of ONE statement.
@@ -1204,48 +1864,203 @@ fn stmt_sig(stmt: &Statement) -> String {
         ),
         Statement::BlockStatement(b) => format!("Block({})", statements_sig(&b.body)),
         Statement::FunctionDeclaration(f) => format!(
-            "FnDecl(name={},params={},body={})",
+            "FnDecl(async={},generator={},name={},params={},body={})",
+            f.r#async,
+            f.generator,
             f.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
             params_sig(&f.params),
             f.body
                 .as_ref()
-                .map(|b| statements_sig(&b.statements))
+                .map(|b| function_body_sig(b))
                 .unwrap_or_default()
         ),
-        Statement::ImportDeclaration(i) => {
-            // The import source + the imported-binding shape (a namespace / named / side-effect
-            // import). The source string is byte-significant.
+        // ── Ordinary-JS control-flow statements. Each is reachable inside a source-preserved
+        // arrow/function body the value emitter byte-copies (e.g. `{@html () => { for(...) … }}`), so
+        // every behavior-bearing sub-part is signed through an existing terminal helper. The pre-fix
+        // `Stmt(discriminant)` fallback collapsed all of these to a discriminant-only signature — a
+        // structural false-PASS this closes.
+        Statement::BreakStatement(s) => format!(
+            "Break({})",
+            s.label.as_ref().map(|l| l.name.as_str()).unwrap_or("")
+        ),
+        Statement::ContinueStatement(s) => format!(
+            "Continue({})",
+            s.label.as_ref().map(|l| l.name.as_str()).unwrap_or("")
+        ),
+        Statement::DebuggerStatement(_) => "Debugger".to_string(),
+        Statement::EmptyStatement(_) => "Empty".to_string(),
+        Statement::DoWhileStatement(s) => {
             format!(
-                "Import(src={:?},specs={})",
-                i.source.value,
-                i.specifiers.as_ref().map(|s| s.len()).unwrap_or(0)
+                "DoWhile(body={},test={})",
+                stmt_sig(&s.body),
+                expr_sig(&s.test)
             )
         }
+        Statement::WhileStatement(s) => {
+            format!(
+                "While(test={},body={})",
+                expr_sig(&s.test),
+                stmt_sig(&s.body)
+            )
+        }
+        Statement::ForStatement(s) => format!(
+            "For(init={},test={},update={},body={})",
+            for_init_sig(&s.init),
+            s.test
+                .as_ref()
+                .map(expr_sig)
+                .unwrap_or_else(|| "<none>".into()),
+            s.update
+                .as_ref()
+                .map(expr_sig)
+                .unwrap_or_else(|| "<none>".into()),
+            stmt_sig(&s.body)
+        ),
+        Statement::ForInStatement(s) => format!(
+            "ForIn(left={},right={},body={})",
+            for_left_sig(&s.left),
+            expr_sig(&s.right),
+            stmt_sig(&s.body)
+        ),
+        Statement::ForOfStatement(s) => format!(
+            "ForOf(await={},left={},right={},body={})",
+            s.r#await,
+            for_left_sig(&s.left),
+            expr_sig(&s.right),
+            stmt_sig(&s.body)
+        ),
+        Statement::SwitchStatement(s) => format!(
+            "Switch(disc={},cases=[{}])",
+            expr_sig(&s.discriminant),
+            s.cases
+                .iter()
+                .map(switch_case_sig)
+                .collect::<Vec<_>>()
+                .join(";")
+        ),
+        Statement::TryStatement(s) => format!(
+            "Try(block={},handler={},finalizer={})",
+            statements_sig(&s.block.body),
+            s.handler
+                .as_ref()
+                .map(|h| format!(
+                    "catch(param={},body={})",
+                    h.param
+                        .as_ref()
+                        .map(|p| binding_sig(&p.pattern))
+                        .unwrap_or_else(|| "<none>".into()),
+                    statements_sig(&h.body.body)
+                ))
+                .unwrap_or_else(|| "<none>".into()),
+            s.finalizer
+                .as_ref()
+                .map(|f| statements_sig(&f.body))
+                .unwrap_or_else(|| "<none>".into())
+        ),
+        Statement::ThrowStatement(s) => format!("Throw({})", expr_sig(&s.argument)),
+        Statement::LabeledStatement(s) => {
+            format!("Label({}:{})", s.label.name.as_str(), stmt_sig(&s.body))
+        }
+        Statement::WithStatement(s) => {
+            format!(
+                "With(object={},body={})",
+                expr_sig(&s.object),
+                stmt_sig(&s.body)
+            )
+        }
+        Statement::ClassDeclaration(c) => class_sig(c),
+        Statement::ImportDeclaration(i) => {
+            // The import SOURCE (byte-significant) + the import KIND (value/type) + the import PHASE
+            // (`source`/`defer`) + the `with`-clause import attributes + the full per-specifier
+            // STRUCTURAL encoding (kind + imported-name + local-name, in order). A bare `import 'x'`
+            // side-effect import (`None` specifiers) encodes `SideEffect`, distinct from
+            // `import {} from 'x'` (`Some([])`). The rule treats imports as structural, so a
+            // namespace-vs-named / imported-name / local-name / phase / attribute drift over the same
+            // source FAILS. An ORACLE axis: official module-script output can carry these.
+            let specs = match &i.specifiers {
+                None => "SideEffect".to_string(),
+                Some(specs) => format!(
+                    "[{}]",
+                    specs
+                        .iter()
+                        .map(import_specifier_sig)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            };
+            format!(
+                "Import(src={:?},kind={:?},phase={:?},with={},specs={})",
+                i.source.value,
+                i.import_kind,
+                i.phase,
+                with_clause_sig(&i.with_clause),
+                specs
+            )
+        }
+        // The full `ExportNamedDeclaration` surface: an inline declaration (`export const a = 1`) OR
+        // a specifier list (`export { a as value }`) OR a re-export source (`export { a } from "x"`),
+        // plus the export-kind and `with`-clause. An ORACLE axis (official module-script output can
+        // carry these) — a specifier/source/kind/with drift over an otherwise identical export FAILS.
         Statement::ExportNamedDeclaration(e) => format!(
-            "ExportNamed({})",
-            e.declaration.as_ref().map(decl_sig).unwrap_or_default()
+            "ExportNamed(decl={},specs=[{}],source={},kind={:?},with={})",
+            e.declaration
+                .as_ref()
+                .map(decl_sig)
+                .unwrap_or_else(|| "<none>".into()),
+            e.specifiers
+                .iter()
+                .map(export_specifier_sig)
+                .collect::<Vec<_>>()
+                .join(";"),
+            e.source
+                .as_ref()
+                .map(|s| format!("{:?}", s.value))
+                .unwrap_or_else(|| "<none>".into()),
+            e.export_kind,
+            with_clause_sig(&e.with_clause)
+        ),
+        // `export * from "x"` / `export * as ns from "x"` — an ORACLE axis. The source, the optional
+        // namespace rename (`exported`), the export-kind, and the `with`-clause are all signed; pre-
+        // fix this fell to the `Stmt(discriminant)` fallback (a false-PASS over different sources).
+        Statement::ExportAllDeclaration(e) => format!(
+            "ExportAll(exported={},source={:?},kind={:?},with={})",
+            e.exported
+                .as_ref()
+                .map(module_export_name_sig)
+                .unwrap_or_else(|| "<none>".into()),
+            e.source.value,
+            e.export_kind,
+            with_clause_sig(&e.with_clause)
         ),
         Statement::ExportDefaultDeclaration(e) => {
             use oxc_ast::ast::ExportDefaultDeclarationKind as K;
             match &e.declaration {
                 K::FunctionDeclaration(f) => format!(
-                    "ExportDefaultFn(name={},params={},body={})",
+                    "ExportDefaultFn(async={},generator={},name={},params={},body={})",
+                    f.r#async,
+                    f.generator,
                     f.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
                     params_sig(&f.params),
                     f.body
                         .as_ref()
-                        .map(|b| statements_sig(&b.statements))
+                        .map(|b| function_body_sig(b))
                         .unwrap_or_default()
                 ),
-                K::ClassDeclaration(_) => "ExportDefaultClass".to_string(),
+                K::ClassDeclaration(c) => format!("ExportDefault({})", class_sig(c)),
                 other => other
                     .as_expression()
                     .map(|e| format!("ExportDefault({})", expr_sig(e)))
                     .unwrap_or_else(|| "ExportDefault?".to_string()),
             }
         }
-        // Any remaining statement kind: conservative Debug fallback (FAILs on any difference;
-        // these do not appear in the emitted client subset).
+        // Discriminant-only collapse for genuinely TS/module-only statement forms not parseable under
+        // `SourceType::mjs()` (e.g. `TSModuleDeclaration`, `TSImportEqualsDeclaration`,
+        // `TSExportAssignment`, and the TS-only declaration forms reached via the
+        // `ExportNamedDeclaration` inner-declaration path, e.g. `export type X = …`). The ordinary-JS
+        // statement set AND the module import/export family are encoded above, so this arm is
+        // unreachable for mjs-parseable input. Tracked: svelte-native-compiler-plan.md §8 D-17 — the
+        // first change that makes one of these accepted client-positive must prove it refused
+        // (fail-closed) or encode it structurally in the same change.
         other => format!("Stmt({:?})", std::mem::discriminant(other)),
     }
 }
@@ -1273,25 +2088,672 @@ fn decl_sig(decl: &Declaration) -> String {
     match decl {
         Declaration::VariableDeclaration(d) => decl_var_sig(d.kind, &d.declarations),
         Declaration::FunctionDeclaration(f) => format!(
-            "FnDecl(name={},params={})",
+            // The BODY is encoded (via `function_body_sig`, including `FunctionBody.directives`),
+            // matching the `Statement::FunctionDeclaration` and `ExportDefaultFn` arms — two
+            // named-export functions with the same signature but different bodies
+            // (`export function f(){a();}` vs `…{b();}`) must NOT collapse to the same signature (a
+            // structural false-PASS). An ORACLE axis: official Svelte client module output can carry
+            // module-script export declarations, so the comparator must be correct here even though
+            // native Verter currently refuses `<script module>`.
+            "FnDecl(async={},generator={},name={},params={},body={})",
+            f.r#async,
+            f.generator,
             f.id.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
-            params_sig(&f.params)
+            params_sig(&f.params),
+            f.body
+                .as_ref()
+                .map(|b| function_body_sig(b))
+                .unwrap_or_default()
         ),
+        Declaration::ClassDeclaration(c) => class_sig(c),
+        // Discriminant-only collapse for genuinely TS-only declaration forms that are NOT accepted
+        // client-positive today (e.g. `TSTypeAliasDeclaration`, `TSInterfaceDeclaration`,
+        // `TSEnumDeclaration`, `TSModuleDeclaration`, `TSImportEqualsDeclaration`). The reachable JS
+        // declaration forms (`VariableDeclaration`, `FunctionDeclaration`, `ClassDeclaration`) are
+        // encoded above. Tracked: svelte-native-compiler-plan.md §8 D-17 — the first change that
+        // makes one of these accepted client-positive must prove it refused (fail-closed) or encode
+        // it structurally in the same change.
         other => format!("Decl({:?})", std::mem::discriminant(other)),
     }
 }
 
 /// The signature of a statement LIST (in order).
 fn statements_sig(stmts: &oxc_allocator::Vec<'_, Statement<'_>>) -> String {
-    let parts: Vec<String> = stmts.iter().map(stmt_sig).collect();
+    // A stray no-op `EmptyStatement` (`;`) in a statement LIST is a printer-dropped cosmetic no-op —
+    // filter it so `{ ; return x; }` and `{ return x; }` compare EQUAL. (An EmptyStatement in a
+    // REQUIRED child position — a loop/if/with/labeled body like `for(;;);` — is NOT filtered: it is
+    // reached through `stmt_sig(Empty)` directly, where an empty vs non-empty body IS behavior-bearing.)
+    // ASI is a non-issue: once it parsed as an AST `EmptyStatement` in a list, it is a removable no-op.
+    let parts: Vec<String> = stmts
+        .iter()
+        .filter(|s| !matches!(s, Statement::EmptyStatement(_)))
+        .map(stmt_sig)
+        .collect();
     format!("[{}]", parts.join(";"))
 }
 
-/// The canonical paren-insensitive structural signature of a whole module. Parses `code` with
-/// OXC (a parse failure panics with a clear message — the caller already guards `parses_as_js`,
-/// so a failure here is a torn module). Two modules differing only by redundant parens produce
-/// the SAME signature.
-fn module_sig(code: &str, side: &str) -> String {
+/// The structural signature of a whole PROGRAM — its top-level directive prologue
+/// (`Program.directives`, e.g. a module-level `"use strict";`) AND its ordered statement body. The
+/// pre-fix `module_sig` was `statements_sig(&program.body)` only, which DROPPED `Program.directives`,
+/// so a directive-bearing module collapsed with an absent/different prologue — a structural
+/// false-PASS this closes. (`Program.directives` is ALSO walked for comment anchors by
+/// `CommentAnchorIndex`; this adds it to the STRUCTURAL signature too.)
+fn program_sig(program: &oxc_ast::ast::Program) -> String {
+    format!(
+        "Program(hashbang={},dirs={},body={})",
+        program
+            .hashbang
+            .as_ref()
+            .map(|h| format!("{:?}", h.value))
+            .unwrap_or_else(|| "<none>".into()),
+        directives_sig(&program.directives),
+        statements_sig(&program.body)
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEMANTIC-COMMENT signature — the in-contract comment boundary the
+// `Compiled-Output Conformance (CRITICAL)` rule keeps in contract.
+//
+// The AST module signature (`statements_sig`) drops ALL comments (OXC's `program.body` carries
+// no comment nodes). NON-SEMANTIC comments (`// note`, `/* note */`, unknown `@foo`) ARE a waived
+// cosmetic axis and stay dropped. But SEMANTIC / tool-consumed comments — PURE-family
+// (`/*@__PURE__*/`), license/preserve (`/*! … */`, `@license`, `@preserve`), source-map
+// (`//# sourceURL=` / `//# sourceMappingURL=`), TS-directives (triple-slash references,
+// `@ts-check`/`@ts-nocheck`/`@ts-ignore`/`@ts-expect-error`), JSDoc, and the other tool
+// directives OXC classifies (Webpack/Vite/Turbopack/CoverageIgnore) — remain IN CONTRACT, so a
+// drop / corruption / move of one is a conformance divergence the comparator MUST catch.
+//
+// The signature is an OCCURRENCE-PATH multiset (not ordered-text-only): each semantic comment is
+// keyed by a deterministic AST OCCURRENCE PATH (`pos/stmt[i]/edge[j]/…` — the indexed child-edge
+// chain from the top-level statement down to the deepest node whose span boundary matches the
+// comment's anchor byte), NOT by structural signatures (`stmt_sig` / `expr_sig` are NOT the anchor
+// basis). The path reads AST topology (not bytes), so the anchor is whitespace- and redundant-paren
+// insensitive, yet POSITION-sensitive: a comment MOVED to a different statement/expression — even a
+// structurally-identical sibling — changes an index segment of its path. Classifying an
+// already-EXTRACTED comment's text via a total membership predicate is in scope (it is NOT a
+// regex-on-type-text semantic engine); slicing the raw code for the already-identified comment token
+// payload is acceptable (NOT a raw full-module comparison).
+// ─────────────────────────────────────────────────────────────────────────────
+
+use oxc_ast::ast::{Comment, CommentContent, CommentPosition};
+use oxc_span::GetSpan;
+
+/// The full conformance signature of a parsed module — the AST module signature AND the
+/// semantic-comment signature, computed from the SAME OXC parse. Equality of both halves is the
+/// gate's oracle.
+struct ModuleConformanceSig {
+    module_sig: String,
+    comment_sig: Vec<String>,
+}
+
+impl ModuleConformanceSig {
+    fn equals(&self, other: &Self) -> bool {
+        self.module_sig == other.module_sig && self.comment_sig == other.comment_sig
+    }
+}
+
+/// Classify a comment as SEMANTIC (in-contract) and return its class label, or `None` if it is a
+/// waived cosmetic comment. The classification is a TOTAL membership predicate over OXC's
+/// `CommentContent` plus a text predicate for the categories OXC does not have a `CommentContent`
+/// variant for (source-map directives and TS directives). `raw` is the comment's exact token text
+/// INCLUDING delimiters (`/* … */` or `// …`).
+fn semantic_comment_class(comment: &Comment, raw: &str) -> Option<&'static str> {
+    // 1. OXC-classified annotation comments that are in contract.
+    match comment.content {
+        CommentContent::Pure => return Some("Pure"),
+        CommentContent::PureNotApplied => return Some("PureNotApplied"),
+        CommentContent::NoSideEffects => return Some("NoSideEffects"),
+        CommentContent::Legal => return Some("Legal"),
+        CommentContent::JsdocLegal => return Some("JsdocLegal"),
+        // JSDoc is in contract for THIS client-JS oracle (excluding it would contradict the rule).
+        CommentContent::Jsdoc => return Some("Jsdoc"),
+        CommentContent::Webpack => return Some("Webpack"),
+        CommentContent::Vite => return Some("Vite"),
+        CommentContent::Turbopack => return Some("Turbopack"),
+        CommentContent::CoverageIgnore => return Some("CoverageIgnore"),
+        // `None` => not OXC-classified; fall through to the text predicate.
+        CommentContent::None => {}
+    }
+    // 2. The text predicate for categories OXC does not have a `CommentContent` variant for. The
+    //    inner text (delimiters stripped) is matched against a small, total set of known directive
+    //    forms. This classifies an already-extracted comment's text — it is NOT a semantic engine.
+    let inner = if let Some(rest) = raw.strip_prefix("/*") {
+        rest.strip_suffix("*/").unwrap_or(rest)
+    } else if let Some(rest) = raw.strip_prefix("//") {
+        rest
+    } else {
+        raw
+    };
+    let t = inner.trim_start();
+    // Source-comment directives: the modern `//# sourceURL=` / `//# sourceMappingURL=` forms (the
+    // leading `#` survives the `//`/`/*` strip above) AND the deprecated legacy `//@ sourceURL=` /
+    // `//@ sourceMappingURL=` `@`-prefixed forms (still emitted by older tooling and consumed by
+    // browsers). Both classify as a source-map directive.
+    for sigil in ['#', '@'] {
+        if let Some(after_sigil) = t.strip_prefix(sigil) {
+            let a = after_sigil.trim_start();
+            if a.starts_with("sourceURL=") || a.starts_with("sourceMappingURL=") {
+                return Some("SourceMap");
+            }
+        }
+    }
+    // TS triple-slash reference directive: a triple-slash directive is a LINE comment whose RAW
+    // text opens with EXACTLY three slashes (`/// <reference …`). Require `raw.strip_prefix("///")`
+    // on the RAW token — NOT a single leading `/` on the already-`//`-stripped inner text, which
+    // would also accept `// / <reference …` (a line comment whose body merely begins `/ <reference`)
+    // as a false directive. After the `///` opener, trim whitespace, then require `<reference`
+    // followed by a BOUNDARY (whitespace / `/` / `>`), so `/// <referencee path=…>` (a token-
+    // boundary lookalike) does NOT classify either.
+    if let Some(after_triple) = raw.strip_prefix("///") {
+        let after_triple = after_triple.trim_start();
+        if let Some(rest) = after_triple.strip_prefix("<reference") {
+            if reference_boundary(rest) {
+                return Some("TsTripleSlash");
+            }
+        }
+    }
+    // TS pragma directives — split by family, because the two families have DIFFERENT valid forms:
+    //
+    // `@ts-check` / `@ts-nocheck` are file-level mode pragmas valid ONLY as a `//` LINE comment
+    // (TypeScript ignores them in `/* */` block form), so they classify only when the RAW token
+    // opens with `//` (NOT `/*`), AND with a TS-pragma boundary = end / whitespace / `:` (so
+    // `// @ts-check/foo` does NOT classify — the `/foo` continues the token). A `/* @ts-check */`
+    // block comment and a `// @ts-check/foo` lookalike both stay WAIVED.
+    //
+    // `@ts-ignore` / `@ts-expect-error` are line-suppression directives valid in BOTH `//` line and
+    // `/* */` block forms in TS, so they keep the looser identifier-token boundary
+    // (`directive_boundary`) and match regardless of the raw delimiter.
+    let is_line_comment = raw.starts_with("//") && !raw.starts_with("/*");
+    if is_line_comment {
+        for d in ["@ts-check", "@ts-nocheck"] {
+            if let Some(rest) = t.strip_prefix(d) {
+                if ts_pragma_boundary(rest) {
+                    return Some("TsDirective");
+                }
+            }
+        }
+    }
+    for d in ["@ts-ignore", "@ts-expect-error"] {
+        if let Some(rest) = t.strip_prefix(d) {
+            if directive_boundary(rest) {
+                return Some("TsDirective");
+            }
+        }
+    }
+    None
+}
+
+/// Whether the text after a `@ts-*` directive token is a TOKEN BOUNDARY — end-of-text or a
+/// non-identifier char (the directive's identifier-like token does not continue). `@ts-ignore-me`
+/// fails (`-` continues the token); `@ts-ignore` / `@ts-ignore foo` / `@ts-ignore: x` pass.
+fn directive_boundary(rest: &str) -> bool {
+    match rest.chars().next() {
+        None => true,
+        // An ASCII letter/digit/`_`/`$`/`-` continues an identifier-like directive token → NOT a
+        // boundary (so `@ts-ignore-me` ≠ `@ts-ignore`).
+        Some(c) => !(c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '-'),
+    }
+}
+
+/// Whether the text after a `@ts-check` / `@ts-nocheck` pragma token is a TS-PRAGMA boundary —
+/// STRICTER than `directive_boundary`: end-of-text, ASCII whitespace, or a `:`. TypeScript treats
+/// `// @ts-check` (and a following comment payload like `// @ts-check: note`) as the mode pragma,
+/// but `// @ts-check/foo` is a different token (the `/foo` continues it) and must NOT classify.
+fn ts_pragma_boundary(rest: &str) -> bool {
+    match rest.chars().next() {
+        None => true,
+        Some(c) => c.is_ascii_whitespace() || c == ':',
+    }
+}
+
+/// Whether the text after `<reference` is a triple-slash-reference BOUNDARY (whitespace / `/` /
+/// `>` / end), so `<reference path=…` passes but `<referencee …` (the `e` continues the token)
+/// does NOT classify.
+fn reference_boundary(rest: &str) -> bool {
+    match rest.chars().next() {
+        None => true,
+        Some(c) => c.is_whitespace() || c == '/' || c == '>',
+    }
+}
+
+// ── Comment-anchor OCCURRENCE PATH ───────────────────────────────────────────
+// CONSISTENCY INVARIANT: the comment-anchor occurrence path MUST be computed over the same normalized
+// AST view as the structural signature; any structural normalization (empty-statement filtering, paren
+// transparency, future list rewrites) must be mirrored in anchor indexing OR introduce a synthetic
+// carrier for comments attached to removed nodes. (Today: `statements_sig` filters list-context
+// `EmptyStatement`, and `CommentAnchorIndex::normalize_statement_list` mirrors that filter — a real
+// statement is indexed by its LOGICAL filtered index and a comment attached to a filtered empty gets a
+// synthetic `empty_gap[<logical>.<empty_ordinal>]:EmptyStatement` anchor (the per-gap empty ordinal
+// disambiguates CONSECUTIVE filtered empties at the same gap); `ParenthesizedExpression` is transparent
+// on both sides. A divergence between the two normalizations would let a comment MOVE onto/off a
+// normalized-away node compare EQUAL — the exact false-PASS this invariant forbids.)
+//
+// A comment's anchor is keyed by a DETERMINISTIC AST OCCURRENCE PATH — the sequence of child
+// segments from the top-level statement INDEX down to the deepest node whose span boundary matches
+// the comment's anchor byte — NOT by a structural shape (`stmt_sig`/`expr_sig`). The old
+// structural-shape key collided whenever a semantic comment MOVED between two STRUCTURALLY-
+// IDENTICAL positions (`/*@__PURE__*/ f(); f();` vs `f(); /*@__PURE__*/ f();` compared EQUAL,
+// a false-PASS), and an intra-statement move inside e.g. a `$.template_effect(() => { … })` body
+// collapsed onto the top-level statement's shape. The occurrence path makes every reachable anchor
+// distinct: identical structural positions at different INDEXES produce different paths, and a move
+// to a structurally-identical sibling changes an index segment.
+//
+// The path is built by a GENERIC OXC child-span walker (`CommentAnchorIndex`, an
+// `oxc_ast_visit::Visit` impl) that walks top-level `Program.directives` and `program.body` and
+// descends EVERY child node in ONE pass. The anchor is deterministic and collision-resistant over the
+// NORMALIZED comparator view: `CommentAnchorIndex` indexes statements by the same empty-filtered
+// logical view as `statements_sig`, node-types the segments, and gives comments attached to
+// normalized-away empty statements an explicit synthetic `empty_gap[<logical>.<empty_ordinal>]` anchor.
+// `CommentAnchorIndex` walks top-level `Program.directives` and `program.body`; descendants are reached
+// through the generic `oxc_ast_visit::Visit` walker, including `FunctionBody.directives` and every
+// nested statement list (the `visit_statements` override applies the same empty-filtered normalization
+// there). A future anchor collapse inside that normalized view is a comparator bug, not D-17 debt.
+// There is no hand-enumerated per-edge descent and therefore no per-edge round can reopen the class.
+//
+// PATH SCHEME: a top-level DIRECTIVE prologue node (`Program.directives[<i>]`) keeps the segment
+// `dir[<i>]` and a top-level statement node keeps the segment `stmt[<logical>]:<AstType>` (its LOGICAL
+// empty-filtered index in `program.body`, node-typed); the two are independent index spaces with
+// distinct prefixes (no collision). A list-context `EmptyStatement` that `statements_sig` filters
+// consumes NO statement/child index and instead records a synthetic
+// `empty_gap[<logical>.<empty_ordinal>]:EmptyStatement` candidate (the `<empty_ordinal>` keeps
+// CONSECUTIVE filtered empties at the same gap distinct), so a comment attached to a filtered empty
+// anchors distinctly from the next real statement and from a sibling empty in the same gap.
+// BELOW either, each ENTERED OXC node contributes a `/`-joined segment
+// `child[<k>]:<AstType>` where `<k>` is the zero-based ENTERED-CHILD INDEX under the current parent
+// (children are counted in `Visit` enter order, EXCLUDING filtered list-context empties) and `<AstType>`
+// is `format!("{:?}", kind.ty())` (`Debug` on the plain `AstType` enum, NOT on `AstKind`, which carries
+// node payload + spans). So a nested object value, a computed/static key, a formal param, a
+// param/destructuring default, a yield argument, an arrow/function body statement, and a named-export
+// function body statement ALL get a concrete deep path; a move between two structurally-identical
+// siblings changes a `child[<k>]` (or `stmt[<logical>]`) index and FAILS. `child[<k>]:<AstType>` is
+// unique within a parent (the entered child index never repeats), and identical structural siblings
+// differ by an ancestor `child[<k>]`/`stmt[<logical>]` — so the path is deterministic and
+// collision-resistant over the normalized comparator view.
+//
+// PAREN TRANSPARENCY (the cosmetic-redundant-paren waiver): a `ParenthesizedExpression` is descended
+// WITHOUT recording a candidate and WITHOUT consuming a child index — its inner expression is
+// visited under the SAME parent path/child-index, so `(a)` and `a` produce the same anchor. For a
+// LEADING comment whose `attached_to` byte is an outer paren's START, the leading resolver aliases
+// that paren start to the innermost unwrapped node's start (recorded as the walk descends each
+// paren), so `/*! keep */ (a)` anchors exactly like `/*! keep */ a`.
+//
+// The path reads AST topology, not bytes, so the anchor is whitespace- and redundant-paren
+// insensitive, yet POSITION-sensitive (a move changes an index). The structural `stmt_sig`/`expr_sig`
+// are NOT used for identity here — the path plus `pos=Leading|Trailing` (plus the per-anchor `ord`)
+// fully identifies the occurrence.
+
+use oxc_ast::AstKind;
+use oxc_ast_visit::Visit;
+
+/// One recorded anchor candidate: the node's span boundaries, its path DEPTH (number of segments,
+/// for the deepest-wins tiebreak), and its full occurrence path
+/// (`stmt[<logical>]:<AstType>/child[<k>]:<AstType>/…`, or a synthetic
+/// `empty_gap[<logical>.<empty_ordinal>]:EmptyStatement`).
+#[derive(Clone)]
+struct AnchorCandidate {
+    start: u32,
+    end: u32,
+    depth: usize,
+    path: String,
+}
+
+/// Which TOP-LEVEL segment space the current depth-0 walk belongs to — a `Program.directives[<i>]`
+/// prologue (`dir[<i>]`) or a `program.body` statement (`stmt[<logical>]:<AstType>`, the LOGICAL
+/// empty-filtered index). The two are independent index spaces with distinct prefixes, so a directive
+/// anchor and a body anchor never collide.
+#[derive(Clone, Copy)]
+enum TopSegmentKind {
+    Directive,
+    Stmt,
+}
+
+/// A GENERIC OXC child-span anchor index, built ONCE per module. It walks top-level
+/// `Program.directives` then `program.body` with [`oxc_ast_visit::Visit`], recording a candidate for
+/// EVERY entered node (keyed by the node's span via [`oxc_span::GetSpan`]) plus, for each
+/// `ParenthesizedExpression`, an alias from the paren start to the innermost unwrapped node start. A
+/// comment's anchor is resolved from the recorded candidates by `(attached_to / comment_start,
+/// CommentPosition)` — see [`CommentAnchorIndex::anchor_for`].
+struct CommentAnchorIndex {
+    candidates: Vec<AnchorCandidate>,
+    /// `paren_start -> innermost-non-paren inner start`, so a LEADING comment whose `attached_to`
+    /// lands on a redundant outer paren resolves to the unwrapped node (the cosmetic-paren waiver).
+    paren_alias: std::collections::HashMap<u32, u32>,
+    /// The path segments from the current top-level node down to the node being entered.
+    path_stack: Vec<String>,
+    /// One entered-child counter per frame on `path_stack` (the count of children entered so far
+    /// under that frame's node). `child_counter.len() == path_stack.len()` between nodes.
+    child_counter: Vec<u32>,
+    /// The index of the top-level node currently being walked (drives the depth-0 segment): a
+    /// directive's SOURCE index for `dir[<i>]`, or a body statement's LOGICAL empty-filtered index for
+    /// `stmt[<logical>]:<AstType>` (set by `normalize_statement_list`).
+    top_index: usize,
+    /// Whether the current depth-0 walk is a directive prologue or a body statement (drives the
+    /// depth-0 segment PREFIX — `dir[` vs `stmt[`).
+    top_segment_kind: TopSegmentKind,
+}
+
+impl CommentAnchorIndex {
+    /// Build the index for a module's TOP-LEVEL nodes. The directive prologue (`Program.directives`)
+    /// is walked FIRST as the `dir[<i>]` segment space, then the statement body (`program.body`) is
+    /// normalized through `normalize_statement_list` as the `stmt[<logical>]:<AstType>` segment space
+    /// (list-context empties filtered to synthetic `empty_gap[<logical>.<empty_ordinal>]` anchors) — the
+    /// two are independent index spaces with distinct prefixes. Each top-level node is walked in source
+    /// order with its index + segment-kind established; the generic `Visit` impl records every descendant
+    /// node's `(span, path)` candidate (so `FunctionBody.directives` are reached once a function body is
+    /// descended).
+    fn build(program: &oxc_ast::ast::Program<'_>) -> Self {
+        let mut index = CommentAnchorIndex {
+            candidates: Vec::new(),
+            paren_alias: std::collections::HashMap::new(),
+            path_stack: Vec::new(),
+            child_counter: Vec::new(),
+            top_index: 0,
+            top_segment_kind: TopSegmentKind::Stmt,
+        };
+        // Directive prologue FIRST (`dir[<i>]`). `visit_directive` fires `enter_node` on the
+        // `AstKind::Directive` node at depth 0 → segment `dir[<i>]` (gated on `top_segment_kind`);
+        // its inner string literal enters at depth 1 → `child[<k>]`.
+        for (i, dir) in program.directives.iter().enumerate() {
+            index.top_index = i;
+            index.top_segment_kind = TopSegmentKind::Directive;
+            debug_assert!(index.path_stack.is_empty() && index.child_counter.is_empty());
+            index.visit_directive(dir);
+        }
+        // Statement body SECOND (`stmt[<logical>]:<AstType>`). The body is normalized by the SAME
+        // per-list helper the nested-list `visit_statements` override uses: list-context
+        // `EmptyStatement`s are filtered (each gets a synthetic `empty_gap[<logical>.<empty_ordinal>]`
+        // anchor and consumes no index) so the anchor index is computed over the SAME empty-filtered view
+        // as `statements_sig`.
+        // `visit_statement` dispatches straight to the concrete statement node's `visit_*` (the
+        // `Statement` enum has no `AstKind`), so the FIRST `enter_node` is the statement node itself at
+        // depth 0 → segment `stmt[<logical>]:<AstType>`; descendants enter at depth ≥ 1 → `child[<k>]`.
+        // (`build` iterates the top-level body MANUALLY rather than via `visit_program`, so the
+        // `visit_statements` override fires only for the NESTED lists reached during descent — both use
+        // `normalize_statement_list`, so they cannot drift.)
+        index.top_segment_kind = TopSegmentKind::Stmt;
+        debug_assert!(index.path_stack.is_empty() && index.child_counter.is_empty());
+        index.normalize_statement_list(&program.body);
+        index
+    }
+
+    /// Record a candidate for an entered node at the CURRENT path.
+    fn record(&mut self, span: oxc_span::Span) {
+        self.candidates.push(AnchorCandidate {
+            start: span.start,
+            end: span.end,
+            depth: self.path_stack.len(),
+            path: self.path_stack.join("/"),
+        });
+    }
+
+    /// Record a SYNTHETIC candidate for a list-context `EmptyStatement` that `statements_sig` filters
+    /// out, so a semantic comment attached to that removed empty resolves to an explicit
+    /// `empty_gap[<logical>.<empty_ordinal>]:EmptyStatement` anchor (distinct from the next real
+    /// statement's `stmt[<logical>]:<AstType>` / `child[<k>]:<AstType>`) instead of collapsing onto an
+    /// unrelated node. The `<empty_ordinal>` is the position of this empty within its run of CONSECUTIVE
+    /// filtered empties at the same `<logical>` gap, so a semantic comment moved among `;;` carriers
+    /// keeps a DISTINCT anchor (the consecutive empties cannot collide on one `<logical>` index). The
+    /// synthetic segment is pushed onto the path (so the recorded path carries its full ancestor chain)
+    /// but consumes NO `child_counter` index and is NOT descended — a filtered empty has no children and
+    /// occupies no child/statement slot, mirroring `statements_sig`'s filter.
+    fn record_empty_gap(&mut self, span: oxc_span::Span, logical: usize, empty_ordinal: usize) {
+        self.path_stack.push(format!(
+            "empty_gap[{logical}.{empty_ordinal}]:EmptyStatement"
+        ));
+        self.record(span);
+        self.path_stack.pop();
+    }
+
+    /// Walk a statement LIST under the SAME normalization `statements_sig` applies: list-context
+    /// `EmptyStatement` nodes are filtered (they consume no statement/child index and get a synthetic
+    /// `empty_gap[<logical>.<empty_ordinal>]` anchor), and each REAL statement is indexed by its LOGICAL
+    /// (empty-filtered) index. `top_index` is set to the running `logical_index` before each real
+    /// statement so a TOP-LEVEL statement's depth-0 segment is `stmt[<logical>]:<AstType>` (`top_index`
+    /// is ignored at depth ≥ 1, where `enter_node` uses the `child_counter`). This is the SINGLE per-list
+    /// normalizer shared by the manual top-level `build` loop and the `visit_statements` override for
+    /// nested lists, so the two paths cannot drift. (REQUIRED-position empties — `for(;;);` / `while(c);`
+    /// / `if(c);` — are reached via `stmt_sig`/the concrete-node visit, NOT a statement list, so they are
+    /// never seen here and stay signed.)
+    fn normalize_statement_list<'a>(&mut self, stmts: &oxc_allocator::Vec<'a, Statement<'a>>) {
+        let mut logical_index = 0usize;
+        // The per-gap ordinal of the current run of consecutive filtered empties at `logical_index`
+        // (reset to 0 each time a real statement consumes a logical index). This disambiguates a
+        // semantic comment's position AMONG consecutive no-op `;` carriers in the SAME gap, so
+        // `/*c*/ ; ; f()` and `; /*c*/ ; f()` resolve DISTINCT anchors (the per-gap empty ordinal).
+        let mut empty_ordinal = 0usize;
+        for stmt in stmts.iter() {
+            if let Statement::EmptyStatement(e) = stmt {
+                self.record_empty_gap(e.span, logical_index, empty_ordinal);
+                empty_ordinal += 1;
+                continue; // consumes no logical index — mirrors `statements_sig`'s filter.
+            }
+            self.top_index = logical_index;
+            self.visit_statement(stmt);
+            logical_index += 1;
+            empty_ordinal = 0;
+        }
+    }
+
+    /// The deterministic occurrence-path anchor for a comment. `Leading` resolves the DEEPEST
+    /// candidate whose `span.start` equals `attached_to` (after aliasing a redundant outer-paren
+    /// start to the unwrapped inner start). `Trailing` resolves the PRECEDING node — among candidates
+    /// with `span.end <= comment_start`, the one with the largest `end` (then deeper path, then
+    /// lexically-larger path) — because OXC leaves `attached_to = 0` for trailing comments (anchoring
+    /// on it would collapse every trailing comment onto the first statement). A comment with no
+    /// matching candidate (an EOF directive on an empty module, or a leading byte that starts no node)
+    /// anchors to `<tail>`.
+    fn anchor_for(
+        &self,
+        attached_to: u32,
+        comment_start: u32,
+        position: CommentPosition,
+    ) -> String {
+        let (pos, body) = match position {
+            CommentPosition::Leading => {
+                // Alias a redundant outer-paren start to the innermost unwrapped node start, so a
+                // leading comment on `(a)` anchors like one on bare `a` (the cosmetic-paren waiver).
+                let target = self
+                    .paren_alias
+                    .get(&attached_to)
+                    .copied()
+                    .unwrap_or(attached_to);
+                let mut best: Option<&AnchorCandidate> = None;
+                for c in &self.candidates {
+                    if c.start != target {
+                        continue;
+                    }
+                    // Deepest wins; tie → larger `end`; tie → lexically-larger path.
+                    let better = match best {
+                        None => true,
+                        Some(prev) => {
+                            (c.depth, c.end, &c.path) > (prev.depth, prev.end, &prev.path)
+                        }
+                    };
+                    if better {
+                        best = Some(c);
+                    }
+                }
+                ("Leading", best.map(|c| c.path.clone()))
+            }
+            CommentPosition::Trailing => {
+                let mut best: Option<&AnchorCandidate> = None;
+                for c in &self.candidates {
+                    if c.end > comment_start {
+                        continue;
+                    }
+                    // Closest preceding node = largest `end` (selected by `end`, NOT path depth, so
+                    // it is correct for ≥10 siblings: a depth/lexicographic tiebreak would let
+                    // `stmt[1]` beat `stmt[10]`); tie → deeper path; tie → lexically-larger path.
+                    let better = match best {
+                        None => true,
+                        Some(prev) => {
+                            (c.end, c.depth, &c.path) > (prev.end, prev.depth, &prev.path)
+                        }
+                    };
+                    if better {
+                        best = Some(c);
+                    }
+                }
+                ("Trailing", best.map(|c| c.path.clone()))
+            }
+        };
+        let body = body.unwrap_or_else(|| "<tail>".to_string());
+        format!("pos={pos}/{body}")
+    }
+}
+
+impl<'a> Visit<'a> for CommentAnchorIndex {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        // The segment for THIS node: a depth-0 node is the top-level directive prologue (`dir[<i>]`)
+        // or statement (`stmt[<i>]:<AstType>`), prefixed by the active `top_segment_kind`; a deeper
+        // node is `child[<k>]:<AstType>` for the next entered-child index `k` of its parent. The
+        // top-level statement segment uses the LOGICAL (empty-filtered) index (`top_index` is set to
+        // the per-list `logical_index` by `normalize_statement_list`) and node-types the segment, so it
+        // is computed over the SAME normalized view as `statements_sig` (which filters list-context
+        // empties) and matches the `child[<k>]:<AstType>` scheme.
+        let segment = if self.path_stack.is_empty() {
+            match self.top_segment_kind {
+                TopSegmentKind::Directive => format!("dir[{}]", self.top_index),
+                TopSegmentKind::Stmt => format!("stmt[{}]:{:?}", self.top_index, kind.ty()),
+            }
+        } else {
+            let counter = self
+                .child_counter
+                .last_mut()
+                .expect("child_counter has a frame for the parent node");
+            let k = *counter;
+            *counter += 1;
+            format!("child[{k}]:{:?}", kind.ty())
+        };
+        self.path_stack.push(segment);
+        self.child_counter.push(0);
+        self.record(kind.span());
+    }
+
+    fn leave_node(&mut self, _kind: AstKind<'a>) {
+        self.path_stack.pop();
+        self.child_counter.pop();
+    }
+
+    fn visit_parenthesized_expression(&mut self, it: &oxc_ast::ast::ParenthesizedExpression<'a>) {
+        // PAREN TRANSPARENCY (leading + trailing): do NOT enter the paren node (no candidate, no
+        // `child[<k>]` segment, no child-index bump) — descend its inner expression under the SAME
+        // parent frame so `(a)` and `a` produce the same anchor. Record the paren-start →
+        // innermost-unwrapped-start alias so a LEADING comment whose `attached_to` is the paren start
+        // resolves to the unwrapped node.
+        let inner = unwrap_parens(&it.expression);
+        let inner_end = inner.span().end;
+        self.paren_alias.insert(it.span.start, inner.span().start);
+        // Visit the immediate inner expression directly (a nested paren recurses through this same
+        // override, chaining its own alias to the same innermost start). `visit_expression` does not
+        // enter an `AstKind` for the `Expression` enum wrapper — it dispatches to the inner concrete
+        // node's `enter_node`, which takes the next child index under the current parent.
+        //
+        // Then make trailing transparency SYMMETRIC. A TRAILING comment resolves by the closest
+        // preceding node's `end`. The inner expression's candidates end BEFORE the outer `)`, but the
+        // ancestor carrier ends AT `)`, so a trailing comment after `(a)` would otherwise pick the
+        // ancestor while the same comment after bare `a` picks the inner node — a cosmetic-paren
+        // false-FAIL (reachable when the comment is newline/ASI-terminated, where OXC keeps it
+        // Trailing). For each candidate recorded DURING this paren's inner descent whose `end` is the
+        // inner expression's end, add a synthetic copy with the SAME path/depth but re-ended at the
+        // outer paren's `)`. The trailing resolver sorts by `(end, depth, path)`, so the synthetic
+        // candidate at `end = )` with the deeper inner path beats the ancestor at `end = )` via the
+        // depth tiebreak — the inner node is also reachable as the closest-preceding candidate at the
+        // paren `)`, matching the bare side's anchor exactly.
+        let before = self.candidates.len();
+        self.visit_expression(&it.expression);
+        let trailing_aliases: Vec<AnchorCandidate> = self.candidates[before..]
+            .iter()
+            .filter(|c| c.end == inner_end)
+            .map(|c| AnchorCandidate {
+                start: c.start,
+                end: it.span.end,
+                depth: c.depth,
+                path: c.path.clone(),
+            })
+            .collect();
+        self.candidates.extend(trailing_aliases);
+    }
+
+    fn visit_statements(&mut self, it: &oxc_allocator::Vec<'a, Statement<'a>>) {
+        // NESTED list-context normalization. `oxc_ast_visit` routes EVERY nested statement list —
+        // `BlockStatement.body`, `FunctionBody.statements`, `SwitchCase.consequent`, `StaticBlock.body`
+        // — through `visit_statements`, so overriding it (instead of the default `walk_statements`)
+        // applies the SAME empty-filtered normalization `statements_sig` uses for those lists: a
+        // list-context `EmptyStatement` is filtered (synthetic `empty_gap[<logical>.<empty_ordinal>]`
+        // anchor, no child index) and each real statement gets its LOGICAL (empty-filtered) `child[<k>]`
+        // index. Routed through the shared `normalize_statement_list` so the nested and top-level views
+        // cannot drift. NOT calling `walk_statements` is deliberate — the default would re-walk empties
+        // with raw child indices, reopening the filter/anchor mismatch inside nested bodies.
+        // (Required-position empties are NOT lists and never reach here.)
+        self.normalize_statement_list(it);
+    }
+}
+
+/// The semantic-comment signature of a parsed module — a SORTED multiset of
+/// `Comment(class=…,text=…,anchor=…,ord=…)` entries, one per SEMANTIC comment. Cosmetic comments
+/// are dropped. The `anchor` is the comment's DETERMINISTIC AST OCCURRENCE PATH (resolved from the
+/// generic `CommentAnchorIndex` child-span walker), which carries `pos=Leading|Trailing`: a `Leading`
+/// comment anchors via OXC's `attached_to` byte, a `Trailing` comment via the PRECEDING node's
+/// occurrence path (OXC computes `attached_to` for
+/// LEADING comments only — it leaves trailing comments' `attached_to = 0`, so anchoring a trailing
+/// comment on it would collapse every trailing comment onto the first statement). `ord` is the
+/// per-anchor ordinal (source order of semantic comments sharing the SAME occurrence path), so two
+/// distinct semantic comments at the same anchor stay distinct and order is preserved within an
+/// anchor. Sorting makes the comparison a multiset (occurrence identity, not global text order, is
+/// what matters) while `ord` keeps per-anchor order significant. `code` is the raw module source;
+/// comment token text is compared EXACTLY (delimiters included) modulo line-ending normalization.
+fn comment_sig(
+    code: &str,
+    comments: &oxc_allocator::Vec<'_, Comment>,
+    program: &oxc_ast::ast::Program<'_>,
+) -> Vec<String> {
+    // Stable source order for deterministic ordinals.
+    let mut ordered: Vec<&Comment> = comments.iter().collect();
+    ordered.sort_by_key(|c| (c.span.start, c.span.end));
+
+    // Build the generic child-span anchor index ONCE per module (not per comment): it walks the
+    // top-level directive prologue then the statement body and records every descendant node's
+    // occurrence-path candidate, then each comment's anchor is resolved from those candidates by
+    // `(attached_to / span.start, position)`.
+    let anchor_index = CommentAnchorIndex::build(program);
+
+    let mut ord_at_anchor: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut entries: Vec<String> = Vec::new();
+    for c in ordered {
+        let raw = &code[c.span.start as usize..c.span.end as usize];
+        let Some(class) = semantic_comment_class(c, raw) else {
+            continue; // cosmetic — waived, dropped from the signature.
+        };
+        // Branch on `CommentPosition`: leading resolves the deepest candidate starting at
+        // `attached_to` (paren-aliased); trailing resolves the preceding node keyed off the comment's
+        // start byte (OXC leaves `attached_to = 0` for trailing comments — see `anchor_for`).
+        let anchor = anchor_index.anchor_for(c.attached_to, c.span.start, c.position);
+        let ord = {
+            let slot = ord_at_anchor.entry(anchor.clone()).or_insert(0);
+            let v = *slot;
+            *slot += 1;
+            v
+        };
+        // Exact comment text, line-ending normalized (CRLF -> LF) so a checked-out EOL difference
+        // does not false-fail; NO trim / whitespace-collapse (license/JSDoc/source-map payload
+        // bytes are in contract).
+        let text = raw.replace("\r\n", "\n").replace('\r', "\n");
+        entries.push(format!(
+            "Comment(class={class},text={text:?},anchor={anchor:?},ord={ord})"
+        ));
+    }
+    entries.sort();
+    entries
+}
+
+/// The full conformance signature of a module — parses `code` ONCE with OXC and derives BOTH the
+/// AST module signature and the semantic-comment signature from the same parse. A parse failure
+/// panics with a clear message (callers already guard `parses_as_js`, so a failure here is a torn
+/// module).
+fn conformance_sig(code: &str, side: &str) -> ModuleConformanceSig {
     let alloc = Allocator::default();
     let source_type = oxc_span::SourceType::mjs();
     let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
@@ -1300,21 +2762,39 @@ fn module_sig(code: &str, side: &str) -> String {
         "the {side} module did not parse as JS (a hard FAIL):\n{code}\nerrors: {:?}",
         ret.errors
     );
-    statements_sig(&ret.program.body)
+    ModuleConformanceSig {
+        module_sig: program_sig(&ret.program),
+        comment_sig: comment_sig(code, &ret.program.comments, &ret.program),
+    }
 }
 
-/// Assert the emitted module and the golden are STRUCTURALLY equal modulo redundant parens.
-/// A behavioral / structural divergence (helper name, call-arg count, sequence split, literal
-/// content, operator, identifier, member, statement order) fails with a message naming the
-/// slug and showing both signatures + both raw modules.
+/// Assert the emitted module and the golden are STRUCTURALLY equal modulo redundant parens AND
+/// carry the SAME in-contract semantic comments at the same occurrence-path anchors. A behavioral /
+/// structural divergence (helper name, call-arg count, sequence split, literal content, operator,
+/// identifier, member, statement order, import specifier) OR a semantic-comment drop / corruption /
+/// move fails with a message naming the slug and showing both raw modules.
+///
+/// GOLDEN-SIDE CAVEAT: the `comment_sig` half is fully enforced on RAW module pairs (proven by
+/// `svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs`), but the COMMITTED
+/// FIXTURE goldens are comment-STRIPPED at generation (`normalizeModuleForComparison`), so when this
+/// helper runs against a committed golden the golden side's `comment_sig` is EMPTY — the FIXTURE gate
+/// does NOT yet prove official-POSITIVE semantic-comment preservation. That golden-DATA oracle gap is
+/// tracked by svelte-native-compiler-plan.md §8 D-19; nothing here implies the fixture gate has
+/// official-positive semantic-comment coverage today.
 fn assert_modules_structurally_equal(slug: &str, emitted: &str, golden: &str) {
-    let emitted_sig = module_sig(emitted, "emitted");
-    let golden_sig = module_sig(golden, "golden");
+    let emitted_sig = conformance_sig(emitted, "emitted");
+    let golden_sig = conformance_sig(golden, "golden");
     assert_eq!(
-        emitted_sig, golden_sig,
+        emitted_sig.module_sig, golden_sig.module_sig,
         "STRUCTURAL drift for codegen cell {slug} (paren-insensitive, but argument/identifier/\
-         operator/literal/structure-precise):\n--- emitted (raw) ---\n{emitted}\n\
+         operator/literal/structure/import-specifier-precise):\n--- emitted (raw) ---\n{emitted}\n\
          --- golden (raw) ---\n{golden}"
+    );
+    assert_eq!(
+        emitted_sig.comment_sig, golden_sig.comment_sig,
+        "SEMANTIC-COMMENT drift for codegen cell {slug} (the in-contract comment boundary: \
+         PURE-family / license-preserve / source-map / TS-directive / JSDoc; non-semantic \
+         comments are waived):\n--- emitted (raw) ---\n{emitted}\n--- golden (raw) ---\n{golden}"
     );
 }
 
@@ -1322,13 +2802,15 @@ fn assert_modules_structurally_equal(slug: &str, emitted: &str, golden: &str) {
 // These prove the structural comparator is NOT a gerrymander: a redundant-paren-only diff
 // PASSES (the cosmetic-paren waiver), but every BEHAVIORAL / structural diff — a changed
 // helper name, a changed call ARG COUNT, a sequence split into separate args, a changed
-// string / template content, a changed operator, a changed identifier — FAILS. Each test
-// would catch the bug it names: it FAILS against the (intentionally diverged) "regression"
-// module and PASSES against the (paren-only-diverged) "cosmetic" module.
+// string / template content, a changed operator, a changed identifier, an import-specifier
+// drift, a semantic-comment drop/corruption/move — FAILS. Each test would catch the bug it
+// names: it FAILS against the (intentionally diverged) "regression" module and PASSES against
+// the (cosmetic-only-diverged) module.
 
-/// Whether two JS modules have the SAME paren-insensitive structural signature.
+/// Whether two JS modules have the SAME FULL conformance signature (paren-insensitive AST
+/// structure AND in-contract semantic comments). Non-semantic comments are waived.
 fn sigs_equal(a: &str, b: &str) -> bool {
-    module_sig(a, "a") == module_sig(b, "b")
+    conformance_sig(a, "a").equals(&conformance_sig(b, "b"))
 }
 
 #[test]
@@ -1455,6 +2937,2352 @@ fn struct_compare_fails_on_swapped_arrow_param_order() {
     assert!(
         sigs_equal("($0, $1) => ($0 + $1);", "($0, $1) => $0 + $1;"),
         "identical params with a redundant body paren must still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_waives_redundant_paren_in_destructuring_default() {
+    // The DESTRUCTURING-DEFAULT cosmetic-paren waiver (the false-FAIL fix). A destructuring binding
+    // default (`{ a = 1 }`) carries an `AssignmentPattern.right` that is an `Expression`; a redundant
+    // author paren around that default (`{ a = (1) }`) is a COSMETIC difference the official printer
+    // drops. The pre-fix `binding_sig` encoded the whole pattern via span-stripped Debug, which does
+    // NOT peel a `ParenthesizedExpression` wrapper, so `{ a = (1) }` and `{ a = 1 }` produced DIFFERENT
+    // signatures — a cosmetic false-FAIL. The recursive `binding_sig` routes the default through the
+    // paren-transparent `expr_sig`, so they now compare EQUAL. Reachable: an author destructuring
+    // default inside a source-preserved value position (a `{@html}` / dynamic-value arrow the emitter
+    // byte-copies) carries exactly this redundant paren.
+    assert!(
+        sigs_equal("var { a = (1) } = o;", "var { a = 1 } = o;"),
+        "a redundant paren around an OBJECT-destructuring default must compare EQUAL (the default is \
+         encoded via the paren-transparent expr_sig; the pre-fix Debug fallback false-FAILED it)"
+    );
+    // The ARRAY-destructuring default variant (`[a = (1)]` vs `[a = 1]`) is likewise paren-transparent.
+    assert!(
+        sigs_equal("var [ a = (1) ] = o;", "var [ a = 1 ] = o;"),
+        "a redundant paren around an ARRAY-destructuring default must also compare EQUAL"
+    );
+    // A NESTED-pattern default (`{ a: { b = (1) } }`) recurses through `binding_sig` and stays
+    // paren-transparent at every nesting level (the recursion is not shallow).
+    assert!(
+        sigs_equal("var { a: { b = (1) } } = o;", "var { a: { b = 1 } } = o;"),
+        "a redundant paren around a NESTED destructuring default must compare EQUAL (binding_sig \
+         recurses into the nested pattern and routes each default through expr_sig)"
+    );
+    // An assignment-EXPRESSION destructuring target (`({ a = (1) } = o)`) reaches
+    // `assignment_target_sig`, which codex requires to be paren-transparent too (not Debug). The
+    // `AssignmentTargetWithDefault.init` default `(1)` must compare EQUAL to the bare `1`.
+    assert!(
+        sigs_equal("({ a = (1) } = o);", "({ a = 1 } = o);"),
+        "a redundant paren in an assignment-EXPRESSION destructuring default must compare EQUAL \
+         (assignment_target_sig routes the default through expr_sig; the pre-fix Debug fallback \
+         false-FAILED it)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_destructuring_property_reorder() {
+    // TRUE-POSITIVE preserved: a real destructuring PROPERTY REORDER must still FAIL. Two object
+    // patterns differing only by property ORDER (`{a, b}` vs `{b, a}`) bind the same names but are a
+    // structural difference the recursive `binding_sig` must keep distinct (it encodes the ordered
+    // property list, not a name set).
+    assert!(
+        !sigs_equal("var { a, b } = o;", "var { b, a } = o;"),
+        "an OBJECT-destructuring property reorder must FAIL (binding_sig encodes the ordered property \
+         list, not an unordered name set)"
+    );
+    // The ARRAY-destructuring element REORDER (`[a, b]` vs `[b, a]`) is likewise distinct — array
+    // position is binding identity.
+    assert!(
+        !sigs_equal("var [ a, b ] = o;", "var [ b, a ] = o;"),
+        "an ARRAY-destructuring element reorder must FAIL (array element position is binding identity)"
+    );
+    // A nested-pattern KEY rename (`{ a: { b } }` vs `{ a: { c } }`) recurses and stays distinct.
+    assert!(
+        !sigs_equal("var { a: { b } } = o;", "var { a: { c } } = o;"),
+        "a nested destructuring binding rename must FAIL (binding_sig recurses into the nested value \
+         pattern)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_destructuring_default_drop() {
+    // TRUE-POSITIVE preserved: dropping a destructuring DEFAULT must still FAIL. `{ a = 1 }` binds
+    // `a` to `1` when the source value is `undefined`; `{ a }` does not — a real behavior change the
+    // recursive `binding_sig` must keep distinct (the `AssignmentPattern` wrapper vs a bare
+    // `BindingIdentifier`).
+    assert!(
+        !sigs_equal("var { a = 1 } = o;", "var { a } = o;"),
+        "an OBJECT-destructuring default DROP must FAIL (a defaulted binding is structurally distinct \
+         from a bare binding)"
+    );
+    // The ARRAY-destructuring default drop (`[a = 1]` vs `[a]`) is likewise distinct.
+    assert!(
+        !sigs_equal("var [ a = 1 ] = o;", "var [ a ] = o;"),
+        "an ARRAY-destructuring default DROP must FAIL"
+    );
+    // And the default VALUE is significant (`{ a = 1 }` vs `{ a = 2 }`) — a different default binds a
+    // different value, caught by the paren-transparent `expr_sig` on the default.
+    assert!(
+        !sigs_equal("var { a = 1 } = o;", "var { a = 2 } = o;"),
+        "a changed destructuring default VALUE must FAIL (the default expr_sig differs)"
+    );
+}
+
+#[test]
+fn struct_compare_waives_leading_comment_redundant_paren() {
+    // A semantic comment leading a REDUNDANT outer paren (`/*! keep */ (a)`) must anchor IDENTICALLY
+    // to the same comment leading the bare inner node (`/*! keep */ a`): the redundant paren is a
+    // COSMETIC difference the official printer drops, so a paren-only difference carrying the SAME
+    // semantic comment must compare EQUAL (the cosmetic-paren waiver). The OLD `expr_anchor` peeled
+    // the paren BEFORE the leading-anchor probe, so `(a)` collapsed to `<tail>` while `a` anchored to
+    // `decl[0].init` — a false-FAIL the paren-transparent leading remap fixes.
+    assert!(
+        sigs_equal("var x = /*! keep */ (a);", "var x = /*! keep */ a;"),
+        "a redundant-paren-only difference carrying the same leading semantic comment must compare \
+         EQUAL (paren-transparent leading anchor; the pre-fix descent false-FAILED this)"
+    );
+    // A NESTED redundant-paren variant must likewise remap transparently to the inner node.
+    assert!(
+        sigs_equal("var x = /*! keep */ ((a));", "var x = /*! keep */ a;"),
+        "a nested redundant-paren leading semantic comment must also compare EQUAL (every transparent \
+         paren layer is peeled without adding a segment)"
+    );
+    // A paren leading a deeper expression still descends into the unwrapped node (no collapse): the
+    // comment leads `(f(a))`, which remaps to `f(a)` and descends to the callee, matching `f(a)`.
+    assert!(
+        sigs_equal("var x = /*! keep */ (f(a));", "var x = /*! keep */ f(a);"),
+        "a leading semantic comment on a parenthesized call must remap to the unwrapped call and \
+         still descend (no shallow collapse)"
+    );
+}
+
+#[test]
+fn struct_compare_waives_trailing_comment_redundant_paren_before_asi() {
+    // A semantic comment TRAILING a redundant-parenthesized expression, NEWLINE/ASI-terminated (where
+    // OXC keeps the comment `Trailing`), must anchor IDENTICALLY to the bare-expression form — a
+    // redundant paren is cosmetic. Pre-fix the trailing resolver picked the ancestor carrier (ending
+    // at `)`) on the `(a)` side but the inner node (ending at `a`) on the bare side → different anchor
+    // → a cosmetic-paren FALSE-FAIL. The symmetric trailing paren-transparency aliases close it.
+    let paren = "var x = (a) /*! keep */\nvar y = 1;";
+    let bare = "var x = a /*! keep */\nvar y = 1;";
+    // Both must be genuinely Trailing (the mechanism under test).
+    assert!(
+        first_semantic_comment_anchor(paren).starts_with("pos=Trailing/"),
+        "paren side must be Trailing"
+    );
+    assert!(
+        first_semantic_comment_anchor(bare).starts_with("pos=Trailing/"),
+        "bare side must be Trailing"
+    );
+    assert!(
+        sigs_equal(paren, bare),
+        "a trailing semantic comment after a redundant paren (ASI-terminated) must compare EQUAL to \
+         the bare form (symmetric trailing paren-transparency)"
+    );
+    // And the anchors must be the SAME string (pin it, so the test is RED if the trailing aliases are removed).
+    assert_eq!(
+        first_semantic_comment_anchor(paren),
+        first_semantic_comment_anchor(bare),
+        "the trailing-comment anchor must be identical for `(a)` and bare `a` (paren-normalized end)"
+    );
+    // TRUE-POSITIVE preserved: a real trailing-comment MOVE to a DIFFERENT statement still FAILs.
+    // Both sides are genuinely Trailing (newline/ASI-terminated), so this discriminates on two
+    // distinct TRAILING anchors (not merely pos=Trailing-vs-Leading) — the exact axis the synthetic
+    // trailing aliases could threaten if they over-collapsed. The synthetic candidate inherits the
+    // inner node's full path (carrying the `stmt[N]` prefix), so a move across statements cannot
+    // collapse.
+    let move_a = "var x = (a) /*! keep */\nvar y = b\n";
+    let move_b = "var x = a\nvar y = (b) /*! keep */\n";
+    assert!(
+        first_semantic_comment_anchor(move_a).starts_with("pos=Trailing/"),
+        "move_a must be Trailing"
+    );
+    assert!(
+        first_semantic_comment_anchor(move_b).starts_with("pos=Trailing/"),
+        "move_b must be Trailing"
+    );
+    assert_ne!(
+        first_semantic_comment_anchor(move_a),
+        first_semantic_comment_anchor(move_b),
+        "a real trailing-comment move across statements must produce DIFFERENT trailing anchors"
+    );
+    assert!(
+        !sigs_equal(move_a, move_b),
+        "a real trailing-comment move to a different statement must still FAIL (distinct trailing anchors)"
+    );
+    // NESTED variant: the symmetry must hold for nested paren descents too — a trailing comment after a
+    // redundant paren INSIDE a function body (ASI-terminated, so OXC keeps it Trailing) anchors to the
+    // deep inner node on BOTH sides. The synthetic trailing aliases minted by the inner paren descent
+    // re-end at the inner paren's `)`, so the inner node is reachable as the closest-preceding
+    // candidate regardless of nesting depth.
+    let nested_paren = "var f = function () { return (a) /*! keep */\nreturn 1; };";
+    let nested_bare = "var f = function () { return a /*! keep */\nreturn 1; };";
+    assert!(
+        first_semantic_comment_anchor(nested_paren).starts_with("pos=Trailing/"),
+        "nested paren side must be Trailing"
+    );
+    assert!(
+        first_semantic_comment_anchor(nested_bare).starts_with("pos=Trailing/"),
+        "nested bare side must be Trailing"
+    );
+    assert_eq!(
+        first_semantic_comment_anchor(nested_paren),
+        first_semantic_comment_anchor(nested_bare),
+        "the nested trailing-comment anchor must be identical for `(a)` and bare `a` (the symmetry \
+         holds through nested paren descents)"
+    );
+    assert!(
+        sigs_equal(nested_paren, nested_bare),
+        "a nested trailing semantic comment after a redundant paren (ASI-terminated) must compare \
+         EQUAL to the bare form"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_semantic_comment_move_between_computed_keys() {
+    // The anchor descent walks object property KEYS (computed-key expressions) BEFORE values, so a
+    // semantic comment MOVED between two structurally-identical COMPUTED keys anchors to a different
+    // `object.prop[i].key.expr` path and FAILS. The pre-fix descent walked only `op.value` + spreads,
+    // so a comment inside a computed key collapsed to `<tail>` and false-PASSED a move. Author object
+    // literals inside source-preserved dynamic attr/class/style/`{@html}` expressions are byte-copied
+    // by the emitter, so `{ [/*@__PURE__*/ k]: v }` is reachable.
+    assert!(
+        !sigs_equal(
+            "var o = { [/*@__PURE__*/ f()]: v, [f()]: v };",
+            "var o = { [f()]: v, [/*@__PURE__*/ f()]: v };"
+        ),
+        "a semantic comment moved between two structurally-identical COMPUTED keys must FAIL \
+         (object property keys are descended; the pre-fix descent false-PASSED this)"
+    );
+    // SANITY (no false-FAIL): the SAME computed-key comment at the SAME key with a whitespace-only
+    // difference still compares EQUAL.
+    assert!(
+        sigs_equal(
+            "var o = { [/*@__PURE__*/ f()]: v };",
+            "var o = { [  /*@__PURE__*/  f()]: v };"
+        ),
+        "the same computed-key semantic comment differing only by whitespace must still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_semantic_comment_move_between_params() {
+    // The anchor descent walks formal PARAMS / binding identifiers, so a semantic comment MOVED
+    // between two params anchors to a different `arrow.params[k]` path and FAILS. The pre-fix descent
+    // did not walk params, so a comment on a param collapsed to `<tail>` and false-PASSED a move.
+    // Author dynamic values can contain `((/*! keep */ a) => a)`, source-preserved by the emitter.
+    assert!(
+        !sigs_equal(
+            "var f = (/*! keep */ a, b) => a;",
+            "var f = (a, /*! keep */ b) => a;"
+        ),
+        "a semantic comment moved between two arrow PARAMS must FAIL (formal params are descended; \
+         the pre-fix descent false-PASSED this)"
+    );
+    // A function-expression param move is likewise distinct (`fn.params[k]`).
+    assert!(
+        !sigs_equal(
+            "var f = function (/*! keep */ a, b) { return a; };",
+            "var f = function (a, /*! keep */ b) { return a; };"
+        ),
+        "a semantic comment moved between two function-expression PARAMS must FAIL (fn.params[k] is \
+         descended)"
+    );
+    // SANITY (no false-FAIL): the SAME comment at the SAME param position with a whitespace-only
+    // difference still compares EQUAL.
+    assert!(
+        sigs_equal(
+            "var f = (/*! keep */ a, b) => a;",
+            "var f = (  /*! keep */  a, b) => a;"
+        ),
+        "the same param semantic comment differing only by whitespace must still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_semantic_comment_move_between_param_defaults() {
+    // The anchor descent now descends each `FormalParameter.initializer` at `arrow.params[k].init`
+    // (mirroring `params_sig`, which already SIGNS `init=<expr_sig>`). A semantic comment MOVED
+    // between two structurally-identical param DEFAULT expressions therefore anchors to a different
+    // `[k].init` path and FAILS. The pre-fix `params_anchor` walked only the binding PATTERN, never
+    // the initializer expression, so a comment inside a param default had NO occurrence path and
+    // collapsed to `<tail>` on BOTH sides — a false-PASS for the move. Author dynamic values can
+    // contain `(a = /*@__PURE__*/ g(), b = g()) => a`, source-preserved (byte-copied) by the emitter.
+    assert!(
+        !sigs_equal(
+            "var f = (a = /*@__PURE__*/ g(), b = g()) => a;",
+            "var f = (a = g(), b = /*@__PURE__*/ g()) => a;"
+        ),
+        "a semantic comment moved between two structurally-identical param DEFAULTS must FAIL \
+         (FormalParameter.initializer is descended at arrow.params[k].init; the pre-fix descent \
+         false-PASSED this)"
+    );
+    // The same defect on a FUNCTION-EXPRESSION param default (`fn.params[k].init`).
+    assert!(
+        !sigs_equal(
+            "var f = function (a = /*@__PURE__*/ g(), b = g()) { return a; };",
+            "var f = function (a = g(), b = /*@__PURE__*/ g()) { return a; };"
+        ),
+        "a semantic comment moved between two function-expression param DEFAULTS must FAIL \
+         (fn.params[k].init is descended)"
+    );
+    // A comment on the binding ID stays DISTINCT from a comment in that same param's default — they
+    // anchor at `arrow.params[k]` vs `arrow.params[k].init`, so the two positions do not collapse.
+    assert!(
+        !sigs_equal(
+            "var f = (/*! keep */ a = g()) => a;",
+            "var f = (a = /*! keep */ g()) => a;"
+        ),
+        "a comment on the param binding id vs inside its default must FAIL (arrow.params[k] vs \
+         arrow.params[k].init are distinct anchors)"
+    );
+    // SANITY (no false-FAIL): the SAME default comment at the SAME default position with a
+    // whitespace-only difference still compares EQUAL.
+    assert!(
+        sigs_equal(
+            "var f = (a = /*@__PURE__*/ g(), b = g()) => a;",
+            "var f = (a =   /*@__PURE__*/   g(), b = g()) => a;"
+        ),
+        "the same param-default semantic comment differing only by whitespace must still compare \
+         EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_semantic_comment_move_between_destructuring_param_defaults() {
+    // The GENERIC child-span anchor walker (`CommentAnchorIndex`) descends EVERY child node, so a
+    // semantic comment inside a DESTRUCTURING param's default expression now has a concrete
+    // occurrence path (it anchors to the default-expression node deep inside the `ObjectPattern`'s
+    // `AssignmentPattern`). A comment MOVED between two structurally-identical destructuring defaults
+    // therefore anchors to a different child-index path and FAILS. The pre-fix hand-enumerated
+    // `binding_pattern_anchor` only offered the WHOLE pattern's span for any non-identifier pattern
+    // (no descent into `ObjectPattern` property defaults), so the comment collapsed to the same
+    // pattern anchor on BOTH sides — a false-PASS for the move. Author dynamic values can carry
+    // `({ a = /*! keep */ g(), b = g() }) => a`, source-preserved (byte-copied) by the emitter. A
+    // license `/*! keep */` (not a PURE annotation) is used so OXC sets NO `pure` node flag — the two
+    // structural signatures stay byte-identical and the ANCHOR is the SOLE discriminator (a PURE
+    // annotation would also flip a `pure` boolean the Debug fallback leaks, masking the anchor axis).
+    assert!(
+        !sigs_equal(
+            "var f = ({ a = /*! keep */ g(), b = g() }) => a;",
+            "var f = ({ a = g(), b = /*! keep */ g() }) => a;"
+        ),
+        "a semantic comment moved between two structurally-identical DESTRUCTURING param defaults \
+         must FAIL (the generic child-span walker descends into the ObjectPattern default \
+         expressions; the pre-fix hand descent false-PASSED this)"
+    );
+    // SANITY (no false-FAIL): the SAME destructuring-default comment at the SAME default with a
+    // whitespace-only difference still compares EQUAL (the path reads AST topology, not bytes).
+    assert!(
+        sigs_equal(
+            "var f = ({ a = /*! keep */ g(), b = g() }) => a;",
+            "var f = ({ a =   /*! keep */   g(), b = g() }) => a;"
+        ),
+        "the same destructuring-param-default semantic comment differing only by whitespace must \
+         still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_semantic_comment_move_between_yield_arguments() {
+    // The GENERIC child-span anchor walker descends EVERY child node, so a `YieldExpression`
+    // argument is descended (the pre-fix hand-enumerated `expr_child_anchor` had NO `YieldExpression`
+    // arm — a yield argument never descended, so a comment inside it collapsed to a shallower node).
+    // A semantic comment MOVED between two structurally-identical `yield <arg>` arguments inside a
+    // `function*` therefore anchors to a different child-index path and FAILS. Author dynamic values
+    // can carry a source-preserved generator function literal the emitter byte-copies.
+    assert!(
+        !sigs_equal(
+            "var f = function* () { yield /*! keep */ g(); yield g(); };",
+            "var f = function* () { yield g(); yield /*! keep */ g(); };"
+        ),
+        "a semantic comment moved between two structurally-identical yield arguments inside a \
+         function* must FAIL (the generic child-span walker descends the YieldExpression argument; \
+         the pre-fix descent had no YieldExpression arm and false-PASSED this)"
+    );
+    // SANITY (no false-FAIL): the SAME yield-argument comment at the SAME yield with a
+    // whitespace-only difference still compares EQUAL.
+    assert!(
+        sigs_equal(
+            "var f = function* () { yield /*! keep */ g(); yield g(); };",
+            "var f = function* () { yield   /*! keep */   g(); yield g(); };"
+        ),
+        "the same yield-argument semantic comment differing only by whitespace must still compare \
+         EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_named_export_function_body_structural_diff() {
+    // `decl_sig`'s `Declaration::FunctionDeclaration` arm now encodes the BODY
+    // (`body={statements_sig(...)}`), matching the `Statement::FunctionDeclaration` and
+    // `ExportDefaultFn` arms. Two named-export functions with the SAME name + params but DIFFERENT
+    // bodies (`a()` vs `b()`) are a genuine structural divergence — the pre-fix arm encoded `params=`
+    // only and collapsed them to the SAME signature (a structural false-PASS, and an honesty
+    // mismatch: the comparator-scope mirror claimed named-export bodies were encoded). An ORACLE axis:
+    // official Svelte client module output can carry module-script export declarations, so the
+    // comparator must be correct here even though native Verter currently refuses `<script module>`.
+    assert!(
+        !sigs_equal(
+            "export function f() { a(); }",
+            "export function f() { b(); }"
+        ),
+        "two named-export functions with the same signature but different bodies must FAIL \
+         (decl_sig now encodes the function body; the pre-fix params-only arm false-PASSED this)"
+    );
+    // SANITY (no false-FAIL): a byte-identical named-export function compares EQUAL, and a
+    // redundant-paren-only body difference still compares EQUAL (the body is signed via the
+    // paren-insensitive `statements_sig` → `expr_sig`).
+    assert!(
+        sigs_equal(
+            "export function f() { return (a + b); }",
+            "export function f() { return a + b; }"
+        ),
+        "a redundant-paren-only named-export function body difference must still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_named_export_function_body_comment_move() {
+    // The GENERIC child-span anchor walker descends nested statements (a function-declaration body's
+    // statements get `child[k]:Statement-kind` segments), so a semantic comment MOVED between two
+    // structurally-identical statements INSIDE a named-export function body anchors to a different
+    // child-index path and FAILS. The pre-fix hand-enumerated `decl_anchor` only descended a
+    // `VariableDeclaration` initializer (never a `FunctionDeclaration` body), so the comment
+    // collapsed to `<tail>` on BOTH sides — a false-PASS for the move. An ORACLE axis: official client
+    // module output can carry module-script export declarations, so the comparator must be correct
+    // here even though native Verter currently refuses `<script module>`.
+    assert!(
+        !sigs_equal(
+            "export function f() { /*@__PURE__*/ a(); b(); }",
+            "export function f() { a(); /*@__PURE__*/ b(); }"
+        ),
+        "a semantic comment moved between two statements inside a named-export function body must \
+         FAIL (the generic child-span walker descends the function body statements; the pre-fix \
+         decl_anchor collapsed them and false-PASSED this)"
+    );
+    // SANITY (no false-FAIL): the SAME body comment at the SAME body statement with a
+    // whitespace-only difference still compares EQUAL.
+    assert!(
+        sigs_equal(
+            "export function f() { /*@__PURE__*/ a(); b(); }",
+            "export function f() {   /*@__PURE__*/   a(); b(); }"
+        ),
+        "the same named-export-body semantic comment differing only by whitespace must still \
+         compare EQUAL"
+    );
+}
+
+#[test]
+fn semantic_comment_class_requires_true_triple_slash_opener() {
+    // A `// / <reference …` line comment (a line comment whose body merely begins `/ <reference` —
+    // only TWO leading slashes) is NOT a triple-slash directive: it must stay WAIVED, so adding it to
+    // one side compares EQUAL. The pre-fix classifier stripped `//` then accepted any single leading
+    // `/`, so it wrongly classified this lookalike as a `<reference` directive (a cosmetic false-FAIL).
+    assert!(
+        sigs_equal("var x = 1;", "// / <reference path=\"x\" />\nvar x = 1;"),
+        "`// / <reference …` is a non-directive lookalike (only two leading slashes) and must compare \
+         EQUAL (true `///` opener required; the pre-fix classifier false-FAILED this)"
+    );
+    // A REAL triple-slash reference (exact `///` opener + `<reference` + boundary) is semantic: a
+    // DROP must FAIL.
+    assert!(
+        !sigs_equal("/// <reference path=\"x\" />\nvar x = 1;", "var x = 1;"),
+        "a dropped REAL `/// <reference …` triple-slash directive must FAIL (the `///` opener still \
+         classifies the genuine directive)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_static_object_key_comment_move() {
+    // STATIC object-property KEY anchor: a semantic comment leading a STATIC key
+    // (`{ /*! keep */ a: v, a: v }`) anchors to `object.prop[0].key`; moved before the second key
+    // (`{ a: v, /*! keep */ a: v }`) it anchors to `object.prop[1].key`, so the MOVE must FAIL. The
+    // pre-fix anchor descent walked only COMPUTED keys + values, so a comment before a static key
+    // collapsed to `<tail>` on BOTH sides and false-PASSED the move. Object literals are
+    // source-preserved (an author object inside a `{@html}` / dynamic-attr / class/style value is
+    // byte-copied), so this is reachable.
+    assert!(
+        !sigs_equal(
+            "var o = { /*! keep */ a: v, a: v };",
+            "var o = { a: v, /*! keep */ a: v };"
+        ),
+        "a semantic comment moved between two structurally-identical STATIC object keys must FAIL \
+         (object.prop[i].key anchor; the pre-fix descent false-PASSED this)"
+    );
+    // SANITY (no false-FAIL): the SAME static-key comment at the SAME key with a whitespace-only
+    // difference still compares EQUAL.
+    assert!(
+        sigs_equal(
+            "var o = { /*! keep */ a: v };",
+            "var o = {   /*! keep */   a: v };"
+        ),
+        "the same static-key semantic comment differing only by whitespace must still compare EQUAL"
+    );
+}
+
+/// Parse `code` and return the DETERMINISTIC anchor path of its FIRST semantic comment (mirrors the
+/// exact parse + `CommentAnchorIndex` resolution `comment_sig` makes). Test-only helper for asserting
+/// an anchor PATH directly when a `!sigs_equal` pair cannot isolate the path axis (e.g. the static-key
+/// vs property-entry specificity, where any structural difference would mask the anchor difference).
+fn first_semantic_comment_anchor(code: &str) -> String {
+    let alloc = Allocator::default();
+    let ret = oxc_parser::Parser::new(&alloc, code, oxc_span::SourceType::mjs()).parse();
+    assert!(
+        !ret.panicked && ret.errors.is_empty(),
+        "the module did not parse as JS:\n{code}\nerrors: {:?}",
+        ret.errors
+    );
+    let anchor_index = CommentAnchorIndex::build(&ret.program);
+    let mut ordered: Vec<&Comment> = ret.program.comments.iter().collect();
+    ordered.sort_by_key(|c| (c.span.start, c.span.end));
+    for c in ordered {
+        let raw = &code[c.span.start as usize..c.span.end as usize];
+        if semantic_comment_class(c, raw).is_none() {
+            continue; // cosmetic — skipped, exactly as `comment_sig` does.
+        }
+        return anchor_index.anchor_for(c.attached_to, c.span.start, c.position);
+    }
+    panic!("no semantic comment found in:\n{code}");
+}
+
+#[test]
+fn struct_compare_anchors_static_key_comment_more_specifically_than_property_entry() {
+    // SPECIFICITY (in generic-scheme terms): a leading comment immediately before a STATIC key
+    // (`{ /*! keep */ a: v }`) starts at the SAME byte as the property itself (a plain `key: value`
+    // property has no leading accessor token, so the `ObjectProperty` and its key `IdentifierName`
+    // both START at the comment's `attached_to` byte). The GENERIC child-span walker records BOTH as
+    // candidates at that byte, and the leading resolver picks the DEEPEST — the key `IdentifierName`
+    // node (one segment deeper than the `ObjectProperty` it nests under). A leading comment before a
+    // `get` ACCESSOR token starts at the property byte but the key `a` starts LATER (after `get `), so
+    // the deepest candidate at the comment byte is the `ObjectProperty` node itself — strictly
+    // SHALLOWER. The invariant the comparator preserves: a static-key comment anchors STRICTLY DEEPER
+    // (a more specific node) than an accessor-token comment, so the accessor path is a PROPER PREFIX
+    // of the static-key path.
+    //
+    // A `!sigs_equal` pair cannot isolate THIS axis: any object pair where the comment anchors at the
+    // key on one side and the property entry on the other must differ structurally too (a plain
+    // `a: v` vs a `get a(){}`), so the structural signature — not the anchor — would carry the FAIL.
+    // The discriminating assertion is therefore the SPECIFICITY RELATIONSHIP between the two anchor
+    // paths (expressed generically, robust to the exact `child[k]:AstType` segment naming), NOT a
+    // literal curated path.
+    let static_key_anchor = first_semantic_comment_anchor("var o = { /*! keep */ a: v };");
+    let accessor_anchor = first_semantic_comment_anchor("var o = { /*! keep */ get a() {} };");
+    // The two anchors are DISTINCT — the static key resolves to a different (more specific) node than
+    // the accessor-token entry.
+    assert_ne!(
+        static_key_anchor, accessor_anchor,
+        "the static-key anchor must be DISTINCT from the accessor-token entry anchor (the static key \
+         resolves one node DEEPER); got static={static_key_anchor:?} accessor={accessor_anchor:?}"
+    );
+    // The accessor-token anchor is a PROPER PREFIX of the static-key anchor (the static key is the
+    // accessor's `ObjectProperty` path PLUS one more child segment — the key node). This is the
+    // scheme-independent form of "the static key is strictly more specific (deeper) than the property
+    // entry": the entry path is an ancestor of the key path.
+    assert!(
+        static_key_anchor.starts_with(&accessor_anchor)
+            && static_key_anchor.len() > accessor_anchor.len(),
+        "the static-key anchor must be STRICTLY DEEPER than the accessor-token entry anchor (the \
+         entry path is a proper prefix of the key path); got static={static_key_anchor:?} \
+         accessor={accessor_anchor:?}"
+    );
+    // And concretely: the static-key path has MORE `/`-separated segments than the accessor path (it
+    // descends one extra child node — the key identifier).
+    let static_depth = static_key_anchor.matches('/').count();
+    let accessor_depth = accessor_anchor.matches('/').count();
+    assert!(
+        static_depth > accessor_depth,
+        "the static-key anchor path must have strictly more segments than the accessor-token entry \
+         path (static_depth={static_depth} accessor_depth={accessor_depth}); got \
+         static={static_key_anchor:?} accessor={accessor_anchor:?}"
+    );
+    // BEHAVIORAL sanity (the existing MOVE still FAILS, and no false-FAIL on whitespace): the
+    // more-specific anchor keeps a static-key MOVE distinct and a whitespace-only diff EQUAL.
+    assert!(
+        !sigs_equal(
+            "var o = { /*! keep */ a: v, a: v };",
+            "var o = { a: v, /*! keep */ a: v };"
+        ),
+        "a static-key comment MOVE must still FAIL (the moved comment anchors under a different \
+         object-property child index)"
+    );
+    assert!(
+        sigs_equal(
+            "var o = { /*! keep */ a: v };",
+            "var o = {  /*! keep */  a: v };"
+        ),
+        "the same static-key comment differing only by whitespace must still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_anchors_top_level_directive_comment_and_fails_on_move() {
+    // The TOP-LEVEL-DIRECTIVE comment-anchor hole. A directive prologue (`"use strict";`) is stored
+    // in `Program.directives`, NOT `Program.body`, so the pre-fix `CommentAnchorIndex::build` (which
+    // walked only the body) gave a SEMANTIC comment leading/trailing a top-level directive NO anchor
+    // candidate — it collapsed to `<tail>`. That made the in-source closure claim ("no walked node can
+    // collapse to `<tail>`") FALSE for directive-bearing modules. Walking `Program.directives` (as
+    // `dir[<i>]`) restores a real anchor. Use a license comment (`/*! keep */`) — NOT `/*@__PURE__*/`,
+    // whose `pure` node flag can leak through other paths and mask the anchor axis.
+    //
+    // MOVE between two real anchors: the SAME semantic comment leading the directive (module A) vs
+    // leading the first body statement (module B) anchors to DIFFERENT occurrence paths (`dir[0]`
+    // vs `stmt[0]`-subtree), so the two modules are UNEQUAL. Pre-fix, A's comment collapsed to
+    // `<tail>` (directive not walked), so the MOVE could false-PASS — this asserts it FAILS.
+    let module_a = "/*! keep */ \"use strict\"; var x = 1;";
+    let module_b = "\"use strict\"; /*! keep */ var x = 1;";
+    assert!(
+        !sigs_equal(module_a, module_b),
+        "a semantic comment MOVED from leading a top-level directive to leading the first body \
+         statement must FAIL (the directive is now a walked anchor `dir[0]`; the pre-fix build \
+         walked only the body so A's comment collapsed to `<tail>` and the move false-PASSED)"
+    );
+    // The comment leading the directive resolves to a REAL (non-`<tail>`) directive anchor — direct
+    // proof the directive is walked (the closure claim is now TRUE for directive-bearing modules).
+    let anchor_a = first_semantic_comment_anchor(module_a);
+    assert!(
+        !anchor_a.ends_with("<tail>"),
+        "a semantic comment leading a top-level directive must resolve to a real directive anchor, \
+         NOT `<tail>` (the directive is walked); got {anchor_a:?}"
+    );
+    // And concretely it anchors at the FIRST directive segment (`dir[0]`), distinct from any body
+    // `stmt[...]` segment — the directive index space is walked first and prefixed distinctly.
+    assert!(
+        anchor_a.contains("dir[0]"),
+        "the directive-leading comment must anchor at the `dir[0]` directive segment; got {anchor_a:?}"
+    );
+    // SANITY (no false-FAIL): the SAME directive-leading comment differing only by whitespace still
+    // compares EQUAL (the anchor is whitespace-insensitive).
+    assert!(
+        sigs_equal(
+            "/*! keep */ \"use strict\"; var x = 1;",
+            "/*! keep */   \"use strict\";   var x = 1;"
+        ),
+        "the same directive-leading semantic comment differing only by whitespace must still compare \
+         EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_object_property_kind_method_computed_shorthand() {
+    // `expr_sig`'s object arm now encodes EVERY behavior-bearing property axis
+    // (`prop(kind=..,method=..,computed=..,shorthand=..,key=..,value=..)`). Each pair below collapsed
+    // to the SAME signature under the pre-fix `key:value`-only encoding and now DIFFERS. Each subcase
+    // names the axis it ISOLATES; where a pair would also differ on another axis (key shape, value
+    // shape), an extra SAME-BODY/SAME-KEY pair pins the named axis as the SOLE discriminator.
+
+    // KIND (get vs method) — ISOLATED: a getter `{ get x(){} }` and a method `{ x(){} }` with the
+    // SAME EMPTY body have the SAME key (`x`) and the SAME (empty) value body, so the ONLY axes that
+    // differ are `op.kind` (Get vs Init) and `op.method` (false vs true). The pre-fix `key:value`
+    // encoding signed both as `k:x:<empty fn>` and collapsed them; the new axes split them.
+    assert!(
+        !sigs_equal("var o = { get x() {} };", "var o = { x() {} };"),
+        "a getter vs a same-empty-body method at the same key must FAIL — kind/method is the SOLE \
+         discriminator (key and body are identical)"
+    );
+
+    // METHOD (method-shorthand vs value) — ISOLATED: a method `{ x() {} }` and a value with a
+    // function expression `{ x: function() {} }` share the SAME key and an empty function body; the
+    // distinguishing axis is `op.method` (true vs false). (Both are `op.kind=Init`, so kind does NOT
+    // discriminate here — method does.)
+    assert!(
+        !sigs_equal("var o = { x() {} };", "var o = { x: function() {} };"),
+        "a method-shorthand property vs a function-value property (same empty body) must FAIL — \
+         op.method is the discriminator"
+    );
+
+    // KIND (get vs set) — ISOLATED at the same key: a getter `{ get x() {} }` and a setter
+    // `{ set x(v) {} }` are distinct accessor halves; `op.kind` is Get vs Set. (A setter takes one
+    // param and a getter takes none, but the discriminating axis the rule cares about is `op.kind`.)
+    assert!(
+        !sigs_equal("var o = { get x() {} };", "var o = { set x(v) {} };"),
+        "a getter vs a setter at the same key must FAIL (op.kind get/set is structural)"
+    );
+
+    // COMPUTED vs STATIC at the same NAME text: `{ x: v }` (static identifier key) vs `{ [x]: v }`
+    // (computed identifier key). This pair is ALSO distinguished by `property_key_sig` alone
+    // (`k:x` vs `k:[Id(x)]`), so `op.computed` is NOT the sole discriminator here — it is a REDUNDANT
+    // second encoding of the same axis. The behavior difference is real (`{ x: v }` keys on the
+    // literal name `x`; `{ [x]: v }` keys on the VALUE of `x`), and BOTH the key-shape and the
+    // `computed` boolean record it; this assertion confirms the pair FAILS (not that `computed` is
+    // the only signal).
+    assert!(
+        !sigs_equal("var o = { x: v };", "var o = { [x]: v };"),
+        "a static key vs a computed key (same name text) must FAIL (the key shape AND op.computed \
+         both record the axis)"
+    );
+
+    // SHORTHAND vs longhand — ISOLATED via `__proto__` (where the axis is semantically load-bearing):
+    // `{ __proto__ }` shorthand sets an OWN property named `__proto__`, while `{ __proto__: x }`
+    // longhand sets the prototype. The key is `__proto__` on both sides; the value differs by
+    // shorthand (`op.shorthand` true → value is the same-name reference) vs longhand. `op.shorthand`
+    // records the axis; the example uses a same-name longhand so the names match and shorthand is the
+    // distinguishing axis.
+    assert!(
+        !sigs_equal("var o = { __proto__ };", "var o = { __proto__: __proto__ };"),
+        "a shorthand property vs a same-name longhand property must FAIL (op.shorthand is structural; \
+         __proto__ shorthand sets an own property, longhand sets the prototype)"
+    );
+
+    // SANITY (no false-FAIL): a byte-identical object compares EQUAL, and a redundant-paren-only
+    // value difference still compares EQUAL.
+    assert!(
+        sigs_equal("var o = { x: (a) };", "var o = { x: a };"),
+        "a redundant-paren-only object-property value difference must still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_param_default() {
+    // `params_sig` now encodes `FormalParameter.initializer` (`init=<expr_sig>` / `init=<none>`).
+    // `(a = 1)`, `(a = 2)`, and `(a)` bind different values when the argument is `undefined` — all
+    // reachable via source-preserved function literals (`{@html () => …}`, dynamic-value arrows).
+    assert!(
+        !sigs_equal("var f = (a = 1) => a;", "var f = (a = 2) => a;"),
+        "a changed param DEFAULT VALUE must FAIL (FormalParameter.initializer is structural)"
+    );
+    assert!(
+        !sigs_equal("var f = (a = 1) => a;", "var f = (a) => a;"),
+        "a present param default vs an absent one must FAIL (init present/absent is structural)"
+    );
+    // SANITY (no false-FAIL): identical params (no defaults) still compare EQUAL.
+    assert!(
+        sigs_equal("var f = (a) => a;", "var f = (a) => a;"),
+        "identical params with no defaults must compare EQUAL"
+    );
+    // SANITY: the SAME default differing only by a redundant paren still compares EQUAL (the default
+    // expression is signed via `expr_sig`, which is paren-insensitive).
+    assert!(
+        sigs_equal("var f = (a = (1)) => a;", "var f = (a = 1) => a;"),
+        "the same param default differing only by a redundant paren must still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_async_and_generator() {
+    // `expr_sig` / `stmt_sig` / `decl_sig` now encode `r#async` (arrow + function) and `generator`
+    // (function only). `async () => 1` returns a Promise; `() => 1` returns `1`. `function*(){}`
+    // returns an iterator; `function(){}` returns `undefined`. Reachable via source-preserved
+    // function literals.
+
+    // ASYNC arrow vs sync arrow.
+    assert!(
+        !sigs_equal("var f = async () => 1;", "var f = () => 1;"),
+        "an async arrow vs a sync arrow must FAIL (r#async is structural)"
+    );
+
+    // GENERATOR function-declaration vs plain (in an export-default form so a top-level statement
+    // carries it): `export default function* f(){}` vs `export default function f(){}`.
+    assert!(
+        !sigs_equal(
+            "export default function* f() {}",
+            "export default function f() {}"
+        ),
+        "a generator function vs a plain function must FAIL (generator is structural)"
+    );
+
+    // ASYNC function expression vs plain function expression.
+    assert!(
+        !sigs_equal(
+            "var f = async function () { return 1; };",
+            "var f = function () { return 1; };"
+        ),
+        "an async function expression vs a plain one must FAIL (r#async is structural)"
+    );
+
+    // SANITY (no false-FAIL): a byte-identical async arrow compares EQUAL.
+    assert!(
+        sigs_equal("var f = async () => 1;", "var f = async () => 1;"),
+        "a byte-identical async arrow must compare EQUAL"
+    );
+}
+
+// ── Terminal statement-encoder / directive discriminators ────────────────────
+// These close the present-day reachable structural FALSE-PASS adjudicated by codex: a
+// source-preserved `{@html () => { … }}` / dynamic-value arrow/function body byte-copies ordinary
+// control-flow statements AND a directive prologue (`"use strict"`) into emitted `clientModule`,
+// but the pre-fix comparator dropped `FunctionBody.directives` and collapsed every control-flow
+// statement to `Stmt(discriminant)`. Each UNEQUAL test below is a real behavioral diff that the
+// pre-fix comparator collapsed to EQUAL (the false-PASS) — they are the literal defect being
+// closed. The wrapper is the reachable form (`var f = () => { … };` — the arrow body the value
+// emitter source-preserves), so each diff routes through the same `function_body_sig` → `stmt_sig`
+// path the gate signs.
+
+#[test]
+fn struct_compare_fails_on_function_body_directive() {
+    // FUNCTION-BODY DIRECTIVE present-vs-absent: `() => { "use strict"; return x; }` carries a
+    // `FunctionBody.directives` prologue the official printer byte-preserves; the pre-fix comparator
+    // signed the body via `statements_sig(&body.statements)` ONLY (directives dropped), so the two
+    // bodies collapsed to the SAME signature — the false-PASS. `function_body_sig` now signs the
+    // ordered directive prologue too.
+    assert!(
+        !sigs_equal(
+            "var f = () => { \"use strict\"; return x; };",
+            "var f = () => { return x; };"
+        ),
+        "a function body with a `\"use strict\"` directive prologue vs one without must FAIL \
+         (function_body_sig signs FunctionBody.directives; the pre-fix statements-only sign \
+         DROPPED them = the false-PASS)"
+    );
+    // A DIFFERENT directive TEXT (`"use strict"` vs `"use asm"`) must also FAIL — the cooked value is
+    // signed, not just presence.
+    assert!(
+        !sigs_equal(
+            "var f = () => { \"use strict\"; return x; };",
+            "var f = () => { \"use asm\"; return x; };"
+        ),
+        "two function bodies with DIFFERENT directive text must FAIL (the cooked directive value is \
+         signed)"
+    );
+    // TOP-LEVEL `Program.directives`: a module-level `"use strict"` prologue present vs absent must
+    // FAIL — the pre-fix `module_sig` was `statements_sig(&program.body)` (program directives
+    // dropped). `program_sig` now prepends `directives_sig(&program.directives)`.
+    assert!(
+        !sigs_equal("\"use strict\"; var x = 1;", "var x = 1;"),
+        "a top-level Program.directives `\"use strict\"` prologue present vs absent must FAIL \
+         (program_sig signs Program.directives; the pre-fix module_sig dropped them)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_for_body() {
+    // `for` body differs: `() => { for(;;) a(); }` vs `() => { for(;;) b(); }`. Pre-fix both
+    // collapsed to `Stmt(discriminant(ForStatement))` (body dropped) → EQUAL = the false-PASS. The
+    // `For(...)` arm now signs init/test/update/body, and the body routes through `stmt_sig` →
+    // `expr_sig`, so the `a()` vs `b()` call diff is caught.
+    assert!(
+        !sigs_equal(
+            "var f = () => { for (;;) a(); };",
+            "var f = () => { for (;;) b(); };"
+        ),
+        "a `for` body call difference must FAIL (the For arm signs its body via stmt_sig; the \
+         pre-fix discriminant collapse made it EQUAL = the false-PASS)"
+    );
+    // A `for` INIT difference (`let i=0` vs `let i=1`) must also FAIL (for_init_sig → decl_var_sig).
+    assert!(
+        !sigs_equal(
+            "var f = () => { for (let i = 0; ; ) a(); };",
+            "var f = () => { for (let i = 1; ; ) a(); };"
+        ),
+        "a `for` init difference must FAIL (for_init_sig signs the init declaration)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_while_and_do_while() {
+    // `while` test differs: pre-fix both collapsed to `Stmt(discriminant(WhileStatement))` → EQUAL.
+    // The `While(...)` arm now signs test (expr_sig) + body (stmt_sig).
+    assert!(
+        !sigs_equal(
+            "var f = () => { while (a) c(); };",
+            "var f = () => { while (b) c(); };"
+        ),
+        "a `while` test difference must FAIL (the While arm signs test via expr_sig; pre-fix \
+         discriminant collapse = EQUAL = the false-PASS)"
+    );
+    // `do-while` body differs: pre-fix discriminant collapse → EQUAL. The `DoWhile(...)` arm signs
+    // body + test.
+    assert!(
+        !sigs_equal(
+            "var f = () => { do a(); while (x); };",
+            "var f = () => { do b(); while (x); };"
+        ),
+        "a `do-while` body difference must FAIL (the DoWhile arm signs its body via stmt_sig)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_for_in_vs_for_of_and_await_flag() {
+    // `for-in` vs `for-of` are DIFFERENT statement families — pre-fix they were distinct discriminants
+    // already, so the load-bearing diff here is the for-of `await` flag flip, which the discriminant
+    // collapse CANNOT see (same discriminant). `for await (x of y)` vs `for (x of y)` must FAIL — the
+    // `ForOf(await=…)` arm signs `r#await`.
+    assert!(
+        !sigs_equal(
+            "var f = async () => { for await (const x of y) a(x); };",
+            "var f = async () => { for (const x of y) a(x); };"
+        ),
+        "a for-of `await` flag flip must FAIL (the ForOf arm signs r#await; the pre-fix \
+         discriminant collapse could not distinguish them = the false-PASS)"
+    );
+    // And a for-of RIGHT-operand difference (the iterated source) must FAIL (for-of right via expr_sig).
+    assert!(
+        !sigs_equal(
+            "var f = () => { for (const x of y) a(x); };",
+            "var f = () => { for (const x of z) a(x); };"
+        ),
+        "a for-of right-operand difference must FAIL (the ForOf arm signs right via expr_sig)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_switch() {
+    // `switch` case CONSEQUENT differs: pre-fix discriminant collapse → EQUAL. `switch (n) { case 1:
+    // a(); }` vs `{ case 1: b(); }` must FAIL — `switch_case_sig` signs each case's test + consequent.
+    assert!(
+        !sigs_equal(
+            "var f = () => { switch (n) { case 1: a(); } };",
+            "var f = () => { switch (n) { case 1: b(); } };"
+        ),
+        "a `switch` case consequent difference must FAIL (switch_case_sig signs the consequent; \
+         pre-fix discriminant collapse = EQUAL = the false-PASS)"
+    );
+    // A case TEST difference (`case 1` vs `case 2`) must also FAIL (switch_case_sig signs the test).
+    assert!(
+        !sigs_equal(
+            "var f = () => { switch (n) { case 1: a(); } };",
+            "var f = () => { switch (n) { case 2: a(); } };"
+        ),
+        "a `switch` case test difference must FAIL (switch_case_sig signs the case test)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_try_catch_finally() {
+    // `try`/catch — catch-PARAM rename: pre-fix discriminant collapse → EQUAL. `try {} catch (e) {}`
+    // vs `catch (err) {}` must FAIL — the `Try(...)` arm signs the catch param via `binding_sig`.
+    assert!(
+        !sigs_equal(
+            "var f = () => { try { a(); } catch (e) { h(e); } };",
+            "var f = () => { try { a(); } catch (err) { h(err); } };"
+        ),
+        "a `try`/catch param rename must FAIL (the Try arm signs catch param via binding_sig; \
+         pre-fix discriminant collapse = EQUAL = the false-PASS)"
+    );
+    // FINALIZER presence differs: `try {} catch {} finally {}` vs without — the `Try(...)` arm signs
+    // `finalizer={…|<none>}`.
+    assert!(
+        !sigs_equal(
+            "var f = () => { try { a(); } catch (e) {} finally { c(); } };",
+            "var f = () => { try { a(); } catch (e) {} };"
+        ),
+        "a `try` finalizer present vs absent must FAIL (the Try arm signs the finalizer block)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_throw_argument() {
+    // `throw` argument differs: pre-fix discriminant collapse → EQUAL. `throw e;` vs `throw f;` must
+    // FAIL — the `Throw(...)` arm signs the argument via `expr_sig`.
+    assert!(
+        !sigs_equal("var f = () => { throw e; };", "var f = () => { throw g; };"),
+        "a `throw` argument difference must FAIL (the Throw arm signs the argument via expr_sig; \
+         pre-fix discriminant collapse = EQUAL = the false-PASS)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_labeled_statement() {
+    // `labeled` label NAME differs: pre-fix discriminant collapse → EQUAL. `outer: for(;;) a();` vs
+    // `inner: for(;;) a();` must FAIL — the `Label(...)` arm signs the label name + body.
+    assert!(
+        !sigs_equal(
+            "var f = () => { outer: for (;;) a(); };",
+            "var f = () => { inner: for (;;) a(); };"
+        ),
+        "a labeled-statement label-name difference must FAIL (the Label arm signs the label name; \
+         pre-fix discriminant collapse = EQUAL = the false-PASS)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_class_in_body_and_declaration() {
+    // `class` in a preserved body — SUPER-CLASS differs: pre-fix `ClassDeclaration` collapsed to
+    // `Stmt(discriminant)` → EQUAL. `class C extends A {}` vs `class C extends B {}` must FAIL —
+    // `class_sig` signs `super=<expr_sig>`.
+    assert!(
+        !sigs_equal(
+            "var f = () => { class C extends A {} return C; };",
+            "var f = () => { class C extends B {} return C; };"
+        ),
+        "a class super-class difference (in a preserved body) must FAIL (class_sig signs super via \
+         expr_sig; pre-fix discriminant collapse = EQUAL = the false-PASS)"
+    );
+    // A class MEMBER KEY difference as a top-level DECLARATION: `class C { a() {} }` vs `class C { b()
+    // {} }` must FAIL — `class_element_sig` signs each method key via `property_key_sig`. (This routes
+    // through `stmt_sig`'s `ClassDeclaration` arm → `class_sig` for a top-level class statement.)
+    assert!(
+        !sigs_equal("class C { a() {} }", "class C { b() {} }"),
+        "a class member-key difference (top-level declaration) must FAIL (class_element_sig signs \
+         the method key; pre-fix discriminant collapse = EQUAL = the false-PASS)"
+    );
+}
+
+#[test]
+fn struct_compare_waives_redundant_paren_in_encoded_statements() {
+    // COSMETIC SANITY (no false-FAIL): the NEW statement arms route every sub-expression through the
+    // paren-transparent `expr_sig`, so a redundant author paren INSIDE one of these statements is the
+    // cosmetic-paren waiver the official printer drops — it must compare EQUAL pre AND post (this
+    // characterizes no-regression for the new arms, not the false-PASS closure).
+    assert!(
+        sigs_equal(
+            "var f = () => { throw (e); };",
+            "var f = () => { throw e; };"
+        ),
+        "a redundant paren around a `throw` argument must compare EQUAL (the Throw arm routes the \
+         argument through the paren-transparent expr_sig)"
+    );
+    // A redundant paren around a `for` body call (`for(;;) (a)();` vs `for(;;) a();`) is likewise
+    // paren-transparent (the body routes through stmt_sig → expr_sig).
+    assert!(
+        sigs_equal(
+            "var f = () => { for (;;) (a)(); };",
+            "var f = () => { for (;;) a(); };"
+        ),
+        "a redundant paren around a `for` body call must compare EQUAL (the For body routes through \
+         the paren-transparent expr_sig)"
+    );
+}
+
+#[test]
+fn semantic_comment_class_ts_check_is_line_only_with_strict_boundary() {
+    // `@ts-check` / `@ts-nocheck` are valid ONLY as `//` LINE comments with a strict boundary
+    // (end / whitespace / `:`). The pre-fix classifier stripped BOTH `//` and `/* */` and accepted
+    // any non-identifier boundary, so a `/* @ts-check */` block and a `// @ts-check/foo` lookalike
+    // wrongly classified as semantic (false-FAILs).
+
+    // WAIVED: a `/* @ts-check */` BLOCK comment is NOT a valid `@ts-check` pragma — it must stay
+    // waived, so adding it to one side compares EQUAL. The pre-fix classifier false-FAILED this.
+    assert!(
+        sigs_equal("var x = 1;", "/* @ts-check */\nvar x = 1;"),
+        "`/* @ts-check */` in BLOCK form is not a valid pragma and must compare EQUAL (line-only; \
+         the pre-fix classifier false-FAILED this)"
+    );
+
+    // WAIVED: `// @ts-check/foo` is a LOOKALIKE — the `/foo` continues the token past the strict
+    // pragma boundary — so it stays waived. The pre-fix boundary accepted `/` and false-FAILED this.
+    assert!(
+        sigs_equal("var x = 1;", "// @ts-check/foo\nvar x = 1;"),
+        "`// @ts-check/foo` is a non-pragma lookalike (strict boundary) and must compare EQUAL (the \
+         pre-fix boundary false-FAILED this)"
+    );
+
+    // SEMANTIC: a genuine `// @ts-check` line pragma dropped must FAIL (the split must not
+    // over-narrow the real line pragma).
+    assert!(
+        !sigs_equal("// @ts-check\nvar x = 1;", "var x = 1;"),
+        "a dropped genuine `// @ts-check` line pragma must FAIL (line-form pragma stays semantic)"
+    );
+    // SEMANTIC: `// @ts-nocheck` (the other line pragma) dropped must FAIL.
+    assert!(
+        !sigs_equal("// @ts-nocheck\nvar x = 1;", "var x = 1;"),
+        "a dropped genuine `// @ts-nocheck` line pragma must FAIL (line-form pragma stays semantic)"
+    );
+    // SEMANTIC (unchanged): `@ts-ignore` / `@ts-expect-error` remain valid in BLOCK form (the split
+    // keeps their looser boundary) — a dropped `/* @ts-expect-error */` block must still FAIL.
+    assert!(
+        !sigs_equal("/* @ts-expect-error */\nvar x = 1;", "var x = 1;"),
+        "a dropped `/* @ts-expect-error */` block directive must still FAIL (block form stays valid \
+         for @ts-ignore / @ts-expect-error)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_class_method_arity() {
+    // `class_element_sig`'s `MethodDefinition` arm now signs the COMPLETE runtime method shape —
+    // `params` (via the terminal `params_sig` → `binding_sig`) alongside kind/static/computed/key/body.
+    // Two methods with the SAME name + body but a DIFFERENT param COUNT are a genuine behavioral
+    // divergence (the arity changes the call contract); the pre-fix arm signed kind/static/computed/
+    // key/body ONLY and collapsed them to the SAME signature (a structural false-PASS). A class is
+    // reachable via a source-preserved `{@html}`/dynamic-value arrow/function body the value emitter
+    // byte-copies.
+    assert!(
+        !sigs_equal(
+            "class C { m(a) { return 1; } }",
+            "class C { m(a, b) { return 1; } }"
+        ),
+        "two class methods with the same name + body but different param ARITY must FAIL \
+         (class_element_sig now signs method params; the pre-fix arm false-PASSED this)"
+    );
+    // SANITY (no false-FAIL): a redundant-paren-only method body difference still compares EQUAL
+    // (the body is signed via the paren-insensitive `function_body_sig` → `expr_sig`).
+    assert!(
+        sigs_equal(
+            "class C { m(a) { return (a); } }",
+            "class C { m(a) { return a; } }"
+        ),
+        "a redundant-paren-only class method body difference must still compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_class_method_async() {
+    // `class_element_sig`'s `MethodDefinition` arm now signs `async` (`m.value.r#async`). An `async`
+    // method and a plain method with the SAME name + params + body differ behaviorally (an async
+    // method returns a Promise); the pre-fix arm dropped the async bit and collapsed them. Reachable
+    // through a source-preserved class body.
+    assert!(
+        !sigs_equal(
+            "class C { async m() { return 1; } }",
+            "class C { m() { return 1; } }"
+        ),
+        "an async class method vs a plain one (same name/params/body) must FAIL (class_element_sig \
+         now signs method async; the pre-fix arm false-PASSED this)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_class_method_generator() {
+    // `class_element_sig`'s `MethodDefinition` arm now signs `generator` (`m.value.generator`). A
+    // generator method `*m(){}` and a plain method with the SAME name + params + body differ
+    // behaviorally (a generator returns an iterator); the pre-fix arm dropped the generator bit and
+    // collapsed them. Reachable through a source-preserved class body.
+    assert!(
+        !sigs_equal(
+            "class C { *m() { return 1; } }",
+            "class C { m() { return 1; } }"
+        ),
+        "a generator class method vs a plain one (same name/params/body) must FAIL (class_element_sig \
+         now signs method generator; the pre-fix arm false-PASSED this)"
+    );
+}
+
+#[test]
+fn struct_compare_waives_class_expression_redundant_parens() {
+    // `expr_sig` now routes a `ClassExpression` through `class_sig` (paren-transparent — the method
+    // body is signed via `function_body_sig` → `expr_sig`, which peels redundant parens). A redundant
+    // author paren inside a class-expression method body is COSMETIC, so two such class expressions
+    // compare EQUAL. Pre-fix, `ClassExpression` Debug-collapsed via the `other =>` fallback, which
+    // leaks the inner paren's span/Debug shape — a cosmetic-paren false-FAIL this closes. A class
+    // expression is reachable via a source-preserved dynamic value (`var C = class { … }`).
+    assert!(
+        sigs_equal(
+            "var C = class { m() { return (x); } };",
+            "var C = class { m() { return x; } };"
+        ),
+        "a redundant-paren-only class EXPRESSION method body difference must compare EQUAL \
+         (expr_sig now routes class expressions through the paren-transparent class_sig; the pre-fix \
+         Debug fallback false-FAILED this)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_class_expression_method_arity() {
+    // A class EXPRESSION now routes through the (fixed) `class_sig`, so a method-arity difference in a
+    // class expression FAILS exactly like a class declaration — proving class expressions reach the
+    // fixed encoder, not the Debug fallback. Pre-fix the `other =>` Debug fallback might happen to
+    // catch the arity (Debug prints params), but it ALSO false-FAILed cosmetic parens (previous test);
+    // the pair together pins "class expr routes through class_sig". Reachable via a source-preserved
+    // dynamic value.
+    assert!(
+        !sigs_equal(
+            "var C = class { m(a) {} };",
+            "var C = class { m(a, b) {} };"
+        ),
+        "two class EXPRESSIONS with a method arity difference must FAIL (class expressions route \
+         through the fixed class_sig)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_class_level_decorator_presence() {
+    // `class_sig` now signs CLASS-level decorators (`decorators=<decorators_sig>`). A decorated class
+    // and the same class without the decorator differ behaviorally (the decorator executes and can
+    // alter the class). OXC parses ECMAScript decorators under the comparator's `SourceType::mjs()`
+    // (verified — the parse succeeds with errors=0), the Svelte runtime strips TS but NOT decorators,
+    // and a decorated class in a source-preserved `{@html}`/dynamic value is byte-copied to emitted
+    // client JS — so this is REACHABLE. The pre-fix `class_sig` ignored `Class.decorators`, collapsing
+    // the two to the SAME signature (a reachable false-PASS this closes). The class is a top-level
+    // declaration (program-body), which routes through `stmt_sig`'s `ClassDeclaration` arm → `class_sig`.
+    assert!(
+        !sigs_equal("@dec class C {}\nvar x = 1;", "class C {}\nvar x = 1;"),
+        "a decorated class vs the same undecorated class must FAIL (class_sig now signs class-level \
+         decorators; the pre-fix arm ignored Class.decorators = the false-PASS)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_class_level_decorator_name_differs() {
+    // Two classes decorated with DIFFERENT decorators (`@a` vs `@b`) differ behaviorally — different
+    // decorator functions run. `class_sig` signs each decorator through the paren-transparent
+    // `expr_sig`, so the decorator IDENTIFIER difference is captured. Pre-fix both collapsed to the
+    // SAME (unsigned-decorator) signature.
+    assert!(
+        !sigs_equal("@a class C {}\nvar x = 1;", "@b class C {}\nvar x = 1;"),
+        "two classes decorated with different decorators (@a vs @b) must FAIL (class_sig signs each \
+         decorator via the paren-transparent expr_sig)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_member_method_decorator_presence() {
+    // `class_element_sig`'s `MethodDefinition` arm now signs the per-member decorators
+    // (`decorators=<decorators_sig>`). A decorated method and the same method without the decorator
+    // differ behaviorally (the member decorator executes). Pre-fix the method arm ignored
+    // `m.decorators`, collapsing them — a reachable false-PASS this closes. Reachable via a
+    // source-preserved class body the value emitter byte-copies.
+    assert!(
+        !sigs_equal("class C { @dec m() {} }", "class C { m() {} }"),
+        "a decorated method vs the same undecorated method must FAIL (class_element_sig now signs \
+         method decorators; the pre-fix arm ignored m.decorators = the false-PASS)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_member_method_decorator_name_differs() {
+    // A method decorated with DIFFERENT decorators (`@a` vs `@b`) differs behaviorally. The
+    // `MethodDefinition` arm signs each decorator through the paren-transparent `expr_sig`, so the
+    // decorator IDENTIFIER difference is captured. Pre-fix both collapsed to the SAME signature.
+    assert!(
+        !sigs_equal("class C { @a m() {} }", "class C { @b m() {} }"),
+        "a method decorated with different decorators (@a vs @b) must FAIL (class_element_sig signs \
+         each method decorator via the paren-transparent expr_sig)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_member_property_decorator_presence() {
+    // `class_element_sig`'s `PropertyDefinition` arm now signs the per-member decorators. A decorated
+    // property and the same property without the decorator differ behaviorally (the property decorator
+    // executes). Pre-fix the prop arm ignored `p.decorators`, collapsing them — a reachable false-PASS.
+    assert!(
+        !sigs_equal("class C { @dec x = 1; }", "class C { x = 1; }"),
+        "a decorated property vs the same undecorated property must FAIL (class_element_sig now signs \
+         property decorators; the pre-fix arm ignored p.decorators = the false-PASS)"
+    );
+}
+
+#[test]
+fn struct_compare_decorator_arg_paren_transparent_but_value_significant() {
+    // Each decorator is signed through the paren-transparent `expr_sig` (a decorator IS an expression —
+    // `@foo`, `@foo.bar`, `@foo(arg)`). This locks BOTH directions:
+    //
+    // PAREN-EQUAL (cosmetic / no-false-FAIL): a redundant paren around a decorator ARGUMENT is the
+    // cosmetic-paren waiver the official printer drops — it must compare EQUAL (the arg is signed via
+    // the paren-transparent `expr_sig`). (Pre-fix this is also EQUAL because decorators were unsigned;
+    // the value-FAIL below is what makes the EQUAL here a MEANINGFUL post-fix transparency assertion.)
+    assert!(
+        sigs_equal("@dec((x)) class C {}\nvar y = 1;", "@dec(x) class C {}\nvar y = 1;"),
+        "a redundant paren around a decorator argument must compare EQUAL (the decorator arg is signed \
+         via the paren-transparent expr_sig)"
+    );
+    // VALUE-FAIL (the arg is actually signed): a DIFFERENT decorator argument value (`@dec(a)` vs
+    // `@dec(b)`) is behavior-bearing and must FAIL — proving the arg is genuinely signed, not dropped.
+    // Pre-fix both collapsed to the SAME (unsigned-decorator) signature = the false-PASS.
+    assert!(
+        !sigs_equal("@dec(a) class C {}\nvar y = 1;", "@dec(b) class C {}\nvar y = 1;"),
+        "two classes with a different decorator ARGUMENT value (@dec(a) vs @dec(b)) must FAIL (the \
+         decorator argument is signed via expr_sig; pre-fix the unsigned decorator false-PASSED this)"
+    );
+}
+
+#[test]
+fn struct_compare_waives_stray_empty_statement_in_list() {
+    // `statements_sig` now FILTERS a stray no-op `EmptyStatement` (`;`) in a statement LIST — the
+    // official printer drops it, so `{ ; return x; }` and `{ return x; }` are a cosmetic-only
+    // difference and must compare EQUAL. Pre-fix `stmt_sig` signed `Empty` for the stray `;`, so the
+    // list signatures differed — a false-FAIL this closes. Reachable via a source-preserved
+    // arrow/function body the value emitter byte-copies.
+    assert!(
+        sigs_equal(
+            "var f = () => { ; return x; };",
+            "var f = () => { return x; };"
+        ),
+        "a stray no-op `;` in a statement LIST must compare EQUAL to the same list without it \
+         (statements_sig filters list-context EmptyStatement; the pre-fix Empty arm false-FAILED this)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_empty_vs_nonempty_required_loop_body() {
+    // The EmptyStatement list-context filter must NOT over-reach into REQUIRED child positions. A
+    // loop BODY is a required position reached through `stmt_sig` DIRECTLY (NOT `statements_sig`), so
+    // an empty loop body (`for(;;);`) vs a non-empty one (`for(;;) a();`) is behavior-bearing and
+    // stays UNEQUAL. This locks the contract: the filter only drops no-op `;` from LISTS, never from a
+    // required body. (Should be UNEQUAL pre AND post — its job is to characterize the no-over-filter
+    // boundary, not to prove a defect closed.)
+    assert!(
+        !sigs_equal(
+            "var f = () => { for (;;); };",
+            "var f = () => { for (;;) a(); };"
+        ),
+        "an EMPTY required loop body vs a non-empty one must stay UNEQUAL (the list-context filter \
+         must NOT over-reach into the required loop-body position reached via stmt_sig directly)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_class_decl_vs_expr_at_export_default() {
+    // `class_sig` now signs `Class.r#type` (ClassDeclaration vs ClassExpression). The decl-vs-expr
+    // distinction is BEHAVIOR-BEARING at `export default`: `export default class C {}` BINDS the name
+    // `C` in module scope (so `var y = C;` succeeds), while `export default (class C {});` is a class
+    // EXPRESSION whose `C` is visible ONLY inside the class body, NOT module scope (so `var y = C;`
+    // throws a ReferenceError). Both flow through the export-default arm → `class_sig`. Pre-fix
+    // `class_sig` dropped `Class.r#type`, so the two signed IDENTICALLY — a behavior-bearing false-PASS
+    // this closes. (The trailing `var y = C;` keeps the two modules' bodies structurally identical so
+    // the `Class.r#type` axis is the SOLE difference carrying the FAIL.)
+    assert!(
+        !sigs_equal(
+            "export default class C {}\nvar y = C;",
+            "export default (class C {});\nvar y = C;"
+        ),
+        "an export-default class DECLARATION (binds C) vs a class EXPRESSION (does not bind C) must \
+         FAIL (class_sig now signs Class.r#type; the pre-fix arm dropped it = the false-PASS)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_jsdoc_on_leading_filtered_empty_vs_leading_real_statement() {
+    // The empty-statement filter ↔ comment-anchor index MISMATCH (false-PASS). `statements_sig`
+    // FILTERS a list-context `EmptyStatement`, so the comment-anchor index MUST be computed over the
+    // SAME normalized view: a real statement is indexed by its LOGICAL (empty-filtered) index, and a
+    // semantic comment attached to a FILTERED empty gets a SYNTHETIC
+    // `empty_gap[<logical>.<empty_ordinal>]:EmptyStatement` anchor — distinct from the next real
+    // statement's `stmt[N]:<AstType>`. So a JSDoc on the leading EMPTY (`/** @type {number} */; var x`)
+    // anchors `empty_gap[0.0]:EmptyStatement` while a JSDoc on the leading VAR
+    // (`/** @type {number} */ var x`) anchors `stmt[0]:VariableDeclaration` → UNEQUAL.
+    // Pre-fix the index walked UNFILTERED `program.body` with bare `stmt[<raw i>]`, so both got the SAME
+    // anchor + the same filtered module_sig → the JSDoc MOVE compared EQUAL (the false-PASS this closes).
+    assert!(
+        !sigs_equal(
+            "/** @type {number} */; var x = \"s\";",
+            "/** @type {number} */ var x = \"s\";"
+        ),
+        "a JSDoc semantic comment on a leading FILTERED empty statement vs on the leading real \
+         statement must FAIL (the anchor index normalizes over the same empty-filtered view: \
+         empty_gap[0.0] vs stmt[0]; the pre-fix raw-index walk collapsed both = the false-PASS)"
+    );
+    // Pin the SPECIFIC anchors (not just inequality) so this test genuinely characterizes the
+    // empty_gap synthetic anchor: a JSDoc on the filtered empty resolves to
+    // `empty_gap[0.0]:EmptyStatement` (NOT `<tail>`, NOT the next real node), and a JSDoc on the real var
+    // resolves to its node-typed logical-index segment. This makes the test RED if `record_empty_gap` is
+    // removed (the empty would otherwise collapse to `<tail>`).
+    assert_eq!(
+        first_semantic_comment_anchor("/** @type {number} */; var x = \"s\";"),
+        "pos=Leading/empty_gap[0.0]:EmptyStatement",
+        "a JSDoc on a leading FILTERED empty statement must resolve to the synthetic empty_gap[0.0] anchor"
+    );
+    assert_eq!(
+        first_semantic_comment_anchor("/** @type {number} */ var x = \"s\";"),
+        "pos=Leading/stmt[0]:VariableDeclaration",
+        "a JSDoc on the leading real var must resolve to its node-typed logical-index segment"
+    );
+}
+
+#[test]
+fn struct_compare_waives_cosmetic_semicolon_before_semantic_comment() {
+    // The SAME mismatch, the false-FAIL direction. A cosmetic leading `;` (a list-context empty the
+    // printer drops) before a semantic comment that leads a REAL statement must NOT shift that
+    // comment's anchor: `; /*! keep */ f();` and `/*! keep */ f();` BOTH anchor the license comment to
+    // `f()`'s `stmt[0]:ExpressionStatement` → EQUAL. Pre-fix the unfiltered index gave the comment raw
+    // `stmt[1]` vs `stmt[0]`, so the cosmetic `;` made them UNEQUAL (the false-FAIL this closes).
+    assert!(
+        sigs_equal("; /*! keep */ f();", "/*! keep */ f();"),
+        "a cosmetic leading `;` before a semantic comment on a real statement must compare EQUAL \
+         (the anchor index normalizes the empty away so the comment anchors the same real statement; \
+         the pre-fix raw-index walk shifted the anchor = the false-FAIL)"
+    );
+}
+
+#[test]
+fn struct_compare_normalizes_empty_gap_anchor_inside_nested_statement_list() {
+    // The empty-gap normalization is RECURSIVE: `statements_sig` filters list-context empties inside
+    // nested lists (block/function bodies, switch consequents, static blocks) too, so the anchor index
+    // must apply the SAME normalization there — done via the `visit_statements` override that mirrors
+    // the top-level loop. INSIDE a function body:
+    //
+    // MOVE (false-PASS direction): a JSDoc on a nested FILTERED empty (`{ /** @type {number} */;
+    // return x; }`) anchors a nested `empty_gap[0.0]:EmptyStatement` while a JSDoc on the nested return
+    // (`{ /** @type {number} */ return x; }`) anchors a nested `stmt[0]:ReturnStatement` → UNEQUAL.
+    assert!(
+        !sigs_equal(
+            "function g(){ /** @type {number} */; return x; }",
+            "function g(){ /** @type {number} */ return x; }"
+        ),
+        "a JSDoc on a nested FILTERED empty vs on the nested real statement must FAIL (the \
+         visit_statements override normalizes nested lists the same way: empty_gap[0.0] vs stmt[0])"
+    );
+    // Pin the SPECIFIC nested anchors so this test genuinely characterizes the RECURSIVE empty_gap
+    // normalization: a JSDoc on the nested filtered empty resolves to a nested
+    // `empty_gap[0.0]:EmptyStatement` segment under the function-body chain (NOT the next real nested
+    // node, NOT `<tail>`), while a JSDoc on the nested real return resolves to its `child[0]` logical
+    // segment. This makes the test RED if `record_empty_gap` is removed (the nested empty would
+    // otherwise collapse to the surrounding node / `<tail>`).
+    assert_eq!(
+        first_semantic_comment_anchor("function g(){ /** @type {number} */; return x; }"),
+        "pos=Leading/stmt[0]:Function/child[2]:FunctionBody/empty_gap[0.0]:EmptyStatement",
+        "a JSDoc on a nested FILTERED empty must resolve to the synthetic nested empty_gap[0.0] anchor"
+    );
+    assert_eq!(
+        first_semantic_comment_anchor("function g(){ /** @type {number} */ return x; }"),
+        "pos=Leading/stmt[0]:Function/child[2]:FunctionBody/child[0]:ReturnStatement",
+        "a JSDoc on the nested real return must resolve to its nested logical-index segment"
+    );
+    // COSMETIC nested `;` (false-FAIL direction): a cosmetic leading `;` inside the body before a
+    // semantic comment on a real nested statement must compare EQUAL (the nested empty is normalized
+    // away, so the comment anchors the same nested statement).
+    assert!(
+        sigs_equal(
+            "function g(){ ; /*! keep */ h(); }",
+            "function g(){ /*! keep */ h(); }"
+        ),
+        "a cosmetic leading `;` inside a function body before a semantic comment on a real nested \
+         statement must compare EQUAL (the visit_statements override normalizes the nested empty away)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_semantic_comment_moved_between_consecutive_filtered_empties() {
+    // The per-gap EMPTY ORDINAL. CONSECUTIVE list-context `EmptyStatement`s (`;;`) are all filtered by
+    // `statements_sig` (cosmetic no-ops) and share the same LOGICAL gap index, so a per-gap ordinal is
+    // required to keep a semantic comment's POSITION among them structural. A `/*@__PURE__*/` comment
+    // moved from BEFORE the first empty to BETWEEN the two empties must compare UNEQUAL — the comment
+    // anchors `empty_gap[0.0]` in one form and `empty_gap[0.1]` in the other. Pre-fix both collapsed to
+    // `empty_gap[0]` (the consecutive empties collided), so the MOVE compared EQUAL — the comparator's
+    // own anchor-consistency invariant ("a future anchor collapse inside the normalized view is a
+    // comparator bug") was violated. This test RED→GREEN characterizes the per-gap empty ordinal.
+    assert!(
+        !sigs_equal("/*@__PURE__*/ ; ; f();", "; /*@__PURE__*/ ; f();"),
+        "a semantic (PURE) comment moved between two CONSECUTIVE filtered empty statements must FAIL \
+         (the per-gap empty ordinal makes empty_gap[0.0] vs empty_gap[0.1] distinct; the pre-fix \
+         single-index anchor collapsed both consecutive empties = the cosmetic-corner false-PASS)"
+    );
+    // Pin the SPECIFIC anchors so the test genuinely characterizes the ordinal (not just inequality):
+    // the leading-on-first-empty form anchors `empty_gap[0.0]`, the moved-between form anchors
+    // `empty_gap[0.1]`. RED if the ordinal is removed (both collapse to `empty_gap[0]`).
+    assert_eq!(
+        first_semantic_comment_anchor("/*@__PURE__*/ ; ; f();"),
+        "pos=Leading/empty_gap[0.0]:EmptyStatement",
+        "a PURE comment leading the FIRST of two consecutive filtered empties anchors empty_gap[0.0]"
+    );
+    assert_eq!(
+        first_semantic_comment_anchor("; /*@__PURE__*/ ; f();"),
+        "pos=Leading/empty_gap[0.1]:EmptyStatement",
+        "a PURE comment leading the SECOND of two consecutive filtered empties anchors empty_gap[0.1]"
+    );
+    // SANITY (no false-FAIL): the SAME comment at the SAME position differing only by whitespace
+    // between the empties must still compare EQUAL (the ordinal is position-structural, not whitespace).
+    assert!(
+        sigs_equal("/*@__PURE__*/ ; ; f();", "/*@__PURE__*/   ;   ; f();"),
+        "the same PURE comment at the same empty position differing only by whitespace must compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_waives_untagged_template_cooked_equal_escape() {
+    // An UNTAGGED `TemplateLiteral`'s COOKED value is its RUNTIME string; the raw escape representation
+    // is a cosmetic carrier (exactly like a `StringLiteral`, which already signs cooked `.value`). So
+    // ``\x41`` and ``A`` (untagged) produce the SAME runtime string `"A"` and must compare EQUAL.
+    // Pre-fix `expr_sig`'s `TemplateLiteral` arm signed `q.value.raw`, so the escape difference made
+    // them UNEQUAL (the false-FAIL this closes). The fix signs the COOKED value per quasi.
+    assert!(
+        sigs_equal("var s = `\\x41`;", "var s = `A`;"),
+        "two UNTAGGED templates with the same COOKED value but different raw escapes must compare \
+         EQUAL (the untagged cooked value is the runtime string; raw is cosmetic carrier)"
+    );
+    // VALUE-FAIL (the cooked value is actually signed): a DIFFERENT cooked value must still FAIL,
+    // proving the fix signs the cooked content rather than dropping it.
+    assert!(
+        !sigs_equal("var s = `A`;", "var s = `B`;"),
+        "two UNTAGGED templates with different COOKED values must FAIL (the cooked value is signed)"
+    );
+}
+
+#[test]
+fn struct_compare_keeps_tagged_template_raw_significant() {
+    // A TAGGED template's tag function observes `strings.raw`, so the RAW escape representation IS
+    // in-contract for a tagged template — ``tag`\x41`` and ``tag`A`` differ in what the tag sees and
+    // must stay UNEQUAL. The tagged arm signs BOTH raw and cooked (so a cooked-only diff is also
+    // caught), but the raw difference alone keeps this pair UNEQUAL. (Should hold pre AND post — it
+    // characterizes that the untagged cooked fix did NOT leak into the tagged arm.)
+    assert!(
+        !sigs_equal("var s = tag`\\x41`;", "var s = tag`A`;"),
+        "two TAGGED templates with different raw escapes must stay UNEQUAL (the tag observes \
+         strings.raw, so raw is in-contract for tagged templates)"
+    );
+}
+
+#[test]
+fn struct_compare_handles_yield_paren_value_and_delegate() {
+    // `expr_sig` now encodes `YieldExpression` (`Yield(delegate=..,arg=..)`) with the argument routed
+    // through the paren-transparent `expr_sig`. Pre-fix yield Debug-collapsed via the `other =>`
+    // fallback (leaking the inner paren span + a Debug shape). Reachable through a source-preserved
+    // generator function literal the emitter byte-copies.
+
+    // PAREN-EQUAL (cosmetic): a redundant paren around the yield argument is COSMETIC and compares
+    // EQUAL (the arg is signed via the paren-transparent `expr_sig`). Pre-fix Debug-collapse leaks the
+    // paren → false-FAIL.
+    assert!(
+        sigs_equal(
+            "var f = function* () { yield (x); };",
+            "var f = function* () { yield x; };"
+        ),
+        "a redundant paren around a yield argument must compare EQUAL (expr_sig now signs the yield \
+         arg paren-transparently; the pre-fix Debug fallback false-FAILED this)"
+    );
+    // VALUE-FAIL: a DIFFERENT yield argument is a behavioral divergence and FAILS.
+    assert!(
+        !sigs_equal(
+            "var f = function* () { yield a; };",
+            "var f = function* () { yield b; };"
+        ),
+        "a yield with a different argument value must FAIL (the yield arg is signed)"
+    );
+    // DELEGATE-FAIL: `yield* g()` (delegating) vs `yield g()` (non-delegating) differ behaviorally
+    // (delegation iterates the operand) and FAIL — the `delegate` bit is signed.
+    assert!(
+        !sigs_equal(
+            "var f = function* () { yield* g(); };",
+            "var f = function* () { yield g(); };"
+        ),
+        "a delegating `yield*` vs a non-delegating `yield` must FAIL (the delegate bit is signed)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_import_expression_source() {
+    // `expr_sig` now encodes a dynamic `ImportExpression` (`Import(source=..,options=..,phase=..)`)
+    // with the source routed through `expr_sig`. Two `import(...)` calls with DIFFERENT sources are a
+    // behavioral divergence (they load different modules) and FAIL; pre-fix the import expression
+    // Debug-collapsed via the `other =>` fallback. Dynamic import is ordinary source-preservable JS
+    // reachable through a `{@html}`/dynamic-value body.
+    assert!(
+        !sigs_equal("var p = import(\"a\");", "var p = import(\"b\");"),
+        "two dynamic import() expressions with different sources must FAIL (the import source is \
+         signed; the pre-fix Debug fallback collapsed it)"
+    );
+    // SANITY (no false-FAIL): the SAME dynamic import with a redundant paren around the source still
+    // compares EQUAL (the source is signed via the paren-transparent `expr_sig`).
+    assert!(
+        sigs_equal("var p = import((\"a\"));", "var p = import(\"a\");"),
+        "a redundant paren around a dynamic import source must compare EQUAL"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_meta_property() {
+    // `expr_sig` encodes a `MetaProperty` (`Meta(meta.property)`). `import.meta` and `new.target` are
+    // DISTINCT meta-properties with different runtime meaning. The wrapper is IDENTICAL on both sides
+    // (`function f(){ return <X>; }` — `new.target` is only valid inside a function) and ONLY the
+    // meta-property differs, so this isolates the `MetaProperty` axis: it would compare EQUAL (false-
+    // PASS) if the `MetaProperty` arm were unsigned. Reachable through ordinary source-preservable JS.
+    assert!(
+        !sigs_equal(
+            "function f(){ return import.meta; }",
+            "function f(){ return new.target; }"
+        ),
+        "import.meta vs new.target must FAIL — the MetaProperty meta/property names are the SOLE \
+         difference (identical function wrapper)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_private_in_expression() {
+    // `expr_sig` encodes a `PrivateInExpression` (`PrivateIn(#name in <right>)`). BOTH classes declare
+    // the SAME member inventory (`#a; #b;`) and an IDENTICAL method, varying ONLY the brand checked in
+    // the `in` expression (`#a in o` vs `#b in o`), so this isolates the `PrivateInExpression.left`
+    // axis: it would compare EQUAL (false-PASS) if `PrivateInExpression` were unsigned. `#x in obj` is
+    // only valid inside a class body — reachable through a source-preserved class body.
+    assert!(
+        !sigs_equal(
+            "class C { #a; #b; m(o){ return #a in o; } }",
+            "class C { #a; #b; m(o){ return #b in o; } }"
+        ),
+        "#a in o vs #b in o must FAIL — the PrivateInExpression.left brand is the SOLE difference \
+         (identical class member inventory on both sides)"
+    );
+}
+
+#[test]
+fn struct_compare_signs_super_in_method() {
+    // `expr_sig` now encodes `Super` as the bare leaf `Super` (not a Debug collapse). A method that
+    // calls `super.m()` differs from one that calls a plain `m()` — the member OBJECT is `Super` on
+    // one side and an identifier on the other — so they FAIL. Super is a leaf; one light assertion.
+    // Reachable inside a source-preserved class method body.
+    assert!(
+        !sigs_equal(
+            "class C extends B { m() { return super.x; } }",
+            "class C extends B { m() { return this.x; } }"
+        ),
+        "a method member access through `super` vs `this` must FAIL (Super is signed as a distinct \
+         leaf object)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Module import/export ORACLE axes. OFFICIAL Svelte client output CAN carry
+// module-script imports/exports (the `matrix/module_import_export` golden proves a
+// `clientModule` with `import {base} from "./base.js"; … export const VERSION = 1;`),
+// so the comparator — the gate ORACLE — must compare these forms even though native
+// Verter currently REFUSES `<script module>` in this branch. The import/export family
+// is signed IN FULL (`ImportDeclaration` source/kind/phase/with-clause/specifiers;
+// `ExportNamedDeclaration` declaration/specifiers/source/export-kind/with-clause;
+// `ExportAllDeclaration` exported/source/export-kind/with-clause). These guards isolate
+// the axes that PARSE under `SourceType::mjs()`: import-attribute key/value + the
+// `with`/`assert` keyword, specifier-only export local/exported, export source,
+// export-all source + namespace rename, hashbang. The `import type` / `export type`
+// kind is TS-only syntax that is NOT parseable under the comparator's `SourceType::mjs()`
+// parse, and the `import defer` phase ties to the namespace-import form, so those two
+// fields are signed DEFENSIVELY (encoded, no planted positive discriminator) — not a
+// reachable gap for the emitted-mjs oracle.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn struct_compare_fails_on_import_attribute_value_and_presence() {
+    // `import d from "x" with { type: "json" }` vs `… with { type: "css" }` differ ONLY in the
+    // import-attribute VALUE — the import source, specifiers, and clause keyword are identical — so
+    // they must FAIL. The `with_clause`/`ImportAttribute` axes are signed.
+    assert!(
+        !sigs_equal(
+            "import d from \"x\" with { type: \"json\" };",
+            "import d from \"x\" with { type: \"css\" };"
+        ),
+        "two imports differing ONLY in the with-clause attribute value must FAIL (the import \
+         attribute value is the SOLE difference)"
+    );
+    // Attribute PRESENCE: a bare import vs the SAME import carrying a `with`-clause must FAIL — the
+    // clause is the SOLE difference.
+    assert!(
+        !sigs_equal(
+            "import d from \"x\";",
+            "import d from \"x\" with { type: \"json\" };"
+        ),
+        "an import with a `with`-clause vs the same import without one must FAIL (the with-clause \
+         presence is the SOLE difference)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_import_attribute_keyword() {
+    // The import-attributes KEYWORD (`with` vs the legacy `assert`) is signed by `with_clause_sig`
+    // (it signs `WithClause.keyword`). Two imports identical except the keyword must FAIL — the
+    // keyword selects the attribute semantics (`with` = import attributes; `assert` = the legacy
+    // import-assertions form). Both parse under `SourceType::mjs()`.
+    assert!(
+        !sigs_equal(
+            "import d from \"x\" with { type: \"json\" };",
+            "import d from \"x\" assert { type: \"json\" };"
+        ),
+        "an import-attributes `with` vs `assert` keyword (same source + attributes) must FAIL (the \
+         WithClause keyword is the SOLE difference)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_specifier_only_export() {
+    // `export { a as value }` vs `export { b as value }` — both have NO inline declaration, an
+    // IDENTICAL surrounding `const a=1,b=2;`, and the same exported name; only the LOCAL specifier
+    // differs. Pre-fix the declaration-only `ExportNamed` arm dropped specifiers → both empty →
+    // EQUAL (a false-PASS). The `ExportSpecifier` axis is signed.
+    assert!(
+        !sigs_equal(
+            "const a=1,b=2; export { a as value };",
+            "const a=1,b=2; export { b as value };"
+        ),
+        "two specifier-only exports differing ONLY in the local binding (`a as value` vs \
+         `b as value`) must FAIL (the export specifier local is the SOLE difference)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_export_source_reexport() {
+    // `export { a } from "./x.js"` vs `… from "./y.js"` — a re-export differing ONLY in the source
+    // module loads a DIFFERENT module, so they must FAIL. Pre-fix the `ExportNamed` arm dropped the
+    // source → EQUAL. The `ExportNamedDeclaration.source` axis is signed.
+    assert!(
+        !sigs_equal(
+            "export { a } from \"./x.js\";",
+            "export { a } from \"./y.js\";"
+        ),
+        "two re-exports differing ONLY in the source module must FAIL (the export source is the SOLE \
+         difference)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_export_all_source_and_namespace() {
+    // `export * from "./a.js"` vs `… from "./b.js"` — pre-fix BOTH fell to the `Stmt(discriminant)`
+    // fallback → EQUAL (a false-PASS). The `ExportAllDeclaration` arm signs the source.
+    assert!(
+        !sigs_equal(
+            "export * from \"./a.js\";",
+            "export * from \"./b.js\";"
+        ),
+        "two export-all re-exports differing ONLY in the source must FAIL (the export-all source is \
+         the SOLE difference)"
+    );
+    // A bare `export *` vs a NAMESPACE-renamed `export * as ns` over the SAME source differ ONLY in
+    // the `exported` rename — they must FAIL.
+    assert!(
+        !sigs_equal(
+            "export * from \"./a.js\";",
+            "export * as ns from \"./a.js\";"
+        ),
+        "an `export *` vs `export * as ns` over the same source must FAIL (the namespace rename is \
+         the SOLE difference)"
+    );
+}
+
+#[test]
+fn struct_compare_fails_on_hashbang() {
+    // A `#!/usr/bin/env node` hashbang present vs absent over the SAME body must FAIL. Pre-fix
+    // `program_sig` dropped `Program.hashbang` → EQUAL (a false-PASS). The hashbang axis is signed.
+    assert!(
+        !sigs_equal("#!/usr/bin/env node\nvar x = 1;", "var x = 1;"),
+        "a `#!/usr/bin/env node` hashbang present vs absent must FAIL (the hashbang is the SOLE \
+         difference)"
+    );
+}
+
+#[test]
+fn struct_compare_waives_directive_carrier_formatting_but_fails_on_directive_text() {
+    // Directive CARRIER FORMATTING (quote style, escape representation) is cosmetic — the official
+    // printer normalizes it, and only the COOKED value is in contract. `"use strict"` vs
+    // `'use strict'` carry the SAME cooked value (OXC's raw directive token strips the surrounding
+    // quotes), so they compare EQUAL both before and after the fix.
+    assert!(
+        sigs_equal("\"use strict\"; var x=1;", "'use strict'; var x=1;"),
+        "a `\"use strict\"` vs `'use strict'` directive (same cooked value, different quote style) \
+         must compare EQUAL (quote style is cosmetic)"
+    );
+    // ESCAPE REPRESENTATION is the genuine false-FAIL the cooked-value-only signature fixes:
+    // `"\x75se strict"` and `"use strict"` have an IDENTICAL cooked value (`use strict`) but a
+    // DIFFERENT raw token (`\x75se strict` vs `use strict`). Pre-fix `directive_sig` signed the raw
+    // token → UNEQUAL (a false-FAIL); signing only the cooked value compares them EQUAL.
+    assert!(
+        sigs_equal("\"\\x75se strict\"; var x=1;", "\"use strict\"; var x=1;"),
+        "an escape-equivalent directive (`\"\\x75se strict\"` vs `\"use strict\"`, same cooked value) \
+         must compare EQUAL (escape representation is cosmetic carrier formatting)"
+    );
+    // A DIFFERENT directive TEXT still diverges — the cooked value differs.
+    assert!(
+        !sigs_equal("\"use strict\";", "\"use asm\";"),
+        "a `\"use strict\"` vs `\"use asm\"` directive must FAIL (the cooked directive value differs)"
+    );
+}
+
+/// THE guard for the `Compiled-Output Conformance (CRITICAL)` rule. It asserts the LANDED
+/// structural comparator `sigs_equal` (the `conformance_sig` → `expr_sig`/`params_sig`/
+/// `binding_sig`/`stmt_sig`/`statements_sig` AST family PLUS the `comment_sig` semantic-comment
+/// signature over the Svelte client backend's emitted JS) DISCRIMINATES a cosmetic-only diff from
+/// a behavioral / structural divergence — exactly the rule's bar: "a cosmetic-only diff passes; a
+/// behavioral or structural divergence fails".
+///
+/// The cosmetic axes this parser-based oracle WAIVES are (1) outer/intra-expression whitespace (OXC
+/// parses each side, so formatting is gone), (2) behavior-preserving redundant parentheses
+/// (`unwrap_parens` peels transparent wrappers), and (3) NON-SEMANTIC comment trivia ONLY — plain
+/// `// note` / `/* note */` and unknown `@foo` annotations. The rule's IN-CONTRACT comment boundary
+/// (directive/pragma `/*@__PURE__*/`, license/preserve, source-map/`sourceURL`, TS-directive,
+/// JSDoc) IS ENFORCED by the `comment_sig` semantic-comment signature: a semantic comment dropped,
+/// corrupted, or MOVED to a different anchor compares UNEQUAL (the FAIL asserts below). The PASS-4
+/// assertion below covers the WAIVED (non-semantic) half — a non-semantic comment still passes —
+/// while the semantic-comment FAIL asserts cover the enforced half.
+/// Per the rule's identifier clause, generated LOCAL IDENTIFIER SPELLINGS are waived ONLY when the
+/// backend oracle
+/// implements scope-aware alpha-equivalence for private bindings; this oracle does NOT — `expr_sig`
+/// encodes `Id(name)` and `binding_sig` encodes `name:{id}` — so for THIS comparator identifiers are
+/// STRUCTURAL and a consistent alpha-rename FAILS. That is the correct, rule-consistent behavior:
+/// the comparator must not silently pass a rename, because nothing here proves the rename is a
+/// behavior-preserving private binding.
+///
+/// This is a discrimination gate, not a passthrough: it would catch a comparator regression that
+/// either started false-passing a structural drift (a loosened signature) OR started false-failing
+/// a cosmetic diff (a paren/whitespace leak). Every input string parses as JS (the comparator
+/// panics on a torn module). The NON-VACUITY assert (a byte-identical pair compares EQUAL) proves
+/// the FAIL asserts genuinely discriminate rather than the comparator being trivially-unequal.
+#[test]
+fn svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() {
+    // ── NON-VACUITY: a byte-identical pair MUST compare EQUAL ──────────────────────────────────
+    // Proves the comparator is not trivially-unequal: the FAIL asserts below genuinely
+    // discriminate (an always-unequal comparator would pass them for the wrong reason).
+    assert!(
+        sigs_equal("var p = root();", "var p = root();"),
+        "NON-VACUITY: a byte-identical module pair must compare EQUAL"
+    );
+
+    // ── PASS cases — cosmetic only (assert EQUAL) ─────────────────────────────────────────────
+
+    // PASS 1: outer/intra-expression whitespace-only difference — the SAME call with identical
+    // identifiers, re-spaced/newlined/tabbed. OXC discards formatting, so these are EQUAL.
+    assert!(
+        sigs_equal(
+            "$.set_attribute(div,'id',a+b);",
+            "$.set_attribute(\n\tdiv, 'id', a + b\n);"
+        ),
+        "PASS: an outer/intra-expression whitespace-only reformat (identical identifiers) must \
+         compare EQUAL (whitespace is a waived cosmetic axis)"
+    );
+
+    // PASS 2: behavior-preserving redundant parentheses only — including a NESTED redundant-paren
+    // variant — with identical identifiers. `unwrap_parens` peels the transparent wrappers.
+    assert!(
+        sigs_equal("$.set_text(t, a + b);", "$.set_text(t, (((a + b))));"),
+        "PASS: a nested redundant-paren wrap the official printer drops (identical identifiers) \
+         must compare EQUAL (redundant parens are a waived cosmetic axis)"
+    );
+
+    // PASS 3: paren + whitespace TOGETHER — an explicit third PASS proving both waived axes
+    // compose. Same structure, identical identifiers, differing only by parens + formatting.
+    assert!(
+        sigs_equal(
+            "$.set_attribute(div,'id',c?a:b);",
+            "$.set_attribute(\n  div,\n  'id',\n  (c ? a : b)\n);"
+        ),
+        "PASS: a combined redundant-paren + whitespace reformat (identical identifiers) must \
+         compare EQUAL (both waived cosmetic axes compose)"
+    );
+
+    // PASS 4: a plainly NON-SEMANTIC JS comment on one side only — a `// plain note` line comment
+    // and a `/* note */` block comment. A non-semantic comment IS a waived cosmetic axis: the
+    // semantic-comment signature (`comment_sig`) classifies these as cosmetic and DROPS them, so
+    // the two sides compare EQUAL. The ENFORCED half — the in-contract semantic-comment boundary
+    // (`/*@__PURE__*/` PURE-family, license/preserve, source-map/`sourceURL`, TS-directive, JSDoc)
+    // — is exercised by the dedicated semantic-comment FAIL/PASS block further below (a semantic
+    // drop / corruption / move FAILS; an unknown `@foo` annotation stays waived).
+    assert!(
+        sigs_equal(
+            "$.set_text(t, a + b);",
+            "// plain note\n$.set_text(t, /* note */ a + b);"
+        ),
+        "PASS: a plainly non-semantic JS comment (line + block) on one side only must compare EQUAL \
+         (non-semantic comments are a waived cosmetic axis; the semantic-comment signature drops \
+         them — the in-contract boundary is enforced separately below)"
+    );
+
+    // ── FAIL cases — behavioral / structural drift (assert UNEQUAL) ───────────────────────────
+
+    // FAIL 1: consistent generated-local/param ALPHA-RENAME (same body rename). The identifier
+    // axis: this oracle treats generated identifier spellings as STRUCTURAL (no scope-aware
+    // alpha-equivalence), so a rename FAILS — consistent with the rule text.
+    assert!(
+        !sigs_equal(
+            "($0) => $.set_text(t, $0);",
+            "($x) => $.set_text(t, $x);"
+        ),
+        "FAIL: a consistent generated-param alpha-rename must FAIL (identifier spellings are \
+         structural for this oracle; the rule waives them only under scope-aware alpha-equivalence)"
+    );
+
+    // FAIL 2: a renamed generated `var` local (`p` vs `q`) — `binding_sig` encodes `name:{id}`.
+    assert!(
+        !sigs_equal("var p = root();", "var q = root();"),
+        "FAIL: a renamed generated `var` local must FAIL (the binding name is structural)"
+    );
+
+    // FAIL 3: swapped memo/effect param ORDER over the same deps, byte-identical body. `params_sig`
+    // is order-sensitive, so the positional dep re-bind is caught.
+    assert!(
+        !sigs_equal(
+            "$.template_effect(($0, $1) => $.set_text(t, `${$0} ${$1}`), [() => a(), () => b()]);",
+            "$.template_effect(($1, $0) => $.set_text(t, `${$0} ${$1}`), [() => a(), () => b()]);"
+        ),
+        "FAIL: a swapped memo/effect param ORDER must FAIL (positional dep re-bind; param order is \
+         structural)"
+    );
+
+    // FAIL 4: helper-name CHOICE change (`$.set_text` vs `$.set_attribute`).
+    assert!(
+        !sigs_equal("$.set_text(div, x);", "$.set_attribute(div, x);"),
+        "FAIL: a changed helper NAME must FAIL (helper choice is structural)"
+    );
+
+    // FAIL 5: helper SEQUENCE reorder — two helpers emitted in swapped order. `statements_sig`
+    // joins statements IN ORDER, so statement order is structural.
+    assert!(
+        !sigs_equal(
+            "$.set_text(a, x); $.set_attribute(b, 'id', y);",
+            "$.set_attribute(b, 'id', y); $.set_text(a, x);"
+        ),
+        "FAIL: a helper SEQUENCE reorder must FAIL (statement order is structural)"
+    );
+
+    // FAIL 6: missing `$.get` reactive read (`$.get(c)` dropped to a bare `c`).
+    assert!(
+        !sigs_equal("$.set_text(n, $.get(c));", "$.set_text(n, c);"),
+        "FAIL: a dropped `$.get` reactive read must FAIL (a missing call is structural)"
+    );
+
+    // FAIL 7: derived/effect statement TOPOLOGY divergence — one side hoists a `var d =
+    // $.derived(...)` declaration feeding `$.template_effect(... $.get(d) ...)`, the other inlines
+    // the same computation directly into the `$.template_effect(...)` with NO `$.derived` decl. The
+    // extra `$.derived` STATEMENT on one side changes `statements_sig` length + content (a genuine
+    // memo/effect-topology difference), not merely an inner-expression shape. Both sides are valid
+    // JS.
+    assert!(
+        !sigs_equal(
+            "var d = $.derived(() => a() + b()); $.template_effect(() => $.set_text(t, $.get(d)));",
+            "$.template_effect(() => $.set_text(t, a() + b()));"
+        ),
+        "FAIL: a hoisted `$.derived` memo decl feeding the effect vs an inlined direct effect must \
+         FAIL (the memo/effect-topology axis: a different derived/effect statement topology)"
+    );
+
+    // FAIL 8: ATTR-vs-PROPERTY route (`$.set_attribute(input,'readonly',r)` vs the property
+    // assignment `input.readOnly = r`) — a CallExpression vs an AssignmentExpression statement.
+    assert!(
+        !sigs_equal(
+            "$.set_attribute(input, 'readonly', r);",
+            "input.readOnly = r;"
+        ),
+        "FAIL: an attribute-helper route vs a direct property assignment must FAIL (distinct \
+         routing; distinct statement shape)"
+    );
+
+    // FAIL 9: EVENT DELEGATION divergence — a dropped trailing `$.delegate([...])` call.
+    assert!(
+        !sigs_equal(
+            "$.template_effect(() => $.set_text(t, x)); $.delegate(['click']);",
+            "$.template_effect(() => $.set_text(t, x));"
+        ),
+        "FAIL: a dropped `$.delegate` event-delegation call must FAIL (a missing statement is \
+         structural)"
+    );
+
+    // FAIL 10: HYDRATION/TEMPLATE topology divergence — a single clone-root path (`$.first_child`)
+    // vs a multi-root fragment walk (`$.first_child` then `$.sibling`). Distinct walk topology.
+    assert!(
+        !sigs_equal(
+            "var n = $.first_child(root);",
+            "var n = $.sibling($.first_child(root));"
+        ),
+        "FAIL: a single clone-root walk vs a multi-root fragment walk must FAIL (distinct \
+         hydration/template topology)"
+    );
+
+    // FAIL 11: OPTIONAL flag / extra call arg dropped (`$.child(p, true)` vs `$.child(p)`).
+    assert!(
+        !sigs_equal("$.child(p, true);", "$.child(p);"),
+        "FAIL: a dropped optional flag / extra call arg must FAIL (call-arg count is structural)"
+    );
+
+    // FAIL 12: REJECT/DIAGNOSTIC ORDER — a reordered ordered statement sequence of the kinds the
+    // client subset actually emits. Two `ExpressionStatement`s with distinct string-literal
+    // payloads in swapped order (NOT bare `throw`s, which the comparator collapses to a
+    // discriminant-only fallback). `Expr(Call(... Str("a")))` discriminates by payload + order.
+    assert!(
+        !sigs_equal("$.warn('a'); $.warn('b');", "$.warn('b'); $.warn('a');"),
+        "FAIL: a reordered diagnostic/reject sequence must FAIL (ordered statement-payload order \
+         is structural)"
+    );
+
+    // FAIL 13a: a call-arg-COUNT change not already covered (a trailing `true` added).
+    assert!(
+        !sigs_equal("$.html(n, () => h);", "$.html(n, () => h, true);"),
+        "FAIL: a changed call-argument COUNT must FAIL (arg count is structural)"
+    );
+
+    // FAIL 13b: an operator change (`a + b` vs `a - b`) and a literal change (`'on'` vs `'off'`).
+    assert!(
+        !sigs_equal("var x = a + b;", "var x = a - b;"),
+        "FAIL: a changed binary operator must FAIL (the operator is structural)"
+    );
+    assert!(
+        !sigs_equal(
+            "$.set_attribute(div, 'state', 'on');",
+            "$.set_attribute(div, 'state', 'off');"
+        ),
+        "FAIL: a changed string-literal payload must FAIL (literal payload bytes are in contract)"
+    );
+
+    // ── IMPORT-SPECIFIER axis — the `stmt_sig` `ImportDeclaration` arm now encodes specifier
+    // KIND / imported-name / local-name (no longer source + COUNT only). The rule treats imports
+    // as STRUCTURAL, so a specifier-shape drift over the SAME source + count MUST FAIL. ────────
+
+    // SANITY PASS: a byte-identical import compares EQUAL, and a whitespace-only reformat of the
+    // SAME import compares EQUAL (the encoding stays whitespace-insensitive — it reads the AST,
+    // not the bytes).
+    assert!(
+        sigs_equal(
+            "import { a as $ } from 'svelte/internal/client';",
+            "import { a as $ } from 'svelte/internal/client';"
+        ),
+        "PASS: a byte-identical specifier-bearing import must compare EQUAL"
+    );
+    assert!(
+        sigs_equal(
+            "import {a as $} from 'svelte/internal/client';",
+            "import {\n  a as $\n} from 'svelte/internal/client';"
+        ),
+        "PASS: a whitespace-only import reformat (same source + specifiers) must compare EQUAL"
+    );
+
+    // FAIL — NAMESPACE-vs-NAMED over the same source + specifier count (1): the OLD source+count
+    // encoding collapsed these to `Import(src,specs=1)`; the structural encoding distinguishes
+    // `Namespace(*)` from `Named(...)`.
+    assert!(
+        !sigs_equal(
+            "import * as $ from 'svelte/internal/client';",
+            "import { a as $ } from 'svelte/internal/client';"
+        ),
+        "FAIL: a namespace import vs a named import (same source + count) must FAIL (specifier KIND \
+         is structural)"
+    );
+
+    // FAIL — IMPORTED-NAME drift (`a` vs `b`) over the same local binding `$`: a different
+    // imported helper from the SAME module is a behavioral divergence.
+    assert!(
+        !sigs_equal(
+            "import { a as $ } from 'svelte/internal/client';",
+            "import { b as $ } from 'svelte/internal/client';"
+        ),
+        "FAIL: an imported-name drift (`a as $` vs `b as $`) must FAIL (the imported symbol is \
+         structural)"
+    );
+
+    // FAIL — LOCAL-NAME drift (`$` vs `_`) over the same imported symbol `a`: the local binding
+    // name is part of the import's structural identity.
+    assert!(
+        !sigs_equal(
+            "import { a as $ } from 'svelte/internal/client';",
+            "import { a as _ } from 'svelte/internal/client';"
+        ),
+        "FAIL: a local-name drift (`a as $` vs `a as _`) must FAIL (the local binding is structural)"
+    );
+
+    // ── SEMANTIC-COMMENT axis — the in-contract comment boundary the rule keeps in contract
+    // (`/*@__PURE__*/` PURE-family, license/preserve, source-map/`sourceURL`, TS-directive,
+    // JSDoc) is now ENFORCED by the semantic-comment signature layered alongside `module_sig`.
+    // A NON-SEMANTIC comment diff (`// note`, `/* note */`) stays WAIVED (compares EQUAL); a
+    // SEMANTIC comment drop / corruption / move MUST FAIL. ──────────────────────────────────────
+
+    // PASS (waived): the plainly-non-semantic comment case (a `// plain note` line + a `/* note */`
+    // block on one side only compares EQUAL) is asserted once above as PASS 4 — not duplicated here.
+    // PASS (waived): an UNKNOWN `@`-annotation comment (`/* @foo */`) is NOT semantic — OXC
+    // classifies it `None`, the text predicate does not match — so it stays waived.
+    assert!(
+        sigs_equal("var x = f();", "var x = /* @foo */ f();"),
+        "PASS: an unknown `@foo` annotation comment is NOT semantic and must compare EQUAL (waived)"
+    );
+
+    // FAIL — SEMANTIC DROP: a `/*@__PURE__*/` PURE annotation on one side dropped on the other.
+    // The PURE annotation suppresses tree-shaking side-effect retention — dropping it is a real
+    // behavioral / tool-consumed divergence.
+    assert!(
+        !sigs_equal("var x = /*@__PURE__*/ f();", "var x = f();"),
+        "FAIL: a dropped `/*@__PURE__*/` PURE annotation must FAIL (PURE is an in-contract \
+         semantic comment)"
+    );
+
+    // FAIL — SEMANTIC CORRUPTION: a license/preserve `/*! … */` whose payload bytes differ. The
+    // exact preserve-form text is in contract (license bytes carry payload).
+    assert!(
+        !sigs_equal("/*! keep */\nvar x = 1;", "/*! changed */\nvar x = 1;"),
+        "FAIL: a corrupted license/preserve `/*! … */` comment must FAIL (license payload bytes \
+         are in contract)"
+    );
+    // FAIL — SEMANTIC DROP of a license comment entirely.
+    assert!(
+        !sigs_equal("/*! @license MIT */\nvar x = 1;", "var x = 1;"),
+        "FAIL: a dropped license/preserve comment must FAIL (license is in contract)"
+    );
+
+    // FAIL — SEMANTIC MOVE: the SAME `/*@__PURE__*/` comment text anchored to a DIFFERENT
+    // statement/expression. Both sides carry the identical PURE annotation and identical
+    // statements, but on different anchors — a sequence-only oracle would MISS this; the
+    // structural-anchor signature catches it.
+    assert!(
+        !sigs_equal(
+            "var a = /*@__PURE__*/ f(); var b = g();",
+            "var a = f(); var b = /*@__PURE__*/ g();"
+        ),
+        "FAIL: a semantic PURE comment moved to a different anchor must FAIL (anchor-precise \
+         comment signature)"
+    );
+
+    // FAIL — SOURCE-MAP directive drop (`//# sourceMappingURL=…`): a tool-consumed source-comment.
+    assert!(
+        !sigs_equal("var x = 1;\n//# sourceMappingURL=x.js.map", "var x = 1;"),
+        "FAIL: a dropped `//# sourceMappingURL=` source-map directive must FAIL (source comments \
+         are in contract)"
+    );
+    // FAIL — TS-directive drop (`// @ts-nocheck`): a tool-consumed TS directive.
+    assert!(
+        !sigs_equal("// @ts-nocheck\nvar x = 1;", "var x = 1;"),
+        "FAIL: a dropped `// @ts-nocheck` TS directive must FAIL (TS directives are in contract)"
+    );
+    // FAIL — JSDoc drop (`/** … */`): per the rule, JSDoc is in contract for this client-JS
+    // oracle.
+    assert!(
+        !sigs_equal("/** @type {number} */\nvar x = 1;", "var x = 1;"),
+        "FAIL: a dropped JSDoc `/** … */` comment must FAIL (JSDoc is in contract for this oracle)"
+    );
+
+    // SANITY (non-vacuity for the semantic axis): an IDENTICAL semantic comment at the SAME anchor
+    // on both sides compares EQUAL — the semantic-comment signature is not trivially-unequal.
+    assert!(
+        sigs_equal("var x = /*@__PURE__*/ f();", "var x = /*@__PURE__*/ f();"),
+        "NON-VACUITY: identical semantic comments at the same anchor must compare EQUAL"
+    );
+
+    // ── OCCURRENCE-PATH anchor — a semantic comment MOVED between two STRUCTURALLY-IDENTICAL
+    // positions must FAIL. The OLD structural-shape anchor keyed by `stmt_sig`/`expr_sig`, so a
+    // move between two identically-shaped statements/expressions collided to the same anchor+ord
+    // and false-PASSED. The occurrence path keys by AST INDEX, so the move changes the path. ─────
+
+    // FAIL — DUPLICATE-ANCHOR MOVE across two STRUCTURALLY-IDENTICAL statements. `/*@__PURE__*/ f();
+    // f();` vs `f(); /*@__PURE__*/ f();`: both modules have two identical `f();` statements and one
+    // PURE comment, differing ONLY in WHICH statement the PURE annotation leads. A structural-shape
+    // anchor would map both `f()` calls to the identical anchor and compare EQUAL (a false-PASS);
+    // the occurrence path (`stmt[0]` vs `stmt[1]`) distinguishes them.
+    assert!(
+        !sigs_equal("/*@__PURE__*/ f(); f();", "f(); /*@__PURE__*/ f();"),
+        "FAIL: a PURE comment moved between two structurally-identical statements must FAIL \
+         (occurrence-path anchor; the structural-shape anchor false-PASSED this)"
+    );
+
+    // FAIL — ARROW-BODY MOVE: an intra-statement move of a PURE comment between two
+    // structurally-identical statements INSIDE a `$.template_effect(() => { … })` arrow body. The
+    // top-level statement is byte-for-byte the same shape on both sides; only the arrow-body
+    // statement index the comment leads differs (`a()` vs `b()`). The OLD anchor collapsed the
+    // intra-arrow position onto the single top-level statement shape and false-PASSED; the
+    // occurrence path descends `…/arrow.body.stmt[0]` vs `…/arrow.body.stmt[1]`.
+    assert!(
+        !sigs_equal(
+            "$.template_effect(() => { /*@__PURE__*/ a(); b(); });",
+            "$.template_effect(() => { a(); /*@__PURE__*/ b(); });"
+        ),
+        "FAIL: a PURE comment moved between two statements inside an arrow body must FAIL \
+         (occurrence-path descends arrow.body.stmt[k]; the structural-shape anchor false-PASSED this)"
+    );
+
+    // FAIL — COMPUTED-KEY MOVE: a PURE comment moved between two structurally-identical COMPUTED
+    // object-property keys. The descent walks `object.prop[k].key.expr` (mirroring `property_key_sig`'s
+    // `as_expression()` path), so the move anchors to a different key path and FAILS; the pre-fix
+    // descent walked only `op.value` + spreads and false-PASSED.
+    assert!(
+        !sigs_equal(
+            "var o = { [/*@__PURE__*/ f()]: v, [f()]: v };",
+            "var o = { [f()]: v, [/*@__PURE__*/ f()]: v };"
+        ),
+        "FAIL: a PURE comment moved between two structurally-identical computed object keys must FAIL \
+         (occurrence-path descends object.prop[k].key.expr; the pre-fix descent false-PASSED this)"
+    );
+
+    // FAIL — PARAM MOVE: a semantic comment moved between two arrow PARAMS. The descent walks
+    // `arrow.params[k]` (binding identifiers), so the move anchors to a different param path and
+    // FAILS; the pre-fix descent did not walk params and false-PASSED.
+    assert!(
+        !sigs_equal(
+            "var f = (/*! keep */ a, b) => a;",
+            "var f = (a, /*! keep */ b) => a;"
+        ),
+        "FAIL: a semantic comment moved between two arrow params must FAIL \
+         (occurrence-path descends arrow.params[k]; the pre-fix descent false-PASSED this)"
+    );
+
+    // PASS (waived) — LEADING-PAREN REMAP: a semantic comment leading a REDUNDANT outer paren
+    // (`/*! keep */ (a)`) anchors IDENTICALLY to the same comment leading the bare node — a paren-only
+    // difference is cosmetic, so it compares EQUAL. The pre-fix `expr_anchor` peeled the paren BEFORE
+    // the leading probe and collapsed `(a)` to `<tail>` (a false-FAIL).
+    assert!(
+        sigs_equal("var x = /*! keep */ (a);", "var x = /*! keep */ a;"),
+        "PASS: a leading semantic comment on a redundant paren must compare EQUAL to the bare node \
+         (paren-transparent leading anchor; the pre-fix descent false-FAILED this)"
+    );
+
+    // SANITY (no false-FAIL): the SAME semantic comment at the SAME structural position with a
+    // whitespace + redundant-paren-only difference still compares EQUAL — the occurrence path reads
+    // AST topology, not bytes, and peels transparent parens without adding a segment.
+    assert!(
+        sigs_equal(
+            "var x = /*@__PURE__*/ f((a));",
+            "var x =   /*@__PURE__*/   f(a);"
+        ),
+        "SANITY: the same PURE comment at the same occurrence path differing only by whitespace + a \
+         redundant paren must still compare EQUAL (occurrence path is byte/paren insensitive)"
+    );
+
+    // ── TRAILING `CommentPosition` — OXC computes `attached_to` for LEADING comments only and
+    // leaves a TRAILING comment's `attached_to = 0`. Anchoring a trailing comment on `attached_to`
+    // would collapse every trailing comment onto the first statement; `comment_sig` branches on
+    // `comment.position` and anchors a trailing comment via the PRECEDING node's occurrence path. ──
+
+    // FAIL — TRAILING SEMANTIC DROP: a trailing `//# sourceMappingURL=` directive dropped. A
+    // trailing source-map directive after the last statement is in contract; dropping it must FAIL.
+    assert!(
+        !sigs_equal("var x = 1; //# sourceMappingURL=a.map", "var x = 1;"),
+        "FAIL: a dropped TRAILING `//# sourceMappingURL=` directive must FAIL (trailing comments \
+         anchor via the preceding node, not byte 0)"
+    );
+
+    // FAIL — TRAILING SEMANTIC MOVE to a different preceding statement. The SAME trailing PURE
+    // comment trails `f();` (stmt[0]) on one side and `g();` (stmt[1]) on the other; both modules
+    // have identical statements + the identical trailing comment text. A trailing `h();` keeps the
+    // comment mid-module so OXC classifies BOTH as `pos=Trailing` with `attached_to = 0` (verified:
+    // attached_to-only anchoring maps BOTH to byte 0 → the first statement → false-PASS, the FIX-2
+    // bug). The Trailing→preceding-node occurrence path anchors side A on `stmt[0]` and side B on
+    // `stmt[1]`, so the move FAILS.
+    assert!(
+        !sigs_equal(
+            "f(); /*@__PURE__*/\ng();\nh();",
+            "f();\ng(); /*@__PURE__*/\nh();"
+        ),
+        "FAIL: a trailing semantic comment moved to a different preceding statement must FAIL \
+         (trailing anchor follows the preceding node, not byte 0)"
+    );
+
+    // FAIL — MULTI-DIGIT-INDEX trailing MOVE: the closest-preceding-node selection must be by the
+    // matched node's `span.end`, NOT by lexicographic path order. With ≥10 preceding `stmt[N]`
+    // siblings, the lexicographically-largest path among the preceding set is `stmt[9]/…` for BOTH
+    // a comment after stmt[10] (preceding {0..10}) AND a comment after stmt[9] (preceding {0..9}) —
+    // so a depth/lexicographic tiebreak COLLIDES the two genuinely-different positions onto stmt[9]
+    // (a false-PASS). The `span.end`-keyed selection anchors the comment to the immediately-
+    // preceding node — stmt[10] vs stmt[9] — so the move correctly FAILS. Build N identical `x();`
+    // statements with the trailing PURE inserted after exactly `n` of them; a trailing `z();` keeps
+    // OXC classifying the comment `pos=Trailing`.
+    {
+        let trailing_after = |n: usize| -> String {
+            format!(
+                "{}/*@__PURE__*/\n{} z();",
+                "x(); ".repeat(n),
+                "x();".repeat(12 - n)
+            )
+        };
+        let after_stmt10 = trailing_after(11); // PURE trails the 11th statement = stmt[10].
+        let after_stmt9 = trailing_after(10); // PURE trails the 10th statement = stmt[9].
+        assert!(
+            !sigs_equal(&after_stmt10, &after_stmt9),
+            "FAIL: a trailing comment after stmt[10] vs stmt[9] must FAIL (closest-preceding-node \
+             selection is by span.end, not lexicographic path order — both collide onto stmt[9] \
+             under a buggy lexicographic tiebreak)"
+        );
+    }
+
+    // SANITY: a LEADING vs a TRAILING semantic comment at the SAME node (stmt[0] `f()`) are DISTINCT
+    // positions — `pos=Leading` vs `pos=Trailing` keeps them apart. Side A leads `f()`
+    // (`pos=Leading`); side B trails `f()` (`pos=Trailing`, attached_to=0, kept mid-module by the
+    // following statements). A leading-vs-trailing-at-the-same-node difference is a real position
+    // change, so it must FAIL.
+    assert!(
+        !sigs_equal(
+            "/*@__PURE__*/ f(); g(); h();",
+            "f(); /*@__PURE__*/\ng();\nh();"
+        ),
+        "FAIL: a leading vs a trailing semantic comment at the same node must FAIL (pos is part of \
+         the anchor identity)"
+    );
+
+    // ── TAXONOMY token boundaries + legacy source-map forms ──────────────────────────────────────
+
+    // PASS (waived): `@ts-ignore-me` is a LOOKALIKE, not the `@ts-ignore` directive — the `-me`
+    // continues the token past the directive boundary, so it stays WAIVED (compares EQUAL).
+    assert!(
+        sigs_equal("var x = f();", "var x = /* @ts-ignore-me */ f();"),
+        "PASS: `@ts-ignore-me` is a non-directive lookalike (token boundary) and must compare EQUAL"
+    );
+
+    // PASS (waived): `/// <referencee path=…>` is a LOOKALIKE, not a triple-slash reference — the
+    // trailing `e` continues the token past `<reference`, so it stays WAIVED.
+    assert!(
+        sigs_equal(
+            "var x = 1;",
+            "/// <referencee path=\"x\" />\nvar x = 1;"
+        ),
+        "PASS: `<referencee …>` is a non-directive lookalike (token boundary) and must compare EQUAL"
+    );
+
+    // FAIL — LEGACY source-map directive drop (`//@ sourceMappingURL=`): the deprecated `@`-prefixed
+    // legacy form is in contract alongside the modern `//#` form; dropping it must FAIL.
+    assert!(
+        !sigs_equal("var x = 1;\n//@ sourceMappingURL=x.js.map", "var x = 1;"),
+        "FAIL: a dropped legacy `//@ sourceMappingURL=` directive must FAIL (legacy source-map forms \
+         are in contract)"
+    );
+    // FAIL — LEGACY `//@ sourceURL=` drop likewise.
+    assert!(
+        !sigs_equal("var x = 1;\n//@ sourceURL=x.js", "var x = 1;"),
+        "FAIL: a dropped legacy `//@ sourceURL=` directive must FAIL (legacy source-map forms are in \
+         contract)"
+    );
+    // SANITY: the genuine `@ts-ignore` directive (exact token, then a boundary) is STILL semantic —
+    // dropping it must FAIL (the boundary fix must not over-narrow the real directive).
+    assert!(
+        !sigs_equal("// @ts-ignore\nvar x = 1;", "var x = 1;"),
+        "FAIL: a dropped genuine `// @ts-ignore` directive must still FAIL (boundary fix keeps the \
+         real directive semantic)"
+    );
+
+    // ── NEWLY-ENCODED SOURCE-PRESERVED AXES — object-property shape, param defaults, async/
+    // generator. Each pair collapsed to the SAME signature under the pre-fix encoding (a silent
+    // structural false-PASS) and now DISCRIMINATES; the `// @ts-check` LINE-only pragma split FAILs
+    // a dropped real pragma while WAIVING the block/lookalike forms. Reachable via source-preserved
+    // author expressions the value-position emitter byte-copies. ────────────────────────────────
+
+    // FAIL — OBJECT-PROPERTY KIND: a getter vs a value at the same key (op.kind get vs init).
+    assert!(
+        !sigs_equal(
+            "var o = { get x() { return 1; } };",
+            "var o = { x: () => 1 };"
+        ),
+        "FAIL: a getter vs a value object property must FAIL (op.kind is structural)"
+    );
+    // FAIL — OBJECT-PROPERTY METHOD: a method-shorthand vs a function-value (op.method).
+    assert!(
+        !sigs_equal(
+            "var o = { x() { return 1; } };",
+            "var o = { x: function() { return 1; } };"
+        ),
+        "FAIL: a method-shorthand vs a function-value property must FAIL (op.method is structural)"
+    );
+    // FAIL — OBJECT-PROPERTY SHORTHAND: `{ a }` vs `{ a: a }` (op.shorthand; __proto__ semantics).
+    assert!(
+        !sigs_equal("var o = { a };", "var o = { a: a };"),
+        "FAIL: a shorthand vs a longhand property must FAIL (op.shorthand is structural)"
+    );
+    // FAIL — OBJECT-PROPERTY COMPUTED: a static key vs a computed key (op.computed).
+    assert!(
+        !sigs_equal("var o = { x: v };", "var o = { [x]: v };"),
+        "FAIL: a static key vs a computed key must FAIL (op.computed is structural)"
+    );
+    // FAIL — STATIC-KEY COMMENT MOVE: a semantic comment moved between two static object keys
+    // anchors to a different `object.prop[i].key` and FAILs (the pre-fix descent false-PASSED this).
+    assert!(
+        !sigs_equal(
+            "var o = { /*! keep */ a: v, a: v };",
+            "var o = { a: v, /*! keep */ a: v };"
+        ),
+        "FAIL: a semantic comment moved between two static object keys must FAIL \
+         (object.prop[i].key anchor; the pre-fix descent false-PASSED this)"
+    );
+    // FAIL — PARAM DEFAULT: a changed/absent param default (FormalParameter.initializer).
+    assert!(
+        !sigs_equal("var f = (a = 1) => a;", "var f = (a = 2) => a;"),
+        "FAIL: a changed param default value must FAIL (FormalParameter.initializer is structural)"
+    );
+    assert!(
+        !sigs_equal("var f = (a = 1) => a;", "var f = (a) => a;"),
+        "FAIL: a present vs absent param default must FAIL (init present/absent is structural)"
+    );
+    // FAIL — ASYNC arrow vs sync arrow (r#async).
+    assert!(
+        !sigs_equal("var f = async () => 1;", "var f = () => 1;"),
+        "FAIL: an async arrow vs a sync arrow must FAIL (r#async is structural)"
+    );
+    // FAIL — GENERATOR vs plain function (generator), in an export-default form so a top-level
+    // statement carries the bit.
+    assert!(
+        !sigs_equal(
+            "export default function* f() {}",
+            "export default function f() {}"
+        ),
+        "FAIL: a generator function vs a plain function must FAIL (generator is structural)"
+    );
+
+    // PASS (waived) — `/* @ts-check */` BLOCK form is not a valid pragma (line-only) and stays
+    // waived; `// @ts-check/foo` is a lookalike past the strict boundary and stays waived.
+    assert!(
+        sigs_equal("var x = 1;", "/* @ts-check */\nvar x = 1;"),
+        "PASS: `/* @ts-check */` block form is not a valid pragma and must compare EQUAL (line-only)"
+    );
+    assert!(
+        sigs_equal("var x = 1;", "// @ts-check/foo\nvar x = 1;"),
+        "PASS: `// @ts-check/foo` is a non-pragma lookalike (strict boundary) and must compare EQUAL"
+    );
+    // FAIL — a dropped genuine `// @ts-check` LINE pragma must still FAIL (split keeps it semantic).
+    assert!(
+        !sigs_equal("// @ts-check\nvar x = 1;", "var x = 1;"),
+        "FAIL: a dropped genuine `// @ts-check` line pragma must FAIL (line-form pragma stays \
+         semantic after the split)"
+    );
+
+    // SANITY (non-vacuity for the new axes): byte-identical pairs of each new shape compare EQUAL.
+    assert!(
+        sigs_equal(
+            "var o = { get x() { return 1; } };",
+            "var o = { get x() { return 1; } };"
+        ) && sigs_equal("var f = (a = 1) => a;", "var f = (a = 1) => a;")
+            && sigs_equal("var f = async () => 1;", "var f = async () => 1;"),
+        "NON-VACUITY: byte-identical getter / param-default / async-arrow pairs must compare EQUAL"
     );
 }
 
@@ -1942,8 +5770,8 @@ fn structural_full_module_gate_rejects_pre_fix_defects() {
     );
 
     // INVALID-JS defects (an UNESCAPED `${` opening a bogus interpolation; a RAW newline inside a
-    // single-quoted literal): the structural comparator's `module_sig` ASSERTS the side parses, so
-    // an invalid-JS emission HARD-FAILS the gate. Here we prove the defect string is NOT valid JS
+    // single-quoted literal): the structural comparator's `conformance_sig` ASSERTS the side parses,
+    // so an invalid-JS emission HARD-FAILS the gate. Here we prove the defect string is NOT valid JS
     // (the parse-assert would fire), i.e. the gate cannot silently pass it.
     assert!(
         !parses_as_js(

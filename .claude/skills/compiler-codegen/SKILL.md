@@ -170,6 +170,20 @@ The Rust compiler has **two separate template codegen paths**. Modifying one doe
 
 The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX); JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
 
+## Compiled-Output Conformance (CRITICAL)
+
+Official-framework compiler conformance is behavioral plus structural/helper-topology parity, not raw-byte identity. For Vue VDOM/Vapor, Svelte `svelte/internal/*`, SSR/client, and future runtime backends, compare emitted output by observable behavior plus parsed/token-normalized structure: imports, helper families, helper call sequence where order is semantic, memoization/reactivity/effect topology, DOM/hydration template topology, class/style/attribute normalization, prop/property routing, event delegation, and diagnostic/reject ordering.
+
+Cosmetic JS carrier formatting is not a finding: indentation, line breaks, non-semantic comments, intra-expression whitespace outside literals, and behavior-preserving redundant parentheses may differ from the official compiler. Directive, pragma, license/preserve, source-map/sourceURL, TS-directive, JSDoc, and other tool-consumed or framework-significant comments remain in contract. Generated local identifier spellings are waived only when the backend oracle implements scope-aware alpha-equivalence for private, non-observable bindings; otherwise identifiers are structural. Literal payload bytes, static HTML/CSS/SSR strings, public/exported or source-authored names, sourcemap mappings, diagnostic text/codes/order, and any framework-defined observable format remain in contract.
+
+Do not build or route production compiled-output emission through JS printers, re-printers, redundant-paren canonicalizers, or any machinery whose role includes mimicking the official compiler's cosmetic JS carrier formatting. Direct-emission helpers may emit syntax-required tokens, including required parentheses for valid JavaScript expression/statement shape, but they must be scoped to semantic/syntactic correctness and covered by behavioral/structural tests rather than official cosmetic byte parity. Emit correct code directly and make conformance oracles structural for cosmetic categories: a cosmetic-only diff passes; a behavioral or structural divergence fails.
+
+Byte-equality tests remain valid only where bytes are the actual contract, such as generated binding freshness, source-map exactness, or self-characterization during a refactor; they are not official-compiler conformance oracles.
+
+Tracked guard gap: the positive structural-discriminator guard currently covers Svelte client only. Add backend-owned positive structural conformance oracles for Vue VDOM/Vapor and SSR/client outputs before those backends are considered fully guard-covered by this rule; the re-printer guard is cross-backend negative coverage.
+
+Guards: `svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs`, `no_compiled_output_cosmetic_reprinter_path`.
+
 ## Strict Slot Children Type Checking (Experimental)
 
 When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree, enforcing that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).
