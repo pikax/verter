@@ -11793,3 +11793,3691 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
         "self-test: an `unsafe fn` MUST FIRE; got: {v:?}"
     );
 }
+
+// ===========================================================================
+// Hot-path reverse-materialization fence.
+//
+// A materialized `TypeExpr` (a `SemanticNodeId -> TypeExpr` projection through
+// a sealed `OutputProjector` cap, a host-threaded surface bridge that returns
+// one, OR a helper whose return is itself materialized) must never feed a
+// SEMANTIC DECISION. Materialization is PERMITTED only as a TERMINAL one-shot
+// output sink: the materialized value IS the published payload / leaf DTO value
+// and no branch / equality / destructure / shape-extraction / sentinel-miss /
+// reducibility / cycle / cardinality / `.filter` decision depends on its
+// variants. The moment a materialized `TypeExpr` drives such a decision it is a
+// forbidden materialize-then-decide site that must move onto node-domain facts.
+//
+// The sealed per-sink `OutputProjector` caps confine the MINT to the sink
+// modules but CANNOT distinguish a terminal publication from a sink-local
+// decide, NOR can they see a decide that consumes a materialized value returned
+// across a function boundary. This guard does that discrimination structurally
+// (a `syn` walk over production source) with four cooperating rails:
+//
+//   (1) LOCATION rail (primary). A materialization SOURCE — a direct mint verb,
+//       a host-threaded surface bridge, or a call to a helper whose return is
+//       materialization-tainted — is a violation UNLESS its enclosing function
+//       (matched by its qualified path against `HOT_TERMINAL_SINKS`) is an
+//       audited terminal one-shot sink. A direct verb / bridge escaping into a
+//       non-terminal body is the reverse-materialization the fence forbids,
+//       independent of any downstream decide. This catches a materializing
+//       helper at its OWN definition, not only at the caller.
+//
+//   (2) RETURN-TAINT rail. A function whose return type names `TypeExpr` and
+//       whose body mints (direct verb / bridge) OR calls an already-tainted
+//       helper is itself a materialization-returning helper. The set is a
+//       fixed point computed from ACTUAL return-taint over the production
+//       function index, not a curated list (a curated list is a false-negative
+//       surface). Resolution is fail-closed: a same-named helper that returns
+//       `TypeExpr` and mints anywhere taints every call of that bare name.
+//
+//   (3) TERMINAL-PURITY / taint rail. Within ANY function, a local is TAINTED
+//       when it is bound from a materialization source, and taint propagates
+//       through `let` / alias rebind / `clone` / `as_ref` / `map` / `filter` /
+//       `and_then` / `unwrap*` / `Some` / `Ok` / reference / field / index /
+//       `?` / iterator adapters / closure params when the receiver is tainted.
+//       A decision is REJECTED only when its operand is TAINTED: a `match` /
+//       `if let` / `let … else` / `matches!` against a `TypeExpr::` variant; a
+//       known node-domain-only gate (`type_expr_contains_semantic_miss`,
+//       `type_expr_root_is_unmaterialized_sentinel`, the route materializedness
+//       filter `dispatch_route_expr_is_materialized`, the registry shape gate
+//       `component_meta_registry_has_explicit_object_surface`, the callable /
+//       snippet extractors); equality / convergence `==` / `!=`; cardinality
+//       `.len()` / `.is_empty()` / `.iter().any|all|find|filter`; or passing a
+//       tainted value to an unknown helper that is not a recognised
+//       passthrough / constructor. The standalone gate `type_expr_to_object_shape`
+//       (no benign use — only ever derives an object shape from a materialized
+//       `TypeExpr`) is rejected unconditionally. Because the rejection requires
+//       a TAINTED operand, a guard clause that classifies an INPUT parameter
+//       (`type_expr_contains_semantic_miss(input)`) is NOT a decide and stays
+//       permitted, and the shared `&TypeExpr` classifier DEFINITIONS that match
+//       on their borrowed parameter without materializing never fire.
+//
+//   (4) QUALIFIED function key. Each function is keyed by module path + inline
+//       `mod` idents + impl frame + nested-fn path, so two same-named methods in
+//       different impls / modules never merge signals (a merge is both a
+//       false-positive surface and a non-authoritative inventory).
+//
+// For a TERMINAL sink the location rail does not apply (the mint is its
+// purpose); it is a violation only if rail (3) finds a sink-local decide — the
+// purity check. The discrimination self-test injects a decide INTO an
+// allowlisted terminal and proves the guard still fires, and proves a cosmetic
+// rewrite (inline / alias / split-helper / convergence) of a real decide cannot
+// evade detection.
+// ===========================================================================
+
+/// Direct materialize PRIMITIVE idents — obtaining a bare `TypeExpr` from the
+/// sealed output boundary (the capability accessors `materialize_output_type_expr`
+/// / `materialize_reduced_output_type_expr` / `into_type_expr` / the
+/// `carrier.type_expr(&cap)` method) plus the local raise/unwrap wrappers that
+/// compose them. EXACT whole-ident match (so `materialize_output_type_expr_for_test`
+/// — the `#[cfg(test)]` sibling — is NOT a primitive).
+const HOT_MAT_DIRECT_IDENTS: &[&str] = &[
+    "materialize_output_type_expr",
+    "materialize_reduced_output_type_expr",
+    "into_type_expr",
+    "type_expr", // the `carrier.type_expr(&cap)` accessor (method-call form only)
+    "materialize_published_node",
+    "shell_raise_to_type_expr",
+    "unwrap_materialized",
+    "materialize_component_meta_type_expr_until_stable",
+    "materialize_component_meta_type_expr_until_stable_full",
+    "materialize_admitted_expansion_node",
+    "raise_realized_callable_member_value",
+    "raise_member_value",
+];
+
+/// Host-threaded surface BRIDGE idents — calling one reverse-materializes a
+/// `TypeExpr` / `ExpandedObjectShape` into the hot caller. A bridge call from a
+/// non-terminal body is a location-rail violation on its own: every production
+/// caller decides on the result. The set includes the two real host-threaded
+/// bridge entrypoints `project_type_surface_expr_via_host_threaded` and
+/// `project_route_surface_expr_via_host_threaded` (called from the registry
+/// materializer and the class-A dispatch conduit) so a bridge call cannot evade
+/// the rail. The bridge DEFINITIONS themselves delegate to an engine sink method
+/// (not to another bridge in this set), so they are not self-flagged.
+const HOT_MAT_BRIDGE_IDENTS: &[&str] = &[
+    "lower_and_project_to_expanded_via_host_threaded",
+    "project_expr_surface_expr_via_host_threaded",
+    "project_expr_surface_shape_via_host_threaded",
+    "project_type_surface_expr_via_host_threaded",
+    "project_route_surface_expr_via_host_threaded",
+];
+
+/// The STANDALONE semantic-gate ident — calling it AT ALL is a decide. Defined
+/// in `verter_semantic`, only ever called on a materialized `TypeExpr` to derive
+/// an object shape for a Pick/Omit/utility decision; there is no benign use, so
+/// it is rejected unconditionally (no taint required).
+const HOT_DECIDE_STANDALONE_IDENTS: &[&str] = &["type_expr_to_object_shape"];
+
+/// TAINTED-OPERAND semantic-gate idents — a node-domain-only classifier that, fed
+/// a MATERIALIZED `TypeExpr`, makes a sentinel / miss / reducibility / callable /
+/// registry-shape / route-materializedness decision. These fire ONLY when their
+/// operand is tainted (a materialized value), so a benign classification of an
+/// INPUT parameter is not a decide and the shared classifier DEFINITIONS (which
+/// match on a borrowed `&TypeExpr` parameter) never fire.
+const HOT_DECIDE_TAINTED_GATE_IDENTS: &[&str] = &[
+    "type_expr_contains_semantic_miss",
+    "type_expr_root_is_unmaterialized_sentinel",
+    "materialized_root_is_unmaterialized_sentinel",
+    "type_expr_contains_reducible_operator",
+    "slot_callable_param_and_return",
+    "callable_arm_from_raised",
+    "snippet_callable_positional_bindings",
+    "component_meta_registry_has_explicit_object_surface",
+    "dispatch_route_expr_is_materialized",
+];
+
+/// EXTRACTING gate idents — a node-domain helper that, fed a MATERIALIZED
+/// `TypeExpr`, returns a `TypeExpr`-bearing SUB-value (a param/return type, a
+/// callable arm). An extractor of a materialized value yields a materialized
+/// value, so the gate's RESULT is itself tainted (propagation), in addition to
+/// the call being a decide. This keeps the
+/// `slots_from_typeinfo_surface → slot_callable_param_and_return → …` chain
+/// tainted end-to-end instead of laundering the extracted sub-expr to untainted.
+const HOT_EXTRACTING_GATE_IDENTS: &[&str] = &[
+    "slot_callable_param_and_return",
+    "slot_callable_param_and_return_from_arms",
+    "callable_arm_from_raised",
+];
+
+/// Lowering / pipeline-feed idents — passing a value to one of these LOWERS a
+/// SYMBOLIC input into the materialization pipeline (`expr` → `SemanticNodeId`).
+/// Feeding a symbolic input to the lowerer is NOT a read/decide, so the
+/// method-arg reader rail excludes them, and a terminal sink that lowers a
+/// `TypeExpr` param is a symbolic-input mint boundary (its input-shape guards
+/// are publication classification, not a materialized-value decide).
+const HOT_LOWERING_IDENTS: &[&str] = &[
+    "lower_type_expr_in_scope",
+    "lower_type_expr_in_scope_with_mode",
+    "lower_type_expr_in_scope_with_context",
+];
+
+/// Method idents that PROPAGATE taint from receiver to result (and, for the
+/// closure-bearing forms, taint the closure's first parameter). A tainted value
+/// flowing through any of these stays tainted, so an alias rebind / `clone` /
+/// `map` / `filter` cannot launder a materialized value past the decide rail.
+const HOT_TAINT_PROPAGATE_METHODS: &[&str] = &[
+    "clone",
+    "as_ref",
+    "as_deref",
+    "as_mut",
+    "to_owned",
+    "cloned",
+    "copied",
+    "unwrap",
+    "unwrap_or",
+    "unwrap_or_else",
+    "unwrap_or_default",
+    "expect",
+    "map",
+    "and_then",
+    "filter",
+    "filter_map",
+    "or",
+    "or_else",
+    "inspect",
+    "take",
+    "flatten",
+    "into",
+    "iter",
+    "into_iter",
+    "iter_mut",
+    "by_ref",
+];
+
+/// Closure-bearing combinators whose FIRST closure parameter is tainted when the
+/// receiver is tainted (so a decide inside the closure body — `matches!`, `==`,
+/// a tainted gate — fires against the tainted element).
+const HOT_TAINT_CLOSURE_METHODS: &[&str] = &[
+    "map",
+    "and_then",
+    "filter",
+    "filter_map",
+    "inspect",
+    "is_some_and",
+    "is_none_or",
+    "any",
+    "all",
+    "find",
+    "find_map",
+    "position",
+    "take_while",
+    "skip_while",
+    "for_each",
+    "map_or",
+    "map_or_else",
+];
+
+/// Cardinality / shape decisions on a tainted receiver.
+const HOT_CARDINALITY_METHODS: &[&str] = &["len", "is_empty", "count"];
+
+/// Std value-forwarding methods that take a value ARGUMENT to conditionally
+/// wrap / store / default it (not to READ/classify it). Excluded from the
+/// method-arg reader rail: `bool.then_some(mat)` publishes `mat` into an
+/// `Option`, it does not decide on `mat`'s structure.
+const HOT_VALUE_FORWARD_METHODS: &[&str] = &[
+    "then",
+    "then_some",
+    "get_or_insert",
+    "get_or_insert_with",
+    "unwrap_or",
+    "unwrap_or_else",
+    "unwrap_or_default",
+    "replace",
+];
+
+/// Constructor / wrapper idents that PROPAGATE taint when wrapping a tainted
+/// argument (they publish, they do not decide).
+const HOT_TAINT_WRAP_CTORS: &[&str] = &["Some", "Ok", "Box", "Arc", "Rc", "Cow"];
+
+/// Serialization / encoding PUBLICATION sinks — receiving a materialized value
+/// here SERIALIZES it into the published payload (bytes / string / writer); it
+/// does NOT read / classify its structure. `serde_json::to_vec(&minted)` is the
+/// canonical terminal serializer. Excluded from the reader rails (both the
+/// method and the free-fn forms) so a legitimate terminal serializer is never
+/// mistaken for a materialize-then-decide (a publication is not a decide).
+const HOT_SERIALIZER_PUBLISH_IDENTS: &[&str] = &[
+    "to_vec",
+    "to_vec_pretty",
+    "to_writer",
+    "to_writer_pretty",
+    "to_string",
+    "to_string_pretty",
+    "serialize",
+];
+
+/// Recognised terminal passthrough / DTO-writer free-fn idents — receiving a
+/// materialized value here is publication, not a decide, so the unknown-helper
+/// rail does not fire on them. (The unknown-helper rail only runs in
+/// NON-terminal bodies; this list keeps a non-terminal forwarder that hands a
+/// materialized value straight to a publication writer from being mistaken for a
+/// classifier.)
+const HOT_TERMINAL_PASSTHROUGH_IDENTS: &[&str] = &[
+    "upsert_component_meta_registry_entry",
+    "surface_view_to_projected_surface",
+    "track_component_meta_dependency",
+    "push",
+    "insert",
+    "extend",
+];
+
+/// The audited closed set of sanctioned TERMINAL one-shot output sinks: a
+/// `(file-suffix, enclosing-fn)` pair where a materialization source is the
+/// FINAL published value with no decision on its variants. Keyed by file SUFFIX
+/// (the production `rel` ends with it) + exact innermost fn name. Each entry is
+/// (a) exempt from the location rail (its mint is permitted) and (b) still
+/// subject to the purity rail (a decide injected here STILL fires — proven by
+/// the discrimination self-test) and (c) asserted ABSENT from the violation set
+/// by the anti-false-positive rail.
+const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
+    (
+        "component_meta_query_engine/surface.rs",
+        "materialize_published_node",
+    ),
+    (
+        "component_meta_query_engine/surface.rs",
+        "lower_and_project_to_expanded_published",
+    ),
+    (
+        "component_meta_query_engine/surface.rs",
+        "project_expr_surface_expr_published",
+    ),
+    (
+        "component_meta_query_engine/surface.rs",
+        "project_class_a_terminal_published",
+    ),
+    (
+        "component_meta_query_engine/surface.rs",
+        "instantiate_local_generic_ref_published",
+    ),
+    (
+        "component_meta_query_engine/surface.rs",
+        "surface_view_to_projected_surface",
+    ),
+    (
+        "component_meta_query_engine/registry_decl.rs",
+        "materialize_member_surface_node_core",
+    ),
+    (
+        "meta_resolve/materialize/field_types.rs",
+        "materialize_component_meta_type_expr_until_stable",
+    ),
+    (
+        "meta_resolve/materialize/field_types.rs",
+        "reduce_member_value_graph_native_with_context",
+    ),
+    (
+        "meta_resolve/materialize/field_types.rs",
+        "lowered_preserve_package_backed_symbolic_refs",
+    ),
+    (
+        "meta_resolve/projectors/output_sink.rs",
+        "shell_raise_to_type_expr",
+    ),
+    (
+        "meta_resolve/projectors/output_sink.rs",
+        "unwrap_materialized",
+    ),
+    (
+        "macro_output_expansion.rs",
+        "materialize_admitted_expansion_node",
+    ),
+    ("macro_output_expansion.rs", "expand_define_model_output"),
+    (
+        "macro_output_expansion.rs",
+        "expand_generic_project_path_output",
+    ),
+    ("macro_output_expansion.rs", "expand_slot_binding_output"),
+    ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
+    ("vue_exec/mod.rs", "raise_member_value"),
+    ("vue_exec/mod.rs", "raise_realized_callable_member_value"),
+    ("vue_exec/normalize.rs", "index_signatures_from_surface"),
+    ("vue_exec/normalize.rs", "model_prop_fields"),
+    // The sealed carrier mint accessors — the lowest-level sanctioned mint
+    // boundary. Each `into_type_expr` / `type_expr` accessor delegates down the
+    // sealed `OutputTypeExpr` chain and returns the `TypeExpr` with no decision;
+    // they ARE the materialization primitive, not a consumer of it.
+    (
+        "project_semantic_dispatch/output_materialization.rs",
+        "into_type_expr",
+    ),
+    (
+        "project_semantic_dispatch/output_materialization.rs",
+        "type_expr",
+    ),
+    // Per-member publication DTO builders (props / expose / object-member / slot
+    // binding leaf surfaces): mint each member's value once through the
+    // registered `raise_member_value` / `unwrap_materialized` mint, store it in
+    // the published DTO, and render it for display — no decision on its variants.
+    ("vue_exec/normalize.rs", "props_from_typeinfo_surface"),
+    ("vue_exec/normalize.rs", "exposed_from_typeinfo_surface"),
+    (
+        "vue_exec/normalize.rs",
+        "object_members_from_typeinfo_surface",
+    ),
+    // NOTE: `binding_fields_from_param_ty` is NOT here — it BRANCHES on its
+    // `param_ty` (`if let TypeExpr::Object`), NAVIGATES it through the shared
+    // resolver (`navigate_param_to_object_surface`), shape-matches `Pick`, and
+    // mints per-member (`raise_member_value`), and in production its `param_ty`
+    // is the upstream-raised slot-callable first parameter. It is a genuine
+    // materialize-then-decide vue-slot conversion target (RED), not a terminal.
+    (
+        "meta_resolve/projectors/output_sink.rs",
+        "surface_member_to_expanded_field",
+    ),
+];
+
+/// Whether a fn/mod/impl is compile-absent from a default production build —
+/// `#[cfg(test)]` / `#[cfg(any(test, feature = "test-support"))]` (the shared
+/// exact recogniser) OR gated behind the `oracle-gen` test-oracle feature (a
+/// `_for_test` helper that the structural fence must not treat as a production
+/// reverse-materialization path).
+fn hot_attrs_are_excluded(attrs: &[syn::Attribute]) -> bool {
+    attrs_are_test_gated(attrs)
+        || attrs.iter().any(|a| {
+            a.path().is_ident("cfg") && a.to_token_stream().to_string().contains("oracle-gen")
+        })
+}
+
+/// Whether a method-call ident is a direct materialize primitive. `type_expr`
+/// counts ONLY as a method call WITH an argument (`carrier.type_expr(&cap)`).
+fn hot_method_is_direct_verb(ident: &str, has_args: bool) -> bool {
+    if ident == "type_expr" {
+        return has_args;
+    }
+    HOT_MAT_DIRECT_IDENTS.contains(&ident)
+}
+
+/// Whether a FREE-FN / assoc-fn last-segment ident is a direct materialize
+/// primitive (the carrier accessor `type_expr` is a method, never a free fn, so
+/// it is excluded here to avoid a false fire on an unrelated free `type_expr`).
+fn hot_free_fn_is_direct_verb(ident: &str) -> bool {
+    ident != "type_expr" && HOT_MAT_DIRECT_IDENTS.contains(&ident)
+}
+
+// ---------------------------------------------------------------------------
+// Shared `use`-derived alias maps (consumed by BOTH the hot fence's variant
+// detection and the Unknown fence). Collection is RECURSIVE over the whole file
+// (top-level AND fn / block / mod-local `use` items), so a function-local
+// `use …::TypeExpr as TE;` is honoured everywhere.
+// ---------------------------------------------------------------------------
+
+/// Per-file alias maps derived from every `use` tree in the file.
+#[derive(Default)]
+struct UseAliasMaps {
+    /// Idents resolving to the `TypeExpr` TYPE (`TypeExpr`, plus any rename
+    /// `use …::TypeExpr as TE;` / `use TypeExpr as TE;`).
+    typeexpr_aliases: std::collections::HashSet<String>,
+    /// Idents resolving to ANY bare-imported `TypeExpr::Variant`
+    /// (`use …::TypeExpr::Object;` → `Object`; `… as O;` → `O`) — for the hot
+    /// fence's bare-variant `matches!(x, Object(_))` detection.
+    typeexpr_variant_idents: std::collections::HashSet<String>,
+    /// The `TypeExpr::Unknown` variant subset (`use …::TypeExpr::Unknown;` →
+    /// `Unknown`; `… as U;` → `U`) — for the Unknown fence.
+    unknown_variant_idents: std::collections::HashSet<String>,
+}
+
+/// Walk a `use` tree accumulating the path-segment stack, recording `TypeExpr`
+/// type aliases and bare `TypeExpr::Variant` imports (incl. the `Unknown`
+/// subset).
+fn use_tree_collect(tree: &syn::UseTree, stack: &mut Vec<String>, maps: &mut UseAliasMaps) {
+    match tree {
+        syn::UseTree::Path(p) => {
+            stack.push(p.ident.to_string());
+            use_tree_collect(&p.tree, stack, maps);
+            stack.pop();
+        }
+        syn::UseTree::Name(n) => {
+            let id = n.ident.to_string();
+            if id == "TypeExpr" {
+                maps.typeexpr_aliases.insert("TypeExpr".to_string());
+            }
+            if stack.iter().any(|s| s == "TypeExpr") {
+                maps.typeexpr_variant_idents.insert(id.clone());
+                if id == "Unknown" {
+                    maps.unknown_variant_idents.insert("Unknown".to_string());
+                }
+            }
+        }
+        syn::UseTree::Rename(r) => {
+            let from = r.ident.to_string();
+            let to = r.rename.to_string();
+            if from == "TypeExpr" {
+                maps.typeexpr_aliases.insert(to);
+            } else if stack.iter().any(|s| s == "TypeExpr") {
+                maps.typeexpr_variant_idents.insert(to.clone());
+                if from == "Unknown" {
+                    maps.unknown_variant_idents.insert(to);
+                }
+            }
+        }
+        syn::UseTree::Group(g) => {
+            for item in &g.items {
+                use_tree_collect(item, stack, maps);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+/// Recursively visits EVERY `use` item in a file (top-level + fn / block / mod
+/// local) into the shared alias maps.
+#[derive(Default)]
+struct UseAliasCollector {
+    maps: UseAliasMaps,
+}
+impl<'ast> syn::visit::Visit<'ast> for UseAliasCollector {
+    fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
+        let mut stack = Vec::new();
+        use_tree_collect(&u.tree, &mut stack, &mut self.maps);
+    }
+}
+
+/// Collect the file's alias maps (seeded with the canonical `TypeExpr` ident).
+fn collect_use_alias_maps(file: &syn::File) -> UseAliasMaps {
+    let mut c = UseAliasCollector::default();
+    c.maps.typeexpr_aliases.insert("TypeExpr".to_string());
+    syn::visit::Visit::visit_file(&mut c, file);
+    c.maps
+}
+
+/// Recursively: does `ts` mention a `TypeExpr` (alias) ident or a bare-imported
+/// `TypeExpr::Variant` ident anywhere (incl. nested groups)? Used to fast-gate a
+/// `matches!(x, TypeExpr::Variant …)` / `matches!(x, TE::Variant …)` /
+/// `matches!(x, Object(_))` scrutinee before the taint check.
+fn hot_token_stream_has_typeexpr(
+    ts: &proc_macro2::TokenStream,
+    aliases: &std::collections::HashSet<String>,
+    variants: &std::collections::HashSet<String>,
+) -> bool {
+    use proc_macro2::TokenTree;
+    ts.clone().into_iter().any(|t| match t {
+        TokenTree::Ident(id) => {
+            let s = id.to_string();
+            aliases.contains(&s) || variants.contains(&s)
+        }
+        TokenTree::Group(g) => hot_token_stream_has_typeexpr(&g.stream(), aliases, variants),
+        _ => false,
+    })
+}
+
+/// A `TypeExpr::Variant` reference: a >=2-segment path one of whose segments is a
+/// `TypeExpr` alias (`TypeExpr::Function` / `TE::Function`), OR a 1-segment
+/// bare-imported variant (`Object` from `use …::TypeExpr::Object;`). A bare
+/// `TypeExpr` type annotation is a `syn::Type`, never reaches here.
+fn hot_path_is_typeexpr_variant(
+    path: &syn::Path,
+    aliases: &std::collections::HashSet<String>,
+    variants: &std::collections::HashSet<String>,
+) -> bool {
+    if path.segments.len() >= 2
+        && path
+            .segments
+            .iter()
+            .any(|s| aliases.contains(&s.ident.to_string()))
+    {
+        return true;
+    }
+    path.segments.len() == 1 && variants.contains(&path.segments[0].ident.to_string())
+}
+
+/// A pattern destructuring a `TypeExpr::Variant` anywhere within it (incl.
+/// nested `Some(TypeExpr::Function(f))` / tuple / or / reference patterns).
+fn hot_pat_has_typeexpr_variant(
+    p: &syn::Pat,
+    aliases: &std::collections::HashSet<String>,
+    variants: &std::collections::HashSet<String>,
+) -> bool {
+    let rec = |p: &syn::Pat| hot_pat_has_typeexpr_variant(p, aliases, variants);
+    match p {
+        syn::Pat::TupleStruct(ts) => {
+            hot_path_is_typeexpr_variant(&ts.path, aliases, variants) || ts.elems.iter().any(rec)
+        }
+        syn::Pat::Struct(s) => hot_path_is_typeexpr_variant(&s.path, aliases, variants),
+        syn::Pat::Path(pp) => hot_path_is_typeexpr_variant(&pp.path, aliases, variants),
+        syn::Pat::Tuple(t) => t.elems.iter().any(rec),
+        syn::Pat::Or(o) => o.cases.iter().any(rec),
+        syn::Pat::Reference(r) => rec(&r.pat),
+        syn::Pat::Paren(p) => rec(&p.pat),
+        _ => false,
+    }
+}
+
+/// Collect the simple binding idents a pattern introduces (so a `let x =
+/// <materialize…>` / `let (a, b) = <materialize…>` / `if let Some(m) =
+/// <materialize…>` marks `x` / `a` / `b` / `m` as holding a materialized value).
+fn hot_collect_bound_idents(p: &syn::Pat, out: &mut Vec<String>) {
+    match p {
+        syn::Pat::Ident(pi) => out.push(pi.ident.to_string()),
+        syn::Pat::Tuple(t) => t
+            .elems
+            .iter()
+            .for_each(|e| hot_collect_bound_idents(e, out)),
+        syn::Pat::TupleStruct(ts) => ts
+            .elems
+            .iter()
+            .for_each(|e| hot_collect_bound_idents(e, out)),
+        syn::Pat::Reference(r) => hot_collect_bound_idents(&r.pat, out),
+        syn::Pat::Paren(p) => hot_collect_bound_idents(&p.pat, out),
+        syn::Pat::Type(pt) => hot_collect_bound_idents(&pt.pat, out),
+        _ => {}
+    }
+}
+
+/// The first closure-parameter ident (peeling a `: Ty` annotation), if simple.
+fn hot_closure_first_param_ident(cl: &syn::ExprClosure) -> Option<String> {
+    match cl.inputs.first()? {
+        syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+        syn::Pat::Type(pt) => {
+            if let syn::Pat::Ident(pi) = &*pt.pat {
+                Some(pi.ident.to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The parsed `matches!(SCRUTINEE, …)` first argument (the tokens before the
+/// first top-level comma), so the taint rail can classify the scrutinee.
+fn hot_matches_scrutinee_expr(ts: &proc_macro2::TokenStream) -> Option<syn::Expr> {
+    use proc_macro2::TokenTree;
+    let mut left = proc_macro2::TokenStream::new();
+    for t in ts.clone() {
+        if let TokenTree::Punct(p) = &t {
+            if p.as_char() == ',' {
+                break;
+            }
+        }
+        left.extend(std::iter::once(t));
+    }
+    syn::parse2(left).ok()
+}
+
+/// Best-effort parse of a `vec![..]` macro's tokens into the element
+/// expressions, robust to both the comma-list form (`vec![a, b]`) and the
+/// repeat form (`vec![x; n]` → `[x]`). A token stream that parses as neither
+/// degrades to a single-expr attempt, else an empty list (never panics).
+fn hot_macro_arg_exprs(tokens: &proc_macro2::TokenStream) -> Vec<syn::Expr> {
+    use syn::punctuated::Punctuated;
+    if let Ok(list) = syn::parse::Parser::parse2(
+        Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated,
+        tokens.clone(),
+    ) {
+        return list.into_iter().collect();
+    }
+    // Repeat form `x ; n` — split at the first top-level `;` and parse the head.
+    use proc_macro2::TokenTree;
+    let mut head = proc_macro2::TokenStream::new();
+    for t in tokens.clone() {
+        if matches!(&t, TokenTree::Punct(p) if p.as_char() == ';') {
+            break;
+        }
+        head.extend(std::iter::once(t));
+    }
+    if let Ok(e) = syn::parse2::<syn::Expr>(head) {
+        return vec![e];
+    }
+    syn::parse2::<syn::Expr>(tokens.clone())
+        .map(|e| vec![e])
+        .unwrap_or_default()
+}
+
+/// The crate-rooted module path for a production `rel` (`src/a/b/route_keys.rs`
+/// → `["crate", "a", "b", "route_keys"]`; a `mod.rs` leaf is dropped). Self-test
+/// rels without a `src/` prefix simply root at `crate`.
+fn hot_mod_path_from_rel(rel: &str) -> Vec<String> {
+    let stripped = rel.strip_prefix("src/").unwrap_or(rel);
+    let stripped = stripped.strip_suffix(".rs").unwrap_or(stripped);
+    let mut parts = vec!["crate".to_string()];
+    for seg in stripped.split('/') {
+        if seg.is_empty() || seg == "mod" {
+            continue;
+        }
+        parts.push(seg.to_string());
+    }
+    parts
+}
+
+/// Whether an ident is snake_case (lowercase / digit / `_`, no uppercase) — used
+/// to recognise a plausible classifier free-fn (vs an `Enum::Variant`
+/// constructor) for the unknown-helper rail.
+fn hot_ident_is_snake_case(ident: &str) -> bool {
+    !ident.is_empty()
+        && ident
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Whether a call path is a `Type::assoc(...)` associated function — the
+/// second-to-last segment names a TYPE (uppercase-initial ident). These are
+/// constructors / type methods (`Foo::new`, `Builder::with_x`), a publication
+/// passthrough rather than a fact-extracting decide, so the unknown-helper rail
+/// excludes them. A module-qualified free fn (`resolver_core::known_keys`) keeps
+/// a lowercase second-to-last segment and is NOT excluded.
+fn hot_call_is_type_associated(path: &syn::Path) -> bool {
+    let n = path.segments.len();
+    n >= 2
+        && path.segments[n - 2]
+            .ident
+            .to_string()
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+}
+
+// ---------------------------------------------------------------------------
+// Qualified production function index + return-taint fixed point.
+//
+// Every production fn is indexed by its QUALIFIED path (module path + inline
+// `mod` idents + impl frame + nested-fn path). A call's callee is resolved to a
+// qualified entry by SCOPE PROXIMITY — the candidate whose declaring scope
+// shares the LONGEST prefix with the calling fn's key wins — so a recursive
+// self-call or a same-impl / same-module sibling resolves to itself and two
+// same-named helpers in different scopes never cross-taint. (This drops the
+// `preserve_registry_callable_param_member_routes::inner` restitcher from the
+// return-taint set: its recursive `inner(...)` calls resolve to ITSELF, not to
+// the unrelated minting `materialize_component_meta_registry_structural_expr::inner`
+// sibling in the same file.) Resolution is fail-closed ONLY on a genuine
+// equal-proximity ambiguity (a same-named materializing candidate at the same
+// distance taints the call); a clearly-nearer non-minting candidate does not.
+// ---------------------------------------------------------------------------
+
+/// The impl-frame key fragment for an `impl` block (`impl(SelfTy)` /
+/// `impl(Trait for SelfTy)`). The index collector and the scanner MUST format
+/// this identically so a call's caller-scope key matches an entry's key.
+fn hot_impl_frame(i: &syn::ItemImpl) -> String {
+    let self_ty = hot_normalize_ws(&i.self_ty.to_token_stream().to_string());
+    match &i.trait_ {
+        Some((_, path, _)) => format!(
+            "impl({} for {})",
+            hot_normalize_ws(&path.to_token_stream().to_string()),
+            self_ty
+        ),
+        None => format!("impl({self_ty})"),
+    }
+}
+
+/// Length of the shared leading prefix of two scope vectors.
+fn hot_common_prefix_len(a: &[String], b: &[String]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
+/// Whether a return type names `TypeExpr` — directly OR through a `use`-alias
+/// (`use …::TypeExpr as TE;` → a `-> Option<TE>` return is TypeExpr-bearing).
+/// Wrapper layers (`Option` / `Result` / `Vec` / tuple / `Box` / `Arc`) are seen
+/// through because the rendered token stream still names the (aliased) ident.
+fn hot_return_type_is_typeexpr(
+    output: &syn::ReturnType,
+    aliases: &std::collections::HashSet<String>,
+) -> bool {
+    let syn::ReturnType::Type(_, ty) = output else {
+        return false;
+    };
+    hot_type_tokens_name_typeexpr(&ty.to_token_stream(), aliases)
+}
+fn hot_type_tokens_name_typeexpr(
+    ts: &proc_macro2::TokenStream,
+    aliases: &std::collections::HashSet<String>,
+) -> bool {
+    use proc_macro2::TokenTree;
+    ts.clone().into_iter().any(|t| match t {
+        TokenTree::Ident(id) => aliases.contains(&id.to_string()),
+        TokenTree::Group(g) => hot_type_tokens_name_typeexpr(&g.stream(), aliases),
+        _ => false,
+    })
+}
+
+/// One indexed production function.
+struct HotFnEntry {
+    /// `mod_path ++ impl_stack ++ fn_stack`; last segment = bare fn name.
+    key: Vec<String>,
+    returns_type_expr: bool,
+    has_direct: bool,
+    has_bridge: bool,
+    /// Bare callee names invoked directly in this fn's own body (nested fns +
+    /// test bodies excluded — each is indexed on its own).
+    calls: std::collections::BTreeSet<String>,
+}
+impl HotFnEntry {
+    fn bare(&self) -> &str {
+        self.key.last().map(String::as_str).unwrap_or_default()
+    }
+    /// The declaring scope = the key without the trailing fn name.
+    fn decl_scope(&self) -> &[String] {
+        &self.key[..self.key.len().saturating_sub(1)]
+    }
+}
+
+/// The global production fn index plus a bare-name lookup.
+#[derive(Default)]
+struct HotFnIndex {
+    entries: Vec<HotFnEntry>,
+    by_bare: std::collections::HashMap<String, Vec<usize>>,
+}
+impl HotFnIndex {
+    fn push(&mut self, e: HotFnEntry) {
+        let i = self.entries.len();
+        self.by_bare
+            .entry(e.bare().to_string())
+            .or_default()
+            .push(i);
+        self.entries.push(e);
+    }
+    /// Resolve a bare callee invoked from `caller_scope` (the calling fn's full
+    /// qualified key) to the candidate entry indices tied at maximal scope
+    /// proximity: one index on a clean resolution, several only on a genuine
+    /// equal-distance ambiguity (which callers treat fail-closed).
+    fn resolve(&self, caller_scope: &[String], bare: &str) -> Vec<usize> {
+        let Some(cands) = self.by_bare.get(bare) else {
+            return Vec::new();
+        };
+        let best = cands
+            .iter()
+            .map(|&i| hot_common_prefix_len(caller_scope, self.entries[i].decl_scope()))
+            .max()
+            .unwrap_or(0);
+        cands
+            .iter()
+            .copied()
+            .filter(|&i| hot_common_prefix_len(caller_scope, self.entries[i].decl_scope()) == best)
+            .collect()
+    }
+    /// Resolve a (possibly QUALIFIED) call PATH from `caller_scope`. A bare
+    /// single-segment path uses pure scope proximity ([`Self::resolve`]). A
+    /// qualified path (`other::helper` / `Type::helper`) respects the written
+    /// qualifier: candidates are first FILTERED to those whose declaring scope is
+    /// consistent with the penultimate segment (a module / impl-type in the
+    /// candidate's `decl_scope`), then proximity runs WITHIN that filtered set —
+    /// so a qualified call can never collapse to the NEAREST same-named bare
+    /// `helper`. Fail-OPEN to bare proximity when the qualifier matches no indexed
+    /// candidate (e.g. an external `serde_json::to_vec`), so detection is never
+    /// reduced below the bare baseline.
+    fn resolve_path(&self, caller_scope: &[String], path: &syn::Path) -> Vec<usize> {
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let Some(bare) = segs.last() else {
+            return Vec::new();
+        };
+        if segs.len() < 2 {
+            return self.resolve(caller_scope, bare);
+        }
+        let qualifier = &segs[segs.len() - 2];
+        let Some(cands) = self.by_bare.get(bare.as_str()) else {
+            return Vec::new();
+        };
+        let filtered: Vec<usize> = cands
+            .iter()
+            .copied()
+            .filter(|&i| {
+                self.entries[i]
+                    .decl_scope()
+                    .iter()
+                    .any(|seg| seg == qualifier || seg.contains(qualifier.as_str()))
+            })
+            .collect();
+        if filtered.is_empty() {
+            return self.resolve(caller_scope, bare);
+        }
+        let best = filtered
+            .iter()
+            .map(|&i| hot_common_prefix_len(caller_scope, self.entries[i].decl_scope()))
+            .max()
+            .unwrap_or(0);
+        filtered
+            .into_iter()
+            .filter(|&i| hot_common_prefix_len(caller_scope, self.entries[i].decl_scope()) == best)
+            .collect()
+    }
+}
+
+/// Collects the call idents + mint flags of ONE function body, skipping nested
+/// fn items (each is indexed on its own).
+#[derive(Default)]
+struct HotCallCollector {
+    calls: std::collections::BTreeSet<String>,
+    has_direct: bool,
+    has_bridge: bool,
+}
+impl<'ast> syn::visit::Visit<'ast> for HotCallCollector {
+    fn visit_item_fn(&mut self, _f: &'ast syn::ItemFn) {}
+    fn visit_impl_item_fn(&mut self, _f: &'ast syn::ImplItemFn) {}
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        let m = mc.method.to_string();
+        if hot_method_is_direct_verb(&m, !mc.args.is_empty()) {
+            self.has_direct = true;
+        }
+        if HOT_MAT_BRIDGE_IDENTS.contains(&m.as_str()) {
+            self.has_bridge = true;
+        }
+        self.calls.insert(m);
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(p) = &*c.func {
+            if let Some(seg) = p.path.segments.last() {
+                let id = seg.ident.to_string();
+                if hot_free_fn_is_direct_verb(&id) {
+                    self.has_direct = true;
+                }
+                if HOT_MAT_BRIDGE_IDENTS.contains(&id.as_str()) {
+                    self.has_bridge = true;
+                }
+                self.calls.insert(id);
+            }
+        }
+        syn::visit::visit_expr_call(self, c);
+    }
+}
+
+/// Walks a file building qualified `HotFnEntry`s. Tracks the SAME mod / impl /
+/// fn scope stacks as the scanner so an entry's key matches the scanner's
+/// caller-scope key exactly. Skips compile-absent (`#[cfg(test)]` / `oracle-gen`)
+/// items so they never contribute return-taint.
+struct HotIndexCollector<'a> {
+    mod_path: Vec<String>,
+    impl_stack: Vec<String>,
+    fn_stack: Vec<String>,
+    aliases: &'a std::collections::HashSet<String>,
+    index: &'a mut HotFnIndex,
+}
+impl<'a> HotIndexCollector<'a> {
+    fn record(&mut self, sig: &syn::Signature, block: &syn::Block) {
+        let mut key = self.mod_path.clone();
+        key.extend(self.impl_stack.iter().cloned());
+        key.extend(self.fn_stack.iter().cloned());
+        let mut cc = HotCallCollector::default();
+        syn::visit::Visit::visit_block(&mut cc, block);
+        self.index.push(HotFnEntry {
+            key,
+            returns_type_expr: hot_return_type_is_typeexpr(&sig.output, self.aliases),
+            has_direct: cc.has_direct,
+            has_bridge: cc.has_bridge,
+            calls: cc.calls,
+        });
+    }
+}
+impl<'a, 'ast> syn::visit::Visit<'ast> for HotIndexCollector<'a> {
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        self.fn_stack.push(f.sig.ident.to_string());
+        self.record(&f.sig, &f.block);
+        syn::visit::visit_item_fn(self, f);
+        self.fn_stack.pop();
+    }
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        self.fn_stack.push(f.sig.ident.to_string());
+        self.record(&f.sig, &f.block);
+        syn::visit::visit_impl_item_fn(self, f);
+        self.fn_stack.pop();
+    }
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        if hot_attrs_are_excluded(&m.attrs) {
+            return;
+        }
+        self.mod_path.push(m.ident.to_string());
+        syn::visit::visit_item_mod(self, m);
+        self.mod_path.pop();
+    }
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        if hot_attrs_are_excluded(&i.attrs) {
+            return;
+        }
+        self.impl_stack.push(hot_impl_frame(i));
+        syn::visit::visit_item_impl(self, i);
+        self.impl_stack.pop();
+    }
+    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+        if hot_attrs_are_excluded(&t.attrs) {
+            return;
+        }
+        self.impl_stack.push(format!("trait({})", t.ident));
+        syn::visit::visit_item_trait(self, t);
+        self.impl_stack.pop();
+    }
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        // Only a DEFAULT (provided) body is production code to index; a
+        // signature-only trait method has no body and contributes nothing.
+        let Some(block) = &f.default else {
+            return;
+        };
+        self.fn_stack.push(f.sig.ident.to_string());
+        self.record(&f.sig, block);
+        syn::visit::visit_trait_item_fn(self, f);
+        self.fn_stack.pop();
+    }
+}
+
+/// Build the global production fn index across every parsed `(rel, File)`,
+/// seeding each file's module path + its `use`-derived `TypeExpr` aliases.
+fn build_hot_index(parsed: &[(String, syn::File)]) -> HotFnIndex {
+    let mut index = HotFnIndex::default();
+    for (rel, file) in parsed {
+        let aliases = collect_use_alias_maps(file).typeexpr_aliases;
+        let mut c = HotIndexCollector {
+            mod_path: hot_mod_path_from_rel(rel),
+            impl_stack: Vec::new(),
+            fn_stack: Vec::new(),
+            aliases: &aliases,
+            index: &mut index,
+        };
+        syn::visit::Visit::visit_file(&mut c, file);
+    }
+    index
+}
+
+/// The return-taint fixed point over QUALIFIED entries. An entry is
+/// materialization-returning when its return names `TypeExpr` AND its body mints
+/// (direct verb / bridge) OR calls — resolved by scope proximity from THIS
+/// entry's key — an already-tainted entry. Fail-closed on equal-proximity
+/// ambiguity (any tied materializing candidate taints the call). Returns the set
+/// of tainted entry indices.
+fn hot_returns_materialized(index: &HotFnIndex) -> std::collections::HashSet<usize> {
+    let mut set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    loop {
+        let mut changed = false;
+        for (i, e) in index.entries.iter().enumerate() {
+            if !e.returns_type_expr || set.contains(&i) {
+                continue;
+            }
+            let mints = e.has_direct
+                || e.has_bridge
+                || e.calls
+                    .iter()
+                    .any(|c| index.resolve(&e.key, c).iter().any(|j| set.contains(j)));
+            if mints {
+                set.insert(i);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    set
+}
+
+/// The set of BARE fn names that RETURN a `TypeExpr`-bearing type (a transformer
+/// / passthrough). Kept bare-name + conservative: the reader rail EXCLUDES a
+/// call whose bare name names any `TypeExpr`-returning fn (excluding more is
+/// strictly safer — it never turns a transformer into a false reader-decide).
+fn hot_returns_typeexpr_bare(index: &HotFnIndex) -> std::collections::HashSet<String> {
+    index
+        .entries
+        .iter()
+        .filter(|e| e.returns_type_expr)
+        .map(|e| e.bare().to_string())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// The per-fn taint scanner.
+// ---------------------------------------------------------------------------
+
+/// The PROVENANCE of a tainted local — what a decide on it means.
+///
+/// `Output` is a freshly MATERIALIZED value (a direct mint / host-threaded
+/// bridge / return-materialization helper, or a propagation of one); a decide on
+/// it is a materialize-then-decide site in EVERY mode (the main fence's RED
+/// signal and an unconditional self-policing failure). `SymbolicInput` is a
+/// SEEDED `TypeExpr` param under self-policing — a would-be-materialized input
+/// the terminal may classify BEFORE lowering it; a decide on it is publication
+/// classification UNLESS that specific param is never lowered. `Output` dominates
+/// when a value derives from both (a container / wrapper mixing a mint with a
+/// param is materialized). In the MAIN fence (not self-policing) no param is
+/// seeded, so `SymbolicInput` never arises and every taint is `Output`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HotTaintKind {
+    Output,
+    SymbolicInput,
+}
+
+impl HotTaintKind {
+    /// Combine two taint provenances (`Output` dominates `SymbolicInput`).
+    fn join(a: Option<HotTaintKind>, b: Option<HotTaintKind>) -> Option<HotTaintKind> {
+        match (a, b) {
+            (Some(HotTaintKind::Output), _) | (_, Some(HotTaintKind::Output)) => {
+                Some(HotTaintKind::Output)
+            }
+            (Some(HotTaintKind::SymbolicInput), _) | (_, Some(HotTaintKind::SymbolicInput)) => {
+                Some(HotTaintKind::SymbolicInput)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct HotFnSignals {
+    innermost: String,
+    mat_direct: bool,
+    mat_bridge: bool,
+    decide_standalone: bool,
+    /// A decide on a MATERIALIZED-OUTPUT value (the main-fence RED decide signal
+    /// AND an unconditional self-policing failure).
+    decide_tainted: bool,
+    /// Self-policing only: the SEEDED symbolic-input `TypeExpr` params this fn
+    /// DECIDES on (branch / navigate / shape-extract / cardinality / reader). A
+    /// decide on a param NOT in `lowered_symbolic_params` is a mislabeled
+    /// terminal (it classifies a materialized value it never lowers).
+    decided_symbolic_params: std::collections::BTreeSet<String>,
+    /// Self-policing only: the SEEDED symbolic-input `TypeExpr` params this fn
+    /// LOWERS into the pipeline (`lower_type_expr_in_scope*`), marking each a
+    /// symbolic-input mint boundary whose input-shape guards are publication
+    /// classification, not a materialized-value decide. The exemption is
+    /// PER-PARAMETER: lowering param `A` does not exempt a decide on a separate
+    /// param `B` or on a fresh mint.
+    lowered_symbolic_params: std::collections::BTreeSet<String>,
+    notes: std::collections::BTreeSet<String>,
+}
+
+/// Per-fn signal collector keyed by QUALIFIED path (module path + inline `mod`
+/// idents + impl frame + nested-fn path), so same-named functions in different
+/// scopes never merge. Tracks per-fn-frame TAINTED locals; a closure attributes
+/// to the enclosing named fn and shares its taint frame (a closure capturing a
+/// materialized binding decides on it for the enclosing fn).
+struct HotMaterializeScanner<'a> {
+    scan_rel: &'a str,
+    mod_path: Vec<String>,
+    impl_stack: Vec<String>,
+    fn_stack: Vec<String>,
+    /// Per-fn-frame tainted locals keyed by ident → taint PROVENANCE
+    /// ([`HotTaintKind`]). A `match` / `matches!` / cardinality / reader decide
+    /// routes on the operand's provenance: `Output` is a materialize-then-decide
+    /// (the main-fence RED signal), `SymbolicInput` (self-policing only) a
+    /// per-parameter publication-classification gate.
+    tainted_stack: Vec<std::collections::HashMap<String, HotTaintKind>>,
+    /// The global qualified fn index — a call's callee resolves through it by
+    /// scope proximity from the calling fn's key.
+    index: &'a HotFnIndex,
+    /// Qualified entry indices whose return is materialization-tainted.
+    returns_mat: &'a std::collections::HashSet<usize>,
+    /// Bare names of production fns that RETURN a `TypeExpr`-bearing type — a
+    /// transformer / passthrough, not a fact extractor. The unknown-helper rail
+    /// excludes them: passing a materialized value to a `TypeExpr`-returning
+    /// transformer is propagation, not a decide.
+    returns_typeexpr: &'a std::collections::HashSet<String>,
+    /// The file's `TypeExpr` type aliases / bare-imported variant idents, so an
+    /// aliased `TE::Object` / bare-imported `Object` variant is recognised.
+    typeexpr_aliases: &'a std::collections::HashSet<String>,
+    typeexpr_variants: &'a std::collections::HashSet<String>,
+    /// Allowlist SELF-POLICING mode: seed each fn's `TypeExpr`-typed params as
+    /// tainted and treat every fn as NON-terminal (so the reader / unknown-helper
+    /// rails fire), to prove an allowlisted terminal does not decide on a
+    /// materialized param.
+    self_policing: bool,
+    per_fn: BTreeMap<String, HotFnSignals>,
+}
+
+impl<'a> HotMaterializeScanner<'a> {
+    fn qual_key(&self) -> String {
+        self.cur_scope().join("::")
+    }
+    /// The calling fn's full qualified key (`mod_path ++ impl_stack ++ fn_stack`)
+    /// — the caller scope used to resolve a call's callee by proximity.
+    fn cur_scope(&self) -> Vec<String> {
+        let mut parts = self.mod_path.clone();
+        parts.extend(self.impl_stack.iter().cloned());
+        parts.extend(self.fn_stack.iter().cloned());
+        parts
+    }
+    /// Whether a bare callee invoked from the current scope resolves (by
+    /// proximity) to a return-materialization-tainted entry. Fail-closed on an
+    /// equal-proximity ambiguity (any tied tainted candidate taints the call).
+    fn call_returns_mat(&self, bare: &str) -> bool {
+        self.index
+            .resolve(&self.cur_scope(), bare)
+            .iter()
+            .any(|i| self.returns_mat.contains(i))
+    }
+    /// Like [`Self::call_returns_mat`], but RESPECTS an explicit path qualifier
+    /// on a free / associated call (`other::helper(..)` / `Type::helper(..)`): a
+    /// qualified callee resolves only among candidates consistent with the
+    /// written qualifier and never collapses to the NEAREST same-named bare
+    /// `helper`.
+    ///
+    /// RESIDUAL INHERENT LIMIT (enumerated, not an open hole): a METHOD call
+    /// `recv.m(..)` carries no written path qualifier — its callee depends on the
+    /// RECEIVER's TYPE, which a syntactic guard cannot resolve without a type
+    /// checker. Full receiver-type disambiguation across two same-named methods
+    /// where one mints is the accepted residual; scope proximity is the sound
+    /// approximation, accepted because no benign/minter same-name method
+    /// collision exists in the tree (a minter method name is a distinctive
+    /// sealed-cap accessor, so the residual is empty in practice).
+    fn call_returns_mat_path(&self, path: &syn::Path) -> bool {
+        self.index
+            .resolve_path(&self.cur_scope(), path)
+            .iter()
+            .any(|i| self.returns_mat.contains(i))
+    }
+    fn cur(&mut self) -> Option<&mut HotFnSignals> {
+        if self.fn_stack.is_empty() {
+            return None;
+        }
+        let key = self.qual_key();
+        let innermost = self.fn_stack.last().cloned().unwrap_or_default();
+        let e = self.per_fn.entry(key).or_default();
+        if e.innermost.is_empty() {
+            e.innermost = innermost;
+        }
+        Some(e)
+    }
+    fn mark_mat_direct(&mut self, note: &str) {
+        if let Some(s) = self.cur() {
+            s.mat_direct = true;
+            s.notes.insert(format!("mat:{note}"));
+        }
+    }
+    fn mark_mat_bridge(&mut self, note: &str) {
+        if let Some(s) = self.cur() {
+            s.mat_bridge = true;
+            s.notes.insert(format!("bridge:{note}"));
+        }
+    }
+    fn mark_decide_standalone(&mut self, note: &str) {
+        if let Some(s) = self.cur() {
+            s.decide_standalone = true;
+            s.notes.insert(format!("gate:{note}"));
+        }
+    }
+    fn mark_decide_tainted(&mut self, note: &str) {
+        if let Some(s) = self.cur() {
+            s.decide_tainted = true;
+            s.notes.insert(format!("decide:{note}"));
+        }
+    }
+    /// Self-policing: record the SEEDED symbolic-input param roots that `arg` (a
+    /// value passed to the lowering pipeline) derives from — each becomes a
+    /// symbolic-input mint boundary, exempting a later decide on THAT param.
+    fn mark_lowers_param(&mut self, arg: &syn::Expr) {
+        let mut roots = std::collections::BTreeSet::new();
+        self.symbolic_param_roots(arg, &mut roots);
+        if roots.is_empty() {
+            return;
+        }
+        if let Some(s) = self.cur() {
+            s.lowered_symbolic_params.extend(roots);
+        }
+    }
+    fn mark_tainted(&mut self, id: String, kind: HotTaintKind) {
+        if let Some(set) = self.tainted_stack.last_mut() {
+            // `Output` dominates: a binding mixing a mint with a seeded param
+            // (or rebound from a mint) is materialized output.
+            if set.get(&id) != Some(&HotTaintKind::Output) {
+                set.insert(id, kind);
+            }
+        }
+    }
+    fn taint_kind(&self, id: &str) -> Option<HotTaintKind> {
+        self.tainted_stack.last().and_then(|s| s.get(id).copied())
+    }
+    fn is_tainted(&self, id: &str) -> bool {
+        self.taint_kind(id).is_some()
+    }
+    /// The PROVENANCE of the materialized `TypeExpr` an expression evaluates to
+    /// — a direct mint, a host-threaded bridge, a call to a return-tainted
+    /// helper, an extracting-gate of a tainted value, a tainted local, or a
+    /// propagation of any of those (incl. through a container / wrapper / branch).
+    /// `None` = not tainted. `Output` dominates `SymbolicInput` when an
+    /// expression mixes both (a container holding a mint is materialized output).
+    fn expr_taint_kind(&self, e: &syn::Expr) -> Option<HotTaintKind> {
+        match e {
+            syn::Expr::MethodCall(mc) => {
+                let m = mc.method.to_string();
+                if hot_method_is_direct_verb(&m, !mc.args.is_empty())
+                    || HOT_MAT_BRIDGE_IDENTS.contains(&m.as_str())
+                    || self.call_returns_mat(&m)
+                {
+                    return Some(HotTaintKind::Output);
+                }
+                // An EXTRACTING gate fed a tainted value yields a materialized
+                // SUB-value (param/return/callable arm) — itself output.
+                if HOT_EXTRACTING_GATE_IDENTS.contains(&m.as_str())
+                    && mc.args.iter().any(|a| self.expr_taint(a))
+                {
+                    return Some(HotTaintKind::Output);
+                }
+                if HOT_TAINT_PROPAGATE_METHODS.contains(&m.as_str()) {
+                    return self.expr_taint_kind(&mc.receiver);
+                }
+                None
+            }
+            syn::Expr::Call(c) => {
+                if let syn::Expr::Path(p) = &*c.func {
+                    if let Some(seg) = p.path.segments.last() {
+                        let id = seg.ident.to_string();
+                        if hot_free_fn_is_direct_verb(&id)
+                            || HOT_MAT_BRIDGE_IDENTS.contains(&id.as_str())
+                            || self.call_returns_mat_path(&p.path)
+                        {
+                            return Some(HotTaintKind::Output);
+                        }
+                        // An EXTRACTING gate fed a tainted value yields a
+                        // materialized SUB-value (param/return/callable arm), so
+                        // the chain stays tainted through the extractor.
+                        if HOT_EXTRACTING_GATE_IDENTS.contains(&id.as_str())
+                            && c.args.iter().any(|a| self.expr_taint(a))
+                        {
+                            return Some(HotTaintKind::Output);
+                        }
+                        // A wrapper ctor PROPAGATES its argument's taint AND its
+                        // provenance — `Some(mat)` stays materialized.
+                        if HOT_TAINT_WRAP_CTORS.contains(&id.as_str()) {
+                            return c
+                                .args
+                                .iter()
+                                .map(|a| self.expr_taint_kind(a))
+                                .fold(None, HotTaintKind::join);
+                        }
+                    }
+                }
+                None
+            }
+            syn::Expr::Path(p) if p.path.segments.len() == 1 => {
+                self.taint_kind(&p.path.segments[0].ident.to_string())
+            }
+            syn::Expr::Reference(r) => self.expr_taint_kind(&r.expr),
+            syn::Expr::Unary(u) => self.expr_taint_kind(&u.expr),
+            syn::Expr::Paren(p) => self.expr_taint_kind(&p.expr),
+            syn::Expr::Group(g) => self.expr_taint_kind(&g.expr),
+            syn::Expr::Try(t) => self.expr_taint_kind(&t.expr),
+            syn::Expr::Field(f) => self.expr_taint_kind(&f.base),
+            syn::Expr::Index(i) => self.expr_taint_kind(&i.expr),
+            syn::Expr::Await(a) => self.expr_taint_kind(&a.base),
+            syn::Expr::Cast(c) => self.expr_taint_kind(&c.expr),
+            // A materialized value bound from a branch — `let m = if … {
+            // helper(…) } else { None }`, a tail `match`, or a block — is
+            // tainted when any branch tail is.
+            syn::Expr::If(ei) => HotTaintKind::join(
+                self.block_tail_taint_kind(&ei.then_branch),
+                ei.else_branch
+                    .as_ref()
+                    .and_then(|(_, e)| self.expr_taint_kind(e)),
+            ),
+            syn::Expr::Block(b) => self.block_tail_taint_kind(&b.block),
+            syn::Expr::Match(em) => em
+                .arms
+                .iter()
+                .map(|a| self.expr_taint_kind(&a.body))
+                .fold(None, HotTaintKind::join),
+            // CONTAINERS / aggregates — a materialized value placed in an array /
+            // tuple / struct / `vec!` is STILL materialized when later
+            // destructured / indexed / field-read back out (propagation, sound:
+            // a propagation of a materialized value is materialized).
+            syn::Expr::Array(arr) => arr
+                .elems
+                .iter()
+                .map(|e| self.expr_taint_kind(e))
+                .fold(None, HotTaintKind::join),
+            syn::Expr::Tuple(t) => t
+                .elems
+                .iter()
+                .map(|e| self.expr_taint_kind(e))
+                .fold(None, HotTaintKind::join),
+            syn::Expr::Struct(s) => s
+                .fields
+                .iter()
+                .map(|f| self.expr_taint_kind(&f.expr))
+                .fold(None, HotTaintKind::join),
+            syn::Expr::Repeat(r) => self.expr_taint_kind(&r.expr),
+            syn::Expr::Macro(mac) if mac.mac.path.is_ident("vec") => {
+                hot_macro_arg_exprs(&mac.mac.tokens)
+                    .iter()
+                    .map(|e| self.expr_taint_kind(e))
+                    .fold(None, HotTaintKind::join)
+            }
+            _ => None,
+        }
+    }
+    /// Whether an expression evaluates to a materialized `TypeExpr` (provenance
+    /// discarded) — the boolean view used for taint propagation / binding.
+    fn expr_taint(&self, e: &syn::Expr) -> bool {
+        self.expr_taint_kind(e).is_some()
+    }
+    /// The provenance of a block's tail expression.
+    fn block_tail_taint_kind(&self, block: &syn::Block) -> Option<HotTaintKind> {
+        match block.stmts.last() {
+            Some(syn::Stmt::Expr(e, None)) => self.expr_taint_kind(e),
+            _ => None,
+        }
+    }
+    /// Collect the SEEDED symbolic-input param roots an expression derives from
+    /// (a `TypeExpr` param flowing through propagation / wrappers / containers /
+    /// references). Self-policing only — drives the PER-PARAMETER lowering
+    /// exemption: a decide / lower is attributed to the specific seeded params it
+    /// touches, never blanket-exempting a whole fn.
+    fn symbolic_param_roots(&self, e: &syn::Expr, out: &mut std::collections::BTreeSet<String>) {
+        match e {
+            syn::Expr::Path(p) if p.path.segments.len() == 1 => {
+                let id = p.path.segments[0].ident.to_string();
+                if self.taint_kind(&id) == Some(HotTaintKind::SymbolicInput) {
+                    out.insert(id);
+                }
+            }
+            syn::Expr::MethodCall(mc)
+                if HOT_TAINT_PROPAGATE_METHODS.contains(&mc.method.to_string().as_str()) =>
+            {
+                self.symbolic_param_roots(&mc.receiver, out);
+            }
+            syn::Expr::Call(c) => {
+                if let syn::Expr::Path(p) = &*c.func {
+                    if let Some(seg) = p.path.segments.last() {
+                        if HOT_TAINT_WRAP_CTORS.contains(&seg.ident.to_string().as_str()) {
+                            c.args
+                                .iter()
+                                .for_each(|a| self.symbolic_param_roots(a, out));
+                        }
+                    }
+                }
+            }
+            syn::Expr::Reference(r) => self.symbolic_param_roots(&r.expr, out),
+            syn::Expr::Unary(u) => self.symbolic_param_roots(&u.expr, out),
+            syn::Expr::Paren(p) => self.symbolic_param_roots(&p.expr, out),
+            syn::Expr::Group(g) => self.symbolic_param_roots(&g.expr, out),
+            syn::Expr::Try(t) => self.symbolic_param_roots(&t.expr, out),
+            syn::Expr::Field(f) => self.symbolic_param_roots(&f.base, out),
+            syn::Expr::Index(i) => self.symbolic_param_roots(&i.expr, out),
+            syn::Expr::Await(a) => self.symbolic_param_roots(&a.base, out),
+            syn::Expr::Cast(c) => self.symbolic_param_roots(&c.expr, out),
+            syn::Expr::Array(arr) => {
+                arr.elems
+                    .iter()
+                    .for_each(|e| self.symbolic_param_roots(e, out));
+            }
+            syn::Expr::Tuple(t) => {
+                t.elems
+                    .iter()
+                    .for_each(|e| self.symbolic_param_roots(e, out));
+            }
+            _ => {}
+        }
+    }
+    /// Route a decide over `operands` by their joined taint PROVENANCE. A
+    /// materialized `Output` operand is the main-fence RED decide (and an
+    /// unconditional self-policing failure); a `SymbolicInput` operand records
+    /// the seeded param roots for the PER-PARAMETER self-policing exemption (a
+    /// decide on a param never lowered is a mislabeled terminal). An untainted
+    /// operand set is no decide. In the MAIN fence only `Output` ever arises, so
+    /// this is byte-identical to the prior unconditional `mark_decide_tainted`.
+    fn record_decide_over(&mut self, operands: &[&syn::Expr], note: &str) {
+        let kind = operands
+            .iter()
+            .map(|o| self.expr_taint_kind(o))
+            .fold(None, HotTaintKind::join);
+        match kind {
+            Some(HotTaintKind::Output) => self.mark_decide_tainted(note),
+            Some(HotTaintKind::SymbolicInput) => {
+                let mut roots = std::collections::BTreeSet::new();
+                for o in operands {
+                    self.symbolic_param_roots(o, &mut roots);
+                }
+                if let Some(s) = self.cur() {
+                    s.decided_symbolic_params.extend(roots);
+                    s.notes.insert(format!("symbolic-decide:{note}"));
+                }
+            }
+            None => {}
+        }
+    }
+    /// Single-operand [`record_decide_over`].
+    fn record_decide(&mut self, operand: &syn::Expr, note: &str) {
+        self.record_decide_over(&[operand], note);
+    }
+    /// Whether the innermost fn is a sanctioned terminal one-shot sink — used to
+    /// SUPPRESS the reader / unknown-helper rails in the MAIN fence (a terminal
+    /// publishes its own minted value through a serializer / writer such as
+    /// `serde_json::to_vec` / `surface_view_to_projected_surface`, which is
+    /// legitimate). The reader / unknown-helper rails OR `self_policing` into
+    /// their gate, so they DO fire under self-policing even for a terminal name
+    /// (the allowlist rail proves a terminal reads no materialized OUTPUT); the
+    /// failure there is still gated on a decide over a MATERIALIZED-OUTPUT value
+    /// or an un-lowered SYMBOLIC-INPUT param, so a legitimate serializer / pure
+    /// lower does not fail. The STRUCTURAL decide rails (`if let` / `match` /
+    /// `matches!` / `==` / cardinality) fire on a seeded materialized param
+    /// regardless of terminal status — they catch `binding_fields_from_param_ty`'s
+    /// `if let TypeExpr::Object = param_ty`.
+    fn cur_is_terminal(&self) -> bool {
+        let Some(innermost) = self.fn_stack.last() else {
+            return false;
+        };
+        HOT_TERMINAL_SINKS
+            .iter()
+            .any(|(suf, fname)| self.scan_rel.ends_with(suf) && innermost == fname)
+    }
+    fn enter_fn(&mut self, name: String) {
+        self.fn_stack.push(name);
+        self.tainted_stack.push(std::collections::HashMap::new());
+    }
+    /// In self-policing mode, seed a fn's `TypeExpr`-typed params as TAINTED so a
+    /// decide on a (would-be-materialized) param surfaces.
+    fn seed_param_taint(&mut self, sig: &syn::Signature) {
+        if !self.self_policing {
+            return;
+        }
+        for input in &sig.inputs {
+            if let syn::FnArg::Typed(pt) = input {
+                if hot_type_tokens_name_typeexpr(&pt.ty.to_token_stream(), self.typeexpr_aliases) {
+                    let mut ids = Vec::new();
+                    hot_collect_bound_idents(&pt.pat, &mut ids);
+                    for id in ids {
+                        self.mark_tainted(id, HotTaintKind::SymbolicInput);
+                    }
+                }
+            }
+        }
+    }
+    fn exit_fn(&mut self) {
+        self.fn_stack.pop();
+        self.tainted_stack.pop();
+    }
+    /// Visit a closure body with its first parameter TAINTED, inheriting the
+    /// receiver's taint PROVENANCE (`kind`), then restore. (A decide inside the
+    /// closure over a materialized iterator element is an `Output` decide; over a
+    /// seeded-param iterator a `SymbolicInput` decide.)
+    fn visit_tainted_closure(&mut self, cl: &syn::ExprClosure, kind: HotTaintKind) {
+        let param = hot_closure_first_param_ident(cl);
+        let added = match &param {
+            Some(id) if !self.is_tainted(id) => {
+                self.mark_tainted(id.clone(), kind);
+                true
+            }
+            _ => false,
+        };
+        syn::visit::Visit::visit_expr(self, &cl.body);
+        if added {
+            if let (Some(id), Some(set)) = (param.as_ref(), self.tainted_stack.last_mut()) {
+                set.remove(id);
+            }
+        }
+    }
+}
+
+impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        self.enter_fn(f.sig.ident.to_string());
+        self.seed_param_taint(&f.sig);
+        syn::visit::visit_item_fn(self, f);
+        self.exit_fn();
+    }
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        self.enter_fn(f.sig.ident.to_string());
+        self.seed_param_taint(&f.sig);
+        syn::visit::visit_impl_item_fn(self, f);
+        self.exit_fn();
+    }
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        if hot_attrs_are_excluded(&m.attrs) {
+            return;
+        }
+        self.mod_path.push(m.ident.to_string());
+        syn::visit::visit_item_mod(self, m);
+        self.mod_path.pop();
+    }
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        if hot_attrs_are_excluded(&i.attrs) {
+            return;
+        }
+        self.impl_stack.push(hot_impl_frame(i));
+        syn::visit::visit_item_impl(self, i);
+        self.impl_stack.pop();
+    }
+    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+        if hot_attrs_are_excluded(&t.attrs) {
+            return;
+        }
+        self.impl_stack.push(format!("trait({})", t.ident));
+        syn::visit::visit_item_trait(self, t);
+        self.impl_stack.pop();
+    }
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        // Only a DEFAULT (provided) body is scannable production code; a
+        // signature-only trait method has no body to materialize-then-decide in.
+        if f.default.is_none() {
+            return;
+        }
+        self.enter_fn(f.sig.ident.to_string());
+        self.seed_param_taint(&f.sig);
+        syn::visit::visit_trait_item_fn(self, f);
+        self.exit_fn();
+    }
+    fn visit_local(&mut self, l: &'ast syn::Local) {
+        if let Some(init) = &l.init {
+            let init_kind = self.expr_taint_kind(&init.expr);
+            if init_kind.is_some()
+                && hot_pat_has_typeexpr_variant(
+                    &l.pat,
+                    self.typeexpr_aliases,
+                    self.typeexpr_variants,
+                )
+            {
+                self.record_decide(&init.expr, "let TypeExpr::… of materialized value");
+            }
+            if let Some(kind) = init_kind {
+                let mut ids = Vec::new();
+                hot_collect_bound_idents(&l.pat, &mut ids);
+                for id in ids {
+                    self.mark_tainted(id, kind);
+                }
+            }
+        }
+        syn::visit::visit_local(self, l);
+    }
+    fn visit_expr_let(&mut self, el: &'ast syn::ExprLet) {
+        let kind = self.expr_taint_kind(&el.expr);
+        if kind.is_some()
+            && hot_pat_has_typeexpr_variant(&el.pat, self.typeexpr_aliases, self.typeexpr_variants)
+        {
+            self.record_decide(&el.expr, "if-let TypeExpr::… of materialized value");
+        }
+        if let Some(kind) = kind {
+            let mut ids = Vec::new();
+            hot_collect_bound_idents(&el.pat, &mut ids);
+            for id in ids {
+                self.mark_tainted(id, kind);
+            }
+        }
+        syn::visit::visit_expr_let(self, el);
+    }
+    fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
+        // Assignment taint introduction — `x = mat();` taints `x` with the RHS
+        // provenance (so a later `matches!(x, TypeExpr::…)` routes by it). A
+        // field-write `self.x = mat()` / `obj.f = mat()` is publication (moving a
+        // materialized value into a field), NOT a decide and not a tracked taint
+        // source — consistent with "a tainted value moved into a terminal DTO
+        // field stays GREEN".
+        if let Some(kind) = self.expr_taint_kind(&a.right) {
+            if let syn::Expr::Path(p) = &*a.left {
+                if p.path.segments.len() == 1 {
+                    self.mark_tainted(p.path.segments[0].ident.to_string(), kind);
+                }
+            }
+        }
+        syn::visit::visit_expr_assign(self, a);
+    }
+    fn visit_expr_match(&mut self, em: &'ast syn::ExprMatch) {
+        if em.arms.iter().any(|a| {
+            hot_pat_has_typeexpr_variant(&a.pat, self.typeexpr_aliases, self.typeexpr_variants)
+        }) {
+            self.record_decide(&em.expr, "match TypeExpr::… of materialized value");
+        }
+        syn::visit::visit_expr_match(self, em);
+    }
+    fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+        if matches!(b.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+            self.record_decide_over(
+                &[&b.left, &b.right],
+                "==/!= convergence on materialized value",
+            );
+        }
+        syn::visit::visit_expr_binary(self, b);
+    }
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        let m = mc.method.to_string();
+        if hot_method_is_direct_verb(&m, !mc.args.is_empty()) {
+            self.mark_mat_direct(&m);
+        }
+        if HOT_MAT_BRIDGE_IDENTS.contains(&m.as_str()) {
+            self.mark_mat_bridge(&m);
+        }
+        let receiver_kind = self.expr_taint_kind(&mc.receiver);
+        let receiver_tainted = receiver_kind.is_some();
+        if receiver_tainted && HOT_CARDINALITY_METHODS.contains(&m.as_str()) {
+            self.record_decide(
+                &mc.receiver,
+                &format!(".{m}() cardinality on materialized value"),
+            );
+        }
+        // A gate passed as a higher-order argument on a tainted receiver
+        // (`.filter(dispatch_route_expr_is_materialized)` / `.any(callable_arm_from_raised)`).
+        // The DECIDE is over the receiver (the iterated materialized collection).
+        if receiver_tainted {
+            for a in &mc.args {
+                if let syn::Expr::Path(p) = a {
+                    if let Some(seg) = p.path.segments.last() {
+                        let id = seg.ident.to_string();
+                        if HOT_DECIDE_STANDALONE_IDENTS.contains(&id.as_str()) {
+                            self.mark_decide_standalone(&id);
+                        }
+                        if HOT_DECIDE_TAINTED_GATE_IDENTS.contains(&id.as_str()) {
+                            self.record_decide(&mc.receiver, &id);
+                        }
+                    }
+                }
+            }
+        }
+        let arg_tainted = mc.args.iter().any(|a| self.expr_taint(a));
+        // Lowering a (would-be-materialized) symbolic param into the pipeline
+        // (`dispatch.lower_type_expr_in_scope*(.., expr, ..)`) marks THAT param a
+        // symbolic-input mint boundary for the self-policing rail (per-parameter).
+        if arg_tainted && HOT_LOWERING_IDENTS.contains(&m.as_str()) {
+            for a in &mc.args {
+                self.mark_lowers_param(a);
+            }
+        }
+        // Method-arg reader rail: a tainted value passed as an ARGUMENT to an
+        // unknown reader method (`reader.classify(&mat)`) extracts a fact from
+        // the materialized value — a decide, routed by the argument's provenance.
+        // Excludes lowering / propagation / closure / cardinality / publication
+        // methods, the mint / bridge verbs, and `TypeExpr`-returning transformers
+        // (propagation, not a decide). Fires in a non-terminal body OR (so the
+        // allowlist self-policing rail can prove a terminal does not read a
+        // materialized value) whenever self-policing.
+        if (self.self_policing || !self.cur_is_terminal())
+            && arg_tainted
+            && hot_ident_is_snake_case(&m)
+            && !HOT_LOWERING_IDENTS.contains(&m.as_str())
+            && !HOT_TAINT_PROPAGATE_METHODS.contains(&m.as_str())
+            && !HOT_TAINT_CLOSURE_METHODS.contains(&m.as_str())
+            && !HOT_CARDINALITY_METHODS.contains(&m.as_str())
+            && !HOT_VALUE_FORWARD_METHODS.contains(&m.as_str())
+            && !HOT_EXTRACTING_GATE_IDENTS.contains(&m.as_str())
+            && !HOT_TERMINAL_PASSTHROUGH_IDENTS.contains(&m.as_str())
+            && !HOT_SERIALIZER_PUBLISH_IDENTS.contains(&m.as_str())
+            && !hot_method_is_direct_verb(&m, !mc.args.is_empty())
+            && !HOT_MAT_BRIDGE_IDENTS.contains(&m.as_str())
+            && !self.returns_typeexpr.contains(&m)
+        {
+            let operands: Vec<&syn::Expr> = mc.args.iter().collect();
+            self.record_decide_over(&operands, &format!("tainted value passed to method `{m}`"));
+        }
+        // Closure-bearing combinator on a tainted receiver: taint the closure's
+        // first parameter (inheriting the receiver's provenance) so a decide
+        // there fires.
+        if receiver_tainted && HOT_TAINT_CLOSURE_METHODS.contains(&m.as_str()) {
+            let kind = receiver_kind.unwrap_or(HotTaintKind::Output);
+            syn::visit::Visit::visit_expr(self, &mc.receiver);
+            for a in &mc.args {
+                if let syn::Expr::Closure(cl) = a {
+                    self.visit_tainted_closure(cl, kind);
+                } else {
+                    syn::visit::Visit::visit_expr(self, a);
+                }
+            }
+            return;
+        }
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(p) = &*c.func {
+            if let Some(seg) = p.path.segments.last() {
+                let id = seg.ident.to_string();
+                let arg_tainted = c.args.iter().any(|a| self.expr_taint(a));
+                if hot_free_fn_is_direct_verb(&id) {
+                    self.mark_mat_direct(&id);
+                }
+                if HOT_MAT_BRIDGE_IDENTS.contains(&id.as_str()) {
+                    self.mark_mat_bridge(&id);
+                }
+                if arg_tainted && HOT_LOWERING_IDENTS.contains(&id.as_str()) {
+                    for a in &c.args {
+                        self.mark_lowers_param(a);
+                    }
+                }
+                if HOT_DECIDE_STANDALONE_IDENTS.contains(&id.as_str()) {
+                    self.mark_decide_standalone(&id);
+                } else if HOT_DECIDE_TAINTED_GATE_IDENTS.contains(&id.as_str()) {
+                    if arg_tainted {
+                        let operands: Vec<&syn::Expr> = c.args.iter().collect();
+                        self.record_decide_over(&operands, &id);
+                    }
+                } else if hot_ident_is_snake_case(&id)
+                    && !hot_free_fn_is_direct_verb(&id)
+                    && !HOT_MAT_BRIDGE_IDENTS.contains(&id.as_str())
+                    && !HOT_LOWERING_IDENTS.contains(&id.as_str())
+                    && !HOT_EXTRACTING_GATE_IDENTS.contains(&id.as_str())
+                    && !self.call_returns_mat_path(&p.path)
+                    && !self.returns_typeexpr.contains(&id)
+                    && !HOT_TAINT_WRAP_CTORS.contains(&id.as_str())
+                    && !HOT_TERMINAL_PASSTHROUGH_IDENTS.contains(&id.as_str())
+                    && !HOT_SERIALIZER_PUBLISH_IDENTS.contains(&id.as_str())
+                    && !hot_call_is_type_associated(&p.path)
+                {
+                    // Unknown-helper rail: passing a materialized value to a free
+                    // fn that EXTRACTS a non-`TypeExpr` fact (it neither returns a
+                    // `TypeExpr` nor is a `Type::assoc` constructor) is a decide on
+                    // the materialized value's structure, routed by the argument's
+                    // provenance. A `TypeExpr`-returning transformer / wrapper, a
+                    // `Type::new` constructor, and a recognised publication
+                    // passthrough are excluded (propagation, not a decide). Fires
+                    // in a non-terminal body OR whenever self-policing (so the
+                    // allowlist rail can prove a terminal reads no materialized
+                    // value).
+                    if (self.self_policing || !self.cur_is_terminal()) && arg_tainted {
+                        let operands: Vec<&syn::Expr> = c.args.iter().collect();
+                        self.record_decide_over(
+                            &operands,
+                            &format!("tainted value passed to `{id}`"),
+                        );
+                    }
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, c);
+    }
+    fn visit_expr_path(&mut self, ep: &'ast syn::ExprPath) {
+        // The standalone gate referenced as a bare combinator value
+        // (`.map(type_expr_to_object_shape)`) — unconditional decide.
+        if let Some(seg) = ep.path.segments.last() {
+            if HOT_DECIDE_STANDALONE_IDENTS.contains(&seg.ident.to_string().as_str()) {
+                self.mark_decide_standalone(&seg.ident.to_string());
+            }
+        }
+        syn::visit::visit_expr_path(self, ep);
+    }
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if mac.path.is_ident("matches")
+            && hot_token_stream_has_typeexpr(
+                &mac.tokens,
+                self.typeexpr_aliases,
+                self.typeexpr_variants,
+            )
+        {
+            if let Some(scrut) = hot_matches_scrutinee_expr(&mac.tokens) {
+                self.record_decide(&scrut, "matches!(materialized, TypeExpr::…)");
+            }
+        }
+        syn::visit::visit_macro(self, mac);
+    }
+}
+
+/// Normalise whitespace in a rendered token string (collapse runs to single
+/// spaces) so an impl-frame key reads cleanly and is stable.
+fn hot_normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Scan one production source file (`rel` is its repo-relative path) against the
+/// global qualified index + `returns_mat` (entry indices) / `returns_typeexpr`
+/// (bare names) sets and return the per-fn violation messages keyed by qualified
+/// path. THE SHARED CORE driving both the global guard and the discrimination
+/// self-test.
+fn hot_materialize_violations_in_src(
+    rel: &str,
+    src: &str,
+    index: &HotFnIndex,
+    returns_mat: &std::collections::HashSet<usize>,
+    returns_typeexpr: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let maps = collect_use_alias_maps(&file);
+    let mut scanner = HotMaterializeScanner {
+        scan_rel: rel,
+        mod_path: hot_mod_path_from_rel(rel),
+        impl_stack: Vec::new(),
+        fn_stack: Vec::new(),
+        tainted_stack: Vec::new(),
+        index,
+        returns_mat,
+        returns_typeexpr,
+        typeexpr_aliases: &maps.typeexpr_aliases,
+        typeexpr_variants: &maps.typeexpr_variant_idents,
+        self_policing: false,
+        per_fn: BTreeMap::new(),
+    };
+    syn::visit::Visit::visit_file(&mut scanner, &file);
+
+    let mut out = Vec::new();
+    for (key, sig) in &scanner.per_fn {
+        let is_terminal = HOT_TERMINAL_SINKS
+            .iter()
+            .any(|(suf, fname)| rel.ends_with(suf) && sig.innermost == *fname);
+        let mat = sig.mat_direct || sig.mat_bridge;
+        let decides = sig.decide_standalone || sig.decide_tainted;
+        let violated = if is_terminal { decides } else { mat || decides };
+        if !violated {
+            continue;
+        }
+        let mut which: Vec<&str> = Vec::new();
+        if sig.mat_bridge {
+            which.push("bridge-call");
+        }
+        if sig.mat_direct && decides {
+            which.push("materialize+decide");
+        } else if sig.mat_direct {
+            which.push("materialize");
+        }
+        if sig.decide_standalone {
+            which.push("standalone-gate");
+        }
+        if sig.decide_tainted && !sig.mat_direct {
+            which.push("decide");
+        }
+        let notes = sig.notes.iter().cloned().collect::<Vec<_>>().join(" ");
+        out.push(format!("{key} [{}] ({notes})", which.join(",")));
+    }
+    out.sort();
+    out
+}
+
+/// Self-test convenience: build a one-file index from a self-contained snippet
+/// and scan it (so a snippet's own materializing / transformer / same-named
+/// helpers resolve through the qualified index exactly as production does).
+fn hot_scan_snippet(rel: &str, src: &str) -> Vec<String> {
+    let file = syn::parse_file(src).expect("self-test snippet must parse");
+    let parsed = vec![(rel.to_string(), file)];
+    let index = build_hot_index(&parsed);
+    let returns_mat = hot_returns_materialized(&index);
+    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
+    hot_materialize_violations_in_src(rel, src, &index, &returns_mat, &returns_typeexpr)
+}
+
+/// A terminal-sink fn's self-policing summary (its `TypeExpr` params seeded
+/// materialized): whether it decides on a MATERIALIZED-OUTPUT value, plus the
+/// SEEDED symbolic-input params it decides on vs the ones it lowers (the
+/// PER-PARAMETER exemption — a param it lowers is a symbolic-input mint boundary
+/// whose input-shape guards are publication classification, not a
+/// materialized-value decide).
+struct HotSelfPolicingSummary {
+    innermost: String,
+    decides_on_output: bool,
+    decided_symbolic_params: std::collections::BTreeSet<String>,
+    lowered_symbolic_params: std::collections::BTreeSet<String>,
+    notes: std::collections::BTreeSet<String>,
+}
+
+impl HotSelfPolicingSummary {
+    /// Whether this terminal FAILS the allowlist self-policing rail: it decides
+    /// on a materialized OUTPUT value (a direct mint / bridge / return-mat — e.g.
+    /// `let mat = some_mint(); if matches!(mat, …)`, or a reader read of a fresh
+    /// mint), OR it decides on a SEEDED symbolic-input param it NEVER lowers (a
+    /// branch / navigate / shape-extract on a materialized value it never feeds
+    /// to the pipeline). A pure lower (+ a shape-gate of THAT lowered param) and
+    /// a serializer of its own minted output do NOT fail — the per-parameter
+    /// exemption is value-scoped, not fn-scoped.
+    fn fails(&self) -> bool {
+        self.decides_on_output
+            || self
+                .decided_symbolic_params
+                .difference(&self.lowered_symbolic_params)
+                .next()
+                .is_some()
+    }
+}
+
+/// Self-policing scan of one production source: seed every fn's `TypeExpr`-typed
+/// params as TAINTED and treat every fn as non-terminal (so the reader /
+/// unknown-helper rails fire), returning a per-fn summary.
+fn hot_self_policing_summaries(
+    rel: &str,
+    src: &str,
+    index: &HotFnIndex,
+    returns_mat: &std::collections::HashSet<usize>,
+    returns_typeexpr: &std::collections::HashSet<String>,
+) -> Vec<HotSelfPolicingSummary> {
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let maps = collect_use_alias_maps(&file);
+    let mut scanner = HotMaterializeScanner {
+        scan_rel: rel,
+        mod_path: hot_mod_path_from_rel(rel),
+        impl_stack: Vec::new(),
+        fn_stack: Vec::new(),
+        tainted_stack: Vec::new(),
+        index,
+        returns_mat,
+        returns_typeexpr,
+        typeexpr_aliases: &maps.typeexpr_aliases,
+        typeexpr_variants: &maps.typeexpr_variant_idents,
+        self_policing: true,
+        per_fn: BTreeMap::new(),
+    };
+    syn::visit::Visit::visit_file(&mut scanner, &file);
+    scanner
+        .per_fn
+        .into_values()
+        .map(|s| HotSelfPolicingSummary {
+            innermost: s.innermost,
+            decides_on_output: s.decide_standalone || s.decide_tainted,
+            decided_symbolic_params: s.decided_symbolic_params,
+            lowered_symbolic_params: s.lowered_symbolic_params,
+            notes: s.notes,
+        })
+        .collect()
+}
+
+/// The hot-path reverse-materialization fence: scans ALL production
+/// `crates/verter_session/src/**/*.rs` (test files + `#[cfg(test)]` code
+/// excluded) and asserts NO fn reverse-materializes a `TypeExpr` (directly, via
+/// a host-threaded surface bridge, or via a return-tainted helper) into a
+/// semantic decision.
+///
+/// The fence is currently RED on this tree by design: it reports the complete
+/// materialize-then-decide inventory the node-domain conversion must move onto
+/// interned `RaisedShapeKey` / `RaisedShapeFacts` facts, materializing ONCE at a
+/// registered terminal sink. It turns GREEN only when every flagged site is
+/// converted; it must not be weakened to pass early.
+#[test]
+fn hot_path_never_calls_materialize_type_expr() {
+    // Pass 1: build the global QUALIFIED fn index + the return-taint set
+    // (qualified entry indices) across every production file.
+    let parsed: Vec<(String, syn::File)> = production_src_files()
+        .into_iter()
+        .filter(|(rel, _)| !rel.contains("/typeinfo_tests/") && !rel.ends_with("/test_only.rs"))
+        .filter_map(|(rel, src)| syn::parse_file(&src).ok().map(|f| (rel, f)))
+        .collect();
+    let index = build_hot_index(&parsed);
+    let returns_mat = hot_returns_materialized(&index);
+    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
+
+    // Pass 2: scan each file for materialize-then-decide violations.
+    let mut offenders: Vec<String> = Vec::new();
+    for (rel, src) in production_src_files() {
+        if rel.contains("/typeinfo_tests/") || rel.ends_with("/test_only.rs") {
+            continue;
+        }
+        offenders.extend(hot_materialize_violations_in_src(
+            &rel,
+            &src,
+            &index,
+            &returns_mat,
+            &returns_typeexpr,
+        ));
+    }
+    offenders.sort();
+
+    // Anti-false-positive rail: NO sanctioned terminal one-shot sink may appear
+    // in the violation set. A terminal that publishes a materialized value with
+    // no decide must stay permitted; if one is flagged, the detector
+    // mis-classified a publication as a decide. The offender's qualified key
+    // carries the crate-rooted module path (`…::component_meta_query_engine::surface::…`)
+    // plus the innermost fn tail (`::materialize_published_node `), so the
+    // module-path fragment + the fn tail together identify the terminal even
+    // through an intervening impl frame.
+    for (file_suffix, fn_name) in HOT_TERMINAL_SINKS {
+        let file_modpath = file_suffix.trim_end_matches(".rs").replace('/', "::");
+        let fn_tail = format!("::{fn_name} ");
+        let falsely_flagged = offenders
+            .iter()
+            .any(|o| o.contains(&file_modpath) && o.contains(&fn_tail));
+        assert!(
+            !falsely_flagged,
+            "FALSE POSITIVE: the sanctioned terminal one-shot sink \
+             `{file_suffix}::{fn_name}` was flagged as a materialize-then-decide \
+             site. A terminal publication (materialized value IS the output, no \
+             decide) must stay permitted. Offenders: {offenders:#?}"
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "hot-path reverse-materialization fence: {} production fn(s) materialize a \
+         `TypeExpr` (directly, via a host-threaded surface bridge, or via a \
+         return-tainted helper) and feed it into a semantic decision. Each must \
+         move onto node-domain facts (the interned `RaisedShapeKey` / \
+         `RaisedShapeFacts` / node-domain sentinel-miss / cardinality APIs) and \
+         materialize ONCE at a registered terminal sink. Sites:\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+/// Allowlist SELF-POLICING: every `HOT_TERMINAL_SINKS` entry must be a genuine
+/// pure one-shot publication sink, not a mislabeled materialize-then-decide site.
+///
+/// Each terminal is scanned with its OWN `TypeExpr`-typed params seeded as
+/// MATERIALIZED (tainted) and treated as non-terminal (so the reader /
+/// unknown-helper rails fire). A terminal FAILS if it commits a tainted decide
+/// (branch / navigate / shape-extract / cardinality / convergence) on a param
+/// UNLESS it LOWERS that param into the materialization pipeline
+/// (`lower_type_expr_in_scope*`), which marks it a SYMBOLIC-INPUT mint boundary
+/// whose input-shape guards are publication classification (the surface / field
+/// projection sinks lower their `expr` input; the dishonest
+/// `binding_fields_from_param_ty` shape navigates + re-mints a param it never
+/// lowers — caught). This is the rail that proves green-ness is trustworthy: a
+/// terminal that decides on a materialized value cannot hide on the allowlist.
+#[test]
+fn hot_terminal_allowlist_entries_are_pure_one_shot_sinks() {
+    let parsed: Vec<(String, syn::File)> = production_src_files()
+        .into_iter()
+        .filter(|(rel, _)| !rel.contains("/typeinfo_tests/") && !rel.ends_with("/test_only.rs"))
+        .filter_map(|(rel, src)| syn::parse_file(&src).ok().map(|f| (rel, f)))
+        .collect();
+    let index = build_hot_index(&parsed);
+    let returns_mat = hot_returns_materialized(&index);
+    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut audited = 0usize;
+    for (suf, fname) in HOT_TERMINAL_SINKS {
+        for (rel, src) in production_src_files() {
+            if !rel.ends_with(suf) {
+                continue;
+            }
+            for summary in
+                hot_self_policing_summaries(&rel, &src, &index, &returns_mat, &returns_typeexpr)
+            {
+                if &summary.innermost != fname {
+                    continue;
+                }
+                audited += 1;
+                if summary.fails() {
+                    failures.push(format!(
+                        "{suf}::{fname} decides on a MATERIALIZED value (a fresh mint, or a seeded \
+                         param it never lowers) — a mislabeled terminal, a materialize-then-decide \
+                         site rather than a pure one-shot publication sink: decided_symbolic={:?} \
+                         lowered_symbolic={:?} notes={:?}",
+                        summary.decided_symbolic_params, summary.lowered_symbolic_params, summary.notes
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        audited >= HOT_TERMINAL_SINKS.len(),
+        "self-policing must locate every terminal sink fn in production source; \
+         audited {audited} of {} entries",
+        HOT_TERMINAL_SINKS.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "DISHONEST TERMINAL ALLOWLIST: {} entry(ies) decide on a materialized param \
+         and must be REMOVED from `HOT_TERMINAL_SINKS` (→ RED conversion target), not \
+         allowlisted as a pure terminal:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Discrimination self-test: the fence's SHARED CORE fires on every shape of
+/// materialize-then-decide — including a decide injected INTO an allowlisted
+/// TERMINAL sink and the cosmetic-rewrite evasions (inline / alias / split-helper
+/// / closure / convergence / cardinality) — and stays quiet on a clean terminal,
+/// a shared `&TypeExpr` classifier definition, and an input-parameter guard.
+#[test]
+fn hot_materialize_fence_self_test_discriminates() {
+    let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
+    let surface = "resolver_core/component_meta_query_engine/surface.rs";
+
+    // (A) A decide injected INTO an allowlisted terminal sink STILL fires (purity:
+    //     the allowlist never blanket-permits a sink-local decide).
+    let poisoned_terminal = r#"
+        fn materialize_published_node(dispatch: &D, node: N) -> Option<TypeExpr> {
+            let cap = MetaQuerySurfaceOutputCap::new(dispatch);
+            let raised = cap.materialize_output_type_expr(node).map(|r| r.into_type_expr(&cap))?;
+            matches!(raised, TypeExpr::Object(_)).then_some(raised)
+        }
+    "#;
+    let v = scan(surface, poisoned_terminal);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::materialize_published_node ")),
+        "self-test (A): a decide injected into the allowlisted terminal \
+         `materialize_published_node` MUST fire; got: {v:?}"
+    );
+
+    // (B) The real-shaped terminal (mint, NO decide) does NOT fire.
+    let clean_terminal = r#"
+        fn materialize_published_node(dispatch: &D, node: N) -> Option<TypeExpr> {
+            let cap = MetaQuerySurfaceOutputCap::new(dispatch);
+            cap.materialize_output_type_expr(node).map(|raised| raised.into_type_expr(&cap))
+        }
+    "#;
+    assert!(
+        scan(surface, clean_terminal).is_empty(),
+        "self-test (B): a clean terminal one-shot sink (mint, no decide) must NOT fire"
+    );
+
+    // (C) The standalone gate fires alone (unconditional, no taint needed).
+    let standalone = r#"
+        fn projected_target_shape(x: &TypeExpr) -> Shape { type_expr_to_object_shape(x) }
+    "#;
+    let v = scan("foo/route_keys.rs", standalone);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::projected_target_shape ") && m.contains("standalone-gate")),
+        "self-test (C): a standalone `type_expr_to_object_shape` gate must fire; got: {v:?}"
+    );
+
+    // (D) A host-threaded bridge call fires alone (C5 fixpoint shape).
+    let bridge = r#"
+        fn solve_or_project_leaf_expr_until_stable(&mut self, s: &str, e: &TypeExpr) -> Option<TypeExpr> {
+            let mut current = e.clone();
+            for _ in 0..3 {
+                let next = lower_and_project_to_expanded_via_host_threaded(self, s, &current)?;
+                if next == current { return Some(next); }
+                current = next;
+            }
+            None
+        }
+    "#;
+    let v = scan("foo/route_keys.rs", bridge);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::solve_or_project_leaf_expr_until_stable ")
+                && m.contains("bridge-call")),
+        "self-test (D): a host-threaded bridge call must fire; got: {v:?}"
+    );
+
+    // (E) A shared `&TypeExpr` classifier DEFINITION (no mint) must NOT fire.
+    let classifier_def = r#"
+        fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
+            match expr {
+                TypeExpr::Unknown { .. } => false,
+                TypeExpr::Object(o) => o.properties.iter().all(dispatch_route_expr_is_materialized),
+                _ => true,
+            }
+        }
+    "#;
+    assert!(
+        scan(surface, classifier_def).is_empty(),
+        "self-test (E): a shared `&TypeExpr` classifier definition must NOT fire"
+    );
+
+    // (F) A `#[cfg(test)]`-gated fn is skipped whole.
+    let test_gated = r#"
+        #[cfg(test)]
+        fn poisoned_under_test(x: &TypeExpr) -> Shape { type_expr_to_object_shape(x) }
+    "#;
+    assert!(
+        scan("foo/route_keys.rs", test_gated).is_empty(),
+        "self-test (F): a `#[cfg(test)]`-gated fn must be skipped whole"
+    );
+
+    // (G) SPLIT-HELPER: a non-terminal caller that obtains a materialized value
+    //     from a return-tainted helper and then decides on it MUST fire — at the
+    //     caller, not only the helper. (The old per-fn co-occurrence scanner
+    //     missed this because the helper-return was not tracked across the call.)
+    let split_helper = r#"
+        fn mat_helper(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+        fn append_entries(x: &TypeExpr) {
+            let materialized = mat_helper(x);
+            if let Some(m) = materialized {
+                if component_meta_registry_has_explicit_object_surface(&m) { record(m); }
+            }
+        }
+    "#;
+    let v = scan("foo/component_meta_methods.rs", split_helper);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::append_entries ") && m.contains("decide")),
+        "self-test (G): a split-helper caller that decides on a return-tainted \
+         materialized value MUST fire at the caller; got: {v:?}"
+    );
+
+    // (H) INLINE: a decide whose scrutinee is an inline materialize-then-helper
+    //     chain (no intermediate `let`) MUST fire — a cosmetic inline cannot
+    //     evade detection.
+    let inline = r#"
+        fn classify(&mut self, x: &TypeExpr) {
+            match mat_step(x).unwrap() {
+                TypeExpr::Object(_) => {}
+                _ => {}
+            }
+        }
+        fn mat_step(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    let v = scan("foo/route_keys.rs", inline);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (H): an inline `match mat_step(x).unwrap() {{ TypeExpr::… }}` decide \
+         MUST fire; got: {v:?}"
+    );
+
+    // (I) ALIAS REBIND: laundering a materialized local through an alias `let`
+    //     before a `matches!` MUST fire.
+    let alias = r#"
+        fn classify(&mut self, x: &TypeExpr) {
+            let raised = mat_step(x);
+            let tmp = raised;
+            let _hit = matches!(tmp, Some(TypeExpr::Object(_)));
+        }
+        fn mat_step(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    let v = scan("foo/route_keys.rs", alias);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (I): an alias-rebind `let tmp = raised; matches!(tmp, …)` decide \
+         MUST fire; got: {v:?}"
+    );
+
+    // (J) TAINTED CLOSURE: a `matches!` inside a `.any(|x| …)` closure over a
+    //     tainted iterator MUST fire (the closure param inherits taint).
+    let closure = r#"
+        fn classify(&mut self, x: &TypeExpr) {
+            let raised = mat_collection(x);
+            let _hit = raised.iter().any(|m| matches!(m, TypeExpr::Object(_)));
+        }
+        fn mat_collection(x: &TypeExpr) -> Vec<TypeExpr> {
+            let cap = Cap::new();
+            let m = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap();
+            vec![m]
+        }
+    "#;
+    let v = scan("foo/route_keys.rs", closure);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (J): a `matches!` inside a `.any(|m| …)` closure over a tainted \
+         iterator MUST fire; got: {v:?}"
+    );
+
+    // (K) CONVERGENCE: a `!=` comparison consuming a return-tainted value (the
+    //     route convergence consumer shape) MUST fire.
+    let convergence = r#"
+        fn converge(&mut self, e: &TypeExpr) -> Option<TypeExpr> {
+            let current = e.clone();
+            if let Some(result) = mat_step(&current) {
+                if result != current { return Some(result); }
+            }
+            None
+        }
+        fn mat_step(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    let v = scan("foo/route_keys.rs", convergence);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::converge ") && m.contains("decide")),
+        "self-test (K): a `result != current` convergence on a return-tainted value \
+         MUST fire; got: {v:?}"
+    );
+
+    // (L) CARDINALITY: a `.len()` decision on a return-tainted collection MUST fire.
+    let cardinality = r#"
+        fn classify(&mut self, x: &TypeExpr) -> bool {
+            let members = mat_members(x);
+            members.len() > 2
+        }
+        fn mat_members(x: &TypeExpr) -> Vec<TypeExpr> {
+            let cap = Cap::new();
+            let m = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap();
+            vec![m]
+        }
+    "#;
+    let v = scan("foo/route_keys.rs", cardinality);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (L): a `.len()` cardinality decision on a return-tainted \
+         collection MUST fire; got: {v:?}"
+    );
+
+    // (M) INPUT-CLASSIFICATION (must STAY GREEN): a terminal that materializes its
+    //     OUTPUT and independently classifies an unrelated INPUT parameter is NOT
+    //     a decide on a materialized value — the taint rail leaves it permitted.
+    let input_guard = r#"
+        fn materialize_published_node(dispatch: &D, node: N, input: &TypeExpr) -> Option<TypeExpr> {
+            if type_expr_contains_semantic_miss(input) { return None; }
+            let cap = MetaQuerySurfaceOutputCap::new(dispatch);
+            cap.materialize_output_type_expr(node).map(|raised| raised.into_type_expr(&cap))
+        }
+    "#;
+    assert!(
+        scan(surface, input_guard).is_empty(),
+        "self-test (M): a terminal classifying an unrelated INPUT parameter (untainted) \
+         must STAY GREEN"
+    );
+
+    // (N) NO-MERGE: two same-named methods in different impls must not merge — one
+    //     mints (flagged), the other classifies an INPUT (must stay clean). The
+    //     old bare-name keying merged their signals into one false positive.
+    let two_impls = r#"
+        impl A { fn build(&self, x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        } }
+        impl B { fn build(&self, x: &TypeExpr) -> bool { type_expr_contains_semantic_miss(x) } }
+    "#;
+    let v = scan("foo/route_keys.rs", two_impls);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("impl(A)") && m.contains("::build ")),
+        "self-test (N): the minting `impl(A)::build` MUST fire; got: {v:?}"
+    );
+    assert!(
+        !v.iter()
+            .any(|m| m.contains("impl(B)") && m.contains("::build ")),
+        "self-test (N): the input-classifying `impl(B)::build` must NOT fire \
+         (no bare-name merge with `impl(A)::build`); got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for the qualified-resolution + extended-taint
+/// closures: qualified return-taint (no same-name cross-merge, incl. the
+/// same-file non-minting-restitcher-beside-minting-sibling shape), assignment /
+/// field-write / method-arg-reader taint, the aliased `TypeExpr` variant,
+/// taint-through an extracting gate, and the allowlist self-policing rail (a
+/// decide-bearing fn cannot sit on the allowlist; a lowering symbolic-input
+/// terminal can).
+#[test]
+fn hot_materialize_fence_self_test_closes_evasions() {
+    let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
+    let rk = "foo/route_keys.rs";
+
+    // (O) QUALIFIED RETURN-TAINT NO-MERGE: a minting nested `inner` beside a
+    //     NON-minting restitcher `inner` in the SAME file. The restitcher's
+    //     recursive `match &inner(..) { TypeExpr::Object(..) }` resolves `inner`
+    //     to ITSELF (non-minting) → stays GREEN; the minting sibling stays RED.
+    //     (Bare-name return-taint would cross-poison the restitcher.)
+    let two_inners = r#"
+        fn outer_mint(e: &TypeExpr) -> TypeExpr {
+            fn inner(e: &TypeExpr) -> TypeExpr {
+                let cap = Cap::new();
+                cap.materialize_output_type_expr(e)
+                    .map(|r| r.into_type_expr(&cap))
+                    .unwrap_or_else(|| e.clone())
+            }
+            inner(e)
+        }
+        fn outer_restitch(materialized: &TypeExpr, raw: &TypeExpr) -> TypeExpr {
+            fn inner(materialized: &TypeExpr, raw: &TypeExpr) -> TypeExpr {
+                match &inner(materialized, raw) {
+                    TypeExpr::Object(_) => materialized.clone(),
+                    _ => raw.clone(),
+                }
+            }
+            inner(materialized, raw)
+        }
+    "#;
+    let v = scan("foo/registry_materialize.rs", two_inners);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("outer_mint::inner ") && m.contains("materialize")),
+        "self-test (O): the MINTING nested `outer_mint::inner` MUST fire; got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("outer_restitch::inner ")),
+        "self-test (O): the NON-minting restitcher `outer_restitch::inner` must STAY GREEN \
+         — its recursive `inner(..)` resolves to itself (qualified return-taint), NOT to the \
+         minting sibling; got: {v:?}"
+    );
+
+    // (P) ASSIGNMENT TAINT: `x = mat();` then `matches!(x, TypeExpr::…)` fires.
+    let assign = r#"
+        fn classify(&mut self, x: &TypeExpr) {
+            let mut current: Option<TypeExpr> = None;
+            current = mat_step(x);
+            let _hit = matches!(current, Some(TypeExpr::Object(_)));
+        }
+        fn mat_step(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    let v = scan(rk, assign);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (P): a reassignment `current = mat_step(x); matches!(current, …)` decide \
+         MUST fire; got: {v:?}"
+    );
+
+    // (Q) DTO-FIELD PUBLICATION (must STAY GREEN): moving a materialized value
+    //     into a struct field is publication, not a decide. (`mat_step` itself
+    //     is correctly RED — it mints in a non-terminal body — but the consumer
+    //     `publish`, which only MOVES the value into a DTO field, must stay green.)
+    let dto_field = r#"
+        fn publish(&self, x: &TypeExpr) -> Dto {
+            let raised = mat_step(x);
+            Dto { value: raised, name: "x".to_string() }
+        }
+        fn mat_step(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    assert!(
+        !scan(rk, dto_field).iter().any(|m| m.contains("::publish ")),
+        "self-test (Q): the consumer `publish`, which only MOVES a materialized value into a \
+         terminal DTO field, must STAY GREEN (field publication is not a decide)"
+    );
+
+    // (R) METHOD-ARG READER: a tainted value passed as a METHOD argument to an
+    //     unknown reader (`reader.classify(&mat)`) is a decide.
+    let method_reader = r#"
+        fn classify(&mut self, x: &TypeExpr) {
+            let raised = mat_step(x).unwrap();
+            let reader = Reader::new();
+            let _verdict = reader.classify(&raised);
+        }
+        fn mat_step(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    let v = scan(rk, method_reader);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::classify ") && m.contains("method `classify`")),
+        "self-test (R): a tainted value passed to an unknown reader METHOD \
+         (`reader.classify(&mat)`) MUST fire; got: {v:?}"
+    );
+
+    // (S) ALIASED `TypeExpr` VARIANT (hot): `use …TypeExpr as TE;
+    //     match raised { TE::Object(_) => }` fires — both the aliased return
+    //     type (`-> Option<TE>`) AND the aliased variant pattern are honoured.
+    let aliased_variant = r#"
+        use verter_type_expr::TypeExpr as TE;
+        fn classify(&mut self, x: &TE) {
+            let raised = mat_step(x);
+            match raised {
+                Some(TE::Object(_)) => {}
+                _ => {}
+            }
+        }
+        fn mat_step(x: &TE) -> Option<TE> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    let v = scan(rk, aliased_variant);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (S): an aliased `match raised {{ TE::Object(_) }}` (TE = TypeExpr) decide \
+         MUST fire; got: {v:?}"
+    );
+
+    // (T) TAINT-THROUGH-EXTRACTING-GATE: a materialized value fed to the
+    //     extracting gate `slot_callable_param_and_return` yields a TAINTED
+    //     extracted param — a later `matches!` on it fires (the chain does NOT
+    //     launder to untainted at the gate).
+    let extracting_gate = r#"
+        fn slots(&mut self, ctx: &C, member: M) -> Option<X> {
+            let value = raise_realized_callable_member_value(ctx, member)?;
+            let (first_param, _ret, _span) = slot_callable_param_and_return(&value)?;
+            let _hit = matches!(first_param, Some(TypeExpr::Object(_)));
+            None
+        }
+    "#;
+    let v = scan("foo/normalize.rs", extracting_gate);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::slots ") && m.contains("matches!(materialized")),
+        "self-test (T): a `matches!` on the param EXTRACTED by \
+         `slot_callable_param_and_return` from a materialized value MUST fire (taint \
+         propagates through the extracting gate); got: {v:?}"
+    );
+
+    // (V) DIFFERENT-IMPL NO CROSS-TAINT (return-taint): a materializing
+    //     `impl(A)::build` must NOT taint a `self.build(..)` call resolving to a
+    //     non-minting `impl(B)::build`.
+    let cross_impl = r#"
+        impl A {
+            fn build(&self, x: &TypeExpr) -> TypeExpr {
+                let cap = Cap::new();
+                cap.materialize_output_type_expr(x)
+                    .map(|r| r.into_type_expr(&cap))
+                    .unwrap_or_else(|| x.clone())
+            }
+        }
+        impl B {
+            fn build(&self, x: &TypeExpr) -> TypeExpr { x.clone() }
+            fn consume(&self, x: &TypeExpr) {
+                let r = self.build(x);
+                let _hit = matches!(r, TypeExpr::Object(_));
+            }
+        }
+    "#;
+    let v = scan(rk, cross_impl);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("impl(A)") && m.contains("::build ")),
+        "self-test (V): the minting `impl(A)::build` MUST fire; got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::consume ")),
+        "self-test (V): `impl(B)::consume` calling `self.build(..)` must STAY GREEN — the \
+         call resolves (by proximity) to the NON-minting `impl(B)::build`, not the minting \
+         `impl(A)::build`; got: {v:?}"
+    );
+
+    // (U) ALLOWLIST CANNOT CARRY A DECIDE: the `binding_fields_from_param_ty`
+    //     shape (branch + navigate + per-member mint on a param it never lowers)
+    //     FAILS the self-policing rail; a symbolic-input terminal that LOWERS its
+    //     param is exempt.
+    let dishonest = r#"
+        fn binding_fields_from_param_ty(ctx: &C, param_ty: &TypeExpr, scope: &S) -> Vec<Binding> {
+            if let TypeExpr::Object(obj) = param_ty {
+                return obj.members().map(|m| raise_member_value(ctx, m)).collect();
+            }
+            let surface = navigate_param_to_object_surface(ctx, scope, param_ty);
+            surface.members().map(|m| raise_member_value(ctx, m)).collect()
+        }
+        fn lower_and_project_to_expanded_published(ctx: &C, scope: &str, expr: &TypeExpr) -> Option<TypeExpr> {
+            let TypeExpr::Ref { .. } = expr else { return None; };
+            let dispatch = Dispatch::new(ctx);
+            let base = dispatch.lower_type_expr_in_scope_with_mode(scope, expr, Mode::Expanded)?;
+            materialize_published_node(&dispatch, base)
+        }
+    "#;
+    let file = syn::parse_file(dishonest).expect("self-test (U) snippet must parse");
+    let parsed = vec![("foo/normalize.rs".to_string(), file)];
+    let index = build_hot_index(&parsed);
+    let rm = hot_returns_materialized(&index);
+    let rt = hot_returns_typeexpr_bare(&index);
+    let summaries = hot_self_policing_summaries("foo/normalize.rs", dishonest, &index, &rm, &rt);
+    let dishonest_sig = summaries
+        .iter()
+        .find(|s| s.innermost == "binding_fields_from_param_ty")
+        .expect("self-test (U): binding_fields_from_param_ty must be scanned");
+    assert!(
+        dishonest_sig.fails() && !dishonest_sig.decided_symbolic_params.is_empty(),
+        "self-test (U): a branch+navigate+mint terminal that NEVER lowers its `TypeExpr` param \
+         MUST fail self-policing (decides on a materialized param it never lowers); got \
+         decided_symbolic={:?}, lowered_symbolic={:?}, decides_on_output={}, notes={:?}",
+        dishonest_sig.decided_symbolic_params,
+        dishonest_sig.lowered_symbolic_params,
+        dishonest_sig.decides_on_output,
+        dishonest_sig.notes
+    );
+    let honest_sig = summaries
+        .iter()
+        .find(|s| s.innermost == "lower_and_project_to_expanded_published")
+        .expect("self-test (U): lower_and_project_to_expanded_published must be scanned");
+    assert!(
+        !honest_sig.lowered_symbolic_params.is_empty() && !honest_sig.fails(),
+        "self-test (U2): a symbolic-input terminal that LOWERS its `TypeExpr` param is exempt \
+         (its input-shape guard is publication classification, not a materialized-value decide)"
+    );
+}
+
+/// Discrimination self-test for trait-DEFAULT method-body coverage: a default
+/// (provided) trait method that materializes-then-decides is scanned by the
+/// shared core exactly like a free / impl fn; a signature-only trait method (no
+/// body) and a `#[cfg(test)]`-gated default body are not scanned.
+#[test]
+fn hot_fence_scans_trait_default_method_bodies() {
+    let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
+    let rk = "foo/route_keys.rs";
+
+    // A default-bodied trait method that mints then decides MUST fire.
+    let trait_default_decide = r#"
+        trait Surface {
+            fn classify(&self, x: &TypeExpr) -> bool {
+                let cap = Cap::new();
+                let raised = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap();
+                matches!(raised, TypeExpr::Object(_))
+            }
+        }
+    "#;
+    let v = scan(rk, trait_default_decide);
+    assert!(
+        v.iter().any(|m| m.contains("trait(Surface)")
+            && m.contains("::classify ")
+            && m.contains("decide")),
+        "self-test (trait-default): a default-bodied trait method that materializes then decides \
+         MUST fire (trait bodies are scanned via `visit_trait_item_fn`); got: {v:?}"
+    );
+
+    // A default-bodied trait method that mints in a NON-terminal body fires on
+    // the location rail alone (no decide needed).
+    let trait_default_mint = r#"
+        trait Surface {
+            fn build(&self, x: &TypeExpr) -> TypeExpr {
+                let cap = Cap::new();
+                cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+            }
+        }
+    "#;
+    let v = scan(rk, trait_default_mint);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("trait(Surface)") && m.contains("::build ") && m.contains("materialize")),
+        "self-test (trait-default-mint): a default-bodied trait method that mints in a non-terminal \
+         body MUST fire on the location rail; got: {v:?}"
+    );
+
+    // A SIGNATURE-ONLY trait method (no default body) has nothing to scan and
+    // must NOT fire, even when its bare name collides with a mint verb.
+    let trait_signature_only = r#"
+        trait Surface {
+            fn into_type_expr(&self, x: &TypeExpr) -> TypeExpr;
+        }
+    "#;
+    assert!(
+        scan(rk, trait_signature_only).is_empty(),
+        "self-test (trait-signature): a signature-only trait method (no body) must NOT fire"
+    );
+
+    // A `#[cfg(test)]`-gated default body is skipped whole.
+    let trait_test_gated = r#"
+        trait Surface {
+            #[cfg(test)]
+            fn classify(&self, x: &TypeExpr) -> bool {
+                let cap = Cap::new();
+                let raised = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap();
+                matches!(raised, TypeExpr::Object(_))
+            }
+        }
+    "#;
+    assert!(
+        scan(rk, trait_test_gated).is_empty(),
+        "self-test (trait-cfg-test): a `#[cfg(test)]`-gated trait default body must be skipped"
+    );
+}
+
+/// Discrimination self-test for the VALUE-SCOPED self-policing exemption: the
+/// `lowers_param` exemption is PER-PARAMETER. A lowering terminal that ALSO
+/// decides on a fresh mint (or reads one, or decides on a SEPARATE un-lowered
+/// param) FAILS; a pure lower (gate of the lowered param) and a serializer of
+/// the minted output do NOT.
+#[test]
+fn hot_self_policing_distinguishes_lowered_param_from_fresh_mint() {
+    let rel = "foo/normalize.rs";
+    let fails = |src: &str, fname: &str| -> bool {
+        let file = syn::parse_file(src).expect("self-policing snippet must parse");
+        let parsed = vec![(rel.to_string(), file)];
+        let index = build_hot_index(&parsed);
+        let rm = hot_returns_materialized(&index);
+        let rt = hot_returns_typeexpr_bare(&index);
+        hot_self_policing_summaries(rel, src, &index, &rm, &rt)
+            .into_iter()
+            .find(|s| s.innermost == fname)
+            .unwrap_or_else(|| panic!("self-policing: fn `{fname}` not scanned"))
+            .fails()
+    };
+    const MINT_HELPER: &str = r#"
+        fn materialize_published_node(dispatch: &D, node: N) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(node).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+
+    // (i) lowers `expr`, then DECIDES on a SEPARATE fresh mint → FIRES (the
+    //     fn-level lowering does not exempt a decide on materialized output).
+    let lower_then_decide_fresh = format!(
+        r#"
+        fn term(dispatch: &D, expr: &TypeExpr) -> Option<TypeExpr> {{
+            let TypeExpr::Ref {{ .. }} = expr else {{ return None; }};
+            let base = dispatch.lower_type_expr_in_scope_with_mode("s", expr, Mode::Expanded)?;
+            let mat = materialize_published_node(&dispatch, base)?;
+            if matches!(mat, TypeExpr::Object(_)) {{ return None; }}
+            Some(mat)
+        }}
+        {MINT_HELPER}
+    "#
+    );
+    assert!(
+        fails(&lower_then_decide_fresh, "term"),
+        "self-test (i): a lowering terminal that ALSO decides on a fresh mint MUST fail self-policing"
+    );
+
+    // (ii) lowers `expr`, then READS a fresh mint via an unknown reader → FIRES
+    //      (reader rails fire under self-policing even in a terminal-named fn).
+    let lower_then_read_fresh = format!(
+        r#"
+        fn term(dispatch: &D, expr: &TypeExpr) -> Option<TypeExpr> {{
+            let TypeExpr::Ref {{ .. }} = expr else {{ return None; }};
+            let base = dispatch.lower_type_expr_in_scope_with_mode("s", expr, Mode::Expanded)?;
+            let mat = materialize_published_node(&dispatch, base)?;
+            let reader = Reader::new();
+            let _v = reader.classify(&mat);
+            Some(mat)
+        }}
+        {MINT_HELPER}
+    "#
+    );
+    assert!(
+        fails(&lower_then_read_fresh, "term"),
+        "self-test (ii): a lowering terminal that READS a fresh mint MUST fail self-policing"
+    );
+
+    // (iii) lowers `expr`, gating only on the LOWERED param's input shape → does
+    //       NOT fail (the gate is pre-lowering publication classification).
+    let pure_lower = format!(
+        r#"
+        fn term(dispatch: &D, expr: &TypeExpr) -> Option<TypeExpr> {{
+            let TypeExpr::Ref {{ .. }} = expr else {{ return None; }};
+            let base = dispatch.lower_type_expr_in_scope_with_mode("s", expr, Mode::Expanded)?;
+            materialize_published_node(&dispatch, base)
+        }}
+        {MINT_HELPER}
+    "#
+    );
+    assert!(
+        !fails(&pure_lower, "term"),
+        "self-test (iii): a terminal that only lowers its param (gating the lower on its input \
+         shape) must NOT fail self-policing"
+    );
+
+    // (iv) serializes its OWN minted output → does NOT fail (publication, not a decide).
+    let serialize_output = r#"
+        fn project_node_to_type_expr_json_bytes(dispatch: &D, node: N) -> Vec<u8> {
+            let cap = Cap::new();
+            let raised = cap.materialize_output_type_expr(node).map(|r| r.into_type_expr(&cap)).unwrap();
+            serde_json::to_vec(&raised).unwrap()
+        }
+    "#;
+    assert!(
+        !fails(serialize_output, "project_node_to_type_expr_json_bytes"),
+        "self-test (iv): a terminal that serializes its minted output must NOT fail self-policing"
+    );
+
+    // (v) PER-PARAMETER: lowers `a`, but DECIDES on a SEPARATE un-lowered param
+    //     `b` → FIRES (fn-level exemption would have wrongly exempted it).
+    let lower_a_decide_b = format!(
+        r#"
+        fn term(dispatch: &D, a: &TypeExpr, b: &TypeExpr) -> Option<TypeExpr> {{
+            if let TypeExpr::Object(_) = b {{ return None; }}
+            let base = dispatch.lower_type_expr_in_scope_with_mode("s", a, Mode::Expanded)?;
+            materialize_published_node(&dispatch, base)
+        }}
+        {MINT_HELPER}
+    "#
+    );
+    assert!(
+        fails(&lower_a_decide_b, "term"),
+        "self-test (v): lowering param `a` must NOT exempt a decide on a SEPARATE un-lowered param \
+         `b` (per-parameter exemption)"
+    );
+}
+
+/// Discrimination self-test for taint propagation through CONTAINERS: a
+/// materialized value placed in a `vec!` / array / tuple / struct stays tainted
+/// when destructured / indexed / field-read back out.
+#[test]
+fn hot_taint_propagates_through_containers() {
+    let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
+    let rk = "foo/route_keys.rs";
+    const MINT: &str = r#"
+        fn mat_step(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    // `vec![mat]` then cardinality.
+    let via_vec = format!(
+        r#"
+        fn classify(&mut self, x: &TypeExpr) -> bool {{
+            let m = mat_step(x).unwrap();
+            let items = vec![m];
+            items.len() > 1
+        }}
+        {MINT}
+    "#
+    );
+    assert!(
+        scan(rk, &via_vec)
+            .iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (vec): a `.len()` cardinality on a `vec![mat]` MUST fire"
+    );
+    // `(mat, x)` tuple then field-read decide.
+    let via_tuple = format!(
+        r#"
+        fn classify(&mut self, x: &TypeExpr) {{
+            let m = mat_step(x).unwrap();
+            let pair = (m, 0u32);
+            let _hit = matches!(pair.0, TypeExpr::Object(_));
+        }}
+        {MINT}
+    "#
+    );
+    assert!(
+        scan(rk, &via_tuple)
+            .iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (tuple): a `matches!` on a tuple field holding a mint MUST fire"
+    );
+    // `Dto { f: mat }` struct then field-read decide.
+    let via_struct = format!(
+        r#"
+        fn classify(&mut self, x: &TypeExpr) {{
+            let m = mat_step(x).unwrap();
+            let dto = Dto {{ f: m, name: 0 }};
+            let _hit = matches!(dto.f, TypeExpr::Object(_));
+        }}
+        {MINT}
+    "#
+    );
+    assert!(
+        scan(rk, &via_struct)
+            .iter()
+            .any(|m| m.contains("::classify ") && m.contains("decide")),
+        "self-test (struct): a `matches!` on a struct field holding a mint MUST fire"
+    );
+}
+
+/// Discrimination self-test for the F2 explicit-qualifier respect: a QUALIFIED
+/// `other::helper(..)` call resolves against the written qualifier and never
+/// collapses to the NEAREST same-named bare `helper`.
+#[test]
+fn hot_qualified_call_respects_path_qualifier() {
+    let v = hot_scan_snippet(
+        "foo/route_keys.rs",
+        r#"
+        mod other {
+            pub fn helper(x: &TypeExpr) -> TypeExpr { x.clone() }
+        }
+        fn helper(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x)
+                .map(|r| r.into_type_expr(&cap))
+                .unwrap_or_else(|| x.clone())
+        }
+        fn consume(x: &TypeExpr) {
+            let r = other::helper(x);
+            let _hit = matches!(r, TypeExpr::Object(_));
+        }
+    "#,
+    );
+    // The minting LOCAL `helper` fires at its own definition.
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::route_keys::helper ") && m.contains("materialize")),
+        "self-test (qualifier): the minting local `helper` MUST fire; got: {v:?}"
+    );
+    // `consume` STAYS GREEN: `other::helper(x)` resolves to the NON-minting module
+    // fn, not the nearer minting local `helper` (bare proximity would tie and
+    // fail-closed onto the minting candidate).
+    assert!(
+        !v.iter().any(|m| m.contains("::consume ")),
+        "self-test (qualifier): `consume` calling `other::helper(x)` must STAY GREEN — the \
+         qualified call resolves to the non-minting `other::helper`, not the local mint; got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for the location-rail anchoring (F6): a non-terminal
+/// that mints-via-helper-then-decides FIRES (at the decider AND the mint source);
+/// pure forwarding of a helper-materialized value WITHOUT a decide does NOT flag
+/// the forwarder — the rail is anchored at the mint SOURCE, which is always
+/// caught, so forwarding-without-a-decide is not a materialize-then-decide.
+#[test]
+fn hot_location_rail_anchored_at_mint_source() {
+    let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
+    let rk = "foo/route_keys.rs";
+    const MINT: &str = r#"
+        fn mat_helper(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    let mint_then_decide = format!(
+        r#"
+        fn consume(x: &TypeExpr) {{
+            let m = mat_helper(x);
+            let _hit = matches!(m, Some(TypeExpr::Object(_)));
+        }}
+        {MINT}
+    "#
+    );
+    let v = scan(rk, &mint_then_decide);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::consume ") && m.contains("decide")),
+        "self-test (F6-decide): mint-via-helper-then-decide MUST fire at the decider; got: {v:?}"
+    );
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::mat_helper ") && m.contains("materialize")),
+        "self-test (F6-source): the mint SOURCE helper is flagged at its own definition; got: {v:?}"
+    );
+    let pure_forward = format!(
+        r#"
+        fn forward(x: &TypeExpr) -> Option<TypeExpr> {{ mat_helper(x) }}
+        {MINT}
+    "#
+    );
+    let v = scan(rk, &pure_forward);
+    assert!(
+        v.iter().any(|m| m.contains("::mat_helper ")),
+        "self-test (F6-source2): the mint source is flagged; got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::forward ")),
+        "self-test (F6-forward): pure forwarding WITHOUT a decide does NOT flag the forwarder \
+         (the location rail is anchored at the mint source); got: {v:?}"
+    );
+}
+
+// ===========================================================================
+// Global Unknown-as-control-flow fence.
+//
+// A `TypeExpr::Unknown { raw }` SEMANTIC sentinel (a raw string the
+// materializedness / miss / budget classifiers string-recognise as control
+// flow) may be constructed ONLY inside the shared sentinel-owner substrate: the
+// raw-spelling producer (`semantic_query_error_raw`), the raw classifier
+// authority (`raw_is_unmaterialized_sentinel`), the output materialize algebra
+// (the `shape_engine` / `raise` boundary), the terminal surface DTO publication
+// (`surface_view_to_projected_surface` / `projected_surface_to_*`), and the
+// display/parser raw fallback (`jsdoc_resolve`). A NEW semantic-sentinel
+// construction OUTSIDE that owner substrate is the forbidden "Unknown as control
+// flow" the global fence bans — a non-owner module fabricating a control
+// sentinel string instead of routing a typed `QueryError` through the single
+// owner mapping.
+//
+// The scanner recognises the construction through `use`-alias maps (so
+// `TypeExpr::Unknown`, an aliased `TE::Unknown`, AND a bare variant-imported
+// `Unknown { … }` all match) and tracks LOCAL raw-taint (so a field-shorthand
+// `TypeExpr::Unknown { raw }` is caught when `raw` was bound from a sentinel
+// producer / const / literal). Benign placeholder Unknowns (`raw: String::new()`,
+// a display `"unknown"`, a debug `format!("{x:?}")`) carry no sentinel-family
+// string and are not flagged.
+//
+// This is the GLOBAL fence (production-wide). The pre-existing carrier-scoped
+// tripwire `carrier_constructors_do_not_use_unknown_as_control_flow`
+// (architecture_guards.rs) stays intact as a narrow scoped guard; this fence
+// does not subsume or weaken it.
+//
+// INHERENT SYNTACTIC LIMIT (accepted, NOT a silent gap). A purely syntactic
+// `syn` guard recognises a sentinel only when its spelling is statically present
+// (a literal, a named const, the producer fn). It CANNOT catch a sentinel string
+// assembled DYNAMICALLY at runtime — `format!("semantic{}", suffix)`, byte
+// concatenation, a runtime-built `String` — because the spelling never appears
+// as a token. That gap is closed at RUNTIME, not syntactically, by three
+// cooperating defenses: (1) the raw classifier authority
+// `raw_is_unmaterialized_sentinel` (`raise_sentinel.rs`), which classifies any
+// `Unknown { raw }` string — however assembled — at the dispatch boundary; (2)
+// the armed per-request projection budget fuse (`request_budget.rs`), which
+// trips on a runaway regardless of how a sentinel was produced; and (3) the
+// producer-side sanitizers (`sanitize_jsdoc_unknown_raw`), which wrap any
+// sentinel-SPELLING payload at the one display-fallback producer so user text
+// can never be read as control flow. This fence is the STATIC half (a new
+// literal/const/producer sentinel construction outside the owner substrate); the
+// runtime classifier + budget fuse + producer sanitizers are the dynamic half.
+// ===========================================================================
+
+// Sentinel markers, split to MIRROR the owner classifier
+// `raw_is_unmaterialized_sentinel` (raise_sentinel.rs) EXACTLY: an exact-match
+// arm, a leading-prefix arm, and the producer-fn / const identifiers that
+// PRODUCE those spellings. Matching the classifier's actual shape — exact
+// spelling / leading prefix on a string VALUE, whole-identifier on a
+// producer/const — is what keeps a benign string that merely EMBEDS a spelling
+// (`"not semanticMiss"`, `"see budgetExceeded( docs"`) from being misread as a
+// control sentinel (the loose-`contains` false positive this faithful split
+// closes).
+
+/// Producer-fn / sentinel-const IDENT markers — an identifier that PRODUCES a
+/// semantic sentinel raw string (the raw producer `semantic_query_error_raw`
+/// and the sentinel-spelling / budget-prefix consts). Matched as a WHOLE
+/// IDENTIFIER token in the `raw:`-field expression, never as a substring.
+const UNKNOWN_SENTINEL_IDENT_MARKERS: &[&str] = &[
+    "semantic_query_error_raw",
+    "SEMANTIC_MISS",
+    "SEMANTIC_OBJECT_SURFACE",
+    "SEMANTIC_SURFACE_MEMBER",
+    "BUDGET_EXCEEDED_SENTINEL_PREFIX",
+];
+
+/// EXACT sentinel spellings — faithful to the owner classifier's exact-match
+/// arm (`SEMANTIC_MISS | SEMANTIC_OBJECT_SURFACE | SEMANTIC_SURFACE_MEMBER |
+/// "semanticAliasCycle" | "semanticFunction" | "VueMacroElements" |
+/// "projectedOpenSurface"`). A `raw:` string literal fires only when its VALUE
+/// equals one of these EXACTLY — never when it merely embeds the text.
+const UNKNOWN_SENTINEL_EXACT_SPELLINGS: &[&str] = &[
+    "semanticMiss",
+    "semanticObjectSurface",
+    "semanticSurfaceMember",
+    "semanticAliasCycle",
+    "semanticFunction",
+    "VueMacroElements",
+    "projectedOpenSurface",
+];
+
+/// PREFIX sentinel spellings — faithful to the owner classifier's
+/// `starts_with(..)` arm (`"materialize:" | "unsupportedIntrinsic(" |
+/// BUDGET_EXCEEDED_SENTINEL_PREFIX | "unstableState(" | "aliasCycle("`). A
+/// `raw:` string literal fires only when its VALUE STARTS WITH one of these —
+/// never when it embeds the text mid-string.
+const UNKNOWN_SENTINEL_PREFIX_SPELLINGS: &[&str] = &[
+    "materialize:",
+    "unsupportedIntrinsic(",
+    "budgetExceeded(",
+    "unstableState(",
+    "aliasCycle(",
+];
+
+/// The sentinel-owner substrate (file SUFFIXES). A semantic-sentinel `Unknown`
+/// construction is PERMITTED here — these files own the raw spelling, the raw
+/// classifier authority, the output materialize algebra, the terminal surface
+/// DTO publication, and the display/parser fallback.
+const UNKNOWN_SENTINEL_OWNER_FILES: &[&str] = &[
+    "resolver_core/component_meta_query_engine/surface.rs",
+    "resolver_core/component_meta_query_engine/mod.rs",
+    "project_semantic_dispatch/raise_sentinel.rs",
+    "project_semantic_dispatch/raise.rs",
+    "project_semantic_dispatch/raise/shape_engine/", // whole output-algebra subtree
+    "host_manage/jsdoc_resolve.rs",
+];
+
+fn unknown_rel_is_sentinel_owner(rel: &str) -> bool {
+    UNKNOWN_SENTINEL_OWNER_FILES
+        .iter()
+        .any(|owner| rel.contains(owner))
+}
+
+/// Whether a raw STRING VALUE is classified as a semantic control sentinel by
+/// the SAME rule as the owner classifier `raw_is_unmaterialized_sentinel`
+/// (raise_sentinel.rs): an EXACT spelling match or a recognised leading PREFIX.
+fn raw_string_is_owner_sentinel(s: &str) -> bool {
+    UNKNOWN_SENTINEL_EXACT_SPELLINGS.contains(&s)
+        || UNKNOWN_SENTINEL_PREFIX_SPELLINGS
+            .iter()
+            .any(|p| s.starts_with(p))
+}
+
+/// Does a `raw:`-field expression carry a semantic control sentinel — FAITHFUL
+/// to the owner classifier `raw_is_unmaterialized_sentinel`? The expression's
+/// token stream (descending macro groups, so a `format!("budgetExceeded({})",
+/// n)` leading-prefix assembly is still caught) is scanned for: (1) a
+/// producer-fn / sentinel-const IDENT marker as a WHOLE identifier; (2) a STRING
+/// LITERAL whose VALUE matches an exact spelling or a leading prefix. A benign
+/// string that merely EMBEDS a spelling (`"not semanticMiss"`,
+/// `"see budgetExceeded( docs"`) carries neither and is NOT flagged — the false
+/// positive a loose `contains` over the rendered tokens produced. Benign
+/// placeholders (`String::new()`, `"unknown"`, a debug `format!("{x:?}")`)
+/// carry no marker.
+fn unknown_raw_expr_is_sentinel(raw_expr: &syn::Expr) -> bool {
+    fn collect(
+        ts: &proc_macro2::TokenStream,
+        idents: &mut std::collections::HashSet<String>,
+        str_values: &mut Vec<String>,
+    ) {
+        use proc_macro2::TokenTree;
+        for tt in ts.clone() {
+            match tt {
+                TokenTree::Ident(i) => {
+                    idents.insert(i.to_string());
+                }
+                TokenTree::Literal(l) => {
+                    if let syn::Lit::Str(s) = syn::Lit::new(l) {
+                        str_values.push(s.value());
+                    }
+                }
+                TokenTree::Group(g) => collect(&g.stream(), idents, str_values),
+                TokenTree::Punct(_) => {}
+            }
+        }
+    }
+    let mut idents = std::collections::HashSet::new();
+    let mut str_values = Vec::new();
+    collect(&raw_expr.to_token_stream(), &mut idents, &mut str_values);
+    if idents
+        .iter()
+        .any(|id| UNKNOWN_SENTINEL_IDENT_MARKERS.contains(&id.as_str()))
+    {
+        return true;
+    }
+    str_values.iter().any(|s| raw_string_is_owner_sentinel(s))
+}
+
+/// Collects `TypeExpr::Unknown { raw: <sentinel> }` constructions in production
+/// fns (skipping `#[cfg(test)]` fns/mods), recognising aliased / bare-variant
+/// forms and field-shorthand raw-taint. The alias maps are the SHARED
+/// [`UseAliasMaps`] collected RECURSIVELY over the whole file (top-level AND
+/// fn / block-local `use` items), so a function-local
+/// `use …::TypeExpr as TE; TE::Unknown { … }` is caught.
+struct UnknownSentinelScanner<'a> {
+    fn_stack: Vec<String>,
+    raw_tainted_stack: Vec<std::collections::HashSet<String>>,
+    maps: &'a UseAliasMaps,
+    hits: Vec<(String, String)>,
+}
+impl<'a> UnknownSentinelScanner<'a> {
+    fn ident(&self) -> String {
+        if self.fn_stack.is_empty() {
+            "<file-scope>".to_string()
+        } else {
+            self.fn_stack.join("::")
+        }
+    }
+    fn mark_raw_tainted(&mut self, id: String) {
+        if let Some(set) = self.raw_tainted_stack.last_mut() {
+            set.insert(id);
+        }
+    }
+    fn raw_is_tainted(&self, id: &str) -> bool {
+        self.raw_tainted_stack
+            .last()
+            .is_some_and(|s| s.contains(id))
+    }
+    /// Whether an `ExprStruct` path constructs `TypeExpr::Unknown` — directly,
+    /// through a `TypeExpr` alias (`TE::Unknown`), or as a bare variant-imported
+    /// `Unknown { … }`.
+    fn is_unknown_ctor(&self, path: &syn::Path) -> bool {
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let Some(last) = segs.last() else {
+            return false;
+        };
+        if last == "Unknown" && segs.iter().any(|s| self.maps.typeexpr_aliases.contains(s)) {
+            return true;
+        }
+        segs.len() == 1 && self.maps.unknown_variant_idents.contains(&segs[0])
+    }
+}
+impl<'a, 'ast> syn::visit::Visit<'ast> for UnknownSentinelScanner<'a> {
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        if attrs_are_test_gated(&f.attrs) {
+            return;
+        }
+        self.fn_stack.push(f.sig.ident.to_string());
+        self.raw_tainted_stack
+            .push(std::collections::HashSet::new());
+        syn::visit::visit_item_fn(self, f);
+        self.raw_tainted_stack.pop();
+        self.fn_stack.pop();
+    }
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        if attrs_are_test_gated(&f.attrs) {
+            return;
+        }
+        self.fn_stack.push(f.sig.ident.to_string());
+        self.raw_tainted_stack
+            .push(std::collections::HashSet::new());
+        syn::visit::visit_impl_item_fn(self, f);
+        self.raw_tainted_stack.pop();
+        self.fn_stack.pop();
+    }
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        if attrs_are_test_gated(&m.attrs) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, m);
+    }
+    fn visit_local(&mut self, l: &'ast syn::Local) {
+        if let Some(init) = &l.init {
+            if unknown_raw_expr_is_sentinel(&init.expr) {
+                let mut ids = Vec::new();
+                hot_collect_bound_idents(&l.pat, &mut ids);
+                for id in ids {
+                    self.mark_raw_tainted(id);
+                }
+            }
+        }
+        syn::visit::visit_local(self, l);
+    }
+    fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
+        // Assignment-form raw-taint: `raw = semantic_query_error_raw(err);`
+        // taints `raw` (so a later `Unknown { raw }` field shorthand fires),
+        // mirroring the `let`-initialiser taint above. A field-write
+        // (`self.raw = …`) is publication, not a tracked taint source.
+        if unknown_raw_expr_is_sentinel(&a.right) {
+            if let syn::Expr::Path(p) = &*a.left {
+                if p.path.segments.len() == 1 {
+                    self.mark_raw_tainted(p.path.segments[0].ident.to_string());
+                }
+            }
+        }
+        syn::visit::visit_expr_assign(self, a);
+    }
+    fn visit_expr_struct(&mut self, es: &'ast syn::ExprStruct) {
+        if self.is_unknown_ctor(&es.path) {
+            for field in &es.fields {
+                if let syn::Member::Named(name) = &field.member {
+                    if name == "raw" {
+                        let sentinel = unknown_raw_expr_is_sentinel(&field.expr)
+                            || matches!(&field.expr, syn::Expr::Path(p)
+                                if p.path.segments.len() == 1
+                                    && self.raw_is_tainted(&p.path.segments[0].ident.to_string()));
+                        if sentinel {
+                            self.hits
+                                .push((self.ident(), field.expr.to_token_stream().to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        syn::visit::visit_expr_struct(self, es);
+    }
+}
+
+/// Scan one production source for sentinel-family `Unknown` constructions.
+fn unknown_sentinel_constructions_in_src(src: &str) -> Vec<(String, String)> {
+    let file = match syn::parse_file(src) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let maps = collect_use_alias_maps(&file);
+    let mut scanner = UnknownSentinelScanner {
+        fn_stack: Vec::new(),
+        raw_tainted_stack: Vec::new(),
+        maps: &maps,
+        hits: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut scanner, &file);
+    scanner.hits
+}
+
+/// The global Unknown-as-control-flow fence: NO production module OUTSIDE the
+/// sentinel-owner substrate may construct a `TypeExpr::Unknown { raw: <semantic
+/// sentinel> }` (directly, through a `TypeExpr` alias, a bare variant import, or
+/// a raw-tainted field shorthand).
+///
+/// Currently GREEN: every sentinel-carrying `Unknown` construction lives in the
+/// owner substrate; non-owner modules construct only benign placeholders. A new
+/// semantic-sentinel construction outside the owner turns this RED.
+#[test]
+fn no_new_semantic_unknown_control_flow_outside_owner() {
+    let mut offenders: Vec<String> = Vec::new();
+    for (rel, src) in production_src_files() {
+        if rel.contains("/typeinfo_tests/") || rel.ends_with("/test_only.rs") {
+            continue;
+        }
+        if unknown_rel_is_sentinel_owner(&rel) {
+            continue;
+        }
+        for (qual_fn, raw) in unknown_sentinel_constructions_in_src(&src) {
+            offenders.push(format!("{rel}::{qual_fn} -> Unknown {{ raw: {raw} }}"));
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "Global Unknown-as-control-flow fence: {} production module(s) OUTSIDE the \
+         sentinel-owner substrate construct a `TypeExpr::Unknown {{ raw: <semantic \
+         sentinel> }}`. Route the typed `QueryError` through the single owner mapping \
+         (`semantic_query_error_raw`) / return a typed carrier instead of fabricating a \
+         control sentinel string. Sites:\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+/// Discrimination self-test for the global Unknown fence — covers the alias,
+/// bare-variant-import, and field-shorthand raw-taint forms in addition to the
+/// direct sentinel construction.
+#[test]
+fn unknown_control_flow_fence_self_test_discriminates() {
+    // (A) A semantic-sentinel `Unknown` construction in a NON-owner fn FIRES.
+    let sentinel_lit = r#"
+        fn fabricate() -> TypeExpr { TypeExpr::Unknown { raw: "semanticMiss".to_string() } }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(sentinel_lit).is_empty(),
+        "self-test (A): a `TypeExpr::Unknown {{ raw: \"semanticMiss\" }}` construction MUST fire"
+    );
+    let sentinel_const = r#"
+        fn fabricate() -> TypeExpr { TypeExpr::Unknown { raw: SEMANTIC_MISS.to_string() } }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(sentinel_const).is_empty(),
+        "self-test (A2): a `raw: SEMANTIC_MISS` construction MUST fire"
+    );
+    let producer_call = r#"
+        fn fabricate(err: &QueryError) -> TypeExpr { TypeExpr::Unknown { raw: semantic_query_error_raw(err) } }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(producer_call).is_empty(),
+        "self-test (A3): a `raw: semantic_query_error_raw(err)` construction MUST fire"
+    );
+
+    // (A4) ALIAS: `use …::TypeExpr as TE; TE::Unknown { raw: <sentinel> }` FIRES.
+    let aliased = r#"
+        use verter_type_expr::TypeExpr as TE;
+        fn fabricate() -> TE { TE::Unknown { raw: "semanticMiss".to_string() } }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(aliased).is_empty(),
+        "self-test (A4): an aliased `TE::Unknown {{ raw: <sentinel> }}` construction MUST fire"
+    );
+
+    // (A5) BARE VARIANT IMPORT: `use …::TypeExpr::Unknown; Unknown { raw: <sentinel> }` FIRES.
+    let bare_variant = r#"
+        use verter_type_expr::TypeExpr::Unknown;
+        fn fabricate() -> X { Unknown { raw: "semanticMiss".into() } }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(bare_variant).is_empty(),
+        "self-test (A5): a bare variant-imported `Unknown {{ raw: <sentinel> }}` MUST fire"
+    );
+
+    // (A6) FIELD-SHORTHAND RAW-TAINT: `let raw = semantic_query_error_raw(e);
+    //      TypeExpr::Unknown { raw }` FIRES (the shorthand carries the tainted local).
+    let shorthand = r#"
+        fn fabricate(err: &QueryError) -> TypeExpr {
+            let raw = semantic_query_error_raw(err);
+            TypeExpr::Unknown { raw }
+        }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(shorthand).is_empty(),
+        "self-test (A6): a field-shorthand `Unknown {{ raw }}` carrying a sentinel-tainted \
+         local MUST fire"
+    );
+
+    // (B) BENIGN placeholders (empty / display / debug) do NOT fire.
+    let empty = r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: String::new() } }"#;
+    assert!(
+        unknown_sentinel_constructions_in_src(empty).is_empty(),
+        "self-test (B): a benign `raw: String::new()` placeholder must NOT fire"
+    );
+    let display = r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: "unknown".to_string() } }"#;
+    assert!(
+        unknown_sentinel_constructions_in_src(display).is_empty(),
+        "self-test (B2): a benign `raw: \"unknown\"` display placeholder must NOT fire"
+    );
+    let debug = r#"fn f(x: &X) -> TypeExpr { TypeExpr::Unknown { raw: format!("{x:?}") } }"#;
+    assert!(
+        unknown_sentinel_constructions_in_src(debug).is_empty(),
+        "self-test (B3): a benign debug-format placeholder must NOT fire"
+    );
+    let benign_shorthand = r#"
+        fn f() -> TypeExpr { let raw = String::new(); TypeExpr::Unknown { raw } }
+    "#;
+    assert!(
+        unknown_sentinel_constructions_in_src(benign_shorthand).is_empty(),
+        "self-test (B4): a field-shorthand carrying a benign (non-sentinel) local must NOT fire"
+    );
+
+    // (C) A `#[cfg(test)]`-gated sentinel construction is skipped whole.
+    let test_gated = r#"
+        #[cfg(test)]
+        fn t() -> TypeExpr { TypeExpr::Unknown { raw: "semanticMiss".to_string() } }
+    "#;
+    assert!(
+        unknown_sentinel_constructions_in_src(test_gated).is_empty(),
+        "self-test (C): a `#[cfg(test)]`-gated sentinel construction must be skipped"
+    );
+
+    // (D) A NON-`TypeExpr` `Unknown { raw }` (a different type's variant, not
+    //     imported from `TypeExpr`) does NOT fire.
+    let other = r#"fn f() -> Other { OtherKind::Unknown { raw: "semanticMiss".into() } }"#;
+    assert!(
+        unknown_sentinel_constructions_in_src(other).is_empty(),
+        "self-test (D): a non-`TypeExpr` `Unknown` construction must NOT fire"
+    );
+
+    // (E) FUNCTION-LOCAL `use` ALIAS: a fn/block-local `use …::TypeExpr as TE;`
+    //     followed by `TE::Unknown { raw: <sentinel> }` FIRES — alias collection
+    //     is recursive over the whole file, not top-level `use` only.
+    let local_use_alias = r#"
+        fn fabricate() -> X {
+            use verter_type_expr::TypeExpr as TE;
+            TE::Unknown { raw: "semanticMiss".into() }
+        }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(local_use_alias).is_empty(),
+        "self-test (E): a FUNCTION-LOCAL `use …::TypeExpr as TE; TE::Unknown {{ raw: <sentinel> }}` \
+         MUST fire (local-use alias collection)"
+    );
+    let local_use_bare_variant = r#"
+        fn fabricate() -> X {
+            use verter_type_expr::TypeExpr::Unknown;
+            Unknown { raw: "budgetExceeded(7)".into() }
+        }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(local_use_bare_variant).is_empty(),
+        "self-test (E2): a FUNCTION-LOCAL bare variant import `use …::TypeExpr::Unknown; \
+         Unknown {{ raw: <sentinel> }}` MUST fire"
+    );
+}
+
+/// Discrimination self-test for the classifier-FAITHFUL Unknown fence: a benign
+/// string that merely EMBEDS a sentinel spelling does NOT fire (the owner
+/// classifier `raw_is_unmaterialized_sentinel` matches the exact spelling /
+/// leading prefix, not a substring), a genuine exact/prefix sentinel DOES fire,
+/// and an assignment-form (`raw = <sentinel>`) raw-taint fires.
+#[test]
+fn unknown_fence_is_classifier_faithful_and_assignment_aware() {
+    // (FAITHFUL-i) A benign literal EMBEDDING `semanticMiss` as a substring is
+    //     NOT the exact spelling the owner classifier recognises → must NOT fire.
+    let benign_substring = r#"
+        fn f() -> TypeExpr { TypeExpr::Unknown { raw: "not semanticMiss".to_string() } }
+    "#;
+    assert!(
+        unknown_sentinel_constructions_in_src(benign_substring).is_empty(),
+        "self-test (FAITHFUL-i): a benign `raw: \"not semanticMiss\"` (embeds the spelling, is not \
+         the EXACT sentinel) must NOT fire — the marker match is classifier-faithful, not a loose \
+         `contains`"
+    );
+    // (FAITHFUL-i2) A literal embedding a PREFIX sentinel mid-string (not as a
+    //     leading prefix) is NOT what `starts_with(..)` recognises → must NOT fire.
+    let benign_prefix_substring = r#"
+        fn f() -> TypeExpr { TypeExpr::Unknown { raw: "see budgetExceeded( docs".to_string() } }
+    "#;
+    assert!(
+        unknown_sentinel_constructions_in_src(benign_prefix_substring).is_empty(),
+        "self-test (FAITHFUL-i2): a benign literal embedding a prefix sentinel mid-string (not as a \
+         leading prefix) must NOT fire"
+    );
+
+    // (FAITHFUL-ii) The EXACT spelling, a LEADING-PREFIX form, and a const ref all
+    //     DO fire (the owner classifier WOULD recognise each).
+    let exact = r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: "semanticMiss".to_string() } }"#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(exact).is_empty(),
+        "self-test (FAITHFUL-ii): the EXACT `semanticMiss` spelling MUST fire"
+    );
+    let prefix =
+        r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: "budgetExceeded(7)".to_string() } }"#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(prefix).is_empty(),
+        "self-test (FAITHFUL-ii2): a LEADING-prefix `budgetExceeded(7)` MUST fire"
+    );
+    let const_ref =
+        r#"fn f() -> TypeExpr { TypeExpr::Unknown { raw: SEMANTIC_OBJECT_SURFACE.to_string() } }"#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(const_ref).is_empty(),
+        "self-test (FAITHFUL-ii3): a sentinel-const reference (`SEMANTIC_OBJECT_SURFACE`) MUST fire"
+    );
+
+    // (ASSIGNMENT) A sentinel bound via `=` REASSIGNMENT (not only a `let`
+    //     initialiser) then placed in `Unknown { raw }` MUST fire.
+    let assign = r#"
+        fn fabricate(err: &QueryError) -> TypeExpr {
+            let mut raw = String::new();
+            raw = semantic_query_error_raw(err);
+            TypeExpr::Unknown { raw }
+        }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(assign).is_empty(),
+        "self-test (ASSIGNMENT): a sentinel bound via ASSIGNMENT \
+         (`raw = semantic_query_error_raw(..)`) then used in `Unknown {{ raw }}` MUST fire \
+         (assignment-form raw-taint, not only `let`)"
+    );
+    // The benign assignment counterpart stays GREEN (no sentinel on the RHS).
+    let assign_benign = r#"
+        fn fabricate() -> TypeExpr {
+            let mut raw = String::new();
+            raw = "unknown".to_string();
+            TypeExpr::Unknown { raw }
+        }
+    "#;
+    assert!(
+        unknown_sentinel_constructions_in_src(assign_benign).is_empty(),
+        "self-test (ASSIGNMENT-benign): an assignment of a benign placeholder must NOT fire"
+    );
+}
+
+/// Collects the rendered first argument of every `<recv>.starts_with(<arg>)`
+/// method call within a target fn body (used to prove the budget classifier
+/// references the shared constant, not an inline literal).
+#[derive(Default)]
+struct StartsWithArgCollector {
+    args: Vec<String>,
+}
+impl<'ast> syn::visit::Visit<'ast> for StartsWithArgCollector {
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        if mc.method == "starts_with" {
+            if let Some(arg) = mc.args.first() {
+                self.args.push(arg.to_token_stream().to_string());
+            }
+        }
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+}
+
+/// Find a free / impl fn named `name` anywhere in a parsed file (recursing
+/// modules + impls) and return its block.
+fn find_fn_block(file: &syn::File, name: &str) -> Option<syn::Block> {
+    #[derive(Default)]
+    struct Finder {
+        target: String,
+        block: Option<syn::Block>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Finder {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            if f.sig.ident == self.target.as_str() {
+                self.block = Some((*f.block).clone());
+            }
+            syn::visit::visit_item_fn(self, f);
+        }
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            if f.sig.ident == self.target.as_str() {
+                self.block = Some(f.block.clone());
+            }
+            syn::visit::visit_impl_item_fn(self, f);
+        }
+    }
+    let mut finder = Finder {
+        target: name.to_string(),
+        block: None,
+    };
+    syn::visit::Visit::visit_file(&mut finder, file);
+    finder.block
+}
+
+/// The `&str` literal VALUE of a top-level / nested `const NAME: &str = "…";`
+/// item, read from the parsed AST (recursing modules + impls). Reading the
+/// const's literal through `syn` — not a source-text `contains` — means a
+/// commented-out spelling cannot spoof the pin and a drift of the REAL const
+/// value is caught. Returns `None` when the const is absent or its initialiser
+/// is not a bare string literal.
+fn const_str_value(file: &syn::File, name: &str) -> Option<String> {
+    #[derive(Default)]
+    struct Finder {
+        target: String,
+        value: Option<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Finder {
+        fn visit_item_const(&mut self, c: &'ast syn::ItemConst) {
+            if c.ident == self.target.as_str() {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &*c.expr
+                {
+                    self.value = Some(s.value());
+                }
+            }
+            syn::visit::visit_item_const(self, c);
+        }
+    }
+    let mut finder = Finder {
+        target: name.to_string(),
+        value: None,
+    };
+    syn::visit::Visit::visit_file(&mut finder, file);
+    finder.value
+}
+
+/// Budget-exceeded sentinel spelling pin: the SINGLE source of truth
+/// `BUDGET_EXCEEDED_SENTINEL_PREFIX` is exactly `"budgetExceeded("`, and the raw
+/// classifier authority `raw_is_unmaterialized_sentinel` recognises the budget
+/// prefix THROUGH that constant (an AST-level `starts_with(BUDGET_EXCEEDED_…)`
+/// reference, comment-blind), never a divergent inline literal. The
+/// armed-runaway fuse depends on this spelling never drifting; the behavioural
+/// half (the classifier actually recognising the prefix at runtime) is pinned by
+/// the `raise_sentinel` unit test
+/// `budget_exceeded_prefix_classifies_as_unmaterialized_sentinel`.
+#[test]
+fn budget_exceeded_sentinel_prefix_is_pinned_and_in_parity() {
+    let mod_src = read_rel("src/resolver_core/component_meta_query_engine/mod.rs");
+    let mod_file = syn::parse_file(&mod_src).expect("parse component_meta_query_engine/mod.rs");
+    let prefix_value = const_str_value(&mod_file, "BUDGET_EXCEEDED_SENTINEL_PREFIX").expect(
+        "the `BUDGET_EXCEEDED_SENTINEL_PREFIX` const must exist (as a bare `&str` literal) in \
+         component_meta_query_engine/mod.rs",
+    );
+    assert_eq!(
+        prefix_value, "budgetExceeded(",
+        "the budget-exceeded sentinel prefix const must hold EXACTLY `\"budgetExceeded(\"` in \
+         component_meta_query_engine/mod.rs (the single source of truth). The pin reads the \
+         const's AST literal VALUE, so a commented-out spelling cannot spoof it and a drift of \
+         the real const fails"
+    );
+
+    let sentinel_src = read_rel("src/project_semantic_dispatch/raise_sentinel.rs");
+    let file = syn::parse_file(&sentinel_src).expect("parse raise_sentinel.rs");
+    let block = find_fn_block(&file, "raw_is_unmaterialized_sentinel")
+        .expect("raw_is_unmaterialized_sentinel must exist in raise_sentinel.rs");
+    let mut collector = StartsWithArgCollector::default();
+    syn::visit::Visit::visit_block(&mut collector, &block);
+
+    assert!(
+        collector
+            .args
+            .iter()
+            .any(|a| a == "BUDGET_EXCEEDED_SENTINEL_PREFIX"),
+        "the raw classifier `raw_is_unmaterialized_sentinel` must recognise the budget \
+         sentinel through a `starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX)` reference to the \
+         shared constant (spelling parity); found `starts_with` args: {:?}",
+        collector.args
+    );
+    assert!(
+        !collector.args.iter().any(|a| a.contains("budgetExceeded(")),
+        "the raw classifier must reference the shared constant, not an inline \
+         `starts_with(\"budgetExceeded(\")` literal (no spelling fork); found `starts_with` \
+         args: {:?}",
+        collector.args
+    );
+}
+
+/// Discrimination self-test for the budget-prefix pin: the pin reads the const
+/// item's AST literal VALUE, so a commented-out canonical spelling beside a
+/// const whose REAL value drifted does NOT satisfy the pin (a source-text
+/// `contains` would have been spoofed by the comment).
+#[test]
+fn budget_prefix_pin_reads_const_value_not_comment_text() {
+    // The canonical spelling appears ONLY in a leading comment; the REAL const
+    // value drifted to `"WRONG("`. A substring `contains` over the source would
+    // wrongly accept the comment; the AST read returns the real value.
+    let spoof = concat!(
+        "// const BUDGET_EXCEEDED_SENTINEL_PREFIX: &str = \"budgetExceeded(\";\n",
+        "pub(crate) const BUDGET_EXCEEDED_SENTINEL_PREFIX: &str = \"WRONG(\";\n"
+    );
+    assert!(
+        spoof.contains(r#"const BUDGET_EXCEEDED_SENTINEL_PREFIX: &str = "budgetExceeded(";"#),
+        "self-test precondition: the comment-only spelling WOULD satisfy a naive source-text \
+         `contains` (the spoof the AST pin must defeat)"
+    );
+    let spoof_file = syn::parse_file(spoof).expect("parse spoofed budget const");
+    let spoofed = const_str_value(&spoof_file, "BUDGET_EXCEEDED_SENTINEL_PREFIX");
+    assert_eq!(
+        spoofed.as_deref(),
+        Some("WRONG("),
+        "the AST pin must read the const's REAL literal value, not the comment spelling"
+    );
+    assert_ne!(
+        spoofed.as_deref(),
+        Some("budgetExceeded("),
+        "a comment-only spelling must NOT satisfy the budget-prefix pin (no source-text spoof)"
+    );
+
+    // The genuine const value is read faithfully through the AST.
+    let real = "pub(crate) const BUDGET_EXCEEDED_SENTINEL_PREFIX: &str = \"budgetExceeded(\";\n";
+    let real_file = syn::parse_file(real).expect("parse genuine budget const");
+    assert_eq!(
+        const_str_value(&real_file, "BUDGET_EXCEEDED_SENTINEL_PREFIX").as_deref(),
+        Some("budgetExceeded("),
+        "the AST pin must read the genuine const literal value"
+    );
+}

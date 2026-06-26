@@ -21158,6 +21158,176 @@ defineProps<{
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// C5 route-fixpoint behaviour-parity characterization.
+//
+// `solve_or_project_leaf_expr_until_stable` (route_keys.rs) is the route-key
+// leaf stabiliser: it re-feeds a materialized `TypeExpr` cursor through the
+// target scope on each iteration (the C5 fixpoint) to stabilise imported-alias
+// helper indexed-access / utility routes. These tests PIN the published prop
+// surface for the C5-exercising fixtures — an imported-alias `Button['ui']`
+// generic-helper route and a multi-hop `Foo['a']['b']` indexed access through
+// imported aliases — with discriminating assertions on the exact terminal
+// shape, so the published output is locked against any change to how the
+// fixpoint decides convergence (e.g. moving it onto a node-domain interned-key
+// compare with no per-iteration materialisation). The strongest risk such a
+// move carries is that a node cursor retains provenance the materialized
+// round-trip erased; these fixtures discriminate exactly that.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// C5 parity: a multi-hop `Foo['a']['b']` indexed access whose root is an
+/// IMPORTED ALIAS (`type ButtonAlias = Outer`) — the leaf stabilises through
+/// the route-key fixpoint against the alias's source scope. The published
+/// terminal is the path-precise primitive; sibling hops never enter the surface.
+#[test]
+fn c5_parity_imported_alias_chain_indexed_access_pins_terminal_primitive() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Inner { full: string; bar: number }
+export interface Outer { a: Inner; other: boolean }
+export type ButtonAlias = Outer"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { ButtonAlias } from './types'
+
+defineProps<{
+  ui: ButtonAlias['a']['full']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+    let ui_ty = evaluated_prop_type(&evaluated, "ui");
+
+    // Terminal collapses to `Inner.full`'s declared `string`. The fixture uses
+    // distinct primitives at each hop (`Inner.full: string`, `Inner.bar:
+    // number`, `Outer.other: boolean`) so the assertion DISCRIMINATES: a
+    // mis-route to `bar` lands on `number`, a walk into `other` lands on
+    // `boolean`; a `Primitive(_)` wildcard would not catch either.
+    assert_eq!(
+        ui_ty,
+        &TypeExpr::Primitive(PrimitiveName::String),
+        "C5 parity: `ButtonAlias['a']['full']` (imported-alias chain) must publish the \
+         path-precise terminal `string`; got {ui_ty:?}"
+    );
+    // Negative: the published terminal is NOT `number` / `boolean` (the sibling
+    // hops) and NOT an `any`/`never`/`unknown`-shaped catch-all.
+    assert_ne!(
+        ui_ty,
+        &TypeExpr::Primitive(PrimitiveName::Number),
+        "C5 parity: must not mis-route to the `bar: number` sibling hop"
+    );
+    assert!(
+        !matches!(ui_ty, TypeExpr::Unknown { .. }),
+        "C5 parity: the stabilised terminal must not collapse to an `Unknown` shell; got {ui_ty:?}"
+    );
+}
+
+/// C5 parity: an imported GENERIC-HELPER route `Button['ui']` where `Button` is
+/// a local alias of an imported generic instantiation (`type Button =
+/// FormApi<string>`). This is the documented `lower_and_project_to_expanded`
+/// constraint case — the empty-path terminal would freeze a generic
+/// `InstantiationRef` under Navigate, so the C5 fixpoint stabilises it at
+/// Expanded. Pins the published `ui` object surface (members + their terminal
+/// primitives), path-precise.
+#[test]
+fn c5_parity_imported_generic_helper_button_ui_route_pins_published_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/form.ts",
+            r#"export type FormApi<T> = {
+  ui: { label: T; count: number }
+  meta: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { FormApi } from './form'
+
+type Button = FormApi<string>
+
+defineProps<{
+  ui: Button['ui']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+    let ui_ty = evaluated_prop_type(&evaluated, "ui");
+
+    // CURRENT behaviour (pinned): `Button['ui']` = `FormApi<string>['ui']` =
+    // `{ label: string; count: number }` — the generic `T=string` substitution
+    // flows into the indexed-access terminal, and the sibling `meta` member is
+    // excluded (path-precise: only the `['ui']` hop loads).
+    let TypeExpr::Object(obj) = ui_ty else {
+        panic!(
+            "C5 parity (button-ui): `Button['ui']` must publish a concrete Object surface \
+             (not an `Unknown` shell / un-expanded `Ref` carrier); got {ui_ty:?}"
+        );
+    };
+    let members: Vec<(&str, &TypeExpr)> = obj
+        .properties
+        .iter()
+        .filter_map(|m| match m {
+            ObjectMember::Property(p) => Some((p.name.as_str(), &p.ty)),
+            _ => None,
+        })
+        .collect();
+    // Path-precise: EXACTLY [label, count] in source order — the `meta` sibling
+    // of `FormApi` never enters the `['ui']` terminal.
+    assert_eq!(
+        members.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        vec!["label", "count"],
+        "C5 parity (button-ui): published `ui` must surface EXACTLY [label, count] in source \
+         order; the `meta` sibling must NOT leak through the `['ui']` terminal. Got {ui_ty:?}"
+    );
+    assert_eq!(
+        obj.properties.len(),
+        2,
+        "exactly two members, no index-signature leak"
+    );
+    // Generic substitution MUST flow into the terminal: `label` carries the
+    // substituted `string`, NOT an un-substituted generic carrier.
+    assert_eq!(
+        members[0].1,
+        &TypeExpr::Primitive(PrimitiveName::String),
+        "C5 parity (button-ui): `label` must carry the `FormApi<string>` substitution (`string`), \
+         not an un-substituted generic; got {:?}",
+        members[0].1
+    );
+    assert!(
+        !matches!(
+            members[0].1,
+            TypeExpr::Ref { .. } | TypeExpr::Unknown { .. }
+        ),
+        "C5 parity (button-ui): `label` must be the substituted primitive, never an \
+         un-resolved `Ref`/`Unknown` generic carrier; got {:?}",
+        members[0].1
+    );
+    assert_eq!(
+        members[1].1,
+        &TypeExpr::Primitive(PrimitiveName::Number),
+        "C5 parity (button-ui): `count` must stay `number`; got {:?}",
+        members[1].1
+    );
+}
+
 /// End-to-end discriminator for the dispatch-bridge `ProjectGeneration`
 /// conversion.
 ///

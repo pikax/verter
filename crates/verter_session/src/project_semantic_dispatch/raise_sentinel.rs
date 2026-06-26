@@ -200,7 +200,9 @@ mod tests {
         query_error_is_object_surface_sentinel, query_error_is_unmaterialized_sentinel,
         raw_is_unmaterialized_sentinel, QueryError, SEMANTIC_OBJECT_SURFACE,
     };
-    use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
+    use crate::resolver_core::component_meta_query_engine::{
+        semantic_query_error_raw, BUDGET_EXCEEDED_SENTINEL_PREFIX,
+    };
     use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
     use crate::semantic_query::SemanticQueryValueTag;
 
@@ -409,6 +411,31 @@ mod tests {
             !query_error_is_object_surface_sentinel(&QueryError::UnrepresentableSurfaceMember),
             "the surface-MEMBER carrier round-trips to SEMANTIC_SURFACE_MEMBER, not the \
              object-surface spelling"
+        );
+    }
+
+    /// Behavioural pin for the budget-exceeded prefix: the classifier recognises
+    /// any string CARRYING the `BUDGET_EXCEEDED_SENTINEL_PREFIX` prefix as an
+    /// unmaterialised sentinel, and rejects a near-miss prefix. This runs the
+    /// real classifier (the AST-level reference is pinned separately by
+    /// `budget_exceeded_sentinel_prefix_is_pinned_and_in_parity`), so a regression
+    /// that stopped honouring the prefix — or forked the spelling — fails here.
+    /// DISCRIMINATING: a near-miss prefix and the bare verb (no `(`) must be
+    /// classified as MATERIALISED.
+    #[test]
+    fn budget_exceeded_prefix_classifies_as_unmaterialized_sentinel() {
+        assert!(
+            raw_is_unmaterialized_sentinel(&format!("{BUDGET_EXCEEDED_SENTINEL_PREFIX}42)")),
+            "a string carrying the budget-exceeded prefix must classify as an \
+             unmaterialised sentinel"
+        );
+        assert!(
+            !raw_is_unmaterialized_sentinel("budgetExceede("),
+            "a near-miss prefix (missing the trailing `d`) must NOT classify as a sentinel"
+        );
+        assert!(
+            !raw_is_unmaterialized_sentinel("budgetExceeded"),
+            "the bare verb without the `(` boundary must NOT classify as a sentinel"
         );
     }
 }
