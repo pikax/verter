@@ -25,9 +25,10 @@ use crate::resolver_core::ResolverContext;
 use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
 
-use super::{
-    read_surface_members, resolve_macro_payload, resolve_payload_surface,
-    surface_member_to_expanded_field,
+use super::output_sink::surface_member_to_expanded_field;
+use super::publication_authority::{
+    admit_published_member, read_surface_member_candidates, resolve_macro_payload,
+    resolve_payload_surface,
 };
 
 pub(crate) fn project_exposed(
@@ -49,11 +50,11 @@ pub(crate) fn project_exposed(
     }
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    // See `project_props` for the PublishedField
-    // origin-edge emit rationale.
-    let admitted: Vec<_> = {
+    // See `project_props` for the PublishedField origin-edge rationale —
+    // recorded uniformly inside `admit_published_member`.
+    let admitted = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
-        let payload_node = match resolve_macro_payload(
+        let payload = match resolve_macro_payload(
             &dispatch,
             owner,
             file,
@@ -65,57 +66,29 @@ pub(crate) fn project_exposed(
             MacroExpansionKind::DefineProps,
             diag_sink,
         ) {
-            Some(node) => node,
+            Some(payload) => payload,
             None => return Vec::new(),
         };
 
-        let surface_node = match resolve_payload_surface(
+        let surface = match resolve_payload_surface(
             &dispatch,
-            payload_node,
-            macro_index,
+            &payload,
             MacroExpansionKind::DefineProps,
-            // Exposed pass-through surface is structural. Routed through the
-            // single-source-of-truth helper (which maps DefineExpose →
-            // Structural) rather than hardcoding the value.
-            super::macro_payload_surface_provenance(AnalyzedMacroKind::DefineExpose),
             diag_sink,
         ) {
-            Some(node) => node,
+            Some(surface) => surface,
             None => return Vec::new(),
         };
 
-        let members = read_surface_members(ctx, surface_node);
-        members
+        read_surface_member_candidates(ctx, &surface)
             .into_iter()
-            // Publication-boundary visibility filter (mirrors props): a
-            // non-public class member is not part of the publicly-exposed
-            // surface. Every non-class origin is `Public`, so this is a no-op
-            // for the common object / interface expose surfaces.
-            .filter(|member| member.visibility.is_public())
-            .filter_map(|member| {
-                let member_cursor = cursor.descend_published_member(member.name.as_ref())?;
-                dispatch.record_published_field_edge(
-                    owner,
-                    surface_node,
-                    member.value,
-                    &member.name,
-                );
-                Some((member, member_cursor))
-            })
-            .collect()
+            .filter_map(|candidate| admit_published_member(candidate, &cursor, &dispatch))
+            .collect::<Vec<_>>()
     };
     admitted
         .into_iter()
-        .map(|(member, member_cursor)| {
-            surface_member_to_expanded_field(
-                query_engine,
-                file,
-                &member,
-                None,
-                None,
-                None,
-                member_cursor,
-            )
+        .map(|admitted| {
+            surface_member_to_expanded_field(query_engine, file, &admitted, None, None, None)
         })
         .collect()
 }

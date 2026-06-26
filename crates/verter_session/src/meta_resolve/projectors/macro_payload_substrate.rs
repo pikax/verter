@@ -291,9 +291,10 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
         // Navigate-mode carrier for a named alias. Resolve the alias's
         // body and recurse. `ResolveDecl` on a navigate `DeclRef`
         // returns an `Opaque(DeclPlaceholder)` deferral (the body is NOT
-        // materialised by `ResolveDecl`), so reach the body by lowering
-        // the prepared declaration's body `TypeExpr` directly — the same
-        // mechanism the structural `named_decl_body` walker used.
+        // materialised by `ResolveDecl`), so reach the body through the
+        // shared `decl_body_hot_ref` hot accessor (the `Instantiate` memo,
+        // the single resolution engine), which returns a graph-native node
+        // that is never materialised back to a `TypeExpr`.
         Some(SemanticNodeData::DeclRef { identity }) => {
             lower_decl_body_to_node(dispatch, &identity.canonical_id, &identity.decl_name).and_then(
                 |resolved| {
@@ -302,7 +303,8 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
             )
         }
         // A `DeclPlaceholder` deferral (e.g. surfaced by an upstream
-        // `ResolveDecl`). Reach its body the same way.
+        // `ResolveDecl`). Reach its body through the same shared
+        // `decl_body_hot_ref` hot accessor.
         Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
             canonical_id,
             name,
@@ -323,22 +325,27 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
 /// truncates a legitimate chain.
 pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 
-/// Lower a named declaration's prepared body `TypeExpr` to a semantic
-/// node in `Navigate` mode (terminal carriers preserved). Returns the
-/// lowered body node — for a conditional alias body
+/// Resolve a named declaration's body to a graph node in `Navigate` mode
+/// (terminal carriers preserved) through the shared hot accessor. Returns
+/// the resolved body node — for a conditional alias body
 /// (`type X = A extends B ? C : D`) this is the `Conditional` node whose
-/// branch refs the emit branch-merge enumerates.
+/// branch refs the emit branch-merge enumerates. The accessor drives the
+/// shared `Instantiate` query (the single resolution engine), so the node
+/// stays graph-native and is never materialised back to a `TypeExpr`.
+/// `args` is empty — a bare named-decl demand carries no explicit type
+/// arguments.
 fn lower_decl_body_to_node(
     dispatch: &ProjectSemanticDispatch<'_>,
     canonical_id: &str,
     name: &str,
 ) -> Option<SemanticNodeId> {
-    let prepared = dispatch.ctx.prepared_type_decl(canonical_id, name)?;
-    dispatch.lower_type_expr_in_scope_with_mode(
+    let handle = dispatch.decl_body_hot_ref(
         canonical_id,
-        &prepared.body,
-        ProjectionMode::Navigate,
-    )
+        name,
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+    )?;
+    Some(handle.node())
 }
 
 #[allow(dead_code)]
@@ -377,8 +384,10 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // carriers to the conditional root, terminating on visited-node
     // identity (a cyclic alias loop returns `None`). The walk is
     // non-invasive (it reads already-interned `SemanticNodeData` and
-    // lowers prepared bodies in Navigate); the branch dispatches below
-    // emit the dep-signature.
+    // reaches each named alias body through the shared `decl_body_hot_ref`
+    // hot accessor — the `Instantiate` memo in Navigate mode — never
+    // materialising a body back to a `TypeExpr`); the branch dispatches
+    // below emit the dep-signature.
     let mut carrier_visited: rustc_hash::FxHashSet<SemanticNodeId> =
         rustc_hash::FxHashSet::default();
     let conditional_node =

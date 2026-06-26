@@ -12,6 +12,25 @@ publish = false
 [features]
 default = []
 session_metrics = []
+# Opt-in test-support seam for items the SEPARATE integration-test binary
+# (`tests/cases/**`) must see but a normal `cargo build` / `pnpm run build:lsp`
+# / `pnpm dev-extension` (debug or release) must NOT compile. The integration
+# binary links `verter_session` as a NON-test dependency, so a `#[cfg(test)]`
+# item on the lib is invisible to it; `#[cfg(debug_assertions)]` would make the
+# item present in EVERY ordinary debug build (a production-reachable hole). This
+# feature threads the needle: it is NOT in `default`, so production builds
+# (incl. plain `cargo build`) do NOT enable it, yet the `[dev-dependencies]`
+# self-edge below (`verter_session = { path = ".", features = ["test-support"] }`)
+# turns it ON for `verter_session`'s OWN test / example / bench targets — the
+# integration binary among them. So an item gated
+# `#[cfg(any(test, feature = "test-support"))]` is reachable from genuine test
+# code in BOTH the unit (`#[cfg(test)]`) and the integration build, and is a
+# COMPILE-ABSENT item in every production profile. The OutputProjector carrier
+# `_for_test` accessors (and the `ShapeCacheDb` synthetic-carrier proof helpers
+# that call them) use this gate so the reverse-materialization fence holds in
+# every build profile, not release-only. Production-unreachability is asserted
+# by `tests/cases/g_misc1/test_support_feature_off_in_default_build.rs`.
+test-support = []
 # Opt-in: the TS7 oracle harness GENERATION side (the §4 generation spike + the
 # snapshot generator), which drives the pinned tsgo via `verter_type_runtime`.
 # `docs/arch/u0-oracle-harness-design.md` §3 invariant 1: tsgo is GENERATION-ONLY
@@ -68,6 +87,7 @@ verter_compiler = { path = "../verter_compiler" }
 verter_protocol = { path = "../verter_protocol" }
 prost = "0.14.3"
 verter_semantic = { path = "../verter_semantic" }
+verter_no_typeexpr = { workspace = true }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 verter_span = { path = "../verter_span" }
@@ -172,6 +192,17 @@ verter_parser = { path = "../verter_parser" }
 # unifies feature requirements per-target — for tests/examples/benches
 # the union includes `test-support`; for production it does not.
 verter_scheduler = { path = "../verter_scheduler", features = ["test-support"] }
+# Self-edge that activates `verter_session`'s OWN `test-support` feature for its
+# test / example / bench targets ONLY (the integration binary `tests/cases/**`
+# among them). Cargo unifies feature requirements per-target: for the test
+# targets the union includes `test-support` (so the integration binary sees the
+# carrier `_for_test` accessors + the `ShapeCacheDb` synthetic-carrier proof
+# helpers), while a production `cargo build` / `cargo build --release` of any
+# dependent does NOT enable it (it is absent from `default` and is not requested
+# by any non-dev edge). This is the same idiom as the `verter_scheduler`
+# `test-support` edge above; it is what lets the reverse-materialization fence
+# be compiler-enforced in EVERY build profile rather than release-only.
+verter_session = { path = ".", features = ["test-support"] }
 verter_type_expr = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }

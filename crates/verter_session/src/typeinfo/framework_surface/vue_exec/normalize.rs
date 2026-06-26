@@ -20,9 +20,10 @@ use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 use super::{
     member_jsdoc_from_spans, navigate_param_to_object_surface, raise_member_value,
     raise_realized_callable_member_value, signature_jsdoc_from_spans, slice_canonical_span,
-    VueMacroSurface,
 };
+use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::surface_projector::render_type_expr_display;
+use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 use crate::VerterHost;
 
@@ -44,8 +45,9 @@ use crate::VerterHost;
 #[must_use]
 pub(crate) fn props_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
-    macro_surface: &VueMacroSurface,
+    resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedPropField> {
+    let macro_surface = resolved.macro_surface();
     // Host-level reads (graph node scope, JSDoc source slicing) go through the
     // host the active `ctx` is installed against; the view-sensitive type
     // resolution (`raise_member_value`) flows through `ctx`.
@@ -53,7 +55,7 @@ pub(crate) fn props_from_typeinfo_surface(
     // `defineModel` contributes its synthesized model prop directly from the
     // analyzer facts (the type argument is the model VALUE type).
     if macro_surface.macro_kind == AnalyzedMacroKind::DefineModel {
-        return model_prop_fields(ctx, macro_surface);
+        return model_prop_fields(ctx, resolved);
     }
 
     macro_surface
@@ -111,8 +113,9 @@ pub(crate) fn props_from_typeinfo_surface(
 #[must_use]
 pub(crate) fn object_members_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
-    macro_surface: &VueMacroSurface,
+    resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<crate::typeinfo::framework_surface::results::NamedTypeMember> {
+    let macro_surface = resolved.macro_surface();
     macro_surface
         .surface
         .members
@@ -148,8 +151,9 @@ pub(crate) fn object_members_from_typeinfo_surface(
 #[must_use]
 pub(crate) fn exposed_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
-    macro_surface: &VueMacroSurface,
+    resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<verter_semantic::analysis::types::AnalyzedExposeField> {
+    let macro_surface = resolved.macro_surface();
     let host = ctx.host_for_fact_tracer_install();
     macro_surface
         .surface
@@ -183,16 +187,24 @@ pub(crate) fn exposed_from_typeinfo_surface(
 /// phantom signature).
 pub(crate) fn index_signatures_from_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
-    macro_surface: &VueMacroSurface,
+    resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<ExpandedIndexSignature> {
+    let macro_surface = resolved.macro_surface();
     let dispatch = ctx.dispatch();
+    // Publication sink (DTO index signatures): materialize into sealed
+    // carriers and unwrap via the typeinfo output capability.
+    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
     macro_surface
         .surface
         .index_signatures
         .iter()
         .filter_map(|sig| {
-            let key_type = dispatch.raise_node_to_type_expr(sig.key_type)?;
-            let value_type = dispatch.raise_node_to_type_expr(sig.value_type)?;
+            let key_type = cap
+                .materialize_output_type_expr(sig.key_type)?
+                .into_type_expr(&cap);
+            let value_type = cap
+                .materialize_output_type_expr(sig.value_type)?
+                .into_type_expr(&cap);
             Some(ExpandedIndexSignature {
                 key_type,
                 value_type,
@@ -214,8 +226,9 @@ pub(crate) fn index_signatures_from_surface(
 /// edit no longer rereads the base host's `defineModel<string>` snapshot.
 pub(crate) fn model_prop_fields(
     ctx: &dyn crate::resolver_core::ResolverContext,
-    macro_surface: &VueMacroSurface,
+    resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedPropField> {
+    let macro_surface = resolved.macro_surface();
     let Some(indexed) = ctx
         .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
         .map(|serve| serve.indexed)
@@ -257,13 +270,17 @@ pub(crate) fn model_prop_fields(
 #[must_use]
 pub(crate) fn emits_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
-    macro_surface: &VueMacroSurface,
+    resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedEmitField> {
+    let macro_surface = resolved.macro_surface();
     // View-sensitive type resolution flows through the active `ctx`
     // (`ctx.dispatch()`). Host-level reads (JSDoc source slicing, node scope)
     // use the host the `ctx` is installed against.
     let host = ctx.host_for_fact_tracer_install();
     let dispatch = ctx.dispatch();
+    // Publication sink (DTO emit fields): materialize into sealed carriers and
+    // unwrap via the typeinfo output capability.
+    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
 
     let mut emits: Vec<AnalyzedEmitField> = Vec::new();
 
@@ -271,7 +288,9 @@ pub(crate) fn emits_from_typeinfo_surface(
     for sig in macro_surface.surface.call_signatures.iter() {
         // `TypeExpr` implements `Drop`, so `func` cannot be moved out of the
         // raised value; bind it and borrow the function.
-        let raised = dispatch.raise_node_to_type_expr(sig.node);
+        let raised = cap
+            .materialize_output_type_expr(sig.node)
+            .map(|carrier| carrier.into_type_expr(&cap));
         let Some(TypeExpr::Function(func)) = &raised else {
             continue;
         };
@@ -505,8 +524,9 @@ fn slot_callable_param_and_return_from_arms(
 #[must_use]
 pub(crate) fn slots_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
-    macro_surface: &VueMacroSurface,
+    resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedSlotField> {
+    let macro_surface = resolved.macro_surface();
     // View-sensitive slot type resolution flows through the active `ctx`.
     // Host-level reads (JSDoc / return-type source slicing, node scope) use the
     // host the `ctx` is installed against.

@@ -32,6 +32,7 @@
 
 use std::sync::Arc;
 
+use static_assertions::assert_not_impl_any;
 use verter_semantic::analysis::Hash16;
 
 // Re-export the solver's primitive enum so semantic nodes and the type
@@ -144,15 +145,35 @@ impl HotTypeRef {
         Self(node)
     }
 
-    /// The underlying interned node id. Used only at the
-    /// [`materialize_type_expr`](crate::project_semantic_dispatch::ProjectSemanticDispatch::materialize_type_expr)
-    /// reverse boundary and by handle-capable consumers; it is never lifted
+    /// The underlying interned node id. Reached at the
+    /// [`materialize_output_type_expr`](crate::project_semantic_dispatch::ProjectSemanticDispatch::materialize_output_type_expr)
+    /// output boundary and by handle-capable consumers; it is never lifted
     /// into a cache key.
     #[must_use]
     pub fn node(self) -> SemanticNodeId {
         self.0
     }
 }
+
+// R6 / handle non-keyability — compiler-enforced, any-file, any-aliasing.
+// `HotTypeRef` is a generation-local arena ordinal and MUST NEVER be a cache
+// key: it must implement neither `Hash` nor a total/partial order, by derive
+// OR by a hand-written impl ANYWHERE in the crate. `assert_not_impl_any!`
+// fails to COMPILE if any such impl exists — strictly stronger than a
+// source-text scan (it cannot be evaded by file location or import aliasing).
+assert_not_impl_any!(HotTypeRef: std::hash::Hash, std::cmp::Ord, std::cmp::PartialOrd);
+
+// HotTypeRef is the SOLE audited hand-written NoTypeExpr witness: it wraps a
+// SemanticNodeId arena ordinal that itself must NOT be NoTypeExpr (raw keyable
+// ids may never pass the hot-carrier bound). Deriving would force a witness on
+// SemanticNodeId; this audited impl asserts ONLY the handle is field-safe.
+impl verter_no_typeexpr::__private::NoTypeExprWitness for HotTypeRef {}
+
+// The raw arena ordinal MUST stay non-witness: if `SemanticNodeId` were
+// `NoTypeExpr`, a future carrier could carry a raw keyable id past the
+// hot-carrier field bound. `assert_not_impl_any!` fails to COMPILE if it ever
+// gains the impl — the compiler proof, any-file, any-alias.
+assert_not_impl_any!(SemanticNodeId: verter_no_typeexpr::NoTypeExpr);
 
 /// Canonicalize a node-id sequence into a true SET: sorted ascending and
 /// deduplicated. The content-free node-set cache-key axes
@@ -1080,7 +1101,7 @@ pub enum ReductionDemand {
 /// macro-root surface and a plain structural surface of the SAME node
 /// never collide on one memo slot. It is NOT an env-hash dimension (R21)
 /// — it is a query-identity dimension, like the projection mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, verter_no_typeexpr::NoTypeExpr)]
 pub enum SurfaceProvenanceContext {
     /// Plain structural lowering. Object members reached here carry
     /// `declared_in_macro_type_arg = false`. This is the default for
@@ -1120,7 +1141,7 @@ pub enum SurfaceProvenanceContext {
 /// `interface Props extends Base` arm is `Heritage` even though it is
 /// `Base`'s own-body member, because the consuming declaration's heritage-arm
 /// context flows into the carrier resolution.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub enum MemberMergeRole {
     /// Reached via an authored reference / synthesized construction — an
     /// authored intersection's reference arm (`type Props = Base & { … }`'s
@@ -4690,7 +4711,9 @@ pub enum SemanticNodeData {
     ///
     /// The walker treats this variant as terminal in `Navigate` mode
     /// ([`PathWalker`] does not dispatch `ResolveDecl`); in `Expanded` mode
-    /// the reducer ([`raise_and_reduce`]) issues a `ResolveDecl` dispatch
+    /// the reducer
+    /// ([`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_and_reduce_with_context`])
+    /// issues a `ResolveDecl` dispatch
     /// and substitutes the result.
     ///
     /// Raises to `TypeExpr::Ref { name: identity.decl_name, type_arguments: [] }`.

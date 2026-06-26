@@ -62,7 +62,13 @@
 /// - `2` — typed-IR fields. Adds `*_expr` / `*_expr_scope` on the
 ///   analyzer/parser-published surfaces. Every cache that transitively stores
 ///   these structs rejects any entry stored under version `1`.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 2;
+/// - `3` — `ShapeCacheDb` synthetic-deepen key identity. The synthetic
+///   slot-binding subject roots on the content-free
+///   `SyntheticBindingId` (via `ShapeCacheKey::synthetic_binding_whole`)
+///   instead of a `SemanticNodeId(value_node)` arena ordinal. The
+///   `ShapeSubject` key identity changed, so any stale entry stored under
+///   the old ordinal key must fail closed.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 3;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

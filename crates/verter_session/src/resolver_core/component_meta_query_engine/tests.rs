@@ -3960,7 +3960,7 @@ export interface Derived extends ButtonProps {
 /// (the pre-D1 state) makes every `Some(..)` below `None`, failing the asserts.
 #[test]
 fn projected_surface_to_type_expr_reemits_member_spans() {
-    use crate::resolver_core::projected_surface_to_type_expr;
+    use super::surface::projected_surface_to_type_expr;
     use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
     use verter_span::Span;
     use verter_type_expr::MemberSpans;
@@ -4027,7 +4027,7 @@ fn projected_surface_to_type_expr_reemits_member_spans() {
 /// (the reconstructed members are Public).
 #[test]
 fn projected_surface_to_type_expr_preserves_member_visibility() {
-    use crate::resolver_core::projected_surface_to_type_expr;
+    use super::surface::projected_surface_to_type_expr;
     use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
     use verter_type_expr::{FunctionExpr, MemberSpans, MemberVisibility};
 
@@ -4129,7 +4129,7 @@ fn projected_surface_to_type_expr_preserves_member_visibility() {
 /// (e.g. a byte-0 placeholder) would fail these `None` asserts.
 #[test]
 fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
-    use crate::resolver_core::projected_surface_to_type_expr;
+    use super::surface::projected_surface_to_type_expr;
     use verter_semantic::analysis::type_solver::query_engine::ProjectedSurface;
 
     let surface = ProjectedSurface {

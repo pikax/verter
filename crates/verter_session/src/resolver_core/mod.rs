@@ -19,11 +19,14 @@ pub mod external_type_frontier;
 mod fallthrough;
 mod fallthrough_request;
 pub mod fallthrough_resolver;
+pub mod hot_prepared;
 pub mod prepared_decl;
 pub mod resolver_runtime;
 pub mod route_demand;
 mod runtime_values;
 pub mod shallow_file_state;
+pub(crate) mod structural_body_memo;
+pub mod structural_body_memo_instrumentation;
 pub(crate) mod surface_projector;
 #[cfg(test)]
 mod surface_projector_tests;
@@ -74,10 +77,18 @@ pub use component_meta::{
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
+// The surface-projection helpers (`projected_surface_from_semantic_node`,
+// `surface_view_to_projected_surface`, `projected_surface_to_type_expr`,
+// `projected_surface_to_expanded_shape`) are intentionally NOT re-exported from
+// `resolver_core`: the raw `SemanticNodeId` / `&SurfaceView` → surface
+// projection stays confined to the query-engine subtree (in-subtree callers
+// reach them via `super::surface::`; out-of-subtree callers route through the
+// engine's sink-local methods `dispatch_projected_surface_to_type_expr` /
+// `projected_expanded_shape_from_node` / the routed-surface methods).
 pub(crate) use component_meta_query_engine::{
-    projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
-    projected_surface_to_type_expr, type_expr_contains_semantic_miss,
-    type_expr_is_expanded_surface, type_expr_root_is_unmaterialized_sentinel,
+    instantiate_local_generic_ref_published, lower_and_project_to_expanded_published,
+    project_class_a_terminal_published, project_expr_surface_expr_published,
+    type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
 };
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{

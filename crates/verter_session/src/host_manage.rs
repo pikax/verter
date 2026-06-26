@@ -15,6 +15,21 @@ use crate::resolver_core::{
 use crate::types::*;
 use crate::VerterHost;
 
+// The output-sink capability for this subtree is defined in the EXACT
+// output-SINK module that projects — `HostManageComponentMetaOutputCap` in
+// `host_manage/component_meta_methods.rs` (whose only submodule is a
+// `#[cfg(test)]` test module, so its whole reachable PRODUCTION scope is that
+// one sink) — NOT subtree-wide. A subtree-wide cap
+// (`pub(in crate::host_manage)`) would let the sibling `host_manage::eval_env`
+// (whose expansion branches drive the sink-owned demand methods
+// `expand_define_model_output` / `expand_generic_project_path_output` /
+// `expand_slot_binding_output`) mint the cap directly and launder a bare
+// `TypeExpr`; terminal-sink minting (the mint scope's whole reachable production
+// module tree is output-only) makes the fence compiler-enforced. The expansion
+// callers pass only closed demands (resolver ctx + owner canonical + macro index
+// + the per-branch terminal demand) — never a raw node — so the input authority
+// is owner-confined alongside the sealed cap unwrap.
+
 // ──────────────────────────────────────────────────────────────────────────
 // private sub-modules under `host_manage/`. Public
 // surface remains rooted at `crate::host_manage::*`; siblings are

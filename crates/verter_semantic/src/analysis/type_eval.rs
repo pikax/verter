@@ -244,7 +244,7 @@ fn collect_direct_object_members(body: &TypeExpr, out: &mut Vec<ObjectMember>) {
 }
 
 /// What kind of type declaration this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
 pub enum TypeDeclKind {
     Alias,
     Interface,
@@ -504,7 +504,7 @@ impl ValueDeclGroup {
 }
 
 /// What kind of value declaration this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
 pub enum ValueDeclKind {
     Const,
     Let,

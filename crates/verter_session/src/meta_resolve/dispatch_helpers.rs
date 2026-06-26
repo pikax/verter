@@ -7,15 +7,19 @@
 //! They fall into two structural categories:
 //!
 //! Class A helpers resolve an arbitrary expression through
-//! `dispatch.execute_to_type_expr(ProjectPath { lowered, [], mode })`
-//! after caller-side lowering, with an expanded-surface filter that drops
-//! results still carrying deferred shells or semantic-miss markers.
+//! `dispatch.execute_read(ProjectPath { lowered, [], mode })` after
+//! caller-side lowering. The accepted result NODE is gated NODE-DOMAIN
+//! (raised-shape facts: drop results still carrying deferred shells or
+//! semantic-miss markers) and materialised to its single publication
+//! `TypeExpr` ONCE at the registered surface sink (the demand-bound
+//! publication adapters in `component_meta_query_engine::surface`).
 //!
 //! Class B helpers resolve a root symbol's surface through
-//! `dispatch.execute_to_type_expr(Instantiate { base, args: [], context:
+//! `dispatch.execute_read(Instantiate { base, args: [], context:
 //! InstantiateContext { projection_reduction, resolve_env_hash } })` with
 //! `context.projection_reduction.mode = Expanded`, where `base` is the
-//! env-bearing content-free `ResolvedDeclSlotIdentity` slot. The slot
+//! env-bearing content-free `ResolvedDeclSlotIdentity` slot, the result
+//! node likewise materialised once at the surface sink. The slot
 //! carries the project-identity / type-env / lib-env dims and the
 //! resolve-env dim rides on `InstantiateContext`; the live whole-hash is
 //! re-sourced at value-compute via `ensure_indexed_ready_serve`, never in the key.
@@ -491,15 +495,13 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_type_expr::TypeExpr> {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::{
         component_meta_registry::{
             component_meta_registry_public_indexed_access_route,
             component_meta_registry_public_utility_route,
         },
-        type_expr_contains_semantic_miss, type_expr_is_expanded_surface, ComponentMetaQueryEngine,
+        ComponentMetaQueryEngine,
     };
-    use crate::semantic_query::{PathSegment, QueryResult, SemanticQueryKey};
 
     // registry-route fast path via caller's engine (or a
     // transient engine when caller doesn't pass one). The Class D
@@ -586,39 +588,11 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     // Traversal Rule" — walking `A['c']['full']['bar']` navigates
     // intermediate hops and expands only the terminal requested
     // projection).
-    let (base_expr, path_segments) = decompose_indexed_access_chain(expr);
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let (base, project_path) = if path_segments.is_empty() {
-        let base = dispatch.lower_type_expr_in_scope_with_mode(
-            scope_canonical_id,
-            expr,
-            ProjectionMode::Expanded,
-        )?;
-        (
-            base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        )
-    } else {
-        let base = dispatch.lower_type_expr_in_scope_with_mode(
-            scope_canonical_id,
-            base_expr,
-            ProjectionMode::Navigate,
-        )?;
-        (base, path_segments)
-    };
-    let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
-        base,
-        path: project_path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Expanded,
-        ),
-    });
-    let projected = match read.value {
-        QueryResult::Value(expr) => expr,
-        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-    };
-    (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
-        .then_some(projected)
+    // Pure-dispatch tail: the decompose + lower + ProjectPath + node-domain
+    // gate + publication materialisation are confined to the registered surface
+    // sink (M4 demand-bound adapter), so no `SemanticNodeId -> TypeExpr`
+    // mid-flight raise happens here.
+    crate::resolver_core::project_class_a_terminal_published(ctx, scope_canonical_id, expr)
 }
 
 /// decompose an IndexedAccess chain over literal-string
@@ -729,50 +703,6 @@ pub(crate) fn decompose_indexed_access_chain_node(
 // barrel-routed declarations, so the shared walker (the merge / heritage
 // / Omit composition) is the place to fix any compound-root gap.
 
-/// Class D — Pick route-target via dispatch's `execute_pick`
-///.
-///
-/// Resolves `symbol_name` to a base `SemanticNodeId` (via Class A
-/// lowering on a bare `Ref` of the symbol), then dispatches
-/// `Pick<base, key_set>` through the dispatch's `execute_pick` helper
-/// (which routes through `build_builtin_utility` Pick arm at
-/// `build.rs:870`).
-///
-/// Returns `Some(reduced)` when the dispatch produces a non-Opaque
-/// projection. Caller pattern (per the engine's
-/// `project_route_surface_expr` Pick fallback): use the result as a
-/// route surface; fall back to the raw registry-candidate path on miss.
-pub(crate) fn pick_via_dispatch_pick_helper(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-    members: &[String],
-) -> Option<verter_type_expr::TypeExpr> {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, QueryResult};
-
-    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx());
-    let symbol_ref = verter_type_expr::TypeExpr::Ref {
-        name: Arc::from(symbol_name),
-        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-    };
-    // Bare-Ref base for the Pick builtin is an intermediate hop;
-    // the Pick result is the terminal demand.
-    let base = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        &symbol_ref,
-        ProjectionMode::Navigate,
-    )?;
-
-    let members_arc: Vec<Arc<str>> = members.iter().map(|s| Arc::from(s.as_str())).collect();
-    let result = dispatch.execute_pick(base, &members_arc, ProjectionMode::Expanded);
-    let node = match result {
-        QueryResult::Value(id) => id,
-        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-    };
-    dispatch.raise_node_to_type_expr(node)
-}
-
 /// Class D — generic-Ref instantiation via dispatch.
 ///
 /// Matches a `TypeExpr::Ref { name, type_arguments }` with non-empty
@@ -803,38 +733,13 @@ pub(crate) fn instantiate_local_generic_ref_via_dispatch(
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_type_expr::TypeExpr> {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use verter_type_expr::TypeExpr;
-
-    // Engine-method parity: bail when `expr` is not a generic `Ref`.
-    let TypeExpr::Ref { type_arguments, .. } = expr else {
-        return None;
-    };
-    if type_arguments.is_empty() {
-        return None;
-    }
-
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Generic-Ref instantiation publishes its raised body as the
-    // result; the caller reads the raised TypeExpr directly without
-    // a path-walking follow-up. Lower at Expanded so the body
-    // materialises in one step.
-    let lowered = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        expr,
-        ProjectionMode::Expanded,
-    )?;
-    let raised = dispatch.raise_node_to_type_expr(lowered)?;
-    // Callers use `.unwrap_or_else(|| original.clone())`, so a no-op
-    // (raised == expr) must surface as `None` to preserve the caller's
-    // own fallback path. A miss-shaped raise (Unknown/Opaque) likewise
-    // surfaces as `None` (unresolved decl / package-backed /
-    // substitution-failure all collapse to the dispatcher's miss
-    // sentinel).
-    if raised == *expr {
-        return None;
-    }
-    Some(raised)
+    // The non-generic-`Ref` bail, the `Expanded` lower, the NODE-DOMAIN no-op
+    // decision (`raised_shape_eq_node_type_expr` — distinct nodes raise to equal
+    // shapes, so bare node-id identity is wrong), and the single publication
+    // materialisation of the changed instantiation are confined to the
+    // registered surface sink (M4 demand-bound adapter) — no mid-flight raise
+    // happens here.
+    crate::resolver_core::instantiate_local_generic_ref_published(ctx, scope_canonical_id, expr)
 }
 
 // =============================================================================
@@ -858,12 +763,13 @@ pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
     scope_canonical_id: &str,
     symbol_name: &str,
 ) -> Option<verter_type_expr::TypeExpr> {
-    use crate::resolver_core::projected_surface_to_type_expr;
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    let surface = engine.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
-    projected_surface_to_type_expr(&surface)
+    // The raw `SurfaceView` / `SemanticNodeId` projection is confined to the
+    // query-engine sink; this host-threaded wrapper reaches it ONLY through the
+    // engine's sink-local composition method.
+    engine.dispatch_projected_surface_to_type_expr(scope_canonical_id, symbol_name)
 }
 
 pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
@@ -871,67 +777,14 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::component_meta_registry::{
-        component_meta_registry_public_indexed_access_route,
-        component_meta_registry_public_utility_route,
-    };
-    use crate::resolver_core::{
-        projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
-    };
-    use crate::semantic_query::{
-        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
-        SemanticQueryOutput,
-    };
-
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
-        .or_else(|| component_meta_registry_public_utility_route(expr))
-    {
-        if let Some(projected) =
-            engine.dispatch_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
-        {
-            return Some(
-                verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected),
-            );
-        }
-    }
-    if let Some(shape) = engine.project_direct_utility_surface_shape(scope_canonical_id, expr) {
-        return Some(shape);
-    }
-    let ctx = engine.ctx();
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Intermediate-base lowering is `Navigate`; the terminal
-    // `ProjectPath { .., Shallow }` carries the publication demand.
-    let base = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        expr,
-        ProjectionMode::Navigate,
-    )?;
-    let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
-        dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
-            base,
-            path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Shallow,
-            ),
-        })
-    else {
-        return None;
-    };
-    let surface = projected_surface_from_semantic_node(ctx, node)?;
-    let shape = projected_surface_to_expanded_shape(&surface);
-    // An index-signature-only surface (`{ [k: string]: string }`) is a
-    // genuine props surface — `defineProps<{ [k: string]: string }>()` admits
-    // every string key. Admitting it here lets the owner-local root gate (which
-    // already counts index signatures) see a non-empty shape; gating on
-    // properties / call-signatures alone would drop an index-sig-only root.
-    (!shape.properties.is_empty()
-        || !shape.call_signatures.is_empty()
-        || !shape.index_signatures.is_empty())
-    .then_some(shape)
+    // The `expr -> lower -> ProjectPath -> node -> shape` resolution lives behind
+    // the query-engine demand API: the caller passes a scope + `&TypeExpr`, never
+    // a resolved node, so the raw `SemanticNodeId`-to-surface projection stays
+    // confined to the query-engine sink (the forgeable node never crosses here).
+    engine.project_expr_to_surface_shape(scope_canonical_id, expr)
 }
 
 pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(
@@ -951,43 +804,20 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_type_expr::TypeExpr> {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::{type_expr_contains_semantic_miss, type_expr_is_expanded_surface};
-    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
-
     if engine.projection_op_budget_exhausted() {
         return None;
     }
-    let ctx = engine.ctx();
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Empty-terminal `ProjectPath { .., Expanded }` requires the
-    // base to be a structural surface that `expand_empty_path_terminal`
-    // can walk. `Navigate` would freeze a generic carrier at
-    // `InstantiationRef` (catch-all), so the expanded-surface filter
-    // downstream would reject. The lowering therefore stays `Expanded`
-    // here — the Shallow walker would need an `InstantiationRef`
-    // enumeration arm before a carrier base could feed an Expanded
-    // terminal.
-    let base = dispatch.lower_type_expr_in_scope_with_mode(
+    // Empty-terminal `ProjectPath { .., Expanded }` requires the base to be a
+    // structural surface `expand_empty_path_terminal` can walk; the lowering
+    // therefore stays `Expanded` (see the demand-bound adapter). The lower +
+    // ProjectPath + node-domain gate (`materialized && expanded_surface &&
+    // node-domain-changed`) + publication materialisation are confined to the
+    // registered surface sink (M4), so no mid-flight raise happens here.
+    crate::resolver_core::lower_and_project_to_expanded_published(
+        engine.ctx(),
         scope_canonical_id,
         expr,
-        ProjectionMode::Expanded,
-    )?;
-    let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
-        base,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            ProjectionMode::Expanded,
-        ),
-    });
-    let reduced = match read.value {
-        QueryResult::Value(expr) => expr,
-        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-    };
-    (!type_expr_contains_semantic_miss(&reduced)
-        && type_expr_is_expanded_surface(&reduced)
-        && reduced != *expr)
-        .then_some(reduced)
+    )
 }
 
 /// Mode-explicit dispatch-direct surface projection. Caller states
@@ -1045,14 +875,9 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     terminal_mode: ProjectionMode,
     demand: crate::semantic_query::ReductionDemand,
 ) -> Option<verter_type_expr::TypeExpr> {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::component_meta_registry::{
         component_meta_registry_public_indexed_access_route,
         component_meta_registry_public_utility_route,
-    };
-    use crate::resolver_core::{type_expr_contains_semantic_miss, type_expr_is_expanded_surface};
-    use crate::semantic_query::{
-        PathSegment, ProjectionReductionContext, QueryResult, SemanticQueryKey,
     };
 
     if engine.projection_op_budget_exhausted() {
@@ -1075,54 +900,66 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
             return Some(solved);
         }
     }
-    let ctx = engine.ctx();
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let base = dispatch.lower_type_expr_in_scope_with_context(
+    // Pure-dispatch path: the lower(base_mode) + ProjectPath(terminal_mode) +
+    // node-domain gate (`!materialized` reject; mode-aware acceptance) +
+    // publication materialisation are confined to the registered surface sink
+    // (M4), so no mid-flight raise happens here.
+    crate::resolver_core::project_expr_surface_expr_published(
+        engine.ctx(),
         scope_canonical_id,
         expr,
-        ProjectionReductionContext {
-            mode: base_mode,
-            demand,
-            provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
-            merge_role: crate::semantic_query::MemberMergeRole::Authored,
-        },
-    )?;
-    let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
-        base,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: ProjectionReductionContext {
-            mode: terminal_mode,
-            demand,
-            provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
-            merge_role: crate::semantic_query::MemberMergeRole::Authored,
-        },
-    });
-    let projected = match read.value {
-        QueryResult::Value(expr) => expr,
-        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-    };
-    if type_expr_contains_semantic_miss(&projected) {
-        return None;
-    }
-    match terminal_mode {
-        // Expanded terminal — only fully materialised surfaces qualify.
-        // A residual `KeyOf` / `IndexedAccess` / `Mapped` / `TypeOf` /
-        // `Conditional` shell means the projection did not reach a
-        // structural answer and the caller MUST fall back.
-        ProjectionMode::Expanded => type_expr_is_expanded_surface(&projected).then_some(projected),
-        // Shallow terminal — accept Ref carriers and one-level
-        // surfaces. The whole point of the Shallow contract is that
-        // the published value may stay as a carrier the consumer
-        // re-resolves on demand; running it through
-        // `type_expr_is_expanded_surface` would reject the carrier
-        // form callers explicitly asked for.
-        ProjectionMode::Shallow => Some(projected),
-        // `Identity` / `Navigate` / `Skeleton` are not produced by
-        // current callsites; admit the result as-is so the helper
-        // remains a single drop-in dispatch primitive if a future
-        // caller picks them up.
-        ProjectionMode::Identity | ProjectionMode::Navigate | ProjectionMode::Skeleton => {
-            Some(projected)
+        base_mode,
+        terminal_mode,
+        demand,
+    )
+}
+
+#[cfg(test)]
+mod pick_demand_api_signature_tests {
+    //! Boundary-closure proof (compile-level ONLY): the routed-Pick member
+    //! surface is reached through the query-engine DEMAND API
+    //! `ComponentMetaQueryEngine::materialize_pick_member_surface`, which takes
+    //! a scope + root symbol + member keys and returns the materialised
+    //! `Option<TypeExpr>` — it accepts NO `SemanticNodeId` and exposes none.
+    //!
+    //! The Pick dispatch + node-core materialisation happen INTERNALLY inside
+    //! the demand API, so a forgeable `SemanticNodeId` never crosses the
+    //! query-engine boundary. The prior shape — a `pick_via_dispatch_pick_node`
+    //! helper that returned a bare `SemanticNodeId` for an out-of-subtree caller
+    //! to feed into `materialize_member_surface_node` — is GONE.
+    //!
+    //! Asserted at COMPILE LEVEL by coercing the demand API to a fn pointer
+    //! whose parameters are exactly `(scope, symbol, members, nested)` and whose
+    //! return is `Option<TypeExpr>`. The coercion type-checks only if the real
+    //! signature matches; a return of `Option<SemanticNodeId>` (the leaking
+    //! node-returning shape) would fail to unify here. This is the successor of
+    //! the §1a fence: no node crosses the boundary because the boundary API
+    //! resolves it internally.
+
+    #[test]
+    fn pick_demand_api_takes_no_node_and_returns_a_type_expr() {
+        // A monomorphic shim whose signature is the boundary contract:
+        // `(scope, symbol, members, nested) -> Option<TypeExpr>`, NO
+        // `SemanticNodeId` in or out. Binding the method to this shim
+        // type-checks only if the real demand-API signature matches; a
+        // node-returning `Option<SemanticNodeId>` shape (the leaking form)
+        // would fail to unify here. This is the successor of the §1a fence.
+        fn _proof(
+            engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+            scope: &str,
+            symbol: &str,
+            members: &[String],
+            nested: bool,
+        ) -> Option<verter_type_expr::TypeExpr> {
+            engine.materialize_pick_member_surface(scope, symbol, members, nested)
         }
+        let _ = _proof
+            as fn(
+                &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+                &str,
+                &str,
+                &[String],
+                bool,
+            ) -> Option<verter_type_expr::TypeExpr>;
     }
 }

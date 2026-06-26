@@ -28,10 +28,23 @@ fn read_projectors_mod() -> String {
     fs::read_to_string(&path).unwrap_or_else(|_| panic!("could not read {}", path.display()))
 }
 
+/// Read the terminal `output_sink` sink module. The boundary-consuming
+/// publication functions (`member_shape_peek_or_compute`,
+/// `reduce_field_type_expr_with_mode`, `surface_member_to_expanded_field`,
+/// `project_model`, `reduce_published_field_types`) live HERE — the only module
+/// that touches the projectors reverse-materialization boundary — NOT in the
+/// parent `projectors/mod.rs`. The peek primitive (`peek_member_shape_known` /
+/// `PeekedShape`) stays in `mod.rs` because it never unwraps a carrier.
+fn read_output_sink() -> String {
+    let path =
+        workspace_root().join("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
+    fs::read_to_string(&path).unwrap_or_else(|_| panic!("could not read {}", path.display()))
+}
+
 fn fn_body_slice<'a>(content: &'a str, signature_anchor: &str) -> &'a str {
     let fn_start = content.find(signature_anchor).unwrap_or_else(|| {
         panic!(
-            "guard: function with signature anchor `{}` must exist in projectors/mod.rs",
+            "guard: function with signature anchor `{}` must exist in the read source",
             signature_anchor
         )
     });
@@ -82,13 +95,11 @@ fn peek_member_shape_known_exists_with_request_bound_assert() {
 // ---------------------------------------------------------------------------
 #[test]
 fn reduce_field_type_expr_peeks_before_route_gate() {
-    let content = read_projectors_mod();
-    // The reduction body lives in the carrier-aware
-    // `reduce_field_type_expr_with_mode`; the bare
-    // `reduce_field_type_expr` is a thin `Expanded`-defaulting
-    // wrapper. The peek-before-gate ordering invariant lives with
-    // the body.
-    let body = fn_body_slice(&content, "pub(crate) fn reduce_field_type_expr_with_mode(");
+    // `reduce_field_type_expr_with_mode` is now SINK-PRIVATE in the terminal
+    // `output_sink` module (the only module that unwraps a sealed carrier). The
+    // peek-before-gate ordering invariant lives with the body there.
+    let content = read_output_sink();
+    let body = fn_body_slice(&content, "fn reduce_field_type_expr_with_mode(");
 
     let peek_idx = body
         .find("peek_member_shape_known(")
@@ -115,9 +126,10 @@ fn reduce_field_type_expr_peeks_before_route_gate() {
 // ---------------------------------------------------------------------------
 #[test]
 fn reduce_field_type_expr_consults_cached_peek_after_gate() {
-    let content = read_projectors_mod();
-    // Body lives in `reduce_field_type_expr_with_mode`.
-    let body = fn_body_slice(&content, "pub(crate) fn reduce_field_type_expr_with_mode(");
+    // Body lives in `reduce_field_type_expr_with_mode`, now sink-private in the
+    // terminal `output_sink` module.
+    let content = read_output_sink();
+    let body = fn_body_slice(&content, "fn reduce_field_type_expr_with_mode(");
 
     let route_gate_idx = body
         .find("type_expr_has_package_backed_object_like_root(")
@@ -144,12 +156,27 @@ fn reduce_field_type_expr_consults_cached_peek_after_gate() {
 // ---------------------------------------------------------------------------
 #[test]
 fn member_shape_peek_or_compute_runs_gates_before_cached_peek() {
-    let content = read_projectors_mod();
+    // `member_shape_peek_or_compute` now lives IN the terminal `output_sink`
+    // sink module (the only module that touches the reverse boundary), so the
+    // raise step calls the now-MODULE-PRIVATE `shell_raise_to_type_expr`
+    // primitive directly (same-module — no `output_sink::` prefix).
+    let content = read_output_sink();
     let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
 
+    // The raise-to-TypeExpr step goes through the sink-private boundary
+    // primitive `shell_raise_to_type_expr(&dispatch, member_value)`. Match the
+    // primitive call, with defensive fallbacks to the older inline boundary-fn
+    // spellings so the guard survives a future reshape; the ANCHOR is "the
+    // raise-to-TypeExpr step" whatever its current spelling.
     let raise_idx = body
-        .find("raise_node_to_type_expr(member_value)")
-        .expect("guard: raise call must remain in `member_shape_peek_or_compute`.");
+        .find("shell_raise_to_type_expr(&dispatch, member_value)")
+        .or_else(|| body.find("shell_raise_to_type_expr("))
+        .or_else(|| body.find("materialize_output_type_expr(member_value)"))
+        .or_else(|| body.find("raise_node_to_type_expr(member_value)"))
+        .expect(
+            "guard: the output raise step (shell_raise_to_type_expr(&dispatch, \
+             member_value)) must remain in `member_shape_peek_or_compute`.",
+        );
     // The gate is invoked via the `_with_fence` variant
     // so the gate's cross-file dep facts thread into the admit's
     // `fact_dep_signature`. Match either the bare or the `_with_fence`

@@ -1,156 +1,23 @@
-//! Published-surface field-type reducer + reducible-operator predicate.
+//! Reducible-operator structural predicate.
 //!
-//! This module hosts the two
-//! helpers the projector pipeline needs to finalise published field
-//! shapes — the per-pipeline driver that runs the shared field-type
-//! reducer over every `evaluated_types` row, and the structural
-//! predicate that decides whether the bounded fixed-point reducer
-//! needs to run for a given `TypeExpr`.
+//! This module hosts the structural predicate that decides whether the
+//! bounded fixed-point reducer needs to run for a given `TypeExpr`. The
+//! published-surface field-type driver (`reduce_published_field_types`) and the
+//! per-field reducer (`reduce_field_type_expr_with_mode`) live in the terminal
+//! `output_sink` sink module (the only module that touches the reverse
+//! materialization boundary); this predicate is pure typed-IR inspection with
+//! no boundary access, so it stays a free-standing `pub(crate)` helper both the
+//! sink reducer and the per-kind projectors consume.
 //!
 //! Historical note: the retired `field_reduce.rs` module hosted the
-//! same two helpers plus a projector-side name-predicate carrier
+//! field-type reducer plus a projector-side name-predicate carrier
 //! check (`is_builtin_utility_instantiation`,
 //! `generic_instantiation_body_is_object`). The demand-driven reducer retires
 //! the projector-side carrier check by routing carrier-stop through
-//! the dispatch demand context — only the type-shape predicate and
-//! the field-type reducer remain.
+//! the dispatch demand context — only the type-shape predicate remains here.
 
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 use verter_type_expr::TypeExpr;
-
-use crate::semantic_query::ProjectionMode;
-
-use super::reduce_field_type_expr_with_mode;
-
-/// Run the shared field-type reducer over every published surface in
-/// `evaluated_types` so consumers see the same finalised shapes the
-/// per-macro projectors already publish for `props` / `emits`.
-///
-/// Published macro props /
-/// emits are reduced under `ProjectionMode::Navigate`. The dispatch's
-/// reduction-demand context propagates this through every nested
-/// operator dispatch — `keyof T` and `{ [K in S]: V }` carrier-stop
-/// when `may_reduce_operator` rejects the context. Explicit narrowing
-/// (`IndexedAccess`, finite `Pick`/`Omit`, closed/open conditionals)
-/// still reduces path-precisely because those callers enter the
-/// reducer with a `Published + Expanded` context downstream.
-///
-/// Synthetic slot-binding carriers (the `slot_bindings` / `bindings`
-/// loops) are SHORT-CIRCUITED when `field.r#type` is a
-/// `TypeExpr::SyntheticSlotBinding(_)` variant — the typed-IR
-/// variant identity IS the carrier-skip signal. On a hit we leave
-/// `field.r#type` unchanged; the published carrier flows downstream
-/// as-is. Reducing a synthetic carrier through the resolver would
-/// re-enter the registry collection looking for a type alias that
-/// does not exist (the carrier's `binding_name` is intrinsic, not a
-/// workspace alias).
-pub(crate) fn reduce_published_field_types(
-    scope_canonical_id: &str,
-    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) {
-    use crate::meta_resolve::compare_type_expr_improvement;
-    use rustc_hash::FxHashMap;
-
-    let mut finalized_prop_types: FxHashMap<String, TypeExpr> = FxHashMap::default();
-    for field in evaluated_types.props.iter_mut() {
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        let mut reduced = reduce_field_type_expr_with_mode(
-            query_engine,
-            scope_canonical_id,
-            raised,
-            ProjectionMode::Navigate,
-        );
-
-        if let Some(shallow) = field.shallow_type_expr.as_ref() {
-            if !matches!(shallow, TypeExpr::Unknown { .. })
-                && (compare_type_expr_improvement(shallow, &reduced)
-                    || root_is_explicit_selector_operator(shallow))
-            {
-                let shallow_reduced = reduce_field_type_expr_with_mode(
-                    query_engine,
-                    scope_canonical_id,
-                    shallow.clone(),
-                    ProjectionMode::Navigate,
-                );
-                if compare_type_expr_improvement(&shallow_reduced, &reduced) {
-                    reduced = shallow_reduced;
-                }
-            }
-        }
-
-        finalized_prop_types.insert(field.name.clone(), reduced.clone());
-        field.r#type = reduced;
-    }
-    for define_props in evaluated_types.define_props.iter_mut() {
-        for property in define_props.result.value.properties.iter_mut() {
-            if let Some(finalised) = finalized_prop_types.get(property.name.as_str()) {
-                property.ty = finalised.clone();
-            }
-        }
-    }
-    for field in evaluated_types.emits.iter_mut() {
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr_with_mode(
-            query_engine,
-            scope_canonical_id,
-            raised,
-            ProjectionMode::Navigate,
-        );
-    }
-    for field in evaluated_types.slot_bindings.iter_mut() {
-        // Typed-IR fast path: synthetic slot-binding carriers are
-        // intrinsic terminal leaves. Their `binding_name` is not a
-        // workspace alias — reducing through the resolver would re-
-        // enter registry collection looking for a type that does not
-        // exist. The variant identity IS the carrier-skip signal.
-        if matches!(&field.r#type, TypeExpr::SyntheticSlotBinding(_)) {
-            continue;
-        }
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        // Navigate (shallow-by-default), matching the props / emits reducers
-        // above: an explicit selector operator (`IndexedAccess`, finite
-        // `Pick`/`Omit`, closed conditional) still reduces path-precisely, but a
-        // symbolic `AppProps['avatar']` whose property body resolves through an
-        // open `[k: string]: any` index signature STAYS the indexed-access
-        // carrier rather than widening through the index signature to `any`.
-        field.r#type = reduce_field_type_expr_with_mode(
-            query_engine,
-            scope_canonical_id,
-            raised,
-            ProjectionMode::Navigate,
-        );
-    }
-    for field in evaluated_types.bindings.iter_mut() {
-        if matches!(&field.r#type, TypeExpr::SyntheticSlotBinding(_)) {
-            continue;
-        }
-        let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        // Navigate (shallow-by-default), matching the props / emits /
-        // slot_bindings reducers above. Model bindings are a macro
-        // publication surface; an explicit selector still reduces
-        // path-precisely, but a plain alias / open generic carrier
-        // stays shallow rather than eagerly expanding.
-        field.r#type = reduce_field_type_expr_with_mode(
-            query_engine,
-            scope_canonical_id,
-            raised,
-            ProjectionMode::Navigate,
-        );
-    }
-}
-
-fn root_is_explicit_selector_operator(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Parenthesized(inner) => root_is_explicit_selector_operator(inner),
-        TypeExpr::IndexedAccess { .. } | TypeExpr::KeyOf(_) | TypeExpr::TypeOf(_) => true,
-        TypeExpr::Ref { name, .. } => matches!(
-            BuiltinUtility::from_name(name.as_ref()),
-            Some(BuiltinUtility::Pick | BuiltinUtility::Omit | BuiltinUtility::Record)
-        ),
-        _ => false,
-    }
-}
 
 /// Does `expr` contain any operator-shape node that the bounded
 /// fixed-point reducer should resolve?

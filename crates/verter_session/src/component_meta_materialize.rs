@@ -4181,4 +4181,118 @@ export type C<T> = A<T>
              candidate whose generation stamp no longer matches.",
         );
     }
+
+    /// Anon-subject runtime acceptance: a root-less anonymous subject keys NO
+    /// `MaterializeStructureDb` slot (it computes uncached via
+    /// `run_uncached_materialisation`), whereas a decl-rooted subject populates
+    /// exactly one slot via `get_or_compute_admit`. The
+    /// `block_1_i_discriminators.rs` characterization asserts the routing by
+    /// SOURCE SCAN (`mat_src.contains("get_or_compute_admit(...)")`); this
+    /// proves the same rooting distinction at RUNTIME through the
+    /// `derive_materialization_subject` `Some`/`None` split and the DB
+    /// `live_count()` slot-count handle.
+    ///
+    /// 1. Decl-rooted: `Ref { Foo }` lowers to a `DeclRef` carrier ⇒
+    ///    `derive_materialization_subject` returns `Some(cache_key)` ⇒
+    ///    materialising it admits exactly ONE DB slot (`live_count` +1).
+    /// 2. Root-less anonymous: an inline `Object` type literal lowers to an
+    ///    anonymous node ⇒ `derive_materialization_subject` returns `None` ⇒
+    ///    materialising it keys NO slot (`live_count` UNCHANGED).
+    ///
+    /// Discriminates: if a root-less anonymous subject erroneously keyed a slot
+    /// (an R6 violation — a graph-instance `SemanticNodeId` becoming a
+    /// query-identity key), the DB would gain an entry it must not, and the
+    /// `live_count` delta for the anonymous materialise would be non-zero.
+    #[test]
+    fn anon_subject_keys_no_materialize_slot_while_decl_rooted_keys_one() {
+        use crate::semantic_query::ProjectionMode;
+        use verter_type_expr::{ObjectExpr, TypeExpr};
+
+        let project = a0_make_project();
+        project
+            .upsert_base("/types.ts", "export type Foo = { x: number }")
+            .unwrap();
+        let host = project.host();
+        let dispatch = ProjectSemanticDispatch::new(host);
+
+        // ── Decl-rooted: lowering `Ref { Foo }` via Navigate yields a DeclRef
+        // carrier whose subject canonicalises to a MaterializationCacheKey.
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/types.ts",
+                &TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering Foo via Navigate must succeed");
+        let decl_key = MaterializeRuntimeKey {
+            scope_canonical_id: StdArc::from("/types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        assert!(
+            derive_materialization_subject(host, &decl_key).is_some(),
+            "control: a DeclRef carrier MUST canonicalise to Some(MaterializationCacheKey) \
+             (decl-rooted subject)"
+        );
+
+        let db = host.project_type_store().materialize_structure_db();
+        let count_before_decl = db.live_count();
+        let _ = materialize_component_meta_structure(host, decl_key);
+        let count_after_decl = db.live_count();
+        assert_eq!(
+            count_after_decl,
+            count_before_decl + 1,
+            "a decl-rooted subject MUST admit exactly ONE MaterializeStructureDb slot \
+             (live_count {count_before_decl} -> {count_after_decl})"
+        );
+
+        // ── Root-less anonymous: an inline `Object` type literal lowers to an
+        // anonymous node that keys NO subject.
+        let anon_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/types.ts",
+                &TypeExpr::Object(StdArc::new(ObjectExpr {
+                    properties: Vec::new(),
+                })),
+                ProjectionMode::Expanded,
+            )
+            .expect("lowering an inline Object literal must succeed");
+        let anon_key = MaterializeRuntimeKey {
+            scope_canonical_id: StdArc::from("/types.ts"),
+            base: anon_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        assert!(
+            derive_materialization_subject(host, &anon_key).is_none(),
+            "control: a root-less anonymous (inline Object) node MUST canonicalise to \
+             None (no MaterializationCacheKey subject)"
+        );
+
+        // CORROBORATING runtime check. The load-bearing anon guard is the
+        // `is_none()` control above (:4270): a root-less anonymous subject
+        // canonicalises to no `MaterializationCacheKey`, so it keys no slot.
+        // This `live_count`-delta corroborates that at runtime but is NOT
+        // independently sufficient — against a slot-collapsing plant (e.g. a
+        // content-free constant `__anon__` subject) the anon node could warm-hit
+        // an already-admitted slot, leaving the count unchanged for the wrong
+        // reason. Treat the `is_none()` control as the discriminator and this
+        // delta as supporting evidence; both assertions stay.
+        let count_before_anon = db.live_count();
+        let _ = materialize_component_meta_structure(host, anon_key);
+        let count_after_anon = db.live_count();
+        assert_eq!(
+            count_after_anon, count_before_anon,
+            "CORROBORATING: a root-less anonymous subject MUST key NO \
+             MaterializeStructureDb slot (it computes uncached via \
+             run_uncached_materialisation) — the slot count stays UNCHANGED \
+             (live_count {count_before_anon} -> {count_after_anon}). The \
+             load-bearing anon guard is the `is_none()` control above; this \
+             delta corroborates it at runtime."
+        );
+    }
 }

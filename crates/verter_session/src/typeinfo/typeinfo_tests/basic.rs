@@ -88,7 +88,7 @@ fn component_like_surface_resolves_through_structured_alias_imports() {
         .into_parts();
     let node = outcome.ok().flatten();
     let expr = host
-        .project_node_to_type_expr(node.expect("Surface<string, Item> must resolve"))
+        .project_node_to_type_expr_for_test(node.expect("Surface<string, Item> must resolve"))
         .expect("resolved node projects to TypeExpr");
 
     let props = object_props(&expr);

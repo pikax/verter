@@ -12,7 +12,8 @@ use std::sync::Arc;
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 use crate::typeinfo::framework_surface::vue_exec::{
-    emits_from_typeinfo_surface, props_from_typeinfo_surface, slots_from_typeinfo_surface,
+    emits_from_typeinfo_surface, props_from_typeinfo_surface, resolved_vue_surface_for_test,
+    slots_from_typeinfo_surface,
 };
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::types::{HostConfig, UpsertRequest};
@@ -96,7 +97,8 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineProps<Props>() must resolve a macro surface");
-    let props = props_from_typeinfo_surface(&*host, &surface);
+    let props =
+        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     names.sort_unstable();
@@ -200,7 +202,8 @@ fn define_emits_normalizer_extracts_call_signature_events_and_strips_event_param
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits must resolve a macro surface");
-    let emits = emits_from_typeinfo_surface(&*host, &surface);
+    let emits =
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
@@ -278,7 +281,8 @@ fn define_emits_normalizer_property_style_fallback() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("property-style defineEmits must resolve a surface");
-    let emits = emits_from_typeinfo_surface(&*host, &surface);
+    let emits =
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
@@ -318,7 +322,8 @@ fn define_emits_normalizer_mixed_callsig_excludes_property_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("mixed defineEmits resolves a surface");
-    let emits = emits_from_typeinfo_surface(&*host, &surface);
+    let emits =
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
@@ -398,7 +403,8 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("imported emit interface resolves a surface");
-    let emits = emits_from_typeinfo_surface(&*host, &surface);
+    let emits =
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     assert_eq!(
         emits.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
@@ -443,7 +449,7 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     let local_emits = {
         let request = props_request(&host, LOCAL, AnalyzedMacroKind::DefineEmits);
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
-        emits_from_typeinfo_surface(&*host, &surface)
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()))
     };
     let change = local_emits.iter().find(|e| e.name == "change").unwrap();
     // The display is the bracketed payload tuple (event-name param stripped),
@@ -474,7 +480,7 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     let cross_emits = {
         let request = props_request(&host, CROSS, AnalyzedMacroKind::DefineEmits);
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
-        emits_from_typeinfo_surface(&*host, &surface)
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()))
     };
     let cross_change = cross_emits.iter().find(|e| e.name == "change").unwrap();
     assert_eq!(
@@ -517,7 +523,8 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots = slots_from_typeinfo_surface(&*host, &surface);
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let mut names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     names.sort_unstable();
@@ -578,7 +585,8 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots = slots_from_typeinfo_surface(&*host, &surface);
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
@@ -649,7 +657,8 @@ fn define_slots_normalizer_publishes_union_of_function_slots() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots = slots_from_typeinfo_surface(&*host, &surface);
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     // The union-of-functions slot must be PUBLISHED (pre-fix it was dropped).
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
@@ -718,7 +727,8 @@ fn define_slots_normalizer_drops_union_bindings_when_an_arm_has_no_param() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let slots = slots_from_typeinfo_surface(&*host, &surface);
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     // The union-of-callables slot is still PUBLISHED (positive): one arm having
     // no param does not make the member non-slot-like.
@@ -780,7 +790,8 @@ fn define_slots_normalizer_extracts_pick_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a Pick first-param resolves a surface");
-    let slots = slots_from_typeinfo_surface(&*host, &surface);
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let row = slots
         .iter()
@@ -837,7 +848,8 @@ fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts()
         "defineModel macro surface carries no object members"
     );
 
-    let props = props_from_typeinfo_surface(&*host, &surface);
+    let props =
+        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
     assert_eq!(props.len(), 1, "defineModel synthesizes exactly one prop");
     let model = &props[0];
     assert_eq!(
@@ -902,7 +914,8 @@ fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("withDefaults' inner defineProps resolves a surface");
-    let props = props_from_typeinfo_surface(&*host, &surface);
+    let props =
+        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     names.sort_unstable();
@@ -1019,7 +1032,8 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("cross-file heritage defineProps resolves a surface");
-    let props = props_from_typeinfo_surface(&*host, &surface);
+    let props =
+        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
     names.sort_unstable();
@@ -1102,7 +1116,8 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("generic heritage defineProps resolves a surface");
-    let props = props_from_typeinfo_surface(&*host, &surface);
+    let props =
+        props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let val = props
         .iter()
@@ -1184,7 +1199,8 @@ fn define_emits_over_local_class_does_not_publish_non_public_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits<Class> resolves a surface");
-    let emits = emits_from_typeinfo_surface(&*host, &surface);
+    let emits =
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
     let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
 
     assert!(
@@ -1226,7 +1242,8 @@ fn define_emits_over_imported_class_does_not_publish_non_public_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits<ImportedClass> resolves a surface");
-    let emits = emits_from_typeinfo_surface(&*host, &surface);
+    let emits =
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
     let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
 
     assert!(
@@ -1263,7 +1280,8 @@ fn define_slots_over_class_does_not_publish_non_public_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots<Class> resolves a surface");
-    let slots = slots_from_typeinfo_surface(&*host, &surface);
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
     let names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
 
     assert!(
@@ -1300,7 +1318,8 @@ fn define_slots_navigated_class_param_does_not_publish_non_public_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let slots = slots_from_typeinfo_surface(&*host, &surface);
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     let default_slot = slots
         .iter()

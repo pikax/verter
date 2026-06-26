@@ -18,18 +18,37 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::TypeExpr;
 
+// Re-export the sealed output carriers so the existing
+// `crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr`
+// reference path the per-member publication projectors thread stays
+// stable. The TYPES are the single canonical sealed carriers defined in
+// `super::output_materialization`; this is a name re-export of the one
+// owner type (NOT a second definition / dual path).
+pub(crate) use super::output_materialization::{MaterializedOutputTypeExpr, OutputTypeExpr};
 use super::ProjectSemanticDispatch;
 use crate::instant::Instant;
-use crate::resolver_core::component_meta_query_engine::{
-    projected_surface_to_type_expr, semantic_query_error_raw, surface_view_to_projected_surface,
-    SEMANTIC_OBJECT_SURFACE,
-};
 use crate::semantic_query::{
-    DepSignature, HotTypeRef, IndexKey, MapperKey, OptionalityMod, PathSegment,
-    PrimitiveKind as SemanticPrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
-    QueryResult, ReadonlyMod, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
+    DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
+    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
 };
+// `HotTypeRef` is only referenced by the test-only `materialize_type_expr`
+// harness wrapper below; the production reverse boundaries take a
+// `SemanticNodeId` directly.
+#[cfg(test)]
+use crate::semantic_query::HotTypeRef;
+
+/// The owner-layer shape engine: the ONE private generic `SemanticNodeData`
+/// fold and its three algebras (materialization vs node-domain facts/key vs
+/// `&TypeExpr` folding). Owns the single exhaustive traversal so the
+/// materialization and the node-domain facts/key cannot drift.
+mod shape_engine;
+
+// Test-only re-export of the interned shape key so the raised-shape parity
+// suite can assert (type-level) that it is an interned id, NOT a `TypeExpr`
+// owner.
+#[cfg(test)]
+pub(in crate::project_semantic_dispatch) use shape_engine::RaisedShapeKey;
 
 // =====================================================================
 // dispatch trace plumbing for cycle-BFS unit tests.
@@ -243,535 +262,128 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// need a [`TypeExpr`] for downstream payload construction. Operator-
     /// shape reduction (`IndexedAccess`, `Conditional`, `Mapped`,
     /// `KeyOf`, `TypeOf`) is the responsibility of the caller — typically
-    /// [`Self::raise_and_reduce`]. This function alone is
-    /// shell-only.
-    pub(crate) fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
+    /// [`Self::materialize_reduced_output_type_expr`]. This function alone
+    /// is shell-only.
+    fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
         let mut active = FxHashSet::default();
-        self.raise_node_to_type_expr_inner(node, &mut active)
+        // The shell-only materialization entry: delegate to the shared shape
+        // engine's `MaterializeTypeExprAlg` — the SOLE exhaustive
+        // `SemanticNodeData -> TypeExpr` traversal (owner-local in
+        // [`shape_engine`]). The materialization and the node-domain facts/key
+        // share that ONE fold, so they cannot drift — anti-drift is structural.
+        // This stays MODULE-PRIVATE; out-of-module callers reach it only through
+        // the sealed `OutputProjector` output seam ([`Self::output_shell_raise_sealed`]).
+        shape_engine::fold_to_type_expr(self, node, &mut active)
     }
 
-    fn raise_node_to_type_expr_inner(
-        &self,
-        node: SemanticNodeId,
-        active: &mut FxHashSet<SemanticNodeId>,
-    ) -> Option<TypeExpr> {
-        let data = super::node_data_for(self.ctx, node)?;
-        Some(match data.as_ref() {
-            SemanticNodeData::Primitive(kind) => semantic_primitive_to_type_expr(*kind),
-            SemanticNodeData::Literal(value) => TypeExpr::Literal(value.clone()),
-            SemanticNodeData::Alias(target) => {
-                if !active.insert(node) {
-                    return Some(TypeExpr::Unknown {
-                        raw: "semanticAliasCycle".to_string(),
-                    });
-                }
-                let result = self.raise_node_to_type_expr_inner(*target, active);
-                active.remove(&node);
-                return result;
-            }
-            SemanticNodeData::Union(members) => TypeExpr::Union(std::sync::Arc::from(
-                members
-                    .iter()
-                    .filter_map(|member| self.raise_node_to_type_expr_inner(*member, active))
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            )),
-            SemanticNodeData::Intersection(members) => {
-                // Drop empty-object arms from the Intersection
-                // projection. `Id<T> = {} & { [P in keyof T]: T[P] }`
-                // and similar helper patterns lower to
-                // `Intersection([empty_object, mapped_object])`; the
-                // empty arm contributes nothing semantically
-                // (`{} & X ≡ X`) but would leak through as a
-                // `TypeExpr::Unknown { raw: SEMANTIC_OBJECT_SURFACE }`
-                // sentinel which breaks callers that expect a pure
-                // Object at the projection boundary. Dropping the
-                // semantically-vacuous arm here collapses `{} & X → X`
-                // so imported-helper UI bindings materialise cleanly
-                // instead of nested in
-                // `Intersection([Unknown, Object])`.
-                let mut arms: Vec<TypeExpr> = members
-                    .iter()
-                    .filter_map(|member| self.raise_node_to_type_expr_inner(*member, active))
-                    .filter(|arm| !matches!(arm, TypeExpr::Unknown { raw } if raw == SEMANTIC_OBJECT_SURFACE))
-                    // `{} & X ≡ X` — the representable empty object (the
-                    // Object arm below raises empty surfaces first-class)
-                    // is equally vacuous inside an intersection. Known
-                    // divergence: for a NULLISH X the pinned tsgo reduces
-                    // `{} & null` / `{} & undefined` to `never`, while this
-                    // projection-boundary filter collapses them to the
-                    // nullish arm. The correct home for that reduction is
-                    // the semantic intersection reducer, not this raise
-                    // boundary — tracked as debt, predating the first-class
-                    // empty-object raise (the retired sentinel filter
-                    // collapsed the same way).
-                    .filter(|arm| !matches!(arm, TypeExpr::Object(object) if object.properties.is_empty()))
-                    .collect();
-                if arms.is_empty() {
-                    // Every arm was vacuous (`{} & {}`): fall back to the
-                    // representable empty object — a zero-arm
-                    // `Intersection([])` is not a publishable shape.
-                    TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
-                        properties: Vec::new(),
-                    }))
-                } else if arms.len() == 1 {
-                    arms.pop().unwrap()
-                } else {
-                    TypeExpr::Intersection(std::sync::Arc::from(arms.into_boxed_slice()))
-                }
-            }
-            SemanticNodeData::Array { element, readonly } => TypeExpr::Array {
-                element: std::sync::Arc::new(self.raise_node_to_type_expr_inner(*element, active)?),
-                readonly: *readonly,
-            },
-            SemanticNodeData::Tuple { elements, readonly } => {
-                use verter_type_expr::TupleElement;
-
-                TypeExpr::Tuple {
-                    elements: std::sync::Arc::from(
-                        elements
-                            .iter()
-                            .filter_map(|element| {
-                                Some(TupleElement {
-                                    label: element
-                                        .label
-                                        .as_ref()
-                                        .map(|label| label.as_ref().to_string()),
-                                    ty: self
-                                        .raise_node_to_type_expr_inner(element.value, active)?,
-                                    optional: element.optional,
-                                    rest: element.rest,
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    ),
-                    readonly: *readonly,
-                }
-            }
-            SemanticNodeData::Object(surface) => {
-                // A genuinely EMPTY surface (no members, no signatures, no
-                // index signature) is the representable empty object `{}`
-                // — `Pick<T, never>`, `Omit<T, keyof T>`,
-                // `NonNullable<unknown>` all reduce to it. Raise it as a
-                // zero-property `TypeExpr::Object` instead of the
-                // `SEMANTIC_OBJECT_SURFACE` sentinel (the sentinel marks a
-                // surface the projection cannot REPRESENT, which an empty
-                // object is not). The intersection vacuous-arm rule above
-                // drops empty-object arms the same way it drops the
-                // sentinel, so `{} & X ≡ X` is preserved.
-                if surface.members.is_empty()
-                    && surface.call_signatures.is_empty()
-                    && surface.construct_signatures.is_empty()
-                    && !surface.has_index_signature
-                {
-                    TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
-                        properties: Vec::new(),
-                    }))
-                } else {
-                    projected_surface_to_type_expr(&surface_view_to_projected_surface(
-                        self.ctx, surface,
-                    ))
-                    .unwrap_or(TypeExpr::Unknown {
-                        raw: SEMANTIC_OBJECT_SURFACE.to_string(),
-                    })
-                }
-            }
-            SemanticNodeData::MergedDecl { contributors } => {
-                // Peer-merge the same-name interface contributors into one
-                // surface (member union + ordered method overload groups) and
-                // raise the merged object.
-                let merged = self.reduce_merged_decl(contributors);
-                return self.raise_node_to_type_expr_inner(merged, active);
-            }
-            // DeclPlaceholder lowers to a TypeExpr::Ref shell.
-            SemanticNodeData::Opaque(QueryError::DeclPlaceholder { name, .. }) => TypeExpr::Ref {
-                name: std::sync::Arc::clone(name),
-                type_arguments: verter_type_expr::empty_type_args(),
-            },
-            SemanticNodeData::Conditional {
-                check,
-                extends,
-                true_branch_ref,
-                false_branch_ref,
-                ..
-            } => TypeExpr::Conditional {
-                check: std::sync::Arc::new(self.raise_node_to_type_expr_inner(*check, active)?),
-                extends: std::sync::Arc::new(self.raise_node_to_type_expr_inner(*extends, active)?),
-                true_type: std::sync::Arc::new(
-                    self.raise_node_to_type_expr_inner(*true_branch_ref, active)?,
-                ),
-                false_type: std::sync::Arc::new(
-                    self.raise_node_to_type_expr_inner(*false_branch_ref, active)?,
-                ),
-            },
-            SemanticNodeData::TemplateLiteral {
-                quasis,
-                expressions,
-            } => TypeExpr::TemplateLiteral {
-                quasis: quasis
-                    .iter()
-                    .map(|quasi| quasi.as_ref().to_string())
-                    .collect(),
-                expressions: std::sync::Arc::from(
-                    expressions
-                        .iter()
-                        .filter_map(|expr| self.raise_node_to_type_expr_inner(*expr, active))
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
-            },
-            SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
-                self.raise_node_to_type_expr_inner(*base, active)?,
-            )),
-            SemanticNodeData::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
-                object: std::sync::Arc::new(self.raise_node_to_type_expr_inner(*object, active)?),
-                index: std::sync::Arc::new(self.index_key_to_type_expr(index, active)?),
-            },
-            SemanticNodeData::Mapped { mapper, .. } => TypeExpr::Mapped {
-                // Presentational projection: look up the binder node
-                // by `mapper.parameter_node` and read its
-                // `display_name` for the projected
-                // `TypeExpr::Mapped { parameter }` field. The
-                // semantic-graph interner dedups only
-                // structurally-identical binders, so the
-                // representative's `display_name` is well-defined.
-                parameter: match super::node_data_for(self.ctx, mapper.parameter_node).as_deref() {
-                    Some(SemanticNodeData::TypeParam { display_name, .. }) => {
-                        display_name.as_ref().to_string()
-                    }
-                    _ => String::new(),
-                },
-                source: std::sync::Arc::new(
-                    match super::node_data_for(self.ctx, mapper.key_space)?.as_ref() {
-                        SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
-                            self.raise_node_to_type_expr_inner(*base, active)?,
-                        )),
-                        _ => self.raise_node_to_type_expr_inner(mapper.key_space, active)?,
-                    },
-                ),
-                value: std::sync::Arc::new(
-                    self.raise_node_to_type_expr_inner(mapper.value_expr, active)?,
-                ),
-                optional: match mapper.optionality {
-                    OptionalityMod::Add => verter_type_expr::MappedModifier::Add,
-                    OptionalityMod::Remove => verter_type_expr::MappedModifier::Remove,
-                    OptionalityMod::Keep => verter_type_expr::MappedModifier::None,
-                },
-                readonly: match mapper.readonly {
-                    ReadonlyMod::Add => verter_type_expr::MappedModifier::Add,
-                    ReadonlyMod::Remove => verter_type_expr::MappedModifier::Remove,
-                    ReadonlyMod::Keep => verter_type_expr::MappedModifier::None,
-                },
-                name_type: match mapper.name_remap {
-                    Some(node) => Some(std::sync::Arc::new(
-                        self.raise_node_to_type_expr_inner(node, active)?,
-                    )),
-                    None => None,
-                },
-            },
-            SemanticNodeData::TypeOf(_) => {
-                let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
-                let type_args = data.carrier_type_args();
-                let mut segments = value_root
-                    .name
-                    .split('.')
-                    .map(|segment| segment.to_string())
-                    .collect::<Vec<_>>();
-                segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
-                // Raise the instantiation-expression args back onto the
-                // projected `ValueRef.type_args` so `typeof C.make<string>`
-                // round-trips its arguments. A miss on any arg becomes the
-                // `<raise miss>` placeholder so the outer typeof still
-                // constructs (mirrors the `ImportType` arm).
-                let raised_args: Vec<TypeExpr> = type_args
-                    .iter()
-                    .map(|id| {
-                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
-                            TypeExpr::Unknown {
-                                raw: "<raise miss>".to_string(),
-                            },
-                        )
-                    })
-                    .collect();
-                TypeExpr::TypeOf(verter_type_expr::ValueRef {
-                    path: segments,
-                    type_args: raised_args,
-                })
-            }
-            SemanticNodeData::TypeParam {
-                display_name,
-                constraint,
-                default,
-                ..
-            } => {
-                // Project `constraint` / `default` back to `TypeExpr`
-                // so the round-trip preserves the declaration shape.
-                // The `active` visited set guards against cyclic
-                // constraint graphs: when a TypeParam's constraint or
-                // default transitively reaches this same node, return
-                // `None` from the recursion and drop the field rather
-                // than looping.
-                //
-                // The projected `TypeExpr::TypeParameter.name` uses
-                // `display_name` — the human-readable parameter name.
-                // `decl` / `param_index` are identity discriminators
-                // for structural interning and do not appear in the
-                // projected `TypeExpr` shape.
-                if !active.insert(node) {
-                    return Some(TypeExpr::Unknown {
-                        raw: "semanticTypeParamCycle".to_string(),
-                    });
-                }
-                let constraint_expr = constraint
-                    .as_ref()
-                    .and_then(|c| self.raise_node_to_type_expr_inner(*c, active))
-                    .map(std::sync::Arc::new);
-                let default_expr = default
-                    .as_ref()
-                    .and_then(|d| self.raise_node_to_type_expr_inner(*d, active))
-                    .map(std::sync::Arc::new);
-                active.remove(&node);
-                TypeExpr::TypeParameter(verter_type_expr::TypeParam {
-                    name: display_name.as_ref().to_string(),
-                    constraint: constraint_expr,
-                    default: default_expr,
-                })
-            }
-            SemanticNodeData::Infer { name } => TypeExpr::Infer {
-                name: name.as_ref().to_string(),
-            },
-            SemanticNodeData::Opaque(err) => match err {
-                QueryError::RecursiveRef { name } => {
-                    TypeExpr::recursive_ref(name.as_ref(), Vec::new())
-                }
-                _ => TypeExpr::Unknown {
-                    raw: semantic_query_error_raw(err),
-                },
-            },
-            SemanticNodeData::VueMacroElements(_) => TypeExpr::Unknown {
-                raw: "VueMacroElements".to_string(),
-            },
-            // Canonical Function shape
-            // converts back to `TypeExpr::Function`. Session 4 lowered
-            // `TypeExpr::Function` → `SemanticNodeData::Function`; this
-            // conversion completes the round-trip so alias bodies that
-            // include function types (`(() => T)` branches) survive
-            // dispatch-only projection without emitting `semanticFunction`
-            // sentinels.
-            SemanticNodeData::Function {
-                params,
-                return_type,
-                type_parameters,
-                signature_span,
-                return_type_span,
-            } => {
-                use verter_type_expr::{FunctionExpr, FunctionParam, FunctionSpans, TypeParam};
-                let parameters: Vec<FunctionParam> = params
-                    .iter()
-                    .filter_map(|p| {
-                        Some(FunctionParam::with_span(
-                            p.name.as_ref().map(|n| n.as_ref().to_string()),
-                            self.raise_node_to_type_expr_inner(p.ty, active)?,
-                            p.optional,
-                            p.rest,
-                            // Carry the graph parameter's span back to the IR.
-                            p.span,
-                            // The TS-annotation-presence fact is a lowering-time
-                            // input to JSDoc `@param` precedence; it is consumed
-                            // ONLY by `enrich_params_and_return_with_jsdoc` at
-                            // build time, before any graph round-trip. A raised
-                            // function is the post-enrichment semantic form and is
-                            // never re-enriched, so the graph node does not carry
-                            // the fact and `false` is the correct, inert value.
-                            false,
-                        ))
-                    })
-                    .collect();
-                let return_ty = self
-                    .raise_node_to_type_expr_inner(*return_type, active)
-                    .map(std::sync::Arc::new);
-                let type_params: Vec<TypeParam> = type_parameters
-                    .iter()
-                    .map(|tp| TypeParam {
-                        name: tp.name.as_ref().to_string(),
-                        constraint: tp
-                            .constraint
-                            .and_then(|c| self.raise_node_to_type_expr_inner(c, active))
-                            .map(std::sync::Arc::new),
-                        default: tp
-                            .default
-                            .and_then(|d| self.raise_node_to_type_expr_inner(d, active))
-                            .map(std::sync::Arc::new),
-                    })
-                    .collect();
-                // Carry the graph Function node's signature / return spans back
-                // to the IR (round-trip provenance preservation).
-                TypeExpr::Function(std::sync::Arc::new(FunctionExpr::with_spans(
-                    parameters,
-                    return_ty,
-                    type_params,
-                    FunctionSpans {
-                        signature: *signature_span,
-                        return_type: *return_type_span,
-                    },
-                )))
-            }
-            // Lazy carriers. DeclRef raises to a
-            // bare `Ref { name }` with empty type arguments. Identity
-            // (`canonical_id + whole_hash`) is encoded in the interning
-            // scope, not in the projected TypeExpr — that's the lossy
-            // direction of the Navigate-mode lazy lowering.
-            SemanticNodeData::DeclRef { identity } => TypeExpr::Ref {
-                name: std::sync::Arc::clone(&identity.decl_name),
-                type_arguments: verter_type_expr::empty_type_args(),
-            },
-            // InstantiationRef raises to `Ref { name, type_arguments: [...] }`.
-            // A miss on any arg raise becomes `Unknown { raw: "<raise
-            // miss>" }` so the outer Ref still constructs (vs. failing
-            // the whole raise which would lose the application shape).
-            SemanticNodeData::InstantiationRef { base, args } => {
-                let raised_args: Vec<TypeExpr> = args
-                    .iter()
-                    .map(|id| {
-                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
-                            TypeExpr::Unknown {
-                                raw: "<raise miss>".to_string(),
-                            },
-                        )
-                    })
-                    .collect();
-                TypeExpr::Ref {
-                    name: std::sync::Arc::clone(&base.decl_name),
-                    type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
-                }
-            }
-            // Unresolved bare-name carrier → `Ref { name, type_arguments }`
-            // (the shallow-by-default published shape). `scope` is value-side
-            // resolution context, not part of the projected shape. The
-            // structurally-lowered `type_args` raise back onto
-            // `Ref.type_arguments` so `Foo<Arg>` round-trips its arguments;
-            // an empty slice raises to the bare `Foo` case. A miss on any
-            // arg becomes the `<raise miss>` placeholder so the outer
-            // reference still constructs (mirrors the `ImportType` arm).
-            SemanticNodeData::BareRef(_) => {
-                let (name, _scope) = data.bare_ref_head().expect("BareRef carrier head");
-                let type_args = data.carrier_type_args();
-                let raised_args: Vec<TypeExpr> = type_args
-                    .iter()
-                    .map(|id| {
-                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
-                            TypeExpr::Unknown {
-                                raw: "<raise miss>".to_string(),
-                            },
-                        )
-                    })
-                    .collect();
-                TypeExpr::Ref {
-                    name: std::sync::Arc::clone(name),
-                    type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
-                }
-            }
-            // Unresolved dynamic-import carrier → `TypeExpr::ImportType`.
-            // A miss on any type-arg raise becomes the `<raise miss>`
-            // placeholder so the outer import-type still constructs.
-            SemanticNodeData::ImportType(_) => {
-                let (specifier, qualifier, typeof_query) =
-                    data.import_type_head().expect("ImportType carrier head");
-                let type_args = data.carrier_type_args();
-                let raised_args: Vec<TypeExpr> = type_args
-                    .iter()
-                    .map(|id| {
-                        self.raise_node_to_type_expr_inner(*id, active).unwrap_or(
-                            TypeExpr::Unknown {
-                                raw: "<raise miss>".to_string(),
-                            },
-                        )
-                    })
-                    .collect();
-                TypeExpr::ImportType {
-                    specifier: std::sync::Arc::clone(specifier),
-                    qualifier: std::sync::Arc::clone(qualifier),
-                    typeof_query,
-                    type_arguments: std::sync::Arc::from(raised_args.into_boxed_slice()),
-                }
-            }
-            // Raw-fallback carrier → `TypeExpr::Unknown { raw }` (the
-            // round-trip of the only carrier that holds raw type text).
-            SemanticNodeData::RawFallback { raw } => TypeExpr::Unknown {
-                raw: raw.as_ref().to_string(),
-            },
-            // Constructor-type carrier → `TypeExpr::ConstructorType`. The
-            // signature interns a `Function` node; rewrap its raised
-            // `FunctionExpr` as a constructor type. Any non-function shape
-            // (malformed carrier) is preserved as raised rather than
-            // fabricated.
-            SemanticNodeData::ConstructorType { signature } => {
-                let raised = self.raise_node_to_type_expr_inner(*signature, active)?;
-                if let TypeExpr::Function(func) = &raised {
-                    TypeExpr::ConstructorType(std::sync::Arc::clone(func))
-                } else {
-                    raised
-                }
-            }
-            // Synthetic-binding carrier → `TypeExpr::SyntheticSlotBinding`.
-            // Re-hydrate the full carrier key by re-attaching the value-side
-            // `value_node` provenance ordinal to the content-free identity.
-            SemanticNodeData::SyntheticBinding { id, value_node } => {
-                TypeExpr::SyntheticSlotBinding(std::sync::Arc::new(id.to_carrier_key(*value_node)))
-            }
-        })
-    }
-
-    /// The single reverse / materialisation boundary: project a
-    /// [`HotTypeRef`] handle back to a compat [`TypeExpr`].
+    /// Plain shell-only output-materialisation boundary: project a
+    /// [`SemanticNodeId`] back to a compat [`TypeExpr`] WITHOUT operator-shape
+    /// reduction.
     ///
-    /// This is the output/compat seam — it is the named boundary that the
-    /// migration collapses all `TypeExpr` materialisation onto. It is a
-    /// TOTAL wrapper over the shell-only [`Self::raise_node_to_type_expr`]
-    /// primitive: every carrier round-trips here (raw-fallback text →
-    /// `Unknown { raw }`, the synthetic binding, the constructor carrier, and
-    /// the `RecursiveRef` back-edge via `Opaque(QueryError::RecursiveRef)`).
-    /// Tuple-element rest fidelity round-trips separately through the `Tuple`
-    /// arm's `TupleElement.rest`; there is no standalone `Rest` carrier. A
-    /// deref miss (a stale handle whose node is out of the live arena)
-    /// yields a `"<materialize miss>"` fallback rather than panicking.
+    /// This is the output/compat seam for callers that already hold the exact
+    /// graph node they want to materialise (typically the demanded terminal of
+    /// a navigate-driven walk) and want it raised AS-IS. It is a thin wrapper
+    /// over the shell-only [`Self::raise_node_to_type_expr`] primitive, so every
+    /// carrier round-trips here (raw-fallback text → `Unknown { raw }`, the
+    /// synthetic binding, the constructor carrier, the `RecursiveRef` back-edge
+    /// via `Opaque(QueryError::RecursiveRef)`); tuple-element rest fidelity
+    /// rides on the `Tuple` arm's `TupleElement.rest`.
     ///
     /// Operator-shape REDUCTION (`IndexedAccess` / `Conditional` / `Mapped`
-    /// / `KeyOf` / `TypeOf`) is NOT performed here — that is
-    /// [`Self::raise_and_reduce`]'s job; this boundary is shell-only, like
-    /// the primitive it wraps.
-    // The production callers (output adapters / diagnostics / compat
-    // exporters) collapse onto this boundary as the hot path migrates off
-    // stored `TypeExpr` bodies; it is exercised today by the carrier
-    // round-trip unit tests.
-    #[allow(dead_code)]
+    /// / `KeyOf` / `TypeOf`) is NOT performed here — an operator node raises to
+    /// its operator `TypeExpr` un-reduced. Callers that need the operator
+    /// collapsed must go through [`Self::materialize_reduced_output_type_expr`].
+    ///
+    /// The `Option` return is the miss signal: `None` means the requested node —
+    /// or a node required while raising it — is unavailable/unraisable from the
+    /// live graph store. It is deliberately NOT folded into an `Unknown`-sentinel
+    /// here so callers can map a miss to whatever their own output contract
+    /// requires.
+    // Raise-side SHELL seam (no operator reduction). `pub(super)` — the
+    // [`OutputProjector`] capability's `materialize_output_type_expr`
+    // boundary method (in `super::output_materialization`) calls this. The
+    // raw `raise_node_to_type_expr` primitive stays MODULE-PRIVATE; this is
+    // the only out-of-module shell-raise reach.
+    //
+    // It hands back a SEALED [`OutputTypeExpr`] carrier, NEVER a bare
+    // [`TypeExpr`]. That is the structural fence: a `project_semantic_dispatch`
+    // SIBLING module (e.g. `mod.rs`, `evaluate.rs`) can reach this `pub(super)`
+    // seam, but the value it gets back is a sealed carrier it CANNOT unwrap
+    // (the inner `TypeExpr` is capability-gated via
+    // [`OutputTypeExpr::into_type_expr`], and a sibling cannot mint an
+    // `OutputProjector`). So no `pub(super)` seam ever yields a raw
+    // `TypeExpr` to a non-capability holder — closing the bare-delegator
+    // laundering hole. `None` is the miss signal.
+    pub(super) fn output_shell_raise_sealed(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<super::output_materialization::OutputTypeExpr> {
+        self.raise_node_to_type_expr(node)
+            .map(super::output_materialization::OutputTypeExpr::from_raise)
+    }
+
+    /// Test-only `HotTypeRef`-shaped wrapper over the raise-side shell
+    /// delegator, kept so the carrier round-trip tests can drive
+    /// materialisation from a `HotTypeRef` handle. Production callers hold a
+    /// [`SemanticNodeId`] and go through the sealed [`OutputProjector`]
+    /// capability boundary; this helper exists ONLY under test (the
+    /// structural guard `materialize_type_expr_is_not_production_visible`
+    /// asserts it is `#[cfg(test)]`-gated and not production-visible).
+    ///
+    /// [`OutputProjector`]: super::output_materialization::OutputProjector
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
-        self.raise_node_to_type_expr(handle.node())
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_output_type_expr(handle.node())
+            .map(|carrier| carrier.into_type_expr(&cap))
             .unwrap_or(TypeExpr::Unknown {
                 raw: "<materialize miss>".to_string(),
             })
     }
 
-    fn index_key_to_type_expr(
+    /// Test-only plain SHELL-raise that returns the unwrapped `TypeExpr`
+    /// (rather than a sealed carrier) so the carrier round-trip / reduction
+    /// suites can assert on the projected `TypeExpr`. Mints the
+    /// `#[cfg(test)]` test capability internally and unwraps — tests never
+    /// hold the capability/carrier. `#[cfg(test)]`-gated; not a production
+    /// path.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn materialize_output_type_expr_for_test(
         &self,
-        index: &IndexKey,
-        active: &mut FxHashSet<SemanticNodeId>,
+        node: SemanticNodeId,
     ) -> Option<TypeExpr> {
-        Some(match index {
-            IndexKey::String(text) => TypeExpr::string_literal(text.as_ref()),
-            IndexKey::Number(number) => TypeExpr::number_literal(number.get() as f64),
-            IndexKey::TypeNode(node) => self.raise_node_to_type_expr_inner(*node, active)?,
-        })
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_output_type_expr(node)
+            .map(|carrier| carrier.into_type_expr(&cap))
+    }
+
+    /// Test-only REDUCE-then-raise that returns the unwrapped `TypeExpr`
+    /// from the sealed `MaterializedOutputTypeExpr` carrier. Mints the
+    /// `#[cfg(test)]` test capability internally. `#[cfg(test)]`-gated; not
+    /// a production path.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn materialize_reduced_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> TypeExpr {
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_reduced_output_type_expr(node, context)
+            .into_type_expr(&cap)
     }
 
     /// `execute` variant that returns the full [`CacheRead`].
     ///
     /// `ProjectSemanticDispatch::execute` (the [`SemanticQueryApi`] trait
     /// method) discards the dep-signature half of the cache read; this
-    /// variant keeps it so callers like [`Self::raise_and_reduce`] can
-    /// accumulate dep facts across nested dispatches and merge them into
+    /// variant keeps it so callers like [`Self::raise_and_reduce_with_context`]
+    /// can accumulate dep facts across nested dispatches and merge them into
     /// the session-layer `fact_versions`. This is the dispatch entry the
     /// cold-build subtree reducer and the operator sub-reductions
     /// (`ProjectPath` / `NormalizeIntersection` / macro-payload
@@ -804,41 +416,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.execute_via_cold_build_helper(key)
     }
 
-    /// Reduce a [`SemanticNodeId`] by dispatching the appropriate
-    /// [`SemanticQueryKey`] for each operator-shape encountered in the
-    /// graph subtree, then raise the fully-reduced graph node to a
-    /// [`TypeExpr`].
-    ///
-    /// Operates GRAPH-NATIVE: walks [`SemanticNodeData`] via the
-    /// graph's `node_data`, dispatches per shape, interns reduced
-    /// shells via [`crate::semantic_query_memo::SemanticGraphStore::intern_preserving_scope`].
-    /// No re-lowering of raised TypeExpr subtrees.
-    ///
-    /// `mode` is threaded into nested dispatches and determines whether
-    /// `DeclRef` / `InstantiationRef` reduce eagerly (Expanded) or stay
-    /// terminal (Navigate).
-    ///
-    /// Returns a [`MaterializedTypeExpr`] carrying the producing
-    /// `SemanticNodeId`, the raised `TypeExpr`, and the accumulated
-    /// `DepSignature`.
-    ///
-    /// Backwards-compatible entry — defaults to a
-    /// `Published(mode)` reduction context. Callers that need the
-    /// reduction-demand axis (`Published` vs `StructuralTransit`) go
-    /// through [`Self::raise_and_reduce_with_context`].
-    // Published(mode)-default convenience wrapper over
-    // `raise_and_reduce_with_context`; exercised by the dispatch reducer tests.
-    #[allow(dead_code)]
-    pub(crate) fn raise_and_reduce(
-        &self,
-        node: SemanticNodeId,
-        mode: ProjectionMode,
-    ) -> MaterializedTypeExpr {
-        self.raise_and_reduce_with_context(node, ProjectionReductionContext::published(mode))
-    }
-
-    /// Context-explicit variant of [`Self::raise_and_reduce`]
-    /// (demand-driven reducer spec).
+    /// Context-explicit reduce-then-raise reducer (demand-driven reducer
+    /// spec).
     ///
     /// The caller supplies the publication
     /// [`ProjectionReductionContext`] that flows into every operator
@@ -847,12 +426,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `Published(Navigate)` is the per-prop publication boundary that
     /// stops at the demanded terminal without breadth-enumerating
     /// composite members or inactive conditional branches.
-    #[allow(dead_code)] // wired by projector per-member entry.
-    pub(crate) fn raise_and_reduce_with_context(
+    // reduce-then-raise orchestrator; the projection-output boundary
+    // (materialize_reduced_output_type_expr) wraps it, and the production
+    // per-member projectors (field_types.rs) reach it through that boundary.
+    pub(super) fn raise_and_reduce_with_context(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> MaterializedTypeExpr {
+    ) -> MaterializedOutputTypeExpr {
         let mut state = ReduceState::default();
         let reduced = self.reduce_graph_node_iterative(node, context, &mut state);
         let type_expr = self
@@ -861,12 +442,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 raw: "<raise miss after reduction>".to_string(),
             });
         let result_is_partial = state.result_is_partial;
-        MaterializedTypeExpr {
-            node_id: Some(reduced),
-            type_expr,
-            dep_signature: state.into_dep_signature(),
+        MaterializedOutputTypeExpr::from_parts(
+            Some(reduced),
+            OutputTypeExpr::from_raise(type_expr),
+            state.into_dep_signature(),
             result_is_partial,
-        }
+        )
     }
 
     /// Top-down demand-driven graph reducer
@@ -905,7 +486,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// Stack-safe for arbitrarily deep acyclic structures (≥5000
     /// levels; verified by stack-safety regression fixtures in §4.1).
-    #[allow(dead_code)] // wired by raise_and_reduce above.
+    // Driven by `raise_and_reduce_with_context` above; reached in production
+    // through the reduce-then-raise output boundary
+    // (materialize_reduced_output_type_expr) from the per-member projectors.
     fn reduce_graph_node_iterative(
         &self,
         root: SemanticNodeId,
@@ -913,7 +496,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         state: &mut ReduceState,
     ) -> SemanticNodeId {
         // Loop-5 instrumentation — count every iterative-reduction
-        // entry. One `raise_and_reduce` produces exactly one of these.
+        // entry. One `raise_and_reduce_with_context` produces exactly one of
+        // these.
         crate::loop5_instrumentation::RAISE_REDUCE_GRAPH_NODE_ITERATIVE_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -1473,9 +1057,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // signature (resolve → project → apply, mirroring the eager
                 // lowering order and the evaluate/walk arms). This is the
                 // SEMANTIC reduction path (the structural raise/round-trip
-                // preserves `type_args` separately at
-                // `raise_node_to_type_expr_inner`); the final reduced node is
-                // driven through the demand reducer below.
+                // preserves `type_args` separately in the
+                // `shape_engine::fold_node` materialisation algebra); the final
+                // reduced node is driven through the demand reducer below.
                 let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                 let value_root = value_root.clone();
                 let path = Arc::clone(path);
@@ -2175,41 +1759,18 @@ fn rebuild_function(
     ))
 }
 
-/// Materialization-grade result returned by [`raise_and_reduce`] and the
-/// session-layer `materialize_*` wrapper.
-///
-/// The session-layer caller `materialize_component_meta_type_expr_until_stable`
-/// returns this struct.
-///
-/// - `node_id`: `Some(id)` for dispatch-produced entries; `None` for
-///   synthetic / inline-annotation entries that bypass the dispatch
-///   path. Captured at materialization time for `SurfaceNodeIdentities`
-///   population.
-/// - `type_expr`: the raised final form.
-/// - `dep_signature`: accumulated fence signatures from all dispatch
-///   calls inside reduction. Session merges into
-///   `ResolvedComponentMetaState.fact_versions` before publish.
-#[derive(Debug, Clone)]
-pub struct MaterializedTypeExpr {
-    pub node_id: Option<SemanticNodeId>,
-    pub type_expr: TypeExpr,
-    pub dep_signature: DepSignature,
-    /// `true` when ANY semantic-dispatch read consumed by the reducer
-    /// returned a PARTIAL value (`result_is_partial` — projection-budget
-    /// exhaustion, cancellation, same-path recursion, or a walker
-    /// fatal/pathological diagnostic). Callers that publish the
-    /// materialized result into a downstream shared cache (e.g. the
-    /// per-field cache in `field_types.rs`, the projector second pass)
-    /// must propagate this bit so the final-result `ComponentMetaResultDb`
-    /// admission gate observes it and refuses to warm a partial. A benign
-    /// non-cacheable nested read (`cache_suppress` without `result_is_partial`
-    /// — ReturnOnly / overflow / unrootable self-root) does NOT set this:
-    /// a complete-but-non-cacheable result MUST still be allowed to warm
-    /// the component-meta result.
-    pub result_is_partial: bool,
-}
+// The materialization-grade result of the reduce-then-raise boundary is
+// the sealed [`MaterializedOutputTypeExpr`] carrier
+// (`super::output_materialization`): a private inner sealed `type_expr`
+// payload (capability-gated unwrap) plus the readable facts-rail metadata
+// (`node_id` / `dep_signature` / `result_is_partial`). The all-`pub`-field
+// `MaterializedTypeExpr` struct that previously lived here is retired —
+// handing back a bare `TypeExpr` field at the boundary was the laundering
+// surface the output-materialization capability fence closes.
 
-#[allow(dead_code)] // wired by raise_and_reduce above.
+// Accumulator for `raise_and_reduce_with_context`; reached in production
+// through the reduce-then-raise output boundary from the per-member
+// projectors.
 #[derive(Default)]
 struct ReduceState {
     visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
@@ -2225,7 +1786,9 @@ struct ReduceState {
     result_is_partial: bool,
 }
 
-#[allow(dead_code)] // wired by raise_and_reduce above.
+// `ReduceState` helpers for `raise_and_reduce_with_context`; reached in
+// production through the reduce-then-raise output boundary from the
+// per-member projectors.
 impl ReduceState {
     fn merge_dep_signature(&mut self, sig: &DepSignature) {
         for (canonical, version) in sig.iter() {
@@ -4980,23 +4543,252 @@ fn instantiation_base_is_resolvable(
     false
 }
 
-fn semantic_primitive_to_type_expr(kind: SemanticPrimitiveKind) -> TypeExpr {
-    use verter_type_expr::PrimitiveName;
+// =====================================================================
+// Node-domain raised-shape decision surface (owner-local).
+//
+// The classifiers + equality primitives below are the graph-native decision
+// surface the Kind-B callers use: they read the TRUE bottom-up
+// `RaisedShapeFacts` / interned `RaisedShapeKey` computed by the shared
+// [`shape_engine`] (the `RaisedShapeAlg` fold), WITHOUT materialising a
+// `TypeExpr`. The materialization (`MaterializeTypeExprAlg`) and the
+// node-domain facts/key share ONE traversal ([`shape_engine::fold_node`]), so
+// they CANNOT drift — anti-drift is structural. The parity tests
+// (`super::raised_shape_tests`) prove `bottom_up_classifier(node) ≡
+// legacy_TypeExpr_predicate ∘ materialize_for_test(node)`; the materialization
+// is pinned independently by the raise / materialization suite.
+// =====================================================================
 
-    TypeExpr::Primitive(match kind {
-        SemanticPrimitiveKind::String => PrimitiveName::String,
-        SemanticPrimitiveKind::Number => PrimitiveName::Number,
-        SemanticPrimitiveKind::Boolean => PrimitiveName::Boolean,
-        SemanticPrimitiveKind::Symbol => PrimitiveName::Symbol,
-        SemanticPrimitiveKind::BigInt => PrimitiveName::BigInt,
-        SemanticPrimitiveKind::Any => PrimitiveName::Any,
-        SemanticPrimitiveKind::Unknown => PrimitiveName::Unknown,
-        SemanticPrimitiveKind::Void => PrimitiveName::Void,
-        SemanticPrimitiveKind::Never => PrimitiveName::Never,
-        SemanticPrimitiveKind::Null => PrimitiveName::Null,
-        SemanticPrimitiveKind::Undefined => PrimitiveName::Undefined,
-        SemanticPrimitiveKind::Object => PrimitiveName::Object,
-    })
+/// Combined facts + node-vs-`TypeExpr` equality of ONE node fold. Re-exported so
+/// the Kind-B sink adapters read both the route-gate facts AND the no-op/changed
+/// decision from a single projection.
+pub(crate) use shape_engine::NodeShapeEq;
+/// Facts about the shape a node raises to, computed bottom-up by the shared
+/// [`shape_engine`] (NOT by materialising a `TypeExpr`). Re-exported from
+/// [`shape_engine`] so the existing `super::raise::RaisedShapeFacts` path stays
+/// stable.
+pub(crate) use shape_engine::RaisedShapeFacts;
+
+// The node-domain decision API is exposed in two signature forms:
+//
+// - DISPATCH-taking (`*_with_dispatch`) — the PRIMARY form. A caller that
+//   already holds a `&ProjectSemanticDispatch` (the sink adapters, the dispatch
+//   internals) passes it so NO redundant `ProjectSemanticDispatch::new` runs.
+// - CTX-taking — a thin convenience that builds ONE dispatch and delegates to
+//   the primary. Used at true boundaries (a caller holding only a
+//   `&dyn ResolverContext`) and by the parity suite.
+
+/// `true` when `node` can be shell-raised to a `TypeExpr` at all
+/// (`raise(node).is_some()`). DISPATCH-taking primary.
+#[must_use]
+pub(crate) fn node_can_shell_raise_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_facts(dispatch, node).is_some_and(|facts| facts.can_shell_raise)
+}
+
+/// `true` when `node` can be shell-raised to a `TypeExpr` at all
+/// (`raise(node).is_some()`), capturing the `?`-propagation `None` positions.
+//
+// CTX-taking convenience over `node_can_shell_raise_with_dispatch`. Production
+// callers already hold a dispatch and use the `_with_dispatch` primary, so this
+// boundary form is exercised by the parity suite; it stays defined in both
+// builds as the named ctx-taking member of the decision API.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "ctx-taking boundary convenience; production callers use the _with_dispatch \
+                  primary; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_can_shell_raise(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    node_can_shell_raise_with_dispatch(&ProjectSemanticDispatch::new(ctx), node)
+}
+
+/// Node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`. A
+/// whole-raise `None` counts as a miss (`true`) — matching how the consuming
+/// Kind-B sites treat a `None` raise (unusable / fall back).
+//
+// Named single-fact member of the node-domain decision API. The Kind-B sink
+// adapters read both facts together through `node_raised_shape_facts_with_dispatch`
+// (one projection), so this single-fact accessor has no production caller; the
+// parity suite exercises it as the equivalence proof.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "single-fact member of the node-domain decision API; the sink adapters read \
+                  both facts via node_raised_shape_facts_with_dispatch; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_contains_semantic_miss_legacy_equivalent(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    match shape_engine::project_node_facts(&dispatch, node) {
+        Some(facts) => !facts.materialized,
+        None => true,
+    }
+}
+
+/// Node-domain equivalent of `type_expr_is_expanded_surface(raise(node))`. A
+/// whole-raise `None` is `false` (no surface to be open).
+//
+// Named single-fact member of the node-domain decision API (see
+// `node_contains_semantic_miss_legacy_equivalent`): the sink adapters read both
+// facts via `node_raised_shape_facts_with_dispatch`, so this single-fact
+// accessor has no production caller; the parity suite exercises it as the
+// equivalence proof.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "single-fact member of the node-domain decision API; the sink adapters read \
+                  both facts via node_raised_shape_facts_with_dispatch; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_is_expanded_surface_legacy_equivalent(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    match shape_engine::project_node_facts(&dispatch, node) {
+        Some(facts) => facts.expanded_surface,
+        None => false,
+    }
+}
+
+/// Both [`RaisedShapeFacts`] of `node` in one projection (the
+/// materialized-miss + expanded-surface gate the Kind-B route helpers apply).
+/// `None` when the whole raise is `None`. DISPATCH-taking primary. Folds through
+/// the FACTS-ONLY [`shape_engine`] algebra — no structural key interned.
+#[must_use]
+pub(crate) fn node_raised_shape_facts_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<RaisedShapeFacts> {
+    shape_engine::project_node_facts(dispatch, node)
+}
+
+/// CTX-taking convenience over `node_raised_shape_facts_with_dispatch`.
+/// Production gates hold a dispatch and use the `_with_dispatch` primary; this
+/// boundary form is exercised by the parity suite as the FACTS-ONLY-algebra
+/// projection in the facts-only-vs-full-fold equivalence proof.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "ctx-taking boundary convenience over the facts-only projection; production \
+                  gates use the _with_dispatch primary; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_raised_shape_facts(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> Option<RaisedShapeFacts> {
+    node_raised_shape_facts_with_dispatch(&ProjectSemanticDispatch::new(ctx), node)
+}
+
+/// Combined [`RaisedShapeFacts`] + node-vs-`TypeExpr` equality of `node` in ONE
+/// fold: the route-gate facts AND the no-op/changed decision (`eq_to_expr`) from
+/// a single key-bearing fold (the input `expr` is interned into the SAME
+/// interner). A site needing both reads this instead of folding the node twice.
+/// DISPATCH-taking primary. `None` when the whole raise is `None`.
+#[must_use]
+pub(crate) fn node_raised_shape_for_eq_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<NodeShapeEq> {
+    shape_engine::project_node_shape_for_eq(dispatch, node, expr)
+}
+
+/// CTX-taking convenience over `node_raised_shape_for_eq_with_dispatch`.
+/// Production no-op/changed gates already hold a dispatch and use the
+/// `_with_dispatch` primary; this boundary form is exercised by the parity suite
+/// (the facts-only-vs-full-fold equivalence proof: the `facts` it returns —
+/// computed by the KEY-bearing algebra — must equal `node_raised_shape_facts`,
+/// computed by the FACTS-ONLY algebra).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "ctx-taking boundary convenience; production gates use the _with_dispatch \
+                  primary; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_raised_shape_for_eq(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<NodeShapeEq> {
+    node_raised_shape_for_eq_with_dispatch(&ProjectSemanticDispatch::new(ctx), node, expr)
+}
+
+/// Raised-shape equality between two nodes: `Some(true)`/`Some(false)` when
+/// BOTH nodes raise to `Some`, `None` when EITHER raise is `None`.
+///
+/// Compares the interned [`shape_engine::RaisedShapeKey`] — NOT the node id:
+/// carriers drop identity on raise (different `DeclRef`/`BareRef`/`TypeParam`
+/// nodes can raise to equal shapes and vice-versa), so the raised-shape key is
+/// the comparison subject.
+//
+// Node-vs-node member of the node-domain decision API. The Kind-B callers use
+// the node-vs-`TypeExpr` form (`raised_shape_eq_node_type_expr`); this node-vs-
+// node form has no production caller yet, so the non-test build sees it as dead
+// while the parity suite exercises it as the equivalence proof.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-vs-node member of the node-domain decision API; exercised by the \
+                  raised-shape parity suite (the equivalence proof)"
+    )
+)]
+#[must_use]
+pub(crate) fn raised_shape_eq_nodes(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    a: SemanticNodeId,
+    b: SemanticNodeId,
+) -> Option<bool> {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    shape_engine::raised_shape_eq_nodes(&dispatch, a, b)
+}
+
+/// Raised-shape equality between a node and a `TypeExpr`: `Some(bool)` when the
+/// node raises to `Some`, `None` when the raise is `None`. The input `TypeExpr`
+/// is folded into the SAME interned key space (no node materialisation).
+//
+// Production no-op/changed gates read both facts AND equality from one fold via
+// `node_raised_shape_for_eq_with_dispatch`, so this standalone node-vs-`TypeExpr`
+// form is exercised by the parity suite (the equivalence proof: it must equal
+// `raise(node) == Some(expr)`).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "production gates use node_raised_shape_for_eq_with_dispatch (facts + equality \
+                  in one fold); the standalone equality form is exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn raised_shape_eq_node_type_expr(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<bool> {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    shape_engine::raised_shape_eq_node_type_expr(&dispatch, node, expr)
 }
 
 #[cfg(test)]
@@ -5114,12 +4906,15 @@ mod tests {
         let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: type_param });
 
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let materialized = dispatch.raise_and_reduce(keyof, ProjectionMode::Expanded);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            keyof,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
 
         assert!(
-            matches!(materialized.type_expr, TypeExpr::KeyOf(_)),
+            matches!(materialized, TypeExpr::KeyOf(_)),
             "open keyof over type parameter must survive raise_and_reduce, got {:?}",
-            materialized.type_expr
+            materialized
         );
     }
 
@@ -5138,12 +4933,15 @@ mod tests {
         let alias = graph.intern_node(SemanticNodeData::Alias(primitive));
 
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let materialized = dispatch.raise_and_reduce(alias, ProjectionMode::Expanded);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            alias,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
 
         assert!(
-            matches!(materialized.type_expr, TypeExpr::Primitive(_)),
+            matches!(materialized, TypeExpr::Primitive(_)),
             "alias to primitive must reduce to that primitive, got {:?}",
-            materialized.type_expr
+            materialized
         );
     }
 
@@ -5164,9 +4962,12 @@ mod tests {
         });
 
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let materialized = dispatch.raise_and_reduce(template, ProjectionMode::Expanded);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            template,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
 
-        match &materialized.type_expr {
+        match &materialized {
             TypeExpr::Unknown { raw } => {
                 assert!(
                     raw.contains("template literal"),
@@ -5198,9 +4999,12 @@ mod tests {
         });
 
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let materialized = dispatch.raise_and_reduce(decl_ref, ProjectionMode::Navigate);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            decl_ref,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
 
-        match &materialized.type_expr {
+        match &materialized {
             TypeExpr::Ref {
                 name,
                 type_arguments,

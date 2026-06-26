@@ -46,8 +46,8 @@ use crate::meta_resolve::{
     ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
 };
 use crate::meta_resolve::{
-    pick_via_dispatch_pick_helper, project_expr_class_a_via_dispatch,
-    project_expr_class_a_via_dispatch_threaded, project_type_surface_expr_via_host_threaded,
+    project_expr_class_a_via_dispatch, project_expr_class_a_via_dispatch_threaded,
+    project_type_surface_expr_via_host_threaded,
 };
 
 // Items that live in the parent shell (`crate::meta_resolve`): the
@@ -75,6 +75,32 @@ use crate::resolver_core::component_meta_registry::{
     enqueue_component_meta_registry_ref, merge_component_meta_registry_candidates,
     owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
     PendingComponentMetaRegistryRef,
+};
+
+crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+    /// The host-method component-meta output-sink capability: the host
+    /// method here that materializes a resolved member node into a published
+    /// `TypeExpr` holds this to materialize the node into a sealed output
+    /// carrier and unwrap it. Its constructor is visible ONLY within
+    /// `crate::host_manage::component_meta_methods` — NOT the whole
+    /// `host_manage` subtree — so the Kind-B bridge sibling
+    /// `host_manage::eval_env` (`fast_to_expansion`) cannot mint it: a
+    /// planted `HostManageComponentMetaOutputCap::new` there is `E0624`.
+    pub(crate) struct HostManageComponentMetaOutputCap;
+    mint: pub(in crate::host_manage::component_meta_methods)
+}
+
+// The sink-owned macro-output expansion demand API + its MODULE-PRIVATE
+// node-domain artifact and materialiser live in the child sink module
+// `macro_output_expansion` (a descendant of this cap's
+// `pub(in crate::host_manage::component_meta_methods)` mint scope, so it can mint
+// the cap; its whole reachable PRODUCTION scope is output-only). The eval_env
+// expansion branches drive the re-exported `expand_*_output` demand methods.
+pub(crate) mod macro_output_expansion;
+
+pub(crate) use macro_output_expansion::{
+    expand_define_model_output, expand_generic_project_path_output, expand_slot_binding_output,
+    DefineModelOutputExpansion, MacroPathOutputExpansion,
 };
 
 impl VerterHost {
@@ -1425,8 +1451,13 @@ impl VerterHost {
             };
 
             // Step 8: raise the instantiated body; publish only when it is
-            // an Object (the shallow substituted surface).
-            let raised = dispatch.raise_node_to_type_expr(node)?;
+            // an Object (the shallow substituted surface). Publication sink:
+            // materialize into a sealed carrier and unwrap via the
+            // component-meta host-method output capability (constructor visible
+            // only within `crate::host_manage::component_meta_methods`).
+            use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+            let cap = HostManageComponentMetaOutputCap::new(&dispatch);
+            let raised = cap.materialize_output_type_expr(node)?.into_type_expr(&cap);
             matches!(raised, TypeExpr::Object(_)).then_some(raised)
         }
         fn materialize_component_meta_registry_candidate(
@@ -2025,34 +2056,31 @@ impl VerterHost {
                     (!properties.is_empty())
                         .then(|| TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties })))
                         .or_else(|| {
-                            // The Pick route dispatches through the builtin
-                            // Pick utility path: pick_via_dispatch_pick_helper
-                            // resolves the symbol to a base node via Class A
-                            // lowering, then dispatches `Pick<base, key_set>`;
-                            // falls back to the raw materialiser candidate for
-                            // non-Object bases.
-                            pick_via_dispatch_pick_helper(
-                                query_engine,
-                                scope_canonical_id,
-                                symbol_name,
-                                members.as_slice(),
-                            )
-                            .map(|projected| {
-                                query_engine.materialize_member_surface_expr(
-                                    scope_canonical_id,
-                                    &projected,
-                                    true,
-                                )
-                            })
-                            .or_else(|| {
-                                materialize_component_meta_registry_candidate(
-                                    query_engine,
+                            // The Pick route dispatches through the builtin Pick
+                            // utility path behind the query-engine DEMAND API:
+                            // `materialize_pick_member_surface` resolves the root
+                            // symbol to a base node, dispatches `Pick<base,
+                            // key_set>`, and materialises the Pick result NODE
+                            // through the engine's node-core — all INTERNALLY, so
+                            // no `SemanticNodeId` crosses the query-engine
+                            // boundary. Falls back to the raw materialiser
+                            // candidate for non-Object bases.
+                            query_engine
+                                .materialize_pick_member_surface(
                                     scope_canonical_id,
                                     symbol_name,
-                                    raw_body,
-                                    prefer_explicit_raw_surface,
+                                    members.as_slice(),
+                                    true,
                                 )
-                            })
+                                .or_else(|| {
+                                    materialize_component_meta_registry_candidate(
+                                        query_engine,
+                                        scope_canonical_id,
+                                        symbol_name,
+                                        raw_body,
+                                        prefer_explicit_raw_surface,
+                                    )
+                                })
                         })
                 }
                 crate::resolver_core::RouteDemand::Omit(omitted) => {

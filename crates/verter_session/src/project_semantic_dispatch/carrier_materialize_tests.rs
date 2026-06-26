@@ -1,12 +1,12 @@
 //! Carrier-contract foundation tests.
 //!
-//! `materialize_type_expr` is the single reverse boundary: every graph
-//! carrier round-trips `HotTypeRef` → `TypeExpr` here, including the
-//! unresolved carriers (`BareRef` / `ImportType`), the raw-fallback text
-//! carrier, the structural fidelity carrier (`ConstructorType`), the
-//! synthetic-binding carrier, the tuple-element `rest` flag (standalone
-//! `Rest` has NO graph carrier — tuple-rest fidelity rides on
-//! [`TupleElement::rest`]), and the demand-time-minted `RecursiveRef`
+//! `materialize_output_type_expr` is the plain shell-only reverse boundary:
+//! every graph carrier round-trips `SemanticNodeId` → `TypeExpr` here,
+//! including the unresolved carriers (`BareRef` / `ImportType`), the
+//! raw-fallback text carrier, the structural fidelity carrier
+//! (`ConstructorType`), the synthetic-binding carrier, the tuple-element
+//! `rest` flag (standalone `Rest` has NO graph carrier — tuple-rest fidelity
+//! rides on [`TupleElement::rest`]), and the demand-time-minted `RecursiveRef`
 //! back-edge (carried as `Opaque(QueryError::RecursiveRef)`).
 //!
 //! These tests are discriminating: each asserts the EXACT projected
@@ -70,12 +70,19 @@ fn synthetic_binding_id_is_content_free_and_rehydrates() {
     assert_eq!(SyntheticBindingId::from_carrier_key(&other), id);
 }
 
-/// Shared harness: intern `data`, materialise it, return the `TypeExpr`.
+/// Shared harness: intern `data`, materialise it through the plain
+/// shell-only output boundary, return the `TypeExpr`. A miss maps to the
+/// `"<materialize miss>"` sentinel (none of these carriers miss — the
+/// shapes are asserted exactly below).
 fn materialize(host: &VerterHost, data: SemanticNodeData) -> TypeExpr {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let node = graph.intern_node(data);
     let dispatch = ProjectSemanticDispatch::new(host);
-    dispatch.materialize_type_expr(HotTypeRef::new(node))
+    dispatch
+        .materialize_output_type_expr_for_test(node)
+        .unwrap_or(TypeExpr::Unknown {
+            raw: "<materialize miss>".to_string(),
+        })
 }
 
 #[test]
@@ -116,7 +123,9 @@ fn materialize_bare_ref_round_trips_type_args() {
         Arc::from(vec![arg].into_boxed_slice()),
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr_for_test(node)
+        .expect("carrier must raise through the plain output boundary");
     match &expr {
         TypeExpr::Ref {
             name,
@@ -158,7 +167,9 @@ fn materialize_typeof_round_trips_type_args() {
         Arc::from(vec![arg].into_boxed_slice()),
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr_for_test(node)
+        .expect("carrier must raise through the plain output boundary");
     match &expr {
         TypeExpr::TypeOf(value_ref) => {
             assert_eq!(
@@ -192,7 +203,9 @@ fn materialize_import_type_round_trips() {
         true,
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr_for_test(node)
+        .expect("carrier must raise through the plain output boundary");
 
     match &expr {
         TypeExpr::ImportType {
@@ -255,7 +268,9 @@ fn materialize_tuple_preserves_element_rest_flag() {
         readonly: false,
     });
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr_for_test(node)
+        .expect("carrier must raise through the plain output boundary");
 
     match &expr {
         TypeExpr::Tuple { elements, .. } => {
@@ -292,7 +307,9 @@ fn materialize_constructor_type_preserves_ctor_ness() {
     });
     let node = graph.intern_node(SemanticNodeData::ConstructorType { signature });
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let expr = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let expr = dispatch
+        .materialize_output_type_expr_for_test(node)
+        .expect("carrier must raise through the plain output boundary");
 
     // Must round-trip as a CONSTRUCTOR type, not a plain function — the
     // whole reason the carrier exists is to keep `new () => R` distinct
@@ -354,6 +371,62 @@ fn materialize_recursive_ref_back_edge_round_trips() {
     }
 }
 
+/// The `HotTypeRef`-shaped test harness `materialize_type_expr` projects the
+/// SAME `TypeExpr` as the plain `materialize_output_type_expr` boundary for the
+/// same node (behavioral equivalence of the harness wrapper); it does not
+/// assert the harness routes through that boundary internally.
+///
+/// It also pins the harness's `None`-miss mapping: a node ABSENT from the live
+/// graph store makes the plain boundary return `None`, and the harness maps that
+/// miss to the `"<materialize miss>"` sentinel.
+#[test]
+fn hot_type_ref_harness_matches_plain_output_boundary() {
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let node = graph.intern_node(SemanticNodeData::new_bare_ref(
+        Arc::from("Foo"),
+        NodeScopeId::Global,
+        Arc::from(Vec::new().into_boxed_slice()),
+    ));
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let via_harness = dispatch.materialize_type_expr(HotTypeRef::new(node));
+    let via_plain = dispatch
+        .materialize_output_type_expr_for_test(node)
+        .expect("the bare-ref carrier raises through the plain boundary");
+
+    // Both routes land the same `Ref { name: "Foo" }` — the harness wrapper is
+    // behaviorally equivalent to the plain boundary for the same node.
+    assert_eq!(
+        via_harness, via_plain,
+        "materialize_type_expr(HotTypeRef) must project the SAME TypeExpr as \
+         materialize_output_type_expr(node) for the same node"
+    );
+    assert!(
+        matches!(&via_harness, TypeExpr::Ref { name, .. } if name.as_ref() == "Foo"),
+        "expected the bare-ref to raise to Ref{{name=Foo}}, got {via_harness:?}"
+    );
+
+    // Miss case: a node ordinal never interned into this fresh graph store is
+    // absent, so the plain boundary returns `None` and the harness maps the miss
+    // to the `"<materialize miss>"` sentinel. This pins the harness's own
+    // miss-unwrap behavior (the only behavior it adds over the plain boundary).
+    let absent = SemanticNodeId(u64::MAX);
+    assert!(
+        dispatch
+            .materialize_output_type_expr_for_test(absent)
+            .is_none(),
+        "an un-interned node ordinal must miss the plain boundary"
+    );
+    assert!(
+        matches!(
+            &dispatch.materialize_type_expr(HotTypeRef::new(absent)),
+            TypeExpr::Unknown { raw } if raw == "<materialize miss>"
+        ),
+        "the harness must map a plain-boundary miss to the `<materialize miss>` sentinel"
+    );
+}
+
 /// Each typed semantic-sentinel `QueryError` must serialize to the
 /// BYTE-IDENTICAL legacy raw string, and the `BudgetExceeded` fuse must keep
 /// its prefix (the must-not-regress). A future stage that swaps a raw
@@ -396,5 +469,87 @@ fn typed_query_error_sentinels_round_trip_to_legacy_raw() {
     assert!(
         semantic_query_error_raw(&budget).starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX),
         "BUDGET_EXCEEDED_SENTINEL must not regress"
+    );
+}
+
+/// Tombstone for the typed resolver-control-sentinel swap: the converted
+/// producer files must NOT reconstruct any of the six control sentinels as a
+/// bare `Unknown { raw }` / `alg.unknown(Arc::from("literal"))` at a
+/// resolver-control site — those now go exclusively through the typed
+/// `opaque_sentinel(QueryError::…)` / `semantic_query_error_raw` path.
+///
+/// NARROWED CLAIM (Fork-D structural-first + tombstone): this is a LEAN
+/// source-contains check over ONLY the two converted files, asserting the EXACT
+/// converted construction patterns are gone. It is NOT a repo-wide scanner. It
+/// deliberately does not police:
+/// - `semantic_query_error_raw` (the legitimate variant→string mapping fn),
+///   whose arms read `=> "semanticAliasCycle".to_string()` /
+///   `=> SEMANTIC_SURFACE_MEMBER.to_string()` (no `raw:` / `Arc::from`
+///   construction context, so the patterns below do not match them);
+/// - the typed `Opaque(err)` conduit `_ => alg.opaque_sentinel(err)` (already
+///   typed-sourced; matches none of the literal patterns);
+/// - the OUT `"projectedOpenSurface"` placeholder (not in the swap set);
+/// - the round-trip pin above, or doc comments.
+///
+/// HONEST RESIDUAL (tracked as debt): a future developer could introduce a NEW
+/// raw control-sentinel spelling not in this fixed pattern list, and this
+/// narrow tombstone would not catch it. The structural defence — the typed
+/// `opaque_sentinel(QueryError)` entry point + exhaustive typed classification —
+/// is the primary guard; this tombstone only pins that the SIX known literals
+/// were actually removed from the SPECIFIC converted sites.
+#[test]
+fn converted_sites_have_no_bare_control_sentinel_literal() {
+    use std::path::PathBuf;
+
+    fn read_src(rel: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    // The shared raise traversal — the nine converted `fold_node` /
+    // `fold_member` arms. After the swap, NONE of the six control literals may
+    // appear inside an `alg.unknown(Arc::from(...))` construction here.
+    let shape_engine = read_src("src/project_semantic_dispatch/raise/shape_engine/mod.rs");
+    for forbidden in [
+        r#"alg.unknown(Arc::from("semanticAliasCycle"))"#,
+        r#"alg.unknown(Arc::from("semanticTypeParamCycle"))"#,
+        r#"alg.unknown(Arc::from("<raise miss>"))"#,
+        "alg.unknown(Arc::from(SEMANTIC_OBJECT_SURFACE))",
+        "alg.unknown(Arc::from(SEMANTIC_SURFACE_MEMBER))",
+        r#"alg.unknown(Arc::from("VueMacroElements"))"#,
+    ] {
+        assert!(
+            !shape_engine.contains(forbidden),
+            "shape_engine/mod.rs still constructs a bare control sentinel: `{forbidden}` — \
+             route it through `alg.opaque_sentinel(QueryError::…)` instead"
+        );
+    }
+    // The typed `Opaque(err)` conduit (the live `fold_node` arm) MUST remain —
+    // its presence confirms this tombstone reads the right file and that the
+    // converted arm routes the borrowed typed `QueryError` through
+    // `opaque_sentinel`, NOT a raw round-trip. Anchored on the LIVE code pattern
+    // (not `semantic_query_error_raw(err)`, which after the swap appears only in a
+    // doc-comment here and so would pass on a comment).
+    assert!(
+        shape_engine.contains("_ => alg.opaque_sentinel(err)"),
+        "the typed Opaque(err) conduit (`_ => alg.opaque_sentinel(err)`) must stay"
+    );
+
+    // The component-meta surface projector — the three converted
+    // `.unwrap_or(TypeExpr::Unknown { raw: … })` member/index sites. After the
+    // swap, the bare `raw: SEMANTIC_SURFACE_MEMBER.to_string()` construction is
+    // gone (the `semantic_query_error_raw` mapping arm `=> SEMANTIC_SURFACE_MEMBER
+    // .to_string()` has no `raw:` prefix, so it is NOT matched).
+    let surface = read_src("src/resolver_core/component_meta_query_engine/surface.rs");
+    assert!(
+        !surface.contains("raw: SEMANTIC_SURFACE_MEMBER.to_string()"),
+        "surface.rs still constructs `Unknown {{ raw: SEMANTIC_SURFACE_MEMBER.to_string() }}` — \
+         route it through `semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember)`"
+    );
+    // The legitimate mapping arm MUST remain (confirms we are not over-claiming
+    // by deleting the mapping itself).
+    assert!(
+        surface.contains("SEMANTIC_SURFACE_MEMBER.to_string()"),
+        "the semantic_query_error_raw UnrepresentableSurfaceMember mapping arm must stay"
     );
 }

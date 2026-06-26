@@ -19,8 +19,254 @@ use super::{
     BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
     SEMANTIC_SURFACE_MEMBER,
 };
+use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
+
+crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+    /// The component-meta query-engine SURFACE projector's output-sink
+    /// capability. The surface projector here holds this to materialize a
+    /// graph node into a sealed output carrier and unwrap it. Its constructor
+    /// is visible ONLY within
+    /// `crate::resolver_core::component_meta_query_engine::surface` — NOT the
+    /// whole query-engine subtree — so no query-engine sibling can mint it
+    /// (planted `MetaQuerySurfaceOutputCap::new` outside this leaf is
+    /// `E0624`).
+    pub(crate) struct MetaQuerySurfaceOutputCap;
+    mint: pub(in crate::resolver_core::component_meta_query_engine::surface)
+}
+
+// ===========================================================================
+// Demand-bound publication adapters (M4 — codex-settled).
+//
+// The Kind-B route helpers / route fixpoint make their convergence / gating /
+// equality decisions NODE-DOMAIN (raised-shape facts + interned key, no
+// `TypeExpr` materialisation). The single PUBLICATION `TypeExpr` they return is
+// materialised ONCE here, at this registered surface sink, through the sealed
+// [`MetaQuerySurfaceOutputCap`]. The adapters take a HIGH-LEVEL demand (scope +
+// `&TypeExpr` + modes); they lower internally so no raw forgeable
+// `SemanticNodeId` ever crosses in from a non-sink caller, and the bare
+// `TypeExpr` leaves only as the accepted publication value.
+// ===========================================================================
+
+/// Materialise an accepted graph `node` into a published `TypeExpr` at this
+/// surface sink. MODULE-PRIVATE: the bare `TypeExpr` is produced here and
+/// handed back to the demand-bound adapters below as the accepted publication
+/// value — a raw node is never accepted from outside the adapters.
+fn materialize_published_node(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<TypeExpr> {
+    let cap = MetaQuerySurfaceOutputCap::new(dispatch);
+    cap.materialize_output_type_expr(node)
+        .map(|raised| raised.into_type_expr(&cap))
+}
+
+/// Demand-bound adapter for the empty-terminal Expanded publication path
+/// (former `lower_and_project_to_expanded_via_host_threaded` materialisation
+/// tail). Lower `expr` at `Expanded`, dispatch `ProjectPath { base, [],
+/// Published(Expanded) }`, gate on NODE-DOMAIN facts
+/// (`materialized && expanded_surface`) plus the node-domain "changed" check
+/// (`!raised_shape_eq_node_type_expr(result, expr)`), and materialise the
+/// accepted result node ONCE at this sink. `None` on lower-miss, dispatch
+/// error/recursive, gate-reject, or raise-miss.
+pub(crate) fn lower_and_project_to_expanded_published(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+) -> Option<TypeExpr> {
+    use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
+
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let base = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Expanded,
+    )?;
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base,
+        path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    let result_node = match read.value {
+        QueryResult::Value(node) => node,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    // Facts + the no-op/changed decision come from ONE node fold (reusing the
+    // dispatch above): `!contains_miss && is_expanded_surface && reduced != expr`
+    // — the `reduced != *expr` no-op check is the node-domain shape inequality.
+    let shape = node_raised_shape_for_eq_with_dispatch(&dispatch, result_node, expr)?;
+    let changed = !shape.eq_to_expr;
+    (shape.facts.materialized && shape.facts.expanded_surface && changed)
+        .then(|| materialize_published_node(&dispatch, result_node))
+        .flatten()
+}
+
+/// Demand-bound adapter for the mode-explicit dispatch-direct surface
+/// projection (former `project_expr_surface_expr_via_host_threaded`
+/// materialisation tail). Lower `expr` at `base_mode`, dispatch
+/// `ProjectPath { base, [], { terminal_mode, demand } }`, refuse a
+/// `semanticMiss`-bearing result (node-domain `!materialized`), then apply the
+/// mode-aware acceptance and materialise the accepted node ONCE at this sink.
+pub(crate) fn project_expr_surface_expr_published(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+    base_mode: crate::semantic_query::ProjectionMode,
+    terminal_mode: crate::semantic_query::ProjectionMode,
+    demand: crate::semantic_query::ReductionDemand,
+) -> Option<TypeExpr> {
+    use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryKey,
+    };
+
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let base = dispatch.lower_type_expr_in_scope_with_context(
+        scope_canonical_id,
+        expr,
+        ProjectionReductionContext {
+            mode: base_mode,
+            demand,
+            provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
+        },
+    )?;
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base,
+        path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: ProjectionReductionContext {
+            mode: terminal_mode,
+            demand,
+            provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
+            merge_role: crate::semantic_query::MemberMergeRole::Authored,
+        },
+    });
+    let result_node = match read.value {
+        QueryResult::Value(node) => node,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    // Facts-only gate — reuses the dispatch above; no structural key interned.
+    let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
+    // Refuse `semanticMiss`-bearing results (node-domain `!materialized`).
+    if !facts.materialized {
+        return None;
+    }
+    let accept = match terminal_mode {
+        // Expanded terminal — only fully materialised surfaces qualify.
+        ProjectionMode::Expanded => facts.expanded_surface,
+        // Shallow / Identity / Navigate / Skeleton — admit the carrier shape.
+        ProjectionMode::Shallow
+        | ProjectionMode::Identity
+        | ProjectionMode::Navigate
+        | ProjectionMode::Skeleton => true,
+    };
+    accept
+        .then(|| materialize_published_node(&dispatch, result_node))
+        .flatten()
+}
+
+/// Demand-bound adapter for the Class-A path-precise projection (former
+/// `project_expr_class_a_via_dispatch_threaded` pure-dispatch tail). Decompose
+/// the IndexedAccess chain INTERNALLY, lower the base (empty path → lower the
+/// whole `expr` at `Expanded`; non-empty path → lower the chain root at
+/// `Navigate`), dispatch `ProjectPath { base, path, Published(Expanded) }`,
+/// gate on `materialized && expanded_surface`, and materialise the accepted
+/// node ONCE at this sink. The lowering happens here so no raw node crosses in.
+pub(crate) fn project_class_a_terminal_published(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+) -> Option<TypeExpr> {
+    use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
+
+    let (base_expr, path_segments) =
+        crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain(expr);
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let (base, project_path) = if path_segments.is_empty() {
+        let base = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            expr,
+            ProjectionMode::Expanded,
+        )?;
+        (
+            base,
+            std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        )
+    } else {
+        let base = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            base_expr,
+            ProjectionMode::Navigate,
+        )?;
+        (base, path_segments)
+    };
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base,
+        path: project_path,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    let result_node = match read.value {
+        QueryResult::Value(node) => node,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    // Facts-only gate — reuses the dispatch above; no structural key interned.
+    let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
+    (facts.materialized && facts.expanded_surface)
+        .then(|| materialize_published_node(&dispatch, result_node))
+        .flatten()
+}
+
+/// Demand-bound adapter for local generic-`Ref` instantiation (former
+/// `instantiate_local_generic_ref_via_dispatch`). Bails on a non-generic `Ref`
+/// (non-`Ref` / empty type-arguments). Lowers `expr` to a node at `Expanded`,
+/// then decides the no-op NODE-DOMAIN via `raised_shape_eq_node_type_expr`
+/// (distinct nodes raise to equal shapes, so bare node-id identity is wrong);
+/// on a real change materialises the instantiated node ONCE at this sink. `None`
+/// for non-ref / empty-args / lower-miss / shape-miss / raised-shape no-op.
+pub(crate) fn instantiate_local_generic_ref_published(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+) -> Option<TypeExpr> {
+    use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::ProjectionMode;
+
+    let TypeExpr::Ref { type_arguments, .. } = expr else {
+        return None;
+    };
+    if type_arguments.is_empty() {
+        return None;
+    }
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    // Lower at Expanded so the body materialises in one step (the caller reads
+    // the published body directly, no path-walking follow-up).
+    let lowered = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Expanded,
+    )?;
+    // A no-op (the lowered body raises to the SAME shape as `expr`) surfaces as
+    // `None` so the caller's own fallback path runs; a miss-shaped raise likewise
+    // (`None` from the projection). Decided WITHOUT materialising — node-domain
+    // shape equality, folded ONCE through the reused dispatch. The `Some(false)`
+    // gate (a genuine change) is `eq_to_expr == false`.
+    if node_raised_shape_for_eq_with_dispatch(&dispatch, lowered, expr).is_none_or(|s| s.eq_to_expr)
+    {
+        return None;
+    }
+    materialize_published_node(&dispatch, lowered)
+}
 
 pub(crate) fn projected_surface_from_semantic_node(
     ctx: &dyn ResolverContext,
@@ -98,15 +344,21 @@ pub(crate) fn surface_view_to_projected_surface(
     surface: &SurfaceView,
 ) -> ProjectedSurface {
     let dispatch = ctx.dispatch();
+    // Mint the surface-projector output capability (constructor visible only
+    // within `crate::resolver_core::component_meta_query_engine::surface`):
+    // this projector is a true publication sink, so it materializes graph
+    // nodes into sealed output carriers and unwraps them via the capability.
+    let cap = MetaQuerySurfaceOutputCap::new(&dispatch);
     let members = surface
         .members
         .iter()
         .map(|member| ProjectedMember {
             name: member.name.as_ref().to_string(),
-            ty: dispatch
-                .raise_node_to_type_expr(member.value)
+            ty: cap
+                .materialize_output_type_expr(member.value)
+                .map(|raised| raised.into_type_expr(&cap))
                 .unwrap_or(TypeExpr::Unknown {
-                    raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                    raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
                 }),
             optional: member.optional,
             readonly: member.readonly,
@@ -129,12 +381,18 @@ pub(crate) fn surface_view_to_projected_surface(
     let call_signatures = surface
         .call_signatures
         .iter()
-        .filter_map(|signature| dispatch.raise_node_to_type_expr(*signature))
+        .filter_map(|signature| {
+            cap.materialize_output_type_expr(*signature)
+                .map(|raised| raised.into_type_expr(&cap))
+        })
         .collect();
     let construct_signatures = surface
         .construct_signatures
         .iter()
-        .filter_map(|signature| dispatch.raise_node_to_type_expr(*signature))
+        .filter_map(|signature| {
+            cap.materialize_output_type_expr(*signature)
+                .map(|raised| raised.into_type_expr(&cap))
+        })
         .collect();
     // Graph `SurfaceView::index_signatures` carries the declared key/value
     // nodes + real OXC spans + the declaration file. Raise the key/value nodes
@@ -147,15 +405,17 @@ pub(crate) fn surface_view_to_projected_surface(
             use verter_semantic::analysis::type_solver::query_engine::ProjectedIndexSignature;
             ProjectedIndexSignature {
                 key_name: "key".to_string(),
-                key_type: dispatch
-                    .raise_node_to_type_expr(signature.key_type)
+                key_type: cap
+                    .materialize_output_type_expr(signature.key_type)
+                    .map(|raised| raised.into_type_expr(&cap))
                     .unwrap_or(TypeExpr::Unknown {
-                        raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                        raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
                     }),
-                value_type: dispatch
-                    .raise_node_to_type_expr(signature.value_type)
+                value_type: cap
+                    .materialize_output_type_expr(signature.value_type)
+                    .map(|raised| raised.into_type_expr(&cap))
                     .unwrap_or(TypeExpr::Unknown {
-                        raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                        raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
                     }),
                 readonly: signature.readonly,
                 spans: signature.spans,
@@ -175,27 +435,16 @@ pub(crate) fn surface_view_to_projected_surface(
 pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Unknown { raw } => {
-            // Every sentinel emitted by `raise_node_to_type_expr_inner`
-            // (exact matches) or by `semantic_query_error_raw` (prefix
-            // matches for parameterised errors) must round-trip to
+            // Every sentinel emitted by the `shape_engine::fold_node`
+            // materialisation algebra (exact matches) or by
+            // `semantic_query_error_raw` (prefix matches for parameterised
+            // errors) must round-trip to
             // "not materialised" so the dispatch-first path falls back
-            // to `owner_engine` for fuller expansion.
-            let is_exact_sentinel = matches!(
-                raw.as_str(),
-                SEMANTIC_MISS
-                    | SEMANTIC_OBJECT_SURFACE
-                    | SEMANTIC_SURFACE_MEMBER
-                    | "semanticAliasCycle"
-                    | "semanticFunction"
-                    | "VueMacroElements"
-                    | "projectedOpenSurface"
-            );
-            let is_prefix_sentinel = raw.starts_with("materialize:")
-                || raw.starts_with("unsupportedIntrinsic(")
-                || raw.starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX)
-                || raw.starts_with("unstableState(")
-                || raw.starts_with("aliasCycle(");
-            !is_exact_sentinel && !is_prefix_sentinel
+            // to `owner_engine` for fuller expansion. The sentinel set
+            // is owned by the shared `raise_sentinel` classifier so the
+            // node-domain raised-shape projection and this `TypeExpr`
+            // recogniser can never disagree on the spelling.
+            !crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel(raw)
         }
         TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
             members.iter().all(dispatch_route_expr_is_materialized)
@@ -295,10 +544,10 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
     }
 }
 
-/// Detects sentinel tokens emitted by `raise_node_to_type_expr_inner`
-/// when dispatch cannot materialise a node. Dispatch-first paths fall
-/// back to `owner_engine` when the sentinel is present — transitional
-/// until §5.8 retires the owner_engine bridge.
+/// Detects sentinel tokens emitted by the `shape_engine::fold_node`
+/// materialisation algebra when dispatch cannot materialise a node.
+/// Dispatch-first paths fall back to `owner_engine` when the sentinel is
+/// present — transitional until §5.8 retires the owner_engine bridge.
 pub(crate) fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     !dispatch_route_expr_is_materialized(expr)
 }
@@ -341,6 +590,19 @@ pub(crate) fn type_expr_is_budget_exceeded_sentinel(expr: &TypeExpr) -> bool {
 /// Returns `true` when `expr` still carries open deferred shell shapes
 /// (`KeyOf`, `IndexedAccess`, `Mapped`, `TypeOf`, `Conditional`) that
 /// indicate dispatch could not structurally expand the surface further.
+//
+// The node-domain `expanded_surface` fact (computed bottom-up in `shape_engine`)
+// now drives every production gate; this `TypeExpr` predicate survives ONLY as
+// the `#[cfg(test)]` parity ORACLE the raised-shape suite compares the bottom-up
+// fact against, so the non-test build sees it as dead.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "TypeExpr parity oracle for the bottom-up expanded_surface fact; \
+                  production gates read the node-domain fact via shape_engine"
+    )
+)]
 pub(crate) fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::KeyOf(_)

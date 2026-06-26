@@ -20,6 +20,19 @@ use crate::instant::Instant;
 use super::super::dep_signature::emit_dispatch_dep_signature_facts;
 use super::super::registry_materialize::preserve_package_backed_symbolic_refs_node;
 
+crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+    /// The whole-expression field-type MATERIALISER's output-sink
+    /// capability. The materialiser here holds this to reduce-then-raise a
+    /// graph node into a sealed output carrier and unwrap it. Its
+    /// constructor is visible ONLY within
+    /// `crate::meta_resolve::materialize::field_types` — NOT the whole
+    /// `meta_resolve` subtree — so the Kind-B bridge sibling
+    /// `meta_resolve::dispatch_helpers` cannot mint it (planted
+    /// `MetaResolveFieldTypesOutputCap::new` there ⇒ `E0624`).
+    pub(crate) struct MetaResolveFieldTypesOutputCap;
+    mint: pub(in crate::meta_resolve::materialize::field_types)
+}
+
 pub(crate) fn type_expr_materializer_context(
     mode: crate::semantic_query::ProjectionMode,
 ) -> crate::semantic_query::ProjectionReductionContext {
@@ -105,18 +118,26 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
     mode: crate::semantic_query::ProjectionMode,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_type_expr::TypeExpr {
-    materialize_component_meta_type_expr_until_stable_full(
+    // `into_type_expr` is an inherent capability-gated accessor on the
+    // carrier, so the `OutputProjector` trait need not be imported here.
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let full = materialize_component_meta_type_expr_until_stable_full(
         expr,
         scope_canonical_id,
         mode,
         query_engine,
-    )
-    .type_expr
+    );
+    // Publication-shell read: unwrap the sealed payload via the meta-resolve
+    // output capability (this shell is a true output sink that publishes the
+    // bare `TypeExpr`).
+    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx());
+    let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
+    full.into_type_expr(&cap)
 }
 
 /// Materialize a `TypeExpr` and return both the result and the
 /// producing `SemanticNodeId` + accumulated dep_signature
-/// ([`MaterializedTypeExpr`]). Sidecar-capture call sites read
+/// ([`MaterializedOutputTypeExpr`]). Sidecar-capture call sites read
 /// `.node_id`; the session merges `.dep_signature` into
 /// `ResolvedComponentMetaState.fact_versions` before publish.
 ///
@@ -142,8 +163,11 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     scope_canonical_id: &str,
     mode: crate::semantic_query::ProjectionMode,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
-    use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
+    use crate::project_semantic_dispatch::output_materialization::{
+        wrap_output_type_expr, OutputProjector,
+    };
+    use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::NodeScopeId;
     use rustc_hash::FxHashMap;
@@ -171,6 +195,20 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // poisoned a published consumer with a transit-lowered value.
     let reduction_context = type_expr_materialize_reduction_context(expr, mode);
 
+    // Classify the shape-cache key ONCE per materialization pass and reuse
+    // the SAME `Option<ShapeCacheKey>` for both the peek (below) and the
+    // admit (further down). The classifier runs the depth-safe synthetic-
+    // carrier walker (`NonSyntheticTypeExpr::new`) per build, so building
+    // it separately for the peek and the admit double-walked every
+    // carrier-free expression. `None` (a composite NESTING a synthetic
+    // carrier — no sound content-free key) still bypasses BOTH the peek
+    // and the admit; the value is computed and returned either way.
+    let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
+        std::sync::Arc::<str>::from(scope_canonical_id),
+        std::sync::Arc::new(expr.clone()),
+        reduction_context,
+    );
+
     // Peek the universal ShapeCacheDb (TypeExpr subject,
     // whole-subject demand under the exact reduction context).
     {
@@ -180,16 +218,18 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let ctx = query_engine.ctx();
-        let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
-            std::sync::Arc::<str>::from(scope_canonical_id),
-            std::sync::Arc::new(expr.clone()),
-            reduction_context,
-        );
-        let host_db = ctx.project_type_store().shape_cache_db();
-        if let Some(cached) = host_db.peek(&cache_key, ctx) {
-            crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return cached;
+        // A composite expression that NESTS a synthetic carrier has no
+        // sound content-free cache key — bypass the cache (skip peek; the
+        // admit path below is likewise skipped) and fall through to the
+        // full cold compute. A bare carrier / carrier-free expression
+        // yields a key normally.
+        if let Some(cache_key) = &cache_key {
+            let host_db = ctx.project_type_store().shape_cache_db();
+            if let Some(cached) = host_db.peek(cache_key, ctx) {
+                crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return cached;
+            }
         }
     }
 
@@ -213,6 +253,11 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
     let ctx = query_engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
+    // Mint the field-types materialiser output capability (constructor
+    // visible only within `crate::meta_resolve::materialize::field_types`):
+    // this materialiser is a true publication sink — it reduce-then-raises
+    // into a sealed carrier and unwraps the sealed payload via the capability.
+    let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
     let env: FxHashMap<String, crate::semantic_query::SemanticNodeId> = FxHashMap::default();
     // Establish ONE tear-free observation of the scope's content
     // identity. The scope's `whole_hash` feeds two distinct consumers
@@ -260,12 +305,12 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             .map(|state| state.whole_hash),
     };
     let Some(observed_scope_whole_hash) = lowering_scope_whole_hash else {
-        return MaterializedTypeExpr {
-            node_id: None,
-            type_expr: expr.clone(),
-            dep_signature: Arc::from(Vec::new()),
-            result_is_partial: false,
-        };
+        return MaterializedOutputTypeExpr::from_parts(
+            None,
+            wrap_output_type_expr(&cap, expr.clone()),
+            Arc::from(Vec::new()),
+            false,
+        );
     };
     let scope = NodeScopeId::File {
         canonical_id: Arc::from(scope_canonical_id),
@@ -309,7 +354,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         );
     }
     let _us_rr_t0 = Instant::now();
-    let dispatch_materialized = dispatch.raise_and_reduce_with_context(lowered, reduction_context);
+    let materialized = cap.materialize_reduced_output_type_expr(lowered, reduction_context);
     let _us_rr_ms = _us_rr_t0.elapsed().as_secs_f64() * 1000.0;
     if _us_trace {
         eprintln!(
@@ -326,14 +371,11 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // project-generation entries (only `WholeHash` survives the
     // conversion); the dropped entries are R20-only signals with no
     // `FactVersionRef` equivalent.
-    emit_dispatch_dep_signature_facts(ctx, &dispatch_materialized.dep_signature);
+    emit_dispatch_dep_signature_facts(ctx, materialized.dep_signature());
 
-    let materialized = MaterializedTypeExpr {
-        node_id: dispatch_materialized.node_id,
-        type_expr: dispatch_materialized.type_expr,
-        dep_signature: dispatch_materialized.dep_signature,
-        result_is_partial: dispatch_materialized.result_is_partial,
-    };
+    // `materialized` is the sealed reduce-then-raise carrier the boundary
+    // produced; thread it through verbatim. Its `type_expr` payload is read
+    // below only through the capability-gated accessor.
 
     // Step 3 closure: write-through to ctx-owned MaterializeMemoDb.
     //
@@ -392,8 +434,10 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // the closed-source path-precise admission. Refuse only the typeof miss so
     // the next request recomputes cold and recovers. The value still flows.
     let typeof_result_root_is_miss = matches!(expr, verter_type_expr::TypeExpr::TypeOf(_))
-        && crate::resolver_core::type_expr_root_is_unmaterialized_sentinel(&materialized.type_expr);
-    if !materialized.result_is_partial
+        && crate::resolver_core::type_expr_root_is_unmaterialized_sentinel(
+            materialized.type_expr(&cap),
+        );
+    if !materialized.result_is_partial()
         && !observed_missing_dependency
         && !typeof_result_root_is_miss
     {
@@ -404,23 +448,26 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            let cache_key =
-                crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
-                    std::sync::Arc::<str>::from(scope_canonical_id),
-                    std::sync::Arc::new(expr.clone()),
-                    reduction_context,
-                );
-            let host_db = ctx.project_type_store().shape_cache_db();
-            let captured_value = materialized.clone();
-            // The SINGLE tear-free scope observation taken above is threaded
-            // into the write-through. The signature builder is
-            // provenance-pure: it roots the keyed scope on the observation's
-            // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
-            // on a re-read of current content. The lowering `NodeScopeId`
-            // was built from the SAME observation's `whole_hash`, so the
-            // memo value and its fact signature root on one identical scope
-            // hash — no torn read.
-            let _ = host_db.get_or_compute(&cache_key, ctx, move || {
+            // A composite expression that NESTS a synthetic carrier has
+            // no sound content-free cache key — skip the cache admit
+            // entirely (the freshly-computed `materialized` value still
+            // flows to the caller below). A bare carrier / carrier-free
+            // expression yields a key normally. The SAME `cache_key` the
+            // peek classified at function entry is reused here — the
+            // classifier (and its synthetic-carrier walk) runs once per
+            // materialization pass, not once per peek and once per admit.
+            if let Some(cache_key) = &cache_key {
+                let host_db = ctx.project_type_store().shape_cache_db();
+                let captured_value = materialized.clone();
+                // The SINGLE tear-free scope observation taken above is threaded
+                // into the write-through. The signature builder is
+                // provenance-pure: it roots the keyed scope on the observation's
+                // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
+                // on a re-read of current content. The lowering `NodeScopeId`
+                // was built from the SAME observation's `whole_hash`, so the
+                // memo value and its fact signature root on one identical scope
+                // hash — no torn read.
+                let _ = host_db.get_or_compute(cache_key, ctx, move || {
             // The keyed scope canonical is the entry's self-root, rooted
             // on the observed materialisation-time content version;
             // every canonical the materialisation walk observed (carried
@@ -443,7 +490,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
             match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
                 &captured_scope_observation,
                 observed_scope_syntactic_export_set,
-                &captured_value.dep_signature,
+                captured_value.dep_signature(),
             ) {
                 crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
                     Some((captured_value, sig.facts))
@@ -451,6 +498,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
                 crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
             }
         });
+            }
         }
     }
 
@@ -462,7 +510,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 }
 
 /// Reduce a per-member surface value (a settled [`SemanticNodeId`]) to
-/// its published [`crate::project_semantic_dispatch::raise::MaterializedTypeExpr`]
+/// its published [`crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr`]
 /// form WITHOUT round-tripping through
 /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::shallow_lower_type_expr`].
 ///
@@ -481,19 +529,19 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 /// # Shape
 ///
 /// Graph-native: walks the reachable subgraph of `member_value` via
-/// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_and_reduce`]
+/// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_and_reduce_with_context`]
 /// (which dispatches per shape through `execute_cooperative`). NOT
 /// path-precise: the iterative reducer pushes children before reducing
 /// parents, so the full subgraph of `member_value` is visited.
 /// Path-precision is provided at a higher layer by the per-member slot
 /// of [`crate::component_meta_caches::ShapeCacheDb`] (indexed by
-/// [`crate::component_meta_caches::ShapeSubject::SemanticNode`] via
-/// `ShapeCacheKey::semantic_node_whole`), which amortises sibling reuse,
-/// not by the reducer itself.
+/// [`crate::component_meta_caches::ShapeSubject::MemberValueNode`] via
+/// `ShapeCacheKey::surface_member_value_whole_with_context`), which
+/// amortises sibling reuse, not by the reducer itself.
 ///
 /// # Returns
 ///
-/// A [`crate::project_semantic_dispatch::raise::MaterializedTypeExpr`]
+/// A [`crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr`]
 /// carrying the reduced node id, the raised `TypeExpr`, and the
 /// accumulated `DepSignature` — the same envelope
 /// [`materialize_component_meta_type_expr_until_stable_full`] returns,
@@ -520,10 +568,14 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
     _scope_canonical_id: &str,
     member_value: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
-) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
+) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
+    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 
     let dispatch = ProjectSemanticDispatch::new(ctx);
+    // Publication sink: reduce-then-raise into the sealed carrier via the
+    // meta-resolve output capability.
+    let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
 
     // Drive the graph-native reducer DIRECTLY on `member_value` under
     // the caller's `context`. NO `shallow_lower_type_expr` round-trip.
@@ -533,9 +585,9 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
     //      children the demand context requires (per the demand-driven
     //      reducer traversal rules).
     //   2. `raise_node_to_type_expr(reduced)` — single terminal raise.
-    //   3. Returns `MaterializedTypeExpr { node_id, type_expr,
-    //      dep_signature }`.
-    let materialized = dispatch.raise_and_reduce_with_context(member_value, context);
+    //   3. Returns the sealed `MaterializedOutputTypeExpr` (node_id +
+    //      sealed type_expr payload + dep_signature + result_is_partial).
+    let materialized = cap.materialize_reduced_output_type_expr(member_value, context);
 
     // Dual-emit dispatch facts into BOTH downstream channels:
     // (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at
@@ -546,7 +598,7 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
     // conversion); the dropped entries are R20-only signals with no
     // `FactVersionRef` equivalent. Mirrors the TypeExpr entry's
     // contract exactly.
-    emit_dispatch_dep_signature_facts(ctx, &materialized.dep_signature);
+    emit_dispatch_dep_signature_facts(ctx, materialized.dep_signature());
 
     materialized
 }
@@ -770,6 +822,7 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_type_expr::TypeExpr {
+    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     let ctx = engine.ctx;
     let dispatch = ProjectSemanticDispatch::new(ctx);
@@ -792,8 +845,11 @@ pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
     if preserved_node == materialized_node {
         return materialized.clone();
     }
-    dispatch
-        .raise_node_to_type_expr(preserved_node)
+    // Publication sink: materialize into a sealed carrier and unwrap via
+    // the meta-resolve output capability.
+    let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
+    cap.materialize_output_type_expr(preserved_node)
+        .map(|carrier| carrier.into_type_expr(&cap))
         .unwrap_or_else(|| materialized.clone())
 }
 

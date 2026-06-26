@@ -204,6 +204,30 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "materialization_cache_key_is_content_free_subject_keyed",
             "materialize_structure_db_is_keyed_on_canonical_subject_not_runtime_key",
             "materialization_cache_key_is_content_free_and_env_discriminating",
+            // Scoped cache-key-hygiene over the shape/materialize
+            // derived-`Hash` keys (`ShapeCacheKey` + `ShapeSubject` +
+            // `ShapeDemand`; `MaterializationCacheKey`): NONE of the
+            // forbidden content/version markers, and a `SemanticNodeId`
+            // ONLY in the two sanctioned positions
+            // (`MaterializationCacheKey.normalized_type_args` +
+            // the sealed `MemberShapeNodeSubject` newtype) — the allow-list
+            // is EXACT, the scope is shape/materialize keys only (a blanket
+            // ban would be unsound). RECORDED SOURCE SCANNER (per the binding
+            // neutral design ruling: a recorded scanner, not structural
+            // enforcement); the predicate + the closed-inventory +
+            // member-arm field-pinning each carry their own discriminator
+            // self-test (registered so the anti-stub proofs cannot be
+            // deleted without the registry noticing). The newtype is pinned
+            // GLOBALLY to one occurrence, the visibility-token strip is
+            // exact, the variant inventory survives attributed arms, and the
+            // exact per-body field inventory each carry a discriminator too.
+            "shape_materialize_key_hygiene_predicate_discriminates",
+            "shape_subject_closed_inventory_self_test",
+            "member_arm_sealed_newtype_is_field_pinned_self_test",
+            "member_shape_node_subject_global_single_occurrence_self_test",
+            "strip_visibility_only_strips_the_pub_token_self_test",
+            "exact_field_inventory_discriminates_self_test",
+            "no_unsanctioned_semantic_node_id_in_shape_or_materialize_key",
         ],
     ),
     (
@@ -386,7 +410,8 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // QueryError), never a raw `TypeExpr::Unknown` control sentinel
             // (scoped to the carrier surface; the global fence lands later).
             "carrier_constructors_do_not_use_unknown_as_control_flow",
-            // The query-free structural lowerer (`structural_lower.rs`) emits
+            // The query-free structural lowerer
+            // (`structural_carrier_producer/macro_arg_producer.rs`) emits
             // the typed carriers from the owned `TypeExpr` WITHOUT any
             // resolution / host query, and never materialises a carrier back
             // to `TypeExpr` during emission — it is a producer, not a second
@@ -427,36 +452,45 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "carrier_module_has_no_public_type_args_surface",
             "carrier_type_args_accessor_is_exhaustive_and_wildcard_free",
             "map_carrier_type_args_is_exhaustive_and_wildcard_free",
-            // MACRO HOT MIRROR — single-engine producer (make-unrepresentable):
-            // the structural lowerer's production entry `lower_type_expr_structural`
-            // is re-housed under `crate::macro_hot_mirror::structural_lower` and is
-            // `pub(in crate::macro_hot_mirror)` ancestor-private, so its SOLE
-            // production caller is the macro hot-mirror builder and a second
-            // macro-arg graph producer is unrepresentable by construction. The
-            // PRIVACY-SHAPE guards pin that visibility on BOTH producer-capable
-            // helpers — the lowerer AND the shared binder-seed helper
-            // `build_script_setup_seed_frames` (likewise `pub(in
-            // crate::macro_hot_mirror)`, so no foreign module can open a second
-            // binder-seed producer); those compiler-enforced privacies are the
-            // LOAD-BEARING confinement. The ENTRY-SURFACE guard is a BOUNDED
+            // STRUCTURAL-CARRIER PRODUCER — single producer (make-unrepresentable):
+            // the raw structural lowerer `lower_type_expr_structural`, the macro
+            // hot-mirror builder, and the binder-seed builder are ALL owned by ONE
+            // module `crate::structural_carrier_producer::macro_arg_producer` and are
+            // MODULE-PRIVATE (no visibility modifier). The owner declares it as a
+            // PRIVATE `mod macro_arg_producer;` re-exporting ONLY
+            // `macro_type_arg_hot_ref` + `MacroHotMirror`, so a SECOND
+            // structural-carrier producer is UNREPRESENTABLE BY CONSTRUCTION: no
+            // foreign module can NAME the private builders (a compile error, E0603 /
+            // E0433), and the producer is COLLAPSED into one module so no same-owner
+            // file can name them either (a third caller is a compile error). The
+            // MODULE-PRIVATE lowerer guard + the PARENT-SHAPE narrowness guard (the
+            // owner directory holds ONLY `macro_arg_producer.rs`, mod.rs, and tests —
+            // so there is no other file that could name the private builders) together
+            // are the compiler-enforced LOAD-BEARING confinement. The SMALL
+            // EXPANSION-SURFACE backstop (`macro_arg_producer.rs` declares NO
+            // production item-position/expr/statement macro / `macro_rules!` /
+            // `include!` / proc-macro attribute / `#[derive]` on a producer-capable
+            // item / out-of-line-or-`#[path]` child mod / `#[macro_use]` — only the
+            // `#[cfg(test)] #[path] mod *_tests;` test wiring is allowlisted) closes
+            // the only same-module code-generation class the structure cannot already
+            // make a compile error. The ENTRY-SURFACE guard is a BOUNDED
             // defense-in-depth token tripwire (NOT exhaustive — documented residual
-            // tail) that pins `macro_type_arg_hot_ref` as the SOLE crate-visible
-            // module-level producer entry of the module (no second outward producer
-            // fn beyond the cfg-gated test facade); the ORDERING TRIPWIRE bans a
-            // production macro-arg eager-lowering path outside the mirror (a
-            // FILE-SCOPE catch: whole-function co-presence PLUS the
-            // cross-function-same-file binding-flow helper split); the PURITY guard
-            // bans the full route/import/cross-file-symbol/carrier-head resolution
-            // surface (`prepared_decl_bundle`, `cached_import_route_resolution`,
+            // tail) pinning `macro_type_arg_hot_ref` as the ONLY crate-visible producer
+            // fn of the owner module; the ORDERING TRIPWIRE bans a production macro-arg
+            // eager-lowering path outside the producer module (a FILE-SCOPE catch:
+            // whole-function co-presence PLUS the cross-function-same-file binding-flow
+            // helper split); the PURITY guard bans the full
+            // route/import/cross-file-symbol/carrier-head resolution surface
+            // (`prepared_decl_bundle`, `cached_import_route_resolution`,
             // `resolve_route_type_edge`, `resolve_type_dependency_canonical`,
             // `resolve_owner_direct_import`, `routed_shallow_state`,
-            // `resolve_*_head`, …) inside the mirror producer — resolution + dep
-            // recording belong at the resolving DEMAND, so the producer stays a
-            // pure structural-carrier lowering and script-setup seeding re-sources
-            // from the owner's route-free `IndexedReady` (`raw_source` +
-            // `framework_parse`).
-            "structural_lowerer_production_entry_is_macro_hot_mirror_private",
-            "script_setup_binder_helper_is_module_private",
+            // `resolve_*_head`, …) inside the producer — resolution + dep recording
+            // belong at the resolving DEMAND, so the producer stays a pure
+            // structural-carrier lowering and script-setup seeding re-sources from the
+            // owner's route-free `IndexedReady` (`raw_source` + `framework_parse`).
+            "structural_carrier_producer_lowerer_is_module_private",
+            "structural_carrier_producer_module_is_narrow",
+            "macro_arg_producer_has_no_production_expansion_surface",
             "macro_hot_mirror_exposes_single_crate_visible_producer_entry",
             "no_production_macro_arg_eager_lowering_outside_mirror",
             "macro_hot_mirror_producer_is_pure_no_route_resolution",
@@ -464,18 +498,167 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // flip): the listed component-meta consumers accept BOTH a
             // parser-produced `TypeExpr` and an already-lowered handle,
             // routing BOTH arms through the SAME dispatch (read-compat,
-            // ONE resolver). G-A forbids a reverse `materialize_type_expr`
-            // bridge in a hot handle arm (the single boundary stays an
-            // output seam); G-B is the per-inventory ordering gate (each
-            // hot carrier has a handle-native consumer BEFORE the producer
-            // flip; the verter_semantic prepared-wrapper payloads are
-            // recorded as crate-boundary-deferred, and a short-lived
+            // ONE resolver). G-A is now the STRUCTURAL
+            // `materialize_type_expr_is_not_production_visible` guard: the
+            // `materialize_type_expr(HotTypeRef)` reverse-handle harness is
+            // `#[cfg(test)]`-gated, so production cannot name it and a hot-arm
+            // reverse-bridge is a compile-time impossibility (replaces the
+            // deleted `no_hot_path_materialize_type_expr_bridge` line
+            // scanner). G-B is the per-inventory ordering gate (each hot
+            // carrier has a handle-native consumer BEFORE the producer flip;
+            // the verter_semantic prepared-wrapper payloads are recorded as
+            // crate-boundary-deferred, and a short-lived
             // absence-of-direct-reference tripwire asserts non-test
             // verter_session production source does not directly name the
             // deferred payload API (the four payload type names /
             // .target_args); it is an ordering tripwire, not a semantic
-            // dataflow proof).
-            "no_hot_path_materialize_type_expr_bridge",
+            // dataflow proof). The durable `SemanticNodeId -> TypeExpr`
+            // OUTPUT boundary is the sealed `OutputProjector` capability +
+            // sealed carriers whose inner `TypeExpr` lives in a deeply-private
+            // `carrier::payload` vault (so in safe Rust outside the vault there
+            // is no readable `TypeExpr` field; the residual trusted surface is
+            // the vault + registration source + guard deletion + unsafe). The
+            // retired interim Kind-B `legacy_semantic_type_expr_bridge` is gone
+            // (its absence tripwired by the tombstone
+            // `retired_kind_b_bridge_symbol_absent_from_production_source`).
+            // The carrier-can't-name-`sealed` seal is COMPILER-enforced: `mod
+            // sealed` is PRIVATE (not `pub(super)`) inside `mod projector`, so a
+            // sibling `carrier`-side `impl projector::sealed::Sealed for HotCap`
+            // is `E0603` (module `sealed` is private) — pinned structurally by
+            // `sealed_module_is_private_not_pub_super`, with the topology guard
+            // as defense-in-depth.
+            // The fence SHAPE is pinned by mechanism-matched guards: the
+            // sanctioned sink set (explicit `impl OutputProjector` self-types +
+            // the matching `impl sealed::Sealed` self-types, no blanket seal
+            // impl) + the EXACT owner module topology (inline projector /
+            // projector::sealed / carrier / carrier::payload only, item-macro /
+            // include! / unknown-attribute / cfg_attr-proc-macro injection
+            // banned) by
+            // `output_projector_owner_registration_inventory`; the carrier/
+            // payload closed item/signature accessor allowlist (every fn
+            // returning TypeExpr cap-gated or exactly test-gated) by
+            // `output_carriers_have_no_inherent_typeexpr_escape_method`; the
+            // carrier/payload field privacy (regardless of spelled type) by
+            // `output_carrier_payload_fields_are_private`; the out-of-crate
+            // visibility boundary by
+            // `output_projector_non_owner_impl_is_compiler_sealed`; and the
+            // mintable `TestOutputCap` capability staying `#[cfg(test)]`-gated
+            // by `test_output_cap_not_visible_or_mintable_in_non_test_builds`
+            // (the carrier TRAIT escapes have an accidental-regression CANARY —
+            // NOT proof-complete; completeness is the payload vault — in the
+            // sibling `src/project_semantic_dispatch/output_materialization_guards.rs`).
+            // The output capability
+            // is minted PER-LEAF (not per-subtree) so a Kind-B bridge sibling
+            // sharing the subtree cannot mint it — pinned by
+            // `output_cap_mint_scope_is_per_leaf_not_subtree`. The
+            // COMPLEMENTARY input-authority hole at the Kind-A PUBLICATION
+            // boundary — a non-sink fn choosing a raw semantic-graph subject /
+            // forging a surface/member/signature wrapper and pairing it with a
+            // cursor to reverse-materialize a member `TypeExpr` — is closed by
+            // the sealed admitted-token chain
+            // (`meta_resolve::projectors::publication_authority`: the
+            // `ResolvedMacroPayload`/`ResolvedPayloadSurface`/`SurfaceMemberCandidate`/`AdmittedPublishedMember`
+            // tokens with private fields + a private `Seal`, minted only by the
+            // admission fns; plus the framework-surface `ResolvedVueSurface` +
+            // `SvelteResolvedSurface` tokens, gated by the sealed
+            // `ResolvedSurfaceAccess` trait whose supertrait seal is PRIVATE to
+            // `resolved_surface_access.rs` — a sibling `impl` is `E0603`, pinned
+            // defense-in-depth by
+            // `resolved_surface_access_impls_are_exactly_the_two_tokens`) as the
+            // COMPILER primary, and pinned by the STRUCTURAL cross-sink
+            // transitive guard `cross_sink_raw_authority_to_type_expr_boundary`
+            // (a structurally-complete — vs the old name-based pin — residual
+            // SUPPLEMENT behind the compiler primary, NOT a replacement) — it
+            // decides "TypeExpr-bearing" by FIELD-CLOSURE from `TypeExpr` over the
+            // type field graph (not a DTO-name list) and fails any reachable
+            // production fn across the registered PUBLICATION sinks (projectors,
+            // cache-key, framework-surface, query-engine surface) that pairs a
+            // forgeable raw-authority input with a `TypeExpr`-bearing output
+            // outside the closed sink-local allowlist. Genuinely structural:
+            // MODULE-QUALIFIED `(module, name)` `TypeDefId` identity carried
+            // through the closure graph by a CONSERVATIVE FAIL-CLOSED resolver
+            // (NOT an exhaustive Rust name resolver) that resolves a written
+            // reference ONLY by genuine PROOF — own-module-def, a genuine
+            // `pub`/`pub(crate)` re-export, a proven intra-crate `use`-binding
+            // chain, or a proven qualifier; an import that CLAIMS a local name and
+            // fails to resolve-by-proof yields `Unresolved` (NEVER a uniqueness
+            // fall-through); else `Unresolved`. A fully-qualified path is proven by
+            // a DIRECT suffix-or-equal module match (relative `crate`/`self`/`super`
+            // rebased onto the referencing module; `super` cannot escape above the
+            // crate root; a too-short ANCESTOR prefix is NOT a match; an UNROOTED
+            // first segment the file `use`-SHADOWS is re-resolved through the shadow,
+            // never trusted on its raw suffix), an EXACT-target `pub`/`pub(crate)`
+            // re-export (the TARGET module is the candidate's real home EXACTLY,
+            // never suffix slack, keyed by the normalized absolute written path), or
+            // a proven intra-crate `use`-binding chain (a module-scoped,
+            // intra-crate-only, non-glob, module/descendant-visibility, cycle-bounded
+            // use-binding PROOF graph). A UNIQUE name does NOT resolve a qualified
+            // path on uniqueness alone (a fabricated
+            // `external::AdmittedPublishedMember` qualifier stays `Unresolved`); an
+            // unqualified name resolves on the own module; else, if a `use` import
+            // CLAIMS the name, its TARGET is resolved BY PROOF and returned as-is (an
+            // import target that does not resolve leaves the name `Unresolved`
+            // immediately — `use crate::evil::AdmittedPublishedMember` does NOT bless
+            // the unique token); else a parent module's accessible `use`-binding
+            // chain may prove it; else, ONLY when no import claimed the name,
+            // exactly-one collected def with that name; a colliding name like the two
+            // `IndexSignature` defs is disambiguated into DISTINCT ids the same way;
+            // an unresolvable / forged-qualifier reference fails closed — with a
+            // fail-closed anti-vacuity rail over the `(module, name)`-keyed
+            // safe-input / construction-chain tokens; the dual-bearing defense is
+            // a DIRECT carve-out (a wrapper directly co-holding a
+            // resolution-authority seed stays forgeable) plus a TRANSITIVE
+            // soundness tripwire whose sanctioned-carrier exemption is QUALIFIED
+            // `(module, name)` (a wrong-module same-name token FIRES); BOTH the
+            // OUTPUT and INPUT sides are fail-closed on an unclassifiable ident,
+            // and the non-authority exemptions are QUALIFIER-AWARE — a Qualified
+            // `(module, name)` entry (anti-vacuity-checked) or a non-field-bearing
+            // CATEGORY entry carrying APPROVED qualified homes, matched against the
+            // `Unresolved` ref's PATH not its bare final segment (a forged
+            // `evil::Span` FIRES; a one-segment generic is benign; a one-segment
+            // trait-bound/external is exempt only with no same-name collected def);
+            // the safe-input set is SPLIT into policy-admitted tokens
+            // vs pre-admission construction-chain structs; the sink-fn collector
+            // is inline-mod-aware. The fence soundness is tripwired by
+            // `forgeable_input_fence_has_no_dual_bearing_type`.
+            // This is the Kind-A / PUBLICATION bar. The Kind-B raise-then-decide
+            // residual is RETIRED: the interim `legacy_semantic_type_expr_bridge`
+            // is deleted, every Kind-B caller now decides on the node-domain
+            // `RaisedShapeFacts` / interned `RaisedShapeKey` (no mid-flight
+            // `SemanticNodeId -> TypeExpr` raise), and the single publication
+            // `TypeExpr` is materialised once at a registered output sink through
+            // the sealed `OutputProjector`. The absence of the retired bridge
+            // symbol is tripwired by the lean tombstone
+            // `retired_kind_b_bridge_symbol_absent_from_production_source`. The
+            // admitted
+            // tokens' field privacy + seal are pinned by
+            // `admitted_tokens_have_private_fields_and_seal`, and the
+            // authority-callable scopes are no-`unsafe` (a transmute could
+            // fabricate a token) by `authority_scopes_contain_no_unsafe`. The
+            // carrier
+            // `_for_test` accessors are gated `#[cfg(any(test, feature =
+            // "test-support"))]` (production-unreachable in EVERY profile,
+            // never `debug_assertions`-present in debug) — pinned by
+            // `carrier_for_test_accessors_are_test_support_gated_not_debug_assertions`.
+            // The `pub(super)` shell raise seam returns a SEALED carrier so a
+            // dispatch sibling cannot launder — pinned by
+            // `raise_output_seam_returns_sealed_carrier_not_bare_type_expr`.
+            "materialize_type_expr_is_not_production_visible",
+            "retired_kind_b_bridge_symbol_absent_from_production_source",
+            "sealed_module_is_private_not_pub_super",
+            "output_projector_owner_registration_inventory",
+            "output_carriers_have_no_inherent_typeexpr_escape_method",
+            "output_carrier_payload_fields_are_private",
+            "output_projector_non_owner_impl_is_compiler_sealed",
+            "test_output_cap_not_visible_or_mintable_in_non_test_builds",
+            "output_cap_mint_scope_is_per_leaf_not_subtree",
+            "cross_sink_raw_authority_to_type_expr_boundary",
+            "forgeable_input_fence_has_no_dual_bearing_type",
+            "admitted_tokens_have_private_fields_and_seal",
+            "resolved_surface_access_impls_are_exactly_the_two_tokens",
+            "authority_scopes_contain_no_unsafe",
+            "carrier_for_test_accessors_are_test_support_gated_not_debug_assertions",
+            "raise_output_seam_returns_sealed_carrier_not_bare_type_expr",
             "stage4_carrier_inventory_handle_native_consumers_present",
             "stage4_deferred_carriers_have_no_session_resolution_consumer",
         ],
@@ -586,6 +769,15 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // The R6 meta-guard itself is anti-stub: a CRITICAL rule
             // must reference a non-empty guard list.
             "every_registry_entry_lists_at_least_one_guard",
+            // The registry-completeness walk that backs
+            // `every_registry_guard_name_resolves_to_a_known_test` must
+            // fail CLOSED: a non-`NotFound` metadata IO error on a crate /
+            // `tests/` / `src/` subtree panics instead of silently skipping
+            // (which would let the meta-guard believe guard coverage exists
+            // for files it never scanned). This self-test proves the
+            // fail-closed `NotADirectory`-panics + `NotFound`-no-panic
+            // discipline of the walk's directory classifier.
+            "registry_completeness_walk_hard_fails_on_metadata_error_self_test",
         ],
     ),
     (
@@ -719,18 +911,58 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         "Synthetic Carrier Typed-IR Rule",
         &[
             // Pins R22 carrier-verdict + carrier-provenance substrate
-            // deletion. The typed-IR
-            // `TypeExpr::SyntheticSlotBinding` variant is the sole
-            // carrier identity at the projector / registry / reducer
+            // deletion — the retired-symbol absence scanner. The
+            // typed-IR `TypeExpr::SyntheticSlotBinding` variant is the
+            // sole carrier identity at the projector / registry / reducer
             // surface; re-introducing the R22 substrate is forbidden.
+            // Lives at
+            // `crates/verter_session/tests/cases/g_misc2/no_carrier_verdict_db.rs`.
             "no_carrier_verdict_db",
+            // Bans a hand-rolled `SemanticNodeId(<ident>.value_node)`
+            // ordinal cache-key construction in production source — the
+            // bounded residual SYNTACTIC supplement to the structural
+            // confinement (sealed `NonSyntheticTypeExpr` + module-private
+            // `ShapeSubject`/`ShapeCacheKey` construction + sealed
+            // `MemberShapeNodeSubject`). The `value_node` arena ordinal is
+            // value-side provenance, never a cache key. Lives at
+            // `crates/verter_session/tests/cases/g_misc2/synthetic_carrier_explicit_deepen_routes_through_shape_cache_key.rs`.
+            "synthetic_carrier_explicit_deepen_routes_through_shape_cache_key",
+            // The discriminator self-test for the value_node scanner above:
+            // proves the STREAM scan catches every instance of the DIRECT
+            // single-ident shape `SemanticNodeId(<ident>.value_node)`
+            // (including a MULTI-LINE split of that shape) and false-positives
+            // on none. The scanner claims only the direct shape; receiver
+            // expressions / chained access / binding indirection are covered by
+            // the structural primary. Registered so the anti-stub proof cannot
+            // be deleted without the registry noticing.
+            "synthetic_carrier_explicit_deepen_guard_self_test",
+            // Discriminating self-tests for the hard-failing production-
+            // source traversal both scanners share: the top-level crate /
+            // `src` classification panics on a non-`NotFound` metadata IO
+            // error instead of collapsing it to a silent skip (the
+            // `Path::is_dir()` fail-open class). Each proves the panic on a
+            // `NotADirectory` traversal while a `NotFound` path remains a
+            // legitimate non-panicking skip. The two scanner files each carry
+            // their OWN uniquely-named copy (the retired-symbol scanner in
+            // `no_carrier_verdict_db.rs` and the synthetic-deepen scanner in
+            // `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key.rs`),
+            // and BOTH are registered so deleting EITHER file's copy dangles
+            // its registry entry and is caught — a single shared name would let
+            // one copy silently satisfy the registry for both.
+            "retired_symbol_scanner_classified_as_dir_hard_fails_on_metadata_error_self_test",
+            "synthetic_deepen_scanner_classified_as_dir_hard_fails_on_metadata_error_self_test",
             // Pins the legitimate explicit-deepen cache route through
-            // `ShapeCacheKey::semantic_node_whole(scope,
-            // SemanticNodeId(carrier.value_node), mode)`. Positive
-            // executable proof of the cache-key identity round-trip
-            // (insert + lookup + scope/mode/value_node discrimination);
-            // discriminates RED-on-revert if the cache route stops
-            // routing through `carrier.value_node`.
+            // `ShapeCacheKey::synthetic_binding_whole(SyntheticBindingId::
+            // from_carrier_key(&carrier), mode)`, rooting on the
+            // content-free `SyntheticBindingId`. Positive executable proof
+            // of the cache-key collapse invariant: two carriers with the
+            // SAME identity tuple but DIFFERENT `value_node` collapse onto
+            // ONE entry (`live_count() == 1`), the still-discriminating
+            // axes (scope / slot / binding / surface_kind / mode) each
+            // MISS, and `value_node` survives only as a value-side
+            // provenance round-trip. Discriminates RED-on-revert against
+            // the retired `SemanticNodeId(value_node)` key (which would
+            // key disjointly ⇒ `live_count() == 2`).
             "synthetic_carrier_explicit_deepen_proof",
             // The migration's content-free successor identity for the
             // synthetic carrier (`SyntheticBindingId`) carries no bare
@@ -761,7 +993,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // every LSP provider-sync file and FAILS if any function OTHER THAN
             // the approved leaf close-dispatch primitives contains an inline
             // provider-close loop (close-before-sync), which would close the live
-            // editor TSX on an owner change or lose the prior path on a failed
+            // editor TSX on an owner change or lose the previous path on a failed
             // sync. A second guard (`vue_sync_functions_never_delegate_raw_stale_close`)
             // closes the delegated-close evasion: a `.vue`-syncing function that
             // hands the RAW `transition.stale_paths` to a close helper before
@@ -1110,16 +1342,137 @@ fn title_normaliser_handles_markdown_and_critical_suffix() {
     assert_eq!(normalise_title("## Not A Rule"), "Not A Rule".to_string(),);
 }
 
-/// Walk every `.rs` file rooted at `path` (recursively) and call
-/// `visit` with each file's path.
+/// Discriminating self-test for the registry-completeness walk's
+/// fail-closed directory classification: `registry_completeness_classified_as_dir`
+/// must hard-fail (panic) on a non-`NotFound` metadata IO error rather than
+/// silently treating the path as a non-directory. This is the precise
+/// difference from `Path::is_dir()`, which collapses EVERY metadata error
+/// (including a `NotADirectory`/permission error) to `false` and would drop a
+/// crate, a `tests/`/`src/` subtree, or a subdir from the registry-completeness
+/// scan vacuously — letting the meta-guard believe guard coverage exists for
+/// files it never scanned.
+///
+/// Uniquely named (NOT shared with the g_misc2 scanners' same-purpose
+/// self-tests): the HashSet-dedup lesson is that two same-named self-tests in
+/// different files leave neither protected — so this guard's fail-closed walk
+/// gets its own distinctly-named self-test, registered under its own name.
+#[test]
+fn registry_completeness_walk_hard_fails_on_metadata_error_self_test() {
+    let scratch = std::env::temp_dir().join(format!(
+        "verter_registry_completeness_classify_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    fs::create_dir_all(&scratch).expect("create scratch dir");
+
+    // A real directory classifies as a directory.
+    assert!(
+        registry_completeness_classified_as_dir(&scratch),
+        "classifier must report an existing directory as a directory"
+    );
+
+    // A genuinely-absent path (`NotFound`) is a LEGITIMATE non-directory
+    // answer — a crate root without a `tests/`/`src/` is simply skipped, NOT a
+    // panic.
+    let absent = scratch.join("definitely_absent").join("src");
+    assert!(
+        !registry_completeness_classified_as_dir(&absent),
+        "classifier must report a genuinely-absent (NotFound) path as a \
+         non-directory WITHOUT panicking — a missing `src/`/`tests/` is a legitimate skip"
+    );
+
+    // A path that traverses THROUGH a regular file as if it were a directory
+    // produces a non-`NotFound` metadata IO error (`NotADirectory` on Unix, an
+    // analogous non-NotFound kind on Windows). `registry_completeness_classified_as_dir`
+    // MUST panic on it; `Path::is_dir()` would silently return `false` (the
+    // fail-open class this guard closes).
+    let regular_file = scratch.join("regular.txt");
+    fs::write(&regular_file, b"not a directory").expect("write regular file");
+    let through_file = regular_file.join("src");
+
+    // Sanity precondition: confirm this scratch path is the IO-error (NOT
+    // NotFound) case on this platform, so the test discriminates rather than
+    // passing vacuously where the path resolves to NotFound.
+    let probe = fs::metadata(&through_file);
+    assert!(
+        probe
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound),
+        "self-test precondition: traversing through a regular file must yield a \
+         non-NotFound metadata IO error on this platform; got {probe:?}"
+    );
+
+    let panicked =
+        std::panic::catch_unwind(|| registry_completeness_classified_as_dir(&through_file))
+            .is_err();
+    assert!(
+        panicked,
+        "classifier must HARD-FAIL (panic) on a non-NotFound metadata IO error \
+         instead of silently treating the path as a non-directory. `Path::is_dir()` \
+         would return `false` here, dropping a subtree from the registry-completeness \
+         scan — that fail-open is exactly what this classifier closes."
+    );
+
+    fs::remove_dir_all(&scratch).ok();
+}
+
+/// Hard-failing directory classification for the registry-completeness
+/// walk. Returns whether `path` is a directory.
+///
+/// A genuinely-absent path (`ErrorKind::NotFound`) is a legitimate
+/// non-directory answer (`false`) — a crate root without a `tests/` or
+/// `src/` is simply skipped. ANY OTHER metadata IO error (permissions, a
+/// `NotADirectory` traversal, a stale handle) is a hard panic carrying the
+/// path: `Path::is_dir()` collapses every such error to `false` and would
+/// silently drop a crate, a `tests/`/`src/` subtree, or a whole subdir from
+/// the registry-completeness scan — the fail-open class that lets the
+/// meta-guard believe guard coverage exists for files it never scanned.
+///
+/// Uniquely named (NOT `classified_as_dir`): the g_misc2 scanners each carry
+/// their own same-purpose helper + self-test, and a HashSet-dedup of
+/// same-named self-tests would leave one copy silently satisfying the
+/// registry for several — so this guard's fail-closed walk discipline gets
+/// its own distinctly-named helper and self-test.
+fn registry_completeness_classified_as_dir(path: &std::path::Path) -> bool {
+    match fs::metadata(path) {
+        Ok(meta) => meta.is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!(
+            "scan integrity: failed to classify `{}`: {e}",
+            path.display()
+        ),
+    }
+}
+
+/// Walk every `.rs` file rooted at `path` (recursively).
+///
+/// A `read_dir` failure that is a legitimate `NotFound` (a crate may lack a
+/// `tests/` or `src/` directory) is an empty skip; any OTHER `read_dir`
+/// error is a hard panic carrying the path — never a silent `return` that
+/// would drop a whole subtree from the registry-completeness scan and let
+/// the meta-guard pass vacuously. Each `DirEntry` is unwrapped with a panic
+/// (no `.flatten()` that would silently drop an errored entry), and the
+/// dir-vs-file classification uses `registry_completeness_classified_as_dir`
+/// (panic-on-non-NotFound-error), never `path.is_dir()`.
 fn walk_rs_files(path: &PathBuf, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(path) {
         Ok(it) => it,
-        Err(_) => return,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => panic!(
+            "scan integrity: failed to read directory `{}`: {e}",
+            path.display()
+        ),
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "scan integrity: failed to read a directory entry under `{}`: {e}",
+                path.display()
+            )
+        });
         let p = entry.path();
-        if p.is_dir() {
+        if registry_completeness_classified_as_dir(&p) {
             walk_rs_files(&p, out);
         } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
             out.push(p);
@@ -1136,9 +1489,15 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
         Ok(it) => it,
         Err(e) => panic!("read crates/: {e}"),
     };
-    for crate_entry in crate_entries.flatten() {
+    for crate_entry in crate_entries {
+        // Unwrap each `DirEntry` with a panic carrying the directory — no
+        // `.flatten()` that would silently drop a crate dir whose entry
+        // errored from the registry-completeness scan.
+        let crate_entry = crate_entry.unwrap_or_else(|e| {
+            panic!("scan integrity: failed to read a crates/ directory entry: {e}")
+        });
         let crate_path = crate_entry.path();
-        if !crate_path.is_dir() {
+        if !registry_completeness_classified_as_dir(&crate_path) {
             continue;
         }
 
@@ -1190,7 +1549,7 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
         let mut files = Vec::new();
         walk_rs_files(&tests_dir, &mut files);
         let src_dir = crate_path.join("src");
-        if src_dir.is_dir() {
+        if registry_completeness_classified_as_dir(&src_dir) {
             walk_rs_files(&src_dir, &mut files);
         }
         for file in files {

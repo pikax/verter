@@ -634,7 +634,8 @@ fn synthetic_binding_id(slot: &str, binding: &str) -> SyntheticBindingId {
 
 /// Intern a real `SyntheticBinding` node whose `value_node` points at the
 /// already-interned `target` node (re-attaching the target's raw ordinal exactly
-/// as the production lowering does at `structural_lower.rs`). The binding's
+/// as the production lowering does at `structural_carrier_producer/lower.rs`).
+/// The binding's
 /// `value_node` therefore RESOLVES in `graph`, so the encoder descends it.
 fn intern_synthetic_binding(
     graph: &SemanticGraphStore,

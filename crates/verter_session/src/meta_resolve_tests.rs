@@ -6774,7 +6774,7 @@ defineProps<Props<T>>()
 
     let raised = match projected {
         QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => dispatch
-            .raise_node_to_type_expr(node_id)
+            .materialize_output_type_expr_for_test(node_id)
             .expect("raise must succeed on a ProjectPath result"),
         other => panic!(
             "spike #1: dispatch returned non-Value for ProjectPath(Props<T>, ['items']): {other:?}\n\
@@ -6888,7 +6888,7 @@ defineProps<Wrapper<Inner>>()
     // shape. `type Wrapper<T> = T` with T=Inner reduces to Inner — the
     // raised TypeExpr should NOT be a Ref to "Wrapper".
     let expanded_raised = dispatch
-        .raise_node_to_type_expr(lowered_expanded)
+        .materialize_output_type_expr_for_test(lowered_expanded)
         .expect("raise expanded");
     if let TypeExpr::Ref { ref name, .. } = expanded_raised {
         assert_ne!(
@@ -6905,7 +6905,7 @@ defineProps<Wrapper<Inner>>()
     // Navigate). Raising back to TypeExpr should preserve the Wrapper
     // Ref so downstream callers can decide whether to project further.
     let navigate_raised = dispatch
-        .raise_node_to_type_expr(lowered_navigate)
+        .materialize_output_type_expr_for_test(lowered_navigate)
         .expect("raise navigate");
     match &navigate_raised {
         TypeExpr::Ref { name, .. } => {
@@ -7016,9 +7016,12 @@ defineProps<{ type?: ButtonHTMLAttributes['type'] }>()
         .lower_type_expr_in_scope_with_mode("/src/App.vue", &expr, ProjectionMode::Expanded)
         .expect("dispatch must lower IndexedAccess<ButtonHTMLAttributes, 'type'> at /src/App.vue");
 
-    let materialized = dispatch.raise_and_reduce(lowered, ProjectionMode::Expanded);
+    let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+        lowered,
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
 
-    let raised = &materialized.type_expr;
+    let raised = &materialized;
 
     // Negative assertions: dispatch must NOT leave the IndexedAccess shell
     // unresolved or erase to Unknown — those are the pre-Step-1.5 dispatch
@@ -7183,7 +7186,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     };
 
     let raised = dispatch
-        .raise_node_to_type_expr(badge_node)
+        .materialize_output_type_expr_for_test(badge_node)
         .expect("raise_node_to_type_expr must succeed on the badge projection");
 
     // Resolve any leading Parenthesized/Alias-style wrappers.
@@ -7363,8 +7366,11 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
         .lower_type_expr_in_scope_with_mode("/App.vue", &macro_shell, ProjectionMode::Expanded)
         .expect("dispatch must lower PricingPlansSlots<{...}> at /App.vue");
 
-    let materialized = dispatch.raise_and_reduce(lowered, ProjectionMode::Expanded);
-    let raised = &materialized.type_expr;
+    let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+        lowered,
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    let raised = &materialized;
 
     // Negative assertion: the dispatch must NOT leave a deferred Mapped
     // shell at the top level — that's the pre-Step-1.5 signature.
@@ -9845,4 +9851,94 @@ defineSlots<Wrapper<{ id: string }>>()
         "an open / unresolved indexed-access slot param root must NOT invent \
          binding rows: {default_bindings:?}"
     );
+}
+
+#[test]
+fn project_model_drops_non_model_cursor() {
+    // FIX-9: `project_model` enforces `PublishedSurfaceKind::Model` from the
+    // cursor's CARRIED surface before publishing (`descend_published_member`
+    // does NOT validate the cursor surface kind, so the API would otherwise be
+    // weaker than the per-member admission invariant). A non-`Model` cursor MUST
+    // early-return `None`; the production caller (project_evaluated_types) passes
+    // a `Model` cursor, which is NOT gated by this check.
+    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::meta_resolve::projectors::{build_owner_decl_identity, project_model};
+    use crate::resolver_core::ComponentMetaQueryEngine;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+const model = defineModel<string>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    assert!(host.ensure_loaded("/src/App.vue"));
+    let snapshot = host
+        .get_raw_analysis_snapshot("/src/App.vue")
+        .expect("raw snapshot should exist");
+    // Locate the `defineModel` macro.
+    let (macro_index, mac) = snapshot
+        .macros
+        .iter()
+        .enumerate()
+        .find(|(_, m)| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+        .expect("the SFC declares a defineModel macro");
+    assert!(
+        mac.is_type_based,
+        "fixture precondition: `defineModel<string>()` is a type-based model macro"
+    );
+
+    let owner = build_owner_decl_identity(host, "/src/App.vue");
+
+    // A non-`Model` cursor (here `Props`) MUST be rejected by the kind check —
+    // `project_model` returns `None` without publishing the model surface under
+    // the wrong published-surface kind.
+    {
+        let mut engine = ComponentMetaQueryEngine::new(host);
+        let wrong_projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
+        let mut diag_sink = Vec::new();
+        let result = project_model(
+            &mut engine,
+            &owner,
+            "/src/App.vue",
+            macro_index,
+            mac,
+            &snapshot,
+            &mut diag_sink,
+            wrong_projection.cursor(),
+        );
+        assert!(
+            result.is_none(),
+            "FIX-9: `project_model` MUST return `None` for a non-`Model` cursor (the kind check \
+             fails closed); got {result:?}"
+        );
+    }
+
+    // The correct `Model` cursor is NOT gated by the kind check — it proceeds to
+    // resolve + publish the model payload (a present model surface).
+    {
+        let mut engine = ComponentMetaQueryEngine::new(host);
+        let model_projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Model);
+        let mut diag_sink = Vec::new();
+        let result = project_model(
+            &mut engine,
+            &owner,
+            "/src/App.vue",
+            macro_index,
+            mac,
+            &snapshot,
+            &mut diag_sink,
+            model_projection.cursor(),
+        );
+        assert!(
+            result.is_some(),
+            "FIX-9: a `Model` cursor must NOT be rejected by the kind check — `defineModel<string>()` \
+             publishes a model field; got {result:?}"
+        );
+    }
 }

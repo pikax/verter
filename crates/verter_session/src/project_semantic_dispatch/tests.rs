@@ -1202,7 +1202,7 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
         "precondition: `ResolveDecl(Leaf)` must be cold before the raise"
     );
 
-    let materialized = dispatch.raise_and_reduce_with_context(
+    let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
         lowered,
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
@@ -1210,12 +1210,9 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
     // Terminal still expands: the consumed `['b']` segment runs in the
     // caller's `Expanded` mode and reduces to the concrete `number`.
     assert!(
-        matches!(
-            materialized.type_expr,
-            TypeExpr::Primitive(PrimitiveName::Number)
-        ),
+        matches!(materialized, TypeExpr::Primitive(PrimitiveName::Number)),
         "terminal `Root['a']['b']` must expand to the concrete `number`; got {:?}",
-        materialized.type_expr
+        materialized
     );
 
     // Intermediate stays Navigate-shallow: the raise reducer demoted the
@@ -14488,27 +14485,26 @@ fn execute_omit_dispatches_through_instantiate_omit_builtin() {
     );
 }
 
-/// `execute_to_type_expr` lowers a successful `QueryResult::Value`
-/// through `raise_node_to_type_expr` and preserves the dep_signature
-/// — a lossy `Option<TypeExpr>` return shape would drop the
-/// dep_signature on the floor and is NOT used here.
+/// `execute_read` returns the full `CacheRead<QueryResult<SemanticNodeId>>`
+/// preserving the dep_signature — the node-domain read the Kind-B sink adapters
+/// gate on. A lossy `Option<SemanticNodeId>` return shape would drop the
+/// dep_signature on the floor and is NOT used.
 #[test]
-fn execute_to_type_expr_preserves_dep_signature_on_success() {
+fn execute_read_preserves_dep_signature_on_success() {
     let host = host();
     upsert_ts(&host, "/w/types.ts", "export type Foo = { x: number }");
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     // ResolveDecl carries a real dep_signature anchored to /w/types.ts.
     let key = SemanticQueryKey::ResolveDecl(resolve_decl_key("/w/types.ts", "Foo"));
-    let read = dispatch.execute_to_type_expr(&key);
+    let read = dispatch.execute_read(key);
 
     // Discriminating: the dep_signature MUST contain at least one
-    // entry. Pre-fix-removing-dep_signature: the helper would
-    // discard the signature returning `Option<TypeExpr>`. Post-fix:
-    // the signature flows through to the caller intact.
+    // entry. A lossy return shape would discard the signature; here the
+    // signature flows through to the caller intact.
     assert!(
         !read.dep_signature.is_empty(),
-        "execute_to_type_expr must preserve dep_signature; got empty"
+        "execute_read must preserve dep_signature; got empty"
     );
     let names: Vec<String> = read
         .dep_signature
@@ -15813,7 +15809,7 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
     // function-like wire decision: the constructor distinction is erased at the
     // query-time round-trip boundary, never surfaced as `semanticMiss`).
     let raised = dispatch
-        .raise_node_to_type_expr(lowered)
+        .materialize_output_type_expr_for_test(lowered)
         .expect("function carrier must raise back to a TypeExpr");
     match &raised {
         TypeExpr::Function(func) => {
@@ -17141,7 +17137,7 @@ fn resolve_class_mech(host: &VerterHost, name: &str) -> verter_type_expr::TypeEx
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
-    host.project_node_to_type_expr(node)
+    host.project_node_to_type_expr_for_test(node)
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
 }
 
@@ -17901,7 +17897,7 @@ fn resolve_named_in(host: &VerterHost, canonical: &str, name: &str) -> verter_ty
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
-    host.project_node_to_type_expr(node)
+    host.project_node_to_type_expr_for_test(node)
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
 }
 

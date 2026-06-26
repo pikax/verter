@@ -19,13 +19,22 @@
 //! different / wrong path (a materialise bridge, a dropped projection,
 //! a skipped dispatch) fails it.
 //!
+//! The node-input reach is a `#[cfg(test)]`-only engine accessor
+//! (`materialize_member_surface_node_for_test`): production callers never
+//! pass a forgeable `SemanticNodeId` into the surface — the node-core is
+//! module-private and out-of-subtree production callers reach the surface
+//! only through the demand APIs (`materialize_pick_member_surface` /
+//! `project_expr_to_surface_shape`).
+//!
 //! Coverage:
-//!  - Member-surface seam (`materialize_member_surface_{expr,node}`):
-//!    the `TypeExpr` arm lowers `expr` then delegates to the node-core;
-//!    the handle arm calls the node-core directly. Same surface.
-//!  - Owner-collection seam (`owner_collection_surface_from_node`):
-//!    reduces a body handle through the same node-core, producing the
-//!    same surface the `TypeExpr` body yields once materialised.
+//!  - Member-surface seam (`materialize_member_surface_expr` + the
+//!    `#[cfg(test)]` node-core reach): the `TypeExpr` arm lowers `expr`
+//!    then delegates to the node-core; the handle arm calls the node-core
+//!    directly. Same surface.
+//!  - Owner-collection seam (the member-surface node-core, owner-collection
+//!    axis `nested = false`): reduces a body handle through the same
+//!    node-core, producing the same surface the `TypeExpr` body yields once
+//!    materialised.
 //!  - Registry "stay symbolic" root classifier
 //!    (`node_root_should_stay_symbolic`): the graph-native sibling of
 //!    the `TypeExpr`-shape predicate classifies the equivalent node
@@ -102,7 +111,7 @@ fn member_surface_expr_and_node_arms_produce_equivalent_surface() {
 
         let node = lower_handle(host, "/types.ts", &expr);
         let node_arm = engine
-            .materialize_member_surface_node("/types.ts", node, false)
+            .materialize_member_surface_node_for_test("/types.ts", node, false)
             .expect("handle arm must produce a surface for the same lowered node");
         (expr_arm, node_arm)
     });
@@ -158,9 +167,12 @@ fn member_surface_expr_and_node_arms_produce_equivalent_surface() {
 }
 
 // ---------------------------------------------------------------------------
-// Owner-collection seam: the handle arm reduces a body handle through
-// the same node-core and yields the same surface the materialised
-// TypeExpr body would.
+// Owner-collection seam: the handle arm reduces an owner-collection body
+// handle through the same member-surface node-core (with `nested = false`,
+// the owner-collection scope axis) and yields the same surface the
+// materialised TypeExpr body would. The thin owner-collection wrapper was
+// folded into the node-core itself (a pure pass-through), so this fixture
+// drives the node-core directly with the owner-collection axis.
 // ---------------------------------------------------------------------------
 #[test]
 fn owner_collection_node_arm_matches_materialized_body_surface() {
@@ -187,19 +199,22 @@ fn owner_collection_node_arm_matches_materialized_body_surface() {
         // with the body the `TypeExpr` arm returns).
         let expr_surface = engine.materialize_member_surface_expr("/owner.ts", &body_expr, false);
 
-        // The handle arm: reduce the SAME body, lowered to a node,
-        // through `owner_collection_surface_from_node`.
+        // The handle arm: reduce the SAME body, lowered to a node, through the
+        // member-surface node-core with the owner-collection scope axis
+        // (`nested = false`) — the surface the deleted owner-collection
+        // pass-through wrapper produced.
         let body_node = lower_handle(host, "/owner.ts", &body_expr);
         let node_surface = engine
-            .owner_collection_surface_from_node("/owner.ts", body_node)
+            .materialize_member_surface_node_for_test("/owner.ts", body_node, false)
             .expect("owner-collection handle arm must produce a surface");
         (expr_surface, node_surface)
     });
 
     assert_eq!(
         expr_surface, node_surface,
-        "owner_collection_surface_from_node (handle arm) MUST yield the identical surface the \
-         materialised TypeExpr body yields — same node, same dispatch"
+        "the owner-collection handle arm (the member-surface node-core, owner-collection axis) \
+         MUST yield the identical surface the materialised TypeExpr body yields — same node, \
+         same dispatch"
     );
     // The top-level surface keeps member values shallow-by-default; pin
     // the INSTANTIATED member value by reducing `NumPair['first']` through
@@ -223,13 +238,13 @@ fn owner_collection_node_arm_matches_materialized_body_surface() {
 // (`materialize_component_meta_type_expr_until_stable_full`, the
 // `ShapeSubject::TypeExpr` path) and the graph-native member reducer
 // (`reduce_member_value_graph_native_with_context`, the
-// `ShapeSubject::SemanticNode` / handle path) produce the same public
+// `ShapeSubject::MemberValueNode` / handle path) produce the same public
 // shape for the same body. This locks the existing handle-native
 // consumer's equivalence — the handle arm drives the reducer DIRECTLY
 // on the lowered node, never re-lowering a materialised TypeExpr.
 // ---------------------------------------------------------------------------
 #[test]
-fn shape_subject_type_expr_and_semantic_node_arms_agree() {
+fn shape_subject_type_expr_and_member_value_node_arms_agree() {
     use crate::meta_resolve::materialize::{
         materialize_component_meta_type_expr_until_stable,
         reduce_member_value_graph_native_with_context,
@@ -263,23 +278,26 @@ fn shape_subject_type_expr_and_semantic_node_arms_agree() {
             &mut engine,
         );
 
-        // ShapeSubject::SemanticNode / handle arm: lower then reduce the
+        // ShapeSubject::MemberValueNode / handle arm: lower then reduce the
         // node DIRECTLY (no TypeExpr round-trip).
         let node = lower_handle(host, "/shape.ts", &expr);
         let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let cap =
+            crate::project_semantic_dispatch::output_materialization::TestOutputCap::new(&dispatch);
         let node_shape = reduce_member_value_graph_native_with_context(
             ctx,
             "/shape.ts",
             node,
             ProjectionReductionContext::published(mode),
         )
-        .type_expr;
+        .into_type_expr(&cap);
         (expr_shape, node_shape)
     });
 
     assert_eq!(
         expr_shape, node_shape,
-        "the ShapeSubject::SemanticNode handle arm (reduce_member_value_graph_native_with_context) \
+        "the ShapeSubject::MemberValueNode handle arm (reduce_member_value_graph_native_with_context) \
          MUST produce the identical public shape as the ShapeSubject::TypeExpr arm \
          (materialize_component_meta_type_expr_until_stable) for the same body"
     );
@@ -298,7 +316,7 @@ fn shape_subject_type_expr_and_semantic_node_arms_agree() {
 /// Shared equivalence assertion for the ShapeSubject reduction path: the
 /// `ShapeSubject::TypeExpr` materialiser
 /// (`materialize_component_meta_type_expr_until_stable`) and the
-/// `ShapeSubject::SemanticNode` / handle reducer
+/// `ShapeSubject::MemberValueNode` / handle reducer
 /// (`reduce_member_value_graph_native_with_context`, fed the lowered
 /// node) must yield the identical public shape. Returns the agreed
 /// shape for fixture-specific negative assertions. This is the
@@ -320,18 +338,21 @@ fn assert_shape_subject_arms_agree(host: &VerterHost, scope: &str, expr: &TypeEx
             materialize_component_meta_type_expr_until_stable(expr, scope, mode, &mut engine);
         let node = lower_handle(host, scope, expr);
         let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let cap =
+            crate::project_semantic_dispatch::output_materialization::TestOutputCap::new(&dispatch);
         let node_arm = reduce_member_value_graph_native_with_context(
             ctx,
             scope,
             node,
             ProjectionReductionContext::published(mode),
         )
-        .type_expr;
+        .into_type_expr(&cap);
         (expr_arm, node_arm)
     });
     assert_eq!(
         expr_arm, node_arm,
-        "the ShapeSubject::SemanticNode handle arm MUST produce the identical shape as the \
+        "the ShapeSubject::MemberValueNode handle arm MUST produce the identical shape as the \
          ShapeSubject::TypeExpr arm for scope {scope}"
     );
     node_arm

@@ -260,7 +260,7 @@ fn peek_operator_shape_cold_memo_returns_none() {
 #[test]
 fn peek_operator_shape_warm_memo_returns_cached() {
     use crate::component_meta_caches::ShapeCacheKey;
-    use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+    use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 
     let host = build_minimal_host();
     let scope: Arc<str> = Arc::from("/workspace/src/Comp.vue");
@@ -285,12 +285,12 @@ fn peek_operator_shape_warm_memo_returns_cached() {
         // closure runs at least once and the `entries` substrate is
         // populated when the gate accepts.
         let memo_db = ctx.project_type_store().shape_cache_db();
-        let seeded = MaterializedTypeExpr {
-            node_id: None,
-            type_expr: TypeExpr::Primitive(PrimitiveName::Number),
-            dep_signature: Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
-            result_is_partial: false,
-        };
+        let seeded = MaterializedOutputTypeExpr::from_type_expr_for_test(
+            None,
+            TypeExpr::Primitive(PrimitiveName::Number),
+            Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
+            false,
+        );
         let admitted = memo_db.get_or_compute(&key, ctx, || {
             Some((
                 seeded.clone(),
@@ -341,10 +341,13 @@ fn peek_operator_shape_warm_memo_returns_cached() {
                 // A peek that returned a freshly-reduced TypeExpr would
                 // not match the seed verbatim.
                 assert!(
-                    matches!(cached.type_expr, TypeExpr::Primitive(PrimitiveName::Number)),
-                    "Cached payload must equal the seeded MaterializedTypeExpr — \
+                    matches!(
+                        cached.type_expr_for_test(),
+                        TypeExpr::Primitive(PrimitiveName::Number)
+                    ),
+                    "Cached payload must equal the seeded MaterializedOutputTypeExpr — \
                      got type_expr = {:?}",
-                    cached.type_expr,
+                    cached.type_expr_for_test(),
                 );
             }
             _ => panic!(
@@ -494,7 +497,7 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
          cache. A shallow admit there causes the materializer's \
          later probe to short-circuit on the bare `Ref` and skip \
          alias-body expansion. Got cached type_expr: {:?}",
-        post.map(|m| m.type_expr),
+        post.map(|m| m.type_expr_for_test().clone()),
     );
 }
 
@@ -637,11 +640,14 @@ fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallo
 // ---------------------------------------------------------------------------
 #[test]
 fn h2_projector_caller_honours_gate_fence_refusal() {
+    // `member_shape_peek_or_compute` now lives in the terminal `output_sink`
+    // sink module (it unwraps a sealed carrier through the module-private
+    // boundary primitive), so the H2 caller invariant is anchored there.
     let proj_src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/meta_resolve/projectors/mod.rs",
+        "/src/meta_resolve/projectors/output_sink.rs",
     ))
-    .expect("read projectors/mod.rs");
+    .expect("read projectors/output_sink.rs");
 
     let fn_marker = "fn member_shape_peek_or_compute(";
     let fn_idx = proj_src

@@ -83,7 +83,7 @@ use crate::cache_runtime::admission::{CacheAdmission, CacheEntry, NonAdmissionRe
 use crate::cache_runtime::node::{lookup, ArtifactNode, ComputeCtx, QueryFlightKey};
 use crate::cache_runtime::singleflight::InflightTable;
 use crate::fact_signature_helpers::ReadSetSignature;
-use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration, ResolverContext};
 use crate::semantic_query::DepSignature;
@@ -1003,20 +1003,20 @@ impl Default for OwnerCollectionDb {
 }
 
 // ===========================================================================
-// 6. ShapeCacheDb — `ShapeCacheKey → MaterializedTypeExpr`
+// 6. ShapeCacheDb — `ShapeCacheKey → MaterializedOutputTypeExpr`
 //
 // Universal shape cache. Replaces the previously-split
 // `MaterializeMemoDb` (TypeExpr-keyed) and `MemberShapeCacheDb`
-// (SemanticNode-keyed) by lifting the discriminant into a
+// (member-value-node-keyed) by lifting the discriminant into a
 // `ShapeSubject` variant. ONE cache, not two. Every shape lookup at
 // every projection boundary goes through this cache.
 //
 // The key shape:
 //
 //   ShapeCacheKey {
-//       subject: ShapeSubject {
-//           TypeExpr { scope, expr } | SemanticNode { scope, node }
-//       },
+//       subject: ShapeSubject,  // TypeExpr (scope+expr) | MemberValueNode
+//                               // (scope + sealed MemberShapeNodeSubject) |
+//                               // SyntheticBinding (content-free id)
 //       demand: ShapeDemand {
 //           path: Arc<[PathSegment]>,
 //           terminal_context: ProjectionReductionContext,  // mode + demand
@@ -1040,7 +1040,7 @@ impl Default for OwnerCollectionDb {
 // `descend_published_member` and re-consult the cache at each hop.
 // ===========================================================================
 
-// Overlay/base isolation for `SemanticNode`-subject entries does NOT
+// Overlay/base isolation for `MemberValueNode`-subject entries does NOT
 // rely on `SemanticNodeId` being generation-tagged (the arena is
 // append-only across generations and IDs are raw `u64`). Isolation comes
 // from three mechanisms working together:
@@ -1053,31 +1053,171 @@ impl Default for OwnerCollectionDb {
 //      `bump_project_generation_and_evict` detect cross-generation drift
 //      on overlay open/close.
 
+/// A [`TypeExpr`] structurally proven to carry NO
+/// [`TypeExpr::SyntheticSlotBinding`] anywhere in its tree.
+///
+/// This is the structural confinement that keeps a synthetic carrier's
+/// `value_node` arena ordinal out of the [`ShapeSubject::TypeExpr`]
+/// structural hash. `TypeExpr`'s derived `Hash` descends recursively, so
+/// a carrier nested under `Object` / `Parenthesized` / `Function` /
+/// `TypeParameter.default` / etc. would otherwise fold its
+/// `SyntheticCarrierKey.value_node` (a store/generation-relative ordinal,
+/// NOT content-free) into the `TypeExpr`-subject key — an R6 violation.
+/// The shallow-terminal rule is a PRODUCER contract; this wrapper makes
+/// it a STRUCTURAL guarantee: a `ShapeSubject::TypeExpr` is non-
+/// constructible from a synthetic-carrying expression.
+///
+/// Construction is fallible ([`Self::new`]) and module-private; the only
+/// way a carrier-free `TypeExpr` reaches the key is through the
+/// `type_expr_whole*` constructors, which classify the incoming
+/// expression (bare carrier → [`ShapeSubject::SyntheticBinding`];
+/// carrier-free → here; nested carrier → no cache key).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NonSyntheticTypeExpr(Arc<TypeExpr>);
+
+impl NonSyntheticTypeExpr {
+    /// Wrap `expr` only if it carries NO `TypeExpr::SyntheticSlotBinding`
+    /// anywhere in its tree. Returns `None` when a carrier is present
+    /// (bare or nested) — such an expression has no sound content-free
+    /// `TypeExpr`-subject key. Reuses the shared depth-safe, iterative,
+    /// no-allocation walker
+    /// [`crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding`]
+    /// — there is exactly one carrier-detection walker.
+    fn new(expr: Arc<TypeExpr>) -> Option<Self> {
+        if crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding(
+            &expr,
+        ) {
+            None
+        } else {
+            Some(Self(expr))
+        }
+    }
+}
+
+/// A module-private zero-sized seal carried by every externally-typed
+/// [`ShapeSubject`] variant. Its type is not nameable outside
+/// `component_meta_caches`, so no other module (in this crate or any
+/// downstream crate) can struct-construct a `ShapeSubject` variant by
+/// literal — the ONLY build path is the `ShapeCacheKey::*_whole*`
+/// constructors. Pattern-matching with `{ .. }` is unaffected.
+///
+/// The `TypeExpr` variant does not need this marker: its
+/// `expr: NonSyntheticTypeExpr` field is itself module-private to
+/// construct, which already seals that arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ConstructionSeal;
+
+/// Sealed graph-node identity for the regular member-shape subject: the
+/// EXACT settled `SurfaceMember.value` graph node. The inner ordinal is
+/// module-private so a raw `SemanticNodeId` cannot spread into the
+/// shape-key subject from an arbitrary node. The ONLY sanctioned
+/// construction is the member-value path (`from_surface_member`); the
+/// `#[cfg(test)]` ctor is for the cache-rail validation test only.
+///
+/// The newtype derives `Hash`/`Eq` TRANSPARENTLY over the same
+/// [`crate::semantic_query::SemanticNodeId`] — so the key's hash bytes are
+/// unchanged versus a bare ordinal field. This is a representation/naming
+/// seal, not a stale-entry compatibility change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct MemberShapeNodeSubject(crate::semantic_query::SemanticNodeId);
+
+impl MemberShapeNodeSubject {
+    /// Sanctioned construction: a POLICY-ADMITTED component member's value
+    /// graph node. Takes the admitted publication token (not a raw
+    /// `&SurfaceMember`) so an arbitrary member cannot be routed through the
+    /// sealed shape subject — the only construction path for the member-shape
+    /// subject is from a member that passed publication admission.
+    fn from_surface_member(
+        member: &crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember<
+            '_,
+        >,
+    ) -> Self {
+        Self(member.member().value)
+    }
+
+    /// Test-only construction from a raw `&SurfaceMember`. The cache-rail
+    /// key-identity tests (`query_db_self_root_tests`) build keys directly from
+    /// synthetic members to assert the subject collapses siblings sharing
+    /// `.value`; they do not resolve a real macro surface. Named `_raw` so it
+    /// can never masquerade as the production admitted-member path.
+    #[cfg(test)]
+    fn from_surface_member_raw(member: &crate::semantic_query::SurfaceMember) -> Self {
+        Self(member.value)
+    }
+
+    /// Test-only arbitrary-node construction for the cache-rail validation
+    /// test (`query_db_self_root_tests`), which needs SOME node-subject key,
+    /// not specifically a member value.
+    #[cfg(test)]
+    fn from_semantic_node_for_test(node: crate::semantic_query::SemanticNodeId) -> Self {
+        Self(node)
+    }
+}
+
 /// Subject of a [`ShapeCacheKey`] — the *what* whose shape is cached.
 ///
 /// `TypeExpr` covers callers whose start point is a parser-produced
-/// `TypeExpr` annotation (the legacy `MaterializeMemoDb` shape).
-/// `SemanticNode` covers callers whose start point is a settled
-/// `SemanticNodeId` (the legacy `MemberShapeCacheDb` shape). Both
-/// subjects share the same cache substrate — they differ only in the
-/// identity used to key entries.
+/// `TypeExpr` annotation. `MemberValueNode` covers the per-member route
+/// whose start point is the settled `SurfaceMember.value` graph node,
+/// keyed by the sealed [`MemberShapeNodeSubject`] newtype.
+/// `SyntheticBinding` covers explicit deepening of a synthetic
+/// slot-binding carrier, keyed by the content-free
+/// [`crate::semantic_query::SyntheticBindingId`]. All subjects share the
+/// same cache substrate — they differ only in the identity used to key
+/// entries.
+///
+/// The variant payloads are non-constructible outside this module: the
+/// `TypeExpr` arm via its module-private [`NonSyntheticTypeExpr`] field,
+/// the `MemberValueNode` arm via the module-private [`MemberShapeNodeSubject`]
+/// newtype's inner field, the `SyntheticBinding` arm via a module-private
+/// [`ConstructionSeal`] marker. External code matches on the variants
+/// (with `{ .. }`) but builds them ONLY through the `ShapeCacheKey`
+/// constructors. This is the structural half of the synthetic-carrier
+/// confinement — see [`NonSyntheticTypeExpr`].
+///
+/// `private_interfaces` is allowed deliberately: a module-private
+/// [`ConstructionSeal`] field on a `pub` enum is reachable for matching
+/// yet its type cannot be named outside this module, so the variant
+/// cannot be struct-constructed externally. That "more private than the
+/// item" shape IS the sealing idiom, not a leak.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[allow(private_interfaces)]
 pub enum ShapeSubject {
     /// TypeExpr-keyed subject. Sibling members of the same
     /// `Pick<Foo, 'a' | 'b'>` raise hash to distinct entries because
     /// the raised `TypeExpr` is structurally distinct per member —
     /// callers seeking per-member dedup should prefer the
-    /// `SemanticNode` subject.
+    /// `MemberValueNode` subject. The expression is wrapped in
+    /// [`NonSyntheticTypeExpr`] so a synthetic carrier can never fold
+    /// its `value_node` ordinal into the structural hash.
     TypeExpr {
         scope: Arc<str>,
-        expr: Arc<TypeExpr>,
+        expr: NonSyntheticTypeExpr,
     },
-    /// SemanticNode-keyed subject. Sibling members whose
-    /// `SurfaceMember.value` is the same settled graph node collapse
-    /// onto each other's warm hits.
-    SemanticNode {
+    /// Member-value graph-node subject. Sibling members whose
+    /// `SurfaceMember.value` is the same settled graph node collapse onto
+    /// each other's warm hits. Keyed by the sealed [`MemberShapeNodeSubject`]
+    /// newtype (its inner arena ordinal is module-private), so a raw
+    /// `SemanticNodeId` cannot spread into the shape-key subject. This is a
+    /// generation/store-scoped graph-instance memo (single-entry,
+    /// fact-validated, generation-gated), NOT a durable content-free
+    /// query-identity key.
+    MemberValueNode {
         scope: Arc<str>,
-        node: crate::semantic_query::SemanticNodeId,
+        node: MemberShapeNodeSubject,
+    },
+    /// Synthetic-binding-keyed subject. The explicit-deepen identity for
+    /// a `TypeExpr::SyntheticSlotBinding` carrier: the content-free
+    /// [`crate::semantic_query::SyntheticBindingId`]
+    /// (`scope_canonical_id, surface_kind, slot_name, binding_name`).
+    /// The carrier's `value_node` arena ordinal is value-side provenance
+    /// only — it round-trips through `SemanticNodeData::SyntheticBinding`
+    /// at the compat boundary and NEVER enters this key. The
+    /// module-private `_seal` blocks external struct-literal
+    /// construction.
+    SyntheticBinding {
+        id: crate::semantic_query::SyntheticBindingId,
+        _seal: ConstructionSeal,
     },
 }
 
@@ -1087,9 +1227,10 @@ impl ShapeSubject {
     /// invalidation.
     pub(crate) fn scope_canonical(&self) -> &Arc<str> {
         match self {
-            ShapeSubject::TypeExpr { scope, .. } | ShapeSubject::SemanticNode { scope, .. } => {
+            ShapeSubject::TypeExpr { scope, .. } | ShapeSubject::MemberValueNode { scope, .. } => {
                 scope
             }
+            ShapeSubject::SyntheticBinding { id, .. } => &id.scope_canonical_id,
         }
     }
 }
@@ -1131,11 +1272,20 @@ impl ShapeDemand {
     /// Demand encoding "whole subject, no path narrowing,
     /// Internal-surface caller, caller-supplied reduction context".
     /// The single entry point for whole-subject demand construction.
-    /// Mode-only callers route through [`ShapeCacheKey::type_expr_whole`]
-    /// / [`ShapeCacheKey::semantic_node_whole`], which wrap the mode in
-    /// `ProjectionReductionContext::published(mode)` for the
-    /// implicit-Published default. Demand-explicit callers build the
-    /// context themselves and use the `_with_context` constructors.
+    ///
+    /// PRODUCTION callers build the [`ProjectionReductionContext`]
+    /// explicitly and use the `_with_context` constructors: TypeExpr
+    /// subjects via [`ShapeCacheKey::type_expr_whole_with_context`],
+    /// member-value subjects via
+    /// [`ShapeCacheKey::surface_member_value_whole_with_context`] (which
+    /// takes a `&SurfaceMember`). The mode-only convenience constructors
+    /// — [`ShapeCacheKey::type_expr_whole`] and the
+    /// `member_value_node_whole_for_test` ctor — wrap a bare
+    /// [`ProjectionMode`] in `ProjectionReductionContext::published(mode)`
+    /// for the implicit-Published default and are reserved for TESTS /
+    /// schema-probe helpers (`member_value_node_whole_for_test` is
+    /// `#[cfg(test)]`-only); no production member-value caller routes
+    /// through them.
     pub(crate) fn whole_subject_with_context(
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
@@ -1150,13 +1300,34 @@ impl ShapeDemand {
     }
 }
 
+/// In-memory `ShapeCacheDb` slot key. This is a derived-`Hash`/`Eq`
+/// DashMap key ONLY — it is NEVER persisted, stable-hashed, or
+/// wire-encoded (the type carries no `Serialize`/`Deserialize` and has
+/// no `bincode` / stable-hash / proto encode site anywhere in the tree).
+/// That is precisely why renaming a `ShapeSubject` variant — with the
+/// variant order preserved and the inner ordinal hidden behind a
+/// `#[derive(Hash, Eq)]` transparent newtype — keeps the key's runtime
+/// hash/equality identity byte-identical and therefore needs NO
+/// `CACHE_CLUSTER_SCHEMA_VERSION` bump (the schema version guards
+/// PERSISTED artifact layouts, not in-memory DashMap key identity).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ShapeCacheKey {
-    pub(crate) subject: ShapeSubject,
-    pub(crate) demand: ShapeDemand,
+    /// Module-private so no other module (in-crate or downstream) can
+    /// build a `ShapeCacheKey { subject, demand }` struct-literal that
+    /// bypasses the classifying `*_whole*` constructors. Sibling modules
+    /// read the rooting canonical through [`Self::scope_canonical`].
+    subject: ShapeSubject,
+    demand: ShapeDemand,
 }
 
 impl ShapeCacheKey {
+    /// Canonical scope id this key is rooted in — the public accessor
+    /// sibling modules use now that `subject` is module-private. Delegates
+    /// to [`ShapeSubject::scope_canonical`].
+    pub(crate) fn scope_canonical(&self) -> &Arc<str> {
+        self.subject.scope_canonical()
+    }
+
     /// Construct a TypeExpr-subject whole-subject key (the default
     /// for callers that have not adopted path-precise demand). The
     /// terminal context is implicitly `Published(mode)` for backwards-
@@ -1167,7 +1338,20 @@ impl ShapeCacheKey {
     /// `cfg(any(test, debug_assertions))` schema-probe helpers reach the
     /// mode-only form, so it is gated to match (no dead surface in
     /// release).
-    #[cfg(any(test, debug_assertions))]
+    ///
+    /// Test callers pass non-synthetic expressions, so this unwraps the
+    /// classified key. A `SyntheticSlotBinding`-carrying expression here
+    /// is a test-fixture error and panics loudly.
+    ///
+    /// Gated `#[cfg(any(test, feature = "test-support"))]` (NOT
+    /// `debug_assertions`): the only callers are in-crate `#[cfg(test)]` suites
+    /// and the test-support `insert_synthetic_for_schema_test` helper — there is
+    /// no production caller (production keys via
+    /// [`Self::type_expr_whole_with_context`]). Keeping the mode-only test
+    /// shortcut on the production-unreachable `test-support` gate (rather than
+    /// `debug_assertions`) keeps it out of every production build and coherent
+    /// with the carrier `_for_test` accessors it feeds through that helper.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn type_expr_whole(
         scope: Arc<str>,
         expr: Arc<TypeExpr>,
@@ -1178,63 +1362,168 @@ impl ShapeCacheKey {
             expr,
             crate::semantic_query::ProjectionReductionContext::published(mode),
         )
+        .expect("type_expr_whole test callers pass non-synthetic expressions")
     }
 
-    /// Construct a TypeExpr-subject whole-subject key under an
-    /// explicit [`ProjectionReductionContext`]. The context
-    /// discriminator keeps the TypeExpr field materialiser's
-    /// per-prop `Published(Navigate)` publication slot disjoint from
-    /// a `StructuralTransit(Navigate)` carrier-lower slot — same
-    /// subject, distinct cache entries.
+    /// Construct a TypeExpr-subject whole-subject key under an explicit
+    /// [`ProjectionReductionContext`], CLASSIFYING the incoming
+    /// expression for synthetic-carrier confinement. The context
+    /// discriminator keeps the TypeExpr field materialiser's per-prop
+    /// `Published(Navigate)` publication slot disjoint from a
+    /// `StructuralTransit(Navigate)` carrier-lower slot — same subject,
+    /// distinct cache entries.
+    ///
+    /// Returns `None` ("no sound cache key") when `expr` NESTS a
+    /// `TypeExpr::SyntheticSlotBinding` carrier under a composite
+    /// (`{x: carrier}`, `carrier | null`, etc.): such a value's identity
+    /// would depend on the carrier's store-relative `value_node` ordinal,
+    /// which has no content-free representation. Callers that get `None`
+    /// run the cold compute and return WITHOUT a cache write (cache
+    /// bypass, not value bypass). Classification:
+    ///   - bare top-level carrier ⇒ redirect to the content-free
+    ///     [`ShapeSubject::SyntheticBinding`] identity;
+    ///   - no carrier anywhere ⇒ [`ShapeSubject::TypeExpr`] over the
+    ///     [`NonSyntheticTypeExpr`]-sealed expression;
+    ///   - nested carrier ⇒ `None`.
     pub(crate) fn type_expr_whole_with_context(
         scope: Arc<str>,
         expr: Arc<TypeExpr>,
         terminal_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Self {
-        Self {
-            subject: ShapeSubject::TypeExpr { scope, expr },
-            demand: ShapeDemand::whole_subject_with_context(terminal_context),
+    ) -> Option<Self> {
+        // A bare top-level carrier redirects to the content-free
+        // synthetic-binding identity — its sound cache key is the
+        // `SyntheticBindingId`, never the structural hash of the carrier
+        // (which folds `value_node`).
+        if let TypeExpr::SyntheticSlotBinding(carrier) = expr.as_ref() {
+            return Some(Self::synthetic_binding_whole_with_context(
+                crate::semantic_query::SyntheticBindingId::from_carrier_key(carrier),
+                terminal_context,
+            ));
         }
+        // A carrier-free expression seals into the `TypeExpr` subject. A
+        // composite that NESTS a carrier fails the seal (`None`) → no
+        // sound cache key.
+        let sealed = NonSyntheticTypeExpr::new(expr)?;
+        Some(Self {
+            subject: ShapeSubject::TypeExpr {
+                scope,
+                expr: sealed,
+            },
+            demand: ShapeDemand::whole_subject_with_context(terminal_context),
+        })
     }
 
-    /// Construct a key for the legacy `MemberShapeCacheDb` shape
-    /// (SemanticNode-subject, whole-subject demand). Terminal
-    /// context is implicitly `Published(mode)`.
-    ///
-    /// Mode-only convenience: production callers route through
-    /// [`Self::semantic_node_whole_with_context`]; only tests and the
-    /// `cfg(any(test, debug_assertions))` schema-probe helpers reach the
-    /// mode-only form, so it is gated to match (no dead surface in
-    /// release).
-    #[cfg(any(test, debug_assertions))]
-    pub(crate) fn semantic_node_whole(
+    /// Test-only: build a member-value-subject key from an ARBITRARY node id.
+    /// Used by the cache-rail self-root validation test, which needs SOME
+    /// node-subject key, not specifically a `SurfaceMember.value`. Named
+    /// `_for_test` so it can never masquerade as a production constructor.
+    #[cfg(test)]
+    pub(crate) fn member_value_node_whole_for_test(
         scope: Arc<str>,
         node: crate::semantic_query::SemanticNodeId,
         mode: ProjectionMode,
     ) -> Self {
-        Self::semantic_node_whole_with_context(
-            scope,
-            node,
+        Self {
+            subject: ShapeSubject::MemberValueNode {
+                scope,
+                node: MemberShapeNodeSubject::from_semantic_node_for_test(node),
+            },
+            demand: ShapeDemand::whole_subject_with_context(
+                crate::semantic_query::ProjectionReductionContext::published(mode),
+            ),
+        }
+    }
+
+    /// Construct a member-value-subject whole-subject key under an explicit
+    /// [`ProjectionReductionContext`]. The SOLE production construction path
+    /// for the member-shape subject — it takes the POLICY-ADMITTED publication
+    /// token (not a raw `&SurfaceMember`) and reads the admitted member's
+    /// `value`, so an arbitrary `SemanticNodeId` / unadmitted member cannot be
+    /// routed through the sealed subject.
+    pub(crate) fn surface_member_value_whole_with_context(
+        scope: Arc<str>,
+        member: &crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember<
+            '_,
+        >,
+        terminal_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Self {
+        Self {
+            subject: ShapeSubject::MemberValueNode {
+                scope,
+                node: MemberShapeNodeSubject::from_surface_member(member),
+            },
+            demand: ShapeDemand::whole_subject_with_context(terminal_context),
+        }
+    }
+
+    /// Test-only member-value key construction from a raw `&SurfaceMember`. The
+    /// cache-rail key-identity tests build keys directly from synthetic members
+    /// to assert the subject collapses siblings sharing `.value`; they do not
+    /// resolve a real macro surface (and so cannot mint an admitted token).
+    /// Named `_raw` so it can never masquerade as the production
+    /// admitted-member path.
+    #[cfg(test)]
+    pub(crate) fn surface_member_value_whole_with_context_raw(
+        scope: Arc<str>,
+        member: &crate::semantic_query::SurfaceMember,
+        terminal_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Self {
+        Self {
+            subject: ShapeSubject::MemberValueNode {
+                scope,
+                node: MemberShapeNodeSubject::from_surface_member_raw(member),
+            },
+            demand: ShapeDemand::whole_subject_with_context(terminal_context),
+        }
+    }
+
+    /// Construct a SyntheticBinding-subject whole-subject key (content-
+    /// free [`crate::semantic_query::SyntheticBindingId`] identity).
+    /// Terminal context is implicitly `Published(mode)`.
+    ///
+    /// The synthetic explicit-deepen route. There is no production
+    /// consumer yet, so — like the `type_expr_whole` mode-only form, and
+    /// under the SAME `cfg(any(test, feature = "test-support"))` gate — this
+    /// keeps no dead surface in any production build. The only callers are
+    /// in-crate `#[cfg(test)]` suites and the test-support
+    /// `insert_synthetic_carrier_deep_for_test` / `get_synthetic_carrier_deep_for_test`
+    /// proof helpers; production keys via
+    /// [`Self::synthetic_binding_whole_with_context`]. The gate is the
+    /// production-unreachable `test-support` feature (NOT `debug_assertions`,
+    /// which is ON in ordinary debug builds) so this stays coherent with the
+    /// carrier `_for_test` accessors the helpers feed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn synthetic_binding_whole(
+        id: crate::semantic_query::SyntheticBindingId,
+        mode: ProjectionMode,
+    ) -> Self {
+        Self::synthetic_binding_whole_with_context(
+            id,
             crate::semantic_query::ProjectionReductionContext::published(mode),
         )
     }
 
-    /// Construct a SemanticNode-subject whole-subject key under an
-    /// explicit [`ProjectionReductionContext`].
-    pub(crate) fn semantic_node_whole_with_context(
-        scope: Arc<str>,
-        node: crate::semantic_query::SemanticNodeId,
+    /// Construct a SyntheticBinding-subject whole-subject key under an
+    /// explicit [`ProjectionReductionContext`]. The content-free
+    /// [`crate::semantic_query::SyntheticBindingId`] is the identity; the
+    /// carrier's `value_node` is value-side provenance only and never
+    /// enters this key.
+    pub(crate) fn synthetic_binding_whole_with_context(
+        id: crate::semantic_query::SyntheticBindingId,
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
         Self {
-            subject: ShapeSubject::SemanticNode { scope, node },
+            subject: ShapeSubject::SyntheticBinding {
+                id,
+                _seal: ConstructionSeal,
+            },
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }
 }
 
 pub struct ShapeCacheDb {
-    entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedTypeExpr>>>,
+    entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedOutputTypeExpr>>>,
     inflight: InflightTable<QueryFlightKey<ShapeCacheKey>>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
@@ -1276,7 +1565,7 @@ impl ShapeCacheDb {
         &self,
         key: &ShapeCacheKey,
         ctx: &dyn ResolverContext,
-    ) -> Option<MaterializedTypeExpr> {
+    ) -> Option<MaterializedOutputTypeExpr> {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1287,7 +1576,12 @@ impl ShapeCacheDb {
         if let Some(rctx) = crate::request_context::current_request_context() {
             let counter = match &key.subject {
                 ShapeSubject::TypeExpr { .. } => &rctx.cache_counters.materialize_memo,
-                ShapeSubject::SemanticNode { .. } => &rctx.cache_counters.member_shape_cache,
+                // The synthetic-binding subject is a member-shape route —
+                // route its peek to the same counter as the regular
+                // `MemberValueNode` member route.
+                ShapeSubject::MemberValueNode { .. } | ShapeSubject::SyntheticBinding { .. } => {
+                    &rctx.cache_counters.member_shape_cache
+                }
             };
             if result.is_some() {
                 counter.hits.fetch_add(1, Ordering::Relaxed);
@@ -1303,9 +1597,9 @@ impl ShapeCacheDb {
         key: &ShapeCacheKey,
         ctx: &dyn ResolverContext,
         compute: F,
-    ) -> Option<MaterializedTypeExpr>
+    ) -> Option<MaterializedOutputTypeExpr>
     where
-        F: FnOnce() -> Option<(MaterializedTypeExpr, Arc<[FactVersionRef]>)>,
+        F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
     {
         // The subject's scope canonical is the entry's self-root —
         // strict warm-read validation rejects a same-scope content edit.
@@ -1320,7 +1614,7 @@ impl ShapeCacheDb {
         // `refused_partial` cell captures the value when the gate refuses
         // so `lookup` (which would surface `None` for a `None`-returning
         // compute) does not erase it.
-        let refused_partial: std::cell::RefCell<Option<MaterializedTypeExpr>> =
+        let refused_partial: std::cell::RefCell<Option<MaterializedOutputTypeExpr>> =
             std::cell::RefCell::new(None);
         let node = SingleEntryArtifactNode {
             entries: &self.entries,
@@ -1329,7 +1623,7 @@ impl ShapeCacheDb {
             compute: std::cell::RefCell::new(Some(|| {
                 compute().and_then(|(value, facts)| {
                     if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                        value.result_is_partial,
+                        value.result_is_partial(),
                     ) {
                         *refused_partial.borrow_mut() = Some(value);
                         None
@@ -1365,9 +1659,9 @@ impl ShapeCacheDb {
         &self,
         key: &ShapeCacheKey,
         ctx: &dyn ResolverContext,
-        value: MaterializedTypeExpr,
+        value: MaterializedOutputTypeExpr,
         fact_dep_signature: Arc<[FactVersionRef]>,
-    ) -> MaterializedTypeExpr {
+    ) -> MaterializedOutputTypeExpr {
         let value_for_closure = value.clone();
         let admitted = self.get_or_compute(key, ctx, move || {
             Some((value_for_closure, fact_dep_signature))
@@ -1410,21 +1704,28 @@ impl ShapeCacheDb {
     /// Test-only synthetic-entry inserter used exclusively by
     /// `cache_invariant_migration` fixtures to verify the cache-cluster
     /// schema-version eviction invariant.
-    #[cfg(any(test, debug_assertions))]
+    ///
+    /// Gated `#[cfg(any(test, feature = "test-support"))]` (NOT
+    /// `debug_assertions`): it constructs a `MaterializedOutputTypeExpr` via the
+    /// capability-free `from_type_expr_for_test` carrier accessor, which is
+    /// itself test-support-gated so it is COMPILE-ABSENT from production debug
+    /// builds. The `cache_invariant_migration` integration case reaches this
+    /// through the production-unreachable `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
-        use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+        use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
         let key = ShapeCacheKey::type_expr_whole(
             Arc::from(marker),
             Arc::new(TypeExpr::Unknown { raw: String::new() }),
             ProjectionMode::Shallow,
         );
         let entry = Arc::new(CacheEntry {
-            value: MaterializedTypeExpr {
-                node_id: None,
-                type_expr: TypeExpr::Unknown { raw: String::new() },
-                dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                result_is_partial: false,
-            },
+            value: MaterializedOutputTypeExpr::from_type_expr_for_test(
+                None,
+                TypeExpr::Unknown { raw: String::new() },
+                Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                false,
+            ),
             signature: ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
             validated_at_generation: 0,
@@ -1437,90 +1738,126 @@ impl ShapeCacheDb {
     // Synthetic-carrier explicit-deepen positive-proof helpers
     // -----------------------------------------------------------------
     //
-    // These helpers exercise the documented legitimate cache route for
-    // deepening a `TypeExpr::SyntheticSlotBinding(SyntheticCarrierKey)`
-    // carrier into its underlying member shape, per the
+    // These helpers exercise the legitimate cache route for deepening a
+    // `TypeExpr::SyntheticSlotBinding(SyntheticCarrierKey)` carrier into
+    // its underlying member shape, per the
     // `[[component-meta-shallow-by-default-rule]]` and the
     // `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
     // architecture guard.
     //
     // The contract: the ONLY legitimate way to deepen a carrier is to
     // construct
-    //   `ShapeCacheKey::semantic_node_whole(carrier.scope_canonical_id,
-    //                                       SemanticNodeId(carrier.value_node),
-    //                                       mode)`
-    // and consult `ShapeCacheDb`. Zero production consumers exercise
-    // this route today — every projector, reducer, registry, and
-    // graph-builder site refuses the carrier as a shallow terminal.
-    // The positive-proof integration test
+    //   `ShapeCacheKey::synthetic_binding_whole(
+    //        SyntheticBindingId::from_carrier_key(carrier), mode)`
+    // and consult `ShapeCacheDb`. The cache identity is the content-free
+    // `SyntheticBindingId` (`scope_canonical_id, surface_kind, slot_name,
+    // binding_name`); the carrier's `value_node` arena ordinal is
+    // value-side provenance only. Zero production consumers exercise this
+    // route today — every projector, reducer, registry, and graph-builder
+    // site refuses the carrier as a shallow terminal. The positive-proof
+    // integration test
     // `tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs` uses these
-    // helpers to prove the cache-key identity round-trip is
-    // well-defined for any future consumer that needs it.
+    // helpers to prove the content-free cache-key identity is well-defined
+    // for any future consumer that needs it.
 
     /// Insert a synthetic-carrier-deep entry into the cache under the
-    /// legitimate cache-route identity. The key is built via
-    /// `ShapeCacheKey::semantic_node_whole(scope, SemanticNodeId(carrier.value_node), mode)`
-    /// — the exact shape the architecture guard mandates. Stored as a
-    /// `MaterializedTypeExpr` whose `type_expr` is the requested deep
-    /// type so a subsequent peek through the same legitimate route
-    /// returns the deep shape, not the carrier.
-    #[cfg(any(test, debug_assertions))]
+    /// content-free synthetic-binding identity. The key is built via
+    /// `ShapeCacheKey::synthetic_binding_whole(
+    ///     SyntheticBindingId::from_carrier_key(carrier), mode)`. Stored as
+    /// a `MaterializedOutputTypeExpr` whose `type_expr` is the requested deep
+    /// type so a subsequent peek through the same identity returns the
+    /// deep shape, not the carrier. The carrier's `value_node` is
+    /// value-side provenance and is NOT part of the cache identity, so the
+    /// entry's `node_id` is left `None` (the proof reads only the
+    /// `type_expr`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_carrier_deep_for_test(
         &self,
         carrier: &verter_type_expr::SyntheticCarrierKey,
         mode: ProjectionMode,
         deep_type: TypeExpr,
     ) {
-        use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
-        let key = ShapeCacheKey::semantic_node_whole(
-            carrier.scope_canonical_id.clone(),
-            crate::semantic_query::SemanticNodeId(carrier.value_node),
+        use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
+        let key = ShapeCacheKey::synthetic_binding_whole(
+            crate::semantic_query::SyntheticBindingId::from_carrier_key(carrier),
             mode,
         );
-        // Reuse the cache-route node identity for provenance — keeps a
-        // single `SemanticNodeId(_.value_node)` construction site
-        // (already routed through the cache factory above) so the
-        // architecture guard's negative-grep scanner sees only the
-        // legitimate cache-route shape.
-        let node_for_provenance = match &key.subject {
-            ShapeSubject::SemanticNode { node, .. } => Some(*node),
-            ShapeSubject::TypeExpr { .. } => None,
-        };
         let entry = Arc::new(CacheEntry {
-            value: MaterializedTypeExpr {
-                node_id: node_for_provenance,
-                type_expr: deep_type,
-                dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                result_is_partial: false,
-            },
+            value: MaterializedOutputTypeExpr::from_type_expr_for_test(
+                None,
+                deep_type,
+                Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                false,
+            ),
             signature: ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
             validated_at_generation: 0,
         });
-        self.entries.insert(key, entry);
-        self.live_counter.fetch_add(1, Ordering::Relaxed);
+        // Bump `live_counter` ONLY on a genuine new key. `DashMap::insert`
+        // returns `Some(old)` on overwrite, `None` on a fresh insert — an
+        // unconditional `fetch_add` over-counts when two same-identity
+        // carriers (differing only in `value_node` provenance) collapse
+        // onto ONE key, diverging the atomic from `entries.len()`.
+        if self.entries.insert(key, entry).is_none() {
+            self.live_counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    /// Peek a synthetic-carrier-deep entry out of the cache through
-    /// the legitimate cache-route identity. Bypasses the full
-    /// `ResolverContext`-gated `peek` so the positive-proof test does
-    /// not need to stand up a host. Returns the materialised deep
-    /// `TypeExpr` if an entry exists for this carrier identity, or
-    /// `None` otherwise.
-    #[cfg(any(test, debug_assertions))]
+    /// Peek a synthetic-carrier-deep entry out of the cache through the
+    /// content-free synthetic-binding identity. Bypasses the full
+    /// `ResolverContext`-gated `peek` so the positive-proof test does not
+    /// need to stand up a host. Returns the materialised deep `TypeExpr`
+    /// if an entry exists for this carrier's content-free identity, or
+    /// `None` otherwise — so two carriers differing only in `value_node`
+    /// hit the same entry (the ordinal is provenance, not identity).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_synthetic_carrier_deep_for_test(
         &self,
         carrier: &verter_type_expr::SyntheticCarrierKey,
         mode: ProjectionMode,
     ) -> Option<TypeExpr> {
-        let key = ShapeCacheKey::semantic_node_whole(
-            carrier.scope_canonical_id.clone(),
-            crate::semantic_query::SemanticNodeId(carrier.value_node),
+        let key = ShapeCacheKey::synthetic_binding_whole(
+            crate::semantic_query::SyntheticBindingId::from_carrier_key(carrier),
             mode,
         );
         self.entries
             .get(&key)
-            .map(|entry| entry.value.type_expr.clone())
+            .map(|entry| entry.value.type_expr_for_test().clone())
+    }
+
+    /// Test-observable: does the TypeExpr shape route produce a SOUND cache
+    /// key for `expr`, or is the subject UNCACHED?
+    ///
+    /// Returns `true` when `ShapeCacheKey::type_expr_whole_with_context`
+    /// classifies `expr` to `Some(key)` (a sound, keyable subject — a
+    /// carrier-free `TypeExpr` subject, or a bare top-level carrier
+    /// redirected to the content-free `SyntheticBinding` identity), and
+    /// `false` when it returns `None` (an unkeyable composite that NESTS a
+    /// synthetic carrier — `NonSyntheticTypeExpr::new` fails, so the subject
+    /// keys NO slot and the caller cache-bypasses). This is the SHAPE-route
+    /// analog of `MaterializationCacheKey`'s root-less-anonymous-subject
+    /// `None` (which already keys no DB slot): an unsound/unkeyable subject
+    /// yields `None` (uncached), never a forged key. Read-only — it does NOT
+    /// touch the cache.
+    ///
+    /// Gated `#[cfg(any(test, feature = "test-support"))]` (NOT
+    /// `debug_assertions`): it is reached directly from the
+    /// `synthetic_carrier_explicit_deepen_proof` integration case (alongside the
+    /// carrier-proof helpers above), so it rides the production-unreachable
+    /// `test-support` feature rather than being present in ordinary debug
+    /// builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn type_expr_shape_route_keys_subject_for_test(
+        scope: Arc<str>,
+        expr: Arc<TypeExpr>,
+        mode: ProjectionMode,
+    ) -> bool {
+        ShapeCacheKey::type_expr_whole_with_context(
+            scope,
+            expr,
+            crate::semantic_query::ProjectionReductionContext::published(mode),
+        )
+        .is_some()
     }
 }
 

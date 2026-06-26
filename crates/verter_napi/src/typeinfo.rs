@@ -75,17 +75,6 @@ pub(crate) fn encode_symbol_list(entries: &[FfiSymbolEntry]) -> Result<Buffer> {
     Ok(Buffer::from(bytes))
 }
 
-/// Encode a single `TypeExpr` to a JSON Buffer.
-pub(crate) fn encode_type_expr(expr: &TypeExpr) -> Result<Buffer> {
-    let bytes = serde_json::to_vec(expr).map_err(|e| {
-        Error::new(
-            Status::GenericFailure,
-            format!("type-expr serialization error: {e}"),
-        )
-    })?;
-    Ok(Buffer::from(bytes))
-}
-
 /// Encode a record into the optional `auditRecord` DTO slot, projecting
 /// the host carrier's mandatory record through the historical "null
 /// when audit is disabled / filtered" contract: only an

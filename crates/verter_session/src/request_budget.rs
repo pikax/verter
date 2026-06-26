@@ -45,7 +45,7 @@ use std::sync::Arc;
 /// malformed payload. The dispatch return carries
 /// `cache_suppress=true`, which propagates through the
 /// reducer/materializer pipeline (see
-/// `MaterializedTypeExpr.cache_suppress` and
+/// `MaterializedOutputTypeExpr.cache_suppress` and
 /// `RequestContext::materialization_cache_suppress`) into
 /// `ResolvedComponentMetaState.synthesis_should_suppress`. The
 /// `ComponentMetaResultDb` admission gate refuses to warm the

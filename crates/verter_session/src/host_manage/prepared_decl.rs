@@ -2135,7 +2135,7 @@ impl VerterHost {
             snapshot: Arc::clone(&stale.snapshot),
             external_type_analysis: Arc::clone(&stale.external_type_analysis),
             declares_interface_app_config: stale.declares_interface_app_config,
-            macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror::default(),
+            macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
         });
         // PRE-PUBLISH FENCE — same ReturnOnly contract as the full
         // materialise: serve, never publish a known-superseded surface.
@@ -2674,7 +2674,7 @@ impl VerterHost {
                 snapshot,
                 external_type_analysis: Arc::clone(&external_type_analysis),
                 declares_interface_app_config,
-                macro_hot_mirror: crate::macro_hot_mirror::MacroHotMirror::default(),
+                macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
             });
 
             // PRE-PUBLISH FENCE. A workspace content mutation or a

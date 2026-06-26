@@ -1,12 +1,42 @@
-//! Session-owned, query-free **structural** lowering of an owned
-//! [`TypeExpr`] into the dormant semantic-graph carriers.
+//! The macro-argument producer — the SINGLE module that owns everything
+//! producer-capable: the query-free structural lowerer, the macro hot
+//! mirror, and the `<script setup generic="…">` binder-seed builder.
 //!
-//! This is the forward boundary that EMITS the unresolved carriers
-//! (`BareRef`, `ImportType`, `RawFallback`, `ConstructorType`,
-//! `SyntheticBinding`, and the tuple-element `rest` flag) alongside the
-//! structural shells (objects, functions, unions, intersections, tuples,
-//! operators) from the [`TypeExpr`] the OXC worker produces. It performs
-//! NO name / import / type resolution or reduction:
+//! ## Single-producer boundary (two confinement regimes)
+//!
+//! Verter has exactly ONE structural-carrier producer. The producer-capable
+//! builders — the raw lowerer [`lower_type_expr_structural`], the macro
+//! hot-mirror builder [`build_macro_hot_ref`], and the scope builder
+//! [`build_script_setup_seed_frames`] — are PRIVATE to THIS module (no
+//! visibility modifier). The ONLY crate-visible items this module exposes are
+//! [`macro_type_arg_hot_ref`] (the sole production entry that lowers a macro
+//! `parsed_type_argument`) and the [`MacroHotMirror`] artifact child it
+//! populates.
+//!
+//! The single-producer guarantee has TWO regimes, NOT one. (1) The FOREIGN
+//! case is COMPILER-CONFINED: a module OUTSIDE this one cannot NAME the
+//! private builders — a foreign reference is a compile error (E0603 / E0433),
+//! not a lint, so a second producer in a foreign module is unrepresentable by
+//! construction. (2) The SAME-MODULE case is NOT compiler-confined: Rust
+//! privacy is module-scoped, so a SECOND producer written INSIDE this file CAN
+//! name the module-private builders, and the owner module's collapse to one
+//! file does not make that a compile error. That same-module residual is
+//! POLICED by the strengthened single-producer architecture guards
+//! (cfg-satisfiability classification + crate-visible producer-exposure
+//! collector covering fn / value / trait entries + the no-codegen-surface
+//! scan + the no-query/dispatch purity scan + the scoped derive-shadow
+//! import check). The IRREDUCIBLE residual is trust in this one sanctioned
+//! producer implementation plus compiler bugs / build-time substitution /
+//! out-of-tree proc-macros — NOT covered by either regime, by design.
+//!
+//! ## The query-free structural lowering
+//!
+//! [`lower_type_expr_structural`] EMITS the unresolved carriers (`BareRef`,
+//! `ImportType`, `RawFallback`, `ConstructorType`, `SyntheticBinding`, and
+//! the tuple-element `rest` flag) alongside the structural shells (objects,
+//! functions, unions, intersections, tuples, operators) from the
+//! [`TypeExpr`] the OXC worker produces. It performs NO name / import / type
+//! resolution or reduction:
 //!
 //! - a bare `Foo` becomes a `BareRef` carrier, never a resolved `DeclRef`
 //!   or `InstantiationRef`;
@@ -18,40 +48,91 @@
 //!   it.
 //!
 //! Resolution and reduction are a later, demand-time concern that consumes
-//! these carriers; this lowerer never anticipates them.
-//!
-//! The lowerer is graph-local: it reaches the [`SemanticGraphStore`] to intern
-//! the structural nodes it builds and read them back (e.g. the distributive
+//! these carriers; this lowerer never anticipates them. The lowerer is
+//! graph-local: it reaches the [`SemanticGraphStore`] to intern the
+//! structural nodes it builds and read them back (e.g. the distributive
 //! check / mapper classification); the owner supplies the rooting
 //! [`NodeScopeId`]. It never touches `ProjectSemanticDispatch`, a resolver
 //! context, a `SemanticQueryKey`, or any host / type-provider state — the
 //! `session_graph_lowerer_makes_no_query` guard locks that statically.
 //!
-//! ## Visibility boundary
+//! ## The macro hot mirror
 //!
-//! [`lower_type_expr_structural`] is `pub(in crate::macro_hot_mirror)` — its
-//! SOLE production entry is the macro hot-mirror builder
-//! ([`super::macro_type_arg_hot_ref`]). The mirror is the single-entry
-//! producer of macro-type-argument graph handles; making the lowerer entry
-//! ancestor-private to `crate::macro_hot_mirror` makes a second production
-//! caller UNREPRESENTABLE by construction (no other module can name the fn),
-//! so the single-engine producer rule needs no source scanner here. Raw
-//! lowerer access for cross-module tests goes through
-//! [`super::for_tests`](super) only.
+//! The hot mirror is the SINGLE-ENTRY producer of a macro's type argument
+//! ([`AnalyzedMacro.parsed_type_argument`](verter_semantic::analysis::AnalyzedMacro))
+//! graph node. The eager, CONTEXT-SHAPED (per the caller's
+//! [`ProjectionMode`](crate::semantic_query::ProjectionMode)) per-site lowering
+//! it replaced produced a one-demand-only reduction — not a storable, shared,
+//! mode-neutral handle. The four production macro-arg sites
+//! (`meta_resolve::slot_binding_graph`, `meta_resolve::projectors`,
+//! `host_manage::eval_env`, and `typeinfo::framework_surface::vue_exec`) now
+//! READ this mirror handle instead of lowering the macro arg themselves.
+//!
+//! On first demand per `macro_index` it lowers the macro's
+//! `parsed_type_argument` ONCE through [`lower_type_expr_structural`] into a
+//! [`HotTypeRef`] — an interned [`SemanticNodeId`] carrying the unresolved
+//! `BareRef` / `ImportType` / operator-shell carriers, NO resolution. Every
+//! production site that needs a macro type-argument graph node reads THIS
+//! handle and re-enters the ONE shared dispatch (`SemanticQueryKey` →
+//! `ProjectSemanticDispatch::execute`) at its own demand / mode (Navigate, a
+//! `ProjectPath` for an indexed-access or per-field path, a Shallow surface).
+//! Different TERMINAL demands are fine; a second BASE producer of the macro
+//! arg's graph node is not — that is the forbidden callsite-scattered
+//! structural-vs-eager dual path.
+//!
+//! ## Laziness / content addressing / singleflight
+//!
+//! [`MacroHotMirror`] is a FILE-ARTIFACT child stored adjacent to the
+//! macros + lazy [`DeclBodyMemo`](crate::decl_body_memo::DeclBodyMemo) on
+//! [`IndexedReady`](crate::project_type_store::IndexedReady) — it mirrors the
+//! memo shape. Its identity is the owning artifact's `(canonical,
+//! whole_hash)` plus the `macro_index`; a content edit publishes a fresh
+//! `IndexedReady` carrying a fresh empty mirror, so a superseded mirror can
+//! never answer a new-content demand. Publishing an artifact lowers ZERO
+//! macro mirrors (the cell table is unallocated until first demand). The
+//! mirror is a lazy DENSE table: an outer [`OnceLock`] lazily allocates a
+//! per-macro-count cell table ONCE on first demand (race-safe via
+//! `get_or_init`); each per-slot [`OnceLock`] (indexed by `macro_index`) is
+//! the singleflight unit — its `get_or_init` collapses concurrent first-touch
+//! of one macro onto one lowering, and waiters block cooperatively on the
+//! cell. Two threads racing the TABLE allocation also singleflight on the
+//! outer cell.
+//!
+//! ## Script-setup generic seeding
+//!
+//! A `<script setup generic="T">` parameter must lower to its
+//! [`SemanticNodeData::TypeParam`] binder, NOT a `BareRef(T)`. The
+//! structural lowerer does not consult the host's script-setup bindings; it
+//! only does a syntactic in-scope binder lookup. So the builder pre-builds a
+//! SEED [`BinderScope`] frame by re-sourcing the `<script setup generic="…">`
+//! clause from the owner's ROUTE-FREE local [`IndexedReady`] data
+//! (`raw_source` + `framework_parse`, through `sfc_script_setup_type_params`)
+//! — interning a `TypeParam` node matching the eager path's `<script-setup>`
+//! decl sentinel + ordinal + lowered constraint / default shape — and passes
+//! it to the lowerer, so `lookup_binder("T")` returns the binder node. This
+//! is owner-local shallow scope data (NOT the prepared-decl bundle, whose
+//! cold path can route-resolve imports), keeping the producer PURE. The seed
+//! frame is built incrementally so an earlier binder is visible to a later
+//! one's constraint / default (TS scoping).
 
 use std::cell::Cell;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
 use verter_type_expr::{FunctionExpr, LiteralValue, MappedModifier, ObjectMember, TypeExpr};
 
+use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, HotTypeRef, IndexKey, IndexSignature, MapperKey, MapperKind,
-    MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError, ReadonlyMod, ScopeId,
-    SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement,
-    TypeParamDecl, ValueRootKey,
+    DeclIdentity, FunctionParam, HashValue, HotTypeRef, IndexKey, IndexSignature, MapperKey,
+    MapperKind, MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError,
+    ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
+    SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
+
+// =============================================================================
+// Query-free structural lowering internals (PRIVATE to this module).
+// =============================================================================
 
 /// A lexical binder frame: the syntactic type-parameter / `infer` /
 /// mapped-type-parameter names in scope at one nesting level, each mapped
@@ -63,20 +144,15 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// lowerer performs is this purely syntactic, in-scope binder lookup, which
 /// needs no host query.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct BinderScope {
+struct BinderScope {
     names: FxHashMap<Arc<str>, SemanticNodeId>,
 }
 
 impl BinderScope {
     /// Bind a syntactic type-parameter name to its interned binder node.
-    ///
-    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
-    /// this is a mirror-internal binder-frame BUILDER used by `mod.rs`'s
-    /// script-setup seed construction, never an outward macro-arg producer
-    /// entry. The mirror's SOLE crate-visible producer entry is the free
-    /// `macro_type_arg_hot_ref`; the entry-surface guard pins that, so any
-    /// helper a foreign module does not need stays module-private.
-    pub(in crate::macro_hot_mirror) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
+    /// Module-internal binder-frame builder used by the script-setup seed
+    /// construction, never an outward producer entry.
+    fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
         self.names.insert(name, node);
     }
 
@@ -96,7 +172,7 @@ impl BinderScope {
 /// `ProjectionReductionContext` — the structural lowerer is not a resolver,
 /// so it has no use for any demand-time resolution surface.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct StructuralLowerContext<'a> {
+struct StructuralLowerContext<'a> {
     /// Innermost-last stack of lexical binder frames; binder lookup scans
     /// from the top (last) frame outward so an inner type-parameter shadows
     /// an outer one of the same name.
@@ -124,11 +200,7 @@ impl<'a> StructuralLowerContext<'a> {
     /// A root context over `binders` (innermost last) with default
     /// provenance: an `Authored` merge role and not-a-macro-own-body. The
     /// empty slice is the no-binders-in-scope root.
-    ///
-    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
-    /// a mirror-internal CONTEXT constructor used by `mod.rs`'s builder, never a
-    /// producer entry.
-    pub(in crate::macro_hot_mirror) fn new(binders: &'a [BinderScope]) -> Self {
+    fn new(binders: &'a [BinderScope]) -> Self {
         Self {
             binders,
             merge_role: MemberMergeRole::Authored,
@@ -160,17 +232,13 @@ impl<'a> StructuralLowerContext<'a> {
     /// Replace the surface-merge role (the owner stamps `OwnBody` on an
     /// interface/class own-body arm and `Heritage` on a heritage arm).
     #[cfg(test)]
-    pub(crate) fn with_merge_role(mut self, merge_role: MemberMergeRole) -> Self {
+    fn with_merge_role(mut self, merge_role: MemberMergeRole) -> Self {
         self.merge_role = merge_role;
         self
     }
 
     /// Mark whether this context lowers the macro type-argument's own body.
-    ///
-    /// Module-restricted (`pub(in crate::macro_hot_mirror)`), NOT crate-visible:
-    /// a mirror-internal CONTEXT builder used by `mod.rs`'s builder, never a
-    /// producer entry.
-    pub(in crate::macro_hot_mirror) fn with_macro_own_body(mut self, macro_own_body: bool) -> Self {
+    fn with_macro_own_body(mut self, macro_own_body: bool) -> Self {
         self.macro_own_body = macro_own_body;
         self
     }
@@ -224,7 +292,7 @@ impl<'a> StructuralLowerContext<'a> {
 /// `RecursiveRef`, which is never produced by fresh OXC lowering and cannot
 /// be reconstructed structurally).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StructuralLowerError {
+enum StructuralLowerError {
     /// `shape` names the offending `TypeExpr` variant for diagnostics.
     UnsupportedWithoutResolution { shape: &'static str },
 }
@@ -234,7 +302,16 @@ pub(crate) enum StructuralLowerError {
 ///
 /// Returns a [`HotTypeRef`] wrapping the interned root node, or a typed
 /// [`StructuralLowerError`] for a shape with no unresolved representation.
-pub(in crate::macro_hot_mirror) fn lower_type_expr_structural(
+///
+/// PRIVATE (no visibility modifier): reachable only from this module's own
+/// producer paths ([`build_macro_hot_ref`], [`build_script_setup_seed_frames`])
+/// and this module's in-module unit tests. TWO REGIMES: a FOREIGN second producer
+/// is COMPILER-CONFINED — no other module can NAME this fn (a compile error,
+/// E0603 / E0433), so it is unrepresentable by construction; a SAME-MODULE second
+/// producer is NOT compiler-confined (Rust privacy is module-scoped, so code
+/// written INSIDE this module CAN name it) and is instead POLICED by the bounded
+/// single-producer architecture guards.
+fn lower_type_expr_structural(
     graph: &SemanticGraphStore,
     expr: &TypeExpr,
     scope: NodeScopeId,
@@ -396,10 +473,16 @@ fn lower_node(
                 lower_node(graph, true_type, scope, &true_ctx)?
             };
             let false_branch_ref = lower_node(graph, false_type, scope, ctx)?;
-            let distributive = matches!(
-                graph.node_data(check).as_deref(),
-                Some(SemanticNodeData::TypeParam { .. })
-            );
+            // This `match` is intentionally the de-sugared form of `matches!`:
+            // a `matches!` body macro is forbidden in this producer module, so
+            // the distributive check stays an explicit `match`. Clippy's
+            // `match_like_matches_macro` suggestion to collapse this back to
+            // `matches!` MUST NOT be applied here.
+            #[allow(clippy::match_like_matches_macro)]
+            let distributive = match graph.node_data(check).as_deref() {
+                Some(SemanticNodeData::TypeParam { .. }) => true,
+                _ => false,
+            };
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Conditional {
                     check,
@@ -1038,6 +1121,281 @@ fn lower_args(
     Ok(Arc::from(lowered.into_boxed_slice()))
 }
 
+// =============================================================================
+// The `<script setup generic="…">` binder-seed builder (PRIVATE).
+// =============================================================================
+
+/// Build the seed [`BinderScope`] stack from the owner's script-setup type
+/// bindings. Returns a one-frame stack (or an empty stack when there are no
+/// script-setup generics). Each binder interns a
+/// [`SemanticNodeData::TypeParam`] node matching the eager path's shape
+/// (`<script-setup>` decl sentinel + the binding ordinal + lowered
+/// constraint / default + display name). The constraint / default lower
+/// under the seed frame accumulated SO FAR, so an earlier generic is visible
+/// to a later one's constraint (`generic="T, U extends T">`) per TS scoping.
+///
+/// The `<script setup generic="…">` clause is re-sourced from the owner's
+/// ROUTE-FREE local [`IndexedReady`] data (`raw_source` + `framework_parse`)
+/// through [`sfc_script_setup_type_params`](crate::host_resolve::sfc_script_setup_type_params)
+/// — the SAME route-free extraction `host_manage` uses to populate the
+/// prepared-decl bundle's `script_setup_type_bindings`, so the seed binder
+/// shape is identical. The helper does NOT read the prepared-decl bundle
+/// (whose cold path can route-resolve imports) — that would make the producer
+/// impure.
+///
+/// PRIVATE (no visibility modifier): an internal helper of
+/// [`build_macro_hot_ref`], confined to this module. Each binder's constraint
+/// / default lowers through [`lower_type_expr_structural`] DIRECTLY — the
+/// binder-seed lowering is part of building the macro handle's scope, NOT a
+/// second macro-arg producer.
+fn build_script_setup_seed_frames(
+    indexed: &crate::project_type_store::IndexedReady,
+    graph: &SemanticGraphStore,
+    scope: &NodeScopeId,
+) -> Vec<BinderScope> {
+    // Re-source the `<script setup generic="…">` clause from the owner's local
+    // route-free parse artifact. The clause-position index IS the ordinal (the
+    // same `param_index` the eager path / prepared-decl bundle assigns), so the
+    // interned `TypeParam` identity tuple matches.
+    let params = crate::host_resolve::sfc_script_setup_type_params(
+        indexed.raw_source.as_ref(),
+        indexed.framework_parse.as_deref(),
+    );
+    if params.is_empty() {
+        return Vec::new();
+    }
+
+    let decl = match scope {
+        NodeScopeId::Global => DeclIdentity {
+            canonical_id: Arc::from(""),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("<script-setup>"),
+        },
+        NodeScopeId::File {
+            canonical_id,
+            whole_hash,
+            ..
+        } => DeclIdentity {
+            canonical_id: Arc::clone(canonical_id),
+            whole_hash: *whole_hash,
+            decl_name: Arc::from("<script-setup>"),
+        },
+    };
+
+    let mut frame = BinderScope::default();
+    for (idx, param) in params.iter().enumerate() {
+        // The constraint / default see the binders accumulated so far. Lower
+        // through the private structural lowerer directly — the binder-seed
+        // lowering is part of building the macro handle's scope, not a second
+        // producer. A scoped non-allocating borrow of the current frame
+        // (`std::slice::from_ref`) feeds the head context without cloning the
+        // accumulated binder map per parameter.
+        let head_frames = std::slice::from_ref(&frame);
+        let head_ctx = StructuralLowerContext::new(head_frames);
+        let constraint = param.constraint.as_ref().and_then(|c| {
+            lower_type_expr_structural(graph, c, scope.clone(), &head_ctx)
+                .ok()
+                .map(HotTypeRef::node)
+        });
+        let default = param.default.as_ref().and_then(|d| {
+            lower_type_expr_structural(graph, d, scope.clone(), &head_ctx)
+                .ok()
+                .map(HotTypeRef::node)
+        });
+        // The clause-position index is the ordinal / `param_index` the eager
+        // path and prepared-decl bundle assign — matching identity tuples.
+        let ordinal = u16::try_from(idx).unwrap_or(u16::MAX);
+        let display_name: Arc<str> = Arc::from(param.name.as_str());
+        let node: SemanticNodeId = graph.intern_node_with_scope(
+            SemanticNodeData::TypeParam {
+                decl: decl.clone(),
+                param_index: ordinal,
+                constraint,
+                default,
+                display_name: Arc::clone(&display_name),
+            },
+            scope.clone(),
+        );
+        frame.bind(display_name, node);
+    }
+
+    // De-sugared `vec![frame]`: this producer module forbids ALL production bang
+    // macro invocations (so the no-codegen-surface guard bans the whole class
+    // rather than allowlisting std macros), so the single-element vector is built
+    // via `Vec::from`. Behavior-identical to `vec![frame]` (one owned move into a
+    // fresh `Vec`).
+    Vec::from([frame])
+}
+
+// =============================================================================
+// The macro hot mirror (the ONLY crate-visible producer surface).
+// =============================================================================
+
+/// Lazy, singleflight, content-addressed mirror of one file's Vue SFC MACRO
+/// type-argument graph handles.
+///
+/// See the module documentation. Stored on
+/// [`IndexedReady`](crate::project_type_store::IndexedReady); content-
+/// addressed by construction (a fresh artifact carries a fresh empty
+/// mirror).
+#[derive(Default)]
+pub struct MacroHotMirror {
+    /// Lazily allocated once on first demand, sized to the owner's macro
+    /// count. `cells[macro_index]` is a per-slot [`OnceLock`]: `Some(HotTypeRef)`
+    /// = lowered, `None` = stable negative (no `parsed_type_argument` / not
+    /// structurally lowerable). The outer [`OnceLock`] stays EMPTY until the
+    /// first `macro_type_arg_hot_ref` demand, so publishing an artifact
+    /// allocates ZERO.
+    cells: OnceLock<Box<[OnceLock<Option<HotTypeRef>>]>>,
+}
+
+impl std::fmt::Debug for MacroHotMirror {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MacroHotMirror")
+            .field(
+                "demanded",
+                &self
+                    .cells
+                    .get()
+                    .map(|c| c.iter().filter(|x| x.get().is_some()).count())
+                    .unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+impl Clone for MacroHotMirror {
+    /// A cloned artifact starts with an EMPTY mirror: the `HotTypeRef`
+    /// handles are interned ids valid for the project graph, but the mirror
+    /// is a per-artifact demand cache and a clone is a distinct artifact
+    /// instance. Re-demand repopulates it (the underlying interned nodes are
+    /// content-addressed, so a re-lower hits the same node ids).
+    fn clone(&self) -> Self {
+        Self {
+            cells: OnceLock::new(),
+        }
+    }
+}
+
+impl MacroHotMirror {
+    /// Number of demanded (filled) macro cells — test observability only,
+    /// never a validity signal. A freshly published artifact reports `0`.
+    #[cfg(test)]
+    pub(crate) fn demanded_count(&self) -> usize {
+        self.cells
+            .get()
+            .map(|c| c.iter().filter(|cell| cell.get().is_some()).count())
+            .unwrap_or(0)
+    }
+}
+
+/// Resolve (lowering once on first demand) the mode-NEUTRAL
+/// [`HotTypeRef`] for the macro at `macro_index` in `owner_canonical`.
+///
+/// This is the SOLE production entry that lowers a macro
+/// `parsed_type_argument` into a semantic-graph handle. Returns `None` when
+/// the owner file is not loaded, the macro index is out of range, the macro
+/// carries no `parsed_type_argument`, or the type argument has no faithful
+/// unresolved structural representation (a stable negative cell).
+pub(crate) fn macro_type_arg_hot_ref(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+) -> Option<HotTypeRef> {
+    let serve = ctx.ensure_indexed_ready_serve(owner_canonical)?;
+    let indexed = serve.indexed;
+
+    // Lazily allocate the dense cell table once, sized to the owner's macro
+    // count (race-safe via the outer `OnceLock::get_or_init`). An
+    // out-of-range `macro_index` returns `None` (same negative as a missing
+    // macro), never grows the table.
+    let table = indexed.macro_hot_mirror.cells.get_or_init(|| {
+        let n = indexed
+            .script_analysis
+            .as_ref()
+            .map(|s| s.macros.len())
+            .unwrap_or(0);
+        (0..n)
+            .map(|_| OnceLock::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    });
+    let cell = table.get(macro_index)?;
+
+    // The mirror is a PURE producer of the UNRESOLVED structural carrier graph
+    // (inert carrier nodes, resolved on demand at the consuming dispatch):
+    // no host route lookup, no dependency emission. Dependency recording
+    // belongs at the RESOLVING demand — the consumer re-enters the ONE
+    // dispatch over this handle and the subquery read signatures (`TypeOf`
+    // import-route facts, `ResolveDecl`/`Instantiate` file whole-hashes)
+    // bubble into the consuming result's `ReadSetSignature`.
+    *cell.get_or_init(|| build_macro_hot_ref(ctx, owner_canonical, &indexed, macro_index))
+}
+
+/// Build the structural [`HotTypeRef`] for one macro index — the
+/// `get_or_init` body. Lowers the macro's `parsed_type_argument` once
+/// through the shared query-free structural lowerer under a script-setup
+/// seed binder frame.
+///
+/// PRIVATE: it names [`lower_type_expr_structural`] and
+/// [`build_script_setup_seed_frames`] DIRECTLY — both are module-private, so
+/// only this module's own producer paths can reach them.
+fn build_macro_hot_ref(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    indexed: &crate::project_type_store::IndexedReady,
+    macro_index: usize,
+) -> Option<HotTypeRef> {
+    let snapshot = indexed.script_analysis.as_ref()?;
+    let mac = snapshot.macros.get(macro_index)?;
+    let parsed_arg = mac.parsed_type_argument.as_ref()?;
+
+    let graph = ctx.project_type_store().semantic_graph();
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(owner_canonical),
+        whole_hash: indexed.whole_hash,
+        local_scope: None,
+    };
+
+    // Macro-T own-body provenance: `defineProps` / `withDefaults` own-body
+    // direct members carry `declared_in_macro_type_arg = true` (a props-axis
+    // concern consumed by the published surface policy). Every other macro is
+    // structural. This mirrors `macro_payload_surface_provenance` —
+    // PROVENANCE is a structural-lowering property of the macro's own body,
+    // not a demand/mode property, so it belongs on the mode-neutral mirror.
+    use verter_semantic::analysis::AnalyzedMacroKind;
+    // De-sugared `matches!`: this producer module forbids ALL production bang
+    // macro invocations (so the no-codegen-surface guard can ban the whole
+    // class instead of allowlisting individual std macros), so the macro-own-
+    // body classification stays an explicit `match`. Behavior-identical to
+    // `matches!(mac.kind, DefineProps | WithDefaults)`. Clippy's
+    // `match_like_matches_macro` suggestion to collapse this back to `matches!`
+    // MUST NOT be applied here.
+    #[allow(clippy::match_like_matches_macro)]
+    let macro_own_body = match mac.kind {
+        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => true,
+        _ => false,
+    };
+
+    // Seed the script-setup generic binders so `defineProps<T>()`'s `T` in a
+    // `<script setup generic="T">` SFC lowers to its `TypeParam` binder, not
+    // a `BareRef(T)`. Built from the owner's ROUTE-FREE local `IndexedReady`
+    // data (`raw_source` + `framework_parse`) — NO host route lookup, so the
+    // mirror stays a pure producer.
+    let seed_frames = build_script_setup_seed_frames(indexed, graph, &scope);
+    let lower_ctx = StructuralLowerContext::new(&seed_frames).with_macro_own_body(macro_own_body);
+
+    lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx).ok()
+}
+
 #[cfg(test)]
 #[path = "structural_lower_tests.rs"]
 mod structural_lower_tests;
+
+#[cfg(test)]
+#[path = "macro_hot_mirror_tests.rs"]
+mod macro_hot_mirror_tests;
+
+#[cfg(test)]
+#[path = "script_setup_binder_tests.rs"]
+mod script_setup_binder_tests;

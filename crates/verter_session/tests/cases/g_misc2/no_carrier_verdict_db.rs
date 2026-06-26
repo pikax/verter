@@ -21,6 +21,23 @@
 //! `crate::meta_resolve::projection_demand::PublishedSurfaceKind`
 //! is a separate, live type that legitimately owns the same
 //! identifier. Forbidding the bare token would false-positive on it.
+//!
+//! GUARD-LOCAL SCANNER RECORD (this is a justified identity-absence
+//! scanner, NOT a structural assert):
+//!
+//!   scanner_invariant=r22_carrier_verdict_substrate_absent_from_production
+//!   scanner_justification=Rust cannot prove "this identifier is absent
+//!     from the entire production codebase and must never be reintroduced"
+//!     — a compile-fail import would catch only a PUBLIC reintroduction,
+//!     not a private type/module/field/accessor; retired-symbol absence is
+//!     expressible only as a name-spelling source scan.
+//!   mechanism_ruling=binding architecture design ruling
+//!     (see `docs/arch/cache-key-guard-mechanism-rulings.md`): a source scanner
+//!     is the justified mechanism for R22 retired-symbol absence (Rust cannot
+//!     prove "identifier absent from the whole codebase / never reintroduced").
+//!   hardening_rounds=0
+//!   hardening_history=none — record adopted at this reorganization; no
+//!     spelling-case add/broaden.
 
 use std::path::{Path, PathBuf};
 
@@ -95,19 +112,44 @@ fn is_self_excluded(path: &Path) -> bool {
 
 /// Walk a `crates/*/src/` tree and collect every `.rs` file that is
 /// production source (NOT a test file and NOT self-excluded).
+///
+/// A directory we are asked to walk MUST be readable — a `read_dir`
+/// failure is a hard error, never a silent `return` that would drop a
+/// whole subtree from the scan and let the gate pass vacuously. Each
+/// `DirEntry` is unwrapped with a panic carrying the directory, and the
+/// dir-vs-file classification uses `entry.file_type()` (panic-on-error),
+/// never `path.is_dir()`/`path.is_file()` — those collapse a metadata
+/// error to `false` and would silently drop a file or whole subtree from
+/// the scan (the per-entry fail-open class this hard-failing traversal
+/// closes).
 fn collect_production_rs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "scan integrity: failed to read directory `{}`: {e}",
+            dir.display()
+        )
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "scan integrity: failed to read a directory entry under `{}`: {e}",
+                dir.display()
+            )
+        });
         let path = entry.path();
-        if path.is_dir() {
+        let file_type = entry.file_type().unwrap_or_else(|e| {
+            panic!(
+                "scan integrity: failed to read the file type of `{}`: {e}",
+                path.display()
+            )
+        });
+        if file_type.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name == "target" || name == "node_modules" || name == ".git" {
                 continue;
             }
             collect_production_rs(&path, out);
-        } else if path.is_file()
+        } else if file_type.is_file()
             && path.extension().and_then(|e| e.to_str()) == Some("rs")
             && !is_test_file(&path)
             && !is_self_excluded(&path)
@@ -315,21 +357,75 @@ fn line_contains_identifier(line: &str, ident: &str) -> bool {
     false
 }
 
+/// Hard-failing directory classification for a path we discovered by
+/// name (a `crates/*` child, or its `src/` subdirectory). Returns
+/// whether the path is a directory.
+///
+/// A genuinely-absent path (`ErrorKind::NotFound`) is a legitimate
+/// non-directory answer (`false`) — a crate root without a `src/` is
+/// simply skipped. ANY OTHER metadata IO error (permissions, a
+/// `NotADirectory` traversal, a stale handle) is a hard panic carrying
+/// the path: `Path::is_dir()` collapses every such error to `false` and
+/// would silently drop a crate or whole `src/` subtree from the scan,
+/// the exact fail-open class this guard must close. Mirrors the
+/// per-entry hard-failing discipline of `collect_production_rs`.
+fn classified_as_dir(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!(
+            "scan integrity: failed to classify `{}`: {e}",
+            path.display()
+        ),
+    }
+}
+
 /// Collect every production `.rs` file under `crates/*/src/`.
+///
+/// The `crates/` directory MUST be readable — a `read_dir` failure is a
+/// hard error, never a silent empty return that would let the gate pass
+/// vacuously. The per-crate dir-vs-file classification uses
+/// `entry.file_type()` (panic-on-error) and the `src/` subdirectory uses
+/// hard-failing metadata (`classified_as_dir`); neither collapses a
+/// metadata IO error to a silent skip.
 fn collect_production_sources() -> Vec<PathBuf> {
     let root = workspace_root();
     let mut files: Vec<PathBuf> = Vec::new();
     let crates_dir = root.join("crates");
-    let Ok(crates) = std::fs::read_dir(&crates_dir) else {
-        return files;
-    };
-    for entry in crates.flatten() {
+    let crates = std::fs::read_dir(&crates_dir).unwrap_or_else(|e| {
+        panic!(
+            "scan integrity: failed to read crates directory `{}`: {e}",
+            crates_dir.display()
+        )
+    });
+    for entry in crates {
+        // Unwrap each `DirEntry` with a panic carrying the directory — no
+        // `.flatten()` that would silently drop a crate dir whose entry
+        // errored.
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "scan integrity: failed to read a crates directory entry under `{}`: {e}",
+                crates_dir.display()
+            )
+        });
         let crate_dir = entry.path();
-        if !crate_dir.is_dir() {
+        // Classify the crate-root entry by its `file_type()` (panic-on-
+        // error), never `path.is_dir()` which would collapse a metadata
+        // error to a silent skip.
+        let crate_dir_is_dir = entry
+            .file_type()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "scan integrity: failed to read the file type of `{}`: {e}",
+                    crate_dir.display()
+                )
+            })
+            .is_dir();
+        if !crate_dir_is_dir {
             continue;
         }
         let src = crate_dir.join("src");
-        if !src.is_dir() {
+        if !classified_as_dir(&src) {
             continue;
         }
         collect_production_rs(&src, &mut files);
@@ -343,14 +439,37 @@ fn collect_production_sources() -> Vec<PathBuf> {
 fn no_carrier_verdict_db_in_production() {
     let files = collect_production_sources();
 
+    // Prove the scan is not vacuous — a sentinel production file that MUST
+    // exist has to be in the collected set. If the traversal returned
+    // empty/partial, this fails loudly instead of passing silently.
+    let sentinel = std::path::Path::new("crates")
+        .join("verter_session")
+        .join("src")
+        .join("component_meta_caches.rs");
+    assert!(
+        files.iter().any(|f| f.ends_with(&sentinel)),
+        "scan vacuity guard: the sentinel production file `{}` was NOT in the collected \
+         source set ({} files). A guard that walks production source must prove it \
+         actually scanned the expected files; an empty/partial traversal must not pass \
+         vacuously.",
+        sentinel.display(),
+        files.len(),
+    );
+
     // Read + preprocess each file ONCE, then test every retired symbol against
     // the cached processed text (was O(symbols × files) of redundant reads).
     let mut hits_by_symbol: std::collections::BTreeMap<&str, Vec<(PathBuf, Vec<usize>)>> =
         RETIRED_SYMBOLS.iter().map(|s| (*s, Vec::new())).collect();
     for file in &files {
-        let Ok(text) = std::fs::read_to_string(file) else {
-            continue;
-        };
+        // A read failure on a file the walk already classified as
+        // production source is a hard error — never a silent skip that
+        // could drop a file carrying a retired symbol from the scan.
+        let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
+            panic!(
+                "scan integrity: failed to read production source `{}`: {e}",
+                file.display()
+            )
+        });
         let processed = preprocess(&text);
         let plines: Vec<&str> = processed.lines().collect();
         for symbol in RETIRED_SYMBOLS {
@@ -426,372 +545,70 @@ fn no_carrier_verdict_db_self_test() {
     );
 }
 
-// ---------------------------------------------------------------------
-// Architecture guard: explicit deepening of a `SyntheticSlotBinding`
-// carrier MUST route through `ShapeCacheKey::semantic_node_whole`.
-//
-// Contract (per `[[component-meta-shallow-by-default-rule]]` and the
-// `TypeExpr::SyntheticSlotBinding` rustdoc):
-//   The synthetic carrier variant is a shallow terminal — projectors,
-//   reducers, and the registry all refuse to resolve its `binding_name`
-//   through `TypeRegistry`. The ONLY legitimate way to deepen a carrier
-//   into its underlying member shape is to construct a
-//   `ShapeCacheKey::semantic_node_whole(scope, SemanticNodeId(key.value_node), mode)`
-//   key and consult `ShapeCacheDb` — the same identity used for any
-//   regular member-shape route.
-//
-//   A consumer that wants to drill down by directly reading
-//   `SyntheticCarrierKey::value_node` and wrapping it in a fresh
-//   `SemanticNodeId(...)` is BYPASSING the cache route. That is the
-//   defect class this guard prevents: such a consumer would (a) miss
-//   the shared `ShapeCacheDb` warm-hit path, (b) escape the
-//   cache's self-root + dep-signature validation, and (c) drift from
-//   the rest of the projector / member-shape pipeline.
-//
-//   Currently zero workspace consumers exercise the explicit-deepen
-//   route — the carrier is always shallow in every projector,
-//   reducer, registry, and graph-builder site. The
-//   `tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs` integration
-//   test exercises the cache-key identity round-trip via the
-//   `ShapeCacheDb::insert_synthetic_carrier_deep_for_test` /
-//   `get_synthetic_carrier_deep_for_test` `#[cfg(any(test,
-//   debug_assertions))]` helpers, proving the route is well-defined
-//   for any future consumer that needs it.
-//
-//   Narrowing rule (what this guard considers a true bypass):
-//     A line that constructs `SemanticNodeId(<ident>.value_node)` is
-//     flagged ONLY when no preceding line within a small upstream
-//     window (`UPSTREAM_CACHE_ROUTE_WINDOW`) calls
-//     `ShapeCacheKey::semantic_node_whole(` (or the
-//     `_with_context` variant). When the upstream call is present,
-//     the deref is the legitimate cache-route argument site (e.g. an
-//     argument expression broken across lines by rustfmt) and is
-//     exempt — the consumer IS using the cache route, just split
-//     across lines.
-
-/// Identifier-boundary token-stream check: does `line` contain the
-/// regex `SemanticNodeId\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*value_node`?
-///
-/// This is the canonical shape of "construct a `SemanticNodeId` from
-/// the `value_node` field of some struct value". It catches the
-/// suspicious pattern without depending on the binding's name. False
-/// positives are possible only if some future unrelated type also
-/// names a field `value_node` — in that case the false-positive site
-/// must be explicitly allowlisted below.
-fn line_constructs_semantic_node_id_from_value_node(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let needle = b"SemanticNodeId";
-    let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    let mut i = 0usize;
-    while i + needle.len() <= bytes.len() {
-        if &bytes[i..i + needle.len()] != needle {
-            i += 1;
-            continue;
-        }
-        let after_ident = i + needle.len();
-        // Identifier-boundary on the right side of `SemanticNodeId` —
-        // reject `SemanticNodeIdSomething` (longer identifier).
-        if after_ident < bytes.len() && is_ident_char(bytes[after_ident]) {
-            i += 1;
-            continue;
-        }
-        // Identifier-boundary on the left side of `SemanticNodeId` —
-        // reject `_SemanticNodeId` (e.g. a member-named version).
-        if i > 0 && is_ident_char(bytes[i - 1]) {
-            i += 1;
-            continue;
-        }
-        // Skip whitespace.
-        let mut j = after_ident;
-        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        // Require an open paren for "constructor call" shape.
-        if j >= bytes.len() || bytes[j] != b'(' {
-            i += 1;
-            continue;
-        }
-        j += 1;
-        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        // Match an identifier `[A-Za-z_][A-Za-z0-9_]*`.
-        let id_start = j;
-        if id_start >= bytes.len()
-            || !(bytes[id_start].is_ascii_alphabetic() || bytes[id_start] == b'_')
-        {
-            i += 1;
-            continue;
-        }
-        let mut id_end = id_start + 1;
-        while id_end < bytes.len() && is_ident_char(bytes[id_end]) {
-            id_end += 1;
-        }
-        // Skip whitespace, then expect `.`.
-        let mut k = id_end;
-        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-            k += 1;
-        }
-        if k >= bytes.len() || bytes[k] != b'.' {
-            i += 1;
-            continue;
-        }
-        k += 1;
-        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-            k += 1;
-        }
-        // Expect literal field name `value_node`.
-        let field = b"value_node";
-        if k + field.len() > bytes.len() || &bytes[k..k + field.len()] != field {
-            i += 1;
-            continue;
-        }
-        // Identifier-boundary on the right side of `value_node` — must
-        // not extend into a longer identifier like `value_nodes`.
-        let after_field = k + field.len();
-        if after_field < bytes.len() && is_ident_char(bytes[after_field]) {
-            i += 1;
-            continue;
-        }
-        return true;
-    }
-    false
-}
-
-/// Lines of upstream context the narrowing rule scans for a
-/// `ShapeCacheKey::semantic_node_whole(` opening before flagging a
-/// `SemanticNodeId(<ident>.value_node)` line as a bypass. Five lines
-/// covers the rustfmt-broken legitimate call shape:
-///
-/// ```ignore
-/// let key = ShapeCacheKey::semantic_node_whole(           // -2
-///     carrier.scope_canonical_id.clone(),                  // -1
-///     crate::semantic_query::SemanticNodeId(carrier.value_node), //  0  ← deref
-///     mode,
-/// );
-/// ```
-const UPSTREAM_CACHE_ROUTE_WINDOW: usize = 5;
-const CACHE_ROUTE_NEEDLE: &str = "ShapeCacheKey::semantic_node_whole";
-
-/// True if any of the `UPSTREAM_CACHE_ROUTE_WINDOW` lines preceding
-/// `idx` contains the cache-route call opener. The check is a plain
-/// substring scan on the preprocessed lines (comments + inline
-/// `#[cfg(test)] mod` blocks already stripped by the caller). The
-/// `_with_context` variant is matched too because its name is a
-/// strict superstring of the bare needle.
-fn upstream_uses_cache_route(lines: &[&str], idx: usize) -> bool {
-    let start = idx.saturating_sub(UPSTREAM_CACHE_ROUTE_WINDOW);
-    lines[start..idx]
-        .iter()
-        .any(|l| l.contains(CACHE_ROUTE_NEEDLE))
-}
-
-/// The architecture guard test: no production source file may
-/// construct a `SemanticNodeId` from any struct's `value_node` field
-/// EXCEPT when the construction is inside the argument list of a
-/// `ShapeCacheKey::semantic_node_whole(...)` (or
-/// `_with_context(...)`) call. The cache-route call is the only
-/// permitted way to express a synthetic-carrier-derived semantic-node
-/// identity; rustfmt may split the call's argument across lines, so
-/// the upstream-window check accepts the legitimate split shape.
+/// Discriminating self-test for the top-level crate/`src` classifier:
+/// `classified_as_dir` must hard-fail on a metadata IO error rather than
+/// silently treating the path as a non-directory. This is the precise
+/// difference from `Path::is_dir()`, which collapses EVERY metadata error
+/// (including a `NotADirectory`/permission error) to `false` and would
+/// drop a crate or whole `src/` subtree from the scan vacuously.
 #[test]
-fn synthetic_carrier_explicit_deepen_routes_through_shape_cache_key() {
-    let files = collect_production_sources();
+fn retired_symbol_scanner_classified_as_dir_hard_fails_on_metadata_error_self_test() {
+    let scratch = std::env::temp_dir().join(format!(
+        "verter_no_carrier_classify_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&scratch).expect("create scratch dir");
 
-    let mut violations: Vec<(PathBuf, Vec<usize>)> = Vec::new();
-    for file in &files {
-        let Ok(text) = std::fs::read_to_string(file) else {
-            continue;
-        };
-        let processed = preprocess(&text);
-        let processed_lines: Vec<&str> = processed.lines().collect();
-        let violation_lines: Vec<usize> = processed_lines
-            .iter()
-            .enumerate()
-            .filter_map(|(i, l)| {
-                if !line_constructs_semantic_node_id_from_value_node(l) {
-                    return None;
-                }
-                // Narrowing: if the upstream window of this line
-                // contains the cache-route call opener, the deref is
-                // the legitimate cache-route argument (split across
-                // lines by rustfmt). Exempt it.
-                if upstream_uses_cache_route(&processed_lines, i) {
-                    return None;
-                }
-                Some(i + 1)
-            })
-            .collect();
-        if !violation_lines.is_empty() {
-            violations.push((file.clone(), violation_lines));
-        }
-    }
-
+    // A real directory classifies as a directory.
     assert!(
-        violations.is_empty(),
-        "Architecture rule violation: production source constructs a \
-         `SemanticNodeId` directly from a struct's `value_node` field \
-         outside the legitimate cache-route call. The synthetic-carrier \
-         explicit-deepen route MUST go through \
-         `ShapeCacheKey::semantic_node_whole(scope, node, mode)` (and \
-         its `_with_context` variant). Direct `SemanticNodeId(_.value_node)` \
-         construction outside that call bypasses the shared \
-         `ShapeCacheDb` warm-hit path AND escapes self-root + \
-         dep-signature validation. See \
-         `[[component-meta-shallow-by-default-rule]]` in \
-         `.claude/skills/component-meta/SKILL.md`.\n\nViolations:\n{violations:#?}"
-    );
-}
-
-/// Self-test for the explicit-deepen guard: the per-line scanner
-/// catches the forbidden shape AND the narrowed end-to-end guard
-/// (upstream-window check) discriminates legitimate cache-route
-/// argument sites from bare bypasses.
-#[test]
-fn synthetic_carrier_explicit_deepen_guard_self_test() {
-    // -----------------------------------------------------------------
-    // Part 1 — per-line scanner: forbidden shapes match, legitimate
-    // shapes do not. (No upstream context yet — that lives in Part 2.)
-    // -----------------------------------------------------------------
-
-    // The forbidden shape — constructs `SemanticNodeId` from any
-    // struct's `value_node` field.
-    let violation_a = "let id = SemanticNodeId(key.value_node);";
-    let violation_b = "    SemanticNodeId(carrier.value_node)";
-    let violation_c = "SemanticNodeId ( binding . value_node ) // whitespace tolerance";
-
-    assert!(
-        line_constructs_semantic_node_id_from_value_node(violation_a),
-        "self-test: scanner missed `SemanticNodeId(key.value_node);` — \
-         the canonical shape of a forbidden direct construction"
-    );
-    assert!(
-        line_constructs_semantic_node_id_from_value_node(violation_b),
-        "self-test: scanner missed `SemanticNodeId(carrier.value_node)`"
-    );
-    assert!(
-        line_constructs_semantic_node_id_from_value_node(violation_c),
-        "self-test: scanner missed whitespace-tolerant `SemanticNodeId ( binding . value_node )`"
+        classified_as_dir(&scratch),
+        "classifier must report an existing directory as a directory"
     );
 
-    // Per-line legitimate shapes — must NOT trip the scanner.
-    let legit_cache_route_pre_bound =
-        "let key = ShapeCacheKey::semantic_node_whole(scope, member_value, mode);";
-    let legit_field_decl = "pub value_node: u64,";
-    let legit_struct_constr =
-        "SyntheticCarrierKey { scope_canonical_id: s, surface_kind: k, slot_name: n, binding_name: b, value_node: 7 }";
-    let legit_serialize = "key.value_node.to_string()";
-    let legit_semantic_node_id_from_const = "let id = SemanticNodeId(0);";
-    let legit_semantic_node_id_from_field_no_value_node =
-        "let id = SemanticNodeId(member.id_field);";
-
-    for legit in [
-        legit_cache_route_pre_bound,
-        legit_field_decl,
-        legit_struct_constr,
-        legit_serialize,
-        legit_semantic_node_id_from_const,
-        legit_semantic_node_id_from_field_no_value_node,
-    ] {
-        assert!(
-            !line_constructs_semantic_node_id_from_value_node(legit),
-            "self-test: scanner false-positives on a legitimate line: `{legit}`"
-        );
-    }
-
-    // -----------------------------------------------------------------
-    // Part 2 — narrowing: the per-line scanner DOES match the deref
-    // shape, but the upstream-window check exempts it when the
-    // legitimate cache-route call opener appears in the upstream
-    // window. This is the rustfmt-broken legitimate shape that would
-    // otherwise be flagged.
-    // -----------------------------------------------------------------
-
-    let legit_split_call: &[&str] = &[
-        "let key = ShapeCacheKey::semantic_node_whole(",
-        "    carrier.scope_canonical_id.clone(),",
-        "    crate::semantic_query::SemanticNodeId(carrier.value_node),",
-        "    mode,",
-        ");",
-    ];
-    // The deref line on its own DOES match the per-line scanner.
+    // A genuinely-absent path (`NotFound`) is a LEGITIMATE non-directory
+    // answer — a crate root without a `src/` is simply skipped, NOT a
+    // panic.
+    let absent = scratch.join("definitely_absent").join("src");
     assert!(
-        line_constructs_semantic_node_id_from_value_node(legit_split_call[2]),
-        "self-test: per-line scanner missed the deref inside the \
-         rustfmt-broken legitimate call"
-    );
-    // But the upstream-window check exempts it.
-    assert!(
-        upstream_uses_cache_route(legit_split_call, 2),
-        "self-test: upstream-window check failed to find \
-         `ShapeCacheKey::semantic_node_whole(` 2 lines upstream of the \
-         deref. The legitimate cache-route argument shape would be \
-         false-flagged."
+        !classified_as_dir(&absent),
+        "classifier must report a genuinely-absent (NotFound) path as a \
+         non-directory WITHOUT panicking — a missing `src/` is a legitimate skip"
     );
 
-    // The `_with_context` variant must also be recognised as legit
-    // because its name is a strict superstring of the bare needle.
-    let legit_split_call_with_ctx: &[&str] = &[
-        "let key = ShapeCacheKey::semantic_node_whole_with_context(",
-        "    carrier.scope_canonical_id.clone(),",
-        "    crate::semantic_query::SemanticNodeId(carrier.value_node),",
-        "    terminal_context,",
-        ");",
-    ];
+    // A path that traverses THROUGH a regular file as if it were a
+    // directory produces a non-`NotFound` metadata IO error
+    // (`NotADirectory` on Unix, an analogous non-NotFound kind on
+    // Windows). `classified_as_dir` MUST panic on it; `Path::is_dir()`
+    // would silently return `false` (the fail-open class this guard
+    // closes). We assert the panic discriminates the hard-failing
+    // classifier from a collapsing `is_dir()` classification.
+    let regular_file = scratch.join("regular.txt");
+    std::fs::write(&regular_file, b"not a directory").expect("write regular file");
+    let through_file = regular_file.join("src");
+
+    // Sanity: confirm this scratch path is the IO-error (NOT NotFound)
+    // case on this platform, so the test discriminates rather than
+    // passing vacuously on a platform where the path resolves to
+    // NotFound.
+    let probe = std::fs::metadata(&through_file);
     assert!(
-        upstream_uses_cache_route(legit_split_call_with_ctx, 2),
-        "self-test: upstream-window check failed to recognise \
-         `_with_context` variant of the cache-route call"
+        probe
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound),
+        "self-test precondition: traversing through a regular file must \
+         yield a non-NotFound metadata IO error on this platform; got {probe:?}"
     );
 
-    // -----------------------------------------------------------------
-    // Part 3 — narrowing discriminates: a bare bypass (no cache-route
-    // call in the upstream window) IS flagged. This is the defect
-    // class the guard exists to prevent.
-    // -----------------------------------------------------------------
-
-    let bypass_bare: &[&str] = &[
-        "fn deepen_directly(carrier: &SyntheticCarrierKey) {",
-        "    let n = SemanticNodeId(carrier.value_node);",
-        "    do_something_else(n);",
-        "}",
-    ];
-    // The deref line matches the per-line scanner.
+    let panicked = std::panic::catch_unwind(|| classified_as_dir(&through_file)).is_err();
     assert!(
-        line_constructs_semantic_node_id_from_value_node(bypass_bare[1]),
-        "self-test: per-line scanner missed the bare bypass deref"
-    );
-    // And the upstream-window check does NOT exempt it (no cache-route
-    // call opener in upstream).
-    assert!(
-        !upstream_uses_cache_route(bypass_bare, 1),
-        "self-test: upstream-window check false-positively found a \
-         cache-route call in upstream context of a bare bypass — the \
-         guard would silently permit the defect class it exists to \
-         prevent"
+        panicked,
+        "classifier must HARD-FAIL (panic) on a non-NotFound metadata IO \
+         error instead of silently treating the path as a non-directory. \
+         `Path::is_dir()` would return `false` here, dropping a subtree \
+         from the scan — that fail-open is exactly what this classifier closes."
     );
 
-    // A bypass that happens to mention the cache-route name in an
-    // unrelated string literal further upstream than the window is
-    // STILL flagged — the window must be bounded.
-    let bypass_distant_mention: &[&str] = &[
-        "// older code referenced ShapeCacheKey::semantic_node_whole here",
-        "fn pad1() {}",
-        "fn pad2() {}",
-        "fn pad3() {}",
-        "fn pad4() {}",
-        "fn pad5() {}",
-        "fn deepen_directly(carrier: &SyntheticCarrierKey) {",
-        "    let n = SemanticNodeId(carrier.value_node);",
-        "}",
-    ];
-    assert!(
-        line_constructs_semantic_node_id_from_value_node(bypass_distant_mention[7]),
-        "self-test: per-line scanner missed the deref in the distant-mention bypass"
-    );
-    assert!(
-        !upstream_uses_cache_route(bypass_distant_mention, 7),
-        "self-test: upstream window must be bounded; the cache-route \
-         mention 7 lines back must NOT exempt the bypass"
-    );
+    std::fs::remove_dir_all(&scratch).ok();
 }

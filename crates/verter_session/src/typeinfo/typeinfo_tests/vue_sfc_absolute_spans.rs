@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::types::AnalyzedMacroKind;
 
-use crate::typeinfo::framework_surface::vue_exec::slots_from_typeinfo_surface;
+use crate::typeinfo::framework_surface::vue_exec::{
+    resolved_vue_surface_for_test, slots_from_typeinfo_surface,
+};
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::typeinfo::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMember};
 use crate::types::{HostConfig, UpsertRequest};
@@ -291,7 +293,7 @@ fn raise_member_value(
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     dispatch
-        .raise_node_to_type_expr(member.value)
+        .materialize_output_type_expr_for_test(member.value)
         .expect("slot member value must raise to a TypeExpr")
 }
 
@@ -343,7 +345,10 @@ fn defineslots_return_span_slices_raw_to_vnode_array() {
     let macro_surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots<...>() must resolve a macro surface");
-    let slots = slots_from_typeinfo_surface(&*host, &macro_surface);
+    let slots = slots_from_typeinfo_surface(
+        &*host,
+        &resolved_vue_surface_for_test(macro_surface.clone()),
+    );
 
     let default = slots
         .iter()

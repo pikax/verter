@@ -709,12 +709,14 @@ fn preflight_reduces_clean(spec: &QuerySpec) -> Result<(), GenError> {
             spec.row_file, spec.row_function
         ))
     })?;
-    let projected = host.project_node_to_type_expr(node).ok_or_else(|| {
-        GenError::PreflightUnclean(format!(
-            "{}::{}: resolved node did not project to a TypeExpr (carrier/operator shell)",
-            spec.row_file, spec.row_function
-        ))
-    })?;
+    let projected = host
+        .project_node_to_type_expr_for_test(node)
+        .ok_or_else(|| {
+            GenError::PreflightUnclean(format!(
+                "{}::{}: resolved node did not project to a TypeExpr (carrier/operator shell)",
+                spec.row_file, spec.row_function
+            ))
+        })?;
     match admission::admit_type_expr(&projected) {
         AdmissionVerdict::Admit => Ok(()),
         verdict => Err(GenError::PreflightUnclean(format!(

@@ -783,7 +783,7 @@ defineProps<{ x: Lib }>()
 // partiality, not bare non-cacheability).
 // ─────────────────────────────────────────────────────────────────
 
-/// Build a valid `(MaterializedTypeExpr, fact_dep_signature)` for a real
+/// Build a valid `(MaterializedOutputTypeExpr, fact_dep_signature)` for a real
 /// upserted scope so `admit_computed` can take its `Cacheable` arm. The
 /// helper observes the scope and runs the engine fact-signature builder
 /// exactly as the projector pipeline does.
@@ -792,10 +792,10 @@ fn shape_value_and_fact_sig_for_scope(
     scope_canonical: &str,
     result_is_partial: bool,
 ) -> (
-    crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
+    crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
     Arc<[crate::resolver_core::FactVersionRef]>,
 ) {
-    use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+    use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
     // Force the scope's `IndexedReady` artifact to materialise so the
     // scheduler reports a live scope and `observe_materialize_scope`
     // returns a tear-free observation (an upsert alone does not eagerly
@@ -809,16 +809,16 @@ fn shape_value_and_fact_sig_for_scope(
         .syntactic_export_set
         .clone()
         .expect("fixture invariant: scope carries a SyntacticExportSet parse fact");
-    let value = MaterializedTypeExpr {
-        node_id: None,
-        type_expr: verter_type_expr::TypeExpr::string_literal("ok".to_string()),
-        dep_signature: Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+    let value = MaterializedOutputTypeExpr::from_type_expr_for_test(
+        None,
+        verter_type_expr::TypeExpr::string_literal("ok".to_string()),
+        Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
         result_is_partial,
-    };
+    );
     let fact_sig = match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
         &observed,
         parse_fact,
-        &value.dep_signature,
+        value.dep_signature(),
     ) {
         crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
         crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
@@ -864,8 +864,8 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
     let live_before_complete = db.live_count();
     let returned_complete = db.admit_computed(&complete_key, ctx, complete_value, complete_sig);
     assert_eq!(
-        returned_complete.type_expr,
-        verter_type_expr::TypeExpr::string_literal("ok".to_string()),
+        returned_complete.type_expr_for_test(),
+        &verter_type_expr::TypeExpr::string_literal("ok".to_string()),
         "admit_computed returns the value verbatim",
     );
     assert_eq!(
@@ -890,8 +890,8 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
     let live_before_partial = db.live_count();
     let returned_partial = db.admit_computed(&partial_key, ctx, partial_value, partial_sig);
     assert_eq!(
-        returned_partial.type_expr,
-        verter_type_expr::TypeExpr::string_literal("ok".to_string()),
+        returned_partial.type_expr_for_test(),
+        &verter_type_expr::TypeExpr::string_literal("ok".to_string()),
         "admit_computed still returns the partial value verbatim to the caller",
     );
     assert_eq!(
@@ -908,7 +908,7 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
 
 /// Per-result completeness gate (NOT the request sticky). The
 /// `ShapeCacheDb` admission gate keys on the value's OWN completeness
-/// (`MaterializedTypeExpr::result_is_partial`, set from the contributing
+/// (`MaterializedOutputTypeExpr::result_is_partial`, set from the contributing
 /// dispatch read in `field_types`), NEVER on the request-global suppress
 /// sticky. The shared semantic caches carry their
 /// OWN completeness so one consumer's request-scoped partial can NOT

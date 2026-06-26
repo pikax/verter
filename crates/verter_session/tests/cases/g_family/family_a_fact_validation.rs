@@ -74,7 +74,7 @@ fn family_a_entries_carry_fact_dep_signature() {
         "entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>",
         "entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>",
         "entries: DashMap<OwnerCollectionKey, Arc<CacheEntry<Option<Arc<TypeExpr>>>>>",
-        "entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedTypeExpr>>>",
+        "entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedOutputTypeExpr>>>",
     ];
     for store in SINGLE_ENTRY_STORES {
         assert!(

@@ -1016,10 +1016,17 @@ impl WasmVerterHost {
                 )
                 .into_parts();
             let (resolved, error) = crate::typeinfo::split_resolve_outcome(outcome);
+            // Bytes facade: `verter_session` wire-encodes the `TypeExpr` to
+            // UTF-8 JSON internally (through the sealed output capability);
+            // the WASM adapter only decodes the bytes to a `String`.
             let type_expr_json = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr(node_id)
-                    .map(|expr| crate::typeinfo::encode_type_expr(&expr))
+                    .project_node_to_type_expr_json_bytes(node_id)
+                    .map(|bytes| {
+                        String::from_utf8(bytes).map_err(|e| {
+                            JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
+                        })
+                    })
                     .transpose()?,
                 None => None,
             };
@@ -1048,10 +1055,17 @@ impl WasmVerterHost {
         catch_panic(AssertUnwindSafe(move || {
             let (outcome, record) = host.evaluate_type_expression_with_audit(req).into_parts();
             let (resolved, error) = crate::typeinfo::split_resolve_outcome(outcome);
+            // Bytes facade: `verter_session` wire-encodes the `TypeExpr` to
+            // UTF-8 JSON internally (through the sealed output capability);
+            // the WASM adapter only decodes the bytes to a `String`.
             let type_expr_json = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr(node_id)
-                    .map(|expr| crate::typeinfo::encode_type_expr(&expr))
+                    .project_node_to_type_expr_json_bytes(node_id)
+                    .map(|bytes| {
+                        String::from_utf8(bytes).map_err(|e| {
+                            JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
+                        })
+                    })
                     .transpose()?,
                 None => None,
             };

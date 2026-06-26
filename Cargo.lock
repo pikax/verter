@@ -4031,6 +4031,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_no_typeexpr"
+version = "0.0.1-beta.1"
+dependencies = [
+ "rustc-hash 2.1.2",
+ "static_assertions",
+ "verter_no_typeexpr_derive",
+ "verter_span",
+]
+
+[[package]]
+name = "verter_no_typeexpr_derive"
+version = "0.0.1-beta.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "verter_parser"
 version = "0.0.1-beta.1"
 dependencies = [
@@ -4108,7 +4127,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallvec",
+ "static_assertions",
  "verter_language",
+ "verter_no_typeexpr",
  "verter_parser",
  "verter_span",
  "verter_type_expr",
@@ -4161,10 +4182,12 @@ dependencies = [
  "verter_audit",
  "verter_compiler",
  "verter_language",
+ "verter_no_typeexpr",
  "verter_parser",
  "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
+ "verter_session",
  "verter_session_oracle_macro",
  "verter_span",
  "verter_type_expr",
@@ -4220,6 +4243,8 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "static_assertions",
+ "verter_no_typeexpr",
  "verter_span",
 ]
 

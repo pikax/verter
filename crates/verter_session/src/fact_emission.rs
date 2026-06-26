@@ -174,25 +174,22 @@ impl LazyBodyFactSource {
             _ => return None,
         };
         let body = match space {
-            SymbolSpace::Type => {
-                let lowered = self.memo.type_decl(name)?;
-                lowered.body.lookup_object().into_owned()
-            }
+            // Body-fact fingerprint input for a TYPE symbol — through the named
+            // compat read on the memo (the fenced output-side body read), never
+            // a direct typed-body access.
+            SymbolSpace::Type => self.memo.compat_type_body_hash_input(name)?,
             // No namespace-space declarations are inventoried by the
             // shallow walk — consistent absence.
             SymbolSpace::Namespace => return None,
             SymbolSpace::Value => {
+                // Keep the synthesised-value-body vs lazy-memo selection HERE,
+                // then assemble the fingerprint input through the named compat
+                // read (the fenced output-side value-body read).
                 let lowered = match self.synthesised_value_bodies.get(name) {
                     Some(body) => Arc::clone(body),
                     None => self.memo.value_decl(name)?,
                 };
-                value_body_for_hash(
-                    lowered.type_annotation.as_ref(),
-                    &lowered.signatures,
-                    lowered.kind,
-                    lowered.object_shape.as_ref(),
-                    lowered.enum_members.as_deref(),
-                )
+                compat_value_body_hash_input(&lowered)
             }
         };
         let outcome = compute_semantic_hash(&body, space, self.lens.as_ref());
@@ -264,6 +261,36 @@ fn value_body_for_hash(
             raw: format!("{kind:?}::{object_shape:?}"),
         },
     }
+}
+
+/// The fingerprint hash INPUT for a VALUE declaration's body — the single
+/// output/compat value-body read, used by the parse-time fact emitter to
+/// compute a body fingerprint and nothing else.
+///
+/// This is deliberately NARROW and PURPOSE-NAMED (a fingerprint hash input, not
+/// a general body accessor). It takes the ALREADY-resolved [`LoweredValueDecl`]
+/// — so the caller keeps the synthesised-value-body vs lazy-memo selection — and
+/// reproduces the EXACT assembled value-body `TypeExpr` ([`value_body_for_hash`]
+/// over the decl's type annotation, signature set, kind, object shape, and enum
+/// members). The fingerprint is therefore byte-identical to the inline read.
+///
+/// It lives next to [`value_body_for_hash`] (its sole producer) rather than on
+/// `DeclBodyMemo`, because the value path's body assembly — and not just a
+/// `lookup_object` view — is owned here; the TYPE-space sibling
+/// ([`DeclBodyMemo::compat_type_body_hash_input`]) lives on the memo because the
+/// type body IS the memo's lowered carrier.
+///
+/// TEMPORARY compat surface: it exists only so the body-fact fingerprint path is
+/// fenced off from the semantic readers. It is anchored as a COMPAT site by the
+/// frozen body-reader inventory guard.
+pub(crate) fn compat_value_body_hash_input(lowered: &LoweredValueDecl) -> TypeExpr {
+    value_body_for_hash(
+        lowered.type_annotation.as_ref(),
+        &lowered.signatures,
+        lowered.kind,
+        lowered.object_shape.as_ref(),
+        lowered.enum_members.as_deref(),
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────

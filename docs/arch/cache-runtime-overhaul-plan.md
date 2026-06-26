@@ -1158,7 +1158,7 @@ Per-row, one `ArtifactNode` or `QueryNode` impl is created.
 
 **Query-identity nodes (skill `R20` multi-candidate — key carries NO content/version/`fact_dep_signature`):**
 
-> SUPERSEDED: the split `MaterializeMemoDb` / `MemberShapeCacheDb` shape caches are retired; the per-member materialiser cache is a slot inside `ShapeCacheDb` indexed by `ShapeSubject::SemanticNode` (unified plan §2.2; the static guard `block_6i_static_guards.rs::shape_cache_db_replaces_split_caches` forbids re-introduction). The `MemberShapeCacheDb` row below maps onto that `ShapeCacheDb` slot.
+> SUPERSEDED: the split `MaterializeMemoDb` / `MemberShapeCacheDb` shape caches are retired; the per-member materialiser cache is a slot inside `ShapeCacheDb` indexed by `ShapeSubject::MemberValueNode` (unified plan §2.2; the static guard `block_6i_static_guards.rs::shape_cache_db_replaces_split_caches` forbids re-introduction). The `MemberShapeCacheDb` row below maps onto that `ShapeCacheDb` slot.
 
 | Cache | Slot key (skill `R6`/H3) | Candidate discriminant | Notes |
 |---|---|---|---|

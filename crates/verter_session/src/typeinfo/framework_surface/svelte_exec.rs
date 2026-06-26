@@ -33,7 +33,9 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
+use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
+use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::framework_surface::results::{
     EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface, PropsSurface, ResolvedMacroPayload,
     ResolvedOutcome,
@@ -46,6 +48,18 @@ use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use crate::VerterHost;
+
+crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+    /// The Svelte framework-surface executor's output-sink capability: the
+    /// Svelte resolution leg here holds this to materialize a graph node into
+    /// a sealed output carrier and unwrap it. Its constructor is visible ONLY
+    /// within `crate::typeinfo::framework_surface::svelte_exec` — NOT the
+    /// whole `typeinfo` subtree — so no `typeinfo` sibling can mint it
+    /// (planted `TypeinfoSvelteSurfaceOutputCap::new` outside this leaf is
+    /// `E0624`).
+    pub(crate) struct TypeinfoSvelteSurfaceOutputCap;
+    mint: pub(in crate::typeinfo::framework_surface::svelte_exec)
+}
 
 /// The wire framework-surface kind a Svelte source family's DTO bundle is keyed
 /// under in the surface store (the store column matches the wire kind the bundle
@@ -173,23 +187,75 @@ fn compute_svelte_surface(
     }
 }
 
-/// Wrap a resolved [`TypeInfoSurface`] in a [`VueMacroSurface`] shell so the
-/// shared per-kind normalizers (`props_from_typeinfo_surface` / `emits…` /
-/// `slots…`) consume it. The shell carries the Svelte owner so member scopes
-/// fall back to the owner file; `macro_index` / `macro_call_span` are synthetic
-/// (the surface members carry their own per-member spans).
+/// Svelte-private mint seal. With no constructor reachable outside
+/// `svelte_exec`, the only code that can place a `SvelteSurfaceSeal` into a
+/// [`SvelteResolvedSurface`] — and therefore the only code that can mint one —
+/// is the `svelte_exec`-private [`macro_surface_shell`].
+struct SvelteSurfaceSeal;
+
+/// A RESOLVED Svelte macro surface — Svelte's OWN sealed resolved-surface
+/// token, minted ONLY inside `svelte_exec` after its resolver produced the
+/// surface. It is NOT a [`ResolvedVueSurface`]: Svelte does not mint the Vue
+/// token from a public `VueMacroSurface` shell (that would re-open the
+/// forgeability the Vue minter's privatization closed).
+///
+/// It wraps a resolution-derived [`VueMacroSurface`] carrier (the shared
+/// surface carrier both frameworks normalize off) plus a private
+/// [`SvelteSurfaceSeal`], and drives the SAME shared per-kind normalizers
+/// through the sealed [`ResolvedSurfaceAccess`] trait — no second normalizer,
+/// no extra allocation (the accessor borrows).
+///
+/// The type is `pub(in crate::typeinfo::framework_surface)` so the trait module
+/// [`crate::typeinfo::framework_surface::resolved_surface_access`] (the SOLE
+/// implementor of [`ResolvedSurfaceAccess`]) can name it for the impl, while the
+/// CONSTRUCTOR ([`macro_surface_shell`], module-private) and the private
+/// [`SvelteSurfaceSeal`] field keep `svelte_exec` the only minter — a sibling
+/// cannot construct one (private fields) and cannot implement the accessor (the
+/// supertrait seal is private to the trait module).
+pub(in crate::typeinfo::framework_surface) struct SvelteResolvedSurface {
+    surface: VueMacroSurface,
+    _seal: SvelteSurfaceSeal,
+}
+
+impl SvelteResolvedSurface {
+    /// The resolution-derived carrier the shared normalizers read, by borrow.
+    /// Exposed to the trait module
+    /// [`crate::typeinfo::framework_surface::resolved_surface_access`] while the
+    /// private `surface` field + the [`SvelteSurfaceSeal`] keep the token
+    /// unmintable and unmodifiable outside `svelte_exec`.
+    pub(in crate::typeinfo::framework_surface) fn surface_carrier(&self) -> &VueMacroSurface {
+        &self.surface
+    }
+}
+
+/// Wrap a resolution-derived [`TypeInfoSurface`] in the carrier and mint
+/// Svelte's OWN sealed [`SvelteResolvedSurface`] token so the shared per-kind
+/// normalizers (`props_from_typeinfo_surface` / `emits…` /
+/// `svelte_snippet_slots…`) consume it through [`ResolvedSurfaceAccess`]. The
+/// carrier holds the Svelte owner so member scopes fall back to the owner file;
+/// `macro_index` / `macro_call_span` are synthetic (the surface members carry
+/// their own per-member spans).
+///
+/// The Svelte path is a RESOLUTION sink too: the `surface` is a navigated /
+/// filtered surface this module resolved, so minting the sealed token here
+/// (rather than handing a bare `&VueMacroSurface` to the now-token-gated
+/// normalizers, or minting the Vue token from a forgeable shell) keeps both Vue
+/// and Svelte on ONE sealed-surface discipline while each owns its own token.
 fn macro_surface_shell(
     surface: TypeInfoSurface,
     macro_kind: AnalyzedMacroKind,
     owner: &str,
-) -> VueMacroSurface {
-    VueMacroSurface {
-        surface,
-        macro_kind,
-        owner_canonical: Arc::from(owner),
-        macro_index: 0,
-        macro_call_span: verter_span::Span::default(),
-        level: TypeInfoQueryLevel::FullMetadata,
+) -> SvelteResolvedSurface {
+    SvelteResolvedSurface {
+        surface: VueMacroSurface {
+            surface,
+            macro_kind,
+            owner_canonical: Arc::from(owner),
+            macro_index: 0,
+            macro_call_span: verter_span::Span::default(),
+            level: TypeInfoQueryLevel::FullMetadata,
+        },
+        _seal: SvelteSurfaceSeal,
     }
 }
 
@@ -504,8 +570,10 @@ fn resolve_snippet_props(
 /// snippet member this:
 ///
 /// 1. realizes the member value to a callable through the SHARED
-///    callable-realization substrate (`realize_callable_member` +
-///    `raise_node_to_type_expr`) — never a second resolver;
+///    callable-realization substrate (`realize_callable_member`) and
+///    materializes it through the sealed `OutputProjector` output
+///    capability (`materialize_output_type_expr` → sealed carrier) — never
+///    a second resolver, never a raw reverse-raise;
 /// 2. iterates the realized `Function`'s parameters in positional ORDER,
 ///    SKIPPING the leading `this` parameter and EXPANDING a rest-tuple
 ///    parameter (`...args: [item: Item, index: number]`) into one binding per
@@ -520,8 +588,9 @@ fn resolve_snippet_props(
 /// source slicing).
 fn svelte_snippet_slots_from_typeinfo_surface(
     ctx: &dyn ResolverContext,
-    macro_surface: &VueMacroSurface,
+    resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedSlotField> {
+    let macro_surface = resolved.macro_surface();
     let host = ctx.host_for_fact_tracer_install();
     macro_surface
         .surface
@@ -541,7 +610,12 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 ),
             )
             .unwrap_or(member.value);
-            let value = dispatch.raise_node_to_type_expr(realized)?;
+            // Publication sink (DTO surface): materialize into a sealed
+            // carrier and unwrap via the typeinfo output capability.
+            let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
+            let value = cap
+                .materialize_output_type_expr(realized)?
+                .into_type_expr(&cap);
             let scope = crate::typeinfo::framework_surface::scope::member_value_expr_scope(
                 host,
                 member,
@@ -1055,7 +1129,12 @@ fn callback_events_from_props_surface(
         // to a bare `Function` — the `?` rides the surface `optional` flag.) A
         // non-callable prop (`label?: string`) and a union with no callable arm
         // both yield `None` (NOT an event).
-        let raised = dispatch.raise_node_to_type_expr(realized);
+        // Publication sink (DTO event surface): materialize into a sealed
+        // carrier and unwrap via the typeinfo output capability.
+        let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
+        let raised = cap
+            .materialize_output_type_expr(realized)
+            .map(|carrier| carrier.into_type_expr(&cap));
         let Some(func) = raised
             .as_ref()
             .and_then(crate::meta_resolve::dispatch_helpers::callable_arm_from_raised)

@@ -839,6 +839,127 @@ fn prepared_decl_bundle_without_store_view_reuses_stable_cache() {
     );
 }
 
+/// Prepared-decl-bundle breadth: ONE bundle, exercised across BOTH a
+/// cache-hit-equivalence re-read AND an exact-resolution-change invalidation —
+/// pairing the two halves the model siblings assert SEPARATELY
+/// (`prepared_decl_bundle_without_store_view_reuses_stable_cache` =
+/// reuse-only; `prepared_type_decl_bundle_invalidates_when_exact_resolution_changes`
+/// = invalidate-only) against ONE shared `/src/types.ts:Props` bundle.
+///
+/// 1. First lookup materializes exactly one bundle
+///    (`bundle_materializations == 1`).
+/// 2. A second unchanged lookup REUSES the stable cache — no rematerialization
+///    (`bundle_materializations` stays 1) and a cache hit registers
+///    (`bundle_cache_hits >= 1`). This is the cache-hit equivalence, and both
+///    reads resolve `Base` to `/src/base.ts`.
+/// 3. The exact resolution is then upgraded (the import route for `./dep` is
+///    retargeted `/src/base.ts` → `/src/alt.ts` via `set_import_dependencies`).
+///    The next lookup INVALIDATES + rebuilds: `bundle_materializations` climbs
+///    to 2 AND the rebuilt `name_resolution` now resolves `Base` to
+///    `/src/alt.ts`.
+///
+/// Discriminates: if prepared-bundle invalidation regressed (the exact-route
+/// fact dropped from the bundle's validity signature), the post-retarget
+/// lookup REUSES the stale bundle — `bundle_materializations` stays 1 and
+/// `Base` keeps resolving to `/src/base.ts`. If reuse regressed, step 2
+/// rematerializes (`bundle_materializations` climbs to 2 prematurely).
+#[test]
+fn prepared_decl_bundle_reuses_then_invalidates_on_exact_resolution_change() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/base.ts", "export interface Base { base: string }\n");
+    ws.inject_file("/src/alt.ts", "export interface Base { alt: number }\n");
+    ws.inject_file(
+        "/src/types.ts",
+        "import type { Base } from './dep'\nexport interface Props extends Base {}\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let _ = host
+        .ensure_indexed_ready("/src/types.ts")
+        .expect("types dependency should seed module facts");
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./dep", "/src/base.ts")],
+    );
+    host.provenance().reset();
+
+    // ── First lookup: materialize exactly one bundle, resolving Base →
+    // /src/base.ts.
+    let first = host
+        .prepared_type_decl("/src/types.ts", "Props")
+        .expect("first lookup should materialize a prepared bundle");
+    let after_first = host.provenance().snapshot();
+    assert_eq!(
+        after_first.bundle_materializations, 1,
+        "first lookup should materialize exactly one bundle"
+    );
+    assert_eq!(
+        first
+            .name_resolution
+            .get("Base")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/base.ts"),
+    );
+
+    // ── Cache-hit equivalence: an unchanged second lookup REUSES the bundle.
+    let second = host
+        .prepared_type_decl("/src/types.ts", "Props")
+        .expect("second lookup should reuse the prepared bundle");
+    let after_second = host.provenance().snapshot();
+    assert_eq!(
+        after_second.bundle_materializations, 1,
+        "cache-hit equivalence: the unchanged re-read MUST reuse the stable bundle \
+         cache, not rematerialize"
+    );
+    assert!(
+        after_second.bundle_cache_hits >= 1,
+        "cache-hit equivalence: the unchanged re-read MUST register a bundle cache hit, got {after_second:?}"
+    );
+    assert_eq!(
+        second
+            .name_resolution
+            .get("Base")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/base.ts"),
+    );
+
+    // ── Invalidation: upgrade the exact resolution (retarget ./dep to
+    // /src/alt.ts). The bundle's exact-route fact must invalidate the stale
+    // bundle so the next lookup rebuilds.
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./dep", "/src/alt.ts")],
+    );
+
+    let rebuilt = host
+        .prepared_type_decl("/src/types.ts", "Props")
+        .expect("Props should rebuild after the effective dependency target changes");
+    let after_rebuild = host.provenance().snapshot();
+    assert_eq!(
+        after_rebuild.bundle_materializations, 2,
+        "DISCRIMINATING (invalidation): upgrading the exact resolution MUST \
+         invalidate the stale bundle so the next lookup REBUILDS \
+         (bundle_materializations 1 -> 2) — a reused stale bundle would keep it at 1"
+    );
+    assert_eq!(
+        rebuilt
+            .name_resolution
+            .get("Base")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/alt.ts"),
+        "DISCRIMINATING (invalidation): the rebuilt bundle's name_resolution MUST \
+         observe the upgraded route (Base -> /src/alt.ts); the stale /src/base.ts \
+         resolution must NOT survive",
+    );
+}
+
 #[test]
 fn prepared_decl_bundle_with_store_view_reuses_cache_for_structural_exact_resolutions() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(

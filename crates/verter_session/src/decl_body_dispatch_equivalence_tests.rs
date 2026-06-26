@@ -113,7 +113,7 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
         }
         // Raised carrier projects back to the bare `Ref { name: "B" }`.
         let raised = host
-            .project_node_to_type_expr(node)
+            .project_node_to_type_expr_for_test(node)
             .expect("carrier must project");
         assert!(
             matches!(&raised, verter_type_expr::TypeExpr::Ref { name, type_arguments }
@@ -424,7 +424,7 @@ fn namespace_sibling_type_reference_resolves_through_dispatch() {
         .resolve_named_symbol("/nst.ts", "M.Outer", &[], Some(ProjectionMode::Expanded))
         .expect("M.Outer must resolve the namespace sibling Inner");
     let projected = host
-        .project_node_to_type_expr(node)
+        .project_node_to_type_expr_for_test(node)
         .expect("M.Outer must project");
     match &projected {
         verter_type_expr::TypeExpr::Object(shape) => {
@@ -605,7 +605,7 @@ fn script_setup_generic_resolves_as_type_parameter_in_an_ordinary_decl_body() {
             .resolve_named_symbol("/G.vue", "A", &[], Some(mode))
             .unwrap_or_else(|| panic!("A must resolve in {mode:?}"));
         let projected = host
-            .project_node_to_type_expr(node)
+            .project_node_to_type_expr_for_test(node)
             .unwrap_or_else(|| panic!("A must project in {mode:?}"));
         match &projected {
             verter_type_expr::TypeExpr::TypeParameter(param) => {

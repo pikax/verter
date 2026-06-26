@@ -149,10 +149,14 @@ fn walk<C: ResolverContext>(
         .raw_surfaces_for(&def_name, locator.symbol_space);
     let lowered_bodies: Vec<TypeExpr> = match locator.symbol_space {
         SymbolSpace::Type => {
-            let Some(lowered) = shallow.type_decl(&def_name) else {
+            // The fenced output-side contributor read for the typeinfo oracle —
+            // a header miss returns `Unresolved` exactly as the direct
+            // `type_decl` miss did.
+            let Some(contributors) = shallow.compat_type_contributors_for_typeinfo(&def_name)
+            else {
                 return WalkOutcome::Unresolved;
             };
-            lowered.body.contributors().to_vec()
+            contributors
         }
         SymbolSpace::Value => {
             if !shallow.has_value_symbol(&def_name) {

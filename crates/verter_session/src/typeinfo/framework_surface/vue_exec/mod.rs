@@ -34,11 +34,16 @@
 //! [`crate::VerterHost::resolve_shallow_surface_for`] uses (NEVER a parallel
 //! reader). The four normalizers ([`props_from_typeinfo_surface`] /
 //! [`emits_from_typeinfo_surface`] / [`slots_from_typeinfo_surface`] /
-//! [`exposed_from_typeinfo_surface`]) consume a [`TypeInfoSurface`] (member
-//! `value` + spans + origin + flags + JSDoc spans) plus the macro-analyzer
-//! facts and produce the FINAL component-meta DTOs (`AnalyzedPropField` /
-//! `AnalyzedEmitField` / `AnalyzedSlotField` / `AnalyzedExposeField`), sourcing
-//! every semantic decision from the typeinfo surface:
+//! [`exposed_from_typeinfo_surface`]) consume the policy-admitted
+//! [`ResolvedVueSurface`] token (a sealed wrapper over the resolved
+//! [`VueMacroSurface`] — member `value` + spans + origin + flags + JSDoc spans)
+//! plus the macro-analyzer facts and produce the FINAL component-meta DTOs
+//! (`AnalyzedPropField` / `AnalyzedEmitField` / `AnalyzedSlotField` /
+//! `AnalyzedExposeField`), sourcing every semantic decision from the typeinfo
+//! surface. The token is minted ONLY by [`resolved_vue_surface`] inside this
+//! framework-surface sink (the Vue resolution path here and the Svelte
+//! `macro_surface_shell`), so no non-sink code can forge a surface and
+//! reverse-materialize a member `TypeExpr`:
 //!
 //! - **props** — one field per named member, carrying the surface's `optional`
 //!   / `readonly` / `declared_in_macro_type_arg`, the member value raised to a
@@ -86,6 +91,7 @@ use verter_semantic::analysis::types::{AnalyzedMacroKind, JsdocTag};
 use verter_type_expr::{TypeExpr, TypeExprScope};
 
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
+use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi,
@@ -106,6 +112,19 @@ pub(crate) use normalize::{
     emits_from_typeinfo_surface, exposed_from_typeinfo_surface, index_signatures_from_surface,
     object_members_from_typeinfo_surface, props_from_typeinfo_surface, slots_from_typeinfo_surface,
 };
+
+crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+    /// The Vue framework-surface executor's output-sink capability: the Vue
+    /// resolution leg here (and the `normalize` child) hold this to
+    /// materialize a graph node into a sealed output carrier and unwrap it.
+    /// Its constructor is visible ONLY within
+    /// `crate::typeinfo::framework_surface::vue_exec` (this module + the
+    /// `normalize` child) — NOT the whole `typeinfo` subtree — so no
+    /// `typeinfo` sibling can mint it (planted
+    /// `TypeinfoVueSurfaceOutputCap::new` outside this leaf is `E0624`).
+    pub(crate) struct TypeinfoVueSurfaceOutputCap;
+    mint: pub(in crate::typeinfo::framework_surface::vue_exec)
+}
 
 /// A typeinfo-owned `.vue` macro surface (FullMetadata).
 ///
@@ -192,6 +211,80 @@ impl VueMacroSurface {
             .map(|cspan| TypeExprScope::new(cspan.file.as_ref()))
             .unwrap_or_else(|| TypeExprScope::new(self.owner_canonical.as_ref()))
     }
+}
+
+/// Framework-surface mint seal. Private to `vue_exec`; with no public
+/// constructor, the only code that can place a `FrameworkSurfaceSeal` into a
+/// [`ResolvedVueSurface`] — and therefore the only code that can mint one — is
+/// the `vue_exec`-private authority fn [`resolved_vue_surface`].
+struct FrameworkSurfaceSeal;
+
+/// A RESOLVED, policy-admitted `.vue` macro surface — a sealed token the Vue
+/// per-kind NORMALIZERS accept through
+/// [`super::resolved_surface_access::ResolvedSurfaceAccess`].
+///
+/// The leak this closes: the normalizers (`props_from_typeinfo_surface` etc.)
+/// together with the member raisers (`raise_member_value` /
+/// `raise_realized_callable_member_value`) take a `VueMacroSurface` /
+/// `TypeInfoSurfaceMember` and reverse-materialize a `TypeExpr`-bearing DTO.
+/// `VueMacroSurface` is a `pub` wire-adjacent carrier with public fields, so
+/// outside `framework_surface` ANY code could forge one and drive the
+/// normalizers. Gating the normalizers on the sealed
+/// [`super::resolved_surface_access::ResolvedSurfaceAccess`] trait — whose
+/// supertrait seal is PRIVATE to `resolved_surface_access.rs`, where the only
+/// `impl` for this token (and the Svelte token) lives — makes that a compile
+/// error: outside the sink there is no way to mint a token (private
+/// [`FrameworkSurfaceSeal`], private `surface` field, minted ONLY by the
+/// `vue_exec`-private [`resolved_vue_surface`]), and no module outside
+/// `resolved_surface_access.rs` can implement the accessor (a sibling
+/// `impl Sealed` is `E0603`), so the normalizers cannot be called without one.
+///
+/// The wrapped surface comes from real resolution — the Vue path's
+/// `resolve_vue_macro_surface_with_ctx` — never a caller-forged surface from
+/// outside the sink.
+pub(crate) struct ResolvedVueSurface {
+    surface: VueMacroSurface,
+    _seal: FrameworkSurfaceSeal,
+}
+
+impl ResolvedVueSurface {
+    /// The resolution-derived carrier the shared normalizers read, by borrow.
+    /// Exposed to the `framework_surface`-level
+    /// [`super::resolved_surface_access`] module (the SOLE implementor of
+    /// `ResolvedSurfaceAccess`) while the private `surface` field + the
+    /// [`FrameworkSurfaceSeal`] keep the token unmintable and unmodifiable
+    /// outside `vue_exec`.
+    pub(in crate::typeinfo::framework_surface) fn surface_carrier(&self) -> &VueMacroSurface {
+        &self.surface
+    }
+}
+
+/// Mint a [`ResolvedVueSurface`] token from a resolution-derived
+/// [`VueMacroSurface`]. PRIVATE to `vue_exec`
+/// (`pub(in crate::typeinfo::framework_surface::vue_exec)`): only the Vue
+/// resolution path here (`vue_macro_dtos_with_ctx`) can mint, after it resolves
+/// a surface. The private [`FrameworkSurfaceSeal`] field keeps the token
+/// unmintable elsewhere — a `framework_surface` sibling can no longer forge a
+/// `VueMacroSurface` and mint the token. Svelte mints its OWN sealed token.
+pub(in crate::typeinfo::framework_surface::vue_exec) fn resolved_vue_surface(
+    surface: VueMacroSurface,
+) -> ResolvedVueSurface {
+    ResolvedVueSurface {
+        surface,
+        _seal: FrameworkSurfaceSeal,
+    }
+}
+
+/// TEST-ONLY minter for the typeinfo adapter tests, which resolve a REAL
+/// `VueMacroSurface` (via `resolve_vue_macro_surface`) and then exercise a
+/// normalizer directly. They live under `typeinfo::typeinfo_tests` — outside
+/// the `framework_surface` sink — so they cannot reach the production
+/// [`resolved_vue_surface`] minter. Named `_for_test` so it can never
+/// masquerade as the production minter; gated `#[cfg(test)]` for zero
+/// footprint outside test builds.
+#[cfg(test)]
+pub(crate) fn resolved_vue_surface_for_test(surface: VueMacroSurface) -> ResolvedVueSurface {
+    resolved_vue_surface(surface)
 }
 
 impl VerterHost {
@@ -425,7 +518,7 @@ impl VerterHost {
         // shared path walker runs intermediate hops in `Navigate` and the
         // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
         // argument decomposes to `(handle_node, [])`.
-        let handle = crate::macro_hot_mirror::macro_type_arg_hot_ref(
+        let handle = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             ctx,
             request.owner_canonical.as_ref(),
             request.macro_index,
@@ -653,11 +746,22 @@ pub(super) fn signature_jsdoc_from_spans(
 /// raiser bound to the ACTIVE `ctx` (`ctx.dispatch()`), so an overlay session
 /// raises against overlay content rather than a fresh base host view. `None`
 /// when the node has no raisable shape.
-pub(super) fn raise_member_value(
+///
+/// Confined to `vue_exec` (`pub(in …vue_exec)`, NOT the broader `pub(super)`):
+/// the only callers are the token-gated normalizers in [`normalize`], so a
+/// `framework_surface` sibling cannot forge a `&TypeInfoSurfaceMember` and
+/// reverse-materialize a `TypeExpr` here. The forgeable-input boundary is
+/// closed at the normalizer (it requires a [`ResolvedVueSurface`] token).
+pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
     ctx: &dyn crate::resolver_core::ResolverContext,
     member: &TypeInfoSurfaceMember,
 ) -> Option<TypeExpr> {
-    ctx.dispatch().raise_node_to_type_expr(member.value)
+    // Publication sink (DTO surface): materialize into a sealed carrier and
+    // unwrap via the typeinfo output capability.
+    let dispatch = ctx.dispatch();
+    let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
+    cap.materialize_output_type_expr(member.value)
+        .map(|raised| raised.into_type_expr(&cap))
 }
 
 /// Realize a slot member's value to its underlying callable through the SHARED
@@ -667,7 +771,11 @@ pub(super) fn raise_member_value(
 /// callable. This keeps the DTO slot surface in agreement with
 /// `slot_binding_graph::compute_bindings_via_graph`, which realizes the same
 /// member value before reading `Function.params`.
-pub(super) fn raise_realized_callable_member_value(
+///
+/// Confined to `vue_exec` (the only caller is the token-gated slot normalizer
+/// in [`normalize`]) for the same forgeable-input reason as
+/// [`raise_member_value`].
+pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_realized_callable_member_value(
     ctx: &dyn crate::resolver_core::ResolverContext,
     member: &TypeInfoSurfaceMember,
 ) -> Option<TypeExpr> {
@@ -680,7 +788,11 @@ pub(super) fn raise_realized_callable_member_value(
         ),
     )
     .unwrap_or(member.value);
-    dispatch.raise_node_to_type_expr(realized)
+    // Publication sink (DTO slot surface): materialize into a sealed carrier
+    // and unwrap via the typeinfo output capability.
+    let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
+    cap.materialize_output_type_expr(realized)
+        .map(|raised| raised.into_type_expr(&cap))
 }
 
 /// Resolve a `.vue` macro's NORMALIZED component-meta DTOs
@@ -814,99 +926,106 @@ pub(crate) fn vue_macro_dtos_with_ctx(
     let (dtos, finalise, fenced_serve_observed) =
         crate::fact_signature_helpers::install_fact_tracer(host, || {
             match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
-                Some(macro_surface) => match macro_kind {
-                    AnalyzedMacroKind::DefineProps => MacroSurfaceDtos {
-                        // A props member is `properties + index signatures`: capture
-                        // the surface's index signatures (key/value raised through
-                        // `ctx`) for `define_props_shape` to publish.
-                        props: Some(PropsSurface {
-                            fields: props_from_typeinfo_surface(ctx, &macro_surface),
-                            index_signatures: index_signatures_from_surface(ctx, &macro_surface),
-                            ..Default::default()
-                        }),
-                        ..MacroSurfaceDtos::default()
-                    },
-                    AnalyzedMacroKind::DefineModel => {
-                        // `defineModel` synthesizes a prop (the model's value type),
-                        // surfaced in BOTH slots: the `props` slot keeps the
-                        // component-meta contract (the model contributes a prop), and
-                        // the `model` slot carries the binding(s) the MODEL framework
-                        // surface reads. `model_prop_fields` is the shared synthesis
-                        // source for both, so the two slots stay in lock-step.
-                        let prop_fields = props_from_typeinfo_surface(ctx, &macro_surface);
-                        let bindings = prop_fields
-                            .iter()
-                            .map(
-                                |prop| crate::typeinfo::framework_surface::results::ModelBinding {
-                                    name: prop.name.clone(),
-                                    prop: prop.clone(),
-                                },
-                            )
-                            .collect();
-                        MacroSurfaceDtos {
+                Some(macro_surface) => {
+                    // Mint the policy-admitted framework-surface token from the
+                    // RESOLVED surface; the normalizers consume the token, never a
+                    // forgeable `&VueMacroSurface`. The mint lives here — the
+                    // framework-surface resolution sink — so no non-sink code can
+                    // reverse-materialize a member `TypeExpr` from a forged surface.
+                    let resolved = resolved_vue_surface(macro_surface);
+                    match macro_kind {
+                        AnalyzedMacroKind::DefineProps => MacroSurfaceDtos {
+                            // A props member is `properties + index signatures`: capture
+                            // the surface's index signatures (key/value raised through
+                            // `ctx`) for `define_props_shape` to publish.
                             props: Some(PropsSurface {
-                                fields: prop_fields,
-                                index_signatures: index_signatures_from_surface(
-                                    ctx,
-                                    &macro_surface,
-                                ),
+                                fields: props_from_typeinfo_surface(ctx, &resolved),
+                                index_signatures: index_signatures_from_surface(ctx, &resolved),
                                 ..Default::default()
                             }),
-                            model: Some(
-                                crate::typeinfo::framework_surface::results::ModelSurface {
-                                    bindings,
+                            ..MacroSurfaceDtos::default()
+                        },
+                        AnalyzedMacroKind::DefineModel => {
+                            // `defineModel` synthesizes a prop (the model's value type),
+                            // surfaced in BOTH slots: the `props` slot keeps the
+                            // component-meta contract (the model contributes a prop), and
+                            // the `model` slot carries the binding(s) the MODEL framework
+                            // surface reads. `model_prop_fields` is the shared synthesis
+                            // source for both, so the two slots stay in lock-step.
+                            let prop_fields = props_from_typeinfo_surface(ctx, &resolved);
+                            let bindings = prop_fields
+                                .iter()
+                                .map(|prop| {
+                                    crate::typeinfo::framework_surface::results::ModelBinding {
+                                        name: prop.name.clone(),
+                                        prop: prop.clone(),
+                                    }
+                                })
+                                .collect();
+                            MacroSurfaceDtos {
+                                props: Some(PropsSurface {
+                                    fields: prop_fields,
+                                    index_signatures: index_signatures_from_surface(ctx, &resolved),
+                                    ..Default::default()
+                                }),
+                                model: Some(
+                                    crate::typeinfo::framework_surface::results::ModelSurface {
+                                        bindings,
+                                    },
+                                ),
+                                ..MacroSurfaceDtos::default()
+                            }
+                        }
+                        AnalyzedMacroKind::DefineEmits => MacroSurfaceDtos {
+                            // The emits object is `events + index signatures`: capture
+                            // the index signature (key/value raised through `ctx`) for
+                            // `define_emits_shape` to publish — the retired materialiser
+                            // surfaced it, so dropping it on the dispatch path was a
+                            // regression.
+                            emits: Some(EmitsSurface {
+                                fields: emits_from_typeinfo_surface(ctx, &resolved),
+                                index_signatures: index_signatures_from_surface(ctx, &resolved),
+                            }),
+                            ..MacroSurfaceDtos::default()
+                        },
+                        AnalyzedMacroKind::DefineSlots => MacroSurfaceDtos {
+                            slots: Some(slots_from_typeinfo_surface(ctx, &resolved)),
+                            ..MacroSurfaceDtos::default()
+                        },
+                        // `defineOptions<T>()` / `defineExpose<T>()` are object-member
+                        // surfaces: the type argument projects to the SAME one-level
+                        // object surface props/emits/slots resolve through (the SHARED
+                        // resolver), normalized here as the pass-through
+                        // `NamedTypeMember` set. A SUPPORTED-with-members surface —
+                        // never a silent supported-empty / unsupported-because-present.
+                        AnalyzedMacroKind::DefineOptions => MacroSurfaceDtos {
+                            options: Some(
+                                crate::typeinfo::framework_surface::results::OptionsSurface {
+                                    members: object_members_from_typeinfo_surface(ctx, &resolved),
                                 },
                             ),
                             ..MacroSurfaceDtos::default()
-                        }
+                        },
+                        AnalyzedMacroKind::DefineExpose => MacroSurfaceDtos {
+                            expose: Some(
+                                crate::typeinfo::framework_surface::results::ExposeSurface {
+                                    members: object_members_from_typeinfo_surface(ctx, &resolved),
+                                },
+                            ),
+                            // The component-meta extract layer needs the richer
+                            // `AnalyzedExposeField` shape (scope + JSDoc) the neutral
+                            // `ExposeSurface` pass-through drops, so resolve it here
+                            // alongside the wire surface from the SAME macro surface.
+                            exposed_fields: exposed_from_typeinfo_surface(ctx, &resolved),
+                            ..MacroSurfaceDtos::default()
+                        },
+                        // `WithDefaults` is not a props-surface source on this path: the
+                        // outer `withDefaults` macro carries no type argument, so
+                        // `resolve_vue_macro_surface_with_ctx` returns `None` for it and
+                        // this arm is unreachable.
+                        AnalyzedMacroKind::WithDefaults => MacroSurfaceDtos::default(),
                     }
-                    AnalyzedMacroKind::DefineEmits => MacroSurfaceDtos {
-                        // The emits object is `events + index signatures`: capture
-                        // the index signature (key/value raised through `ctx`) for
-                        // `define_emits_shape` to publish — the retired materialiser
-                        // surfaced it, so dropping it on the dispatch path was a
-                        // regression.
-                        emits: Some(EmitsSurface {
-                            fields: emits_from_typeinfo_surface(ctx, &macro_surface),
-                            index_signatures: index_signatures_from_surface(ctx, &macro_surface),
-                        }),
-                        ..MacroSurfaceDtos::default()
-                    },
-                    AnalyzedMacroKind::DefineSlots => MacroSurfaceDtos {
-                        slots: Some(slots_from_typeinfo_surface(ctx, &macro_surface)),
-                        ..MacroSurfaceDtos::default()
-                    },
-                    // `defineOptions<T>()` / `defineExpose<T>()` are object-member
-                    // surfaces: the type argument projects to the SAME one-level
-                    // object surface props/emits/slots resolve through (the SHARED
-                    // resolver), normalized here as the pass-through
-                    // `NamedTypeMember` set. A SUPPORTED-with-members surface —
-                    // never a silent supported-empty / unsupported-because-present.
-                    AnalyzedMacroKind::DefineOptions => MacroSurfaceDtos {
-                        options: Some(
-                            crate::typeinfo::framework_surface::results::OptionsSurface {
-                                members: object_members_from_typeinfo_surface(ctx, &macro_surface),
-                            },
-                        ),
-                        ..MacroSurfaceDtos::default()
-                    },
-                    AnalyzedMacroKind::DefineExpose => MacroSurfaceDtos {
-                        expose: Some(crate::typeinfo::framework_surface::results::ExposeSurface {
-                            members: object_members_from_typeinfo_surface(ctx, &macro_surface),
-                        }),
-                        // The component-meta extract layer needs the richer
-                        // `AnalyzedExposeField` shape (scope + JSDoc) the neutral
-                        // `ExposeSurface` pass-through drops, so resolve it here
-                        // alongside the wire surface from the SAME macro surface.
-                        exposed_fields: exposed_from_typeinfo_surface(ctx, &macro_surface),
-                        ..MacroSurfaceDtos::default()
-                    },
-                    // `WithDefaults` is not a props-surface source on this path: the
-                    // outer `withDefaults` macro carries no type argument, so
-                    // `resolve_vue_macro_surface_with_ctx` returns `None` for it and
-                    // this arm is unreachable.
-                    AnalyzedMacroKind::WithDefaults => MacroSurfaceDtos::default(),
-                },
+                }
                 None => MacroSurfaceDtos::default(),
             }
         });

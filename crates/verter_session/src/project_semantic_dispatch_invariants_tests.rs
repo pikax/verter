@@ -1968,10 +1968,12 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
     //      skeleton caller would silently lower at a publication demand it never
     //      asked for); and
     //   2. the QUERY-FREE structural producer `lower_type_expr_structural`
-    //      (re-housed under `crate::macro_hot_mirror::structural_lower` as the
-    //      macro hot mirror's `pub(in crate::macro_hot_mirror)` entry), which
-    //      emits the dormant graph carriers from the owned `TypeExpr` without
-    //      performing any name / import / type resolution.
+    //      (owned by `crate::structural_carrier_producer::macro_arg_producer`,
+    //      where it is module-private — no visibility modifier — so no other
+    //      file can name it; the only crate-visible producer entry is
+    //      `macro_type_arg_hot_ref`), which emits the dormant graph carriers
+    //      from the owned `TypeExpr` without performing any name / import /
+    //      type resolution.
     // The two are distinct and non-overlapping; neither may grow a second
     // definition, and the retired bare-`mode` eager wrapper stays absent.
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
@@ -1998,13 +2000,12 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
 fn semantic_node_to_type_expr_has_exactly_one_path() {
     // Sibling invariant of `type_expr_lowering_has_exactly_two_single_definition_producers`:
     // the reverse direction (`SemanticNodeId → TypeExpr`) must also
-    // have exactly one production path. After Step 6.1 of the F2
-    // architectural unification, `fn raise_node_to_type_expr(`
-    // appears exactly once — in
-    // `project_semantic_dispatch/raise.rs`. The trailing `(` is part
-    // of the needle so the counter does not double-count
-    // `fn raise_node_to_type_expr_inner(` (which appears in the same
-    // module as the recursion helper).
+    // have exactly one production path. `fn raise_node_to_type_expr(`
+    // appears exactly once — the module-private shell primitive in
+    // `project_semantic_dispatch/raise.rs` that delegates to
+    // `shape_engine::fold_to_type_expr`. The trailing `(` is part of the
+    // needle as a whole-identifier boundary so the counter cannot
+    // double-count any `..._suffix(` variant of the same name stem.
     let count = count_def_in_crates("fn raise_node_to_type_expr(");
     assert_eq!(
         count, 1,
@@ -3104,8 +3105,9 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
 /// `meta_resolve.rs` and `fallthrough.rs` must be funneled through
 /// the Class A dispatch helper
 /// (`project_expr_class_a_via_dispatch[_threaded]`) or, where the
-/// helper isn't usable, through `dispatch.execute_to_type_expr` on a
-/// `ProjectPath { mode: Expanded }` query directly.
+/// helper isn't usable, through `dispatch.execute_read` on a
+/// `ProjectPath { mode: Expanded }` query directly (the accepted node
+/// is materialised to its publication `TypeExpr` at the surface sink).
 ///
 /// Final-state expectations:
 /// - `meta_resolve.rs` retains AT MOST 1 `.lower_and_project_to_expanded(`

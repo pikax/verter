@@ -380,12 +380,12 @@ materialize_structure: CacheLayerHitMiss,
  */
 materialize_memo: CacheLayerHitMiss,
 /**
- * `ShapeCacheDb` (per-member slot, `ShapeSubject::SemanticNode`) —
+ * `ShapeCacheDb` (per-member slot, `ShapeSubject::MemberValueNode`) —
  * per-member graph-native materialiser cache. The field name
  * retains its historical `member_shape_cache` identifier so audit
  * consumers do not break across the shape-cache unification; the
  * underlying cache is the unified `ShapeCacheDb` keyed by
- * `ShapeCacheKey::semantic_node_whole(scope, member_id, mode)`.
+ * `ShapeCacheKey::surface_member_value_whole_with_context(scope, &SurfaceMember, context)`.
  */
 member_shape_cache: CacheLayerHitMiss,
 /**

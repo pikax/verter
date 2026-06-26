@@ -1,0 +1,19 @@
+[package]
+name = "verter_no_typeexpr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Compiler-enforced NoTypeExpr marker trait — a carrier owning a transitive TypeExpr fails the bound"
+publish = false
+
+[dependencies]
+verter_no_typeexpr_derive = { path = "../verter_no_typeexpr_derive" }
+verter_span = { path = "../verter_span" }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+static_assertions = "1.1.0"
