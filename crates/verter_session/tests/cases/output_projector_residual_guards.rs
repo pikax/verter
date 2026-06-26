@@ -11863,6 +11863,50 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 // allowlisted terminal and proves the guard still fires, and proves a cosmetic
 // rewrite (inline / alias / split-helper / convergence) of a real decide cannot
 // evade detection.
+//
+// Enumerated inherent limits (FP-safe — these can only MISS, never over-fire).
+// Each is an ACCEPTED syntactic residual of a static `syn` walk over untyped
+// source, deliberate and bounded — a missed shape, never a false RED — so a
+// future reader knows it is by design, not a bug:
+//
+//   - BARE-NAME transformer exclusion: a bare-name call whose name matches any
+//     production fn that RETURNS a `TypeExpr` (`returns_typeexpr`) is excluded
+//     from the reader rail as a transformer (propagation, not a fact-extracting
+//     decide). Conservative by construction — excluding more never turns a
+//     transformer into a false reader-decide (documented at
+//     `hot_returns_typeexpr_bare`). The reader rails key on the receiver /
+//     qualified forms, so a bare transformer name reads as forwarding.
+//   - ASSOCIATED-CONSTRUCTOR exclusion: a `Type::assoc(&mat)` call whose tail is
+//     a conventional constructor / builder / conversion name
+//     (`hot_assoc_tail_is_constructor`) CONSTRUCTS a value FROM the materialized
+//     argument (publication), so it is excluded; an associated READER
+//     (`Reader::classify(&mat)`) fires, symmetric with the method-call form.
+//     Biased toward exempting — it may MISS an unconventionally-named
+//     constructor, never over-fire on one.
+//   - EXTRACTOR name-list closure: `HOT_EXTRACTING_GATE_IDENTS` is a closed set
+//     of the known structural `TypeExpr` extractors; a PURE non-minting rename
+//     (returns a borrowed sub-expression of an already-materialized input without
+//     re-minting) is not propagated by the name-list, sound because its SOURCE
+//     mint is flagged at its own site, and a RE-minting rename is caught by the
+//     RETURN-taint rail regardless of name (documented on the constant).
+//   - AGGREGATE coverage count: the self-policing rail's `audited >= len` check
+//     proves every terminal-sink entry was LOCATED in production source, an
+//     aggregate, NOT a per-site proof that each was scanned exactly once.
+//   - MACRO-BODY blindness for non-`matches!` macros: macro bodies other than the
+//     explicitly-handled container (`vec!`) / `matches!` forms are not deeply
+//     scanned for decides — a decide hidden inside an arbitrary user macro body
+//     is a missed shape.
+//   - RECEIVER-TYPE-GENERAL callee disambiguation: distinguishing two same-named
+//     METHODS where one mints, across receiver types, requires a type checker;
+//     the guard uses fail-open scope proximity + explicit-qualifier respect +
+//     fail-closed on a distinctive minter name (the minter accessors are
+//     distinctive sealed-cap names, so the residual is empty in practice;
+//     documented at `call_returns_mat_path`).
+//   - LOCATION rail anchored at the mint SOURCE: pure forwarding of a
+//     helper-materialized value WITHOUT a decide does not flag the forwarder —
+//     the mint source is always flagged at its own definition, so
+//     forwarding-without-a-decide is not a materialize-then-decide (characterized
+//     by `hot_location_rail_anchored_at_mint_source`).
 // ===========================================================================
 
 /// Direct materialize PRIMITIVE idents — obtaining a bare `TypeExpr` from the
@@ -11934,6 +11978,19 @@ const HOT_DECIDE_TAINTED_GATE_IDENTS: &[&str] = &[
 /// the call being a decide. This keeps the
 /// `slots_from_typeinfo_surface → slot_callable_param_and_return → …` chain
 /// tainted end-to-end instead of laundering the extracted sub-expr to untainted.
+///
+/// Enumerated inherent limit (FP-safe — can only MISS, never over-fire): this is
+/// a CLOSED set of the known structural `TypeExpr` extractors. A PURE NON-MINTING
+/// rename — a renamed helper that returns a BORROWED sub-expression of an
+/// already-materialized input WITHOUT re-minting (`fn first_param(x: &TypeExpr)
+/// -> Option<TypeExpr>` destructuring `x`) — is not propagated by this name-list.
+/// That is SOUND to leave: the SOURCE mint of that materialized input is itself
+/// flagged at its own mint site (the same rail-anchored-at-the-mint-source
+/// rationale as the location rail), so the value is never laundered into a silent
+/// decide. A renamed extractor that RE-MINTS is caught by the orthogonal
+/// RETURN-taint rail regardless of its name (characterized by
+/// `hot_renamed_minting_extractor_is_caught_by_return_taint`). The list is an
+/// enumerated residual, not an open hole.
 const HOT_EXTRACTING_GATE_IDENTS: &[&str] = &[
     "slot_callable_param_and_return",
     "slot_callable_param_and_return_from_arms",
@@ -12451,11 +12508,15 @@ fn hot_ident_is_snake_case(ident: &str) -> bool {
 }
 
 /// Whether a call path is a `Type::assoc(...)` associated function — the
-/// second-to-last segment names a TYPE (uppercase-initial ident). These are
-/// constructors / type methods (`Foo::new`, `Builder::with_x`), a publication
-/// passthrough rather than a fact-extracting decide, so the unknown-helper rail
-/// excludes them. A module-qualified free fn (`resolver_core::known_keys`) keeps
-/// a lowercase second-to-last segment and is NOT excluded.
+/// second-to-last segment names a TYPE (uppercase-initial ident). The
+/// unknown-helper rail combines this with [`hot_assoc_tail_is_constructor`]: a
+/// CONSTRUCTOR-named associated call (`Foo::new`, `Builder::with_x`) is a
+/// publication passthrough (it CONSTRUCTS a value FROM the argument) and stays
+/// excluded, but an associated READER (`Reader::classify`) is a fact-extracting
+/// decide on the materialized value's structure and is NOT excluded — symmetric
+/// with the method-call reader rail (`recv.classify(&mat)`). A module-qualified
+/// free fn (`resolver_core::known_keys`) keeps a lowercase second-to-last segment
+/// and is not associated at all.
 fn hot_call_is_type_associated(path: &syn::Path) -> bool {
     let n = path.segments.len();
     n >= 2
@@ -12465,6 +12526,26 @@ fn hot_call_is_type_associated(path: &syn::Path) -> bool {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// Whether an associated-function tail is a CONVENTIONAL Rust constructor /
+/// builder / conversion name (`Foo::new` / `Foo::from` / `Foo::with_capacity` /
+/// `Foo::default` / `Foo::builder` / `Foo::try_from` …). The method-call reader
+/// rail never sees a constructor (a constructor is not invoked as `recv.new(..)`),
+/// so the associated-call reader rail — the symmetric form — must likewise exempt
+/// a constructor: feeding a materialized value to `Foo::from(mat)` CONSTRUCTS a
+/// value from it (propagation / publication), it does not READ/classify its
+/// structure. A non-constructor associated tail (`Reader::classify`) is a
+/// fact-extracting decide and fires. Biased toward EXEMPTING (the fence may MISS
+/// an unconventionally-named constructor; it must never over-fire on one — the
+/// enumerated-inherent-limit, FP-safe direction).
+fn hot_assoc_tail_is_constructor(tail: &str) -> bool {
+    matches!(
+        tail,
+        "new" | "default" | "build" | "builder" | "empty" | "of"
+    ) || tail.starts_with("from")
+        || tail.starts_with("with_")
+        || tail.starts_with("try_")
 }
 
 // ---------------------------------------------------------------------------
@@ -13547,18 +13628,22 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
                     && !HOT_TAINT_WRAP_CTORS.contains(&id.as_str())
                     && !HOT_TERMINAL_PASSTHROUGH_IDENTS.contains(&id.as_str())
                     && !HOT_SERIALIZER_PUBLISH_IDENTS.contains(&id.as_str())
-                    && !hot_call_is_type_associated(&p.path)
+                    && !(hot_call_is_type_associated(&p.path) && hot_assoc_tail_is_constructor(&id))
                 {
-                    // Unknown-helper rail: passing a materialized value to a free
-                    // fn that EXTRACTS a non-`TypeExpr` fact (it neither returns a
-                    // `TypeExpr` nor is a `Type::assoc` constructor) is a decide on
-                    // the materialized value's structure, routed by the argument's
-                    // provenance. A `TypeExpr`-returning transformer / wrapper, a
-                    // `Type::new` constructor, and a recognised publication
-                    // passthrough are excluded (propagation, not a decide). Fires
-                    // in a non-terminal body OR whenever self-policing (so the
-                    // allowlist rail can prove a terminal reads no materialized
-                    // value).
+                    // Unknown-helper / associated-reader rail: passing a
+                    // materialized value to a free fn OR an associated/static
+                    // reader (`Reader::classify(&mat)`) that EXTRACTS a
+                    // non-`TypeExpr` fact (it neither returns a `TypeExpr` nor is a
+                    // `Type::assoc` CONSTRUCTOR) is a decide on the materialized
+                    // value's structure, routed by the argument's provenance — and
+                    // is symmetric with the method-call reader rail. A
+                    // `TypeExpr`-returning transformer / wrapper, a
+                    // CONSTRUCTOR-named associated call (`Type::new` /
+                    // `hot_assoc_tail_is_constructor`), and a recognised
+                    // publication passthrough are excluded (propagation, not a
+                    // decide). Fires in a non-terminal body OR whenever
+                    // self-policing (so the allowlist rail can prove a terminal
+                    // reads no materialized value).
                     if (self.self_policing || !self.cur_is_terminal()) && arg_tainted {
                         let operands: Vec<&syn::Expr> = c.args.iter().collect();
                         self.record_decide_over(
@@ -14753,6 +14838,129 @@ fn hot_location_rail_anchored_at_mint_source() {
         !v.iter().any(|m| m.contains("::forward ")),
         "self-test (F6-forward): pure forwarding WITHOUT a decide does NOT flag the forwarder \
          (the location rail is anchored at the mint source); got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for the RETURN-taint coverage of a renamed
+/// structural extractor: a helper whose name is NOT a member of the closed
+/// `HOT_EXTRACTING_GATE_IDENTS` set but that RE-MINTS a fresh `TypeExpr` (so its
+/// return is materialization-tainted) and whose result is then DECIDED on is
+/// caught at the decider through the RETURN-taint rail (`call_returns_mat` /
+/// `returns_mat`), INDEPENDENT of the extractor name-list. This pins the SAFE
+/// half of the enumerated `HOT_EXTRACTING_GATE_IDENTS` inherent limit: a
+/// re-minting rename cannot launder its result past the decide rail, because the
+/// catch is anchored at the RETURN-taint of the mint, not at the helper's name.
+/// The core assertion would FAIL if the return-taint rail were removed — the
+/// renamed helper is in no name-list, so its result would then be untainted and
+/// the decide silent (the test isolates the rail, not the name-list).
+#[test]
+fn hot_renamed_minting_extractor_is_caught_by_return_taint() {
+    let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
+    let rk = "foo/route_keys.rs";
+    // `weird_extract` is a NATURALLY-renamed structural extractor — NOT a member
+    // of `HOT_EXTRACTING_GATE_IDENTS` — that RE-MINTS a fresh `TypeExpr`. Its
+    // result is fed to a `matches!` decide in a SEPARATE non-terminal caller (so
+    // the caller itself performs no direct mint).
+    let renamed_minting_extractor = r#"
+        fn weird_extract(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x)
+                .map(|r| r.into_type_expr(&cap))
+                .unwrap_or_else(|| x.clone())
+        }
+        fn decide_on_extracted(x: &TypeExpr) {
+            let sub = weird_extract(x);
+            let _hit = matches!(sub, TypeExpr::Object(_));
+        }
+    "#;
+    let v = scan(rk, renamed_minting_extractor);
+    // The caller fires at the DECIDE — via the return-taint rail, since
+    // `weird_extract` is in NO name-list (so the ONLY taint source for `sub` is
+    // the return-taint of the re-minting helper).
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::decide_on_extracted ") && m.contains("decide")),
+        "self-test (renamed-extractor): a re-minting renamed extractor whose result is decided on \
+         MUST fire at the decider via the RETURN-taint rail, independent of \
+         `HOT_EXTRACTING_GATE_IDENTS`; got: {v:?}"
+    );
+    // Premise guard (test isolation): the renamed helper is genuinely OUTSIDE the
+    // closed extractor name-list, so the catch above is rail-anchored, not
+    // name-list-anchored. If `weird_extract` were ever added to the list this
+    // premise breaks and the test no longer isolates the return-taint rail.
+    assert!(
+        !HOT_EXTRACTING_GATE_IDENTS.contains(&"weird_extract"),
+        "self-test (renamed-extractor): the renamed helper must NOT be in the closed extractor \
+         name-list (else the test would not isolate the return-taint rail)"
+    );
+    // The re-minting extractor ALSO fires at its OWN definition — the location
+    // rail anchors at the mint SOURCE, which is why a PURE non-minting rename
+    // (one that returns a borrowed sub-expression of an already-materialized
+    // input without re-minting) is the sound enumerated residual: its source mint
+    // is flagged at its own site.
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::weird_extract ") && m.contains("materialize")),
+        "self-test (renamed-extractor): the re-minting extractor is flagged at its own mint source; \
+         got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for the ASSOCIATED/STATIC reader rail: an
+/// associated-function reader call `Reader::classify(&mat)` whose argument is a
+/// materialization-tainted `TypeExpr` is a decide on the materialized value's
+/// structure — exactly like the method-call reader `recv.classify(&mat)` — and
+/// MUST fire. Before this rail an associated/static call (`Type::method(..)`,
+/// uppercase second-to-last segment) was blanket-exempted as "type-associated",
+/// so the reader rail did not fire for it while the method-call form did; this
+/// closes that asymmetry. The anti-FP half pins that the rail is gated on a
+/// materialization-tainted ARGUMENT, not on the associated-call shape itself.
+#[test]
+fn hot_associated_reader_call_with_tainted_arg_fires() {
+    let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
+    let rk = "foo/route_keys.rs";
+    const MINT: &str = r#"
+        fn mat_helper(x: &TypeExpr) -> Option<TypeExpr> {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap))
+        }
+    "#;
+    // The caller obtains a materialized value from a return-tainted helper (so it
+    // does NOT mint directly — no location-rail flag on the caller) and passes it
+    // to an ASSOCIATED reader `Reader::classify(&m)`. The caller therefore fires
+    // ONLY via the associated-reader rail.
+    let assoc_reader = format!(
+        r#"
+        fn reads_via_assoc(x: &TypeExpr) {{
+            let m = mat_helper(x).unwrap();
+            let _fact = Reader::classify(&m);
+        }}
+        {MINT}
+    "#
+    );
+    let v = scan(rk, &assoc_reader);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::reads_via_assoc ") && m.contains("decide")),
+        "self-test (assoc-reader): an associated reader call `Reader::classify(&mat)` on a \
+         materialization-tainted arg MUST fire (a decide), symmetric with the method-call form; \
+         got: {v:?}"
+    );
+
+    // (anti-FP) The SAME associated reader call on a NON-tainted arg does NOT
+    // fire — the rail is gated on a materialization-tainted argument, not on the
+    // associated-call shape. (`plain` is an ordinary borrowed param; in the main
+    // fence no param is seeded tainted.)
+    let assoc_reader_untainted = r#"
+        fn reads_untainted(plain: &TypeExpr) {
+            let _fact = Reader::classify(plain);
+        }
+    "#;
+    assert!(
+        scan(rk, assoc_reader_untainted).is_empty(),
+        "self-test (assoc-reader anti-FP): an associated reader call on a NON-tainted (un-minted) \
+         arg must NOT fire — the rail requires a materialization-tainted argument; got: {:?}",
+        scan(rk, assoc_reader_untainted)
     );
 }
 
