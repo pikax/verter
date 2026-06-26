@@ -435,11 +435,22 @@ async fn try_spawn_tsserver(
     let crash_notify = Arc::new(Notify::new());
     let tsserver_str = tsserver_path.to_string_lossy().to_string();
 
+    // The carrier-publish store dir the LSP publishes carriers into — delivered to
+    // the plugin so it reads the SAME store the publish path writes. Derived from
+    // the workspace root through the shared store-dir resolver, identical to the
+    // dir `TsserverEngineBackend` computes on the publish side.
+    let carrier_store_dir =
+        verter_lsp::external_ts::default_carrier_store_dir_string(workspace_root);
+
     match TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_str,
         workspace_root,
         args.plugin_path.as_deref(),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer is the sole
+        // companion→source response mapper, so the plugin returns RAW responses.
+        false,
         Some(Arc::clone(&crash_notify)),
     )
     .await

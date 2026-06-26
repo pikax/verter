@@ -980,8 +980,12 @@ async fn send_success_response(
     }
 }
 
+/// `configure_tsserver_session` sends ONLY the `configure` handshake and injects
+/// NO inferred-project compiler options: a framework carrier is a member of its
+/// REAL configured project (via the plugin), so there is no config-less inferred
+/// carrier to configure. `compilerOptionsForInferredProjects` must never be sent.
 #[tokio::test]
-async fn test_configure_tsserver_session_does_not_wait_for_inferred_project_options() {
+async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
     let (client_reader, server_writer) = tokio::io::duplex(65536);
     let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
     tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
@@ -1014,42 +1018,34 @@ async fn test_configure_tsserver_session_does_not_wait_for_inferred_project_opti
                     seen_commands_task.lock().await.push(command.clone());
                     if command == "configure" {
                         send_success_response(&pending_task, seq, &command).await;
-                    } else if command == "compilerOptionsForInferredProjects" {
-                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                        send_success_response(&pending_task, seq, &command).await;
-                        break;
                     }
                 }
             }
         }
     });
 
-    let start = std::time::Instant::now();
     let ws_root = configure_tsserver_session(Arc::clone(&transport), "C:\\project")
         .await
         .expect("configuration should succeed");
-    let elapsed = start.elapsed();
 
     // Canonical form lowercases the Windows drive letter (keeps the colon).
     assert_eq!(ws_root, "c:/project");
-    assert!(
-        elapsed < std::time::Duration::from_millis(250),
-        "tsserver startup should not wait for inferred project options (elapsed {:?})",
-        elapsed
-    );
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Let any (erroneously-spawned) background request reach the mock reader.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let commands = seen_commands.lock().await.clone();
     assert_eq!(
         commands.first().map(String::as_str),
         Some("configure"),
-        "configure must still be sent first"
+        "configure must be sent first"
     );
     assert!(
-        commands
+        !commands
             .iter()
             .any(|command| command == "compilerOptionsForInferredProjects"),
-        "inferred project options should still be requested in the background"
+        "inferred-project compiler options must NEVER be sent — the carrier is a real \
+         configured-project member, so there is no inferred carrier to configure. \
+         Seen: {commands:?}"
     );
 
     let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
@@ -1077,7 +1073,7 @@ async fn run_update_file_capture(
 
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let opened_files: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let opened_files: Arc<Mutex<HashMap<String, OpenKind>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Pre-populate caches to simulate an already-open file
     if let Some(old) = old_content {
@@ -1085,7 +1081,10 @@ async fn run_update_file_capture(
             .lock()
             .await
             .insert(file.to_string(), Arc::from(old));
-        opened_files.lock().await.insert(file.to_string());
+        opened_files
+            .lock()
+            .await
+            .insert(file.to_string(), OpenKind::Source);
     }
 
     // Run the same logic as update_file
@@ -1105,7 +1104,7 @@ async fn run_update_file_capture(
         .insert(file.clone(), Arc::from(content.as_str()));
 
     let mut opened = opened_files.lock().await;
-    if opened.contains(&file) {
+    if opened.contains_key(&file) {
         drop(opened);
         if let Some(end_line) = old_line_count {
             let _ = transport
@@ -1143,7 +1142,7 @@ async fn run_update_file_capture(
                 .await;
         }
     } else {
-        opened.insert(file.clone());
+        opened.insert(file.clone(), OpenKind::Source);
         drop(opened);
         let _ = transport
             .command_no_response(
@@ -1215,6 +1214,342 @@ async fn test_update_file_single_line_content() {
         .unwrap();
     assert_eq!(end_line, 2, "single-line content: lines().count()=1, +1=2");
     assert_ne!(end_line, 1_000_000, "must NOT use hardcoded 1_000_000");
+}
+
+/// Capture the wire frame the `notify_carrier_changed` eviction body produces for
+/// a companion path — the same `updateOpen { changedFiles }` lever the live method
+/// issues (factored here so the eviction frame is asserted without standing up a
+/// full provider).
+async fn run_notify_carrier_changed_capture(companion: &str) -> Vec<serde_json::Value> {
+    let (client_reader, server_writer) = tokio::io::duplex(65536);
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx: stdin_tx.clone(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+    });
+
+    // The exact body of `TsserverTypeProvider::notify_carrier_changed`: an
+    // `updateOpen` with an EMPTY `changedFiles` edit forces tsserver to re-resolve
+    // references to the companion, evicting a negative `fileExists`/module-
+    // resolution result cached while the companion's blob was not yet on disk.
+    let file = TsserverTypeProvider::normalize_path(companion);
+    let _ = transport
+        .command_no_response(
+            "updateOpen",
+            serde_json::json!({
+                "changedFiles": [{ "fileName": file, "textChanges": [] }]
+            }),
+        )
+        .await;
+
+    let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut reader = BufReader::new(client_reader);
+    let mut frames = Vec::new();
+    loop {
+        let mut line = String::new();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(_)) => {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    frames.push(val);
+                }
+            }
+            Ok(Err(_)) => break,
+        }
+    }
+    frames
+}
+
+/// C10 eviction discriminator: `notify_carrier_changed` fires an `updateOpen`
+/// `changedFiles` frame for the COMPANION path so tsserver re-resolves a path it
+/// probed COLD (a negative resolution cached while the companion's blob did not
+/// yet exist) — NOT a sticky `TS2307`. A no-eviction model would send NO frame, so
+/// this asserting a frame IS sent discriminates the eviction lever.
+#[tokio::test]
+async fn tsserver_cold_read_no_sticky_ts2307() {
+    let frames = run_notify_carrier_changed_capture("/proj/src/Comp.vue.tsx").await;
+
+    assert_eq!(
+        frames.len(),
+        1,
+        "the eviction must issue EXACTLY ONE updateOpen frame (a no-eviction model \
+         would send none — leaving a cold-probed companion pinned to a sticky TS2307)"
+    );
+    let frame = &frames[0];
+    assert_eq!(
+        frame["command"].as_str(),
+        Some("updateOpen"),
+        "the eviction lever is the `updateOpen` file-changed notification"
+    );
+    let changed = &frame["arguments"]["changedFiles"];
+    assert_eq!(
+        changed[0]["fileName"].as_str(),
+        Some("/proj/src/Comp.vue.tsx"),
+        "the eviction targets the COMPANION path (the path whose fileExists/module \
+         resolution tsserver cached cold)"
+    );
+    // The edit is empty (a content-preserving touch): the bytes are unchanged, only
+    // tsserver's cached resolution for the file is invalidated.
+    assert!(
+        changed[0]["textChanges"]
+            .as_array()
+            .is_some_and(|c| c.is_empty()),
+        "the eviction is a content-preserving touch (empty textChanges): {frame}"
+    );
+}
+
+/// The cold-companion classifier matches ONLY the tsserver "the file argument
+/// itself is not (yet) a valid source file in the program" failure — a transient
+/// COLD signal on a just-published companion — and never a genuine module-not-found
+/// the user should see. A real `TS2307` arrives in the SUCCESS body (so it never
+/// reaches this classifier at all); the strings below are the transport-level
+/// `success:false` messages that DO reach it.
+#[test]
+fn tsserver_cold_companion_error_classifier_is_narrow() {
+    // The exact cold failure observed against live tsserver TS6.0.3 on a configured-
+    // project build: the just-opened companion is not yet in the program tsserver
+    // type-checks, so `getValidSourceFile` throws and the whole command fails.
+    assert!(
+        tsserver_diag_error_is_companion_not_ready(
+            "Could not find source file: '/proj/src/AssertJson.vue.tsx'."
+        ),
+        "the cold companion-not-in-program failure must classify as retryable"
+    );
+    assert!(
+        tsserver_diag_error_is_companion_not_ready("Could not find source file: 'X.svelte.tsx'"),
+        "the message-substring match is case/path independent"
+    );
+
+    // HAZARD: a genuine module-not-found the user must see never reaches this
+    // classifier (it is a SUCCESS-body diagnostic, not a transport error), and even
+    // its text must NOT match — these are real-error messages that must surface.
+    assert!(
+        !tsserver_diag_error_is_companion_not_ready(
+            "Cannot find module './missing' or its corresponding type declarations."
+        ),
+        "a genuine TS2307 module-not-found must NOT be swallowed as cold-retryable"
+    );
+    assert!(
+        !tsserver_diag_error_is_companion_not_ready(
+            "request 'semanticDiagnosticsSync' timed out after 10s"
+        ),
+        "a transport timeout is a distinct terminal condition, not the cold signal"
+    );
+    assert!(
+        !tsserver_diag_error_is_companion_not_ready("response channel closed"),
+        "a closed channel is terminal, not the cold signal"
+    );
+    assert!(
+        !tsserver_diag_error_is_companion_not_ready(""),
+        "an empty message is not the cold signal"
+    );
+}
+
+/// Drive the REAL `resync_open_files_inner` against a bare transport + caches and
+/// capture the JSON frames it writes. `entries` are `(file, kind, content)` to
+/// pre-track; `carrier_projects` maps a companion path to its owning tsconfig.
+async fn run_resync_capture(
+    entries: &[(&str, OpenKind, &str)],
+    carrier_projects: &[(&str, &str)],
+) -> Vec<serde_json::Value> {
+    let (client_reader, server_writer) = tokio::io::duplex(65536);
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx: stdin_tx.clone(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+    });
+
+    let opened_files: Arc<Mutex<HashMap<String, OpenKind>>> = Arc::new(Mutex::new(HashMap::new()));
+    let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let content_generations: Arc<ContentGenerations> = Arc::new(ContentGenerations::default());
+    {
+        let mut opened = opened_files.lock().await;
+        for (file, kind, _content) in entries {
+            opened.insert((*file).to_string(), *kind);
+        }
+    }
+    for (file, _kind, content) in entries {
+        // Populate via the production writer so each pre-tracked file carries a
+        // matching content generation: the resync gate compares the captured
+        // generation to the live one, and pre-tracking content WITHOUT a
+        // generation would leave the gate reading `None` and skip every reopen.
+        store_content_bump_generation(
+            &contents_cache,
+            &content_generations,
+            file,
+            Arc::from(*content),
+        )
+        .await;
+    }
+    let carrier_map: Arc<parking_lot::RwLock<HashMap<String, String>>> =
+        Arc::new(parking_lot::RwLock::new(HashMap::new()));
+    {
+        let mut map = carrier_map.write();
+        for (companion, tsconfig) in carrier_projects {
+            map.insert((*companion).to_string(), (*tsconfig).to_string());
+        }
+    }
+    let project_roots = Arc::new(parking_lot::RwLock::new(Vec::new()));
+
+    resync_open_files_inner(
+        Arc::clone(&transport),
+        Arc::clone(&opened_files),
+        Arc::clone(&contents_cache),
+        Arc::clone(&content_generations),
+        Arc::clone(&carrier_map),
+        project_roots,
+        "/project".to_string(),
+    )
+    .await
+    .expect("resync should succeed");
+
+    let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut reader = BufReader::new(client_reader);
+    let mut frames = Vec::new();
+    loop {
+        let mut line = String::new();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(_)) => {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    frames.push(val);
+                }
+            }
+            Ok(Err(_)) => break,
+        }
+    }
+    frames
+}
+
+/// Find the `open` frame a resync issued for `file`.
+fn resync_open_frame_for<'a>(
+    frames: &'a [serde_json::Value],
+    file: &str,
+) -> Option<&'a serde_json::Value> {
+    frames.iter().find(|frame| {
+        frame["command"].as_str() == Some("open")
+            && frame["arguments"]["file"].as_str() == Some(file)
+    })
+}
+
+/// A resync must reopen a SOURCE file WITH its `fileContent` (tsserver owns its
+/// content) but a CARRIER COMPANION CONTENTLESSLY — resending the carrier's bytes
+/// would convert it back into a tsserver content authority, violating the
+/// "plugin `getScriptSnapshot` is the sole content authority" contract. The bug
+/// this guards: `resync_open_files` reopened EVERY tracked path with
+/// `fileContent`, including carrier companions.
+#[tokio::test]
+async fn resync_reopens_source_with_content_but_carrier_contentless() {
+    let source = "/project/src/real.ts";
+    let carrier = "/project/src/Comp.vue.tsx";
+    let frames = run_resync_capture(
+        &[
+            (source, OpenKind::Source, "export const x = 1;\n"),
+            (
+                carrier,
+                OpenKind::CarrierCompanion,
+                "export default {} as any;\n",
+            ),
+        ],
+        &[(carrier, "/project/tsconfig.json")],
+    )
+    .await;
+
+    let source_open =
+        resync_open_frame_for(&frames, source).expect("source must be reopened on resync");
+    assert_eq!(
+        source_open["arguments"]["fileContent"].as_str(),
+        Some("export const x = 1;\n"),
+        "a SOURCE file must be reopened WITH its fileContent (tsserver owns its content): {source_open}"
+    );
+
+    let carrier_open =
+        resync_open_frame_for(&frames, carrier).expect("carrier must be reopened on resync");
+    assert!(
+        carrier_open["arguments"].get("fileContent").is_none(),
+        "a CARRIER COMPANION must be reopened CONTENTLESSLY on resync — resending its \
+         bytes makes tsserver the content authority and breaks the plugin's \
+         getScriptSnapshot contract: {carrier_open}"
+    );
+    // The contentless carrier reopen must still route to its OWN configured project
+    // (the tsconfig dir), exactly like the publish-time `register_carrier_member`.
+    assert_eq!(
+        carrier_open["arguments"]["projectRootPath"].as_str(),
+        Some("/project"),
+        "the carrier reopen routes to its owning configured project's root: {carrier_open}"
+    );
+}
+
+/// M7 — a transport-send FAILURE on the contentless carrier open must NOT leave a
+/// phantom-registered carrier. The open is marked in `opened_files` BEFORE the send;
+/// if the send fails, the mark (and the `carrier_projects` routing entry) MUST be
+/// rolled back so a LATER registration re-attempts the open. RED before the fix: the
+/// `opened_files` mark survived the failure, so a later registration saw
+/// `opened_now == false` and skipped the open forever (the companion never became a
+/// configured-project member).
+#[tokio::test]
+async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
+    // A transport whose stdin RECEIVER is dropped: `command_no_response`'s send
+    // fails ("stdin writer closed"), simulating a transport-send failure.
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    drop(stdin_rx);
+    let transport = TsserverTransport {
+        stdin_tx,
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+    };
+
+    let file = "/project/src/App.vue.tsx";
+    let opened_files: Arc<Mutex<HashMap<String, OpenKind>>> = Arc::new(Mutex::new(HashMap::new()));
+    let carrier_projects: Arc<parking_lot::RwLock<HashMap<String, String>>> =
+        Arc::new(parking_lot::RwLock::new(HashMap::new()));
+    // The trait method inserts the routing entry BEFORE the open; mirror that so the
+    // rollback of BOTH maps is observable.
+    carrier_projects
+        .write()
+        .insert(file.to_string(), "/project/tsconfig.json".to_string());
+
+    let result = open_carrier_companion_contentless(
+        &transport,
+        &opened_files,
+        &carrier_projects,
+        file,
+        "TSX",
+        "/project",
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a failed contentless carrier open must surface as Err, not silent success"
+    );
+    assert!(
+        !opened_files.lock().await.contains_key(file),
+        "a failed open MUST roll back the opened_files mark so a later registration \
+         RE-ATTEMPTS the open — a phantom 'already opened' entry would leave the \
+         carrier forever unopened (never a configured-project member)"
+    );
+    assert!(
+        !carrier_projects.read().contains_key(file),
+        "a failed open MUST roll back the carrier_projects routing entry too"
+    );
 }
 
 #[tokio::test]
@@ -2004,5 +2339,341 @@ fn assemble_signature_label_offsets_are_utf16_not_bytes_or_chars() {
         assembled.param_offsets[0].0,
         prefix.chars().count() as u32,
         "offsets must be UTF-16 units, never char counts"
+    );
+}
+
+// ── resync per-file generation gate ───────────────────────────────────
+
+/// A bare transport + the live caches a resync reads, with no tsserver child.
+/// Mirrors `run_update_file_capture`'s harness, exposing the caches so a test can
+/// drive `resync_capture` / `resync_apply` and a concurrent content mutation
+/// directly (the production resync method delegates to those exact functions).
+struct ResyncHarness {
+    transport: Arc<TsserverTransport>,
+    stdin_tx: mpsc::Sender<TsserverStdinMessage>,
+    contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
+    opened_files: Arc<Mutex<HashMap<String, OpenKind>>>,
+    generations: Arc<ContentGenerations>,
+    carrier_projects: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    project_roots: Arc<parking_lot::RwLock<Vec<String>>>,
+    client_reader: tokio::io::DuplexStream,
+}
+
+fn resync_harness() -> ResyncHarness {
+    let (client_reader, server_writer) = tokio::io::duplex(65536);
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let transport = Arc::new(TsserverTransport {
+        stdin_tx: stdin_tx.clone(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+    });
+    ResyncHarness {
+        transport,
+        stdin_tx,
+        contents: Arc::new(Mutex::new(HashMap::new())),
+        opened_files: Arc::new(Mutex::new(HashMap::new())),
+        generations: Arc::new(ContentGenerations::default()),
+        carrier_projects: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        client_reader,
+    }
+}
+
+/// Shut the writer down and read every frame that reached tsserver. The per-read
+/// timeout is only a failsafe (the writer drains all queued frames before EOF).
+async fn drain_frames(
+    stdin_tx: &mpsc::Sender<TsserverStdinMessage>,
+    client_reader: tokio::io::DuplexStream,
+) -> Vec<serde_json::Value> {
+    let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
+    let mut reader = BufReader::new(client_reader);
+    let mut frames = Vec::new();
+    loop {
+        let mut line = String::new();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(_)) => {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    frames.push(val);
+                }
+            }
+            Ok(Err(_)) => break,
+        }
+    }
+    frames
+}
+
+#[tokio::test]
+async fn resync_skips_stale_source_reopen_when_content_generation_advanced() {
+    // DISCRIMINATION: reverting the generation gate (always reopen with the
+    // captured content) makes this RED — the resync would `close` then `open` the
+    // source with the stale `const v = 1;` bytes, clobbering the concurrent edit's
+    // `const v = 2;` that `update_file` already pushed.
+    let h = resync_harness();
+    let file = "/project/src/App.vue.tsx";
+
+    store_content_bump_generation(&h.contents, &h.generations, file, Arc::from("const v = 1;"))
+        .await;
+    h.opened_files
+        .lock()
+        .await
+        .insert(file.to_string(), OpenKind::Source);
+
+    // Capture the resync plan (content `v1`, generation 1).
+    let entries = resync_capture(&h.opened_files, &h.contents, &h.generations).await;
+
+    // A concurrent `update_file` lands AFTER the capture: newer bytes + a bumped
+    // generation.
+    store_content_bump_generation(&h.contents, &h.generations, file, Arc::from("const v = 2;"))
+        .await;
+
+    resync_apply(
+        &h.transport,
+        entries,
+        &h.contents,
+        &h.generations,
+        &h.carrier_projects,
+        &h.project_roots,
+        "/project",
+    )
+    .await
+    .unwrap();
+
+    let frames = drain_frames(&h.stdin_tx, h.client_reader).await;
+    assert!(
+        !frames.iter().any(|f| f["command"] == "open"),
+        "a resync whose captured generation is stale must NOT reopen the source, frames={frames:?}"
+    );
+    assert!(
+        !frames.iter().any(|f| f["command"] == "close"),
+        "a skipped stale resync must not even close the source, frames={frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn resync_reopens_source_with_current_content_when_generation_matches() {
+    // The non-racy path still works: when no edit lands after capture, the source
+    // is closed and reopened WITH its content.
+    let h = resync_harness();
+    let file = "/project/src/App.vue.tsx";
+
+    store_content_bump_generation(&h.contents, &h.generations, file, Arc::from("const v = 1;"))
+        .await;
+    h.opened_files
+        .lock()
+        .await
+        .insert(file.to_string(), OpenKind::Source);
+
+    let entries = resync_capture(&h.opened_files, &h.contents, &h.generations).await;
+    resync_apply(
+        &h.transport,
+        entries,
+        &h.contents,
+        &h.generations,
+        &h.carrier_projects,
+        &h.project_roots,
+        "/project",
+    )
+    .await
+    .unwrap();
+
+    let frames = drain_frames(&h.stdin_tx, h.client_reader).await;
+    assert!(
+        frames
+            .iter()
+            .any(|f| f["command"] == "close" && f["arguments"]["file"] == file),
+        "resync closes the source, frames={frames:?}"
+    );
+    assert!(
+        frames.iter().any(|f| f["command"] == "open"
+            && f["arguments"]["file"] == file
+            && f["arguments"]["fileContent"] == "const v = 1;"),
+        "resync reopens the source with its current content, frames={frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn resync_reopens_carrier_companion_contentlessly() {
+    // PRESERVED behavior: a carrier companion is reopened with NO `fileContent`
+    // (the plugin stays the engine-side content authority) and routed to its
+    // owning project's directory. It carries no bytes, so the generation gate
+    // never applies to it.
+    let h = resync_harness();
+    let carrier = "/project/src/App.vue.tsx";
+
+    h.opened_files
+        .lock()
+        .await
+        .insert(carrier.to_string(), OpenKind::CarrierCompanion);
+    h.carrier_projects
+        .write()
+        .insert(carrier.to_string(), "/project/tsconfig.json".to_string());
+
+    let entries = resync_capture(&h.opened_files, &h.contents, &h.generations).await;
+    resync_apply(
+        &h.transport,
+        entries,
+        &h.contents,
+        &h.generations,
+        &h.carrier_projects,
+        &h.project_roots,
+        "/project",
+    )
+    .await
+    .unwrap();
+
+    let frames = drain_frames(&h.stdin_tx, h.client_reader).await;
+    let open = frames
+        .iter()
+        .find(|f| f["command"] == "open" && f["arguments"]["file"] == carrier)
+        .expect("carrier companion is reopened");
+    assert!(
+        open["arguments"].get("fileContent").is_none(),
+        "a carrier companion must be reopened CONTENTLESSLY, frame={open:?}"
+    );
+    assert_eq!(
+        open["arguments"]["projectRootPath"], "/project",
+        "a carrier companion routes to its owning project directory, frame={open:?}"
+    );
+}
+
+/// M9 — the resync content-generation gate must reject a close→reopen ABA.
+///
+/// A resync captures a file's `(content, generation)` snapshot, then — before the
+/// captured plan is applied — the file is CLOSED and REOPENED with fresh bytes (an
+/// editor close→reopen, or a delete→recreate). The gate re-reads the live
+/// generation immediately before reopening and skips the stale reopen unless it
+/// still matches the captured one. The ABA hazard: a per-file counter that
+/// resets/recycles on close would re-stamp the reopened file with the SAME value
+/// the resync captured, so the gate would falsely match and resend the STALE
+/// captured bytes — clobbering the fresh content. The `ContentGenerations` counter
+/// is GLOBALLY monotonic, so a reopened file always draws a strictly greater
+/// value the captured one can never alias.
+///
+/// DISCRIMINATING: with the production global-monotonic counter the live
+/// generation after close→reopen is strictly greater than the captured one
+/// (gate skips, no stale reopen). Replacing `store_content_bump_generation`'s
+/// `next_generation()` with a per-file `map.get(file).unwrap_or(0) + 1` reset
+/// counter makes the reopened generation equal the captured one again, so BOTH
+/// assertions below go RED (`live_gen > captured_gen` fails, and the stale bytes
+/// are resent).
+#[tokio::test]
+async fn resync_generation_gate_rejects_close_reopen_aba() {
+    let (client_reader, server_writer) = tokio::io::duplex(65536);
+    let (stdin_tx, stdin_rx) = mpsc::channel::<TsserverStdinMessage>(64);
+    tokio::spawn(tsserver_stdin_writer_loop(server_writer, stdin_rx));
+    let transport = TsserverTransport {
+        stdin_tx: stdin_tx.clone(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        next_seq: AtomicI64::new(1),
+    };
+
+    let opened_files: Mutex<HashMap<String, OpenKind>> = Mutex::new(HashMap::new());
+    let contents_cache: Mutex<HashMap<String, Arc<str>>> = Mutex::new(HashMap::new());
+    let content_generations = ContentGenerations::default();
+    let carrier_projects: parking_lot::RwLock<HashMap<String, String>> =
+        parking_lot::RwLock::new(HashMap::new());
+    let project_roots: parking_lot::RwLock<Vec<String>> = parking_lot::RwLock::new(Vec::new());
+
+    let file = "/project/src/real.ts";
+    let stale = "export const v = 1;\n";
+    let fresh = "export const v = 2;\n";
+
+    // 1. First write → captured generation; track it as an open Source.
+    store_content_bump_generation(
+        &contents_cache,
+        &content_generations,
+        file,
+        Arc::from(stale),
+    )
+    .await;
+    opened_files
+        .lock()
+        .await
+        .insert(file.to_string(), OpenKind::Source);
+
+    // 2. Capture the resync plan (records the captured content + generation).
+    let entries = resync_capture(&opened_files, &contents_cache, &content_generations).await;
+    assert_eq!(entries.len(), 1, "exactly the tracked source is captured");
+    let captured_gen = entries[0].generation;
+
+    // 3. The ABA: close (forget) then reopen with FRESH bytes BEFORE the captured
+    //    plan is applied.
+    forget_content(&contents_cache, &content_generations, file).await;
+    store_content_bump_generation(
+        &contents_cache,
+        &content_generations,
+        file,
+        Arc::from(fresh),
+    )
+    .await;
+
+    // The reopened generation must be STRICTLY GREATER than the captured one — the
+    // direct ABA-free invariant. A reset/recycle counter would re-stamp it equal.
+    let live_gen = content_generations
+        .map
+        .lock()
+        .get(file)
+        .copied()
+        .expect("reopened file is tracked");
+    assert!(
+        live_gen > captured_gen,
+        "a reopened file must draw a strictly greater generation than the captured one \
+         (captured={captured_gen}, live={live_gen}); an equal value is the ABA the global \
+         monotonic counter exists to prevent"
+    );
+
+    // 4. Apply the now-stale captured plan: the gate must SKIP the reopen.
+    resync_apply(
+        &transport,
+        entries,
+        &contents_cache,
+        &content_generations,
+        &carrier_projects,
+        &project_roots,
+        "/project",
+    )
+    .await
+    .expect("resync apply should succeed");
+
+    // Drain the frames the apply wrote.
+    let _ = stdin_tx.send(TsserverStdinMessage::Shutdown).await;
+    let mut reader = BufReader::new(client_reader);
+    let mut frames = Vec::new();
+    loop {
+        let mut line = String::new();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(_)) => {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    frames.push(val);
+                }
+            }
+            Ok(Err(_)) => break,
+        }
+    }
+
+    // 5. The stale captured bytes must NEVER be resent — a false ABA match would
+    //    reopen the file with the captured `stale` content, clobbering `fresh`.
+    let resent_stale = frames.iter().any(|frame| {
+        frame["command"] == "open"
+            && frame["arguments"]["file"] == file
+            && frame["arguments"]["fileContent"] == stale
+    });
+    assert!(
+        !resent_stale,
+        "the stale captured bytes must not be resent after a close→reopen (the gate must skip \
+         the superseded reopen), frames={frames:?}"
     );
 }

@@ -36,6 +36,62 @@ fn prelude_opens_the_projection_and_no_script_tag_survives() {
 }
 
 #[test]
+fn ide_carrier_exports_public_facade_default_with_typed_props() {
+    // The IDE carrier (`Comp.svelte.tsx`) is the in-project bare-import target
+    // (`import Comp from "./Comp.svelte"` → `Comp.svelte.tsx`), so it must
+    // export the component's PUBLIC type as a clean `export default` — a
+    // constructable component whose instance carries `$props`/`$events`/
+    // `$slots`. `$props` is derived SYNTACTICALLY from the instance script's
+    // `$props()` annotation.
+    let code = project(
+        "<script lang=\"ts\">let { msg }: { msg: string } = $props();</script>\n<div>{msg}</div>",
+    );
+    assert!(
+        code.contains("export default __VerterPublicComponent;"),
+        "IDE carrier must export the public component facade as default:\n{code}"
+    );
+    assert!(
+        code.contains("type __VerterPublicProps = { msg: string };"),
+        "public facade $props must carry the syntactic annotation:\n{code}"
+    );
+    assert!(
+        code.contains("$props: __VerterPublicProps;")
+            && code.contains("$events: Record<string, unknown>;")
+            && code.contains("$slots: Record<string, unknown>;"),
+        "public instance must surface $props/$events/$slots:\n{code}"
+    );
+    // The bare `export {};` module marker is REPLACED by the facade default —
+    // the `export default` already makes the file a module.
+    assert!(
+        !code.contains("export {};"),
+        "the bare `export {{}}` marker must be replaced by the facade default:\n{code}"
+    );
+    // Template internals stay LOCAL (non-exported): the render scope fn is a
+    // plain local function, never the public default.
+    assert!(
+        code.contains("function __verter_render()")
+            && !code.contains("export default __verter_render")
+            && !code.contains("export { __verter_render as default }"),
+        "template internals (__verter_render) must NOT be the public default:\n{code}"
+    );
+}
+
+#[test]
+fn ide_carrier_facade_degrades_untyped_props_to_permissive_record() {
+    // An untyped `$props()` (or no instance script) degrades the public facade
+    // `$props` to a permissive `Record<string, unknown>` (LOCAL — no resolver).
+    let code = project("<div>{x}</div>");
+    assert!(
+        code.contains("type __VerterPublicProps = Record<string, unknown>;"),
+        "untyped/absent $props must degrade to a permissive Record:\n{code}"
+    );
+    assert!(
+        code.contains("export default __VerterPublicComponent;"),
+        "a template-only Svelte component must still export a public facade:\n{code}"
+    );
+}
+
+#[test]
 fn interpolation_is_kept_verbatim() {
     let code = project("<div>{count}</div>");
     assert!(code.contains("{count}"));

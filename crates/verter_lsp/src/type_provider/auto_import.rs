@@ -457,6 +457,23 @@ pub fn translate_completion_import_edits(
     mapper: &ProviderPositionMapper,
     carrier_li: &LineIndex,
 ) -> Result<Vec<TextEdit>, AutoImportEditMappingError> {
+    // Rewrite any carrier-COMPANION import specifier in the inserted text back to
+    // the bare `.vue`/`.svelte` specifier BEFORE mapping/anchoring. The TS engine
+    // can emit `from "./Comp.vue.tsx"` / `"./Comp.vue.verter.ts"` for a bare
+    // carrier import resolved through the plugin's in-project redirection; on the
+    // verter_lsp LSP surface the plugin returns raw responses, so this rewrite is
+    // owned here (fail-closed — a non-companion specifier is untouched). Done once
+    // up front so both the verbatim and re-anchor paths use the bare specifier.
+    let edits: Vec<ProviderImportEdit> = edits
+        .iter()
+        .map(|e| ProviderImportEdit {
+            start: e.start,
+            end: e.end,
+            new_text: rewrite_inserted_carrier_specifier(&e.new_text),
+        })
+        .collect();
+    let edits = &edits;
+
     let mut result: Vec<TextEdit> = Vec::new();
     let mut missed: Vec<BorrowedImportEdit<'_>> = Vec::new();
 
@@ -538,4 +555,113 @@ fn skip_one_line_break(source: &str, offset: u32) -> u32 {
         i += 1;
     }
     i as u32
+}
+
+/// Rewrite a carrier-COMPANION import specifier inside an engine-produced
+/// auto-import `new_text` back to the BARE `.vue`/`.svelte` specifier.
+///
+/// When the TS engine resolves a bare `./Comp.vue` import through the plugin's
+/// in-project redirection, an auto-import / add-missing-import edit it produces
+/// can name the COMPANION provider path in its `from "…"` clause
+/// (`from "./Comp.vue.tsx"`, `from "./Comp.svelte.tsx"`, or the API carrier
+/// `from "./Comp.vue.verter.ts"`) — a path that does not exist on disk. On the
+/// verter_lsp LSP surface the plugin no longer pre-maps responses (the Rust merge
+/// layer is the sole mapper), so this rewrite is owned HERE: strip the carrier
+/// companion suffix from the quoted specifier so the user's source gets the bare
+/// `from "./Comp.vue"` they would have written.
+///
+/// This is a PATH-string normalization of an already-produced edit (a specifier
+/// IS text), in the same allowed class as
+/// [`merge::normalize_carrier_path`](crate::type_provider::merge) — NOT a
+/// semantic type decision. It is FAIL-CLOSED in two senses:
+/// - It only rewrites a specifier whose stripped stem is a real carrier path
+///   (registry-classified via [`verter_workspace::path_is_carrier`]); a specifier
+///   that is NOT a carrier companion (a plain `./utils`, or an ambiguous Svelte
+///   rune `./store.svelte.ts` whose stem `./store.svelte` is itself a carrier —
+///   see below) is left UNCHANGED, so a real rune import is never mangled.
+/// - It rewrites ONLY the contents of `from "…"` / `from '…'` (and a bare
+///   side-effect `import "…"`) — never free-form text.
+///
+/// The `.verter.ts` API carrier and the `.tsx`/`.jsx` IDE companion both strip to
+/// the same bare carrier. A Svelte rune module `./store.svelte.ts` has stem
+/// `./store.svelte`, which IS a carrier extension; but a rune module is `.svelte.ts`,
+/// NOT a `.svelte.tsx`/`.svelte.verter.ts` companion, so it never matches the
+/// companion-suffix patterns here and is left intact.
+#[must_use]
+pub(crate) fn rewrite_inserted_carrier_specifier(new_text: &str) -> String {
+    // Locate the module-specifier string literal. An import statement carries it
+    // as `from "…"` / `from '…'`; a side-effect import is a bare `import "…"`.
+    // We rewrite the FIRST such literal only (an import line has exactly one).
+    let Some((open_quote_idx, quote)) = find_specifier_quote(new_text) else {
+        return new_text.to_string();
+    };
+    let spec_start = open_quote_idx + 1;
+    let Some(rel_close) = new_text[spec_start..].find(quote) else {
+        return new_text.to_string();
+    };
+    let spec_end = spec_start + rel_close;
+    let specifier = &new_text[spec_start..spec_end];
+
+    let Some(bare) = bare_carrier_specifier(specifier) else {
+        return new_text.to_string();
+    };
+
+    let mut out = String::with_capacity(new_text.len());
+    out.push_str(&new_text[..spec_start]);
+    out.push_str(&bare);
+    out.push_str(&new_text[spec_end..]);
+    out
+}
+
+/// The byte index of the opening quote of the module specifier in an import
+/// `new_text`, plus the quote char. Prefers a `from` clause; falls back to a
+/// bare side-effect `import "…"`. Returns `None` when no specifier literal is
+/// found (the text is not an import line).
+fn find_specifier_quote(new_text: &str) -> Option<(usize, char)> {
+    // `from` clause: scan for the keyword, then the next quote after it.
+    if let Some(from_idx) = new_text.find("from ") {
+        let after = from_idx + "from ".len();
+        if let Some(rel) = new_text[after..].find(['"', '\'']) {
+            let idx = after + rel;
+            let quote = new_text.as_bytes()[idx] as char;
+            return Some((idx, quote));
+        }
+    }
+    // Bare side-effect import: `import "…";`.
+    if let Some(import_idx) = new_text.find("import ") {
+        let after = import_idx + "import ".len();
+        let rest = new_text[after..].trim_start();
+        if rest.starts_with('"') || rest.starts_with('\'') {
+            let idx = new_text.len() - rest.len();
+            let quote = new_text.as_bytes()[idx] as char;
+            return Some((idx, quote));
+        }
+    }
+    None
+}
+
+/// The bare `.vue`/`.svelte` specifier for a carrier-COMPANION specifier, or
+/// `None` when `specifier` is not a carrier companion (leave it unchanged).
+///
+/// Strips a `.tsx`/`.jsx` IDE-companion suffix or the `.verter.ts` API-carrier
+/// suffix and KEEPS the result only when the stem is a registry-classified
+/// carrier path. A non-carrier specifier (a plain `./utils`, a `.svelte.ts` rune
+/// module) yields `None`.
+fn bare_carrier_specifier(specifier: &str) -> Option<String> {
+    // API carrier: `./Comp.vue.verter.ts` → `./Comp.vue`.
+    if let Some(stem) = specifier.strip_suffix(verter_workspace::CARRIER_API_VIRTUAL_SUFFIX) {
+        if verter_workspace::path_is_carrier(stem) {
+            return Some(stem.to_string());
+        }
+        return None;
+    }
+    // IDE companion: `./Comp.vue.tsx` / `./Comp.svelte.jsx` → bare carrier.
+    for ext in [".tsx", ".jsx"] {
+        if let Some(stem) = specifier.strip_suffix(ext) {
+            if verter_workspace::path_is_carrier(stem) {
+                return Some(stem.to_string());
+            }
+        }
+    }
+    None
 }

@@ -7788,6 +7788,10 @@ mod foundations_guards {
             "materializes the Verter-owned `@verter/svelte-jsx` shim into the host data directory for TSGO/inferred-project resolution (tool setup, not semantic input); reads it back via byte-compare; never the user workspace. Test fixtures use temp-dir scratch space.",
         ),
         (
+            "crates/verter_lsp/src/external_ts/carrier_publish_store.rs",
+            "materializes the Verter-owned carrier-snapshot store (content-addressed blobs + atomic manifest) into a per-host temp directory for the tsserver plugin to read synchronously (tool output mirroring the in-memory ProviderSurfaceStore, not semantic input); never the user workspace. Test fixtures use temp-dir scratch space.",
+        ),
+        (
             "crates/verter_lsp/src/config.rs",
             "test fixtures only (`#[cfg(test)] mod tests` blocks set up tmp directories for `discover_lint_config` tests). No production-path call.",
         ),

@@ -258,18 +258,19 @@ impl ProjectResolver {
 
     /// Map a source file path to the provider-graph path used by the type provider.
     ///
-    /// For a framework CARRIER file (`.vue` / `.svelte`) this appends `.ts`
-    /// (the public API shim — the uniform api suffix from the
-    /// `VirtualFileNaming` column); for non-carrier files the source path is
-    /// returned as-is. The carrier-extension set is derived from the language
-    /// registry (the registry is the single classification authority), so a
-    /// new carrier needs no edit here. This is a pure path transform that does
-    /// not require project ownership — callers that need ownership must check
-    /// it separately via `owner_for_file()`.
+    /// For a framework CARRIER file (`.vue` / `.svelte`) this appends the
+    /// reserved API virtual-file suffix [`CARRIER_API_VIRTUAL_SUFFIX`]
+    /// (`.verter.ts` — the redirect-reached public API shim, the uniform api
+    /// suffix from the `VirtualFileNaming` column); for non-carrier files the
+    /// source path is returned as-is. The carrier-extension set is derived from
+    /// the language registry (the registry is the single classification
+    /// authority), so a new carrier needs no edit here. This is a pure path
+    /// transform that does not require project ownership — callers that need
+    /// ownership must check it separately via `owner_for_file()`.
     pub fn provider_id_for_source(&self, source_id: &str) -> Option<String> {
         let normalized_source = normalize_canonical_id(source_id);
         if path_is_carrier(&normalized_source) {
-            Some(format!("{}.ts", normalized_source))
+            Some(format!("{normalized_source}{CARRIER_API_VIRTUAL_SUFFIX}"))
         } else {
             Some(normalized_source)
         }
@@ -296,10 +297,12 @@ impl ProjectResolver {
 
     /// Reverse-map a provider-graph path back to its source file path.
     ///
-    /// Strips `.tsx`, `.jsx`, or `.ts` suffixes from a carrier virtual path
-    /// (e.g., `foo.vue.tsx` -> `foo.vue`, `Bar.svelte.ts` -> `Bar.svelte`).
-    /// The carrier-extension set is derived from the language registry. For
-    /// non-carrier paths, returns the path as-is if owned by a project.
+    /// Strips the carrier virtual suffixes from a carrier virtual path: the IDE
+    /// `.tsx`/`.jsx` companion (e.g. `foo.vue.tsx` -> `foo.vue`) or the
+    /// reserved API suffix [`CARRIER_API_VIRTUAL_SUFFIX`] (`.verter.ts` — e.g.
+    /// `Bar.svelte.verter.ts` -> `Bar.svelte`). The carrier-extension set is
+    /// derived from the language registry. For non-carrier paths, returns the
+    /// path as-is if owned by a project.
     pub fn source_id_from_provider_id(&self, provider_id: &str) -> Option<String> {
         let normalized = normalize_canonical_id(provider_id);
 
@@ -313,11 +316,12 @@ impl ProjectResolver {
                 return Some(candidate.to_string());
             }
         }
-        // Carrier API virtual paths: strip the trailing `.ts` (`foo.vue.ts` ->
-        // `foo.vue`).
-        if normalized.ends_with(".ts") && path_is_carrier(&normalized[..normalized.len() - 3]) {
-            let candidate = &normalized[..normalized.len() - 3];
-            if self.owner_for_file(candidate).is_some() {
+        // Carrier API virtual paths: strip the reserved `.verter.ts` API suffix
+        // (`foo.vue.verter.ts` -> `foo.vue`). The reserved infix is why this is
+        // unambiguous against a real `.svelte.ts` rune module — a rune path
+        // never carries the `.verter.` infix.
+        if let Some(candidate) = normalized.strip_suffix(CARRIER_API_VIRTUAL_SUFFIX) {
+            if path_is_carrier(candidate) && self.owner_for_file(candidate).is_some() {
                 return Some(candidate.to_string());
             }
         }
@@ -402,8 +406,8 @@ impl ProjectResolver {
             .unwrap_or_else(|| source_id.clone());
         let provider_target = match target_owner {
             // Any framework CARRIER (`.vue` / `.svelte`) targets the public API
-            // virtual file (`{src}.ts`) for cross-file component typing — the
-            // carrier-extension set is the registry's, not a `.vue` literal.
+            // virtual file (`{src}.verter.ts`) for cross-file component typing —
+            // the carrier-extension set is the registry's, not a `.vue` literal.
             Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
                 ProviderTarget::CarrierPublicApi
             }
@@ -453,8 +457,8 @@ impl ProjectResolver {
             .unwrap_or_else(|| source_id.clone());
         let provider_target = match target_owner {
             // Any framework CARRIER (`.vue` / `.svelte`) targets the public API
-            // virtual file (`{src}.ts`) for cross-file component typing — the
-            // carrier-extension set is the registry's, not a `.vue` literal.
+            // virtual file (`{src}.verter.ts`) for cross-file component typing —
+            // the carrier-extension set is the registry's, not a `.vue` literal.
             Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
                 ProviderTarget::CarrierPublicApi
             }
@@ -806,16 +810,31 @@ pub fn carrier_ide_provider_path(source_id: &str, is_jsx: bool) -> String {
     format!("{source_id}{ext}")
 }
 
-/// The carrier-independent API virtual-file derivation: append `.ts` to the
-/// FULL carrier canonical (`Foo.vue` → `Foo.vue.ts`, `Foo.svelte` →
-/// `Foo.svelte.ts`). Mirrors `carrier_ide_provider_path` for the API
-/// (`.d.ts`-style) provider surface. `provider_id_for_source` additionally
-/// gates on carrier classification; the LSP cold-start fallback (which
-/// already knows it holds a carrier) routes through this rather than
-/// hardcoding `{src}.vue.ts`.
+/// The reserved carrier API virtual-file suffix: the `.verter.` infix marks a
+/// REDIRECT-reached public-API carrier surface (never a bare-import probe
+/// target), uniformly across adapters. A bare `.svelte.ts` API carrier would
+/// collide with a Svelte rune-module extension (tsgo probes `.svelte.ts` before
+/// `.svelte.tsx`), so the API carrier carries this reserved infix; no real
+/// adapter source or rune-module extension carries `.verter.`.
+///
+/// This MIRRORS the `VirtualFileNaming` column's `import_surface`
+/// `Suffix(".verter.ts")` in `verter_session`'s framework descriptor (the
+/// single naming authority). The two derivations cannot import each other
+/// (`verter_session` depends on `verter_workspace`, not the reverse), so they
+/// are kept byte-for-byte in sync by the `virtual_file_naming_characterization`
+/// guard rather than a shared import.
+pub const CARRIER_API_VIRTUAL_SUFFIX: &str = ".verter.ts";
+
+/// The carrier-independent API virtual-file derivation: append the reserved
+/// [`CARRIER_API_VIRTUAL_SUFFIX`] (`.verter.ts`) to the FULL carrier canonical
+/// (`Foo.vue` → `Foo.vue.verter.ts`, `Foo.svelte` → `Foo.svelte.verter.ts`).
+/// Mirrors `carrier_ide_provider_path` for the API (`.d.ts`-style) provider
+/// surface. `provider_id_for_source` additionally gates on carrier
+/// classification; the LSP cold-start fallback (which already knows it holds a
+/// carrier) routes through this rather than hardcoding `{src}.vue.verter.ts`.
 #[must_use]
 pub fn carrier_api_provider_path(source_id: &str) -> String {
-    format!("{source_id}.ts")
+    format!("{source_id}{CARRIER_API_VIRTUAL_SUFFIX}")
 }
 
 /// Whether `path` is a framework CARRIER file (`.vue` / `.svelte`), by the

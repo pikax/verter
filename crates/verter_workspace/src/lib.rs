@@ -146,7 +146,7 @@ pub use published_state::{ProjectEnvHashArray, PublishedRoot};
 pub use resolver::{
     carrier_api_provider_path, carrier_ide_provider_path, path_is_carrier, strip_carrier_extension,
     IdeProjectCompilerOptions, IdeProjectConfig, NativeProjectResolver, ProjectMembership,
-    ProjectResolver, WorkspaceAlias,
+    ProjectResolver, WorkspaceAlias, CARRIER_API_VIRTUAL_SUFFIX,
 };
 pub use snapshot_builder::build_workspace_snapshot_simple;
 #[cfg(not(target_arch = "wasm32"))]

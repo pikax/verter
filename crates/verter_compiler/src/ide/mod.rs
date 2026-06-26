@@ -37,6 +37,65 @@ pub mod script;
 pub mod script_recover;
 pub mod template;
 
+/// The reserved public-API carrier virtual-file suffix (`.verter.ts`).
+///
+/// A component's PUBLIC type lives in the REDIRECT-reached public-API carrier
+/// (`Foo.vue.verter.ts` / `Foo.svelte.verter.ts`) — the cross-package /
+/// project-reference redirect target. It is NEVER the in-project bare-import
+/// target (that is the component IDE carrier, [`CARRIER_IDE_TSX_SUFFIX`]).
+///
+/// The IDE carrier self-imports this API surface to type the component
+/// instance and re-exports its public default, so a consumer importing the IDE
+/// carrier sees the component's public type.
+///
+/// This MIRRORS `verter_workspace::CARRIER_API_VIRTUAL_SUFFIX` (the single
+/// naming authority). `verter_compiler` is a lower crate than `verter_workspace`
+/// and cannot import it, so the two derivations are kept byte-for-byte in sync
+/// by [`tests::carrier_api_suffix_matches_workspace_naming`] + the
+/// `virtual_file_naming_*` guards rather than a shared import.
+pub const CARRIER_API_VIRTUAL_SUFFIX: &str = ".verter.ts";
+
+/// The component IDE-carrier virtual-file suffix for a TypeScript carrier
+/// (`.tsx`). A bare in-project `import X from "./Comp.vue"` MUST resolve to the
+/// component IDE carrier (`Comp.vue.tsx`) — the bare-import-probe-reachable
+/// identity — so in-project `.vue`/`.svelte` import specifiers rewrite to this
+/// suffix, NOT the `.ts`/`.verter.ts` API surface.
+pub const CARRIER_IDE_TSX_SUFFIX: &str = ".tsx";
+
+/// The component IDE-carrier virtual-file suffix for a JavaScript
+/// (`<script lang="jsx">`) carrier (`.jsx`).
+///
+/// Part of the documented carrier-suffix vocabulary: the resolver enumerates
+/// BOTH `.tsx` and `.jsx` for the bare-import probe, so a `.jsx`-source
+/// component is reached at this suffix even though codegen always TEXTUALLY
+/// targets [`CARRIER_IDE_TSX_SUFFIX`] (see [`in_project_carrier_import_suffix`]).
+#[allow(dead_code)]
+pub const CARRIER_IDE_JSX_SUFFIX: &str = ".jsx";
+
+/// The component IDE-carrier suffix appended to an in-project `.vue`/`.svelte`
+/// import specifier so a bare `import "./Comp.vue"` resolves to the
+/// component IDE carrier (the bare-import-probe-reachable identity, §2.2/§2.9).
+///
+/// The suffix depends on the IMPORTED component's script lang, which the
+/// importer generally cannot know at codegen time. The common case (Vue
+/// non-jsx, Svelte) is `.tsx`; a `.jsx` carrier only applies to a Vue
+/// `<script lang="jsx">` component. Codegen therefore always targets
+/// [`CARRIER_IDE_TSX_SUFFIX`] textually — the engine/resolver enumerates BOTH
+/// `.tsx` and `.jsx` for the bare probe (`ide_carrier_suffixes()`), so a
+/// `.jsx`-source component is the residual edge handled by resolution, not by
+/// this textual interim.
+//
+// TODO(follow-up): the FINAL architecture (external-ts-engine-architecture.md
+// §2.2 L81) removes this textual specifier rewrite entirely in favor of
+// module RESOLUTION mapping bare `./Comp.vue` → `Comp.vue.tsx` (the
+// plugin/resolver's `resolveModuleNameLiterals` / FS-overlay probe). The
+// textual rewrite is the sanctioned INTERIM until that resolution-based
+// mapping lands in a later sub-block.
+#[must_use]
+pub const fn in_project_carrier_import_suffix() -> &'static str {
+    CARRIER_IDE_TSX_SUFFIX
+}
+
 /// Options for IDE script generation.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -516,6 +575,34 @@ pub fn sanitize_js_identifier(filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The carrier-suffix constants must hold their documented shape: the API
+    /// surface carries the reserved `.verter.` infix (a REDIRECT-reached
+    /// cross-package target, never a bare-import probe target), while the
+    /// component IDE carrier is a plain `.tsx`/`.jsx` (the bare-import-probe
+    /// identity). `verter_compiler` cannot depend on `verter_workspace`, so the
+    /// literal byte-equality with `verter_workspace::CARRIER_API_VIRTUAL_SUFFIX`
+    /// is guarded cross-crate by `virtual_file_naming_characterization` in
+    /// `verter_session`; this local test pins the shape so a drift here is
+    /// caught at the source crate too.
+    #[test]
+    fn carrier_api_suffix_matches_workspace_naming() {
+        assert_eq!(CARRIER_API_VIRTUAL_SUFFIX, ".verter.ts");
+        assert_eq!(CARRIER_IDE_TSX_SUFFIX, ".tsx");
+        assert_eq!(CARRIER_IDE_JSX_SUFFIX, ".jsx");
+        // The reserved `.verter.` infix marks the API surface; the IDE carrier
+        // suffixes must NOT carry it (they are bare-import probe targets).
+        assert!(CARRIER_API_VIRTUAL_SUFFIX.contains(".verter."));
+        assert!(!CARRIER_IDE_TSX_SUFFIX.contains(".verter."));
+        assert!(!CARRIER_IDE_JSX_SUFFIX.contains(".verter."));
+        // The in-project bare-import rewrite always targets the component IDE
+        // carrier (the bare-import-probe identity), never the API surface.
+        assert_eq!(in_project_carrier_import_suffix(), CARRIER_IDE_TSX_SUFFIX);
+        assert_ne!(
+            in_project_carrier_import_suffix(),
+            CARRIER_API_VIRTUAL_SUFFIX
+        );
+    }
 
     #[test]
     fn sanitize_basic() {

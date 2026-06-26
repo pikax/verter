@@ -185,12 +185,21 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         if let ScriptItem::Import(imp) = item {
             let abs_start = content_start + imp.span.start;
             let abs_end = content_start + imp.span.end;
-            // Rewrite .vue imports to .vue.ts so type providers resolve them
-            // to the public API output instead of the IDE (.vue.tsx) output.
+            // Rewrite an in-project bare `.vue` import to the COMPONENT IDE
+            // carrier suffix (`./Comp.vue` → `./Comp.vue.tsx`) so the type
+            // provider resolves it to the bare-import-probe-reachable identity
+            // (§2.2/§2.9) and the consumer gets the component's public default
+            // (the IDE carrier re-exports it from the `.verter.ts` API surface).
             // Uses prepend_left so the sourcemap accounts for the extra bytes.
+            //
+            // TODO(follow-up): the FINAL architecture (external-ts-engine-
+            // architecture.md §2.2 L81) removes this textual rewrite in favor
+            // of resolution-based mapping (the plugin/resolver maps bare
+            // `./Comp.vue` → `Comp.vue.tsx`); the textual rewrite is the
+            // sanctioned INTERIM until that lands.
             if imp.source.ends_with(".vue") {
                 let quote_pos = content_start + imp.source_span.end - 1;
-                ct.prepend_left(quote_pos, ".ts");
+                ct.prepend_left(quote_pos, crate::ide::in_project_carrier_import_suffix());
             }
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
         }
@@ -202,9 +211,12 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     // function wrapper (TS1232) while the user types a broken statement below them.
     if let Some(plan) = &recovery_plan {
         for imp in &plan.imports {
+            // TODO(follow-up): textual interim — see the clean-path rewrite
+            // above; the final architecture maps `./Comp.vue` → `Comp.vue.tsx`
+            // through module resolution (§2.2 L81).
             if imp.source.ends_with(".vue") {
                 let quote_pos = imp.source_span.end - 1;
-                ct.prepend_left(quote_pos, ".ts");
+                ct.prepend_left(quote_pos, crate::ide::in_project_carrier_import_suffix());
             }
             ct.move_with_suffix(imp.span.start, imp.span.end, hoist_pos, "\n");
         }
@@ -220,22 +232,25 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     }
 
     // Rewrite .vue specifiers in re-exports (e.g., `export { Foo } from './Foo.vue'`).
-    // These aren't hoisted, but their specifiers still need .vue → .vue.ts.
+    // These aren't hoisted, but their specifiers still need the in-project
+    // component IDE-carrier suffix (`./Foo.vue` → `./Foo.vue.tsx`) — see the
+    // import rewrite above for the interim/final-architecture note.
     for item in &parse_result.items {
         if let ScriptItem::Export(exp) = item {
             if let (Some(src), Some(src_span)) = (exp.source, exp.source_span) {
                 if src.ends_with(".vue") {
                     let quote_pos = content_start + src_span.end - 1;
-                    ct.prepend_left(quote_pos, ".ts");
+                    ct.prepend_left(quote_pos, crate::ide::in_project_carrier_import_suffix());
                 }
             }
         }
     }
 
-    // Rewrite .vue specifiers in dynamic imports (e.g., `import('./Foo.vue')`).
+    // Rewrite .vue specifiers in dynamic imports (e.g., `import('./Foo.vue')`)
+    // to the in-project component IDE-carrier suffix (`./Foo.vue.tsx`).
     for src_span in &parse_result.vue_dynamic_import_spans {
         let quote_pos = content_start + src_span.end - 1;
-        ct.prepend_left(quote_pos, ".ts");
+        ct.prepend_left(quote_pos, crate::ide::in_project_carrier_import_suffix());
     }
 
     // Extract bindings

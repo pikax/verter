@@ -603,6 +603,33 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "rune_module_self_file_state_closed_on_did_close",
         ],
     ),
+    (
+        "Project-Bound External-TS Contract",
+        &[
+            // A production external-TS op is uninstantiable without a
+            // `BoundProject` witness; no path-only result-construction entry
+            // (`query_by_path` / `open_tsx` / `update_file(uri)`) in production.
+            "provider_op_requires_resolved_project",
+            // TS-correct ownership: a carrier source is owned only via the
+            // default include, a no-extension directory/bare-star glob, or an
+            // explicit per-extension `files`/glob entry — never an `*.ts` glob;
+            // TypeScript `include` has no brace expansion.
+            "carrier_ownership_extension_rules",
+            // A real user file at the exact `{name}.vue.tsx`/`.svelte.tsx`
+            // companion path downgrades the source to `Ambiguous` — the overlay
+            // is never placed, no external-TS result, the real file is never
+            // shadowed (`.vue` AND `.svelte`).
+            "carrier_never_shadows_real_user_file",
+            // A `Foo.svelte` component beside a real same-stem `Foo.svelte.ts`
+            // rune is a DETECTED ambiguity (fail closed, no silently-wrong edge).
+            "same_stem_svelte_component_rune_fails_closed",
+            // The tsserver inferred-project knobs
+            // (`compilerOptionsForInferredProjects`, the tsserver
+            // `configure_paths` impl, synthetic inferred-project carrier opens)
+            // are gone — the plugin's project-bound membership replaces them.
+            "no_inferred_project_knobs_on_tsserver",
+        ],
+    ),
     // ──────────────────── SKILL.md additions ──────────────────────
     (
         "Component-Meta Heuristic Prevention",

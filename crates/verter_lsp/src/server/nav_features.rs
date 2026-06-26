@@ -674,7 +674,20 @@ pub(super) async fn handle_completion(
                 let mut type_completion_result = tp
                     .get_completions(&ctx.tsx_path, tsx_offset, tp_trigger)
                     .await;
-                if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+                // Recover a "No content available" completion: the carrier surface
+                // the provider needs is not currently materialised. The recovery
+                // mechanism is engine-specific:
+                //   * tsserver — the carrier is served from the publish store via
+                //     the plugin (NOT an open buffer), so re-PUBLISH the carrier
+                //     companions (the change notification fires inside
+                //     `publish_carrier`) to refresh the store + evict the stale
+                //     resolution; the carrier-companion open verbs are no-ops here.
+                //   * tgo — the carrier is an open buffer, so reopen it (close +
+                //     open) and re-sync the API to re-establish the lost content.
+                if matches!(
+                    server.type_provider_kind,
+                    crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::Tsgo
+                ) {
                     for retry_delay_ms in [50u64, 150, 300] {
                         let needs_retry = matches!(
                             type_completion_result,
@@ -684,12 +697,18 @@ pub(super) async fn handle_completion(
                             break;
                         }
                         tracing::debug!(
-                            "completion: retrying tsserver completion after no-content error for {} (delay={}ms)",
+                            "completion: retrying completion after no-content error for {} (delay={}ms)",
                             ctx.tsx_path,
                             retry_delay_ms
                         );
-                        server.force_reopen_current_file_in_type_provider(uri).await;
-                        server.sync_api_to_provider(uri).await;
+                        if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+                            if let Some(canonical_id) = server.documents.get_canonical_id(uri) {
+                                server.publish_carrier_to_external_ts(&canonical_id).await;
+                            }
+                        } else {
+                            server.force_reopen_current_file_in_type_provider(uri).await;
+                            server.sync_api_to_provider(uri).await;
+                        }
                         server.ensure_imported_carrier_apis_synced(uri).await;
                         tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                         type_completion_result = tp

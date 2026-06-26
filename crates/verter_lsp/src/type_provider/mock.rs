@@ -105,6 +105,14 @@ mod inner {
             added: Vec<serde_json::Value>,
             removed: Vec<serde_json::Value>,
         },
+        NotifyCarrierChanged {
+            companion_path: String,
+        },
+        RegisterCarrierMember {
+            companion_path: String,
+            content: String,
+            project_file_name: String,
+        },
     }
 
     /// Shared state for the mock provider.
@@ -146,6 +154,13 @@ mod inner {
         /// Defaults to `"tsgo"`; tests that exercise provider-id validation set
         /// it explicitly via [`MockTypeProvider::set_provider_id`].
         provider_id: Option<&'static str>,
+        /// Test seam: when set to `Some((path, gate))`, a
+        /// `register_carrier_member` against `path` RECORDS its call and then
+        /// AWAITS `gate` before returning — pausing the caller (e.g. a respawn's
+        /// carrier replay) on that exact registration so a concurrency test can
+        /// deterministically open the snapshot→swap window. Other paths are
+        /// unaffected.
+        register_block: Option<(String, std::sync::Arc<tokio::sync::Notify>)>,
     }
 
     /// A mock `TypeProvider` for testing.
@@ -351,6 +366,22 @@ mod inner {
                 .unwrap()
                 .fail_sync_paths
                 .insert(path.to_string());
+        }
+
+        /// Test seam: make `register_carrier_member` against `path` RECORD its call
+        /// and then BLOCK until the returned [`Notify`](tokio::sync::Notify) is
+        /// signalled. Returns the gate the test signals (`notify_one`, which stores
+        /// a permit so there is no signal-before-await race) to release the blocked
+        /// registration. Used to pause a respawn's carrier replay mid-flight so the
+        /// registration TOCTOU window is deterministically observable. Other paths
+        /// register without blocking.
+        pub fn block_register_carrier_member(
+            &self,
+            path: &str,
+        ) -> std::sync::Arc<tokio::sync::Notify> {
+            let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().register_block = Some((path.to_string(), gate.clone()));
+            gate
         }
     }
 
@@ -567,6 +598,44 @@ mod inner {
             // (wrongly) closed even while a sibling kind's sync fails.
             let fail = state.fail_file_ops;
             Box::pin(async move { fail_or_ok(fail, "close_file") })
+        }
+
+        fn notify_carrier_changed(&self, companion_path: &str) -> ProviderFuture<'_, ()> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(MockCall::NotifyCarrierChanged {
+                companion_path: companion_path.to_string(),
+            });
+            Box::pin(async { Ok(()) })
+        }
+
+        fn register_carrier_member(
+            &self,
+            companion_path: &str,
+            content: &str,
+            project_file_name: &str,
+        ) -> ProviderFuture<'_, ()> {
+            // Record the call and capture the block gate (if this path is gated)
+            // while holding the sync lock, then RELEASE the lock before awaiting —
+            // awaiting under the std mutex would deadlock every other mock op.
+            let block = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::RegisterCarrierMember {
+                    companion_path: companion_path.to_string(),
+                    content: content.to_string(),
+                    project_file_name: project_file_name.to_string(),
+                });
+                state
+                    .register_block
+                    .as_ref()
+                    .filter(|(blocked_path, _)| blocked_path == companion_path)
+                    .map(|(_, gate)| gate.clone())
+            };
+            Box::pin(async move {
+                if let Some(gate) = block {
+                    gate.notified().await;
+                }
+                Ok(())
+            })
         }
 
         fn get_completions(

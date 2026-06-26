@@ -54,6 +54,11 @@ mod store;
 /// continuation modules — extracted for file size.
 mod ident;
 
+/// The IDE-carrier PUBLIC-FACADE default-export synthesiser — extracted for
+/// file size.
+mod facade;
+
+use facade::svelte_public_facade;
 use ident::{
     is_bare_tag_identifier, is_type_query_safe_lvalue, is_valid_binding_identifier,
     is_valid_component_reference, skip_string_literal,
@@ -198,6 +203,9 @@ pub fn project_svelte_ide(
         .instance_content()
         .map(|c| &source[c.start as usize..c.end as usize])
         .and_then(extract_props_annotation);
+    // Keep a copy for the PUBLIC-FACADE default export (the projector consumes
+    // `self_props_type` for the `<svelte:self>` local contract).
+    let facade_props_type = self_props_type.clone();
     let mut projector = TemplateProjector {
         ct: &mut ct,
         source,
@@ -210,6 +218,13 @@ pub fn project_svelte_ide(
         block_declared: Vec::new(),
     };
     projector.project_template(&parsed.template, region);
+
+    // Emit the component's PUBLIC-FACADE default export onto the IDE carrier
+    // (the in-project bare-import target, §2.2/§2.9). See [`svelte_public_facade`]
+    // for the shape; it REPLACES the bare `export {};` marker. Appended through
+    // `CodeTransform::append` (output-only, unmapped) so it perturbs no mapped
+    // span — keeping CodeTransform the single source of truth for carrier text.
+    ct.append(&svelte_public_facade(facade_props_type.as_deref()));
 
     // Experimental await-EXPRESSIONS (F6) — instance/module SCRIPT positions.
     // An `await` at instance-script top level OR inside a `$derived(...)` /
@@ -408,10 +423,11 @@ impl TemplateProjector<'_, '_> {
     /// wraps — every byte outside the script/style blocks.
     fn project_template(&mut self, nodes: &[SvelteNode], region: Option<(u32, u32)>) {
         let Some((first, last)) = region else {
-            // No template — emit an empty render function so the file is still
-            // a valid module and the prelude's checkers are referenced.
+            // No template — emit an empty render function. The file is made a
+            // valid module by the PUBLIC-FACADE `export default` appended after
+            // the projector runs (no separate `export {};` marker needed).
             self.ct
-                .append("\n;function __verter_render() { return (<></>); }\nexport {};\n");
+                .append("\n;function __verter_render() { return (<></>); }\n");
             return;
         };
 
@@ -470,7 +486,9 @@ impl TemplateProjector<'_, '_> {
                 }
             }
         }
-        self.ct.append_left(last, "\n</>);\n}\nexport {};\n");
+        // The render fn closes here; the file is made a module by the
+        // PUBLIC-FACADE `export default` appended after the projector runs.
+        self.ct.append_left(last, "\n</>);\n}\n");
         // F8 `<svelte:self>` LOCAL contract — emitted at MODULE scope ABOVE the
         // render fn, as a PREFIX of the render-header insertion (one chunk, so it
         // reliably lands above `;function __verter_render()` regardless of

@@ -22,7 +22,15 @@
 use std::path::{Path, PathBuf};
 
 /// The ONE allowed content-addressed surface-store type (plus its private inner).
-const ALLOWED_SURFACE_STORE_TYPES: &[&str] = &["ProviderSurfaceStore", "StoreInner"];
+// `CarrierStoreReadyParams` is the `$/verter/carrierStoreReady` notification
+// payload DTO (`{ carrier_store_dir: String }`) — it carries the published store
+// DIRECTORY path to the editor, it is NOT a content-addressed surface store. The
+// substring marker `CarrierStore` matches its name spuriously.
+const ALLOWED_SURFACE_STORE_TYPES: &[&str] = &[
+    "ProviderSurfaceStore",
+    "StoreInner",
+    "CarrierStoreReadyParams",
+];
 
 /// Name fragments that mark a type as a (forbidden, if not allow-listed)
 /// content-addressed surface/carrier store.

@@ -336,6 +336,9 @@ const outerLabel = 'outer'
         tmp.to_str().expect("tmp path should be valid UTF-8"),
         None,
         None,
+        // No plugin loaded here; pass the verter_lsp-internal default.
+        false,
+        None,
     )
     .await
     .expect("tsserver should spawn");
@@ -524,6 +527,9 @@ const outerLabel = 'outer'
         tmp.to_str().expect("tmp path should be valid UTF-8"),
         None,
         None,
+        // No plugin loaded here; pass the verter_lsp-internal default.
+        false,
+        None,
     )
     .await
     .expect("tsserver should spawn");
@@ -688,6 +694,9 @@ const outerLabel = 'outer'
         tmp.to_str().expect("tmp path should be valid UTF-8"),
         Some(&plugin_path),
         None,
+        // verter_lsp-internal backend default (response mapping unused here).
+        false,
+        None,
     )
     .await
     .expect("tsserver should spawn");
@@ -799,6 +808,9 @@ async fn test_e2e_tsserver_vfor_member_access_from_fixture_generated_vue_output(
         &tsserver_path,
         tmp.to_str().expect("tmp path should be valid UTF-8"),
         None,
+        None,
+        // No plugin loaded here; pass the verter_lsp-internal default.
+        false,
         None,
     )
     .await

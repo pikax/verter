@@ -550,7 +550,7 @@ impl TypeProvider for LostContentCompletionProvider {
             if self.require_current_api {
                 let current_api_path = path
                     .strip_suffix(".tsx")
-                    .map(|prefix| format!("{prefix}.ts"))
+                    .map(|prefix| format!("{prefix}.verter.ts"))
                     .unwrap_or_else(|| path.clone());
                 if !self.open_paths.lock().unwrap().contains(&current_api_path) {
                     return Err(crate::type_provider::protocol::TypeProviderError::new(
@@ -675,6 +675,28 @@ impl TypeProvider for LostContentCompletionProvider {
 fn make_hover_test_service(
     type_provider: Arc<dyn TypeProvider>,
 ) -> tower_lsp_server::LspService<VerterLanguageServer> {
+    make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsserver)
+}
+
+/// Build a hover/sync test service whose engine exercises the inferred
+/// carrier-open path (tgo). Used by the tests that characterize the
+/// ENGINE-AGNOSTIC IDE-path commit/close-after-success state machine
+/// (open-new-then-close-old, retain-prior-on-failed-sync, jsx↔tsx flip):
+/// under tsserver the carrier-companion content verbs are no-ops (publish-only),
+/// so the open/fail path that discipline guards is observable only on tgo. The
+/// tsserver publish-only contract for those same methods is covered separately
+/// (the `project_sync` suppression tests + the imported-carrier publish-only
+/// tests + the real-provider carrier baselines).
+fn make_hover_test_service_tgo(
+    type_provider: Arc<dyn TypeProvider>,
+) -> tower_lsp_server::LspService<VerterLanguageServer> {
+    make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsgo)
+}
+
+fn make_hover_test_service_with_kind(
+    type_provider: Arc<dyn TypeProvider>,
+    kind: crate::TypeProviderKind,
+) -> tower_lsp_server::LspService<VerterLanguageServer> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
@@ -685,7 +707,7 @@ fn make_hover_test_service(
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                type_provider_kind: kind,
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
@@ -709,21 +731,69 @@ fn install_test_resolver_for_root(
         verter_workspace::FilesystemOptions::default(),
     ));
 
-    // Build a minimal project graph with a single project.
-    let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
+    let root_cp = verter_workspace::CanonicalPath::new(root);
+
+    // Mirror the production snapshot builder, which emits a tsconfig-backed
+    // `Configured` project AND a `Fallback` project at the workspace root. A
+    // carrier's external-TS membership resolves through the SHARED publish path
+    // (`publish_carrier` → `WorkspaceProjectResolver`), and that resolver only
+    // mints a `ProjectBinding` for a `Configured` owner — a `Fallback`-only
+    // snapshot fails closed (`NoProject`), so the carrier is never published or
+    // registered. A `tsconfig` therefore yields a `Configured` owner here so the
+    // membership path exercises the same mechanism production uses. The projects
+    // are pushed in precedence order (a `Configured` owner precedes the `Fallback`
+    // at the same root) and re-id'd by index so IDs match position.
+    let mut projects: Vec<verter_workspace::workspace_snapshot::OwnershipProject> = Vec::new();
+    if let Some(tsconfig) = tsconfig {
+        // Spec-bridge membership: an `include` of `{root}/**/*` with an empty
+        // materialized set, so `ConfiguredMembership::contains` matches every
+        // file under `root` via the static spec (the documented bridge mode for
+        // a harness that does not walk the disk).
+        let spec = verter_workspace::StaticMembershipSpec {
+            files: Vec::new(),
+            include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+                &root_cp, "**/*",
+            )],
+            exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+                &root_cp,
+                "node_modules/**",
+            )],
+        };
+        projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
+            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            root: root_cp.clone(),
+            workspace_root: root_cp.clone(),
+            payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+                membership: verter_workspace::ConfiguredMembership {
+                    spec,
+                    materialized_files: Default::default(),
+                },
+                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
+                workspace_aliases: Vec::new(),
+            },
+        });
+    }
+    projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
         id: verter_workspace::workspace_snapshot::ProjectId(0),
-        root: verter_workspace::CanonicalPath::new(root),
-        workspace_root: verter_workspace::CanonicalPath::new(root),
+        root: root_cp.clone(),
+        workspace_root: root_cp.clone(),
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
             membership: verter_workspace::FallbackMembership {
-                root: verter_workspace::CanonicalPath::new(root),
+                root: root_cp.clone(),
                 exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
                     "{}/node_modules/**",
                     root
                 ))],
             },
         },
-    }];
+    });
+    // IDs must match index position (the snapshot invariant
+    // `build_workspace_snapshot_simple` upholds after its precedence sort).
+    for (i, project) in projects.iter_mut().enumerate() {
+        project.id = verter_workspace::workspace_snapshot::ProjectId(i as u32);
+    }
 
     let resolver = verter_workspace::ProjectResolver::new(vec![
         crate::project_resolver::IdeProjectConfig::new(
@@ -1177,6 +1247,23 @@ async fn make_definition_test_server(
     Arc<MockTypeProvider>,
     String,
 ) {
+    make_definition_test_server_with_kind(files, crate::TypeProviderKind::Tsserver).await
+}
+
+/// Build a filesystem-backed definition/sync test server bound to `kind`. The
+/// barrel-sync BFS tests route through `Tsgo` so the terminal-carrier sync is an
+/// observable `open_file` (under tsserver the carrier-companion verbs are
+/// publish-only); the resolution-graph walk they characterize is engine-agnostic.
+async fn make_definition_test_server_with_kind(
+    files: &[(&str, &str, &str)],
+    kind: crate::TypeProviderKind,
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
@@ -1207,7 +1294,7 @@ async fn make_definition_test_server(
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                type_provider_kind: kind,
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
@@ -1484,7 +1571,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
         prepared
             .resolved_dependencies
             .iter()
-            .any(|entry| entry.provider_specifier == "./Foo.vue.ts"),
+            .any(|entry| entry.provider_specifier == "./Foo.vue.verter.ts"),
         "Vue dependencies should target their provider API paths"
     );
     assert!(
@@ -1495,7 +1582,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
         "non-Vue workspace dependencies should preserve the source import specifier"
     );
     assert!(
-        prepared.rewritten.contains("'./Foo.vue.ts'"),
+        prepared.rewritten.contains("'./Foo.vue.verter.ts'"),
         "exact Vue imports should rewrite through the resolved provider specifier"
     );
     assert!(
@@ -1582,7 +1669,7 @@ fn provider_vue_path_helpers_use_original_paths() {
         "Vue IDE path should be canonical_id.tsx"
     );
     assert_eq!(
-        api_path, "/workspace/src/App.vue.ts",
+        api_path, "/workspace/src/App.vue.verter.ts",
         "Vue API path should be canonical_id.ts"
     );
 }
@@ -1762,11 +1849,16 @@ fn svelte_component_virtual_still_resolves_to_carrier() {
     .unwrap();
 
     assert_eq!(
-        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/Foo.svelte.ts")
-            .as_deref(),
+        source_id_from_provider_carrier_path(
+            &resolver,
+            &host,
+            "/workspace/src/Foo.svelte.verter.ts"
+        )
+        .as_deref(),
         Some("/workspace/src/Foo.svelte"),
-        "a Foo.svelte.ts API virtual with a backing Foo.svelte component must \
-         reverse-map to the carrier"
+        "a Foo.svelte.verter.ts API virtual with a backing Foo.svelte component must \
+         reverse-map to the carrier (the reserved .verter.ts infix — a bare \
+         .svelte.ts is a rune-module path, not the API carrier)"
     );
     assert_eq!(
         source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/Foo.svelte.tsx")
@@ -4689,7 +4781,7 @@ const outerLabel = 'outer'
     );
 }
 
-/// HEADLINE: incomplete member access in `<script setup>` (`a.`).
+/// Incomplete member access in `<script setup>` (`a.`).
 ///
 /// The recovery codegen keeps the virtual file valid TSX, and the completion handler
 /// classifies the SCRIPT dot boundary as `MemberAccess` so the dot-trigger + member-filtering
@@ -5968,6 +6060,7 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
         &pending_snapshot_provider_sync,
         false,
         None,
+        None,
     )
     .await;
 
@@ -5989,16 +6082,104 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".vue.verter.ts")
         )),
-        "drain should sync the Vue public API through .vue.ts"
+        "drain should sync the Vue public API through .vue.verter.ts"
     );
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".tsx")
         )),
         "drain should sync the open Vue IDE file through the synthetic TSX path"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owner_loss_retracts_carrier_membership_from_the_ledger() {
+    // Gap (a) — production-path coverage for the background-drain no-owner branch.
+    // `drain_pending_snapshot_provider_sync` →
+    // `sync_pending_snapshot_provider_file` → `sync_pending_carrier_provider_file`'s
+    // no-owner arm MUST route owner loss through the membership reconciler so a
+    // previously-advertised carrier is RETRACTED from the ledger-backed
+    // `getExternalFiles`. DISCRIMINATION: a drain arm that handled only the provider
+    // buffer (the pre-fix gap, where the store/ledger membership was never retracted
+    // on a drained owner loss) leaves the source advertised — the final assertion
+    // catches it. RED is reproduced by removing the `reconcile_membership` call from
+    // that no-owner arm.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let source = "/workspace/src/Gone.vue";
+    let uri: Uri = "file:///workspace/src/Gone.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    // A real coordinator over a real on-disk backend (the same store the plugin
+    // reads); its membership ledger is the advertisement authority under test.
+    let backend = Arc::new(crate::external_ts::TsserverEngineBackend::with_default_host_version());
+    let coordinator = crate::external_ts::CarrierPublishCoordinator::new(
+        Arc::clone(&backend),
+        Arc::clone(&type_provider),
+        "5.9.0",
+    );
+
+    // Pre-advertise the carrier in the ledger — the state owner loss must retract.
+    let ledger = backend.membership_ledger();
+    let canonical = crate::external_ts::CanonicalSource::from(source);
+    ledger
+        .commit(
+            &canonical,
+            crate::external_ts::MembershipRecord::Advertised {
+                project: crate::external_ts::ProjectUri::from("/workspace/tsconfig.json"),
+                companions: vec![crate::external_ts::LedgerCompanion {
+                    provider_uri: Arc::from("/workspace/src/Gone.vue.tsx"),
+                    role: verter_session::external_ts::SnapshotRole::CarrierIde,
+                    script_kind: verter_session::external_ts::ScriptKind::Tsx,
+                }],
+                lease: ledger.current_session(),
+            },
+        )
+        .expect("seed the prior advertisement");
+    assert!(
+        ledger.is_advertised(&canonical),
+        "the carrier must start advertised so the drain has something to retract"
+    );
+
+    // A READY snapshot rooted ELSEWHERE: ownership is resolved (ownership_ready) but
+    // does NOT own this source → authoritative owner loss (not a cold bootstrap).
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other_ws",
+        Some("/other_ws/tsconfig.json"),
+    );
+    let provider_sync_states = DashMap::new();
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert(source.to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .await;
+
+    assert!(
+        !ledger.is_advertised(&canonical),
+        "owner loss through the background drain MUST retract the carrier from the \
+         ledger-backed getExternalFiles (the no-owner drain arm routes through the reconciler)"
     );
 }
 
@@ -6020,7 +6201,7 @@ async fn drain_keeps_partially_failed_vue_file_queued_for_retry() {
 
     let provider = Arc::new(MockTypeProvider::new());
     // Fail ONLY the API `.vue.ts` sync; the IDE `.tsx` succeeds → PARTIAL.
-    provider.set_fail_sync_path("/workspace/src/App.vue.ts");
+    provider.set_fail_sync_path("/workspace/src/App.vue.verter.ts");
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
         "/workspace",
@@ -6037,6 +6218,7 @@ async fn drain_keeps_partially_failed_vue_file_queued_for_retry() {
         &provider_sync_states,
         &pending_snapshot_provider_sync,
         false,
+        None,
         None,
     )
     .await;
@@ -6064,7 +6246,7 @@ async fn drain_keeps_partially_failed_vue_file_queued_for_retry() {
             MockCall::OpenFile { path, .. }
                 | MockCall::UpdateFile { path, .. }
                 | MockCall::LoadFile { path, .. }
-            if path == "/workspace/src/App.vue.ts"
+            if path == "/workspace/src/App.vue.verter.ts"
         )),
         "the API `.vue.ts` kind should have been attempted (then failed), calls={calls:?}"
     );
@@ -6101,7 +6283,7 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
         ProviderSyncState {
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -6118,6 +6300,7 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
         &provider_sync_states,
         &pending_snapshot_provider_sync,
         false,
+        None,
         None,
     )
     .await;
@@ -6150,7 +6333,7 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
         !calls.iter().any(|call| matches!(
             call,
             MockCall::CloseFile { path }
-                if path == "/workspace/src/App.vue.tsx" || path == "/workspace/src/App.vue.ts"
+                if path == "/workspace/src/App.vue.tsx" || path == "/workspace/src/App.vue.verter.ts"
         )),
         "owner-None drain must NOT close an open Vue file's live provider paths, calls={calls:?}"
     );
@@ -6193,7 +6376,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
                 "/old/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -6211,6 +6394,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
         &provider_sync_states,
         &pending_snapshot_provider_sync,
         false,
+        None,
         None,
     )
     .await;
@@ -6252,7 +6436,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
         )),
         "owned→unowned conversion must CLOSE the dropped owner-derived `.vue.ts`, calls={calls:?}"
     );
@@ -6299,7 +6483,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
                 "/old/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -6367,7 +6551,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
         )),
         "no-IDE owned→unowned conversion must close the dropped `.vue.ts`, calls={calls:?}"
     );
@@ -6407,7 +6591,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
                 "/old/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -6460,7 +6644,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
         )),
         "owned→unowned conversion must CLOSE the stale `.vue.ts`, calls={calls:?}"
     );
@@ -6490,7 +6674,7 @@ async fn preserve_open_unresolved_carrier_failed_first_open_commits_no_dead_ide_
     // preserve branch (which also queues the file) is exercised end to end.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     // Ready snapshot at `/other` — it does NOT own the open `/workspace` file.
     install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
@@ -6558,6 +6742,147 @@ const msg = 'hello'
     );
 }
 
+/// Owner loss (production path) RETRACTS the carrier's store
+/// membership through the REAL production sync-transition entry
+/// `ensure_current_file_synced` (NOT `publish_carrier` directly). A carrier
+/// published while OWNED must DISAPPEAR from the on-disk carrier store (the
+/// `@verter/typescript-plugin`'s `getExternalFiles` source) once its owner is gone.
+///
+/// RED before the fix: the interactive `publish_carrier_to_external_ts` early-
+/// returned on the no-owner transition WITHOUT retracting — the retract inside
+/// `publish_carrier` was dead in production because the no-owner branch never
+/// reached it — so the stale carrier persisted in the store across owner loss. This
+/// test drives the production entry (the same coverage class the original
+/// BLOCKER-1's hermetic test missed by calling `publish_carrier` directly).
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
+    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
+
+    // Unique workspace root so the per-(host_version, ws_root) carrier store dir is
+    // isolated from other tests. A unix-style absolute root round-trips cleanly
+    // through `open_test_vue`'s `file://{path}` URI (canonical_id == path).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let ws_root = format!("/verter_b1_prod_{nanos}/ws");
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/App.vue");
+
+    // A tsserver-kind server ⇒ a real `CarrierPublishCoordinator` (real backend +
+    // on-disk store, mock provider). The production interactive entry
+    // `ensure_current_file_synced` publishes the carrier into THIS store.
+    let provider = std::sync::Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service =
+        make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsserver);
+    let server = service.inner();
+
+    // 1. Owner-ready snapshot owning the workspace (Configured project) → the
+    //    carrier resolves to a ProjectBinding and publishes.
+    install_test_resolver_for_root(server, &ws_root, Some(&tsconfig));
+    let uri = open_test_vue(
+        server,
+        &source,
+        "<script setup lang=\"ts\">\nconst msg: string = 'hi'\n</script>\n\
+         <template><div>{{ msg }}</div></template>\n",
+    );
+
+    server.ensure_current_file_synced(&uri).await;
+
+    // The carrier must now be a member of its configured project in the store.
+    // Capture the published provider paths so the post-retract check is path-exact
+    // without hardcoding the companion suffix.
+    let published_providers: Vec<String> = {
+        let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
+        let manifest = store.current_manifest();
+        let project = manifest
+            .projects
+            .get(&tsconfig)
+            .expect("the owning project must have a manifest entry after a publish");
+        let providers: Vec<String> = project
+            .owned_sources
+            .iter()
+            .filter(|o| o.source_uri == source)
+            .map(|o| o.provider_uri.clone())
+            .collect();
+        assert!(
+            !providers.is_empty(),
+            "after a publish under a configured owner the carrier source MUST be in \
+             the store's owned set"
+        );
+        assert!(
+            providers
+                .iter()
+                .any(|p| project.ready_files.contains_key(p)),
+            "the published companion MUST be in ready_files (the getExternalFiles set)"
+        );
+        providers
+    };
+
+    // The ledger-backed `getExternalFiles` authority must agree with the on-disk
+    // store: the reconciler is the single writer of BOTH, so a published source is
+    // advertised in the ledger.
+    assert!(
+        server
+            .membership_ledger()
+            .expect("a tsserver server has a membership ledger")
+            .is_advertised(&crate::external_ts::CanonicalSource::from(source.as_str())),
+        "after a publish the source must be advertised in the ledger-backed getExternalFiles"
+    );
+
+    // 2. The owner DISAPPEARS: install a ready snapshot rooted ELSEWHERE that does
+    //    NOT own this file (owner loss; ownership_ready = true).
+    let other_root = format!("/verter_b1_other_{nanos}/ws");
+    install_test_resolver_for_root(
+        server,
+        &other_root,
+        Some(&format!("{other_root}/tsconfig.json")),
+    );
+
+    // 3. Drive the SAME production entry again. Owner loss MUST retract the carrier.
+    server.ensure_current_file_synced(&uri).await;
+
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
+    let manifest = store.current_manifest();
+    let still_owned = manifest
+        .projects
+        .get(&tsconfig)
+        .map(|p| p.owned_sources.iter().any(|o| o.source_uri == source))
+        .unwrap_or(false);
+    assert!(
+        !still_owned,
+        "owner loss through the production `ensure_current_file_synced` entry MUST \
+         retract the carrier source from the store's owned set (it was DEAD CODE in \
+         production before the fix)"
+    );
+    let still_ready = manifest
+        .projects
+        .get(&tsconfig)
+        .map(|p| {
+            published_providers
+                .iter()
+                .any(|pv| p.ready_files.contains_key(pv))
+        })
+        .unwrap_or(false);
+    assert!(
+        !still_ready,
+        "owner loss MUST remove the carrier's companions from ready_files so \
+         getExternalFiles stops serving them — the carrier must DISAPPEAR from the \
+         store manifest"
+    );
+    // …and the ledger-backed authority must agree: owner loss leaves the source
+    // NOT advertised (the reconciler tombstoned it as the single writer of both).
+    assert!(
+        !server
+            .membership_ledger()
+            .expect("a tsserver server has a membership ledger")
+            .is_advertised(&crate::external_ts::CanonicalSource::from(source.as_str())),
+        "owner loss through the production entry MUST leave the source NOT advertised \
+         in the ledger-backed getExternalFiles"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn preserve_open_unresolved_carrier_failed_update_keeps_prior_live_ide_path() {
     // R3-1 (b): an OPEN unowned `.vue` with a prior LIVE IDE path whose UPDATE
@@ -6567,7 +6892,7 @@ async fn preserve_open_unresolved_carrier_failed_update_keeps_prior_live_ide_pat
     // committed state and `active_ide_path_for_uri` both retain it.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -6660,7 +6985,7 @@ async fn preserve_open_unresolved_carrier_jsx_flip_syncs_new_tsx_and_closes_old_
     // wrong (JSX) provider artifact and the `.tsx` was never opened.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -6856,7 +7181,7 @@ async fn preserve_open_unresolved_carrier_jsx_flip_failed_tsx_sync_retains_prior
     // hover died. This is the exact regression this test pins.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -6949,7 +7274,7 @@ async fn preserve_open_unresolved_carrier_prior_owned_jsx_flip_failed_drops_api_
     // path) and is NEVER closed.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -6973,7 +7298,7 @@ const msg = 'hello'
                 "/old/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -7008,7 +7333,7 @@ const msg = 'hello'
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
         )),
         "the dropped owner-derived `.vue.ts` must be CLOSED even on a failed flip, calls={calls:?}"
     );
@@ -7200,7 +7525,7 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
             "/old/tsconfig.json".to_string(),
         ),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         shadow_path: None,
@@ -7221,6 +7546,7 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         &provider_sync_states,
         &pending_snapshot_provider_sync,
         false,
+        None,
         None,
     )
     .await;
@@ -7309,7 +7635,7 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
                 "/old/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -7328,6 +7654,7 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
         &pending_snapshot_provider_sync,
         false,
         None,
+        None,
     )
     .await;
 
@@ -7339,7 +7666,7 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
     assert!(
         !calls.iter().any(|call| matches!(
             call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
         )),
         "a same-path API rebind must NOT close the live .ts path, calls={calls:?}"
     );
@@ -7430,7 +7757,7 @@ async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kin
                 "/old/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -7447,6 +7774,7 @@ async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kin
         &provider_sync_states,
         &pending_snapshot_provider_sync,
         false,
+        None,
         None,
     )
     .await;
@@ -7481,7 +7809,7 @@ async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kin
     // Positive: the API kind that DID sync advanced + is marked loaded.
     assert_eq!(
         state.api_path.as_deref(),
-        Some("/workspace/src/App.vue.ts"),
+        Some("/workspace/src/App.vue.verter.ts"),
         "the synced API path is committed"
     );
     assert!(
@@ -7605,14 +7933,24 @@ defineProps<{ msg: string }>()
         .await;
 
     let calls = provider.file_sync_calls();
-    let expected_api_path = format!("{child_id}.ts");
+    let expected_api_path = format!("{child_id}.verter.ts");
+    // Publish-only contract: in the pre-snapshot bootstrap window the carrier has
+    // NO resolved configured project to be a member of yet, so under tsserver NO
+    // carrier-companion content open reaches the provider — the carrier becomes a
+    // member via the drain's re-publish once the snapshot resolves an owner.
+    // Opening the unresolved `.vue.verter.ts` into tsserver here would make a
+    // second content authority, which the publish-only contract forbids.
     assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::OpenFile { path, .. } if path == &expected_api_path
-            )),
-            "pre-snapshot imported Vue API sync should open the unresolved .vue.ts path, calls={calls:?}"
-        );
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &expected_api_path
+        )),
+        "tsserver pre-snapshot imported Vue API sync must NOT open the carrier companion \
+         (publish-only; membership comes from the drain re-publish); calls={calls:?}"
+    );
 
     let state = server
         .provider_sync_states
@@ -7670,23 +8008,28 @@ defineProps<{ msg: string }>()
         .expect("snapshot imported API sync should record the API path");
     let calls = provider.file_sync_calls();
 
+    // Publish-only contract: under tsserver the imported child carrier becomes a
+    // configured-project MEMBER via the publish store + plugin — the LSP must NOT
+    // open/update/load the synthetic companion as a second content authority. So
+    // NO carrier-companion content verb reaches the provider for the API path.
+    // Routing tsserver through the inferred open path would make the OpenFile
+    // reappear and this assertion fail — the discriminating signal.
     assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::OpenFile { path, .. } if path == &api_path
-            )),
-            "snapshot imported Vue API sync should open the provider-facing API path for tsserver, calls={calls:?}, api_path={api_path}"
-        );
-    assert!(
-            !calls.iter().any(|call| matches!(
-                call,
-                MockCall::LoadFile { path, .. } if path == &api_path
-            )),
-            "snapshot imported Vue API sync should not only cache the API path for tsserver, calls={calls:?}, api_path={api_path}"
-        );
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &api_path
+        )),
+        "tsserver imported Vue API sync must NOT open/update/load the carrier companion \
+         (publish-only); calls={calls:?}, api_path={api_path}"
+    );
+    // The committed state still marks the API store-resident (the plugin serves
+    // it as a member), so the imported-carrier prewarm is observably complete.
     assert!(
         state.api_background_loaded,
-        "snapshot imported API sync should mark the API path as loaded"
+        "snapshot imported API sync should mark the API path as store-resident (loaded)"
     );
 }
 
@@ -7755,7 +8098,7 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
                 "/old/tsconfig.json".to_string(),
             ),
             ide_path: Some(format!("{canonical_id}.tsx")),
-            api_path: Some(format!("{canonical_id}.ts")),
+            api_path: Some(format!("{canonical_id}.verter.ts")),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -7814,17 +8157,29 @@ defineProps<{ msg: string }>()
     );
 
     let ide_path = format!("{canonical_id}.tsx");
-    let api_path = format!("{canonical_id}.ts");
+    let api_path = format!("{canonical_id}.verter.ts");
 
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // A REAL resolver that owns the workspace: the background task now derives its
+    // transition through the carrier-sync gateway (which resolves the owner), so the
+    // owner-resolved `.vue.tsx`/`.vue.verter.ts` paths are produced internally.
+    let workspace_root = crate::test_utils::canonical_test_path(&workspace);
     let snapshot = PublishedResolverSnapshot {
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![]),
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                workspace_root.clone(),
+                workspace_root.clone(),
+                None,
+            ),
+        ]),
         ownership_ready: true,
     };
 
     let provider_sync_states = Arc::new(DashMap::new());
-    // Prior committed OWNED state: live + loaded IDE `.tsx` AND API `.ts`.
+    // Prior committed OWNED state under a DIFFERENT owner key, with the SAME IDE/API
+    // paths the gateway will re-derive → owner_changed force-rebind marks BOTH the
+    // IDE `.tsx` and API `.ts` stale.
     let prior_state = ProviderSyncState {
         owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
             "/old/tsconfig.json".to_string(),
@@ -7838,32 +8193,27 @@ defineProps<{ msg: string }>()
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
 
-    // New owner (DIFFERENT key) with the SAME IDE/API paths → owner_changed
-    // force-rebind marks BOTH the IDE `.tsx` and API `.ts` stale.
-    let next_state = ProviderSyncState {
-        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
-            "/new/tsconfig.json".to_string(),
-        ),
+    // Sanity: the gateway-equivalent transition marks the same-path IDE `.tsx` stale
+    // (the close trigger). The task re-derives this internally; this local
+    // computation only asserts the scenario is set up correctly.
+    let sanity_next = crate::provider_sync::ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(workspace_root.clone()),
         ide_path: Some(ide_path.clone()),
         api_path: Some(api_path.clone()),
-        ide_background_loaded: false,
-        api_background_loaded: false,
-        shadow_path: None,
-        shadow_background_loaded: false,
+        ..Default::default()
     };
-    let transition = crate::provider_sync::prepare_sync_transition(
+    let sanity_transition = crate::provider_sync::prepare_sync_transition(
         &provider_sync_states,
         &canonical_id,
-        next_state,
+        sanity_next,
     );
-    // Sanity: the IDE `.tsx` IS in the stale set (this is the close trigger).
     assert!(
-        transition
+        sanity_transition
             .stale_paths
             .iter()
             .any(|(kind, path)| *kind == ProviderPathKind::Ide && path == &ide_path),
         "owner-change force-rebind must mark the same-path IDE `.tsx` stale, stale={:?}",
-        transition.stale_paths
+        sanity_transition.stale_paths
     );
     sync_api_to_provider_background_task(
         sync,
@@ -7872,7 +8222,7 @@ defineProps<{ msg: string }>()
         Arc::clone(&provider_sync_states),
         crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
-        transition,
+        false,
         false,
     )
     .await;
@@ -7930,18 +8280,29 @@ defineProps<{ msg: string }>()
     // Prior API path is DIFFERENT from the new one so a close-before-sync of the
     // old path would be observable.
     let prior_api_path = format!("{canonical_id}.old.ts");
-    let new_api_path = format!("{canonical_id}.ts");
+    let new_api_path = format!("{canonical_id}.verter.ts");
 
     let provider = Arc::new(MockTypeProvider::new());
     // Fail the NEW API path sync only.
     provider.set_fail_sync_path(&new_api_path);
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // A REAL resolver owning the workspace: the background task derives the owner-
+    // resolved `.vue.verter.ts` API path (== `new_api_path`) through the gateway.
+    let workspace_root = crate::test_utils::canonical_test_path(&workspace);
     let snapshot = PublishedResolverSnapshot {
-        resolver: crate::project_resolver::NativeProjectResolver::new(vec![]),
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                workspace_root.clone(),
+                workspace_root.clone(),
+                None,
+            ),
+        ]),
         ownership_ready: true,
     };
 
     let provider_sync_states = Arc::new(DashMap::new());
+    // Prior committed state under a DIFFERENT owner key with a DIFFERENT API path
+    // (`.old.ts`) → the gateway-derived `.verter.ts` API rebind marks `.old.ts` stale.
     let prior_state = ProviderSyncState {
         owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
             "/old/tsconfig.json".to_string(),
@@ -7955,22 +8316,6 @@ defineProps<{ msg: string }>()
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
 
-    let next_state = ProviderSyncState {
-        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
-            "/new/tsconfig.json".to_string(),
-        ),
-        ide_path: Some(ide_path.clone()),
-        api_path: Some(new_api_path.clone()),
-        ide_background_loaded: false,
-        api_background_loaded: false,
-        shadow_path: None,
-        shadow_background_loaded: false,
-    };
-    let transition = crate::provider_sync::prepare_sync_transition(
-        &provider_sync_states,
-        &canonical_id,
-        next_state,
-    );
     sync_api_to_provider_background_task(
         sync,
         snapshot,
@@ -7978,7 +8323,7 @@ defineProps<{ msg: string }>()
         Arc::clone(&provider_sync_states),
         crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
-        transition,
+        false,
         false,
     )
     .await;
@@ -8097,13 +8442,19 @@ async fn barrel_eager_sync_follows_reexport_hops_and_is_provider_neutral() {
     let mid_barrel = "export { default as Foo } from './Foo.vue'\n";
     let top_barrel = "export * from './Foo'\n";
     let usage = "<script setup lang=\"ts\">\nimport { Foo } from './components'\n</script>\n<template><Foo></Foo></template>\n";
-    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
-        ("src/components/Foo/Foo.vue", "vue", foo),
-        ("src/components/Foo/index.ts", "typescript", mid_barrel),
-        ("src/components/index.ts", "typescript", top_barrel),
-        ("src/Usage.vue", "vue", usage),
-    ])
-    .await;
+    // tgo: the barrel BFS reach is engine-agnostic; tgo makes the terminal-carrier
+    // sync an observable `open_file` (tsserver is publish-only for carriers).
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/components/Foo/Foo.vue", "vue", foo),
+                ("src/components/Foo/index.ts", "typescript", mid_barrel),
+                ("src/components/index.ts", "typescript", top_barrel),
+                ("src/Usage.vue", "vue", usage),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
 
     let server = service.inner();
     let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
@@ -8140,13 +8491,19 @@ async fn barrel_eager_sync_terminates_on_reexport_cycle_and_still_syncs_terminal
     let a_barrel = "export * from './b'\nexport { default as Cyc } from './Cyc.vue'\n";
     let b_barrel = "export * from './a'\n";
     let usage = "<script setup lang=\"ts\">\nimport { Cyc } from './a'\n</script>\n<template><Cyc></Cyc></template>\n";
-    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
-        ("src/Cyc.vue", "vue", cyc),
-        ("src/a.ts", "typescript", a_barrel),
-        ("src/b.ts", "typescript", b_barrel),
-        ("src/Usage.vue", "vue", usage),
-    ])
-    .await;
+    // tgo: the cycle-bounded BFS reach is engine-agnostic; tgo makes the terminal-
+    // carrier sync an observable `open_file` (tsserver is publish-only for carriers).
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/Cyc.vue", "vue", cyc),
+                ("src/a.ts", "typescript", a_barrel),
+                ("src/b.ts", "typescript", b_barrel),
+                ("src/Usage.vue", "vue", usage),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
 
     let server = service.inner();
     let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
@@ -8266,7 +8623,7 @@ defineProps<{ msg: string }>()
     // Seed a prior live state (as a bootstrap pass would have): unresolved with
     // a live TSX + API. The buggy arm would close BOTH and remove the entry.
     let child_tsx = format!("{child_id}.tsx");
-    let child_api = format!("{child_id}.ts");
+    let child_api = format!("{child_id}.verter.ts");
     server.commit_provider_sync_state(
         child_id,
         ProviderSyncState {
@@ -8326,7 +8683,7 @@ async fn sync_api_to_provider_retains_prior_path_when_replacement_sync_fails() {
     // close the prior live path and must retain the prior state.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server); // owns /workspace via tsconfig.json
 
@@ -8340,7 +8697,7 @@ defineProps<{ msg: string }>()
 "#,
     );
 
-    let api_path = "/workspace/src/App.vue.ts";
+    let api_path = "/workspace/src/App.vue.verter.ts";
     // Fail the API `.vue.ts` sync.
     provider.set_fail_sync_path(api_path);
     // Seed prior state from a STALE owner key: same owner-independent `.vue.ts`
@@ -8395,26 +8752,13 @@ defineProps<{ msg: string }>()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ensure_current_file_synced_queues_unresolved_ide_path_for_snapshot_reconciliation() {
+    // Engine-agnostic pre-snapshot unresolved-IDE state machine: route through the
+    // tgo inferred-open engine so the unresolved `.tsx` open is observable. Under
+    // tsserver the carrier open is suppressed (publish-only; membership comes from
+    // the drain re-publish once the snapshot resolves an owner).
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let host_for_server = Arc::clone(&host);
-    let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-                suppress_imported_carrier_prewarm: false,
-            },
-        )
-    });
+    let service = make_hover_test_service_tgo(type_provider);
 
     let server = service.inner();
     let uri = open_test_vue(
@@ -8630,7 +8974,7 @@ const msg = 'hello'
                 "/stale/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             shadow_path: None,
@@ -8691,7 +9035,7 @@ async fn ensure_current_file_synced_does_not_rechurn_steady_state_unowned_open_v
     // re-synced the provider artifact — a per-keystroke perf regression.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     // Ready snapshot at `/other` — does NOT own the open `/workspace` file.
     install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
@@ -8819,7 +9163,7 @@ const msg = 'updated'
 async fn current_file_sync_reopens_when_live_ide_path_changes() {
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -8928,7 +9272,7 @@ async fn current_file_sync_retains_old_ide_path_when_new_sync_fails() {
     // Pre-fix it closed the old path BEFORE the (failing) open.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -9044,7 +9388,7 @@ const msg = 'hello'
                 "/workspace/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: false,
             api_background_loaded: true,
             shadow_path: None,
@@ -9095,10 +9439,15 @@ const msg = 'hello'
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn completion_reopens_current_file_when_tsserver_lost_virtual_file_content() {
+async fn completion_reopens_current_file_when_open_buffer_provider_loses_virtual_file_content() {
     let provider = Arc::new(LostContentCompletionProvider::default());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    // The lost-content REOPEN recovery is the inferred-open-buffer mechanism
+    // (close+reopen the carrier TSX to refresh content). It is tgo-specific: under
+    // tsserver the carrier content lives in the publish store (not an open buffer),
+    // so the carrier-companion open verbs are no-ops and this reopen path does not
+    // apply. Characterize it on the engine that uses it.
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -9160,10 +9509,14 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn completion_syncs_current_file_api_when_tsserver_needs_self_public_api() {
+async fn completion_syncs_current_file_api_when_open_buffer_provider_needs_self_public_api() {
     let provider = Arc::new(LostContentCompletionProvider::requiring_current_api());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    // The lost-content current-API re-SYNC recovery is the inferred-open-buffer
+    // mechanism (re-sync the carrier API content into an open buffer). It is
+    // tgo-specific: under tsserver the carrier API lives in the publish store, so
+    // the carrier-companion sync verbs are no-ops. Characterize it on tgo.
+    let service = make_hover_test_service_tgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -9205,7 +9558,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     assert!(
             calls.iter().any(|call| matches!(
                 call,
-                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.ts"
+                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.verter.ts"
             )),
             "recovery should open the current file .vue.ts path when the provider requires it, calls={calls:?}"
         );
@@ -9231,11 +9584,24 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -9250,21 +9616,28 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-                suppress_imported_carrier_prewarm: false,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_none_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -9360,11 +9733,24 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -9379,21 +9765,28 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-                suppress_imported_carrier_prewarm: false,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_none_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -9462,11 +9855,24 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -9481,21 +9887,28 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-                suppress_imported_carrier_prewarm: false,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_none_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -9622,11 +10035,24 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -9641,21 +10067,28 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-                suppress_imported_carrier_prewarm: false,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_none_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -9715,11 +10148,24 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -9734,21 +10180,28 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-                suppress_imported_carrier_prewarm: false,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_none_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -10003,6 +10456,7 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         &provider_sync_states,
         &app_id,
         false,
+        None,
     )
     .await;
     assert_eq!(
@@ -10021,14 +10475,16 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".vue.verter.ts")
         )),
         "pending sync should push the provider-facing Vue API file"
     );
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".tsx")
         )),
         "pending sync should push the hydrated TSX output"
     );
@@ -10091,6 +10547,7 @@ defineProps<{ msg: string }>()
         &provider_sync_states,
         &app_id,
         true,
+        None,
     )
     .await;
 
@@ -10104,7 +10561,7 @@ defineProps<{ msg: string }>()
     assert!(
             calls.iter().any(|call| matches!(
                 call,
-                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.verter.ts")
             )),
             "TSGO pending sync should keep syncing the API artifact, calls={calls:?}"
         );
@@ -11395,6 +11852,107 @@ async fn rune_module_self_file_state_closed_on_did_close() {
     drain.abort();
 }
 
+/// R1b close-lifecycle: deleting a carrier source CLOSES its companions in the
+/// provider (retracting the open diagnostics buffer + carrier→project route). The
+/// companion close is the buffer-side half of carrier retraction (the store-side
+/// half is `retract_carrier_from_external_ts`). DISCRIMINATING: with the
+/// `close_provider_state` call removed from the delete handler, no `CloseFile`
+/// reaches the provider and the assertions fail.
+#[tokio::test]
+async fn deleting_carrier_source_closes_its_companions_in_provider() {
+    use crate::provider_sync::ProviderOwnerBinding;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let vue_uri: Uri = "file:///workspace/src/Comp.vue".parse().unwrap();
+    let canonical_id = "/workspace/src/Comp.vue";
+    let ide_path = "/workspace/src/Comp.vue.tsx";
+    let api_path = "/workspace/src/Comp.vue.verter.ts";
+
+    // Open the carrier source and commit a provider sync state advertising both
+    // companions (the state the carrier-membership sync establishes).
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">const a = 1;</script>\n".to_string(),
+    });
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
+            ide_path: Some(ide_path.to_string()),
+            api_path: Some(api_path.to_string()),
+            ide_background_loaded: false,
+            api_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+        },
+    );
+
+    // Delete the carrier source → the handler closes its companions.
+    super::lifecycle::handle_did_delete_files(
+        server,
+        DeleteFilesParams {
+            files: vec![FileDelete {
+                uri: vue_uri.as_str().to_string(),
+            }],
+        },
+    )
+    .await;
+
+    let closed: Vec<String> = provider
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            MockCall::CloseFile { path } => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        closed.iter().any(|p| p == ide_path),
+        "deleting the carrier must CLOSE its IDE companion ({ide_path}); closed: {closed:?}"
+    );
+    assert!(
+        closed.iter().any(|p| p == api_path),
+        "deleting the carrier must CLOSE its API companion ({api_path}); closed: {closed:?}"
+    );
+    // The provider sync state is gone (retracted).
+    assert!(
+        server
+            .provider_sync_state_for_source(canonical_id)
+            .is_none(),
+        "deleting the carrier removes its provider sync state"
+    );
+
+    drain.abort();
+}
+
 /// Guard `self_file_rename_and_code_actions_gated_off`: rename and code actions
 /// are DEFERRED for a SELF-FILE rune-module own buffer — their workspace-EDIT
 /// positions are not yet mapped through the self-file mapper, so an applied edit
@@ -12262,6 +12820,7 @@ import Child from '@/components/Child.vue'
         &vfs_workspace,
         &provider_sync_states,
         false,
+        None,
     )
     .await;
 
@@ -12270,9 +12829,9 @@ import Child from '@/components/Child.vue'
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } if path.contains("Child.vue.ts")
+            MockCall::OpenFile { path, .. } if path.contains("Child.vue.verter.ts")
         )),
-        "resync should open Child.vue.ts in the type provider, calls={calls:?}"
+        "resync should open the Child API carrier (Child.vue.verter.ts) in the type provider, calls={calls:?}"
     );
 
     // Positive: provider_sync_states should have the child entry
@@ -12288,7 +12847,7 @@ import Child from '@/components/Child.vue'
     assert!(
         !calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } if path.ends_with(".ts") && !path.ends_with(".vue.ts")
+            MockCall::OpenFile { path, .. } if path.ends_with(".ts") && !path.ends_with(".vue.verter.ts")
         )),
         "resync should NOT sync non-.vue files, calls={calls:?}"
     );
@@ -12338,7 +12897,7 @@ defineProps<{ msg: string }>()
         .to_string();
     let app_id = format!("{workspace_id}/src/App.vue");
     let child_id = format!("{workspace_id}/src/components/Child.vue");
-    let child_api_path = format!("{child_id}.ts");
+    let child_api_path = format!("{child_id}.verter.ts");
 
     let app_source = r#"<script setup lang="ts">
 import Child from '@/components/Child.vue'
@@ -12409,6 +12968,7 @@ import Child from '@/components/Child.vue'
         &vfs_workspace,
         &provider_sync_states,
         false,
+        None,
     )
     .await;
 
@@ -12526,6 +13086,7 @@ import Child from '@/components/Child.vue'
         &vfs_workspace,
         &provider_sync_states,
         true,
+        None,
     )
     .await;
 
@@ -12637,6 +13198,7 @@ import { Overlay } from './components'
         &vfs_workspace,
         &provider_sync_states,
         true,
+        None,
     )
     .await;
 
@@ -12722,7 +13284,7 @@ defineProps<{ msg: string }>()
     let app_id = format!("{workspace_id}/src/App.vue");
     let child_id = format!("{workspace_id}/src/components/Child.vue");
     let child_tsx = format!("{child_id}.tsx");
-    let child_api_path = format!("{child_id}.ts");
+    let child_api_path = format!("{child_id}.verter.ts");
 
     let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
@@ -12804,6 +13366,7 @@ defineProps<{ msg: string }>()
         &vfs_workspace,
         &provider_sync_states,
         false,
+        None,
     )
     .await;
 
@@ -12899,7 +13462,7 @@ defineProps<{ show: boolean }>()
     let app_id = format!("{workspace_id}/src/App.vue");
     let overlay_id = format!("{workspace_id}/src/components/Overlay.vue");
     let overlay_tsx = format!("{overlay_id}.tsx");
-    let overlay_api = format!("{overlay_id}.ts");
+    let overlay_api = format!("{overlay_id}.verter.ts");
 
     let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
@@ -12985,6 +13548,7 @@ defineProps<{ show: boolean }>()
         &vfs_workspace,
         &provider_sync_states,
         true,
+        None,
     )
     .await;
 
@@ -13071,7 +13635,7 @@ defineProps<{ msg: string }>()
     );
     let canonical_id = "/workspace/src/App.vue";
     let app_tsx = "/workspace/src/App.vue.tsx";
-    let app_api = "/workspace/src/App.vue.ts";
+    let app_api = "/workspace/src/App.vue.verter.ts";
 
     // Seed a STALE `Owned` committed state with the IDE TSX live AND an owner-
     // derived `.vue.ts`. The owner is now None and the IDE output is absent —
@@ -13174,7 +13738,7 @@ defineProps<{ msg: string }>()
     );
     let canonical_id = "/workspace/src/App.vue";
     let app_tsx = "/workspace/src/App.vue.tsx";
-    let app_api = "/workspace/src/App.vue.ts";
+    let app_api = "/workspace/src/App.vue.verter.ts";
 
     // Seed a STALE `Owned` committed state with the IDE TSX live AND an owner-
     // derived `.vue.ts`. The owner is now None; the destructive reload below
@@ -13239,6 +13803,225 @@ defineProps<{ msg: string }>()
             MockCall::CloseFile { path } if path == app_tsx
         )),
         "owner-loss reconcile must NOT close the live IDE TSX, calls={calls:?}"
+    );
+}
+
+// ── external-TS membership reconciler: production-path coverage ──
+
+/// A small `.vue` carrier source used by the membership production-path tests.
+const MEMBERSHIP_TEST_VUE: &str =
+    "<script setup lang=\"ts\">\nconst msg: string = 'hi'\n</script>\n\
+     <template><div>{{ msg }}</div></template>\n";
+
+/// A→B atomic swap through the PRODUCTION interactive entry
+/// `ensure_current_file_synced`: a source that moves from owner A to owner B must
+/// leave NOTHING advertised under A in the ledger-backed `getExternalFiles` (the
+/// source-indexed single-entry swap). DISCRIMINATING: a publish-then-prune impl
+/// that added B without removing the A entry would leave `advertised_under(A)`
+/// non-empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_change_a_to_b_through_production_leaves_nothing_under_a() {
+    use crate::external_ts::{CanonicalSource, ProjectUri};
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    // Two configs at the SAME root, each owning `{root}/src/App.vue` via `**/*`.
+    let tsconfig_a = "/workspace/tsconfig.json";
+    let tsconfig_b = "/workspace/tsconfig.app.json";
+    let canonical_id = "/workspace/src/App.vue";
+
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig_a));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+    server.ensure_current_file_synced(&uri).await;
+
+    assert_eq!(
+        server
+            .membership_ledger()
+            .expect("tsserver has a ledger")
+            .advertised_under(&ProjectUri::from(tsconfig_a)),
+        vec![CanonicalSource::from(canonical_id)],
+        "after the A publish the source is advertised under A"
+    );
+
+    // The owner CHANGES to B (same root, new tsconfig).
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig_b));
+    server.ensure_current_file_synced(&uri).await;
+
+    let ledger = server.membership_ledger().expect("tsserver has a ledger");
+    assert!(
+        ledger
+            .advertised_under(&ProjectUri::from(tsconfig_a))
+            .is_empty(),
+        "the A→B swap MUST leave NOTHING advertised under the old project A, got {:?}",
+        ledger.advertised_under(&ProjectUri::from(tsconfig_a))
+    );
+    assert_eq!(
+        ledger.advertised_under(&ProjectUri::from(tsconfig_b)),
+        vec![CanonicalSource::from(canonical_id)],
+        "the source must be advertised under the new project B after the swap"
+    );
+}
+
+/// Gap (d) — `resync_background_carrier_file` owner loss must RETRACT the
+/// ledger-backed `getExternalFiles` membership, not only reconcile the provider
+/// buffer binding. DISCRIMINATING: pre-change the resync owner-loss path corrected
+/// the binding (preserve/clear) but left the STORE/ledger membership advertised.
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_background_owner_loss_retracts_ledger_membership() {
+    use crate::external_ts::CanonicalSource;
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let tsconfig = "/workspace/tsconfig.json";
+    let canonical_id = "/workspace/src/App.vue";
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+
+    // Publish under the resolved owner (the carrier is advertised).
+    server.ensure_current_file_synced(&uri).await;
+    assert!(
+        server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "precondition: the carrier is advertised after the owned publish"
+    );
+
+    // Owner loss: a ready snapshot rooted ELSEWHERE that does not own the file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+    server.resync_background_carrier_file(canonical_id).await;
+
+    assert!(
+        !server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "resync owner-loss MUST retract the ledger-backed getExternalFiles membership"
+    );
+}
+
+/// Gap (d) defect 2 — an OWNER-RESOLVED tsserver carrier reaches the store/ledger
+/// through the reconciler, NOT the no-op ProjectSync content verbs. Driven through
+/// `sync_compiled_carrier_to_provider` (the post-compile sync decision
+/// `resync_background_carrier_file` calls). DISCRIMINATING: pre-change the
+/// owner-resolved branch ran `sync_tsx`/`sync_dts` (tsserver NO-OPS), so the ledger
+/// stayed empty; the publish gap meant background/file-watch updates never reached
+/// the store.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
+    use crate::external_ts::CanonicalSource;
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let tsconfig = "/workspace/tsconfig.json";
+    let canonical_id = "/workspace/src/App.vue";
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
+    open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+
+    assert!(
+        !server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "precondition: not advertised before the resync publish"
+    );
+
+    // The post-compile sync decision for an owner-resolved tsserver carrier. The
+    // tsserver owned branch publishes through `publish_carrier_to_external_ts`
+    // (which compiles internally), so the ledger advertises regardless of the
+    // passed IDE output.
+    server
+        .sync_compiled_carrier_to_provider(canonical_id, None)
+        .await;
+
+    assert!(
+        server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "an owner-resolved tsserver carrier MUST be advertised in the ledger via the \
+         reconciler (not the no-op ProjectSync verbs)"
+    );
+    // The ledger-backed advertised set for the project includes the carrier's
+    // companion provider paths.
+    let advertised = server.external_ts_advertised_for_project(tsconfig);
+    assert!(
+        advertised.iter().any(|p| p.starts_with(canonical_id)),
+        "the project's ledger-backed getExternalFiles set must include the carrier's \
+         companions, got {advertised:?}"
+    );
+}
+
+/// Gap (c) — `sync_imported_carrier_api_lightweight` owner loss must retract the
+/// ledger membership of an imported child carrier whose owner is gone.
+/// DISCRIMINATING: pre-change the imported-child owner-loss branch corrected the
+/// binding but left the STORE/ledger membership advertised.
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_child_owner_loss_retracts_ledger_membership() {
+    use crate::external_ts::CanonicalSource;
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let tsconfig = "/workspace/tsconfig.json";
+    let canonical_id = "/workspace/src/Child.vue";
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+
+    // Publish under the resolved owner.
+    server.ensure_current_file_synced(&uri).await;
+    assert!(
+        server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "precondition: the imported child carrier is advertised after the owned publish"
+    );
+
+    // Owner loss, then drive the imported-child lightweight sync.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+    server
+        .sync_imported_carrier_api_lightweight(canonical_id)
+        .await;
+
+    assert!(
+        !server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "imported-child owner-loss MUST retract the ledger-backed getExternalFiles membership"
+    );
+}
+
+/// Gap (b) — for tsserver, the background API sync routes the carrier to the drain
+/// (which reconciles through the membership reconciler) instead of running the
+/// `ProjectSync` content task whose `.vue.ts` verbs are tsserver NO-OPS.
+/// DISCRIMINATING: pre-change, with a ready snapshot + owner, it spawned the
+/// background task (which never queued and never reached the store), so the carrier
+/// was NOT in the pending-snapshot drain set.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_api_background_queues_carrier_for_drain_on_tsserver() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let tsconfig = "/workspace/tsconfig.json";
+    let canonical_id = "/workspace/src/App.vue";
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+
+    // Clear any queue entry seeded by `did_open` so the assertion is discriminating.
+    server.pending_snapshot_provider_sync.remove(canonical_id);
+    server.sync_api_to_provider_in_background(uri);
+
+    assert!(
+        server.pending_snapshot_provider_sync.contains(canonical_id),
+        "the tsserver background API sync MUST queue the carrier for the drain (the \
+         single membership reconciler), not run the no-op ProjectSync content task"
     );
 }
 

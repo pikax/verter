@@ -99,7 +99,8 @@ pub struct RecoveredImport<'a> {
     /// Module specifier text WITHOUT the surrounding quotes (e.g. `vue`, `./Foo.vue`).
     pub source: &'a str,
     /// Span of the source string literal INCLUDING quotes (SFC-absolute), used to
-    /// rewrite `.vue` → `.vue.ts`.
+    /// rewrite an in-project `.vue` import to the component IDE carrier
+    /// (`.vue.tsx`).
     pub source_span: Span,
     /// Local binding names introduced by this import (default / namespace / named
     /// locals). Empty for side-effect imports (`import './x'`).

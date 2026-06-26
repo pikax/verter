@@ -291,6 +291,171 @@ fn record_for_closed_carrier_captures_host_source_without_documents() {
     assert_eq!(snap.source_hash, ContentHash::of(carrier_src));
 }
 
+/// The publish-time choke records EVERY carrier role (IDE + API) so each
+/// companion's `version` — the plugin's `getScriptVersion` — STRICTLY ADVANCES on
+/// content change. The defect this guards: the IDE companion's surface was never
+/// recorded (only the API was), so its version was pinned at `1` and tsserver
+/// retained a stale `SourceFile` across `.vue` edits (split-brain with the
+/// advancing API version). RED before the fix: the IDE version stays `1` across a
+/// content change; the API version advances independently.
+#[test]
+fn carrier_companions_record_every_role_and_advance_version_on_content_change() {
+    use std::sync::Arc as StdArc;
+    use verter_session::external_ts::{ScriptKind, SnapshotRole};
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+
+    use crate::external_ts::CarrierCompanion;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.to_string()),
+        input_id: CANONICAL.to_string(),
+        source: StdArc::from("<script setup lang=\"ts\">\nconst n: number = 1;\n</script>\n"),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+
+    let ide_path = "/src/Child.vue.tsx";
+    let api_path = "/src/Child.vue.verter.ts";
+    let make = |ide_code: &str, api_code: &str| {
+        vec![
+            CarrierCompanion {
+                provider_uri: StdArc::from(ide_path),
+                content: StdArc::from(ide_code),
+                map_json: None,
+                role: SnapshotRole::CarrierIde,
+                script_kind: ScriptKind::Tsx,
+                version: 0,
+            },
+            CarrierCompanion {
+                provider_uri: StdArc::from(api_path),
+                content: StdArc::from(api_code),
+                map_json: None,
+                role: SnapshotRole::CarrierApi,
+                script_kind: ScriptKind::Ts,
+                version: 0,
+            },
+        ]
+    };
+
+    let mut v1 = make(
+        "export default {}; /* ide v1 */\n",
+        "declare const C: {}; /* api v1 */\n",
+    );
+    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v1);
+    let (ide_v1, api_v1) = (v1[0].version, v1[1].version);
+
+    let mut v2 = make(
+        "export default {}; /* ide v2 CHANGED */\n",
+        "declare const C: {}; /* api v2 CHANGED */\n",
+    );
+    record_and_version_carrier_companions(&store, None, &host, CANONICAL, &mut v2);
+    let (ide_v2, api_v2) = (v2[0].version, v2[1].version);
+
+    assert!(
+        ide_v2 > ide_v1,
+        "the IDE carrier companion version (getScriptVersion) MUST strictly advance on a \
+         content change — it was pinned at 1 because the IDE surface was never recorded; \
+         got ide_v1={ide_v1} ide_v2={ide_v2}"
+    );
+    assert!(
+        api_v2 > api_v1,
+        "the API carrier companion version must STILL advance independently (no \
+         split-brain / regression); got api_v1={api_v1} api_v2={api_v2}"
+    );
+    assert_ne!(
+        ide_v1, 1,
+        "the IDE companion must carry a real recorded generation, not the stale `1` fallback"
+    );
+    assert_ne!(
+        ide_v1, api_v1,
+        "within ONE record_and_version call the IDE and API companions are distinct \
+         captures and MUST receive distinct generations (no cross-stamping); \
+         ide_v1={ide_v1} api_v1={api_v1}"
+    );
+}
+
+/// M6: `record_carrier_companion_surface` returns the EXACT generation
+/// [`ProviderSurfaceStore::record`] linearized for the capture, so the batch
+/// versioner stamps from that value rather than a second `current_snapshot` read
+/// (which a concurrent close could race to `None`/stale). RED before M6: the
+/// function returned `()` (no generation to source the version from — callers
+/// re-read `current_snapshot`, the close-race / cross-stamp hazard).
+#[test]
+fn record_carrier_companion_surface_returns_linearized_record_generation() {
+    use std::sync::Arc as StdArc;
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.to_string()),
+        input_id: CANONICAL.to_string(),
+        source: StdArc::from("<script setup lang=\"ts\">\nconst n: number = 1;\n</script>\n"),
+        file_language: FileLanguage::vue(),
+        aliases: vec![],
+    });
+    let store = ProviderSurfaceStore::new();
+    let ide_path = "/src/Child.vue.tsx";
+
+    let g1 = record_carrier_companion_surface(
+        &store,
+        None,
+        &host,
+        CANONICAL,
+        ide_path,
+        ProviderSurfaceKind::CarrierIde,
+        "export default {}; /* v1 */\n",
+        None,
+    );
+    let g2 = record_carrier_companion_surface(
+        &store,
+        None,
+        &host,
+        CANONICAL,
+        ide_path,
+        ProviderSurfaceKind::CarrierIde,
+        "export default {}; /* v2 CHANGED */\n",
+        None,
+    );
+
+    assert!(
+        g1.is_some() && g2.is_some(),
+        "a recorded companion returns its linearized generation; got g1={g1:?} g2={g2:?}"
+    );
+    assert!(
+        g2 > g1,
+        "each record returns the generation it linearized — strictly monotonic across \
+         a content change; got g1={g1:?} g2={g2:?}"
+    );
+    assert_eq!(
+        g2,
+        store
+            .current_snapshot(ide_path)
+            .map(|snapshot| snapshot.stamp.generation),
+        "the returned generation MUST equal the generation `record` linearized (the \
+         version is sourced from record(), not a second current_snapshot lookup)"
+    );
+
+    // A carrier with no host/VFS source records nothing and returns None — the
+    // ONLY case the batch versioner falls to its `1` fail-safe.
+    let missing = record_carrier_companion_surface(
+        &store,
+        None,
+        &host,
+        "/src/Never.vue",
+        "/src/Never.vue.tsx",
+        ProviderSurfaceKind::CarrierIde,
+        "export default {}\n",
+        None,
+    );
+    assert_eq!(
+        missing, None,
+        "no carrier source ⇒ no record ⇒ None (fail-closed), so only this case uses \
+         the `1` fallback"
+    );
+}
+
 /// A carrier with NO host/VFS source (deleted / never loaded) records nothing —
 /// the path has no current generation, so a returned offset fails closed.
 #[test]

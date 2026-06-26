@@ -5,7 +5,8 @@
 //! synthesized `default` symbol/export inventory. It runs NO `Instantiate`, NO
 //! semantic dispatch, and NO OXC at render time (static-guarded by
 //! `non_vue_api_projector_has_no_dispatch_or_oxc`): every input is already-cached
-//! shallow state. It produces the content behind the `Foo.svelte.ts` api file.
+//! shallow state. It produces the content behind the `Foo.svelte.verter.ts`
+//! api file.
 //!
 //! Rendered declarations, in order:
 //! 1. the TYPE-ONLY import / re-export prelude — minimal `import type` lines
@@ -31,7 +32,7 @@ use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::types::{PublicApiMode, TscResponse};
 
 /// The F13 derived-callback-event helper types rendered into every Svelte
-/// `.svelte.ts` shim.
+/// `.svelte.verter.ts` shim.
 ///
 /// The `$events` map values are HANDLER types uniformly (the component `on:`
 /// helper checks `handler: $events[K]`), produced from the TWO event models:

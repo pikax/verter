@@ -123,7 +123,7 @@ async fn sync_coordinator_closes_stale_owner_ids_when_owner_changes() {
         },
     );
 
-    let transition = prepare_sync_transition(
+    let transition = crate::provider_sync::prepare_sync_transition(
         &states,
         "/workspace/src/App.vue",
         ProviderSyncState {
@@ -248,6 +248,8 @@ async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missin
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
         provider_sync_states: Arc::new(DashMap::new()),
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
     };
 
     sync_file(
@@ -287,6 +289,8 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
         provider_sync_states: Arc::new(DashMap::new()),
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
     };
 
     // No prior state in the (empty) states map; no IDE output this pass.
@@ -342,6 +346,8 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
         provider_sync_states: Arc::new(DashMap::new()),
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
     };
 
     publish_merged_diagnostics(&deps, "/workspace/src/App.vue", uri.as_str()).await;
@@ -409,6 +415,8 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
         provider_sync_states: Arc::clone(&provider_sync_states),
         vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
     };
 
     sync_file(&deps, canonical_id, uri.as_str()).await;
@@ -525,6 +533,8 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
         provider_sync_states,
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
     };
 
     let merged = rune_module_diagnostics(
@@ -634,6 +644,8 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
         provider_sync_states: Arc::clone(&provider_sync_states),
         vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
     };
 
     sync_file(&deps, canonical_id, uri.as_str()).await;
@@ -746,6 +758,8 @@ defineProps<{ msg: string }>()
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
         provider_sync_states: Arc::clone(&provider_sync_states),
         vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
     };
 
     sync_file(&deps, canonical_id, "file:///workspace/src/App.vue").await;

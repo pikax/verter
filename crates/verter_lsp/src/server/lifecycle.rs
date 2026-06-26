@@ -320,6 +320,30 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
         tracing::info!("Sent $/verter/mcpReady with port {port}");
     }
 
+    // Emit the resolved per-workspace carrier-store dir so the extension can hand
+    // it to VS Code's OWN TypeScript server (via `configurePlugin`); a plain `.ts`
+    // opened there then reads the SAME store and resolves imported `.vue`/`.svelte`
+    // carriers. The LSP is the single source of the
+    // `<temp>/verter-carrier-store/<host-version>/<workspace-hash>/` derivation —
+    // it cannot be reproduced extension-side without mirroring the exact recipe. The
+    // dir is keyed on the primary workspace root (the one the carrier-publish path
+    // and the spawned tsserver share).
+    {
+        let first_root = server.workspace_roots.lock().await.first().cloned();
+        if let Some(root_uri) = first_root {
+            let workspace_root = crate::documents::uri_to_canonical_id_from_str(&root_uri);
+            let carrier_store_dir =
+                crate::external_ts::default_carrier_store_dir_string(&workspace_root);
+            server
+                .client
+                .send_notification::<CarrierStoreReady>(CarrierStoreReadyParams {
+                    carrier_store_dir: carrier_store_dir.clone(),
+                })
+                .await;
+            tracing::info!("Sent $/verter/carrierStoreReady with dir {carrier_store_dir}");
+        }
+    }
+
     // Eagerly populate type provider workspace roots so that
     // did_open (which can fire before background_init completes) sends
     // a reasonable projectRootPath to tsserver.
@@ -670,11 +694,22 @@ pub(super) async fn handle_did_change(
                 coordinator.signal(canonical_id.clone(), uri.as_str().to_string());
             }
 
-            // Eager TSX sync — send fresh TSX to type provider immediately.
-            // sync_tsx is fire-and-forget (~1ms), so this adds negligible latency.
-            // This ensures ALL subsequent requests (completion, hover, definition)
-            // see fresh content without needing per-handler inline sync.
-            if let Some(sync) = &server.project_sync {
+            // Eager carrier refresh — make the freshly-edited carrier content
+            // visible to the type provider immediately, so the next interactive
+            // request (completion, hover, definition) sees it without per-handler
+            // inline sync.
+            //
+            // tsserver: the carrier is a configured-project MEMBER served from the
+            // publish store, so a fresh edit must RE-PUBLISH the companions (and
+            // fire the change notification) — NOT open the synthetic TSX as a
+            // second content authority (the eager `sync_tsx` is a no-op for
+            // tsserver). The publish is fail-closed (a no-owner carrier publishes
+            // nothing). tgo keeps the eager `sync_tsx` content open.
+            if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+                if carrier_language_for(&canonical_id).is_some() {
+                    server.publish_carrier_to_external_ts(&canonical_id).await;
+                }
+            } else if let Some(sync) = &server.project_sync {
                 if let Some(ide) = server.documents.get_ide(&uri) {
                     if let Some(ide_path) = server.eager_syncable_ide_path_for_uri(&uri) {
                         if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
@@ -736,11 +771,10 @@ pub(super) async fn handle_did_close(
         let state = server
             .provider_sync_state_for_source(&canonical_id)
             .or_else(|| {
-                server.documents.get_ide(uri).and_then(|ide| {
-                    server
-                        .prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
-                        .map(|transition| transition.next)
-                })
+                server
+                    .documents
+                    .get_ide(uri)
+                    .and_then(|ide| server.carrier_close_state(&canonical_id, ide.is_jsx))
             });
         let is_tsgo = matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
@@ -928,13 +962,18 @@ pub(super) async fn handle_did_change_watched_files(
                 .documents
                 .host()
                 .get_ide(canonical_id, &profile)
-                .and_then(|ide| {
-                    server
-                        .prepare_carrier_provider_sync_transition(canonical_id, ide.is_jsx)
-                        .map(|transition| transition.next)
-                })
+                .and_then(|ide| server.carrier_close_state(canonical_id, ide.is_jsx))
         }) {
             server.close_provider_state(&state).await;
+        }
+        // Drop the carrier's STORE membership too — the provider-buffer close above
+        // closes the open companion; this retracts it from `getExternalFiles` so the
+        // deleted carrier is no longer advertised to the plugin. Best-effort on the
+        // delete path, but a failure is surfaced.
+        if let Err(error) = server.retract_carrier_from_external_ts(canonical_id).await {
+            tracing::warn!(
+                "did_change_watched_files: carrier retract failed for {canonical_id}: {error}"
+            );
         }
         server.documents.host().remove(canonical_id);
         server.cached_verter_diags.remove(uri_str.as_str());
@@ -1076,14 +1115,17 @@ pub(super) async fn handle_did_delete_files(
                     .documents
                     .host()
                     .get_ide(&canonical_id, &profile)
-                    .and_then(|ide| {
-                        server
-                            .prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
-                            .map(|transition| transition.next)
-                    })
+                    .and_then(|ide| server.carrier_close_state(&canonical_id, ide.is_jsx))
             })
         {
             server.close_provider_state(&state).await;
+        }
+        // Retract the carrier's STORE membership (the provider buffer was closed
+        // above) so the deleted carrier is no longer advertised via
+        // `getExternalFiles`. Best-effort on the delete path (the file is gone; the
+        // next authoritative publish re-prunes), but a failure is surfaced.
+        if let Err(error) = server.retract_carrier_from_external_ts(&canonical_id).await {
+            tracing::warn!("did_delete_files: carrier retract failed for {canonical_id}: {error}");
         }
         server.documents.host().remove(&canonical_id);
         server.cached_verter_diags.remove(uri.as_str());

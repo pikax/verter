@@ -218,12 +218,13 @@ mod tests {
         assert!(a.contains("carrierExtension: \".vue\""));
         assert!(a.contains("carrierExtension: \".svelte\""));
         assert!(a.contains("kind: \"jsxConditional\", jsx: \".jsx\", nonJsx: \".tsx\""));
-        // The import surface is the `.ts` API file (suffix policy).
-        assert!(a.contains("importSurface: { kind: \"suffix\", suffix: \".ts\" }"));
+        // The import surface is the reserved `.verter.ts` API file (suffix
+        // policy) — the redirect-reached infix, never a bare `.ts`.
+        assert!(a.contains("importSurface: { kind: \"suffix\", suffix: \".verter.ts\" }"));
         assert!(a.contains("testingApiSuffix: \".__verter_test.ts\""));
         assert!(a.contains("sidecarSuffixes: []"));
         // The Svelte COMPONENT row renders its fixed `.tsx` IDE suffix policy,
-        // the `.ts` import surface, and a NULL testing surface.
+        // the `.verter.ts` import surface, and a NULL testing surface.
         assert!(a.contains("FRAMEWORK_TAG_SVELTE: {"));
         assert!(a.contains("ide: { kind: \"suffix\", suffix: \".tsx\" }"));
         // The Svelte row's testing surface is null (no `.svelte.__verter_test`).

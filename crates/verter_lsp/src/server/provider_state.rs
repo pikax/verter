@@ -150,22 +150,64 @@ impl VerterLanguageServer {
             .map(|entry| entry.clone())
     }
 
-    pub(super) fn prepare_carrier_provider_sync_transition(
+    /// Route a carrier's sync through the SINGLE carrier-sync gateway: the membership
+    /// decision (publish on owned / retract on owner-loss for tsserver) is FUSED with
+    /// the provider-state transition + the sealed receipt that gates the commit. This
+    /// is the server-side wrapper every interactive/background carrier-sync entry uses
+    /// (it builds the engine membership context from `self`).
+    pub(super) async fn reconcile_carrier_via_gateway(
         &self,
         canonical_id: &str,
         is_jsx: bool,
-    ) -> Option<crate::provider_sync::ProviderSyncTransition> {
-        let snapshot = self.published_resolver()?;
-        let next_state = crate::provider_sync::carrier_sync_state_for_source(
-            &snapshot.resolver,
+        ide: Option<&verter_session::IdeResponse>,
+    ) -> crate::external_ts::CarrierSyncDecision {
+        let Some(snapshot) = self.published_resolver() else {
+            // No published snapshot yet (bootstrap): nothing to advertise/commit.
+            return crate::external_ts::CarrierSyncDecision::Pending;
+        };
+        // Clone the VFS handle out of the guard so no lock is held across the await.
+        let vfs = self.vfs_workspace.read().clone();
+        // tsserver: the carrier reaches the provider as a store-backed configured-
+        // project member, so the gateway runs the membership reconcile. tgo (no
+        // coordinator) ⇒ `None` ⇒ the gateway returns a direct-open transition.
+        let membership = match (
+            matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver),
+            self.carrier_publish_coordinator.as_ref(),
+            vfs.as_ref(),
+        ) {
+            (true, Some(coordinator), Some(vfs)) => {
+                Some(crate::external_ts::CarrierMembershipCtx {
+                    coordinator,
+                    vfs,
+                    ownership_ready: snapshot.ownership_ready,
+                })
+            }
+            _ => None,
+        };
+        crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
+            host: self.documents.host(),
+            resolver: &snapshot.resolver,
+            provider_sync_states: &self.provider_sync_states,
+            provider_surfaces: self.documents.provider_surfaces(),
+            documents: Some(&self.documents),
             canonical_id,
             is_jsx,
-        )?;
-        Some(prepare_sync_transition(
-            &self.provider_sync_states,
-            canonical_id,
-            next_state,
-        ))
+            ide,
+            membership,
+            reason: crate::external_ts::ReconcileReason::SourceSynced,
+        })
+        .await
+    }
+
+    /// The carrier provider paths for `canonical_id` for the CLOSE-only path (delete /
+    /// file-removed buffer cleanup). NOT a commit — needs no receipt.
+    pub(super) fn carrier_close_state(
+        &self,
+        canonical_id: &str,
+        is_jsx: bool,
+    ) -> Option<ProviderSyncState> {
+        let snapshot = self.published_resolver()?;
+        crate::external_ts::carrier_close_target(&snapshot.resolver, canonical_id, is_jsx)
     }
 
     pub(super) fn prepare_non_carrier_provider_sync_transition(
@@ -186,6 +228,24 @@ impl VerterLanguageServer {
 
     pub(super) fn commit_provider_sync_state(&self, canonical_id: &str, state: ProviderSyncState) {
         commit_sync_transition(&self.provider_sync_states, canonical_id, state);
+    }
+
+    /// Commit a CARRIER provider state — GATED on the sealed receipt minted by the
+    /// carrier-sync gateway (so a carrier state can never be committed without the
+    /// membership decision). Non-carrier (shadow) commits keep
+    /// [`Self::commit_provider_sync_state`].
+    pub(super) fn commit_carrier_provider_state(
+        &self,
+        canonical_id: &str,
+        state: ProviderSyncState,
+        receipt: &crate::external_ts::CarrierProviderCommit,
+    ) {
+        crate::external_ts::commit_carrier_provider_state(
+            &self.provider_sync_states,
+            canonical_id,
+            state,
+            receipt,
+        );
     }
 
     pub(super) fn remove_provider_sync_state(
@@ -254,6 +314,9 @@ impl VerterLanguageServer {
         // is still open in the provider — rows 7 & 9), the owner-derived API is
         // dropped+closed unconditionally, and the orphaned prior IDE path is
         // closed ONLY after a successful flip (close-after-success).
+        // An UNRESOLVED (owner-less) open-document liveness state is membership-free
+        // (no publish to forget), so it commits through the plain non-carrier path —
+        // the receipt gates only OWNED-publish commits.
         let commit = crate::provider_sync::open_unresolved_carrier_commit(
             previous.as_ref(),
             target,
@@ -297,6 +360,7 @@ impl VerterLanguageServer {
         mut committed_state: ProviderSyncState,
         stale_paths: &[(ProviderPathKind, String)],
         synced_kinds: &[ProviderPathKind],
+        receipt: &crate::external_ts::CarrierProviderCommit,
     ) {
         if synced_kinds.is_empty() {
             return;
@@ -311,7 +375,7 @@ impl VerterLanguageServer {
             &committed_state,
             synced_kinds,
         );
-        self.commit_provider_sync_state(canonical_id, committed_state);
+        self.commit_carrier_provider_state(canonical_id, committed_state, receipt);
         self.close_provider_paths(&genuinely_stale).await;
     }
 

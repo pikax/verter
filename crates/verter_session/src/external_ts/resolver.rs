@@ -353,10 +353,13 @@ impl<'a> WorkspaceProjectResolver<'a> {
     /// `source_uri`, derived from the owning adapter's `VirtualFileNaming`
     /// authority (NOT a hardcoded `.tsx`). The source is classified to its
     /// carrier language via the shared `LanguageRegistry`, matched to its
-    /// `FrameworkAdapterDescriptor`, and each `ide_carrier_suffixes()` entry is
-    /// appended to the full carrier canonical (`Foo.vue` + `.jsx` →
-    /// `Foo.vue.jsx`). Framework-agnostic: a new adapter participates the moment
-    /// its descriptor is registered, with no per-adapter branch here.
+    /// `FrameworkAdapterDescriptor`, and the descriptor authority
+    /// [`crate::framework::descriptor::VirtualFileNaming::ide_carrier_identities`]
+    /// composes each companion identity by appending its IDE suffix to the full
+    /// carrier canonical
+    /// (`Foo.vue` + `.jsx` → `Foo.vue.jsx`). Framework-agnostic: a new adapter
+    /// participates the moment its descriptor is registered, with no per-adapter
+    /// branch here.
     fn descriptor_ide_carrier_paths(&self, source_uri: &str) -> Vec<String> {
         use verter_language::StaticClassification;
 
@@ -375,8 +378,7 @@ impl<'a> WorkspaceProjectResolver<'a> {
             .iter()
             .filter(|descriptor| descriptor.carrier_language.as_ref() == Some(&carrier_language_id))
             .filter_map(|descriptor| descriptor.virtual_file_naming.as_ref())
-            .flat_map(|naming| naming.ide_carrier_suffixes())
-            .map(|suffix| format!("{source_uri}{suffix}"))
+            .flat_map(|naming| naming.ide_carrier_identities(source_uri))
             .collect()
     }
 }

@@ -137,13 +137,7 @@ impl VerterLanguageServer {
                             self.documents
                                 .host
                                 .get_ide(&canonical_id, &profile)
-                                .and_then(|ide| {
-                                    self.prepare_carrier_provider_sync_transition(
-                                        &canonical_id,
-                                        ide.is_jsx,
-                                    )
-                                    .map(|transition| transition.next)
-                                })
+                                .and_then(|ide| self.carrier_close_state(&canonical_id, ide.is_jsx))
                         })
                     {
                         self.close_provider_state(&state).await;

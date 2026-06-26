@@ -111,6 +111,99 @@ export function normalizePath(fileName: string): string {
   return fileName.replace(/\\/g, "/");
 }
 
+/**
+ * The IDE-carrier companion suffix a `VirtualPathPolicy` produces — the
+ * `ide` column, NOT the import surface. This is the path the Rust LSP
+ * publishes a carrier's interactive content at (`Comp.vue.tsx` /
+ * `Comp.svelte.tsx`) and the in-project module-resolution redirect target:
+ *   - `suffix`        → its single suffix (Svelte's IDE policy → `.tsx`).
+ *   - `jsxConditional`→ the `nonJsx` suffix (the TypeScript-TSX carrier the
+ *     host publishes for a TS carrier — Vue's `.tsx`); the `jsx` (`.jsx`)
+ *     branch is the JavaScript-carrier form and is not the published TS
+ *     identity the redirect targets.
+ *   - `selfFile`/`none` → no distinct companion (returns `null`).
+ *
+ * Derived from the generated column so adding a carrier needs no edit here.
+ */
+function ideCarrierSuffix(policy: VirtualPathPolicy): string | null {
+  switch (policy.kind) {
+    case "suffix":
+      return policy.suffix;
+    case "jsxConditional":
+      return policy.nonJsx;
+    case "selfFile":
+    case "none":
+      return null;
+  }
+}
+
+/**
+ * The per-carrier IDE-companion naming table: each component carrier extension
+ * (`.vue`/`.svelte`) mapped to its IDE-carrier suffix (the `ide` column). Built
+ * once from the generated column, in parallel to the import-surface `CARRIERS`
+ * table above.
+ */
+const IDE_CARRIERS: readonly { extension: string; ideSuffix: string }[] = Object.values(
+  VIRTUAL_FILE_NAMING,
+)
+  .filter((row) => row.carrierExtension !== null && ideCarrierSuffix(row.ide) !== null)
+  .map((row) => ({
+    extension: row.carrierExtension as string,
+    ideSuffix: ideCarrierSuffix(row.ide) as string,
+  }));
+
+/**
+ * The IDE-carrier companion path for a bare carrier file (`Comp.vue` →
+ * `Comp.vue.tsx`, `Comp.svelte` → `Comp.svelte.tsx`), or `null` when `fileName`
+ * is not a recognised component carrier. This is the in-project module-resolution
+ * redirect target — the SOURCE carrier identity both engines resolve a bare
+ * `./Comp.vue` import to — distinct from the `.verter.ts` API carrier (the
+ * cross-package/project-ref redirect target).
+ */
+export function toIdeCarrierFileName(fileName: string): string | null {
+  const normalized = normalizePath(fileName);
+  for (const c of IDE_CARRIERS) {
+    if (normalized.endsWith(c.extension)) {
+      return `${normalized}${c.ideSuffix}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The component-carrier SOURCE extensions (`.vue`, `.svelte`) — the file
+ * extensions tsserver must be told to accept as program members via
+ * `extraFileExtensions` so a `getExternalFiles`-advertised carrier SOURCE path
+ * enters the configured project's Program. Derived from the generated column (a
+ * row with a carrier extension + a distinct IDE companion is a true component
+ * carrier), so a new framework participates with no edit here.
+ */
+export const CARRIER_SOURCE_EXTENSIONS: readonly string[] = IDE_CARRIERS.map((c) => c.extension);
+
+/**
+ * Whether `fileName` is a bare component-carrier SOURCE path (`*.vue` / `*.svelte`)
+ * — the path tsserver queries after `getExternalFiles` advertises it. Distinct
+ * from a companion virtual path (`*.vue.tsx` / `*.vue.verter.ts`).
+ */
+export function isCarrierSourcePath(fileName: string): boolean {
+  const normalized = normalizePath(fileName);
+  return CARRIER_SOURCE_EXTENSIONS.some(
+    (ext) => normalized.endsWith(ext) && toIdeCarrierFileName(normalized) !== null,
+  );
+}
+
+/**
+ * The IDE-companion provider path that backs a carrier SOURCE path's content
+ * when tsserver makes the source a program member, or `null` for a non-carrier
+ * path. `getExternalFiles` advertises the SOURCE path (`Comp.vue`); tsserver then
+ * asks the host for the source path's snapshot/kind/version, which the plugin
+ * answers with the IDE companion's (`Comp.vue.tsx`) carrier content + TSX kind.
+ * This is exactly [`toIdeCarrierFileName`] (source → IDE companion).
+ */
+export function carrierSourceToCompanion(sourcePath: string): string | null {
+  return isCarrierSourcePath(sourcePath) ? toIdeCarrierFileName(sourcePath) : null;
+}
+
 /** The carrier row whose bare extension matches `fileName`, if any. */
 function carrierFor(fileName: string): CarrierNaming | undefined {
   return CARRIERS.find((c) => c.carrier.test(fileName));
@@ -213,6 +306,12 @@ const CARRIER_VIRTUAL_SUFFIX_STRIPPERS: readonly {
   // The `.d.ts` accepted-spelling alias is `{carrier_ext}.d.ts` uniformly.
   suffixes.push(".d.ts");
   if (c.apiSuffix) suffixes.push(c.apiSuffix);
+  // The IDE-carrier companion suffix (the `ide` column — `Comp.vue.tsx`). An
+  // engine-produced import/code-action whose specifier targets the IDE carrier
+  // must strip back to the bare carrier too, alongside the `.verter.ts` API
+  // carrier and the `.d.ts` alias.
+  const ide = IDE_CARRIERS.find((row) => row.extension === c.extension);
+  if (ide && !suffixes.includes(ide.ideSuffix)) suffixes.push(ide.ideSuffix);
   return suffixes.map((virtualSuffix) => ({
     pattern: new RegExp(escapeRegExp(`${c.extension}${virtualSuffix}`), "g"),
     carrierExt: c.extension,
@@ -318,9 +417,24 @@ export function containingFileAwareExists(
   fileExists: (candidate: string) => boolean,
   containingFile: string,
 ): (candidate: string) => boolean {
-  const base = path.dirname(containingFile);
-  return (candidate: string): boolean =>
-    fileExists(path.isAbsolute(candidate) ? candidate : path.resolve(base, candidate));
+  const base = path.posix.dirname(normalizePath(containingFile));
+  return (candidate: string): boolean => {
+    const normalizedCandidate = normalizePath(candidate);
+    // Resolve a RELATIVE backing candidate against the containing dir with the
+    // POSIX resolver — `path.resolve` on Windows would emit backslashes + a
+    // drive letter, which never matches the POSIX-normalised paths the rest of
+    // this module (and the carrier store) operates on. An already-absolute
+    // candidate (POSIX `/x` OR Windows `X:/x`) is passed through unchanged.
+    const resolved = isNormalizedAbsolute(normalizedCandidate)
+      ? normalizedCandidate
+      : normalizePath(path.posix.resolve(base, normalizedCandidate));
+    return fileExists(resolved);
+  };
+}
+
+/** Whether a forward-slash-normalised path is absolute (POSIX `/x` or Windows `X:/x`). */
+function isNormalizedAbsolute(p: string): boolean {
+  return p.startsWith("/") || /^[A-Za-z]:\//.test(p);
 }
 
 export function isLikelyTestFileName(fileName: string): boolean {

@@ -25,6 +25,11 @@
 //!
 //! `verter_type_runtime` does NOT depend on `verter_session::resolver_core` or `verter_session`.
 
+// The resilient single-writer actor never holds a synchronous lock across an
+// `.await` or channel send; denying this lint keeps that discipline enforced
+// crate-wide so a held-lock restart/backpressure stall cannot reappear.
+#![deny(clippy::await_holding_lock)]
+
 pub mod backend;
 pub mod codec;
 pub mod contents_snapshot;

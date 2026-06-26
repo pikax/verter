@@ -163,11 +163,57 @@ pub trait TypeProvider: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    /// Update the inferred project compiler options with path mappings.
+    /// Configure the project's compiler options with `paths`/`baseUrl` mappings.
+    /// Implemented by engines whose carrier membership is config-injection-based
+    /// (tsgo); the tsserver provider relies on its `@verter/typescript-plugin`
+    /// making carriers configured-project members, so it uses the default no-op.
     fn configure_paths(
         &self,
         _base_url: &str,
         _paths: serde_json::Value,
+    ) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Evict a carrier companion's stale resolution from the engine's caches
+    /// AFTER the carrier-publish store warms its content.
+    ///
+    /// A synchronous-host engine (tsserver, via the plugin) caches negative
+    /// resolution results — including a `fileExists(companion) == false` probed
+    /// while the companion's content was not yet on disk. Once the store warms the
+    /// companion, the engine must be told the file changed so it re-resolves;
+    /// otherwise a cold-probed import stays pinned to a sticky `TS2307`. The
+    /// default is a no-op (an engine whose membership is not store-backed needs no
+    /// eviction); `TsserverTypeProvider` overrides it to fire an `updateOpen`
+    /// file-changed notification for the companion path.
+    fn notify_carrier_changed(&self, _companion_path: &str) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Register a published carrier companion with the provider so subsequent
+    /// queries route to the carrier's OWNING configured project and convert
+    /// positions against the carrier's content — WITHOUT opening it as an editor
+    /// buffer (the `@verter/typescript-plugin`'s `getScriptSnapshot` remains the
+    /// SOLE content authority; this never sends the bytes to the engine).
+    ///
+    /// `companion_path` is the carrier companion path (`{name}.vue.tsx` /
+    /// `{name}.vue.verter.ts`); `content` is the exact bytes the publish store
+    /// holds for it (used ONLY for the provider's local position conversion —
+    /// `byte_offset_to_tsserver_pos` / `parse_tsserver_location` — never forwarded
+    /// to the engine); `project_file_name` is the owning project's tsconfig path
+    /// (resolved by the publish path's `ProjectBinding`), threaded into the
+    /// `projectFileName` of carrier diagnostics/definition/hover/completion requests
+    /// so the companion is type-checked in its REAL configured project rather than
+    /// a fresh inferred/default project (which would yield empty/wrong results).
+    ///
+    /// Default is a no-op (an engine that does not need project-targeted carrier
+    /// queries or local content for position conversion); `TsserverTypeProvider`
+    /// overrides it to hydrate its `contents` cache and its carrier→project map.
+    fn register_carrier_member(
+        &self,
+        _companion_path: &str,
+        _content: &str,
+        _project_file_name: &str,
     ) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }

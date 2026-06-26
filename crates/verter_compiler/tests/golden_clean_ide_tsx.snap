@@ -9,7 +9,7 @@ const count = ref(0)
 
 const __props = props;
 // @ts-ignore
-let ___VERTER___instance!: Omit<InstanceType<import('./Index.vue.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<import('./Index.vue.verter.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -46,5 +46,7 @@ void (___VERTER___instance).valueOf;
 
 return {};
 } // close templateBindingFN
+
+export { default } from './Index.vue.verter.ts';
 
 type ___VERTER___attributes = {};

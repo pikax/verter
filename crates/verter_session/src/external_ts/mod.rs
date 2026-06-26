@@ -31,8 +31,12 @@
 //! impossibility is enforced by the compiler; the `provider_op_requires_resolved_project`
 //! architecture guard is the static backstop.
 //!
-//! NOTE: this contract is DEFINED but not yet wired live over the existing
-//! inferred LSP path — that change lands with the first real backend.
+//! The tsserver engine is wired live on this contract: the LSP's carrier-publish
+//! coordinator resolves a `.vue`/`.svelte` source to its configured project,
+//! mints the witness via `ensure_project`, and publishes the carrier companions
+//! into the on-disk store the `@verter/typescript-plugin` reads — making the
+//! carrier a configured-project member. The tsgo engine is migrated onto this
+//! contract separately.
 
 mod carrier;
 mod engine;

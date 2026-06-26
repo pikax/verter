@@ -23,8 +23,8 @@ use crate::documents::position_map::PositionMapper;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
     commit_sync_transition, genuinely_stale_after_sync, open_unresolved_carrier_commit,
-    open_unresolved_carrier_state, prepare_sync_transition, remove_sync_state,
-    revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
+    open_unresolved_carrier_state, remove_sync_state, revert_unsynced_kinds, ProviderPathKind,
+    ProviderSyncState,
 };
 use crate::server::compute_verter_diagnostics_for_with_views;
 use crate::type_provider::merge;
@@ -77,6 +77,16 @@ pub struct SyncCoordinatorDeps {
     pub provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     /// VFS workspace for published LspViews and resolver snapshot.
     pub vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
+    /// The active engine kind. For tsserver the debounced carrier sync PUBLISHES
+    /// the carrier companions into the on-disk store (the membership mechanism)
+    /// rather than opening them — the carrier-companion verbs on `project_sync`
+    /// are no-ops for tsserver, so without the publish here the debounced tick
+    /// could bypass the store and leave the carrier's store content stale.
+    pub type_provider_kind: crate::TypeProviderKind,
+    /// The live carrier-publish coordinator — `Some` only for tsserver. The
+    /// debounced sync publishes a freshly-edited carrier's companions through it
+    /// so the plugin serves up-to-date content on the next pull.
+    pub carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
@@ -218,129 +228,182 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     tracing::info!("sync_coordinator: HOST_GET_IDE_START {canonical_id}");
     let ide = tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
     let is_jsx = ide.as_ref().map(|ide| ide.is_jsx).unwrap_or(false);
-    let Some(next_state) = crate::provider_sync::carrier_sync_state_for_source(
-        &snapshot.resolver,
+
+    // The tsserver carrier-membership context: the debounced carrier reaches the
+    // provider as a store-backed configured-project member. Clone the VFS handle in
+    // its own statement so the `RwLockReadGuard` is dropped BEFORE any await. tgo
+    // (no coordinator) ⇒ `None` ⇒ the gateway returns a direct-open transition.
+    let vfs = deps.vfs_workspace.read().clone();
+    let membership = match (
+        matches!(deps.type_provider_kind, crate::TypeProviderKind::Tsserver),
+        deps.carrier_publish_coordinator.as_ref(),
+        vfs.as_ref(),
+    ) {
+        (true, Some(coordinator), Some(vfs)) => Some(crate::external_ts::CarrierMembershipCtx {
+            coordinator,
+            vfs,
+            ownership_ready: snapshot.ownership_ready,
+        }),
+        _ => None,
+    };
+
+    // Route the freshly-debounced carrier through the SINGLE carrier-sync gateway:
+    // tsserver PUBLISHES the companions into the store the plugin reads (refreshing
+    // the store content for the next pull), tgo opens the companions directly, and an
+    // owner loss RETRACTS the membership + preserves an open document / clears a
+    // closed one. The receipt gates every commit.
+    match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
+        host: deps.documents.host(),
+        resolver: &snapshot.resolver,
+        provider_sync_states: &deps.provider_sync_states,
+        provider_surfaces: deps.documents.provider_surfaces(),
+        documents: Some(&deps.documents),
         canonical_id,
         is_jsx,
-    ) else {
-        // No owner resolved. Editor-liveness invariant: the coordinator syncs
-        // OPEN documents (signalled from did_change). An OPEN `.vue` must keep
-        // its TSX live as Unresolved open-document state — NEVER clear+close.
-        // Only a genuinely non-open file is removed (and only once ready).
-        if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
-            preserve_open_unresolved_carrier(deps, canonical_id, is_jsx, ide.as_ref()).await;
-        } else if snapshot.ownership_ready {
-            clear_provider_sync_state(
-                &deps.project_sync,
-                deps.documents.provider_surfaces(),
+        ide: ide.as_ref(),
+        membership,
+        reason: crate::external_ts::ReconcileReason::SourceSynced,
+    })
+    .await
+    {
+        crate::external_ts::CarrierSyncDecision::Published {
+            committed_state,
+            receipt,
+        } => {
+            // The plugin serves both store-resident companions: no buffer I/O.
+            crate::external_ts::commit_carrier_provider_state(
                 &deps.provider_sync_states,
                 canonical_id,
-            )
-            .await;
-        }
-        deps.pending_snapshot_provider_sync
-            .insert(canonical_id.to_string());
-        if snapshot.ownership_ready {
-            tracing::warn!(
-                "sync_coordinator: {canonical_id} has no project owner after real snapshot"
-            );
-        } else {
-            tracing::info!(
-                "sync_coordinator: {canonical_id} unowned during bootstrap, queued for drain"
+                committed_state,
+                &receipt,
             );
         }
-        return;
-    };
-    // Close-AFTER-successful-sync (per-kind, skip-active): capture stale + prior
-    // state, sync each kind, then commit and close only genuinely-stale paths.
-    // The coordinator can touch an OPEN file, so a failed replacement sync must
-    // never close the live path nor commit an unsynced path.
-    let previous_state = deps
-        .provider_sync_states
-        .get(canonical_id)
-        .map(|entry| entry.clone());
-    let transition = prepare_sync_transition(&deps.provider_sync_states, canonical_id, next_state);
-    let stale_paths = transition.stale_paths;
-    let mut committed_state = transition.next;
-    let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+        crate::external_ts::CarrierSyncDecision::DirectOpen {
+            transition,
+            receipt,
+        } => {
+            // Close-AFTER-successful-sync (per-kind, skip-active): capture stale +
+            // prior state, sync each kind, then commit and close only genuinely-
+            // stale paths. The coordinator can touch an OPEN file, so a failed
+            // replacement sync must never close the live path nor commit an unsynced
+            // path.
+            let previous_state = deps
+                .provider_sync_states
+                .get(canonical_id)
+                .map(|entry| entry.clone());
+            let stale_paths = transition.stale_paths;
+            let mut committed_state = transition.next;
+            let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
 
-    if let Some(ide) = ide {
-        tracing::info!("sync_coordinator: HOST_GET_IDE_DONE {canonical_id}");
-        if let Some(ide_path) = committed_state.ide_path.clone() {
-            tracing::info!("sync_coordinator: TSX_SYNC_START {ide_path}");
-            let result = if committed_state.ide_background_loaded {
-                deps.project_sync.sync_tsx(&ide_path, &ide.code).await
-            } else {
-                deps.project_sync.open_tsx(&ide_path, &ide.code).await
-            };
-            match result {
-                Ok(()) => {
-                    committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                    synced_kinds.push(ProviderPathKind::Ide);
+            if let Some(ide) = ide.as_ref() {
+                if let Some(ide_path) = committed_state.ide_path.clone() {
+                    tracing::info!("sync_coordinator: TSX_SYNC_START {ide_path}");
+                    let result = if committed_state.ide_background_loaded {
+                        deps.project_sync.sync_tsx(&ide_path, &ide.code).await
+                    } else {
+                        deps.project_sync.open_tsx(&ide_path, &ide.code).await
+                    };
+                    match result {
+                        Ok(()) => {
+                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                            synced_kinds.push(ProviderPathKind::Ide);
+                        }
+                        Err(e) => {
+                            tracing::warn!("sync_coordinator: tsx sync failed for {ide_path}: {e}")
+                        }
+                    }
+                    tracing::info!("sync_coordinator: TSX_SYNC_DONE {ide_path}");
                 }
-                Err(e) => tracing::warn!("sync_coordinator: tsx sync failed for {ide_path}: {e}"),
             }
-            tracing::info!("sync_coordinator: TSX_SYNC_DONE {ide_path}");
-        } else {
-            tracing::debug!("sync_coordinator: no owner-aware IDE path for {canonical_id}");
-        }
-    } else {
-        tracing::info!("sync_coordinator: HOST_GET_IDE_DONE (none) {canonical_id}");
-    }
 
-    // Sync API (DTS) output to type provider
-    tracing::info!("sync_coordinator: HOST_GET_API_START {canonical_id}");
-    let api = tokio::task::block_in_place(|| deps.documents.host.get_public_api(canonical_id));
-    if let Some(api) = api {
-        tracing::info!("sync_coordinator: HOST_GET_API_DONE {canonical_id}");
-        if let Some(dts_path) = committed_state.api_path.clone() {
-            let result = if committed_state.api_background_loaded {
-                deps.project_sync.sync_dts(&dts_path, &api.code).await
-            } else {
-                deps.project_sync.open_dts(&dts_path, &api.code).await
-            };
-            match result {
-                Ok(()) => {
-                    committed_state.set_background_loaded(ProviderPathKind::Api, true);
-                    synced_kinds.push(ProviderPathKind::Api);
-                    // Record a fresh generation pinning the EXACT content just
-                    // synced under this virtual path (the single choke point).
-                    crate::provider_surface_store::record_carrier_api_surface(
-                        deps.documents.provider_surfaces(),
-                        Some(&deps.documents),
-                        deps.documents.host(),
-                        canonical_id,
-                        &dts_path,
-                        &api.code,
-                        api.source_map.as_deref(),
-                    );
+            let api =
+                tokio::task::block_in_place(|| deps.documents.host.get_public_api(canonical_id));
+            if let Some(api) = api {
+                if let Some(dts_path) = committed_state.api_path.clone() {
+                    let result = if committed_state.api_background_loaded {
+                        deps.project_sync.sync_dts(&dts_path, &api.code).await
+                    } else {
+                        deps.project_sync.open_dts(&dts_path, &api.code).await
+                    };
+                    match result {
+                        Ok(()) => {
+                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            synced_kinds.push(ProviderPathKind::Api);
+                            // Record a fresh generation pinning the EXACT content
+                            // just synced under this virtual path.
+                            crate::provider_surface_store::record_carrier_api_surface(
+                                deps.documents.provider_surfaces(),
+                                Some(&deps.documents),
+                                deps.documents.host(),
+                                canonical_id,
+                                &dts_path,
+                                &api.code,
+                                api.source_map.as_deref(),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("sync_coordinator: dts sync failed for {dts_path}: {e}")
+                        }
+                    }
                 }
-                Err(e) => tracing::warn!("sync_coordinator: dts sync failed for {dts_path}: {e}"),
             }
-        } else {
-            tracing::debug!("sync_coordinator: no owner-aware API path for {canonical_id}");
-        }
-    } else {
-        tracing::info!("sync_coordinator: HOST_GET_API_DONE (none) {canonical_id}");
-    }
 
-    if !synced_kinds.is_empty() {
-        revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced_kinds);
-        let genuinely_stale =
-            genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
-        commit_sync_transition(&deps.provider_sync_states, canonical_id, committed_state);
-        // `close_stale_paths` retires any closed `Api` surface's active generation
-        // in the provider-surface store (forget), so a closed `{carrier}.ts` is
-        // never later vouched as current by a cross-file rename.
-        close_stale_paths(
-            &deps.project_sync,
-            deps.documents.provider_surfaces(),
-            &genuinely_stale,
-        )
-        .await;
+            if !synced_kinds.is_empty() {
+                revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced_kinds);
+                let genuinely_stale =
+                    genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
+                crate::external_ts::commit_carrier_provider_state(
+                    &deps.provider_sync_states,
+                    canonical_id,
+                    committed_state,
+                    &receipt,
+                );
+                // `close_stale_paths` retires any closed `Api` surface's active
+                // generation in the provider-surface store (forget), so a closed
+                // `{carrier}.ts` is never later vouched as current by a rename.
+                close_stale_paths(
+                    &deps.project_sync,
+                    deps.documents.provider_surfaces(),
+                    &genuinely_stale,
+                )
+                .await;
+            }
+        }
+        crate::external_ts::CarrierSyncDecision::Unowned => {
+            // No owner. Editor-liveness invariant: an OPEN `.vue` keeps its TSX live
+            // as Unresolved open-document state — NEVER clear+close. Only a genuinely
+            // non-open file is removed (and only once ready). The gateway already
+            // RETRACTED the STORE/ledger membership.
+            if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
+                preserve_open_unresolved_carrier(deps, canonical_id, is_jsx, ide.as_ref()).await;
+            } else if snapshot.ownership_ready {
+                clear_provider_sync_state(
+                    &deps.project_sync,
+                    deps.documents.provider_surfaces(),
+                    &deps.provider_sync_states,
+                    canonical_id,
+                )
+                .await;
+            }
+            deps.pending_snapshot_provider_sync
+                .insert(canonical_id.to_string());
+            if snapshot.ownership_ready {
+                tracing::warn!(
+                    "sync_coordinator: {canonical_id} has no project owner after real snapshot"
+                );
+            } else {
+                tracing::info!(
+                    "sync_coordinator: {canonical_id} unowned during bootstrap, queued for drain"
+                );
+            }
+        }
+        crate::external_ts::CarrierSyncDecision::Pending => {
+            // Nothing advertised this pass (cold defer / transient compile miss):
+            // keep the file queued so a later snapshot/drain reconciles it.
+            deps.pending_snapshot_provider_sync
+                .insert(canonical_id.to_string());
+        }
     }
-    // On total failure nothing is committed and nothing is closed: the previous
-    // state + provider paths are retained intact.
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");
 }
 

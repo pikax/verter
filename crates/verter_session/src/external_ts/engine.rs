@@ -171,6 +171,14 @@ pub struct SnapshotFile {
     pub content: Arc<str>,
     pub content_hash: Hash16,
     pub map_hash: Hash16,
+    /// The serialized `CodeTransform` source-map JSON (the `ProviderPositionMapper`
+    /// JSON) the on-disk publish store writes to `maps/blake3-<map_hash>.json`.
+    /// `None` when the carrier has no source map (a zero `map_hash`) OR when the
+    /// publish path has not threaded the map JSON yet — a publisher that carries
+    /// only the `map_hash` identity (the in-memory rename-mapping path) leaves this
+    /// `None`, and the store then advertises no on-disk map blob (no broken
+    /// pointer), the fail-closed two-phase rule applied to maps as well as content.
+    pub map_json: Option<Arc<str>>,
     pub version: u64,
     pub open_state: OpenState,
 }
@@ -257,12 +265,11 @@ pub enum EngineError {
 pub struct BoundProjectSeal(());
 
 impl BoundProjectSeal {
-    /// Mint the seal. Crate-internal: the witness chain stays closed.
-    ///
-    /// Exercised by the contract tests today; the first real backend mints the
-    /// seal inside its `ensure_project` once the contract is wired live (the
-    /// contract is intentionally additive in this change).
-    #[allow(dead_code)]
+    /// Mint the seal. Crate-internal: the witness chain stays closed. The seal
+    /// never leaves this module — a foreign backend mints its [`BoundProject`]
+    /// through [`BoundProject::from_ensured`] (which requires an [`EnsureProject`],
+    /// itself mintable only from a resolved [`ProjectBinding`](super::ProjectBinding)),
+    /// so the `provider_op_requires_resolved_project` type-state holds across crates.
     pub(super) fn new() -> Self {
         Self(())
     }
@@ -298,6 +305,27 @@ impl BoundProject {
             capabilities,
             env_dims,
         }
+    }
+
+    /// Mint the witness directly from an [`EnsureProject`] request — the path a
+    /// real [`EngineBackend`] in ANOTHER crate uses inside its `ensure_project`.
+    ///
+    /// This PRESERVES the `provider_op_requires_resolved_project` type-state: an
+    /// `EnsureProject` is itself mintable ONLY from a resolved [`ProjectBinding`]
+    /// (its constructor is `pub(super)`), so requiring one here means a foreign
+    /// backend still cannot fabricate a `BoundProject` without a binding. The
+    /// project URI and env dims are READ FROM the request (the backend cannot
+    /// substitute a mismatched project), and the seal is minted internally — the
+    /// raw [`BoundProjectSeal`] never leaves the contract module. The backend
+    /// supplies only its negotiated [`EngineCapabilities`].
+    #[must_use]
+    pub fn from_ensured(request: &EnsureProject, capabilities: EngineCapabilities) -> Self {
+        Self::sealed(
+            BoundProjectSeal::new(),
+            Arc::clone(&request.tsconfig_uri),
+            capabilities,
+            *request.env_dims(),
+        )
     }
 
     /// The owning project (tsconfig URI) this witness is bound to.

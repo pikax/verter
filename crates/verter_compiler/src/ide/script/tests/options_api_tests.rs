@@ -198,8 +198,8 @@ const count = ref(0)
 
     // Companion imports should be hoisted above the wrapper function
     assert!(
-        code.contains("import MyComponent from './MyComponent.vue.ts'"),
-        "companion import should be hoisted with .vue.ts rewrite: {code}"
+        code.contains("import MyComponent from './MyComponent.vue.tsx'"),
+        "companion in-project import should resolve to the IDE carrier (.vue.tsx): {code}"
     );
 
     // Import should appear before the wrapper function
@@ -393,8 +393,8 @@ const count = ref(0)
 
     // Companion imports should be hoisted
     assert!(
-        code.contains("import MyComponent from './MyComponent.vue.ts'"),
-        "companion import should be hoisted with .vue.ts rewrite:\n{code}"
+        code.contains("import MyComponent from './MyComponent.vue.tsx'"),
+        "companion in-project import should resolve to the IDE carrier (.vue.tsx):\n{code}"
     );
 
     // Import should appear before the wrapper function

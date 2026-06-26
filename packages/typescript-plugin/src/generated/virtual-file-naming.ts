@@ -48,14 +48,14 @@ export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = 
   FRAMEWORK_TAG_VUE: {
     carrierExtension: ".vue",
     ide: { kind: "jsxConditional", jsx: ".jsx", nonJsx: ".tsx" },
-    importSurface: { kind: "suffix", suffix: ".ts" },
+    importSurface: { kind: "suffix", suffix: ".verter.ts" },
     testingApiSuffix: ".__verter_test.ts",
     sidecarSuffixes: [],
   },
   FRAMEWORK_TAG_SVELTE: {
     carrierExtension: ".svelte",
     ide: { kind: "suffix", suffix: ".tsx" },
-    importSurface: { kind: "suffix", suffix: ".ts" },
+    importSurface: { kind: "suffix", suffix: ".verter.ts" },
     testingApiSuffix: null,
     sidecarSuffixes: [],
   },

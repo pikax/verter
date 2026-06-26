@@ -538,7 +538,14 @@ pub fn merge_code_actions(
                             tsx_line_index,
                             mapper,
                         ) {
-                            preamble_imports.push((edit.start, edit.end, edit.new_text));
+                            // Rewrite a companion import specifier to the bare carrier
+                            // before the preamble re-anchor coalesces these into the
+                            // `<script setup>` block (Rust-owned on the LSP surface).
+                            let new_text =
+                                crate::type_provider::auto_import::rewrite_inserted_carrier_specifier(
+                                    &edit.new_text,
+                                );
+                            preamble_imports.push((edit.start, edit.end, new_text));
                             continue;
                         }
 
@@ -575,10 +582,19 @@ pub fn merge_code_actions(
                     if let Some(range) = mapped {
                         let carrier_path = normalize_carrier_path(edit_path, carrier_source_exists);
                         if let Some(uri) = path_to_uri(carrier_path) {
-                            changes.entry(uri).or_default().push(TextEdit {
-                                range,
-                                new_text: edit.new_text,
-                            });
+                            // A companion import specifier inside the inserted text
+                            // (`from "./Comp.vue.tsx"` / `.verter.ts`) is rewritten to
+                            // the bare `.vue`/`.svelte` specifier — owned by Rust on the
+                            // LSP surface (the plugin returns raw responses). Fail-closed:
+                            // a non-companion specifier is left unchanged.
+                            let new_text =
+                                crate::type_provider::auto_import::rewrite_inserted_carrier_specifier(
+                                    &edit.new_text,
+                                );
+                            changes
+                                .entry(uri)
+                                .or_default()
+                                .push(TextEdit { range, new_text });
                         }
                     }
                     // FAIL CLOSED: any unmapped carrier-IDE edit (a strict-mapper miss that is not a
@@ -606,10 +622,18 @@ pub fn merge_code_actions(
                 ) else {
                     continue;
                 };
-                changes.entry(uri).or_default().push(TextEdit {
-                    range,
-                    new_text: edit.new_text,
-                });
+                // A real `.ts` edit can still carry a companion import specifier in
+                // an added import (`from "./Comp.vue.tsx"`) — rewrite it to bare
+                // `.vue`/`.svelte` (Rust-owned on the LSP surface). Fail-closed for a
+                // non-companion specifier (left unchanged).
+                let new_text =
+                    crate::type_provider::auto_import::rewrite_inserted_carrier_specifier(
+                        &edit.new_text,
+                    );
+                changes
+                    .entry(uri)
+                    .or_default()
+                    .push(TextEdit { range, new_text });
             }
 
             // Flush the collected CURRENT-file preamble import insertions ONCE: the shared re-anchor

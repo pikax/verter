@@ -1841,8 +1841,9 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 /// When the default export is a plain object (no `defineComponent` wrapper),
 /// we insert `defineComponent()` around it so that Vue's type overloads
 /// infer data/methods/computed on the instance type. This makes
-/// `InstanceType<typeof import('./Foo.vue.ts')['default']>` resolve to the
-/// full component instance rather than `never`.
+/// `InstanceType<typeof import('./Foo.vue.verter.ts')['default']>` resolve to
+/// the full component instance rather than `never` (the public-API carrier is
+/// the `.verter.ts` surface).
 fn generate_options_api_stub(_component_name: &str, script_content: &str) -> TscOutput {
     let source_map = minimal_source_map();
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());

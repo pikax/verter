@@ -80,10 +80,12 @@ pub(super) fn process_companion_for_tsx<'alloc>(
         if let ScriptItem::Import(imp) = item {
             let abs_start = comp_start + imp.span.start;
             let abs_end = comp_start + imp.span.end;
-            // Rewrite .vue imports to .vue.ts (see script setup comment above)
+            // Rewrite an in-project bare `.vue` import to the component IDE
+            // carrier suffix (`./Comp.vue` → `./Comp.vue.tsx`) — see the
+            // script-setup comment for the interim/final-architecture note.
             if imp.source.ends_with(".vue") {
                 let quote_pos = comp_start + imp.source_span.end - 1;
-                ct.prepend_left(quote_pos, ".ts");
+                ct.prepend_left(quote_pos, crate::ide::in_project_carrier_import_suffix());
             }
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
 
@@ -112,22 +114,24 @@ pub(super) fn process_companion_for_tsx<'alloc>(
         }
     }
 
-    // Rewrite .vue specifiers in re-exports (see script setup comment above).
+    // Rewrite .vue specifiers in re-exports (see script setup comment above) —
+    // in-project component IDE-carrier suffix (`./Foo.vue` → `./Foo.vue.tsx`).
     for item in &parse_result.items {
         if let ScriptItem::Export(exp) = item {
             if let (Some(src), Some(src_span)) = (exp.source, exp.source_span) {
                 if src.ends_with(".vue") {
                     let quote_pos = comp_start + src_span.end - 1;
-                    ct.prepend_left(quote_pos, ".ts");
+                    ct.prepend_left(quote_pos, crate::ide::in_project_carrier_import_suffix());
                 }
             }
         }
     }
 
-    // Rewrite .vue specifiers in dynamic imports (see script setup comment above).
+    // Rewrite .vue specifiers in dynamic imports (see script setup comment above) —
+    // in-project component IDE-carrier suffix (`./Foo.vue.tsx`).
     for src_span in &parse_result.vue_dynamic_import_spans {
         let quote_pos = comp_start + src_span.end - 1;
-        ct.prepend_left(quote_pos, ".ts");
+        ct.prepend_left(quote_pos, crate::ide::in_project_carrier_import_suffix());
     }
 
     // Remove `export default { ... }` — runtime-only Options API config.

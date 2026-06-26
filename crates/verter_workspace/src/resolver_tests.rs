@@ -657,8 +657,8 @@ fn provider_paths_keep_vue_as_public_api_targets() {
         .expect("vue files should be rewritten to public API provider paths");
 
     assert!(
-        provider_id.ends_with("/src/App.vue.ts"),
-        "Vue files should resolve to .vue.ts in the provider graph: {provider_id}"
+        provider_id.ends_with("/src/App.vue.verter.ts"),
+        "Vue files should resolve to .vue.verter.ts in the provider graph: {provider_id}"
     );
     assert!(
         !provider_id.ends_with("/src/App.vue"),
@@ -691,15 +691,16 @@ fn provider_ide_id_appends_tsx_to_vue() {
     assert_ne!(
         Some(provider_id.clone()),
         resolver.provider_id_for_source("/workspace/src/App.vue"),
-        "IDE provider paths must remain distinct from the public .vue.ts API path"
+        "IDE provider paths must remain distinct from the public .vue.verter.ts API path"
     );
 }
 
 #[test]
 fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
     // The carrier-extension generalization: a `.svelte` file receives BOTH the
-    // api virtual file (`.svelte.ts`) and the IDE virtual file (`.svelte.tsx`),
-    // derived from the registry carrier-extension set — not a `.vue`-literal.
+    // api virtual file (`.svelte.verter.ts`, the reserved redirect-reached
+    // infix) and the IDE virtual file (`.svelte.tsx`), derived from the registry
+    // carrier-extension set — not a `.vue`-literal.
     let resolver = ProjectResolver::new(vec![project(
         "/workspace",
         "/workspace",
@@ -710,7 +711,7 @@ fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
     let api = resolver
         .provider_id_for_source("/workspace/src/Comp.svelte")
         .expect("svelte files receive an api provider path");
-    assert_eq!(api, "/workspace/src/Comp.svelte.ts");
+    assert_eq!(api, "/workspace/src/Comp.svelte.verter.ts");
 
     // A `.svelte` carrier always projects `.tsx` (is_jsx = false → Fixed).
     let ide = resolver
@@ -800,16 +801,16 @@ fn strip_carrier_extension_is_registry_backed_for_every_carrier() {
 }
 
 #[test]
-fn carrier_api_provider_path_appends_ts_to_full_carrier() {
-    // The API virtual path is the FULL carrier canonical + `.ts` for every
-    // carrier — never a hardcoded `.vue.ts`.
+fn carrier_api_provider_path_appends_verter_ts_to_full_carrier() {
+    // The API virtual path is the FULL carrier canonical + the reserved
+    // `.verter.ts` infix for every carrier — never a hardcoded `.vue.ts`.
     assert_eq!(
         carrier_api_provider_path("/workspace/src/App.vue"),
-        "/workspace/src/App.vue.ts"
+        "/workspace/src/App.vue.verter.ts"
     );
     assert_eq!(
         carrier_api_provider_path("/workspace/src/App.svelte"),
-        "/workspace/src/App.svelte.ts"
+        "/workspace/src/App.svelte.verter.ts"
     );
     // Mirrors the IDE derivation's carrier-genericity.
     assert_eq!(
@@ -876,10 +877,10 @@ fn resolve_relative_vue_import_returns_real_source_and_provider_api() {
     assert_eq!(resolved.source_id, "/workspace/src/Foo.vue");
     assert_eq!(resolved.provider_target, ProviderTarget::CarrierPublicApi);
     assert_eq!(resolved.resolution_kind, ResolutionKind::Relative);
-    assert_eq!(resolved.provider_specifier, "./Foo.vue.ts");
+    assert_eq!(resolved.provider_specifier, "./Foo.vue.verter.ts");
     assert!(
-        resolved.provider_id.ends_with("/src/Foo.vue.ts"),
-        "provider graph should target the materialized .vue.ts API file: {}",
+        resolved.provider_id.ends_with("/src/Foo.vue.verter.ts"),
+        "provider graph should target the materialized .vue.verter.ts API file: {}",
         resolved.provider_id
     );
 }
@@ -1589,8 +1590,8 @@ fn resolve_relative_unowned_to_owned_target() {
         "Vue target owned by a project should get CarrierPublicApi"
     );
     assert!(
-        resolved.provider_id.ends_with(".vue.ts"),
-        "provider_id for owned Vue target should be .vue.ts: {}",
+        resolved.provider_id.ends_with(".vue.verter.ts"),
+        "provider_id for owned Vue target should be .vue.verter.ts: {}",
         resolved.provider_id
     );
     assert_eq!(
@@ -1956,16 +1957,16 @@ fn preferred_specifier_none_for_provider_paths() {
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
 
-    // .vue.ts is a provider path, not a real file — should not match
+    // .vue.verter.ts is a provider path, not a real file — should not match
     let result = resolver.preferred_specifier(
         &reader,
         "/workspace/src/App.ts",
-        "/workspace/src/Foo.vue.ts",
+        "/workspace/src/Foo.vue.verter.ts",
     );
 
     assert!(
         result.is_none(),
-        "provider paths (.vue.ts) should return None — got: {result:?}"
+        "provider paths (.vue.verter.ts) should return None — got: {result:?}"
     );
 }
 
@@ -2782,8 +2783,8 @@ fn provider_id_for_source_vue_without_ownership() {
     let resolver = NativeProjectResolver::new(vec![]);
     assert_eq!(
         resolver.provider_id_for_source("/foo.vue"),
-        Some("/foo.vue.ts".to_string()),
-        "Vue file should get .ts suffix even without project ownership"
+        Some("/foo.vue.verter.ts".to_string()),
+        "Vue file should get the reserved .verter.ts API suffix even without project ownership"
     );
 }
 

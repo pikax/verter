@@ -12,8 +12,8 @@
 use tower_lsp_server::ls_types::{Position, Range};
 
 use super::auto_import::{
-    translate_completion_import_edits, AutoImportEditMappingError, ProviderImportEdit,
-    ScriptImportInsertionAnchor,
+    rewrite_inserted_carrier_specifier, translate_completion_import_edits,
+    AutoImportEditMappingError, ProviderImportEdit, ScriptImportInsertionAnchor,
 };
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
@@ -506,5 +506,73 @@ fn translate_completion_import_edits_absent_boundary_zero_width_no_anchor_is_unm
         Err(AutoImportEditMappingError::UnmappableEdit { start: at, end: at }),
         "an absent-boundary zero-width edit with no anchor must fail closed as UnmappableEdit \
          (never strict-accepted at the mapped position): {result:?}"
+    );
+}
+
+// ── inserted-import carrier-specifier rewrite (Rust-owned on the LSP surface) ──
+
+#[test]
+fn specifier_rewrite_strips_vue_ide_companion_to_bare_carrier() {
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("import Comp from \"./Comp.vue.tsx\";\n"),
+        "import Comp from \"./Comp.vue\";\n",
+        "a `.vue.tsx` IDE-companion specifier must be rewritten to the bare `.vue`"
+    );
+    // Single-quote style is handled too.
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("import Comp from './Comp.vue.tsx';\n"),
+        "import Comp from './Comp.vue';\n"
+    );
+}
+
+#[test]
+fn specifier_rewrite_strips_svelte_companion_and_api_carrier() {
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("import Widget from \"./Widget.svelte.tsx\";\n"),
+        "import Widget from \"./Widget.svelte\";\n",
+        "a `.svelte.tsx` companion specifier must be rewritten to the bare `.svelte`"
+    );
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("import Comp from \"./Comp.vue.verter.ts\";\n"),
+        "import Comp from \"./Comp.vue\";\n",
+        "a `.verter.ts` API-carrier specifier must be rewritten to the bare `.vue`"
+    );
+}
+
+#[test]
+fn specifier_rewrite_leaves_non_carrier_specifiers_untouched() {
+    // A plain sibling import is never a carrier companion → unchanged.
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("import { formatCount } from \"./utils\";\n"),
+        "import { formatCount } from \"./utils\";\n",
+        "a plain `./utils` import must be left UNCHANGED (not a carrier companion)"
+    );
+    // A Svelte RUNE module (`.svelte.ts`) is NOT a `.svelte.tsx`/`.verter.ts`
+    // companion — it must be left intact so a real rune import is never mangled.
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("import { store } from \"./store.svelte.ts\";\n"),
+        "import { store } from \"./store.svelte.ts\";\n",
+        "a Svelte rune module `./store.svelte.ts` must NOT be rewritten (fail closed)"
+    );
+    // A bare `.ts` whose stem is not a carrier (`./Comp.ts`) is unchanged.
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("import x from \"./plain.tsx\";\n"),
+        "import x from \"./plain.tsx\";\n",
+        "a `.tsx` whose stem is not a carrier must be left UNCHANGED"
+    );
+}
+
+#[test]
+fn specifier_rewrite_handles_side_effect_import_and_non_import_text() {
+    // A bare side-effect import of a companion is rewritten.
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("import \"./Comp.vue.tsx\";\n"),
+        "import \"./Comp.vue\";\n"
+    );
+    // Free-form / non-import text carries no specifier literal → unchanged.
+    assert_eq!(
+        rewrite_inserted_carrier_specifier("const x = 1;\n"),
+        "const x = 1;\n",
+        "text with no import specifier must be returned unchanged"
     );
 }

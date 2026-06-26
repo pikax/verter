@@ -579,7 +579,8 @@ fn recovery_plan_recovers_real_import_with_bindings() {
 
 #[test]
 fn recovery_plan_recovers_vue_import_source_span() {
-    // `.vue` imports need the source span so the failure path can rewrite to `.vue.ts`.
+    // `.vue` imports need the source span so the failure path can rewrite to the
+    // component IDE carrier (`.vue.tsx`).
     let plan = scan("import Foo from './Foo.vue'\nFoo.");
     assert_eq!(plan.imports.len(), 1);
     assert_eq!(plan.imports[0].source, "./Foo.vue");

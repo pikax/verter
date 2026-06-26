@@ -250,8 +250,18 @@ pub async fn spawn(
             Ok(Arc::new(provider))
         }
         (ProviderName::Tsserver, SpawnPlan::Tsserver { node, tsserver_js }) => {
-            let provider =
-                TsserverTypeProvider::spawn(node, tsserver_js, workspace_root, None, None).await?;
+            // No plugin loaded (baseline), so the response-remap gate is moot;
+            // pass the verter_lsp-internal default (`false`).
+            let provider = TsserverTypeProvider::spawn(
+                node,
+                tsserver_js,
+                workspace_root,
+                None,
+                None,
+                false,
+                None,
+            )
+            .await?;
             Ok(Arc::new(provider))
         }
         // The plan is always built for the requested provider in `resolve_with`.

@@ -449,6 +449,15 @@ impl PlannedFile {
             content: self.content,
             content_hash: self.content_hash,
             map_hash: self.map_hash,
+            // The planner carries the map IDENTITY (`map_hash`) but not the
+            // serialized map JSON — the in-memory `ProviderSurfaceSnapshot` holds a
+            // PARSED `ProviderPositionMapper`, not its source JSON. Threading the
+            // map JSON onto the publish path (so the on-disk store writes the map
+            // blob) is part of the live-publish wiring; until then this is `None`
+            // and the store advertises no on-disk map blob for the file (it still
+            // records the `map_hash` identity) — the fail-closed two-phase rule for
+            // maps (never advertise a map blob that does not exist).
+            map_json: None,
             version: self.version,
             open_state,
         }

@@ -242,9 +242,35 @@ impl RecordSurface {
         source_map: Option<ProviderPositionMapper>,
         carrier_source: Arc<str>,
     ) -> Self {
+        Self::carrier_legacy(
+            ProviderSurfaceKind::CarrierApi,
+            provider_path,
+            source_canonical,
+            provider_content,
+            source_map,
+            carrier_source,
+        )
+    }
+
+    /// Build a `RecordSurface` for ANY carrier role under the legacy capture (the
+    /// extended project-bound columns left unset (`None`/zero), set downstream).
+    /// Generalises [`carrier_api_legacy`](Self::carrier_api_legacy) over `kind` so
+    /// the publish path can record the IDE role (not only the API role) through the
+    /// same generation-stamped store — the IDE surface MUST be recorded so its
+    /// generation (the plugin's `getScriptVersion`) advances on every content
+    /// change instead of staying pinned at the `unwrap_or(1)` fallback.
+    #[must_use]
+    pub fn carrier_legacy(
+        kind: ProviderSurfaceKind,
+        provider_path: String,
+        source_canonical: String,
+        provider_content: Arc<str>,
+        source_map: Option<ProviderPositionMapper>,
+        carrier_source: Arc<str>,
+    ) -> Self {
         Self {
             provider_path,
-            kind: ProviderSurfaceKind::CarrierApi,
+            kind,
             source_canonical,
             provider_content,
             source_map,
@@ -1118,29 +1144,115 @@ pub fn record_carrier_api_surface(
     api_code: &str,
     source_map_json: Option<&str>,
 ) {
-    let Some(carrier_source) = resolve_carrier_source(documents, host, canonical_id) else {
-        // No carrier source to map INTO → recording a snapshot would be useless
-        // (the merge would fail closed anyway). Skip the record; the path simply
-        // has no current generation, so a returned offset fails closed.
-        return;
-    };
+    // The legacy `CarrierApi`-only record site does not stamp a companion version,
+    // so the recorded generation is intentionally discarded here.
+    let _ = record_carrier_companion_surface(
+        store,
+        documents,
+        host,
+        canonical_id,
+        provider_path,
+        ProviderSurfaceKind::CarrierApi,
+        api_code,
+        source_map_json,
+    );
+}
+
+/// Record a published carrier companion surface of ANY role (`CarrierIde` /
+/// `CarrierApi` / …) under a fresh generation — the role-generalised core of
+/// [`record_carrier_api_surface`]. Stamps the source-map identity (`map_hash`)
+/// from the SAME JSON; the extended project-bound columns are left unset (set by
+/// the live project-bound publish path downstream).
+///
+/// This is the publish-time choke the IDE role MUST flow through: recording only
+/// the API role pins the IDE companion's `getScriptVersion` at the `unwrap_or(1)`
+/// fallback, so tsserver retains a STALE `SourceFile` across `.vue` edits (the
+/// engine uses `getScriptVersion` as its content-invalidation contract). A surface
+/// whose carrier source is unavailable is NOT recorded (fail-closed) and returns
+/// `None`; otherwise returns the EXACT generation [`ProviderSurfaceStore::record`]
+/// linearized for THIS capture under its lifecycle lock. Callers stamp the
+/// companion version from this returned value rather than a second
+/// [`ProviderSurfaceStore::current_snapshot`] read — a concurrent close racing
+/// between the record and the re-read could return `None` (pinning the version to a
+/// stale `1` fallback) or a sibling capture's generation.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn record_carrier_companion_surface(
+    store: &ProviderSurfaceStore,
+    documents: Option<&DocumentRegistry>,
+    host: &VerterHost,
+    canonical_id: &str,
+    provider_path: &str,
+    kind: ProviderSurfaceKind,
+    code: &str,
+    source_map_json: Option<&str>,
+) -> Option<u64> {
+    let carrier_source = resolve_carrier_source(documents, host, canonical_id)?;
     let map_hash = source_map_json.map(hash16_of_str).unwrap_or([0u8; 16]);
     let source_map = source_map_json
         .and_then(|json| PositionMapper::from_json(json).ok())
         .map(ProviderPositionMapper::source_map);
-    let mut surface = RecordSurface::carrier_api_legacy(
+    let mut surface = RecordSurface::carrier_legacy(
+        kind,
         provider_path.to_string(),
         canonical_id.to_string(),
-        Arc::from(api_code),
+        Arc::from(code),
         source_map,
         carrier_source,
     );
-    // The legacy `CarrierApi` rename-mapping record now also stamps the source-map
-    // identity (§2.7) so a map-only change is a distinct capture; the remaining
-    // project-bound columns (project owner, regen key, engine-recheck state) are set by
-    // the live project-bound publish path downstream.
+    // Stamp the source-map identity (§2.7) so a map-only change is a distinct
+    // capture; the remaining project-bound columns (project owner, regen key,
+    // engine-recheck state) are set by the live project-bound publish path
+    // downstream.
     surface.map_hash = map_hash;
-    store.record(surface);
+    // `record` returns the immutable snapshot it linearized under the lifecycle
+    // lock — `stamp.generation` is the authoritative version for THIS capture.
+    Some(store.record(surface).stamp.generation)
+}
+
+/// Record EVERY published carrier companion's surface through the store at publish
+/// time (so each role's generation — the plugin's `getScriptVersion` — advances on
+/// content change) and stamp each companion's `version` from its freshly-recorded
+/// generation. THE single publish-time carrier recording+versioning path: it
+/// replaces the per-site "record the API surface only, then read
+/// `generation-or-1`" logic that left the IDE companion's surface unrecorded and
+/// its version pinned at `1` (a stale-diagnostics defect, since the live tsserver
+/// backend invalidates on `getScriptVersion`). Records each companion exactly once
+/// (no double-record) under its role's [`ProviderSurfaceKind`].
+pub fn record_and_version_carrier_companions(
+    store: &ProviderSurfaceStore,
+    documents: Option<&DocumentRegistry>,
+    host: &VerterHost,
+    canonical_id: &str,
+    companions: &mut [crate::external_ts::CarrierCompanion],
+) {
+    use verter_session::external_ts::SnapshotRole;
+    for companion in companions.iter_mut() {
+        let kind = match companion.role {
+            SnapshotRole::CarrierIde => ProviderSurfaceKind::CarrierIde,
+            SnapshotRole::CarrierApi => ProviderSurfaceKind::CarrierApi,
+            SnapshotRole::CarrierBatch => ProviderSurfaceKind::CarrierBatch,
+            SnapshotRole::Shadow => ProviderSurfaceKind::Shadow,
+            SnapshotRole::Real => ProviderSurfaceKind::Real,
+        };
+        // Stamp the version from the generation `record` linearized for THIS
+        // capture (returned directly), NOT a second `current_snapshot` read: the
+        // re-read could race a concurrent close to `None` (pinning the IDE
+        // companion at the `1` fail-safe) or to a sibling capture's generation. The
+        // `1` fail-safe survives only when the carrier source was unavailable
+        // (record skipped, returns `None`).
+        companion.version = record_carrier_companion_surface(
+            store,
+            documents,
+            host,
+            canonical_id,
+            &companion.provider_uri,
+            kind,
+            &companion.content,
+            companion.map_json.as_deref(),
+        )
+        .unwrap_or(1);
+    }
 }
 
 /// Hash a string into a [`Hash16`] (the env-hash representation the contract

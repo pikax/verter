@@ -108,7 +108,8 @@ pub struct VirtualFileNaming {
     pub ide: VirtualPathPolicy,
     /// How the IMPORT-RESOLUTION virtual surface (what a CONSUMING module
     /// resolves the file to) is named: a suffix-appended distinct API file
-    /// (`.ts`) for a component carrier, or the self file for a rune module.
+    /// (`.verter.ts`, the reserved redirect-reached infix) for a component
+    /// carrier, or the self file for a rune module.
     pub import_surface: VirtualPathPolicy,
     /// The testing-API virtual-file suffix. Structural rule: `Some` here
     /// REQUIRES `import_surface` to append a distinct file (a testing-API file
@@ -130,9 +131,10 @@ impl VirtualFileNaming {
 
     /// The fixed API-file suffix the import surface appends, when the import
     /// surface is a DISTINCT-file (`Suffix`) policy — the component-carrier
-    /// dual-file API surface (`.ts`). `None` for a `SelfFile`/`None`/
-    /// `JsxConditional` import surface (a rune module serves its own file; a
-    /// JSX-conditional surface has no single fixed API suffix).
+    /// dual-file API surface (`.verter.ts`, the reserved redirect-reached
+    /// infix). `None` for a `SelfFile`/`None`/`JsxConditional` import surface (a
+    /// rune module serves its own file; a JSX-conditional surface has no single
+    /// fixed API suffix).
     #[must_use]
     pub fn api_surface_suffix(&self) -> Option<&'static str> {
         match self.import_surface {
@@ -161,6 +163,28 @@ impl VirtualFileNaming {
             VirtualPathPolicy::JsxConditional { jsx, non_jsx } => vec![non_jsx, jsx],
             VirtualPathPolicy::SelfFile | VirtualPathPolicy::None => Vec::new(),
         }
+    }
+
+    /// Every descriptor-valid IDE carrier IDENTITY for a carrier `source`, in a
+    /// stable order: the FULL carrier source with each IDE suffix appended
+    /// (`Foo.vue` + `.tsx` → `Foo.vue.tsx`, `Foo.vue` + `.jsx` → `Foo.vue.jsx`).
+    ///
+    /// This is the descriptor AUTHORITY for the IDE carrier's companion identity.
+    /// The suffix is APPENDED to the full carrier source: the carrier extension
+    /// (`.vue`/`.svelte`) is PRESERVED and NO infix is inserted between the
+    /// source and the suffix, so the produced identity is EXACTLY the path a tsgo
+    /// basename-append probe for the bare carrier import reaches. The reserved
+    /// `.verter.` infix lives only on the redirect-reached
+    /// [`api_surface_suffix`](Self::api_surface_suffix), never here. A consumer
+    /// composing an IDE carrier path MUST route through this — never `format!`-ing
+    /// a suffix onto a source itself, which is how the carrier extension gets
+    /// dropped or the `.verter.` infix leaks onto the bare-probed IDE surface.
+    #[must_use]
+    pub fn ide_carrier_identities(&self, source: &str) -> Vec<String> {
+        self.ide_carrier_suffixes()
+            .into_iter()
+            .map(|suffix| format!("{source}{suffix}"))
+            .collect()
     }
 }
 
@@ -208,7 +232,16 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
                 jsx: ".jsx",
                 non_jsx: ".tsx",
             },
-            import_surface: VirtualPathPolicy::Suffix(".ts"),
+            // The public-API / import-resolution carrier is REDIRECT-reached
+            // (never bare-import-probed), so it carries the Verter-reserved
+            // `.verter.` infix uniformly across adapters. A bare `.svelte.ts`
+            // API carrier would collide with a Svelte rune module (GATE 5: tsgo
+            // probes `.svelte.ts` before `.svelte.tsx`); `.verter.ts` collides
+            // with no real adapter source or rune-module extension.
+            import_surface: VirtualPathPolicy::Suffix(".verter.ts"),
+            // The testing-API surface stays `.__verter_test.ts`: it is itself a
+            // redirect-reached, non-bare-probed surface, and `.svelte.__verter_test.ts`
+            // is not a rune-module extension, so it is already collision-free.
             testing_api_suffix: Some(".__verter_test.ts"),
             sidecar_suffixes: &[],
         }),
@@ -252,9 +285,14 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
             // the projection emits TS with the `@jsxImportSource`
             // pragma — it is never JSX-conditional the way a Vue
             // `<script lang="jsx">` carrier is, so there is no `.jsx`
-            // alternative. Its import surface is the `.ts` API file.
+            // alternative. Its import surface is the `.verter.ts` API file.
             ide: VirtualPathPolicy::Suffix(".tsx"),
-            import_surface: VirtualPathPolicy::Suffix(".ts"),
+            // The public-API / import-resolution carrier carries the reserved
+            // `.verter.` infix: a bare `.svelte.ts` API carrier would collide
+            // with a Svelte rune module (GATE 5 — `.svelte.ts` is probed before
+            // `.svelte.tsx`). This carrier is redirect-reached, never
+            // bare-probed, so the reserved infix breaks no probe.
+            import_surface: VirtualPathPolicy::Suffix(".verter.ts"),
             // No testing-API surface for Svelte (the testing surface is
             // Vue-only).
             testing_api_suffix: None,
@@ -331,7 +369,12 @@ mod tests {
                 non_jsx: ".tsx",
             }
         );
-        assert_eq!(naming.import_surface, VirtualPathPolicy::Suffix(".ts"));
+        // The public-API carrier carries the reserved `.verter.` infix
+        // (redirect-reached, never bare-probed — GATE 5).
+        assert_eq!(
+            naming.import_surface,
+            VirtualPathPolicy::Suffix(".verter.ts")
+        );
         assert_eq!(naming.testing_api_suffix, Some(".__verter_test.ts"));
         assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
         assert!(naming.is_structurally_valid());
@@ -349,7 +392,7 @@ mod tests {
             .as_ref()
             .expect("the Svelte descriptor carries a virtual-file naming column");
         // A `.svelte` COMPONENT projects a fixed `.tsx` IDE file and a
-        // `.ts` import surface, and has NO testing-API surface (Vue-only).
+        // `.verter.ts` import surface, and has NO testing-API surface (Vue-only).
         assert_eq!(naming.ide, VirtualPathPolicy::Suffix(".tsx"));
         assert_ne!(
             naming.ide,
@@ -359,7 +402,12 @@ mod tests {
             },
             "Svelte is NOT JSX-conditional"
         );
-        assert_eq!(naming.import_surface, VirtualPathPolicy::Suffix(".ts"));
+        // The public-API carrier carries the reserved `.verter.` infix: a bare
+        // `.svelte.ts` would collide with a rune module (GATE 5).
+        assert_eq!(
+            naming.import_surface,
+            VirtualPathPolicy::Suffix(".verter.ts")
+        );
         assert_eq!(naming.testing_api_suffix, None);
         assert_eq!(naming.sidecar_suffixes, &[] as &[&str]);
         assert!(naming.is_structurally_valid());

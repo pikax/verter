@@ -14767,7 +14767,7 @@ import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithPro
 const msg = 'hi'
 
 // @ts-ignore
-let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.verter.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -14802,6 +14802,8 @@ void (___VERTER___instance).valueOf;
 
 return {};
 } // close templateBindingFN
+
+export { default } from './App.vue.verter.ts';
 
 type ___VERTER___attributes = {};
 "#
@@ -14858,6 +14860,27 @@ fn template_expression_overlay_pins_absolute_output_bytes() {
     // Guard the goldens themselves against accidental triviality.
     assert!(TS_OVERLAY_GOLDEN_RUNTIME.contains("_createElementBlock(\"p\""));
     assert!(TS_OVERLAY_GOLDEN_TSX.contains("<p title={msg}>{ msg }</p>"));
+
+    // The IDE carrier exports the component's PUBLIC FACADE — a clean
+    // `export default` re-exported from the API carrier (`.verter.ts`), the
+    // surface a consumer of `import Comp from "./Comp.vue"` (→ `Comp.vue.tsx`)
+    // sees. The self-import that types `___VERTER___instance` also targets the
+    // API carrier, NOT the IDE output.
+    assert!(
+        tsx.contains("export { default } from './App.vue.verter.ts';"),
+        "IDE carrier must re-export the public default from the API carrier:\n{tsx}"
+    );
+    assert!(
+        tsx.contains("import('./App.vue.verter.ts')"),
+        "instance self-import must target the .verter.ts API carrier:\n{tsx}"
+    );
+    // Template internals stay LOCAL (non-exported): the binding fn is a plain
+    // `export function` helper, never the component's public default.
+    assert!(
+        !tsx.contains("export default ___VERTER___")
+            && !tsx.contains("export { ___VERTER___TemplateBindingFN as default }"),
+        "template internals must NOT be exported as the public default:\n{tsx}"
+    );
 }
 
 /// A malformed template interpolation surfaces an identical diagnostic whether

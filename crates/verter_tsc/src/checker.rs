@@ -3,13 +3,14 @@
 //! Three-stage pipeline:
 //!
 //! **Stub stage — Public API stubs:**
-//!   For each .vue file → `get_public_api()` → `.vue.ts` stub with real component types.
+//!   For each .vue file → `get_public_api()` → public-API stub with real component types.
 //!   Enables cross-component prop/emit/slot type checking (imports resolve to actual types
 //!   instead of the generic `DefineComponent<{}, {}, any>` wildcard shim).
 //!
 //! **Validation stage (TSX):**
 //!   For each .vue file → `compile()` with `CompileTarget::IDE` → full TSX with source map.
-//!   `.vue.ts` imports are rewritten to point to stubs.
+//!   The carrier public-API imports (the reserved `.verter.ts` virtual suffix) are
+//!   rewritten to point to stubs.
 //!   Type-checks script body + template. Reports ALL type errors.
 //!
 //! **Declaration-generation stage (TSC):**
@@ -65,15 +66,15 @@ struct CheckerInvocation {
     success: bool,
 }
 
-/// Generate `.vue.ts` public API stub files for cross-component type resolution.
+/// Generate public-API stub files for cross-component type resolution.
 ///
-/// For each `.vue` file, generates a `.vue.ts` stub containing the component's public API
+/// For each `.vue` file, generates a stub containing the component's public API
 /// (props, emits, slots, exposed bindings) so that cross-component imports resolve to
 /// real types instead of the generic `DefineComponent<{}, {}, any>` wildcard shim.
 ///
 /// Returns:
-/// - `vue_ts_paths`: list of generated `.vue.ts` file paths (for tsconfig `files`)
-/// - `vue_ts_map`: canonical `.vue` path → temp-dir `.vue.ts` path (for import rewriting)
+/// - `vue_ts_paths`: list of generated stub file paths (for tsconfig `files`)
+/// - `vue_ts_map`: canonical `.vue` path → temp-dir stub path (for import rewriting)
 fn generate_public_api_stubs(
     host: &VerterHost,
     vue_files: &[PathBuf],
@@ -101,6 +102,9 @@ fn generate_public_api_stubs(
             .unwrap_or("Component");
         let component_name = sanitize_component_name(raw_name);
         let hash = simple_hash(canonical_id.as_bytes());
+        // The stub's on-disk name is internal: `rewrite_vue_ts_imports` connects
+        // the codegen's carrier-API specifier to this file via `vue_ts_map`, so
+        // the `.vue.ts` extension here only needs `allowImportingTsExtensions`.
         let stub_name = format!("{component_name}_{hash:016x}.vue.ts");
         let stub_path = temp_dir.join(&stub_name);
 
@@ -260,7 +264,7 @@ pub fn run(
     };
 
     // ── Generate public API stubs ─────────────────────────
-    // Create a shared VerterHost, upsert all .vue files, and generate .vue.ts
+    // Create a shared VerterHost, upsert all .vue files, and generate public-API
     // stubs containing real component types for cross-component type resolution.
     let host = VerterHost::new_standalone(HostConfig::default());
     for vue_path in &config.vue_files {
@@ -286,10 +290,11 @@ pub fn run(
     // This catches type errors that the minimal macro-only .tsc.tsx would miss.
     let mut validation_generated = generate_all_tsx(&config.vue_files, temp_dir.path());
 
-    // ── Rewrite .vue.ts imports ──────────────────────────────────────
-    // The IDE codegen rewrites `.vue` imports to `.vue.ts` (for the LSP's
-    // virtual file system). Remap known .vue.ts paths to temp-dir stubs
-    // (for real cross-component type checking) and strip .ts from unknown
+    // ── Rewrite carrier public-API imports ───────────────────────────
+    // The IDE codegen targets a carrier's public API via the reserved
+    // `.verter.ts` virtual suffix (`Foo.vue.verter.ts`). Remap known
+    // carrier-API paths to temp-dir stubs (for real cross-component type
+    // checking) and strip the suffix back to the carrier path for unknown
     // paths (falling back to the wildcard shim).
     for (_, code, tsx_path) in &mut validation_generated {
         let rewritten = rewrite_vue_ts_imports(code, &vue_ts_map);
@@ -891,7 +896,7 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
 
     let result = if import_path.starts_with("./") || import_path.starts_with("../") {
         // Check if the path after "./" is already an absolute path (e.g., "./D:/...")
-        // This happens when the IDE codegen embeds a full filename in import('./filename.vue.ts').
+        // This happens when the IDE codegen embeds a full filename in import('./filename.vue.verter.ts').
         let after_dot = import_path.strip_prefix("./").unwrap_or(import_path);
         if after_dot.contains(':') || after_dot.starts_with('/') {
             // Already absolute — just strip the "./" prefix
@@ -912,64 +917,140 @@ fn rewrite_quoted_path(after: &str, vue_dir: &Path) -> Option<(String, usize)> {
     Some((result, path_end + 1))
 }
 
-/// Rewrite `.vue.ts` import paths in generated TSX code.
+/// The virtual-file suffixes the IDE codegen appends onto a carrier path, in
+/// longest-first match order (so `.verter.ts` is tried before any suffix that
+/// could be its tail). Each is stripped to recover the bare carrier path.
 ///
-/// For known `.vue` files (present in `vue_ts_map`), rewrites the import to point
-/// to the temp-dir public API stub. For unknown `.vue.ts` paths (e.g., from
-/// node_modules), strips the `.ts` suffix so the `*.vue` wildcard shim matches.
+/// - [`CARRIER_API_VIRTUAL_SUFFIX`] (`.verter.ts`) — the API carrier: the
+///   public-default re-export (`export { default } from './Foo.vue.verter.ts'`)
+///   and the `___VERTER___instance` self-import.
+/// - `.tsx` / `.jsx` — the IDE carrier: an in-project bare `.vue`/`.svelte`
+///   import rewritten to its bare-import-probe identity (`./Comp.vue` →
+///   `./Comp.vue.tsx`). These are the TypeScript/JSX companion extensions, not a
+///   reserved Verter suffix; the `path_is_carrier` gate below is what restricts
+///   the strip to genuine carrier companions (a plain `./Widget.tsx` is left
+///   untouched because `Widget` is not a carrier).
+const CARRIER_VIRTUAL_IMPORT_SUFFIXES: &[&str] = &[
+    verter_workspace::CARRIER_API_VIRTUAL_SUFFIX, // ".verter.ts"
+    ".tsx",
+    ".jsx",
+];
+
+/// Rewrite carrier virtual-file import paths in generated IDE TSX code.
 ///
-/// Handles both `import('path.vue.ts')` and `from 'path.vue.ts'` patterns.
+/// The IDE codegen targets a sibling carrier's virtual file via one of two
+/// surfaces (see [`CARRIER_VIRTUAL_IMPORT_SUFFIXES`]): the API carrier
+/// (`Foo.vue.verter.ts`) for the public-default re-export and `$instance`
+/// self-import, and the IDE carrier (`Foo.vue.tsx`) for in-project component
+/// imports. By the time this runs the specifier has already been resolved to an
+/// absolute carrier-virtual path by [`rewrite_relative_imports`].
+///
+/// For known carriers (present in `vue_ts_map`, keyed by canonical carrier path),
+/// rewrites the import to point to the temp-dir public API stub — the stub
+/// re-exports the component's public default, so it satisfies both surfaces. For
+/// unknown carrier paths (e.g., from node_modules), strips the virtual suffix
+/// back to the bare carrier path (`Bar.vue` / `Bar.svelte`) so the `*.vue` /
+/// `*.svelte` wildcard shim matches.
+///
+/// Handles `import('path…')`, `from 'path…'`, and `export … from 'path…'`.
 fn rewrite_vue_ts_imports(code: &str, vue_ts_map: &HashMap<String, PathBuf>) -> String {
-    // Fast path: no .vue.ts in the code at all
-    if !code.contains(".vue.ts") {
+    // Fast path: no carrier-virtual suffix terminates a quoted string anywhere.
+    // (`.tsx`/`.jsx` are common in TSX output, so the precise check is the loop;
+    // this only skips files with none of the suffixes at all.)
+    if !CARRIER_VIRTUAL_IMPORT_SUFFIXES
+        .iter()
+        .any(|s| code.contains(s))
+    {
         return code.to_string();
     }
 
     let mut result = String::with_capacity(code.len());
     let mut rest = code;
 
-    while let Some(idx) = rest.find(".vue.ts") {
-        let after = idx + 7; // ".vue.ts" is 7 bytes
+    // Walk quote-delimited specifiers. Each opening quote begins a candidate
+    // import specifier; if it ends in a carrier-virtual suffix over a carrier
+    // path, rewrite/strip it, otherwise pass it through untouched.
+    while let Some(rel_quote) = rest.find(['\'', '"']) {
+        let quote_char = rest.as_bytes()[rel_quote] as char;
+        // Emit everything up to and including the opening quote.
+        result.push_str(&rest[..=rel_quote]);
+        let body = &rest[rel_quote + 1..];
 
-        // Only rewrite when .vue.ts is inside a quoted string (import specifier).
-        // Check that the character after ".vue.ts" is a quote (end of specifier).
-        let is_in_string = after < rest.len() && matches!(rest.as_bytes()[after], b'\'' | b'"');
+        let Some(rel_close) = body.find(quote_char) else {
+            // Unterminated quote — emit the remainder and stop.
+            result.push_str(body);
+            rest = "";
+            break;
+        };
+        let specifier = &body[..rel_close];
 
-        if is_in_string {
-            // Find the opening quote by scanning backwards from the .vue.ts position.
-            let quote_char = rest.as_bytes()[after] as char;
-            let path_end = idx + 4; // end of ".vue" (before ".ts")
-
-            // Find the start of the quoted string by scanning backwards.
-            if let Some(quote_start) = rest[..idx].rfind(quote_char) {
-                let vue_path = &rest[quote_start + 1..path_end]; // path without .ts suffix
-
-                // Look up in the map to see if this is a known .vue file.
-                if let Some(stub_path) = vue_ts_map.get(vue_path) {
-                    // Known .vue file — rewrite to temp-dir stub path.
-                    let stub_str = stub_path.to_string_lossy().replace('\\', "/");
-                    result.push_str(&rest[..quote_start + 1]); // up to and including opening quote
-                    result.push_str(&stub_str);
-                    rest = &rest[after..]; // skip past closing quote position
-                } else {
-                    // Unknown .vue.ts — strip .ts suffix for wildcard shim fallback.
-                    result.push_str(&rest[..path_end]); // include ".vue"
-                    rest = &rest[after..]; // skip ".ts"
-                }
-            } else {
-                // No opening quote found — keep as-is
-                result.push_str(&rest[..after]);
-                rest = &rest[after..];
-            }
-        } else {
-            // Not a quoted import specifier — keep as-is
-            result.push_str(&rest[..after]);
-            rest = &rest[after..];
+        match carrier_virtual_import_target(specifier, vue_ts_map) {
+            Some(Rewrite::Stub(stub)) => result.push_str(&stub),
+            Some(Rewrite::CarrierPath(len)) => result.push_str(&specifier[..len]),
+            None => result.push_str(specifier),
         }
+
+        // Emit the closing quote and continue past it.
+        result.push(quote_char);
+        rest = &body[rel_close + 1..];
     }
 
     result.push_str(rest);
     result
+}
+
+/// The rewrite decision for a single quoted import specifier.
+enum Rewrite {
+    /// Replace the specifier with this temp-dir stub path (known carrier).
+    Stub(String),
+    /// Keep only the leading `len` bytes (the bare carrier path), dropping the
+    /// virtual suffix (unknown carrier → wildcard-shim fallback).
+    CarrierPath(usize),
+}
+
+/// Classify a quoted import `specifier` as a carrier-virtual import.
+///
+/// Returns `None` if the specifier is not a carrier companion (left untouched).
+/// Otherwise resolves the stub via `vue_ts_map` (canonical path first, then a
+/// basename fallback) or, when unknown, the bare carrier-path prefix length.
+fn carrier_virtual_import_target(
+    specifier: &str,
+    vue_ts_map: &HashMap<String, PathBuf>,
+) -> Option<Rewrite> {
+    // Strip the first matching virtual suffix; the remainder must be a carrier
+    // path (`…/Foo.vue` / `…/Foo.svelte`). Longest-first so `.verter.ts` wins.
+    let carrier_path = CARRIER_VIRTUAL_IMPORT_SUFFIXES
+        .iter()
+        .find_map(|suffix| specifier.strip_suffix(suffix))
+        .filter(|carrier| verter_workspace::path_is_carrier(carrier))?;
+
+    // Known carrier → temp-dir stub (canonical-path match, basename fallback).
+    let stub = vue_ts_map.get(carrier_path).or_else(|| {
+        carrier_basename(carrier_path).and_then(|base| {
+            vue_ts_map
+                .iter()
+                .find(|(canonical, _)| carrier_basename(canonical) == Some(base))
+                .map(|(_, stub)| stub)
+        })
+    });
+
+    Some(match stub {
+        Some(stub_path) => Rewrite::Stub(stub_path.to_string_lossy().replace('\\', "/")),
+        // Unknown carrier → keep the bare carrier path for the wildcard shim.
+        None => Rewrite::CarrierPath(carrier_path.len()),
+    })
+}
+
+/// The final `/`-delimited segment of a normalized carrier path (the carrier
+/// filename, e.g. `…/src/Foo.vue` → `Foo.vue`). Used as the basename-match key
+/// for the rare case where a carrier-virtual specifier survives as a bare basename.
+///
+/// CAVEAT: basename matching is ambiguous when two carriers in different
+/// directories share a filename (e.g. `a/Foo.vue` and `b/Foo.vue`). The primary
+/// canonical-path lookup is exact and is what the post-`rewrite_relative_imports`
+/// specifier always hits; the basename branch is a best-effort fallback only.
+fn carrier_basename(carrier_path: &str) -> Option<&str> {
+    carrier_path.rsplit('/').next().filter(|s| !s.is_empty())
 }
 
 /// Sanitize a component name to be a valid JavaScript identifier.
@@ -1783,7 +1864,7 @@ const props = defineProps<{ msg: string }>()
         );
     }
 
-    // ── .vue.ts import rewriting tests ──────────────────────────
+    // ── carrier public-API import rewriting tests ──────────────
 
     #[test]
     fn rewrite_vue_ts_imports_rewrites_known_and_strips_unknown() {
@@ -1792,53 +1873,141 @@ const props = defineProps<{ msg: string }>()
             "D:/project/src/components/Foo.vue".to_string(),
             PathBuf::from("C:/tmp/Foo_abc.vue.ts"),
         );
-        // Bar.vue is NOT in the map — should fall back to stripping .ts
+        // Bar.vue is NOT in the map — should fall back to stripping `.verter.ts`.
 
-        let code = r#"import('D:/project/src/components/Foo.vue.ts')['default']
-import type { Props } from 'D:/project/src/components/Bar.vue.ts'"#;
+        let code = r#"import('D:/project/src/components/Foo.vue.verter.ts')['default']
+import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
         let result = rewrite_vue_ts_imports(code, &map);
 
-        // Positive: known Foo.vue.ts should be rewritten to temp stub
+        // Positive: known Foo carrier-API should be rewritten to its temp stub.
         assert!(
             result.contains("'C:/tmp/Foo_abc.vue.ts'"),
-            "known Foo.vue.ts should become temp stub path: {result}"
+            "known Foo carrier-API should become temp stub path: {result}"
         );
 
-        // Positive: unknown Bar.vue.ts should have .ts stripped (wildcard shim fallback)
+        // Positive: unknown Bar carrier-API should strip back to the carrier path.
         assert!(
             result.contains("'D:/project/src/components/Bar.vue'"),
-            "unknown Bar.vue.ts should become Bar.vue: {result}"
+            "unknown Bar carrier-API should become Bar.vue: {result}"
         );
 
-        // Negative: original Foo.vue.ts path should not remain
+        // Negative: original Foo carrier-API path should not remain.
         assert!(
-            !result.contains("D:/project/src/components/Foo.vue.ts"),
-            "original Foo.vue.ts path should be replaced: {result}"
+            !result.contains("D:/project/src/components/Foo.vue.verter.ts"),
+            "original Foo carrier-API path should be replaced: {result}"
+        );
+    }
+
+    /// Discriminating regression for the carrier-API suffix migration: the
+    /// rewrite matches the reserved `.verter.ts` suffix (not the legacy
+    /// `.vue.ts` stub extension), and a bare-basename carrier-API specifier
+    /// still resolves to its stub via the basename fallback.
+    #[test]
+    fn rewrite_vue_ts_imports_matches_verter_suffix_and_basename() {
+        let mut map = HashMap::new();
+        map.insert(
+            "D:/project/src/Foo.vue".to_string(),
+            PathBuf::from("C:/tmp/Foo_abc.vue.ts"),
+        );
+
+        // Known carrier-API, bare basename (no directory) → basename fallback hit.
+        let known = r#"import('Foo.vue.verter.ts')['default']"#;
+        let known_out = rewrite_vue_ts_imports(known, &map);
+        assert!(
+            known_out.contains("'C:/tmp/Foo_abc.vue.ts'"),
+            "bare-basename known carrier-API should map to its stub: {known_out}"
+        );
+        assert!(
+            !known_out.contains("Foo.vue.verter.ts"),
+            "the original carrier-API specifier should be gone: {known_out}"
+        );
+
+        // Unknown carrier-API, bare basename → stripped to the carrier path.
+        let unknown = r#"import('Bar.vue.verter.ts')['default']"#;
+        let unknown_out = rewrite_vue_ts_imports(unknown, &map);
+        assert!(
+            unknown_out.contains("'Bar.vue'"),
+            "unknown carrier-API should strip back to Bar.vue: {unknown_out}"
+        );
+        assert!(
+            !unknown_out.contains(".verter.ts"),
+            "no `.verter.ts` should survive for the unknown carrier: {unknown_out}"
+        );
+
+        // A legacy `.vue.ts` specifier is NOT a carrier-API import and is left
+        // untouched (proves the matcher keys on `.verter.ts`, not `.vue.ts`).
+        let legacy = r#"import('D:/project/src/Foo.vue.ts')['default']"#;
+        let legacy_out = rewrite_vue_ts_imports(legacy, &map);
+        assert_eq!(
+            legacy_out, legacy,
+            "a legacy `.vue.ts` specifier must not be treated as carrier-API: {legacy_out}"
+        );
+    }
+
+    /// The IDE carrier surface: an in-project component import is rewritten to
+    /// the component's IDE carrier (`./Comp.vue` → `./Comp.vue.tsx`). `verter_tsc`
+    /// must map that `.vue.tsx` specifier to the same stub as the API carrier,
+    /// and a plain `.tsx` import that is NOT a carrier companion must be left
+    /// alone (the `path_is_carrier` gate).
+    #[test]
+    fn rewrite_vue_ts_imports_maps_ide_carrier_and_ignores_plain_tsx() {
+        let mut map = HashMap::new();
+        map.insert(
+            "D:/project/src/Child.vue".to_string(),
+            PathBuf::from("C:/tmp/Child_abc.vue.ts"),
+        );
+
+        // Known IDE carrier import → stub.
+        let known = r#"import Child from 'D:/project/src/Child.vue.tsx'"#;
+        let known_out = rewrite_vue_ts_imports(known, &map);
+        assert!(
+            known_out.contains("'C:/tmp/Child_abc.vue.ts'"),
+            "known `.vue.tsx` IDE carrier should map to its stub: {known_out}"
+        );
+        assert!(
+            !known_out.contains(".vue.tsx"),
+            "the IDE-carrier specifier should be gone: {known_out}"
+        );
+
+        // Unknown IDE carrier → strip `.tsx` back to the carrier path for the shim.
+        let unknown = r#"import Other from 'D:/vendor/Other.vue.tsx'"#;
+        let unknown_out = rewrite_vue_ts_imports(unknown, &map);
+        assert!(
+            unknown_out.contains("'D:/vendor/Other.vue'"),
+            "unknown `.vue.tsx` should strip back to the carrier path: {unknown_out}"
+        );
+
+        // A plain `.tsx` import (not a carrier companion) must be untouched.
+        let plain = r#"import W from './Widget.tsx'"#;
+        let plain_out = rewrite_vue_ts_imports(plain, &map);
+        assert_eq!(
+            plain_out, plain,
+            "a non-carrier `.tsx` import must be left untouched: {plain_out}"
         );
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_preserves_non_vue_imports() {
+    fn rewrite_vue_ts_imports_preserves_non_carrier_imports() {
         let map = HashMap::new();
         let code = r#"import { ref } from 'vue'
 import type { Foo } from './types'"#;
 
         let result = rewrite_vue_ts_imports(code, &map);
 
-        // Non-.vue.ts imports should be untouched
-        assert_eq!(result, code, "non-vue.ts imports should be unchanged");
+        // Non-carrier imports should be untouched.
+        assert_eq!(result, code, "non-carrier imports should be unchanged");
     }
 
     #[test]
     fn rewrite_vue_ts_imports_preserves_non_string_occurrences() {
         let map = HashMap::new();
-        // .vue.ts not inside quotes (e.g. in a comment) should not be changed
-        let code = "// This references a .vue.ts file\nconst x = 1;";
+        // A carrier-API suffix not inside quotes (e.g. in a comment) is unchanged.
+        let code = "// This references a Foo.vue.verter.ts file\nconst x = 1;";
         let result = rewrite_vue_ts_imports(code, &map);
         assert_eq!(
             result, code,
-            "non-string .vue.ts should be unchanged: {result}"
+            "non-string carrier-API suffix should be unchanged: {result}"
         );
     }
 
@@ -1850,14 +2019,14 @@ import type { Foo } from './types'"#;
             PathBuf::from("C:/tmp/Child_xyz.vue.ts"),
         );
 
-        let code = r#"import Child from "D:/project/Child.vue.ts""#;
+        let code = r#"import Child from "D:/project/Child.vue.verter.ts""#;
         let result = rewrite_vue_ts_imports(code, &map);
         assert!(
             result.contains(r#""C:/tmp/Child_xyz.vue.ts""#),
-            "double-quoted known .vue.ts should be rewritten: {result}"
+            "double-quoted known carrier-API should be rewritten: {result}"
         );
         assert!(
-            !result.contains("D:/project/Child.vue.ts"),
+            !result.contains("D:/project/Child.vue.verter.ts"),
             "original path should be replaced: {result}"
         );
     }
@@ -2595,7 +2764,9 @@ defineProps<{ msg: string }>()
             PathBuf::from("C:/tmp/out/Child_abc.vue.ts"),
         );
 
-        let code = r#"import('D:/project/src/Child.vue.ts')['default']"#;
+        // Post-`rewrite_relative_imports` the carrier-API specifier carries the
+        // canonical carrier path plus the reserved `.verter.ts` suffix.
+        let code = r#"import('D:/project/src/Child.vue.verter.ts')['default']"#;
         let result = rewrite_vue_ts_imports(code, &map);
 
         // Positive: should rewrite to temp path
@@ -2603,10 +2774,10 @@ defineProps<{ msg: string }>()
             result.contains("C:/tmp/out/Child_abc.vue.ts"),
             "should rewrite to temp stub path: {result}"
         );
-        // Negative: original .vue.ts path should be gone
+        // Negative: original carrier-API path should be gone
         assert!(
-            !result.contains("D:/project/src/Child.vue.ts"),
-            "original .vue.ts path should be replaced: {result}"
+            !result.contains("D:/project/src/Child.vue.verter.ts"),
+            "original carrier-API path should be replaced: {result}"
         );
     }
 
@@ -2614,17 +2785,18 @@ defineProps<{ msg: string }>()
     fn rewrite_vue_ts_imports_preserves_unknown() {
         let map = HashMap::new(); // empty — no known paths
 
-        let code = r#"import('D:/node_modules/some-lib/Comp.vue.ts')['default']"#;
+        let code = r#"import('D:/node_modules/some-lib/Comp.vue.verter.ts')['default']"#;
         let result = rewrite_vue_ts_imports(code, &map);
 
-        // Unknown .vue.ts should be stripped to .vue (fallback to wildcard shim)
+        // Unknown carrier-API path → strip `.verter.ts` back to the carrier path
+        // (fallback to the `*.vue` wildcard shim).
         assert!(
             result.contains("Comp.vue'"),
-            "unknown .vue.ts should have .ts stripped for wildcard shim fallback: {result}"
+            "unknown carrier-API path should strip back to the carrier path: {result}"
         );
         assert!(
-            !result.contains(".vue.ts"),
-            "unknown .vue.ts should not remain as-is: {result}"
+            !result.contains(".verter.ts"),
+            "unknown carrier-API path should not remain as-is: {result}"
         );
     }
 
@@ -2636,32 +2808,32 @@ defineProps<{ msg: string }>()
             PathBuf::from("C:/tmp/out/Child_abc.vue.ts"),
         );
 
-        let code = r#"import type { Props } from 'D:/project/src/Child.vue.ts'"#;
+        let code = r#"import type { Props } from 'D:/project/src/Child.vue.verter.ts'"#;
         let result = rewrite_vue_ts_imports(code, &map);
 
         // Positive: should rewrite from-syntax imports too
         assert!(
             result.contains("C:/tmp/out/Child_abc.vue.ts"),
-            "from-syntax .vue.ts import should be rewritten: {result}"
+            "from-syntax carrier-API import should be rewritten: {result}"
         );
         // Negative: original path should be gone
         assert!(
-            !result.contains("D:/project/src/Child.vue.ts"),
+            !result.contains("D:/project/src/Child.vue.verter.ts"),
             "original path should be replaced: {result}"
         );
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_ignores_non_vue_ts() {
+    fn rewrite_vue_ts_imports_ignores_non_carrier_imports() {
         let map = HashMap::new();
 
         let code = r#"import type { Foo } from 'D:/project/src/types.ts'"#;
         let result = rewrite_vue_ts_imports(code, &map);
 
-        // Non-.vue.ts imports should remain unchanged
+        // Non-carrier imports should remain unchanged.
         assert_eq!(
             result, code,
-            "non-.vue.ts imports should be unchanged: {result}"
+            "non-carrier imports should be unchanged: {result}"
         );
     }
 

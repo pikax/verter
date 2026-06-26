@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -600,6 +600,59 @@ pub fn merge_diagnostic_sets(
     merged
 }
 
+/// The tsserver substring that signals the diagnostics file ARGUMENT itself is
+/// not (yet) a valid source file in the program. On a cold configured-project
+/// build the just-published `.vue.tsx` / `.svelte.tsx` companion is transiently
+/// absent from the program tsserver type-checks, so `getValidSourceFile` throws
+/// and `semanticDiagnosticsSync` fails the whole command with this message —
+/// distinct from a SUCCESS-body `TS2307` ("Cannot find module …") about a user
+/// import, which never reaches the transport-error path.
+const TSSERVER_SOURCE_FILE_NOT_IN_PROGRAM: &str = "Could not find source file";
+
+/// tsserver's `ThrowNoProject` message — the carrier's owning configured project
+/// is not loaded yet, so a `projectFileName`-targeted request misses
+/// (`getProject(projectFileName)` is undefined) and falls through to
+/// `ensureDefaultProjectForFile`, which throws for a virtual companion that lives
+/// on no real-disk path. Recoverable by `reloadProjects` (loads the configured
+/// projects from their on-disk tsconfigs).
+const TSSERVER_NO_PROJECT: &str = "No Project";
+
+/// Does this transport-error message signal the diagnostics companion is not yet
+/// in the program (a transient COLD condition), rather than a terminal failure or
+/// a genuine module-not-found the user must see?
+///
+/// NARROW by construction: matches the two cold-membership throws —
+/// `getValidSourceFile` ("Could not find source file": the configured project
+/// exists but the companion is not yet a `getExternalFiles` member) and
+/// `ThrowNoProject` ("No Project": the carrier's owning configured project is not
+/// loaded at all). Both recover via `reloadProjects`. A genuine `TS2307` arrives
+/// as a SUCCESS-body diagnostic, so its text never reaches here; transport
+/// timeouts and closed channels are distinct terminal strings that must NOT be
+/// treated as cold.
+fn tsserver_diag_error_is_companion_not_ready(message: &str) -> bool {
+    message.contains(TSSERVER_SOURCE_FILE_NOT_IN_PROGRAM) || message.contains(TSSERVER_NO_PROJECT)
+}
+
+/// Recover a companion's configured-project membership after a cold "Could not
+/// find source file" miss. The caller re-issues its query after this returns.
+///
+/// The companion's membership is owned by the plugin's `getExternalFiles`, which
+/// tsserver consults only when it (re)evaluates project STRUCTURE — re-opening
+/// the file alone does not re-query it. `reloadProjects` is the lever that
+/// re-invokes `getExternalFiles`, admitting the now-published companion into its
+/// configured project.
+///
+/// This is scoped to the cold-error path ONLY (a warm query never reaches here),
+/// so the heavier all-projects reload is paid solely while a freshly built
+/// project is still settling, never on a warm pull. Best-effort: a failure is
+/// swallowed so a mid-restart provider never turns a cold-recovery touch into a
+/// hard error.
+async fn recover_companion_membership(transport: &TsserverTransport) {
+    let _ = transport
+        .command_no_response("reloadProjects", serde_json::json!({}))
+        .await;
+}
+
 /// Parse a `*DiagnosticsSync` response body into a `TypeDiagnostic` vec.
 ///
 /// All three tsserver diagnostic-pull commands (`semanticDiagnosticsSync`,
@@ -679,6 +732,20 @@ fn tsserver_pos_to_byte_offset_checked(content: &str, line: u32, offset: u32) ->
     Some(offset)
 }
 
+/// How a tracked open file was opened — the discriminant a resync replays on.
+///
+/// A `Source` file (a real `.ts`/`.tsx` or an editor-open buffer) is reopened
+/// WITH its `fileContent`: tsserver IS its content authority. A `CarrierCompanion`
+/// (a published `{name}.vue.tsx` / `{name}.vue.verter.ts`) is reopened
+/// CONTENTLESSLY — the `@verter/typescript-plugin`'s `getScriptSnapshot` is the
+/// SOLE engine-side content authority, so a resync must never resend its bytes
+/// (which would convert it back into a tsserver-owned content buffer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenKind {
+    Source,
+    CarrierCompanion,
+}
+
 /// A `TypeProvider` backed by a tsserver process (`node tsserver.js`).
 pub struct TsserverTypeProvider {
     transport: Arc<TsserverTransport>,
@@ -686,10 +753,11 @@ pub struct TsserverTypeProvider {
     child: Child,
     /// Cached file contents for position conversion.
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
-    /// Files that have been sent to tsserver via `open` command.
-    /// Used by `update_file` to decide between `open` vs `updateOpen`.
-    /// `load_file` adds to `contents` but NOT to `opened_files`.
-    opened_files: Arc<Mutex<HashSet<String>>>,
+    /// Files that have been sent to tsserver via `open` command, tagged by
+    /// [`OpenKind`] so a resync replays a source WITH content but a carrier
+    /// companion CONTENTLESSLY. Used by `update_file` to decide between `open` vs
+    /// `updateOpen`. `load_file` adds to `contents` but NOT to `opened_files`.
+    opened_files: Arc<Mutex<HashMap<String, OpenKind>>>,
     /// Cached diagnostics from event notifications.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
     /// Workspace root path (forward slashes) for `projectRootPath` in open commands.
@@ -698,6 +766,29 @@ pub struct TsserverTypeProvider {
     /// Sorted by length descending (longest prefix first).
     /// When non-empty, per-file matching takes priority over the global `workspace_root`.
     project_roots: Arc<parking_lot::RwLock<Vec<String>>>,
+    /// Published-carrier companion path → owning configured-project tsconfig path.
+    /// Populated by [`TypeProvider::register_carrier_member`] from the LSP publish
+    /// path's resolved `ProjectBinding`. A carrier query (diagnostics / definition /
+    /// hover / completion) looks the companion up here and passes the owning
+    /// tsconfig as `projectFileName`, so the companion is type-checked in its REAL
+    /// configured project (where `getExternalFiles` admitted it) instead of a fresh
+    /// inferred/default project that would return empty/wrong results.
+    carrier_projects: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    /// Per-file content generation: a globally-unique, monotonically-increasing
+    /// stamp written in lockstep with every `contents` write (open / load /
+    /// update / carrier register) and dropped on close. A resync captures each
+    /// file's generation alongside its content snapshot and re-checks it
+    /// immediately before the reopen send; if a concurrent `update_file` has
+    /// stamped a newer value — or a close dropped it — the resync SKIPS the
+    /// now-stale reopen (the update already pushed the newer bytes), so a resync
+    /// can never reopen a source with bytes a concurrent edit has already
+    /// superseded. Because each stamp is drawn from a single process-monotonic
+    /// counter, a reopen of a since-closed path receives a FRESH value rather
+    /// than a recycled per-file count, so a stale captured generation can never
+    /// alias a reopened file (no ABA). Guarded by a synchronous lock taken only
+    /// while the async `contents` guard is held, so the `(content, generation)`
+    /// pair is consistent and no lock spans an `.await`.
+    content_generations: Arc<ContentGenerations>,
 }
 
 impl Drop for TsserverTypeProvider {
@@ -711,11 +802,34 @@ async fn configure_tsserver_session(
     workspace_root: &str,
 ) -> Result<String, TypeProviderError> {
     let ws_root = verter_span::path::canonicalize_path(workspace_root);
+
+    // Tell tsserver to accept framework-carrier SOURCE extensions (`.vue`/
+    // `.svelte`) as program members so a `getExternalFiles`-advertised carrier
+    // source (served the generated TSX by the `@verter/typescript-plugin` host
+    // hooks) enters its configured project's Program. The extensions are derived
+    // from the shared language registry (framework-agnostic — a new carrier
+    // participates automatically); each is `scriptKind: TSX` (TypeScript value 4),
+    // `isMixedContent: false` (the plugin serves the full generated TSX, not the
+    // raw carrier text tsserver would otherwise try to scan).
+    const TS_SCRIPT_KIND_TSX: u8 = 4;
+    let extra_file_extensions: Vec<serde_json::Value> = verter_language::LanguageRegistry::global()
+        .carrier_extensions()
+        .into_iter()
+        .map(|ext| {
+            serde_json::json!({
+                "extension": ext,
+                "isMixedContent": false,
+                "scriptKind": TS_SCRIPT_KIND_TSX,
+            })
+        })
+        .collect();
+
     transport
         .request(
             "configure",
             serde_json::json!({
                 "hostInfo": "verter-lsp",
+                "extraFileExtensions": extra_file_extensions,
                 "preferences": {
                     "providePrefixAndSuffixTextForRename": true,
                     "includeCompletionsForModuleExports": true,
@@ -732,38 +846,20 @@ async fn configure_tsserver_session(
         )
         .await?;
 
-    let inferred_transport = Arc::clone(&transport);
-    let inferred_ws_root = ws_root.clone();
-    tokio::spawn(async move {
-        if let Err(error) = inferred_transport
-            .request(
-                "compilerOptionsForInferredProjects",
-                serde_json::json!({
-                    "options": {
-                        "module": "esnext",
-                        "target": "esnext",
-                        "moduleResolution": "bundler",
-                        "jsx": "preserve",
-                        "jsxImportSource": "vue",
-                        "allowImportingTsExtensions": true,
-                        "allowJs": true,
-                        "checkJs": true,
-                        "strict": true,
-                        "allowArbitraryExtensions": true,
-                        "baseUrl": inferred_ws_root,
-                    }
-                }),
-            )
-            .await
-        {
-            tracing::warn!("failed to configure inferred tsserver project options: {error}");
-        }
-    });
-
+    // A framework carrier is a member of its REAL configured project (the
+    // `@verter/typescript-plugin` makes it one via `getExternalFiles` +
+    // `extraFileExtensions`), so the carrier sees the project's own
+    // `paths`/`baseUrl`/`types`/`lib`/`jsx`/`moduleResolution`/references. The
+    // session therefore injects NO inferred-project compiler options — there is no
+    // config-less inferred carrier to configure.
     Ok(ws_root)
 }
 
-#[cfg(test)]
+/// The tsserver CLI args that load `@verter/typescript-plugin` as a global
+/// language-service plugin from `plugin_path`. The plugin is what makes a
+/// framework carrier a member of its configured project (`getExternalFiles` +
+/// `extraFileExtensions`), so loading it is the load-bearing half of the
+/// project-bound contract. Empty when no plugin probe location was supplied.
 fn tsserver_plugin_args(plugin_path: Option<&str>) -> Vec<String> {
     let Some(plugin_path) = plugin_path.filter(|path| !path.is_empty()) else {
         return Vec::new();
@@ -784,13 +880,33 @@ impl TsserverTypeProvider {
     /// `node_path`: path to the `node` executable.
     /// `tsserver_path`: path to `tsserver.js`.
     /// `workspace_root`: filesystem path to the workspace root.
-    /// `plugin_path`: reserved for legacy/plugin test coverage; currently not
-    /// used when spawning the production tsserver process.
+    /// `plugin_path`: the directory containing `@verter/typescript-plugin`. When
+    /// `Some`, the plugin is loaded as a tsserver global language-service plugin
+    /// (`--globalPlugins @verter/typescript-plugin --pluginProbeLocations <path>
+    /// --allowLocalPluginLoads`). The plugin is what makes a framework carrier a
+    /// member of its configured project, so loading it is required for
+    /// project-bound carrier membership.
+    /// `carrier_store_dir`: the resolved per-workspace carrier-publish store dir
+    /// the Rust LSP publishes carriers into. When `Some`, it is delivered to the
+    /// plugin via the `VERTER_CARRIER_STORE_DIR` environment variable so the
+    /// plugin reads the SAME store the LSP writes. The caller (the LSP) computes
+    /// this from its shared publish store so the two agree.
+    /// `plugin_response_remap`: whether the plugin should map carrier-companion
+    /// RESPONSES (definition/references/rename/code-action edits/completion-detail
+    /// edits) back to `.vue`/`.svelte` source. This is the verter_lsp-INTERNAL
+    /// backend, where the Rust `verter_lsp` merge layer is the SOLE response
+    /// mapper — so production callers pass `false` (the plugin returns RAW
+    /// companion responses and the Rust layer maps, with no double-mapping). The
+    /// VS Code DIRECT surface (the editor's own TS server + the plugin, no
+    /// verter_lsp in the response path) leaves it `true`, where the plugin IS the
+    /// only mapper; that surface is represented by a test that passes `true`.
     pub async fn spawn(
         node_path: &str,
         tsserver_path: &str,
         workspace_root: &str,
-        _plugin_path: Option<&str>,
+        plugin_path: Option<&str>,
+        carrier_store_dir: Option<&str>,
+        plugin_response_remap: bool,
         crash_notify: Option<Arc<Notify>>,
     ) -> Result<Self, TypeProviderError> {
         let mut cmd = tokio::process::Command::new(node_path);
@@ -804,6 +920,37 @@ impl TsserverTypeProvider {
         cmd.arg(tsserver_path)
             .arg("--useSyntaxServer=false")
             .arg("--disableAutomaticTypingAcquisition");
+
+        // Load `@verter/typescript-plugin` so carriers become configured-project
+        // members. The plugin reads the carrier-publish store synchronously.
+        for plugin_arg in tsserver_plugin_args(plugin_path) {
+            cmd.arg(plugin_arg);
+        }
+
+        // Deliver the carrier-publish store dir to the plugin. The plugin reads
+        // it from `VERTER_CARRIER_STORE_DIR` (its config-key fallback); the LSP
+        // computes the SAME dir from its shared publish store, so the plugin reads
+        // exactly the bytes the LSP wrote.
+        if let Some(store_dir) = carrier_store_dir.filter(|d| !d.is_empty()) {
+            cmd.env("VERTER_CARRIER_STORE_DIR", store_dir);
+        }
+
+        // Gate the plugin's companion→source RESPONSE remap by surface. On the
+        // verter_lsp-internal backend (`plugin_response_remap == false`, the
+        // production default) the Rust `verter_lsp` merge layer is the SOLE
+        // response mapper — it owns the authoritative position mapper, strict
+        // offset mapping, preamble-import re-anchor, and the inserted-import
+        // specifier rewrite. Were the plugin to ALSO pre-map companion responses,
+        // the Rust merge layer would receive an already-`.vue`-source edit and
+        // double-map / drop it. So `"0"` DISABLES the plugin remap here. The VS
+        // Code DIRECT surface (no verter_lsp in the response path) leaves it
+        // `true`, where the plugin IS the only mapper. Delivered on the SAME
+        // channel as the carrier store dir; the plugin reads
+        // `VERTER_PLUGIN_RESPONSE_REMAP` (default ENABLED when unset).
+        cmd.env(
+            "VERTER_PLUGIN_RESPONSE_REMAP",
+            if plugin_response_remap { "1" } else { "0" },
+        );
 
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -878,10 +1025,12 @@ impl TsserverTypeProvider {
             transport,
             child,
             contents: contents_cache,
-            opened_files: Arc::new(Mutex::new(HashSet::new())),
+            opened_files: Arc::new(Mutex::new(HashMap::new())),
             diagnostics_cache,
             workspace_root: ws_root,
             project_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            carrier_projects: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            content_generations: Arc::new(ContentGenerations::default()),
         })
     }
 
@@ -896,6 +1045,39 @@ impl TsserverTypeProvider {
         let roots = self.project_roots.read();
         verter_span::path::longest_project_root(file, &roots, &self.workspace_root).to_string()
     }
+
+    /// The owning configured-project tsconfig path for a registered carrier
+    /// companion, or `None` for a non-carrier (real `.ts`/`.tsx`) file. A carrier
+    /// query passes this as `projectFileName` so the companion is type-checked in
+    /// the project where `getExternalFiles` admitted it — `file` is already in
+    /// normalized form (the carrier map is keyed by normalized companion paths).
+    fn project_file_name_for(&self, file: &str) -> Option<String> {
+        self.carrier_projects.read().get(file).cloned()
+    }
+}
+
+/// Inject `projectFileName` into a tsserver request's args when the file is a
+/// registered carrier companion (`project_file_name` is `Some`). tsserver resolves
+/// a request's project as `getProject(projectFileName) ||
+/// ensureDefaultProjectForFile(file)`; for a carrier (an EXTERNAL
+/// `getExternalFiles` member, never a root) the default-project fallback can pick
+/// the wrong / a fresh inferred project and return empty results, so the owning
+/// tsconfig MUST be named explicitly. A non-carrier file (`None`) leaves `args`
+/// untouched (its default project is correct). Captured `Option<String>` form so
+/// it works inside the request closures after `self` fields are moved out.
+fn inject_project_file_name(
+    mut args: serde_json::Value,
+    project_file_name: &Option<String>,
+) -> serde_json::Value {
+    if let Some(name) = project_file_name {
+        if let Some(map) = args.as_object_mut() {
+            map.insert(
+                "projectFileName".to_string(),
+                serde_json::Value::String(name.clone()),
+            );
+        }
+    }
+    args
 }
 
 impl TypeProvider for TsserverTypeProvider {
@@ -914,6 +1096,7 @@ impl TypeProvider for TsserverTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
+        let content_generations = Arc::clone(&self.content_generations);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsserver_open_file",
@@ -924,11 +1107,17 @@ impl TypeProvider for TsserverTypeProvider {
                     project_root,
                 ),
                 async {
-                    contents_cache
+                    store_content_bump_generation(
+                        &contents_cache,
+                        &content_generations,
+                        &file,
+                        Arc::from(content.as_str()),
+                    )
+                    .await;
+                    opened_files
                         .lock()
                         .await
-                        .insert(file.clone(), Arc::from(content.as_str()));
-                    opened_files.lock().await.insert(file.clone());
+                        .insert(file.clone(), OpenKind::Source);
                     // tsserver `open` command doesn't return a response.
                     // projectRootPath tells tsserver where to find tsconfig.json.
                     transport
@@ -966,12 +1155,19 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
+        let content_generations = Arc::clone(&self.content_generations);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsserver_load_file",
                 format!("file={} content_len={}", file, content.len()),
                 async {
-                    contents_cache.lock().await.insert(file, content.into());
+                    store_content_bump_generation(
+                        &contents_cache,
+                        &content_generations,
+                        &file,
+                        content.into(),
+                    )
+                    .await;
                     crate::type_runtime_trace_event!(
                         "tsserver_load_file_result",
                         "cached_only=true".to_string()
@@ -990,6 +1186,7 @@ impl TypeProvider for TsserverTypeProvider {
         let contents_cache = Arc::clone(&self.contents);
         let opened_files = Arc::clone(&self.opened_files);
         let project_root = self.project_root_for(&file);
+        let content_generations = Arc::clone(&self.content_generations);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsserver_update_file",
@@ -1008,13 +1205,16 @@ impl TypeProvider for TsserverTypeProvider {
                         cache.get(&file).map(|c| c.lines().count() as u32 + 1)
                     };
 
-                    contents_cache
-                        .lock()
-                        .await
-                        .insert(file.clone(), Arc::from(content.as_str()));
+                    store_content_bump_generation(
+                        &contents_cache,
+                        &content_generations,
+                        &file,
+                        Arc::from(content.as_str()),
+                    )
+                    .await;
 
                     let mut opened = opened_files.lock().await;
-                    if opened.contains(&file) {
+                    if opened.contains_key(&file) {
                         drop(opened);
                         if let Some(end_line) = old_line_count {
                             tracing::debug!(
@@ -1072,8 +1272,11 @@ impl TypeProvider for TsserverTypeProvider {
                             Ok(())
                         }
                     } else {
-                        // File not open yet — open it and track
-                        opened.insert(file.clone());
+                        // File not open yet — open it and track. `update_file` is the
+                        // editor-content path, so this is a `Source` open (it carries
+                        // `fileContent`); a carrier companion is never first-opened
+                        // here (it enters only via `register_carrier_member`).
+                        opened.insert(file.clone(), OpenKind::Source);
                         drop(opened);
                         tracing::info!(
                             "tsserver update_file: first open for {file} ({} bytes)",
@@ -1109,14 +1312,22 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let content_generations = Arc::clone(&self.content_generations);
         let opened_files = Arc::clone(&self.opened_files);
+        let carrier_projects = Arc::clone(&self.carrier_projects);
         Box::pin(async move {
             crate::type_runtime_trace_scope_async!(
                 "tsserver_close_file",
                 format!("file={}", file),
                 async {
-                    contents_cache.lock().await.remove(&file);
+                    forget_content(&contents_cache, &content_generations, &file).await;
                     opened_files.lock().await.remove(&file);
+                    // Retract the carrier→project routing for a closed companion so
+                    // it no longer injects `projectFileName` (a closed companion is
+                    // no longer a member; a stale route would target a project the
+                    // companion left). A no-op for a real `.ts`/`.tsx` file (never in
+                    // the carrier map).
+                    carrier_projects.write().remove(&file);
                     transport
                         .command_no_response("close", serde_json::json!({ "file": file }))
                         .await?;
@@ -1131,6 +1342,130 @@ impl TypeProvider for TsserverTypeProvider {
         })
     }
 
+    fn notify_carrier_changed(&self, companion_path: &str) -> ProviderFuture<'_, ()> {
+        let file = Self::normalize_path(companion_path);
+        let transport = Arc::clone(&self.transport);
+        Box::pin(async move {
+            // Evict tsserver's sticky resolution cache for a companion whose
+            // content the carrier-publish store has now warmed. `updateOpen` with
+            // an empty `changedFiles` edit is the documented file-changed signal:
+            // it forces tsserver to re-resolve references to `file` (clearing a
+            // negative `fileExists`/module-resolution result cached while the
+            // companion's blob did not yet exist on disk) without mutating its
+            // content — the plugin serves the now-ready bytes on the re-read.
+            transport
+                .command_no_response(
+                    "updateOpen",
+                    serde_json::json!({
+                        "changedFiles": [{
+                            "fileName": file,
+                            "textChanges": [],
+                        }]
+                    }),
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn register_carrier_member(
+        &self,
+        companion_path: &str,
+        content: &str,
+        project_file_name: &str,
+    ) -> ProviderFuture<'_, ()> {
+        let file = Self::normalize_path(companion_path);
+        let content: Arc<str> = Arc::from(content);
+        let project_file_name = Self::normalize_path(project_file_name);
+        let contents_cache = Arc::clone(&self.contents);
+        let content_generations = Arc::clone(&self.content_generations);
+        let carrier_projects = Arc::clone(&self.carrier_projects);
+        let opened_files = Arc::clone(&self.opened_files);
+        let transport = Arc::clone(&self.transport);
+        let script_kind_name = if file.ends_with(".jsx") {
+            "JSX"
+        } else if file.ends_with(".tsx") {
+            "TSX"
+        } else if file.ends_with(".js") {
+            "JS"
+        } else {
+            "TS"
+        };
+        // `projectRootPath` for the project-load `open` is the tsconfig's directory.
+        let project_root = project_file_name
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .unwrap_or_else(|| project_file_name.clone());
+        Box::pin(async move {
+            // Hydrate the LOCAL position-conversion content for the companion —
+            // the bytes are NEVER forwarded to tsserver (the `open` below carries
+            // NO `fileContent`; the `@verter/typescript-plugin`'s `getScriptSnapshot`
+            // serves the engine-side content from the publish store). Filling
+            // `contents` lets `byte_offset_to_tsserver_pos` (request offsets) and
+            // `parse_tsserver_location` (response spans) work for the carrier instead
+            // of the `(1, offset + 1)` line-1 sentinel.
+            store_content_bump_generation(
+                &contents_cache,
+                &content_generations,
+                &file,
+                Arc::clone(&content),
+            )
+            .await;
+            // Record the owning configured project so carrier queries route there
+            // via `projectFileName` (the companion is an EXTERNAL `getExternalFiles`
+            // member, so its default-project resolution is otherwise undecided —
+            // `ensureDefaultProjectForFile` would throw `No Project` for a virtual
+            // companion on no real-disk path).
+            carrier_projects
+                .write()
+                .insert(file.clone(), project_file_name.clone());
+
+            // CONTENTLESS open of the companion: tsserver does not compute
+            // diagnostics for a file that is not a session buffer, and a carrier's
+            // owning CONFIGURED PROJECT is not created until a file it contains is
+            // opened (without it, `getProject(projectFileName)` misses and
+            // `ensureDefaultProjectForFile` throws `No Project`). The `open` carries
+            // a `projectRootPath` so tsserver creates/finds the configured project
+            // and admits the companion via `getExternalFiles`, and carries NO
+            // `fileContent` so the plugin's `getScriptSnapshot` remains the SOLE
+            // content authority (this is a membership + diagnostics-buffer signal,
+            // never a competing carrier-content open). BOTH companions are opened:
+            // the IDE `.tsx` is the diagnostics surface, and the public-API
+            // `.verter.ts` is re-exported by the IDE companion
+            // (`export { default } from './{name}.verter.ts'`), so its program
+            // contribution must also be loaded for the IDE surface's own
+            // diagnostics (e.g. a no-default-export error) to resolve. Tracked in
+            // `opened_files` (idempotent; a later `close_file` retracts it). Tagged
+            // `CarrierCompanion` so a resync replays it CONTENTLESSLY — never
+            // resending bytes that would make tsserver its content authority.
+            open_carrier_companion_contentless(
+                &transport,
+                &opened_files,
+                &carrier_projects,
+                &file,
+                script_kind_name,
+                &project_root,
+            )
+            .await?;
+            // No per-open project verification: the carrier reaching this point is
+            // ALREADY a confirmed configured-project member. The fail-closed gate
+            // against an inferred / ownerless / ambiguous carrier lives UPSTREAM at
+            // the publish boundary — `WorkspaceProjectResolver` only mints a
+            // `ProjectBinding` (→ `BoundProject` → publish → this registration) for a
+            // resolved configured owner; `NoProject` / `Ambiguous` / scratch publish
+            // and register NOTHING, so an ownerless carrier never opens. A contentless
+            // open transiently associating with tsserver's inferred/default project is
+            // a LOAD-TIMING state, not a wrong owner: carrier queries route with the
+            // resolved `projectFileName`, and the lazy cold-read `reloadProjects`
+            // recovery (`recover_companion_membership`, fired only when a real query
+            // hits "Could not find source file" / "No Project") settles a not-yet-
+            // loaded project on demand. A synchronous per-open `projectInfo` round-trip
+            // would add latency to every carrier open AND race-close a legitimately-
+            // owned companion that is merely still settling.
+            Ok(())
+        })
+    }
+
     fn get_completions(
         &self,
         path: &str,
@@ -1141,6 +1476,7 @@ impl TypeProvider for TsserverTypeProvider {
         let trigger = trigger_character.map(|s| s.to_string());
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -1150,13 +1486,16 @@ impl TypeProvider for TsserverTypeProvider {
                 }
             };
 
-            let mut args = serde_json::json!({
-                "file": file,
-                "line": line,
-                "offset": col,
-                "includeExternalModuleExports": true,
-                "includeInsertTextCompletions": true,
-            });
+            let mut args = inject_project_file_name(
+                serde_json::json!({
+                    "file": file,
+                    "line": line,
+                    "offset": col,
+                    "includeExternalModuleExports": true,
+                    "includeInsertTextCompletions": true,
+                }),
+                &project_file_name,
+            );
 
             if let Some(ref t) = trigger {
                 args["triggerCharacter"] = serde_json::Value::String(t.clone());
@@ -1191,6 +1530,7 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&file);
         Box::pin(async move {
             let (line, col, cache_hit) = {
                 let cache = contents_cache.lock().await;
@@ -1209,16 +1549,40 @@ impl TypeProvider for TsserverTypeProvider {
                     file, offset, line, col, cache_hit,
                 ),
                 async {
-                    let result = transport
-                        .request(
-                            "quickinfo",
-                            serde_json::json!({
-                                "file": file,
-                                "line": line,
-                                "offset": col,
-                            }),
-                        )
-                        .await;
+                    // COLD-build recovery (mirrors `get_diagnostics`): a hover on a
+                    // companion not yet a configured-project member fails with
+                    // "Could not find source file". On that NARROW cold error,
+                    // recover the companion's membership (re-query
+                    // `getExternalFiles`) and re-issue `quickinfo`, bounded by a
+                    // short deadline with cooperative sleeps. The recovery fires
+                    // ONLY on the cold miss, never on a warm hover.
+                    let cold_deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(2500);
+                    let result = loop {
+                        let r = transport
+                            .request(
+                                "quickinfo",
+                                inject_project_file_name(
+                                    serde_json::json!({
+                                        "file": file,
+                                        "line": line,
+                                        "offset": col,
+                                    }),
+                                    &project_file_name,
+                                ),
+                            )
+                            .await;
+                        match r {
+                            Err(e)
+                                if tsserver_diag_error_is_companion_not_ready(&e.message)
+                                    && std::time::Instant::now() < cold_deadline =>
+                            {
+                                recover_companion_membership(&transport).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                            }
+                            other => break other,
+                        }
+                    };
 
                     match result {
                         Ok(body) => {
@@ -1446,6 +1810,11 @@ impl TypeProvider for TsserverTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         let diagnostics_cache = Arc::clone(&self.diagnostics_cache);
+        // Route a carrier companion's diagnostic passes to its OWNING configured
+        // project (so `semanticDiagnosticsSync` type-checks it where
+        // `getExternalFiles` admitted it, not a fresh inferred project that returns
+        // empty). `None` for a non-carrier file (its default project is correct).
+        let project_file_name = self.project_file_name_for(&file);
         Box::pin(async move {
             let content = {
                 let cache = contents_cache.lock().await;
@@ -1460,12 +1829,41 @@ impl TypeProvider for TsserverTypeProvider {
             // parity gap (GAP-2). The semantic pass is authoritative for the
             // success/fallback decision; syntactic/suggestion failures degrade to
             // an empty set for that category rather than failing the whole pull.
-            let semantic_result = transport
-                .request(
-                    "semanticDiagnosticsSync",
-                    serde_json::json!({ "file": file }),
-                )
-                .await;
+            //
+            // COLD-build re-poll: on a freshly built configured project the
+            // just-published companion is not yet a program member tsserver
+            // type-checks, so the semantic pass fails the whole command with
+            // "Could not find source file: <companion>". On that NARROW error,
+            // recover the companion's configured-project membership (re-query
+            // `getExternalFiles` — see `recover_companion_membership`) and re-issue
+            // the semantic pass, bounded by a short deadline with cooperative
+            // sleeps (never a busy-spin). The recovery fires ONLY on this cold miss,
+            // so a warm pull never pays it. Only this error is retried: a genuine
+            // module-not-found arrives in the SUCCESS body (so it never reaches the
+            // error path) and timeouts / closed channels are distinct terminal
+            // strings that fall straight through.
+            let cold_deadline = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+            let semantic_result = loop {
+                let result = transport
+                    .request(
+                        "semanticDiagnosticsSync",
+                        inject_project_file_name(
+                            serde_json::json!({ "file": file }),
+                            &project_file_name,
+                        ),
+                    )
+                    .await;
+                match result {
+                    Err(e)
+                        if tsserver_diag_error_is_companion_not_ready(&e.message)
+                            && std::time::Instant::now() < cold_deadline =>
+                    {
+                        recover_companion_membership(&transport).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                    }
+                    other => break other,
+                }
+            };
 
             match semantic_result {
                 Ok(semantic_body) => {
@@ -1478,7 +1876,10 @@ impl TypeProvider for TsserverTypeProvider {
                     let syntactic = transport
                         .request(
                             "syntacticDiagnosticsSync",
-                            serde_json::json!({ "file": file }),
+                            inject_project_file_name(
+                                serde_json::json!({ "file": file }),
+                                &project_file_name,
+                            ),
                         )
                         .await
                         .ok()
@@ -1494,7 +1895,10 @@ impl TypeProvider for TsserverTypeProvider {
                     let suggestion = transport
                         .request(
                             "suggestionDiagnosticsSync",
-                            serde_json::json!({ "file": file }),
+                            inject_project_file_name(
+                                serde_json::json!({ "file": file }),
+                                &project_file_name,
+                            ),
                         )
                         .await
                         .ok()
@@ -1511,8 +1915,18 @@ impl TypeProvider for TsserverTypeProvider {
                     diagnostics_cache.lock().await.insert(file, diags.clone());
                     Ok(diags)
                 }
+                Err(e) if tsserver_diag_error_is_companion_not_ready(&e.message) => {
+                    // The companion is STILL not in the program after the bounded
+                    // cold-build re-poll. Surface this as a NOT-READY error (do not
+                    // mask it to an empty set, which would warm a torn empty result
+                    // and let it read as "no diagnostics"). Propagating lets the
+                    // caller's diagnostics retry loop re-pull once the project
+                    // finishes building.
+                    Err(e)
+                }
                 Err(_) => {
-                    // Fall back to cached diagnostics
+                    // Any other failure (timeout, closed channel) falls back to the
+                    // last cached diagnostics for this file.
                     let cache = diagnostics_cache.lock().await;
                     Ok(cache.get(&file).cloned().unwrap_or_default())
                 }
@@ -1524,6 +1938,7 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -1536,11 +1951,14 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request(
                     "definition",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": file,
+                            "line": line,
+                            "offset": col,
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await?;
 
@@ -1568,6 +1986,7 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -1580,11 +1999,14 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request(
                     "typeDefinition",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": file,
+                            "line": line,
+                            "offset": col,
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await?;
 
@@ -1608,6 +2030,7 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let project_file_name = self.project_file_name_for(&file);
         Box::pin(async move {
             let (line, col) = {
                 let cache = contents_cache.lock().await;
@@ -1620,11 +2043,14 @@ impl TypeProvider for TsserverTypeProvider {
             let result = transport
                 .request(
                     "references",
-                    serde_json::json!({
-                        "file": file,
-                        "line": line,
-                        "offset": col,
-                    }),
+                    inject_project_file_name(
+                        serde_json::json!({
+                            "file": file,
+                            "line": line,
+                            "offset": col,
+                        }),
+                        &project_file_name,
+                    ),
                 )
                 .await?;
 
@@ -2278,77 +2704,301 @@ impl TypeProvider for TsserverTypeProvider {
         let transport = Arc::clone(&self.transport);
         let opened_files = Arc::clone(&self.opened_files);
         let contents_cache = Arc::clone(&self.contents);
+        let content_generations = Arc::clone(&self.content_generations);
+        let carrier_projects = Arc::clone(&self.carrier_projects);
         let project_roots = Arc::clone(&self.project_roots);
         let workspace_root = self.workspace_root.clone();
         Box::pin(async move {
-            let files: Vec<String> = opened_files.lock().await.iter().cloned().collect();
-            let contents = contents_cache.lock().await;
-            for file in &files {
-                let Some(content) = contents.get(file).cloned() else {
+            resync_open_files_inner(
+                transport,
+                opened_files,
+                contents_cache,
+                content_generations,
+                carrier_projects,
+                project_roots,
+                workspace_root,
+            )
+            .await
+        })
+    }
+}
+
+/// The tsserver `scriptKindName` for a file path.
+fn script_kind_name(file: &str) -> &'static str {
+    if file.ends_with(".tsx") {
+        "TSX"
+    } else if file.ends_with(".jsx") {
+        "JSX"
+    } else if file.ends_with(".js") {
+        "JS"
+    } else {
+        "TS"
+    }
+}
+
+/// Per-file content-generation tracker.
+///
+/// Each content write stamps the file with the NEXT value of a single
+/// process-monotonic counter, so every generation is globally unique and
+/// strictly increasing. A close removes the file's generation; because a later
+/// reopen draws a FRESH counter value (never a recycled per-file count), a stale
+/// captured generation can never alias a reopened file (no ABA), and a resync
+/// that captured a since-closed or since-edited file fails its re-check and
+/// skips the now-stale reopen.
+#[derive(Default)]
+struct ContentGenerations {
+    /// `file` → its content generation at the last write. Synchronous lock taken
+    /// only while the async `contents` guard is held, so the `(content,
+    /// generation)` pair is observed consistently and no lock spans an `.await`.
+    map: parking_lot::Mutex<HashMap<String, u64>>,
+    /// Source of the next, globally-unique generation value.
+    counter: AtomicU64,
+}
+
+impl ContentGenerations {
+    /// The next globally-unique, monotonically-increasing generation value.
+    fn next_generation(&self) -> u64 {
+        self.counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+/// Store a file's content and stamp its content generation atomically.
+///
+/// The generation is drawn and recorded under a SYNCHRONOUS lock taken (and
+/// released) while the async `contents` guard is held, so a concurrent resync
+/// capture observes a consistent `(content, generation)` pair, the generation is
+/// stamped in content-write order, and no lock spans an `.await` (the only await
+/// is acquiring `contents`).
+async fn store_content_bump_generation(
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    generations: &ContentGenerations,
+    file: &str,
+    content: Arc<str>,
+) {
+    let mut guard = contents.lock().await;
+    let next = generations.next_generation();
+    guard.insert(file.to_string(), content);
+    generations.map.lock().insert(file.to_string(), next);
+}
+
+/// Forget a file's content AND its generation (on close). Combined with the
+/// globally-unique counter, a later reopen of the same path draws a fresh
+/// generation a stale captured one cannot match.
+async fn forget_content(
+    contents: &Mutex<HashMap<String, Arc<str>>>,
+    generations: &ContentGenerations,
+    file: &str,
+) {
+    let mut guard = contents.lock().await;
+    guard.remove(file);
+    generations.map.lock().remove(file);
+}
+
+/// The contentless carrier-companion open, factored out of `register_carrier_member`
+/// so the open-failure rollback is unit-testable against a bare transport WITHOUT
+/// spawning a tsserver child. The trait method delegates here, so this IS the
+/// production carrier-open path.
+///
+/// Atomically marks the companion opened (`opened_files`) and, only if newly marked,
+/// issues the CONTENTLESS `open`. On a transport-send FAILURE it ROLLS BACK the
+/// optimistic `opened_files` mark AND the `carrier_projects` routing entry, so a
+/// later registration RE-ATTEMPTS the open instead of observing a phantom "already
+/// opened" (`opened_now == false`) and skipping it forever — which would leave the
+/// companion never a configured-project member (a phantom-registered carrier). The
+/// atomic check-and-mark (not a check-then-mark) keeps two concurrent registrations
+/// from both issuing the open.
+async fn open_carrier_companion_contentless(
+    transport: &TsserverTransport,
+    opened_files: &Arc<Mutex<HashMap<String, OpenKind>>>,
+    carrier_projects: &Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    file: &str,
+    script_kind_name: &str,
+    project_root: &str,
+) -> Result<(), TypeProviderError> {
+    let opened_now = opened_files
+        .lock()
+        .await
+        .insert(file.to_string(), OpenKind::CarrierCompanion)
+        .is_none();
+    if opened_now {
+        if let Err(error) = transport
+            .command_no_response(
+                "open",
+                serde_json::json!({
+                    "file": file,
+                    "scriptKindName": script_kind_name,
+                    "projectRootPath": project_root,
+                }),
+            )
+            .await
+        {
+            opened_files.lock().await.remove(file);
+            carrier_projects.write().remove(file);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// A per-file resync plan entry captured atomically from the live caches.
+struct ResyncEntry {
+    file: String,
+    kind: OpenKind,
+    /// The captured `Source` content (`None` for a carrier companion, which is
+    /// always reopened contentlessly).
+    content: Option<Arc<str>>,
+    /// The per-file content generation at capture time; re-checked before a
+    /// `Source` reopen so a concurrent edit's newer bytes are never overwritten.
+    generation: u64,
+}
+
+/// Capture the resync plan: each opened file's kind, its content snapshot, and
+/// its content generation. The `(content, generation)` pair is read under the
+/// `contents` guard so it is consistent with `store_content_bump_generation`
+/// (no writer can be observed half-applied), and no lock spans an `.await`.
+async fn resync_capture(
+    opened_files: &Mutex<HashMap<String, OpenKind>>,
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
+    content_generations: &ContentGenerations,
+) -> Vec<ResyncEntry> {
+    let files: Vec<(String, OpenKind)> = opened_files
+        .lock()
+        .await
+        .iter()
+        .map(|(file, kind)| (file.clone(), *kind))
+        .collect();
+    let guard = contents_cache.lock().await;
+    let generations = content_generations.map.lock();
+    files
+        .into_iter()
+        .map(|(file, kind)| {
+            let content = guard.get(&file).map(Arc::clone);
+            let generation = generations.get(&file).copied().unwrap_or(0);
+            ResyncEntry {
+                file,
+                kind,
+                content,
+                generation,
+            }
+        })
+        .collect()
+}
+
+/// Apply a captured resync plan: close+reopen each file.
+///
+/// A `Source` entry is reopened WITH its captured content (tsserver is the
+/// source's content authority), but ONLY after a generation re-check confirms a
+/// concurrent `update_file` has not landed newer bytes since capture; if it has,
+/// the now-stale reopen is SKIPPED — the update already pushed the current bytes,
+/// so resending the captured ones would overwrite them (the stale-reopen bug this
+/// gate closes). A `CarrierCompanion` entry is reopened CONTENTLESSLY and routed
+/// to its OWN configured project (the plugin's `getScriptSnapshot` stays the sole
+/// engine-side content authority — resending bytes would make tsserver the
+/// carrier's content owner); it carries no bytes, so it needs no generation gate.
+async fn resync_apply(
+    transport: &TsserverTransport,
+    entries: Vec<ResyncEntry>,
+    contents_cache: &Mutex<HashMap<String, Arc<str>>>,
+    content_generations: &ContentGenerations,
+    carrier_projects: &parking_lot::RwLock<HashMap<String, String>>,
+    project_roots: &parking_lot::RwLock<Vec<String>>,
+    workspace_root: &str,
+) -> Result<(), TypeProviderError> {
+    for entry in entries {
+        let kind_name = script_kind_name(&entry.file);
+        match entry.kind {
+            OpenKind::Source => {
+                let Some(content) = entry.content else {
                     continue;
                 };
-                // Close the file so tsserver forgets its project association
+                // Generation gate: re-read the live generation under the contents
+                // guard (so a writer's atomic content+generation update is never
+                // observed half-applied), immediately before sending the reopen.
+                // If it advanced past the captured value — or the file was closed
+                // (no entry) — a concurrent edit/close already superseded these
+                // bytes; skip the stale reopen rather than clobber the newer state.
+                let still_current = {
+                    let _contents = contents_cache.lock().await;
+                    content_generations.map.lock().get(&entry.file).copied()
+                        == Some(entry.generation)
+                };
+                if !still_current {
+                    continue;
+                }
                 transport
-                    .command_no_response("close", serde_json::json!({ "file": file }))
+                    .command_no_response("close", serde_json::json!({ "file": entry.file }))
                     .await?;
-                // Re-open with fresh projectRootPath from the now-populated project_roots
                 let project_root = {
                     let roots = project_roots.read();
-                    verter_span::path::longest_project_root(file, &roots, &workspace_root)
+                    verter_span::path::longest_project_root(&entry.file, &roots, workspace_root)
                         .to_string()
                 };
                 transport
                     .command_no_response(
                         "open",
                         serde_json::json!({
-                            "file": file,
+                            "file": entry.file,
                             "fileContent": content,
-                            "scriptKindName": if file.ends_with(".tsx") { "TSX" }
-                                else if file.ends_with(".jsx") { "JSX" }
-                                else if file.ends_with(".js") { "JS" }
-                                else { "TS" },
+                            "scriptKindName": kind_name,
                             "projectRootPath": project_root,
                         }),
                     )
                     .await?;
             }
-            Ok(())
-        })
-    }
-
-    fn configure_paths(&self, base_url: &str, paths: serde_json::Value) -> ProviderFuture<'_, ()> {
-        let transport = Arc::clone(&self.transport);
-        let base_url = base_url.to_string();
-        Box::pin(async move {
-            let mut options = serde_json::json!({
-                "module": "esnext",
-                "target": "esnext",
-                "moduleResolution": "bundler",
-                "jsx": "preserve",
-                "jsxImportSource": "vue",
-                "allowImportingTsExtensions": true,
-                "allowJs": true,
-                "checkJs": true,
-                "strict": true,
-                "allowArbitraryExtensions": true,
-                "baseUrl": base_url,
-                "paths": paths,
-            });
-            // Remove null paths (shouldn't happen but be safe)
-            if options.get("paths").is_some_and(|v| v.is_null()) {
-                if let Some(obj) = options.as_object_mut() {
-                    obj.remove("paths");
-                }
+            OpenKind::CarrierCompanion => {
+                let project_root = carrier_projects
+                    .read()
+                    .get(&entry.file)
+                    .and_then(|tsconfig| tsconfig.rsplit_once('/').map(|(dir, _)| dir.to_string()))
+                    .unwrap_or_else(|| {
+                        let roots = project_roots.read();
+                        verter_span::path::longest_project_root(&entry.file, &roots, workspace_root)
+                            .to_string()
+                    });
+                transport
+                    .command_no_response("close", serde_json::json!({ "file": entry.file }))
+                    .await?;
+                transport
+                    .command_no_response(
+                        "open",
+                        serde_json::json!({
+                            "file": entry.file,
+                            "scriptKindName": kind_name,
+                            "projectRootPath": project_root,
+                        }),
+                    )
+                    .await?;
             }
-            let _ = transport
-                .request(
-                    "compilerOptionsForInferredProjects",
-                    serde_json::json!({ "options": options }),
-                )
-                .await;
-            Ok(())
-        })
+        }
     }
+    Ok(())
+}
+
+/// The `resync_open_files` body, factored out of the trait method (which only owns
+/// `Arc`-cloned state) so it is unit-testable against a bare transport + caches
+/// WITHOUT spawning a tsserver child. The method delegates here, so this IS the
+/// production resync path: a [`resync_capture`] snapshot (content + generation)
+/// followed by a generation-gated [`resync_apply`].
+async fn resync_open_files_inner(
+    transport: Arc<TsserverTransport>,
+    opened_files: Arc<Mutex<HashMap<String, OpenKind>>>,
+    contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
+    content_generations: Arc<ContentGenerations>,
+    carrier_projects: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    project_roots: Arc<parking_lot::RwLock<Vec<String>>>,
+    workspace_root: String,
+) -> Result<(), TypeProviderError> {
+    let entries = resync_capture(&opened_files, &contents_cache, &content_generations).await;
+    resync_apply(
+        &transport,
+        entries,
+        &contents_cache,
+        &content_generations,
+        &carrier_projects,
+        &project_roots,
+        &workspace_root,
+    )
+    .await
 }
 
 // ── Helper functions ─────────────────────────────────────────────────

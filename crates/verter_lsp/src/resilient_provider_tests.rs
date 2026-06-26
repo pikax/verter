@@ -321,6 +321,171 @@ async fn restart_replays_all_cached_path_configs() {
 }
 
 #[tokio::test]
+async fn register_carrier_member_forwards_and_replays_after_restart() {
+    let initial = MockTypeProvider::new();
+    let replacement = MockTypeProvider::new();
+    let initial_clone = initial.clone();
+    let replacement_clone = replacement.clone();
+    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement);
+
+    // (i) forward + (ii) cache: a carrier companion registered on the wrapper must
+    // reach the LIVE inner provider (the wrapper must not swallow it in a trait
+    // default no-op — that no-op was the production bug: carriers never registered
+    // with tsserver because the publish path called the wrapper, not the inner).
+    provider
+        .register_carrier_member(
+            "/project/src/App.vue.tsx",
+            "export default {} as any;\n",
+            "/project/tsconfig.json",
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        initial_clone.calls().iter().any(|call| matches!(
+            call,
+            MockCall::RegisterCarrierMember {
+                companion_path,
+                project_file_name,
+                ..
+            } if companion_path == "/project/src/App.vue.tsx"
+                && project_file_name == "/project/tsconfig.json"
+        )),
+        "register_carrier_member must forward to the live inner provider, calls={:?}",
+        initial_clone.calls()
+    );
+
+    // Drive the wrapper into its restarting (inner-down) state, then release the
+    // respawn.
+    assert!(
+        wait_for_restarting(&provider, &crash_notify).await,
+        "inner provider should be down (restarting) after crash notify"
+    );
+    spawn_gate.add_permits(1);
+
+    // (iii) replay: the cached carrier registration is re-issued to the FRESH inner
+    // after restart — carrying the SAME contentless registration payload — so the
+    // carrier re-enters its owning configured project on the replacement provider
+    // before user-facing requests can hit it.
+    let calls = await_replayed_calls(&replacement_clone, 1).await;
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::RegisterCarrierMember {
+                companion_path,
+                content,
+                project_file_name,
+            } if companion_path == "/project/src/App.vue.tsx"
+                && content == "export default {} as any;\n"
+                && project_file_name == "/project/tsconfig.json"
+        )),
+        "a cached carrier registration must replay into the replacement after restart, calls={calls:?}"
+    );
+}
+
+/// Production path: a `register_carrier_member` racing the respawn's carrier
+/// snapshot → replay → inner-swap MUST reach the fresh inner, never be lost.
+///
+/// The window: a registration that caches AFTER the respawn snapshots its carrier
+/// set but BEFORE the inner is swapped in would (pre-fix) see `inner = None`, return
+/// success-as-cached, and be in NEITHER the replay set NOR the live inner. The fix
+/// serializes registration against the snapshot→replay→swap via a gate.
+///
+/// This drives the PRODUCTION `ResilientProvider` wrapper: it pauses the real
+/// respawn INSIDE its carrier replay (by blocking the replacement mock's
+/// `register_carrier_member` on the replayed carrier A — the gate-held window) and
+/// then issues a registration for a DIFFERENT carrier B through the wrapper's
+/// public surface. RED before the fix: B caches post-snapshot, sees `inner = None`,
+/// and never reaches the replacement; GREEN: B blocks on the gate until the swap,
+/// then forwards to the replacement.
+#[tokio::test(flavor = "multi_thread")]
+async fn registration_racing_respawn_replay_reaches_fresh_inner() {
+    let initial = MockTypeProvider::new();
+    let replacement = MockTypeProvider::new();
+    let replacement_clone = replacement.clone();
+
+    let carrier_a = "/project/src/A.vue.tsx";
+    let carrier_b = "/project/src/B.vue.tsx";
+
+    // Pause the respawn's REPLAY of carrier A inside the gate-held window: the
+    // replacement's `register_carrier_member(A)` records then blocks until released.
+    let release_a = replacement.block_register_carrier_member(carrier_a);
+
+    let (provider, crash_notify, spawn_gate) = make_resilient(initial, replacement);
+    let provider = Arc::new(provider);
+
+    // Register carrier A on the wrapper BEFORE the crash so it is in the respawn's
+    // replay snapshot.
+    provider
+        .register_carrier_member(
+            carrier_a,
+            "export default {} as any; // A\n",
+            "/project/tsconfig.json",
+        )
+        .await
+        .unwrap();
+
+    // Trip the crash; the monitor clears the inner and parks on the spawn gate.
+    assert!(
+        wait_for_restarting(&provider, &crash_notify).await,
+        "inner provider should be down (restarting) after crash notify"
+    );
+    // Release the respawn: it spawns the replacement, then replays carrier A —
+    // which BLOCKS in the replacement mock, holding the registration gate across
+    // the snapshot→swap window.
+    spawn_gate.add_permits(1);
+
+    // Wait until A's replay has been recorded — the respawn is now PAUSED mid-replay
+    // (carrier snapshot taken, inner not yet swapped, registration gate held).
+    let replayed = await_replayed_calls(&replacement_clone, 1).await;
+    assert!(
+        replayed.iter().any(|call| matches!(
+            call,
+            MockCall::RegisterCarrierMember { companion_path, .. } if companion_path == carrier_a
+        )),
+        "the respawn must be paused replaying carrier A (the gate-held window), calls={replayed:?}"
+    );
+
+    // Issue carrier B THROUGH the wrapper while the respawn is paused in the window.
+    let provider_for_b = Arc::clone(&provider);
+    let task_b = tokio::spawn(async move {
+        provider_for_b
+            .register_carrier_member(
+                carrier_b,
+                "export default {} as any; // B\n",
+                "/project/tsconfig.json",
+            )
+            .await
+    });
+
+    // No settle needed: the single-writer actor serialises B's command behind the
+    // respawn through its command channel, so B is enqueued and processed after the
+    // swap regardless of timing — the assertion below blocks on the recorded calls
+    // (`await_replayed_calls`), not on a wall-clock delay.
+
+    // Release A → the respawn finishes the replay, swaps in the fresh inner, and
+    // drops the gate. GREEN: B now forwards to the replacement.
+    release_a.notify_one();
+    task_b
+        .await
+        .expect("B task joins")
+        .expect("B registration ok");
+
+    // The fresh inner (replacement) MUST have received carrier B — either by replay
+    // (had it landed before the snapshot) or by the gate-serialized forward. RED:
+    // B was lost in the snapshot→swap window and never reached the replacement.
+    let calls = await_replayed_calls(&replacement_clone, 2).await;
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::RegisterCarrierMember { companion_path, .. } if companion_path == carrier_b
+        )),
+        "a registration racing the respawn replay MUST reach the fresh inner (not be \
+         lost in the snapshot→swap window), calls={calls:?}"
+    );
+}
+
+#[tokio::test]
 async fn resolve_completion_delegates_to_the_inner_provider() {
     let initial = MockTypeProvider::new();
     let replacement = MockTypeProvider::new();

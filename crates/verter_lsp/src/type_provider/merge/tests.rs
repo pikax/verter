@@ -4440,9 +4440,11 @@ fn normalize_carrier_path_strips_dts() {
 }
 
 #[test]
-fn normalize_carrier_path_strips_vue_ts() {
+fn normalize_carrier_path_strips_vue_verter_ts() {
+    // The carrier PUBLIC-API surface is the reserved `.verter.ts` infix; a bare
+    // `App.vue.ts` is NOT the API surface (see `normalize_carrier_path_skips_real_vue_ts`).
     assert_eq!(
-        normalize_carrier_path("/src/App.vue.ts", &carrier_exists),
+        normalize_carrier_path("/src/App.vue.verter.ts", &carrier_exists),
         "/src/App.vue"
     );
 }
@@ -4463,9 +4465,16 @@ fn normalize_carrier_path_strips_svelte_virtual_suffixes() {
         normalize_carrier_path("/src/Comp.svelte.tsx", &carrier_exists),
         "/src/Comp.svelte"
     );
+    // The API surface is the reserved `.verter.ts` infix; a bare `.svelte.ts` is
+    // a RUNE-MODULE path, never the carrier API surface (must NOT strip).
+    assert_eq!(
+        normalize_carrier_path("/src/Comp.svelte.verter.ts", &carrier_exists),
+        "/src/Comp.svelte"
+    );
     assert_eq!(
         normalize_carrier_path("/src/Comp.svelte.ts", &carrier_exists),
-        "/src/Comp.svelte"
+        "/src/Comp.svelte.ts",
+        "a bare .svelte.ts is a rune-module path, not the API surface — passes through"
     );
     assert_eq!(
         normalize_carrier_path("/node_modules/lib/C.svelte.d.ts", &carrier_exists),
@@ -4495,9 +4504,17 @@ fn real_svelte_rune_module_is_not_a_carrier_virtual_file() {
         "/src/store.svelte.ts",
         "a real rune module's path must pass through unchanged (no backing source)"
     );
-    // Contrast: a backed `Foo.svelte.ts` IS the component API virtual file and normalizes.
+    // A backed bare `Foo.svelte.ts` is ALSO a rune-module path now (NOT the API
+    // surface) — the reserved `.verter.` infix is the API carrier — so it passes
+    // through even with a backing `Foo.svelte` component.
     assert_eq!(
         normalize_carrier_path("/src/Foo.svelte.ts", &carrier_exists),
+        "/src/Foo.svelte.ts",
+        "a bare .svelte.ts is a rune-module path, not the API surface"
+    );
+    // Contrast: the reserved `.svelte.verter.ts` API surface DOES normalize to the carrier.
+    assert_eq!(
+        normalize_carrier_path("/src/Foo.svelte.verter.ts", &carrier_exists),
         "/src/Foo.svelte"
     );
 }
@@ -4762,8 +4779,9 @@ fn merge_rename_carrier_api_target_maps_via_api_sourcemap_and_is_included() {
     let api_provider_li = LineIndex::new_utf16(api_surface);
     let api_carrier_li = LineIndex::new_utf16(api_carrier_source);
 
-    // `is_carrier_api_path` requires `path_is_carrier(strip ".ts")` AND the carrier source to exist.
-    let api_path = "/src/Child.vue.ts".to_string();
+    // `is_carrier_api_path` requires the reserved `.verter.ts` API suffix over a
+    // real carrier source (a bare `.vue.ts` is NOT the API surface).
+    let api_path = "/src/Child.vue.verter.ts".to_string();
     let carrier_source_exists = |p: &str| p == "/src/Child.vue";
 
     let type_locations = vec![RenameLocation {
@@ -4916,7 +4934,7 @@ fn merge_rename_carrier_api_target_utf8_session_nonascii_prefix_maps_correct_ran
     let api_carrier_utf16_li = LineIndex::new_utf16(api_carrier_source);
     let api_carrier_utf8_li = LineIndex::new(api_carrier_source, PositionEncodingKind::UTF8);
 
-    let api_path = "/src/Child.vue.ts".to_string();
+    let api_path = "/src/Child.vue.verter.ts".to_string();
     let carrier_source_exists = |p: &str| p == "/src/Child.vue";
     let type_locations = vec![RenameLocation {
         path: api_path.clone(),
@@ -5076,13 +5094,16 @@ fn merge_rename_superseded_virtual_surface_with_real_backing_file_fails_closed()
     // superseded) VIRTUAL surface. If the merge edited this real file it would land at a wrong
     // span and corrupt it.
     let real_ts = "// a real same-named sidecar that must NOT be touched\nexport const foo = 1\n";
-    let real_path = "/src/Child.vue.ts".to_string();
+    // The reserved API-carrier path (`.verter.ts`) is the virtual surface; this
+    // defensive scenario models a real same-named sidecar squatting on it.
+    let real_path = "/src/Child.vue.verter.ts".to_string();
     let reader_path = real_path.clone();
     let real_content: Arc<str> = Arc::from(real_ts);
     let read_source = move |p: &str| (p == reader_path.as_str()).then(|| real_content.clone());
 
-    // `Child.vue` exists → `is_carrier_api_path("/src/Child.vue.ts")` is true (suffix + exists), so
-    // the merge CONSULTS the api resolver for this path (the suffix gate is unchanged).
+    // `Child.vue` exists → `is_carrier_api_path("/src/Child.vue.verter.ts")` is
+    // true (reserved API suffix + carrier source exists), so the merge CONSULTS
+    // the api resolver for this path (the suffix gate is unchanged).
     let carrier_source_exists = |p: &str| p == "/src/Child.vue";
 
     // The resolver classifies this path as a KNOWN virtual surface that can no longer be mapped
@@ -5215,7 +5236,7 @@ fn merge_rename_store_known_virtual_absent_from_capture_routes_virtual_drop_end_
 
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
 
-    let vpath = "/src/Child.vue.ts".to_string();
+    let vpath = "/src/Child.vue.verter.ts".to_string();
     // A REAL same-named sidecar with a renameable symbol on line 1 — the file that would be
     // corrupted if a virtual-surface miss degraded to NotVirtual.
     let real_ts = "// real sidecar that must NOT be touched\nexport const foo = 1\n";

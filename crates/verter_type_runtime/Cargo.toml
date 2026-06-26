@@ -18,5 +18,18 @@ tracing = "0.1.44"
 verter_span = { path = "../verter_span" }
 verter_language = { path = "../verter_language" }
 
+[dev-dependencies]
+# `test-util` provides the paused virtual clock (`#[tokio::test(start_paused = true)]`)
+# the resilient restart-interleaving tests use to drive respawn backoff
+# deterministically without any wall-clock sleep.
+tokio = { version = "1.52", features = [
+    "test-util",
+    "macros",
+    "rt",
+    "sync",
+    "time",
+    "io-util",
+] }
+
 [features]
 default = []

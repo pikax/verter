@@ -18,6 +18,7 @@ use verter_workspace::WorkspaceRead;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
+use crate::external_ts::AbsentReason;
 use crate::provider_sync::ProviderPathKind;
 use crate::type_provider::auto_import::{
     resolve_script_import_anchor, ScriptImportInsertionAnchor,
@@ -200,24 +201,35 @@ impl VerterLanguageServer {
         let _timer = self
             .statistics
             .timer("ide_sync", Some(uri.as_str().to_string()));
-        if let Some(sync) = &self.project_sync {
-            if let Some(canonical_id) = self.documents.get_canonical_id(uri) {
-                self.documents.host().ensure_loaded(&canonical_id);
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return;
+        };
+        self.documents.host().ensure_loaded(&canonical_id);
+        let Some(ide) = self.documents.get_ide(uri) else {
+            tracing::debug!("sync_ide: no IDE output available for {}", uri.as_str());
+            return;
+        };
+        // Route through the SINGLE carrier-sync gateway: the membership decision
+        // (store-backed configured-project member for tsserver) is FUSED with the
+        // provider-state commit. tsserver ⇒ `Published`; tgo ⇒ `DirectOpen` (open the
+        // IDE companion buffer directly).
+        match self
+            .reconcile_carrier_via_gateway(&canonical_id, ide.is_jsx, Some(&ide))
+            .await
+        {
+            crate::external_ts::CarrierSyncDecision::Published {
+                committed_state,
+                receipt,
+            } => {
+                self.commit_carrier_provider_state(&canonical_id, committed_state, &receipt);
             }
-            if let Some(ide) = self.documents.get_ide(uri) {
-                let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
-                    return;
-                };
-                let Some(transition) =
-                    self.prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
-                else {
-                    self.pending_snapshot_provider_sync.insert(canonical_id);
-                    tracing::debug!(
-                        "sync_ide: resolver snapshot unavailable for {}",
-                        uri.as_str()
-                    );
-                    return;
-                };
+            crate::external_ts::CarrierSyncDecision::DirectOpen {
+                transition,
+                receipt,
+            } => {
                 // Close-AFTER-sync (skip-active, per-kind) — uniform with every
                 // owner-resolved Vue sync path.
                 let previous_state = self.provider_sync_state_for_source(&canonical_id);
@@ -241,83 +253,195 @@ impl VerterLanguageServer {
                     committed_state,
                     &stale_paths,
                     &synced_kinds,
+                    &receipt,
                 )
                 .await;
-            } else {
-                tracing::debug!("sync_ide: no IDE output available for {}", uri.as_str());
+            }
+            crate::external_ts::CarrierSyncDecision::Unowned
+            | crate::external_ts::CarrierSyncDecision::Pending => {
+                self.pending_snapshot_provider_sync.insert(canonical_id);
             }
         }
     }
 
     /// Sync the public API (.vue.ts) to the type provider for cross-file component resolution.
     pub(super) async fn sync_api_to_provider(&self, uri: &Uri) {
-        if let Some(sync) = &self.project_sync {
-            let canonical_id = match self.documents.get_canonical_id(uri) {
-                Some(id) => id,
-                None => return,
-            };
-            self.documents.host().ensure_loaded(&canonical_id);
-            if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
-                if let Some(snapshot) = self.published_resolver() {
-                    configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false)
-                        .await;
-                }
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        let canonical_id = match self.documents.get_canonical_id(uri) {
+            Some(id) => id,
+            None => return,
+        };
+        self.documents.host().ensure_loaded(&canonical_id);
+        if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+            if let Some(snapshot) = self.published_resolver() {
+                configure_provider_paths_for_source(sync, &snapshot, &canonical_id, false).await;
             }
-            let Some(transition) = self
-                .documents
-                .get_ide(uri)
-                .and_then(|ide| {
-                    self.prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
-                })
-                .or_else(|| {
-                    self.prepare_carrier_provider_sync_transition(
-                        &canonical_id,
-                        self.documents.is_jsx(uri),
-                    )
-                })
-            else {
-                self.pending_snapshot_provider_sync.insert(canonical_id);
-                return;
-            };
-            // Close-AFTER-sync: capture stale + prior state, sync, then commit +
-            // close only genuinely-stale paths (this path can touch an open Vue
-            // file, so a failed replacement must not close the live path).
-            let previous_state = self.provider_sync_state_for_source(&canonical_id);
-            let stale_paths = transition.stale_paths;
-            let mut committed_state = transition.next;
-            let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
-            if let Some(dts_path) = committed_state.api_path.clone() {
-                if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
-                    let result = if committed_state.api_background_loaded {
-                        sync.sync_dts(&dts_path, &api.code).await
-                    } else {
-                        sync.open_dts(&dts_path, &api.code).await
-                    };
-                    if let Err(e) = result {
-                        tracing::warn!("sync_api: failed for {dts_path}: {e}");
-                    } else {
-                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
-                        synced_kinds.push(ProviderPathKind::Api);
-                        // Record a fresh generation pinning the synced content +
-                        // its same-content source map under this virtual path.
-                        self.record_carrier_api_snapshot(
-                            &canonical_id,
-                            &dts_path,
-                            &api.code,
-                            api.source_map.as_deref(),
-                        );
+        }
+        let ide = self.documents.get_ide(uri);
+        let is_jsx = ide
+            .as_ref()
+            .map(|ide| ide.is_jsx)
+            .unwrap_or_else(|| self.documents.is_jsx(uri));
+        // Route through the SINGLE carrier-sync gateway: membership fused with the
+        // provider-state commit. tsserver ⇒ `Published` (the plugin serves both
+        // companions); tgo ⇒ `DirectOpen` (open the API companion buffer directly).
+        match self
+            .reconcile_carrier_via_gateway(&canonical_id, is_jsx, ide.as_ref())
+            .await
+        {
+            crate::external_ts::CarrierSyncDecision::Published {
+                committed_state,
+                receipt,
+            } => {
+                self.commit_carrier_provider_state(&canonical_id, committed_state, &receipt);
+            }
+            crate::external_ts::CarrierSyncDecision::DirectOpen {
+                transition,
+                receipt,
+            } => {
+                // Close-AFTER-sync: capture stale + prior state, sync, then commit +
+                // close only genuinely-stale paths (this path can touch an open Vue
+                // file, so a failed replacement must not close the live path).
+                let previous_state = self.provider_sync_state_for_source(&canonical_id);
+                let stale_paths = transition.stale_paths;
+                let mut committed_state = transition.next;
+                let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+                if let Some(dts_path) = committed_state.api_path.clone() {
+                    if let Some(api) = self.documents.host.get_public_api(&canonical_id) {
+                        let result = if committed_state.api_background_loaded {
+                            sync.sync_dts(&dts_path, &api.code).await
+                        } else {
+                            sync.open_dts(&dts_path, &api.code).await
+                        };
+                        if let Err(e) = result {
+                            tracing::warn!("sync_api: failed for {dts_path}: {e}");
+                        } else {
+                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            synced_kinds.push(ProviderPathKind::Api);
+                            // Record a fresh generation pinning the synced content +
+                            // its same-content source map under this virtual path.
+                            self.record_carrier_api_snapshot(
+                                &canonical_id,
+                                &dts_path,
+                                &api.code,
+                                api.source_map.as_deref(),
+                            );
+                        }
                     }
                 }
+                self.commit_and_close_after_sync(
+                    &canonical_id,
+                    previous_state.as_ref(),
+                    committed_state,
+                    &stale_paths,
+                    &synced_kinds,
+                    &receipt,
+                )
+                .await;
             }
-            self.commit_and_close_after_sync(
-                &canonical_id,
-                previous_state.as_ref(),
-                committed_state,
-                &stale_paths,
-                &synced_kinds,
-            )
-            .await;
+            crate::external_ts::CarrierSyncDecision::Unowned
+            | crate::external_ts::CarrierSyncDecision::Pending => {
+                self.pending_snapshot_provider_sync.insert(canonical_id);
+            }
         }
+    }
+
+    /// Publish a carrier's companions into the project-bound store the
+    /// `@verter/typescript-plugin` reads — the tsserver carrier-membership path
+    /// for the INTERACTIVE sync entry points (the drain has its own publish).
+    ///
+    /// Returns `true` when the tsserver publish path HANDLED this carrier (the
+    /// caller must NOT also open the companions directly), `false` when there is
+    /// no coordinator (tgo / no provider) so the caller runs the direct
+    /// `open_file`/`sync_*` path. Resolution is fail-closed inside the coordinator
+    /// (a no-owner/ambiguous source publishes nothing — but it is still
+    /// "handled": the carrier is intentionally not a member, never opened).
+    ///
+    /// Recompiles the IDE + public-API surfaces (the same content the direct path
+    /// syncs), records the API provider surface for span classification, and
+    /// publishes through the shared coordinator (which mints the witness, runs the
+    /// two-phase store publish, and evicts the post-warm sticky resolution).
+    pub(super) async fn publish_carrier_to_external_ts(&self, canonical_id: &str) -> bool {
+        // Only a framework carrier (`.vue`/`.svelte`) with a tsserver coordinator is
+        // published; a non-carrier file (or tgo / no provider) is NOT handled here —
+        // it falls through to the caller's direct-open path.
+        if self.carrier_publish_coordinator.is_none() {
+            return false;
+        }
+        if carrier_language_for(canonical_id).is_none() {
+            return false;
+        }
+        self.documents.host().ensure_loaded(canonical_id);
+        let profile = self.documents.tsx_profile.read().clone();
+        let _ = block_in_place_if_available(|| {
+            self.documents
+                .host
+                .ensure_ide_compiled(canonical_id, &profile)
+        });
+        let ide =
+            block_in_place_if_available(|| self.documents.host.get_ide(canonical_id, &profile));
+        let is_jsx = ide.as_ref().map(|o| o.is_jsx).unwrap_or(false);
+
+        // This is the MEMBERSHIP-refresh entry (eager carrier refresh / cross-file
+        // prewarm): route through the SINGLE carrier-sync gateway for the store
+        // membership decision (publish on owned / retract on owner-loss). The
+        // provider-state COMMIT is the caller's responsibility here, so the gateway's
+        // `Published` committed_state + receipt are intentionally discarded — only the
+        // store membership is refreshed. Fail-closed inside the gateway.
+        let _ = self
+            .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref())
+            .await;
+        true
+    }
+
+    /// Retract a carrier source from the external-TS engine — the DELETE /
+    /// file-removed transition for the tsserver engine. Routes through the
+    /// reconciler's `remove_source_membership`, which retracts the durable on-disk
+    /// store, closes the provider companion buffers, and tombstones the ledger so the
+    /// carrier disappears from the ledger-backed `getExternalFiles`. `Ok(())` when
+    /// there is no tsserver coordinator (tgo / no provider); a reconcile failure is
+    /// PROPAGATED (never swallowed) so a delete caller can surface it.
+    pub(super) async fn retract_carrier_from_external_ts(
+        &self,
+        canonical_id: &str,
+    ) -> Result<(), crate::external_ts::ReconcileErr> {
+        if let Some(coordinator) = self.carrier_publish_coordinator.as_ref() {
+            // The Tombstoned outcome is observed via the ledger; the delete caller
+            // needs only success-vs-failure (propagated).
+            let _outcome = coordinator
+                .remove_membership(canonical_id, AbsentReason::Deleted)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The source-membership ledger — INTERNAL transition bookkeeping (the
+    /// reconciler's sole writer is its `commit`). `None` for tgo / no-provider (no
+    /// external-TS engine). It is NOT the production serve path: live `getExternalFiles`
+    /// is served CROSS-PROCESS from the on-disk store `ready_files`. This in-process
+    /// ledger read is the TEST-SIDE authority the production-path tests assert
+    /// membership against (the value the reconciler keeps consistent with that store).
+    #[cfg(test)]
+    #[must_use]
+    pub(super) fn membership_ledger(&self) -> Option<&Arc<crate::external_ts::MembershipLedger>> {
+        self.carrier_publish_coordinator
+            .as_ref()
+            .map(|coordinator| coordinator.backend().membership_ledger())
+    }
+
+    /// The carrier-companion provider paths advertised for `project` per the in-process
+    /// ledger — a TEST-SIDE view of the reconciler's membership bookkeeping, NOT the
+    /// production `getExternalFiles` path (which the plugin serves cross-process from
+    /// the on-disk store `ready_files`). Empty for tgo / no-provider.
+    #[cfg(test)]
+    #[must_use]
+    pub(super) fn external_ts_advertised_for_project(&self, project: &str) -> Vec<String> {
+        self.carrier_publish_coordinator
+            .as_ref()
+            .map(|coordinator| coordinator.backend().external_files_for_project(project))
+            .unwrap_or_default()
     }
 
     pub(super) async fn sync_carrier_public_api_by_canonical_id(&self, canonical_id: &str) {
@@ -595,24 +719,26 @@ impl VerterLanguageServer {
         let Some(canonical_id) = self.documents.get_canonical_id(&uri) else {
             return;
         };
+        // tsserver: the API companion reaches the engine through the store-backed
+        // membership (the background ProjectSync content task below is a no-op for
+        // tsserver), so queue the carrier for the drain, which reconciles it through
+        // the single membership reconciler. The direct background task is the tgo
+        // route.
+        if self.carrier_publish_coordinator.is_some() {
+            self.pending_snapshot_provider_sync.insert(canonical_id);
+            return;
+        }
         let Some(snapshot) = self.published_resolver() else {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
         };
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
-        let Some(transition) = self
-            .prepare_carrier_provider_sync_transition(&canonical_id, self.documents.is_jsx(&uri))
-        else {
-            self.pending_snapshot_provider_sync.insert(canonical_id);
-            return;
-        };
-        // No API path → nothing for the API-only background task to do.
-        if transition.next.api_path.is_none() {
-            return;
-        }
-        // The background task routes through the per-kind close-after-successful-
-        // sync discipline: it manages ONLY the API kind, reverts the IDE kind to
-        // its prior live path, and must never close or rebind the live IDE `.tsx`.
+        let is_jsx = self.documents.is_jsx(&uri);
+        // The background task routes through the SINGLE carrier-sync gateway (TGO
+        // direct-open) for its transition + receipt, then applies the per-kind
+        // close-after-successful-sync discipline: it manages ONLY the API kind,
+        // reverts the IDE kind to its prior live path, and must never close or
+        // rebind the live IDE `.tsx`.
         let host = self.documents.host_arc();
         let provider_sync_states = Arc::clone(&self.provider_sync_states);
         let provider_surfaces = self.documents.provider_surfaces().clone();
@@ -624,7 +750,7 @@ impl VerterLanguageServer {
                 provider_sync_states,
                 provider_surfaces,
                 canonical_id,
-                transition,
+                is_jsx,
                 is_tsgo,
             ),
         );
@@ -710,11 +836,27 @@ impl VerterLanguageServer {
         // + auto-ingress handles recursive dependency walking.
         self.documents.host().ensure_loaded(&canonical_id);
 
-        // Recompile + refresh mapper (in case blocker hydration changed TSX)
+        // Recompile + refresh mapper (in case blocker hydration changed TSX) BEFORE
+        // the carrier-sync gateway runs, so a tsserver membership publish advertises
+        // the freshly-compiled companions.
         self.documents.recompile_and_refresh_mapper(uri);
 
         let ide = self.documents.get_ide(uri);
         let is_jsx = ide.as_ref().map(|r| r.is_jsx).unwrap_or(false);
+
+        // Route the carrier MEMBERSHIP decision through the SINGLE carrier-sync
+        // gateway and capture the receipt that GATES the owner-resolved commit below.
+        // tsserver: PUBLISHES the carrier's companions into the store the plugin reads
+        // (the configured-project membership) and returns `Published`; the IDE
+        // companion is STILL opened below (tsserver `geterr` runs on open buffers) —
+        // membership (plugin) + open buffer (diagnostics) complement. tgo: returns
+        // `DirectOpen` (no store), minting the receipt for the direct open+commit. An
+        // owner-loss (`Unowned`) RETRACTS the membership inside the gateway and yields
+        // no receipt (the open-document liveness commit below is membership-free).
+        let owned_commit_receipt = self
+            .reconcile_carrier_via_gateway(&canonical_id, is_jsx, ide.as_ref())
+            .await
+            .into_owned_receipt();
 
         // Determine sync plan: owner-aware, unresolved, or skip.
         let snapshot = self.published_resolver();
@@ -727,43 +869,44 @@ impl VerterLanguageServer {
                     // Non-carrier file: IDE sync not applicable.
                     return;
                 };
-                match crate::provider_sync::carrier_sync_state_for_source(
+                if crate::provider_sync::current_owner_binding_for_source(
                     &snap.resolver,
                     &canonical_id,
-                    is_jsx,
-                ) {
-                    Some(_) => (ide_path, false),
-                    None => {
-                        // Ready snapshot but no owner for this Vue file. Editor-
-                        // liveness invariant: an OPEN document keeps its TSX live
-                        // as UNRESOLVED open-document state instead of closing it.
-                        //
-                        // Route an OPEN file through the shared
-                        // `preserve_open_unresolved_carrier` primitive (forces
-                        // `Unresolved`, preserves the live IDE TSX, drops AND
-                        // CLOSES the stale owner-derived `.vue.ts`), queue it for a
-                        // future owner reconciliation, and return. This is the
-                        // owner-loss/mismatch reconcile (R2-5): a previously-
-                        // `Owned` open file that lost its owner must shed its stale
-                        // `Owned` binding + owner-derived API path here, not retain
-                        // them via an early return or an inline commit that leaks
-                        // the dropped `.vue.ts`.
-                        if self.documents.canonical_id_to_uri(&canonical_id).is_some() {
-                            self.preserve_open_unresolved_carrier(
-                                &canonical_id,
-                                is_jsx,
-                                ide.as_ref().map(|output| &*output.code),
-                            )
-                            .await;
-                            self.queue_snapshot_provider_sync(canonical_id.clone());
-                            self.needs_deferred_sync.insert(canonical_id);
-                            return;
-                        }
-                        // Closed/non-open Vue file with no owner: fall through with
-                        // `unresolved = true` (the shared commit records an
-                        // `Unresolved` binding carrying this IDE path).
-                        (ide_path, true)
+                )
+                .is_unresolved()
+                {
+                    // Ready snapshot but no owner for this Vue file. Editor-
+                    // liveness invariant: an OPEN document keeps its TSX live
+                    // as UNRESOLVED open-document state instead of closing it.
+                    //
+                    // Route an OPEN file through the shared
+                    // `preserve_open_unresolved_carrier` primitive (forces
+                    // `Unresolved`, preserves the live IDE TSX, drops AND
+                    // CLOSES the stale owner-derived `.vue.ts`), queue it for a
+                    // future owner reconciliation, and return. This is the
+                    // owner-loss/mismatch reconcile (R2-5): a previously-
+                    // `Owned` open file that lost its owner must shed its stale
+                    // `Owned` binding + owner-derived API path here, not retain
+                    // them via an early return or an inline commit that leaks
+                    // the dropped `.vue.ts`. The gateway above already RETRACTED
+                    // the STORE/ledger membership; this preserve is membership-free.
+                    if self.documents.canonical_id_to_uri(&canonical_id).is_some() {
+                        self.preserve_open_unresolved_carrier(
+                            &canonical_id,
+                            is_jsx,
+                            ide.as_ref().map(|output| &*output.code),
+                        )
+                        .await;
+                        self.queue_snapshot_provider_sync(canonical_id.clone());
+                        self.needs_deferred_sync.insert(canonical_id);
+                        return;
                     }
+                    // Closed/non-open Vue file with no owner: fall through with
+                    // `unresolved = true` (the shared commit records an
+                    // `Unresolved` binding carrying this IDE path).
+                    (ide_path, true)
+                } else {
+                    (ide_path, false)
                 }
             }
             Some(snap) => {
@@ -841,31 +984,31 @@ impl VerterLanguageServer {
                         api_path: None,
                         ..Default::default()
                     }
-                } else if let Some(snapshot) = &snapshot {
-                    crate::provider_sync::carrier_sync_state_for_source(
-                        &snapshot.resolver,
-                        &canonical_id,
-                        is_jsx,
-                    )
-                    .unwrap_or_else(|| {
-                        crate::provider_sync::ProviderSyncState {
+                } else {
+                    // Owner-resolved carrier: the owner-aware provider paths (the
+                    // same computation the gateway used to mint the receipt). A miss
+                    // (snapshot lost mid-sync) falls back to an unresolved state.
+                    self.carrier_close_state(&canonical_id, is_jsx)
+                        .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
                             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
                             ide_path: Some(ide_path.clone()),
                             api_path: None,
                             ..Default::default()
-                        }
-                    })
-                } else {
-                    // No VFS workspace (rare) — unresolved fallback
-                    crate::provider_sync::ProviderSyncState {
-                        owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
-                        ide_path: Some(ide_path.clone()),
-                        api_path: None,
-                        ..Default::default()
-                    }
+                        })
                 };
                 state.set_background_loaded(ProviderPathKind::Ide, true);
-                self.commit_provider_sync_state(&canonical_id, state);
+                // An owner-resolved (carrier) commit is GATED on the gateway receipt;
+                // an UNRESOLVED open-document liveness state is membership-free and
+                // commits through the plain non-carrier path. If the gateway did not
+                // advertise this pass (transient compile/membership defer), the owned
+                // state is left uncommitted and queued — NEVER committed ungated.
+                if unresolved {
+                    self.commit_provider_sync_state(&canonical_id, state);
+                } else if let Some(receipt) = &owned_commit_receipt {
+                    self.commit_carrier_provider_state(&canonical_id, state, receipt);
+                } else {
+                    self.queue_snapshot_provider_sync(canonical_id.clone());
+                }
 
                 // FIX-7: only NOW — after the new path synced and the new state
                 // is committed — close the previous IDE path if it differs. On
@@ -1696,6 +1839,7 @@ impl VerterLanguageServer {
                 ))
             },
             vfs_workspace: Arc::clone(&self.vfs_workspace),
+            carrier_publish_coordinator: self.carrier_publish_coordinator.clone(),
         };
 
         let ctx = context.to_owned();
@@ -1752,86 +1896,110 @@ impl VerterLanguageServer {
 
             if let Some(sync) = &self.project_sync {
                 let is_jsx = ide.as_ref().map(|output| output.is_jsx).unwrap_or(false);
-                let Some(transition) =
-                    self.prepare_carrier_provider_sync_transition(canonical_id, is_jsx)
-                else {
-                    // Ready snapshot but no owner. Editor-liveness invariant: an
-                    // OPEN imported `.vue` (imported-by-an-open-file) must keep
-                    // its TSX live as Unresolved open-document state — NEVER
-                    // clear+close. Only a genuinely non-open import is removed.
-                    if self.documents.canonical_id_to_uri(canonical_id).is_some() {
-                        self.preserve_open_unresolved_carrier(
+                // Route through the SINGLE carrier-sync gateway (membership fused with
+                // the provider-state transition + receipt). An imported child carrier
+                // reaches tsserver as a store-backed configured-project member
+                // (`Published`); tgo opens the companions directly (`DirectOpen`).
+                match self
+                    .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref())
+                    .await
+                {
+                    crate::external_ts::CarrierSyncDecision::Published {
+                        committed_state,
+                        receipt,
+                    } => {
+                        self.commit_carrier_provider_state(canonical_id, committed_state, &receipt);
+                    }
+                    crate::external_ts::CarrierSyncDecision::DirectOpen {
+                        transition,
+                        receipt,
+                    } => {
+                        // Owner-resolved: sync NEW paths first, then close stale-after-
+                        // success (per-kind, skip-active). This branch can touch an open
+                        // file, so a failed replacement must not close the live path.
+                        let previous_state = self.provider_sync_state_for_source(canonical_id);
+                        let stale_paths = transition.stale_paths;
+                        let mut committed_state = transition.next;
+                        let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+
+                        if let Some(ide) = ide.as_ref() {
+                            if let Some(ide_path) = committed_state.ide_path.clone() {
+                                let result = if committed_state.ide_background_loaded {
+                                    sync.sync_tsx(&ide_path, &ide.code).await
+                                } else {
+                                    sync.open_tsx(&ide_path, &ide.code).await
+                                };
+                                if result.is_ok() {
+                                    committed_state
+                                        .set_background_loaded(ProviderPathKind::Ide, true);
+                                    synced_kinds.push(ProviderPathKind::Ide);
+                                } else if let Err(error) = result {
+                                    tracing::warn!(
+                                        "sync_imported_carrier_api_lightweight: failed for {ide_path}: {error}"
+                                    );
+                                    self.queue_snapshot_provider_sync(canonical_id.to_string());
+                                }
+                            }
+                        }
+
+                        if let Some(dts_path) = committed_state.api_path.clone() {
+                            let result = if committed_state.api_background_loaded {
+                                sync.sync_dts(&dts_path, &api.code).await
+                            } else {
+                                sync.open_dts(&dts_path, &api.code).await
+                            };
+                            if result.is_ok() {
+                                committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                                synced_kinds.push(ProviderPathKind::Api);
+                                // Record a fresh generation pinning the EXACT content +
+                                // its same-content source map under this virtual path.
+                                self.record_carrier_api_snapshot(
+                                    canonical_id,
+                                    &dts_path,
+                                    &api.code,
+                                    api.source_map.as_deref(),
+                                );
+                            } else if let Err(e) = result {
+                                tracing::warn!(
+                                    "sync_imported_carrier_api_lightweight: failed for {dts_path}: {e}"
+                                );
+                                self.queue_snapshot_provider_sync(canonical_id.to_string());
+                            }
+                        }
+
+                        self.commit_and_close_after_sync(
                             canonical_id,
-                            is_jsx,
-                            ide.as_ref().map(|output| &*output.code),
+                            previous_state.as_ref(),
+                            committed_state,
+                            &stale_paths,
+                            &synced_kinds,
+                            &receipt,
                         )
                         .await;
-                    } else {
-                        self.clear_provider_sync_state(canonical_id).await;
                     }
-                    self.queue_snapshot_provider_sync(canonical_id.to_string());
-                    return;
-                };
-                // Owner-resolved: sync NEW paths first, then close stale-after-
-                // success (per-kind, skip-active). This branch can touch an open
-                // file, so a failed replacement must not close the live path.
-                let previous_state = self.provider_sync_state_for_source(canonical_id);
-                let stale_paths = transition.stale_paths;
-                let mut committed_state = transition.next;
-                let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
-
-                if let Some(ide) = ide.as_ref() {
-                    if let Some(ide_path) = committed_state.ide_path.clone() {
-                        let result = if committed_state.ide_background_loaded {
-                            sync.sync_tsx(&ide_path, &ide.code).await
+                    crate::external_ts::CarrierSyncDecision::Unowned => {
+                        // Ready snapshot but no owner. Editor-liveness invariant: an
+                        // OPEN imported `.vue` (imported-by-an-open-file) must keep its
+                        // TSX live as Unresolved open-document state — NEVER clear+close.
+                        // Only a genuinely non-open import is removed. The gateway has
+                        // already RETRACTED the STORE/ledger membership; the open-document
+                        // liveness commit below is membership-free (no receipt).
+                        if self.documents.canonical_id_to_uri(canonical_id).is_some() {
+                            self.preserve_open_unresolved_carrier(
+                                canonical_id,
+                                is_jsx,
+                                ide.as_ref().map(|output| &*output.code),
+                            )
+                            .await;
                         } else {
-                            sync.open_tsx(&ide_path, &ide.code).await
-                        };
-                        if result.is_ok() {
-                            committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                            synced_kinds.push(ProviderPathKind::Ide);
-                        } else if let Err(error) = result {
-                            tracing::warn!(
-                                "sync_imported_carrier_api_lightweight: failed for {ide_path}: {error}"
-                            );
-                            self.queue_snapshot_provider_sync(canonical_id.to_string());
+                            self.clear_provider_sync_state(canonical_id).await;
                         }
+                        self.queue_snapshot_provider_sync(canonical_id.to_string());
                     }
-                }
-
-                if let Some(dts_path) = committed_state.api_path.clone() {
-                    let result = if committed_state.api_background_loaded {
-                        sync.sync_dts(&dts_path, &api.code).await
-                    } else {
-                        sync.open_dts(&dts_path, &api.code).await
-                    };
-                    if result.is_ok() {
-                        committed_state.set_background_loaded(ProviderPathKind::Api, true);
-                        synced_kinds.push(ProviderPathKind::Api);
-                        // Record a fresh generation pinning the EXACT content +
-                        // its same-content source map under this virtual path.
-                        self.record_carrier_api_snapshot(
-                            canonical_id,
-                            &dts_path,
-                            &api.code,
-                            api.source_map.as_deref(),
-                        );
-                    } else if let Err(e) = result {
-                        tracing::warn!(
-                            "sync_imported_carrier_api_lightweight: failed for {dts_path}: {e}"
-                        );
+                    crate::external_ts::CarrierSyncDecision::Pending => {
                         self.queue_snapshot_provider_sync(canonical_id.to_string());
                     }
                 }
-
-                self.commit_and_close_after_sync(
-                    canonical_id,
-                    previous_state.as_ref(),
-                    committed_state,
-                    &stale_paths,
-                    &synced_kinds,
-                )
-                .await;
             }
             return;
         }
@@ -1973,98 +2141,116 @@ impl VerterLanguageServer {
                 configure_provider_paths_for_source(sync, &snapshot, canonical_id, true).await;
             }
         }
-        let Some(transition) = self.prepare_carrier_provider_sync_transition(canonical_id, is_jsx)
-        else {
-            // Ready snapshot but no owner. Editor-liveness invariant: an OPEN
-            // Vue document keeps its TSX live as Unresolved open-document state
-            // (the binding is reconciled to `Unresolved` and the owner-derived
-            // `.vue.ts` is dropped+closed) — only a genuinely non-open
-            // (background) file is cleared. This runs BEFORE requiring IDE
-            // output, so a compile miss can never leave a stale `Owned` binding
-            // alive (R3-5). The preserve helper syncs fresh IDE code only when it
-            // is available (`ide.code`), else it just corrects the binding.
-            if self.documents.canonical_id_to_uri(canonical_id).is_some() {
-                self.preserve_open_unresolved_carrier(
+        // Route the owner-resolved sync through the SINGLE carrier-sync gateway: the
+        // membership decision is FUSED with the provider-state transition + the
+        // sealed receipt that gates the commit. tsserver advertised ⇒ `Published`
+        // (commit the store-resident state); tgo ⇒ `DirectOpen` (per-kind open +
+        // commit); owner loss ⇒ `Unowned` (retract done in the gateway; preserve the
+        // open-document liveness state or clear a non-open file); bootstrap/degraded
+        // ⇒ `Pending` (keep queued).
+        match self
+            .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide)
+            .await
+        {
+            crate::external_ts::CarrierSyncDecision::Published {
+                committed_state,
+                receipt,
+            } => {
+                self.commit_carrier_provider_state(canonical_id, committed_state, &receipt);
+            }
+            crate::external_ts::CarrierSyncDecision::DirectOpen {
+                transition,
+                receipt,
+            } => {
+                // Close-AFTER-sync (per-kind, skip-active): capture stale + prior
+                // state, sync each kind, then commit (receipt-gated) + close
+                // genuinely-stale.
+                let previous_state = self.provider_sync_state_for_source(canonical_id);
+                let stale_paths = transition.stale_paths;
+                let mut committed_state = transition.next;
+                let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
+
+                // Owner-resolved IDE sync runs only when fresh IDE code is available.
+                // On a transient IDE compile miss (`ide == None`) the owner binding is
+                // still correct (`Owned`), so the IDE kind simply does not sync this
+                // pass — the API kind below may still sync, and no stale binding is
+                // left behind.
+                if let (Some(ide), Some(tsx_path)) = (ide, committed_state.ide_path.clone()) {
+                    let is_bg = self
+                        .is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
+                    let result = if is_bg {
+                        sync.sync_tsx(&tsx_path, &ide.code).await
+                    } else {
+                        sync.open_tsx(&tsx_path, &ide.code).await
+                    };
+                    if result.is_ok() {
+                        committed_state.set_background_loaded(ProviderPathKind::Ide, true);
+                        synced_kinds.push(ProviderPathKind::Ide);
+                    } else if let Err(e) = result {
+                        tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
+                    }
+                }
+
+                // Sync .vue.ts as secondary provider support output.
+                if let Some(api) = self.documents.host.get_public_api(canonical_id) {
+                    if let Some(dts_path) = committed_state.api_path.clone() {
+                        let is_bg = self.is_background_loaded_for_source_kind(
+                            canonical_id,
+                            ProviderPathKind::Api,
+                        );
+                        let result = if is_bg {
+                            sync.sync_dts(&dts_path, &api.code).await
+                        } else {
+                            // First-time DTS sync: open_dts sends it to the provider
+                            // (load_dts only caches locally, breaking cross-file ops).
+                            sync.open_dts(&dts_path, &api.code).await
+                        };
+                        if result.is_ok() {
+                            committed_state.set_background_loaded(ProviderPathKind::Api, true);
+                            synced_kinds.push(ProviderPathKind::Api);
+                            // Record a fresh generation pinning the synced content +
+                            // its same-content source map under this virtual path.
+                            self.record_carrier_api_snapshot(
+                                canonical_id,
+                                &dts_path,
+                                &api.code,
+                                api.source_map.as_deref(),
+                            );
+                        }
+                    }
+                }
+
+                self.commit_and_close_after_sync(
                     canonical_id,
-                    is_jsx,
-                    ide.map(|output| &*output.code),
+                    previous_state.as_ref(),
+                    committed_state,
+                    &stale_paths,
+                    &synced_kinds,
+                    &receipt,
                 )
                 .await;
-            } else {
-                self.clear_provider_sync_state(canonical_id).await;
             }
-            self.queue_snapshot_provider_sync(canonical_id.to_string());
-            return;
-        };
-        // Close-AFTER-sync (per-kind, skip-active): capture stale + prior
-        // state, sync each kind, then commit + close genuinely-stale.
-        let previous_state = self.provider_sync_state_for_source(canonical_id);
-        let stale_paths = transition.stale_paths;
-        let mut committed_state = transition.next;
-        let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
-
-        // Owner-resolved IDE sync runs only when fresh IDE code is available. On
-        // a transient IDE compile miss (`ide == None`) the owner binding is still
-        // correct (`Owned`), so the IDE kind simply does not sync this pass — the
-        // API kind below may still sync, and no stale binding is left behind.
-        if let (Some(ide), Some(tsx_path)) = (ide, committed_state.ide_path.clone()) {
-            let is_bg =
-                self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Ide);
-            let result = if is_bg {
-                sync.sync_tsx(&tsx_path, &ide.code).await
-            } else {
-                sync.open_tsx(&tsx_path, &ide.code).await
-            };
-            if result.is_ok() {
-                committed_state.set_background_loaded(ProviderPathKind::Ide, true);
-                synced_kinds.push(ProviderPathKind::Ide);
-            } else if let Err(e) = result {
-                tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
-            }
-        }
-
-        // Sync .vue.ts as secondary provider support output.
-        if let Some(api) = self.documents.host.get_public_api(canonical_id) {
-            if let Some(dts_path) = committed_state.api_path.clone() {
-                let is_bg =
-                    self.is_background_loaded_for_source_kind(canonical_id, ProviderPathKind::Api);
-                let result = if is_tsgo {
-                    // TSGO: open/update DTS so it's in TSGO's virtual FS alongside the IDE file.
-                    if is_bg {
-                        sync.sync_dts(&dts_path, &api.code).await
-                    } else {
-                        sync.open_dts(&dts_path, &api.code).await
-                    }
-                } else if is_bg {
-                    sync.sync_dts(&dts_path, &api.code).await
-                } else {
-                    // First-time DTS sync: use open_dts to send to the type provider.
-                    // load_dts only caches locally (tsserver wouldn't know the file),
-                    // which breaks cross-file operations like rename.
-                    sync.open_dts(&dts_path, &api.code).await
-                };
-                if result.is_ok() {
-                    committed_state.set_background_loaded(ProviderPathKind::Api, true);
-                    synced_kinds.push(ProviderPathKind::Api);
-                    // Record a fresh generation pinning the synced content + its
-                    // same-content source map under this virtual path.
-                    self.record_carrier_api_snapshot(
+            crate::external_ts::CarrierSyncDecision::Unowned => {
+                // Ready snapshot but no owner. Editor-liveness invariant: an OPEN Vue
+                // document keeps its TSX live as Unresolved open-document state — only
+                // a genuinely non-open (background) file is cleared. The gateway has
+                // already RETRACTED the STORE/ledger membership; the open-document
+                // liveness commit below is membership-free (no receipt).
+                if self.documents.canonical_id_to_uri(canonical_id).is_some() {
+                    self.preserve_open_unresolved_carrier(
                         canonical_id,
-                        &dts_path,
-                        &api.code,
-                        api.source_map.as_deref(),
-                    );
+                        is_jsx,
+                        ide.map(|output| &*output.code),
+                    )
+                    .await;
+                } else {
+                    self.clear_provider_sync_state(canonical_id).await;
                 }
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+            }
+            crate::external_ts::CarrierSyncDecision::Pending => {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
             }
         }
-
-        self.commit_and_close_after_sync(
-            canonical_id,
-            previous_state.as_ref(),
-            committed_state,
-            &stale_paths,
-            &synced_kinds,
-        )
-        .await;
     }
 }

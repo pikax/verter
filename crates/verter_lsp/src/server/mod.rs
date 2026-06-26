@@ -332,14 +332,29 @@ pub struct VerterLanguageServer {
     /// canonical (transitive deps NOT invalidated — codified
     /// limitation).
     hover_provenance_cache: Arc<crate::features::hover_provenance::HoverProvenanceCache>,
+    /// The live carrier-publish coordinator for the tsserver engine — the seam
+    /// that makes a framework carrier a member of its REAL configured project by
+    /// publishing its companions into the on-disk store the
+    /// `@verter/typescript-plugin` reads. `Some` only when the active provider is
+    /// tsserver: for tsserver the carrier companions reach the engine through the
+    /// store + plugin membership (NOT a direct `provider.open_file`); for tsgo the
+    /// existing inferred carrier-open path is used. The backend it holds resolves
+    /// the SAME store dir the tsserver spawn delivers to the plugin.
+    carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
 }
 
 impl VerterLanguageServer {
     pub fn new(client: Client, config: LspConfig) -> Self {
-        let project_sync = config
-            .type_provider
-            .as_ref()
-            .map(|tp| ProjectSync::new(Arc::clone(tp), config.project_sync_mode));
+        let project_sync = config.type_provider.as_ref().map(|tp| {
+            // Bind the sync to the active engine kind so the carrier-companion
+            // content opens are suppressed for tsserver (the plugin serves the
+            // carrier from the publish store) and flow through for tgo.
+            ProjectSync::new_with_kind(
+                Arc::clone(tp),
+                config.project_sync_mode,
+                config.type_provider_kind,
+            )
+        });
 
         let needs_ide_sync = Arc::new(DashSet::new());
         let needs_deferred_sync = Arc::new(DashSet::new());
@@ -351,6 +366,28 @@ impl VerterLanguageServer {
         let vfs_workspace: Arc<
             parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
         > = Arc::new(parking_lot::RwLock::new(None));
+
+        // The live carrier-publish coordinator: built ONLY for the tsserver engine
+        // (tsgo keeps the inferred carrier-open path until its own migration). It
+        // holds a `TsserverEngineBackend` whose store dir is derived from the SAME
+        // shared resolver the tsserver spawn uses to point the plugin at the store,
+        // so the LSP publishes exactly the store the plugin reads.
+        let carrier_publish_coordinator = match (&config.type_provider, config.type_provider_kind) {
+            (Some(provider), crate::TypeProviderKind::Tsserver) => {
+                let backend = Arc::new(
+                    crate::external_ts::TsserverEngineBackend::with_default_host_version(),
+                );
+                // The negotiated TypeScript version is informational on the minted
+                // binding (membership keys on env dims + content hash, not this
+                // string); the project's real version refines it when known.
+                Some(crate::external_ts::CarrierPublishCoordinator::new(
+                    backend,
+                    Arc::clone(provider),
+                    crate::external_ts::default_carrier_store_host_version(),
+                ))
+            }
+            _ => None,
+        };
 
         // Create SyncCoordinator if a type provider is connected.
         // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
@@ -367,6 +404,8 @@ impl VerterLanguageServer {
                     position_encoding: Arc::clone(&position_encoding),
                     provider_sync_states: Arc::clone(&provider_sync_states),
                     vfs_workspace: Arc::clone(&vfs_workspace),
+                    type_provider_kind: config.type_provider_kind,
+                    carrier_publish_coordinator: carrier_publish_coordinator.clone(),
                 },
             )
         });
@@ -408,6 +447,7 @@ impl VerterLanguageServer {
             hover_provenance_cache: Arc::new(
                 crate::features::hover_provenance::HoverProvenanceCache::new(),
             ),
+            carrier_publish_coordinator,
         }
     }
 

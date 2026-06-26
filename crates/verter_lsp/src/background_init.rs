@@ -55,6 +55,10 @@ pub(super) struct BackgroundInitArgs {
     /// VFS workspace handle — populated during background_init with a FilesystemWorkspace.
     pub(super) vfs_workspace:
         Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
+    /// The tsserver carrier-publish coordinator (the store-publish membership
+    /// path). `Some` only for the tsserver engine; `None` for tgo and when no
+    /// type provider is connected.
+    pub(super) carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
 }
 
 struct PublishedWorkspaceBuild {
@@ -140,6 +144,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         position_encoding,
         mru_canonical_ids,
         vfs_workspace,
+        carrier_publish_coordinator,
     } = args;
 
     let host = documents.host_arc();
@@ -282,6 +287,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         &pending_snapshot_provider_sync,
         is_tsgo,
         Some(&mru_canonical_ids),
+        carrier_publish_coordinator.as_ref(),
     )
     .await;
 
@@ -292,6 +298,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         &vfs_workspace,
         &provider_sync_states,
         is_tsgo,
+        carrier_publish_coordinator.as_ref(),
     )
     .await;
 
@@ -348,6 +355,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             provider_sync_states: Arc::clone(&provider_sync_states),
             provider_surfaces: documents.provider_surfaces().clone(),
             is_tsgo,
+            carrier_publish_coordinator: carrier_publish_coordinator.clone(),
             tsx_profile: tsx_profile.read().clone(),
             tsconfig_patterns: Vec::new(),
             workspace_snapshot: scanner_snapshot,

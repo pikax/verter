@@ -162,6 +162,21 @@ async function activateExtension(context: ExtensionContext) {
   let configRestartTimer: ReturnType<typeof setTimeout> | undefined;
   let tsPluginConfigured = false;
   let tsPluginPromise: Promise<void> | undefined;
+  // The resolved per-workspace carrier-store dir the LSP publishes carriers into,
+  // delivered by the LSP's `$/verter/carrierStoreReady` notification (emitted from
+  // the server's init lifecycle, which resolves the dir authoritatively via
+  // `default_carrier_store_dir_string(workspace_root)` and also hands it to its own
+  // spawned tsserver through `VERTER_CARRIER_STORE_DIR`). The notification handler
+  // (`onCarrierStoreReady` → `applyCarrierStoreDir`) records it here and forwards it
+  // to VS Code's OWN TypeScript server via `configurePlugin`, so a plain `.ts`
+  // (served by VS Code's TS service, not the LSP-spawned tsserver) reads the SAME
+  // store the LSP writes — the headline "plain .ts importing a .vue gets real types"
+  // DX. The extension never re-derives the dir itself (the recipe — blake3 over the
+  // canonicalized + case-folded workspace root plus the LSP version — lives solely
+  // in the LSP, so mirroring it here would risk silently targeting the WRONG dir).
+  // `undefined` until the notification arrives; until then VS Code's own TS server
+  // has no store and fails closed (the LSP-spawned tsserver still has the env dir).
+  let carrierStoreDir: string | undefined;
 
   const getStartedClient = () => {
     if (!server) {
@@ -182,10 +197,12 @@ async function activateExtension(context: ExtensionContext) {
   const getTypeScriptPluginConfig = (): {
     enable: true;
     exposeBindingsTesting?: boolean;
+    carrierStoreDir?: string;
   } => {
     const pluginConfig: {
       enable: true;
       exposeBindingsTesting?: boolean;
+      carrierStoreDir?: string;
     } = { enable: true };
     const experimentalConfig = workspace.getConfiguration("verter.experimental");
     const inspect = experimentalConfig.inspect<boolean>("exposeBindingsTesting");
@@ -204,7 +221,32 @@ async function activateExtension(context: ExtensionContext) {
       );
     }
 
+    // Forward the LSP-reported carrier-store dir to VS Code's TS server plugin
+    // so it reads the same store the LSP publishes carriers into. Omitted until
+    // the LSP reports it (the plugin then falls back to the env var).
+    if (carrierStoreDir !== undefined) {
+      pluginConfig.carrierStoreDir = carrierStoreDir;
+    }
+
     return pluginConfig;
+  };
+
+  /**
+   * Record the LSP-reported carrier-store dir and (re-)configure VS Code's TS
+   * server plugin so it picks up the new `carrierStoreDir`. A no-op when the dir
+   * is unchanged (avoids a redundant `configurePlugin` round-trip). When the dir
+   * changes (first report, or a workspace switch), the configured flag is reset
+   * so `ensureTypeScriptPluginConfigured(force)` re-issues `configurePlugin` with
+   * the updated config.
+   */
+  const applyCarrierStoreDir = (dir: string | undefined) => {
+    if (dir === carrierStoreDir) {
+      return;
+    }
+    carrierStoreDir = dir;
+    tsPluginConfigured = false;
+    tsPluginPromise = undefined;
+    void ensureTypeScriptPluginConfigured(undefined, true);
   };
 
   const ensureTypeScriptPluginConfigured = (document?: TextDocument, force = false) => {
@@ -268,6 +310,7 @@ async function activateExtension(context: ExtensionContext) {
 
     serverPromise = activateVueLanguageServer(context, log, startupProbe, {
       onReady: ensureDeferredFeaturesRegistered,
+      onCarrierStoreReady: applyCarrierStoreDir,
     })
       .then((runtime) => {
         server = runtime;
@@ -438,6 +481,12 @@ export async function activateVueLanguageServer(
   startupProbe?: StartupProbe,
   options?: {
     onReady?: () => void;
+    /**
+     * Called with the LSP-reported per-workspace carrier-store dir (the
+     * `CarrierStoreReady` notification). The extension forwards it to VS Code's
+     * own TS server via `configurePlugin`.
+     */
+    onCarrierStoreReady?: (carrierStoreDir: string) => void;
   },
 ) {
   const { workspaceFolders } = workspace;
@@ -882,6 +931,12 @@ export async function activateVueLanguageServer(
     lc.onNotification(NotificationType.TypeProviderSyncComplete, (params: { gen: number }) => {
       log.info(`TypeProviderSyncComplete (init generation ${params.gen})`);
     });
+    lc.onNotification(NotificationType.CarrierStoreReady, (params: { carrierStoreDir: string }) => {
+      log.info(`Carrier store dir reported by LSP: ${params.carrierStoreDir}`);
+      // Forward to VS Code's own TS server plugin so a plain `.ts` served by
+      // VS Code's TS service reads the same store the LSP publishes into.
+      options?.onCarrierStoreReady?.(params.carrierStoreDir);
+    });
   }
 
   function stopHeartbeatTimer() {
@@ -1305,9 +1360,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
 
   // Track whether the active editor is a framework-carrier file (.vue/.svelte).
   const updateHasActiveCarrierFile = () => {
-    const isCarrier = isFrameworkCarrierLanguageId(
-      window.activeTextEditor?.document?.languageId,
-    );
+    const isCarrier = isFrameworkCarrierLanguageId(window.activeTextEditor?.document?.languageId);
     commands.executeCommand("setContext", "verter.hasActiveCarrierFile", isCarrier);
   };
   updateHasActiveCarrierFile();

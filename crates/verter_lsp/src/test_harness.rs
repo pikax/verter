@@ -117,6 +117,8 @@ pub(crate) struct TestSessionBuilder {
     fixture_files: Vec<String>,
     virtual_files: Vec<(String, String)>,
     suppress_imported_carrier_prewarm: bool,
+    plugin_response_remap: bool,
+    resilient: bool,
 }
 
 impl TestSessionBuilder {
@@ -127,7 +129,36 @@ impl TestSessionBuilder {
             fixture_files: Vec::new(),
             virtual_files: Vec::new(),
             suppress_imported_carrier_prewarm: false,
+            // The verter_lsp-internal backend is the DEFAULT: the Rust merge layer
+            // is the sole companion→source response mapper, so the spawned plugin
+            // returns RAW companion responses. A test exercising the VS Code DIRECT
+            // surface (the plugin as the sole mapper) opts in via
+            // `plugin_response_remap(true)`.
+            plugin_response_remap: false,
+            resilient: false,
         }
+    }
+
+    /// Wrap the spawned `TsserverTypeProvider` in the PRODUCTION
+    /// [`ResilientProvider`](crate::resilient_provider::ResilientProvider) via
+    /// `crate::tsserver::resilient::new` — the exact wrap `try_spawn_tsserver`
+    /// installs in `main.rs`. This exercises the carrier path THROUGH the wrapper
+    /// (the production seam), not the raw provider; only meaningful for the tsserver
+    /// kind. No production wiring changes — this only chooses to build the same wrap
+    /// the binary builds.
+    pub(crate) fn resilient(mut self, enabled: bool) -> Self {
+        self.resilient = enabled;
+        self
+    }
+
+    /// Spawn the tsserver plugin with companion→source RESPONSE remap ENABLED —
+    /// the VS Code DIRECT surface, where the plugin (not verter_lsp) is the sole
+    /// response mapper. The default (`false`) is the verter_lsp-internal backend,
+    /// where the Rust merge layer maps and the plugin returns raw responses.
+    /// Only meaningful for the tsserver provider (the plugin lives there).
+    pub(crate) fn plugin_response_remap(mut self, enabled: bool) -> Self {
+        self.plugin_response_remap = enabled;
+        self
     }
 
     /// Use an E2E fixture workspace root for the project scaffold.
@@ -173,6 +204,19 @@ impl TestSessionBuilder {
         let fixture_name = self.fixture.as_deref().unwrap_or("single-project");
         let workspace_id = fixture_workspace_root(fixture_name);
 
+        // Per-session carrier-store isolation. The production store dir is keyed
+        // `(host_version, workspace_root)`, so two sessions over the SAME fixture
+        // share one on-disk store and an earlier session's manifest/blobs leak into
+        // a later session's cold read. Each session installs a UNIQUE host-version
+        // segment (`unique_store_segment`) so its dir is
+        // `…/verter-carrier-store/<unique-segment>/<workspace-hash>/`, fully isolated.
+        // Both the tsserver spawn (the `VERTER_CARRIER_STORE_DIR` the plugin reads)
+        // and the LSP-side publish backend read the SAME segment through
+        // `default_carrier_store_host_version`, so they always agree on the dir.
+        let store_segment = unique_store_segment();
+        let session_carrier_store_dir =
+            crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id);
+
         let provider: Arc<dyn TypeProvider> = match self.kind {
             TestProviderKind::Tsserver => {
                 let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -192,21 +236,66 @@ impl TestSessionBuilder {
                     .join("../../packages/vue-vscode/node_modules")
                     .to_string_lossy()
                     .replace('\\', "/");
-                match crate::tsserver::ipc::TsserverTypeProvider::spawn(
+                // Deliver the SAME carrier-publish store dir the `VerterLanguageServer`
+                // built below publishes into, so the spawned tsserver's plugin reads
+                // exactly the store the LSP writes. Both sides resolve the per-session
+                // ISOLATED dir: the spawn from `session_carrier_store_dir` here, the
+                // LSP backend from the matching `store_segment` override installed
+                // around its construction below.
+                let carrier_store_dir = session_carrier_store_dir
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let tsserver_path_str = tsserver_path.to_string_lossy().replace('\\', "/");
+                // When `.resilient()` is set, spawn WITH a crash-notify and wrap in
+                // the production `ResilientProvider` (the carrier path then runs
+                // through the wrapper, the real production seam). Otherwise the raw
+                // provider, as before.
+                let crash_notify: Option<Arc<tokio::sync::Notify>> = if self.resilient {
+                    Some(Arc::new(tokio::sync::Notify::new()))
+                } else {
+                    None
+                };
+                let spawned = crate::tsserver::ipc::TsserverTypeProvider::spawn(
                     &node_path,
-                    &tsserver_path.to_string_lossy().replace('\\', "/"),
+                    &tsserver_path_str,
                     &workspace_id,
                     Some(&plugin_path),
-                    None,
+                    Some(&carrier_store_dir),
+                    self.plugin_response_remap,
+                    crash_notify.clone(),
                 )
-                .await
-                {
-                    Ok(p) => Arc::new(p),
+                .await;
+                let p = match spawned {
+                    Ok(p) => p,
                     Err(e) => {
                         return handle_absent_provider(
                             self.kind,
                             &format!("tsserver spawn failed: {e}"),
                         )
+                    }
+                };
+                match crash_notify {
+                    Some(crash_notify) => {
+                        // Byte-identical to the `main.rs` production wrap: the
+                        // notifier rides an empty client cell (logs only) — the test
+                        // never injects a real `Client`.
+                        let client_cell = Arc::new(tokio::sync::OnceCell::new());
+                        let resilient = crate::tsserver::resilient::new(
+                            p,
+                            crash_notify,
+                            node_path,
+                            tsserver_path_str,
+                            workspace_id.clone(),
+                            Some(plugin_path),
+                            client_cell,
+                            3,
+                        );
+                        let provider: Arc<dyn TypeProvider> = Arc::new(resilient);
+                        provider
+                    }
+                    None => {
+                        let provider: Arc<dyn TypeProvider> = Arc::new(p);
+                        provider
                     }
                 }
             }
@@ -253,20 +342,29 @@ impl TestSessionBuilder {
         let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&provider);
-        let (service, socket) = tower_lsp_server::LspService::new(move |client| {
-            VerterLanguageServer::new(
-                client,
-                LspConfig {
-                    host: Arc::clone(&host_for_server),
-                    type_provider: Some(Arc::clone(&type_provider_for_server)),
-                    project_sync_mode: crate::ProjectSyncMode::FullProject,
-                    type_provider_kind: provider_kind,
-                    suggest_tsgo: false,
-                    mcp_port: None,
-                    type_provider_none_reason: None,
-                    suppress_imported_carrier_prewarm,
-                },
-            )
+        // Construct the server with the per-session store-dir override installed:
+        // `VerterLanguageServer::new` builds the tsserver `CarrierPublishCoordinator`
+        // (whose backend reads `default_carrier_store_host_version`) and spawns the
+        // sync coordinator that captures it, all SYNCHRONOUSLY inside this factory.
+        // `with_isolated_store_segment` holds the install lock across that synchronous
+        // construction, so the LSP backend resolves the SAME isolated dir the spawn
+        // above used and no concurrent session observes this session's segment.
+        let (service, socket) = with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: provider_kind,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_none_reason: None,
+                        suppress_imported_carrier_prewarm,
+                    },
+                )
+            })
         });
 
         // Drain the client socket to prevent backpressure
@@ -356,6 +454,7 @@ impl TestSessionBuilder {
             provider,
             workspace_id,
             kind: self.kind,
+            carrier_store_dir: session_carrier_store_dir,
             _drain_handle: drain_handle,
         };
 
@@ -383,6 +482,12 @@ pub(crate) struct RealProviderTestSession {
     provider: Arc<dyn TypeProvider>,
     workspace_id: String,
     kind: TestProviderKind,
+    /// This session's ISOLATED carrier-publish store dir
+    /// (`…/verter-carrier-store/<unique-segment>/<workspace-hash>/`). Unique per
+    /// session so no carrier-store state leaks between tests; removed on
+    /// [`Self::shutdown`]. Both the spawned plugin (via `VERTER_CARRIER_STORE_DIR`)
+    /// and the LSP-side publish backend resolve exactly this dir.
+    carrier_store_dir: std::path::PathBuf,
     _drain_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -396,6 +501,13 @@ impl RealProviderTestSession {
     #[allow(dead_code)]
     pub(crate) fn provider_kind(&self) -> TestProviderKind {
         self.kind
+    }
+
+    /// This session's ISOLATED carrier-publish store dir. Unique per session, so
+    /// no carrier-store state leaks between tests sharing a fixture workspace root.
+    #[allow(dead_code)]
+    pub(crate) fn carrier_store_dir(&self) -> &std::path::Path {
+        &self.carrier_store_dir
     }
 
     /// Returns `true` when this session uses TSGO.
@@ -925,16 +1037,75 @@ impl RealProviderTestSession {
         last
     }
 
-    /// Shut down the type provider process.
+    /// Shut down the type provider process and remove this session's isolated
+    /// carrier-publish store dir.
+    ///
+    /// The per-session store tree is owned by THIS session, so removing it on
+    /// shutdown keeps the temp dir from accumulating one tree per test across a run
+    /// (the production store is long-lived and shared per workspace; the isolated
+    /// test tree is not). Best-effort: a removal failure (e.g. the plugin process
+    /// still holds a handle on a slow shutdown) is non-fatal — the OS temp dir is
+    /// reclaimed eventually and the unique segment guarantees no cross-test reuse.
     pub(crate) async fn shutdown(self) {
         let _ = self.provider.shutdown().await;
         self._drain_handle.abort();
+        let _ = std::fs::remove_dir_all(&self.carrier_store_dir);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// A UNIQUE carrier-store host-version segment for one test session.
+///
+/// Used to isolate each real-provider session's on-disk carrier store (see
+/// [`TestSessionBuilder::build`]). It keeps the live package-version prefix (so the
+/// per-session trees still cluster under the version, matching production layout)
+/// and appends a triple that is unique both across PROCESSES (nextest runs one
+/// process per test) and WITHIN a process (`cargo test` runs sessions as concurrent
+/// threads): the process id, a process-monotonic counter, and a nanosecond clock
+/// reading. The result is a portable path segment — only `[0-9a-z.-]`, no
+/// NTFS-illegal characters — so it is a valid directory name on every platform.
+pub(crate) fn unique_store_segment() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{version}-test-{pid}-{seq}-{nanos}",
+        version = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+/// Run `build` with `segment` installed as the active carrier-store host-version
+/// override, restoring the prior state afterward.
+///
+/// The override is read by `default_carrier_store_host_version`, which is the
+/// single function BOTH the LSP-side publish backend
+/// ([`crate::external_ts::TsserverEngineBackend::with_default_host_version`]) and
+/// the tsserver spawn-dir string ([`crate::external_ts::default_carrier_store_dir_string`])
+/// call — so installing one segment moves both onto the same per-session ISOLATED
+/// dir. `build` MUST be the synchronous server construction (the
+/// `LspService::new` whose factory runs `VerterLanguageServer::new`): the install
+/// lock is held across it (no `.await`), so a concurrent session never observes
+/// this session's segment and the process-global override stays race-free.
+///
+/// This is the SHARED isolation seam for every real-tsserver test that builds its
+/// own server (both [`TestSessionBuilder::build`] and the hand-rolled direct-spawn
+/// tests in `server_tests`), so a single derivation keeps the publish side and the
+/// plugin side in agreement on the per-session dir.
+pub(crate) fn with_isolated_store_segment<T>(segment: &str, build: impl FnOnce() -> T) -> T {
+    let _install_guard = crate::external_ts::test_store_dir_override::install_lock();
+    crate::external_ts::test_store_dir_override::set(segment);
+    let built = build();
+    crate::external_ts::test_store_dir_override::clear();
+    built
+}
 
 /// Resolve an E2E fixture workspace root as a canonical path.
 pub(crate) fn fixture_workspace_root(name: &str) -> String {
@@ -1010,6 +1181,75 @@ pub(crate) fn materialize_pkg_vuecomp(fixture: &str) -> std::path::PathBuf {
          <template><div>{{ vendoredVueOnly }}</div></template>\n",
     )
     .expect("write Vendored.vue");
+    root
+}
+
+/// Link one already-resolved package directory into a fixture's `node_modules`
+/// under `link_name`, cross-platform. On Windows a **directory junction**
+/// A FLAT, dependency-free `vue` type stub: exactly the surface the generated Vue
+/// component IDE/API carriers consume (`defineComponent`, `PublicProps`,
+/// `HTMLAttributes`). See [`materialize_external_ts_dx_deps`] for why a stub is
+/// preferred over the real pnpm-installed `vue` here.
+const VUE_TYPE_STUB_DTS: &str = r#"// Minimal `vue` type surface for the external-TS-DX fixture carriers.
+export type PublicProps = { class?: unknown; style?: unknown };
+export type HTMLAttributes = Record<string, unknown>;
+export declare function defineComponent<P = {}>(options: P): {
+  new (...args: any[]): { $props: P };
+};
+export {};
+"#;
+
+/// Make the `external-ts-dx` fixture self-sufficient for the §2.9 plain-`.ts`-
+/// imports-`.vue`/`.svelte` enhanced-DX contract: provide a flat dependency-free
+/// `vue` type stub and materialise `@verter/types` from the bundled standalone
+/// declaration (the same artifact the production server writes).
+///
+/// `node_modules` is gitignored repo-wide, so these deps cannot be committed and
+/// must be materialised at test time (the same fixture-setup category as
+/// [`materialize_pkg_ui`]). The generated component carriers reference `vue` and
+/// `@verter/types`; without them the `$props` surface degrades to `any` and the
+/// types-flow assertions become vacuous. A hand-written flat stub keeps the
+/// surface honest and deterministic while staying hermetic — no external corpus,
+/// no fragile pnpm-store transitive-symlink resolution.
+///
+/// The Svelte component carrier is self-contained (Verter synthesises its public
+/// instance surface with no `svelte` dependency), so no `svelte` stub is needed.
+///
+/// Returns the fixture workspace root.
+pub(crate) fn materialize_external_ts_dx_deps() -> std::path::PathBuf {
+    let root = std::path::PathBuf::from(fixture_workspace_root("external-ts-dx"));
+    let node_modules = root.join("node_modules");
+    let _ = std::fs::create_dir_all(&node_modules);
+
+    // A FLAT, self-contained `vue` type stub providing exactly the surface the
+    // generated component IDE/API carriers consume (`defineComponent`,
+    // `PublicProps`, `HTMLAttributes`). Hand-written + dependency-free so the
+    // `$props` surface resolves to the REAL declared member type (e.g.
+    // `verterDxHeadline: string`) deterministically — without dragging in vue's
+    // transitive `@vue/*` + `csstype` closure (whose pnpm-store symlink layout is
+    // not junction-resolvable). This is a TYPE stub only; the §2.9 contract is
+    // about the carrier-resolved prop surface flowing into the `.ts`, not vue's
+    // runtime.
+    let vue_dir = node_modules.join("vue");
+    let _ = std::fs::create_dir_all(&vue_dir);
+    let _ = std::fs::write(vue_dir.join("index.d.ts"), VUE_TYPE_STUB_DTS);
+    let _ = std::fs::write(
+        vue_dir.join("package.json"),
+        r#"{"name":"vue","version":"3.0.0-stub","types":"index.d.ts"}"#,
+    );
+
+    // `@verter/types` from the bundled standalone declaration.
+    let types_dir = node_modules.join("@verter").join("types");
+    let _ = std::fs::create_dir_all(&types_dir);
+    let _ = std::fs::write(
+        types_dir.join("index.d.ts"),
+        verter_session::VERTER_TYPES_STANDALONE_DTS,
+    );
+    let _ = std::fs::write(
+        types_dir.join("package.json"),
+        r#"{"name":"@verter/types","types":"index.d.ts"}"#,
+    );
+
     root
 }
 
@@ -1109,156 +1349,6 @@ macro_rules! canary_assert_known_limitation {
 
 pub(crate) use canary_assert_known_limitation;
 
-// ---------------------------------------------------------------------------
-// Require-mode fail-closed tests
-// ---------------------------------------------------------------------------
-//
-// These prove the harness is FAIL-CLOSED: an absent provider under require-mode
-// is a HARD failure, never a skip-as-pass (the exact vacuity class a prior fix
-// found and removed). They exercise the pure policy + the harness build path
-// with a guaranteed-absent provider, so they discriminate regardless of whether
-// a provider happens to be installed on the running machine.
-
-/// The require decision is non-vacuous: requiring a provider turns its absence
-/// into a HARD failure, so a provider-absent CI run can never report the gate
-/// green by skipping. Both branches are covered (pure function — no provider
-/// needed on the machine).
-#[test]
-fn provider_absence_is_hard_fail_when_required_else_skip() {
-    assert_eq!(
-        provider_absence_outcome(true),
-        ProviderAbsence::HardFail,
-        "a required-but-absent provider must FAIL the test, not skip"
-    );
-    assert_eq!(
-        provider_absence_outcome(false),
-        ProviderAbsence::SkipWithReason,
-        "a non-required absent provider degrades to a graceful skip"
-    );
-}
-
-/// `handle_absent_provider` PANICS (fail-closed) when the provider's require
-/// env is set — proven by forcing tgo absent via the require env regardless of
-/// whether tgo is installed. Reverting the require check (always-skip) makes
-/// this test stop panicking, so it is discriminating.
-///
-/// Serialized via a process-global mutex because it mutates a process env var,
-/// which other env-reading tests in this binary could observe.
-#[test]
-fn handle_absent_provider_fails_closed_under_require_env() {
-    let _guard = require_env_test_lock().lock().unwrap();
-    let key = TestProviderKind::Tsgo.require_env();
-    let prev = std::env::var_os(key);
-    std::env::set_var(key, "1");
-
-    let outcome = std::panic::catch_unwind(|| {
-        // Same-thread: the env var set above is visible. Forces the absent path.
-        handle_absent_provider(
-            TestProviderKind::Tsgo,
-            "forced-absent for fail-closed proof",
-        )
-    });
-
-    // Restore env before asserting so a failure cannot leak the override.
-    match prev {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
-
-    assert!(
-        outcome.is_err(),
-        "VERTER_REQUIRE_TSGO=1 with an absent provider must PANIC (fail-closed), not return a skip"
-    );
-}
-
-/// Without the require env set, an absent provider degrades to a graceful skip
-/// (`None`) — the non-CI developer ergonomics path. Pairs with the test above
-/// to pin both halves of the gate.
-#[test]
-fn handle_absent_provider_skips_without_require_env() {
-    let _guard = require_env_test_lock().lock().unwrap();
-    let key = TestProviderKind::Tsgo.require_env();
-    let prev = std::env::var_os(key);
-    std::env::remove_var(key);
-
-    let result = handle_absent_provider(TestProviderKind::Tsgo, "absent, not required");
-
-    match prev {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
-
-    assert!(
-        result.is_none(),
-        "an absent, non-required provider must return None (skip), not a session"
-    );
-}
-
-/// `handle_absent_provider` PANICS (fail-closed) when `VERTER_REQUIRE_TSSERVER`
-/// is set — the symmetric counterpart of the tgo gate, proven by forcing the
-/// tsserver kind absent via its require env regardless of whether tsserver is
-/// installed. Reverting the require check (always-skip) makes this test stop
-/// panicking, so it is discriminating.
-///
-/// Serialized via the same process-global mutex as the tgo require tests because
-/// it mutates a process env var that other env-reading tests could observe.
-#[test]
-fn tsserver_handle_absent_provider_fails_closed_under_require_env() {
-    let _guard = require_env_test_lock().lock().unwrap();
-    let key = TestProviderKind::Tsserver.require_env();
-    assert_eq!(
-        key, "VERTER_REQUIRE_TSSERVER",
-        "the tsserver require knob must be VERTER_REQUIRE_TSSERVER (symmetric with tgo)"
-    );
-    let prev = std::env::var_os(key);
-    std::env::set_var(key, "1");
-
-    let outcome = std::panic::catch_unwind(|| {
-        // Same-thread: the env var set above is visible. Forces the absent path.
-        handle_absent_provider(
-            TestProviderKind::Tsserver,
-            "forced-absent for fail-closed proof",
-        )
-    });
-
-    // Restore env before asserting so a failure cannot leak the override.
-    match prev {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
-
-    assert!(
-        outcome.is_err(),
-        "VERTER_REQUIRE_TSSERVER=1 with an absent provider must PANIC (fail-closed), not return a skip"
-    );
-}
-
-/// Without `VERTER_REQUIRE_TSSERVER` set, an absent tsserver degrades to a
-/// graceful skip (`None`) — the non-CI developer ergonomics path. Pairs with the
-/// test above to pin both halves of the tsserver gate.
-#[test]
-fn tsserver_handle_absent_provider_skips_without_require_env() {
-    let _guard = require_env_test_lock().lock().unwrap();
-    let key = TestProviderKind::Tsserver.require_env();
-    let prev = std::env::var_os(key);
-    std::env::remove_var(key);
-
-    let result = handle_absent_provider(TestProviderKind::Tsserver, "absent, not required");
-
-    match prev {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
-
-    assert!(
-        result.is_none(),
-        "an absent, non-required tsserver must return None (skip), not a session"
-    );
-}
-
-/// Process-global lock so the env-mutating require-mode tests do not race each
-/// other (or any other env-reading test) within this test binary.
-fn require_env_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
+#[cfg(test)]
+#[path = "test_harness_tests.rs"]
+mod test_harness_tests;

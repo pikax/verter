@@ -367,9 +367,13 @@ pub(crate) fn normalize_carrier_path<'a>(
         // The `{carrier}.d.ts` accepted-spelling alias — from node_modules, no
         // collision risk.
         return &path[..path.len() - 5];
-    } else if path.ends_with(".ts") && verter_workspace::path_is_carrier(&path[..path.len() - 3]) {
-        let candidate = &path[..path.len() - 3]; // strip .ts
-        if carrier_source_exists(candidate) {
+    } else if let Some(candidate) = path.strip_suffix(verter_workspace::CARRIER_API_VIRTUAL_SUFFIX)
+    {
+        // The carrier PUBLIC-API surface (`{carrier}.verter.ts`, e.g.
+        // `MyComp.vue.verter.ts`). The reserved `.verter.` infix is the API
+        // carrier identity (a bare `{carrier}.ts` is NOT — `.svelte.ts` is a
+        // rune-module path); strip the full reserved suffix, never a bare `.ts`.
+        if verter_workspace::path_is_carrier(candidate) && carrier_source_exists(candidate) {
             return candidate;
         }
     }
@@ -384,26 +388,28 @@ pub(crate) fn is_carrier_ide_path(path: &str) -> bool {
         && verter_workspace::path_is_carrier(&path[..path.len() - 4])
 }
 
-/// Whether `path` is a carrier PUBLIC-API virtual file (`{carrier}.ts`, e.g.
-/// `MyComp.vue.ts`) backed by a real `.vue`/`.svelte` source — the macro-derived
-/// declaration surface synced for cross-file type resolution. Its byte offsets
-/// index the generated API surface and map back to the carrier source through
-/// that surface's own CodeTransform sourcemap (NOT the `.tsx` IDE sourcemap).
+/// Whether `path` is a carrier PUBLIC-API virtual file
+/// (`{carrier}.verter.ts`, e.g. `MyComp.vue.verter.ts`) backed by a real
+/// `.vue`/`.svelte` source — the macro-derived declaration surface synced for
+/// cross-file type resolution. Its byte offsets index the generated API surface
+/// and map back to the carrier source through that surface's own CodeTransform
+/// sourcemap (NOT the `.tsx` IDE sourcemap).
 ///
-/// The `carrier_source_exists` guard mirrors [`normalize_carrier_path`]'s `.ts`
-/// arm: a real on-disk `{name}.{carrier}.ts` with no backing carrier source (or a
-/// plain `.ts`) is NOT an API surface and must not be claimed here.
+/// The API carrier carries the reserved `.verter.` infix
+/// ([`verter_workspace::CARRIER_API_VIRTUAL_SUFFIX`]) — a bare `{carrier}.ts`
+/// (e.g. a real on-disk `App.vue.ts`, or a `.svelte.ts` rune module) is NOT an
+/// API surface. The `carrier_source_exists` guard mirrors
+/// [`normalize_carrier_path`]'s API arm.
 pub(crate) fn is_carrier_api_path(
     path: &str,
     carrier_source_exists: &dyn Fn(&str) -> bool,
 ) -> bool {
-    // Exclude `.d.ts` (handled by its own normalization arm) before the `.ts` test.
-    if path.ends_with(".d.ts") {
-        return false;
+    match path.strip_suffix(verter_workspace::CARRIER_API_VIRTUAL_SUFFIX) {
+        Some(candidate) => {
+            verter_workspace::path_is_carrier(candidate) && carrier_source_exists(candidate)
+        }
+        None => false,
     }
-    path.ends_with(".ts")
-        && verter_workspace::path_is_carrier(&path[..path.len() - 3])
-        && carrier_source_exists(&path[..path.len() - 3])
 }
 
 /// Like `normalize_carrier_path` but returns an owned String.

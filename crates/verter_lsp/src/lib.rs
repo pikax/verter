@@ -1,3 +1,8 @@
+// The carrier-membership / provider-sync paths must never hold a synchronous guard
+// across an `.await` (the single-writer actor + reconciler lock discipline). Deny it
+// crate-wide so a regression fails the build, matching `verter_type_runtime`.
+#![deny(clippy::await_holding_lock)]
+
 pub mod analysis;
 pub mod audit_harness;
 pub mod capabilities;
@@ -7,6 +12,7 @@ pub mod config;
 pub mod css;
 pub mod documents;
 pub mod extension_provider;
+pub mod external_ts;
 pub mod external_ts_sync;
 pub mod features;
 pub mod project_resolver;

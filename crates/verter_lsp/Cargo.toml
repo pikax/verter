@@ -53,6 +53,13 @@ dashmap = "6.2"
 glob = "0.3.3"
 lru = "0.18"
 parking_lot = "0.12.5"
+# Atomic temp-then-rename for the on-disk carrier-snapshot store (the §2.2
+# content-addressed blobs + atomic manifest swap). `NamedTempFile::persist`
+# atomically replaces an existing target on every platform (ReplaceFile/
+# MoveFileEx on Windows, rename(2) on Unix) — the cross-platform atomic-replace
+# the published manifest swap requires. Also a dev-dependency (below) for the
+# existing test seams; promoted to a runtime dep here for the store.
+tempfile = "3.27"
 
 [[bin]]
 name = "verter-lsp"

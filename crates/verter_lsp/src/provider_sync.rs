@@ -146,27 +146,6 @@ pub struct ProviderSyncTransition {
     pub stale_paths: Vec<(ProviderPathKind, String)>,
 }
 
-pub fn carrier_sync_state_for_source(
-    resolver: &NativeProjectResolver,
-    source_id: &str,
-    is_jsx: bool,
-) -> Option<ProviderSyncState> {
-    let owner = resolver.owner_for_file(source_id)?;
-    let owner_key = owner
-        .tsconfig_path
-        .clone()
-        .unwrap_or_else(|| owner.root.clone());
-    Some(ProviderSyncState {
-        owner_binding: ProviderOwnerBinding::Owned(owner_key),
-        ide_path: resolver.provider_ide_id_for_source(source_id, is_jsx),
-        api_path: resolver.provider_id_for_source(source_id),
-        shadow_path: None,
-        ide_background_loaded: false,
-        api_background_loaded: false,
-        shadow_background_loaded: false,
-    })
-}
-
 /// The owner binding the CURRENT snapshot resolver would assign to `source_id`.
 ///
 /// `Owned(key)` when a single project owns the file (the same `tsconfig_path`-

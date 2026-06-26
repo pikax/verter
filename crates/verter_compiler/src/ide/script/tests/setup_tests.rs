@@ -59,14 +59,25 @@ const x = 1
 </script>"#,
     );
 
-    // Positive: .vue imports should become .vue.ts
+    // Positive: an in-project .vue import resolves to the COMPONENT IDE carrier
+    // (`.vue.tsx`, the bare-import-probe identity), NOT the `.verter.ts` API
+    // surface. The consumer gets the component's public default (the IDE carrier
+    // re-exports it from the API carrier).
     assert!(
-        code.contains("from './MyComp.vue.ts'"),
-        "single-quoted .vue import should become .vue.ts: {code}"
+        code.contains("from './MyComp.vue.tsx'"),
+        "single-quoted in-project .vue import should resolve to the IDE carrier (.vue.tsx): {code}"
     );
     assert!(
-        code.contains("from \"@/components/Another.vue.ts\""),
-        "double-quoted .vue import should become .vue.ts: {code}"
+        code.contains("from \"@/components/Another.vue.tsx\""),
+        "double-quoted in-project .vue import should resolve to the IDE carrier (.vue.tsx): {code}"
+    );
+
+    // Negative: a bare in-project import must NOT target the `.verter.ts` API
+    // surface (that is the cross-package redirect target, never the in-project
+    // bare-import target).
+    assert!(
+        !code.contains("./MyComp.vue.verter.ts"),
+        "in-project .vue import must NOT target the .verter.ts API carrier: {code}"
     );
 
     // Negative: non-.vue imports should NOT be rewritten
@@ -75,13 +86,14 @@ const x = 1
         "non-.vue import must not be rewritten: {code}"
     );
 
-    // Negative: should NOT have bare .vue' or .vue" (without .ts)
+    // Negative: should NOT have a bare .vue' or .vue" (must carry the IDE
+    // carrier suffix .vue.tsx).
     assert!(
-        !code.contains(".vue'") || code.contains(".vue.ts'"),
+        !code.contains(".vue'") || code.contains(".vue.tsx'"),
         "bare .vue' should not remain: {code}"
     );
     assert!(
-        !code.contains(".vue\"") || code.contains(".vue.ts\""),
+        !code.contains(".vue\"") || code.contains(".vue.tsx\""),
         "bare .vue\" should not remain: {code}"
     );
 }
@@ -100,8 +112,8 @@ const x = 1
     );
 
     assert!(
-        code.contains("from './Base.vue.ts'"),
-        "companion script .vue import should become .vue.ts: {code}"
+        code.contains("from './Base.vue.tsx'"),
+        "companion script in-project .vue import should resolve to the IDE carrier (.vue.tsx): {code}"
     );
 }
 
@@ -118,10 +130,11 @@ const x = 1
 </script>"#,
     );
 
-    // Positive: .vue re-export should become .vue.ts
+    // Positive: an in-project .vue re-export resolves to the component IDE
+    // carrier (.vue.tsx).
     assert!(
-        code.contains("from './Dropdown.vue.ts'"),
-        "re-export .vue specifier should become .vue.ts: {code}"
+        code.contains("from './Dropdown.vue.tsx'"),
+        "re-export in-project .vue specifier should resolve to the IDE carrier (.vue.tsx): {code}"
     );
 
     // Negative: non-.vue re-export should NOT be rewritten
@@ -165,14 +178,100 @@ const count = ref(0)
         code
     );
     assert!(
-        code.contains("import('./App.vue.ts')"),
-        "Should reference the component's own .vue.ts file. Got: {}",
+        code.contains("import('./App.vue.verter.ts')"),
+        "Should self-import the component's own PUBLIC-API carrier (.vue.verter.ts). Got: {}",
         code
     );
     assert!(
         code.contains("void ___VERTER___instance;"),
         "Should void-suppress instance. Got: {}",
         code
+    );
+}
+
+#[test]
+fn ide_carrier_exports_public_facade_reexport_for_script_setup() {
+    // The Vue IDE carrier (`App.vue.tsx`) is the in-project bare-import target,
+    // so it must export the component's PUBLIC default. `<script setup>` has no
+    // own default, so the carrier RE-EXPORTS the public default from the API
+    // carrier (`App.vue.verter.ts`, where the public type is synthesised).
+    let (code, _) = gen_tsx_script(
+        r#"<script setup lang="ts">
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(
+        code.contains("export { default } from './App.vue.verter.ts';"),
+        "script-setup IDE carrier must re-export the public default from the API carrier. Got: {code}"
+    );
+    // Template internals stay LOCAL — the binding fn is a helper, never the
+    // public default.
+    assert!(
+        !code.contains("export default ___VERTER___")
+            && !code.contains("___VERTER___TemplateBindingFN as default"),
+        "template internals must NOT be exported as the public default. Got: {code}"
+    );
+}
+
+#[test]
+fn facade_reexport_and_self_import_use_basename_not_full_canonical_path() {
+    // The live carrier-publish path passes the FULL canonical path as the carrier
+    // filename. The IDE carrier and its sibling API carrier share a directory, so
+    // the `./`-relative specifier MUST collapse to the basename — a `./d:/…/…`
+    // specifier resolves to nothing and breaks the public-default re-export for a
+    // plain-script importer.
+    use crate::ide::script::wrapper::{instance_declaration, public_facade_reexport};
+
+    let full_path = "d:/dev/project/src/components/Comp.vue";
+
+    let reexport = public_facade_reexport(full_path);
+    assert!(
+        reexport.contains("export { default } from './Comp.vue.verter.ts';"),
+        "re-export must use the basename-relative API specifier. Got: {reexport}"
+    );
+    assert!(
+        !reexport.contains("./d:/") && !reexport.contains("/src/components/"),
+        "re-export must NOT embed the absolute canonical path. Got: {reexport}"
+    );
+
+    let self_import = instance_declaration(full_path, false, false);
+    assert!(
+        self_import.contains("import('./Comp.vue.verter.ts')"),
+        "self-import must use the basename-relative API specifier. Got: {self_import}"
+    );
+    assert!(
+        !self_import.contains("./d:/") && !self_import.contains("/src/components/"),
+        "self-import must NOT embed the absolute canonical path. Got: {self_import}"
+    );
+}
+
+#[test]
+fn ide_carrier_options_api_uses_own_default_not_facade_reexport() {
+    // The Options-API carrier already emits its OWN public `export default
+    // __sfc__` (the component value), so it must NOT also emit the facade
+    // re-export — that would be a DUPLICATE default export.
+    let (code, _) = gen_tsx_script(
+        r#"<script>
+export default {
+  data() { return { count: 0 } }
+}
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(
+        code.contains("export default __sfc__"),
+        "Options-API carrier keeps its own public `export default __sfc__`. Got: {code}"
+    );
+    assert!(
+        !code.contains("export { default } from"),
+        "Options-API carrier must NOT also emit the facade re-export (duplicate default). Got: {code}"
+    );
+    // Exactly one `export default` (the `__sfc__` one) — no duplicate.
+    assert_eq!(
+        code.matches("export default").count(),
+        1,
+        "Options-API carrier must have exactly one default export. Got: {code}"
     );
 }
 

@@ -6,17 +6,29 @@
 //! `jsx`/`moduleResolution`/project references), so it emits false `TS2307`
 //! (unresolved `@/`-aliased import) and `TS2304` (unknown ambient global).
 //!
-//! Every test here is `#[ignore]`d so the canonical gate stays GREEN: they are
-//! the RED baseline that goes green when the tsserver backend lands and makes
-//! the carrier a real member of the configured project. Un-ignoring them is that
-//! backend's green gate. They are REAL fixtures + REAL assertions (not stubs):
-//! the assertions describe the correct configured-project outcome, so they FAIL
-//! against today's inferred path and PASS once the contract is wired live.
+//! The `*_tsserver` tests are LIVE: the tsserver carrier-publish path makes the
+//! carrier a real member of its configured project (the LSP publishes the carrier
+//! companions into the on-disk store the `@verter/typescript-plugin` reads, and
+//! the plugin advertises them via `getExternalFiles` under the `extraFileExtensions`
+//! the LSP configures), so the aliased import + ambient global resolve. The
+//! `*_tsgo` tests stay `#[ignore]`d until the tgo engine is migrated onto the same
+//! contract. They are REAL fixtures + REAL assertions (not stubs): the assertions
+//! describe the correct configured-project outcome.
 //!
 //! The hermetic skip is intrinsic: `TestSessionBuilder::build()` returns `None`
 //! (and the test returns early) when the provider binary / `node_modules` is
 //! absent, so a developer machine without the toolchain never sees a spurious
 //! failure even if the test is run with `--ignored`.
+//!
+//! The two solution-style / multi-root `*_tsserver` tests below characterize the
+//! LEAF-binding cases (a leaf config not named `tsconfig.json`, and a cross-package
+//! dependency carrier). Their consumers are VUE-FREE (mirroring
+//! `external-ts-engine/AliasConsumer.vue`) so the ONLY resolution that can produce
+//! a TS2307 is the leaf-binding mechanism, not a missing `vue` dependency. They
+//! resolve TODAY under the diagnostics cold-membership recovery (the `reloadProjects`
+//! lever forces the referenced leaf projects to load and re-advertise their
+//! `getExternalFiles`), so they PASS when run with `--ignored`; they are kept
+//! `#[ignore]`d only pending confirmation that gating on that lever is intended.
 
 use tower_lsp_server::ls_types::Diagnostic;
 
@@ -55,7 +67,6 @@ async fn assert_carrier_resolves_configured(session: &RealProviderTestSession, r
 // ── paths / baseUrl / types / lib / jsx / moduleResolution (one cross-section) ──
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED baseline for the project-bound external-TS engine; goes green once the tsserver backend makes the carrier a configured-project member"]
 async fn vue_carrier_resolves_aliased_import_and_ambient_under_configured_project_tsserver() {
     let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
         .fixture(FIXTURE)
@@ -65,6 +76,93 @@ async fn vue_carrier_resolves_aliased_import_and_ambient_under_configured_projec
         return;
     };
     assert_carrier_resolves_configured(&session, "src/AliasConsumer.vue").await;
+    session.shutdown().await;
+}
+
+// ── POSITIVE carrier-diagnostic PRESENCE (not absence) ──
+//
+// The `*_resolves_*` baselines above are ABSENCE checks (no false TS2307/TS2304)
+// — they pass vacuously even if the carrier yields ZERO diagnostics. This test
+// is the PRESENCE counterpart: a `.vue` carrier with a DELIBERATE TS2322 (a
+// string assigned to a `number` in `<script setup>`) must surface that exact
+// diagnostic on the carrier's `.vue` SOURCE. It is the end-to-end proof that
+// carrier diagnostics positively flow under the project-bound engine WITHOUT a
+// contentful companion open: the LSP publishes the carrier, registers it with
+// its owning configured project (`projectFileName`) + a contentless
+// project-load open, and `semanticDiagnosticsSync` reports TS2322 mapped back
+// through the carrier source map. Reverting the project-targeting / membership
+// signal makes `semanticDiagnosticsSync` return empty (or `No Project`) and this
+// PRESENCE assertion fails — discriminating.
+#[tokio::test(flavor = "multi_thread")]
+async fn vue_carrier_surfaces_semantic_type_error_on_source_tsserver() {
+    let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
+        .fixture(FIXTURE)
+        .build()
+        .await
+    else {
+        return;
+    };
+    let uri = session.open_fixture_file("src/TypeErrorCarrier.vue").await;
+    let diags = session.merged_diagnostics(&uri).await;
+
+    // TS2322 = "Type 'string' is not assignable to type 'number'". Assert by code
+    // (stable across tsserver/TSGO), falling back to the message text.
+    assert!(
+        has_code(&diags, "2322") || diags.iter().any(|d| d.message.contains("not assignable")),
+        "a carrier `<script setup>` type error must surface TS2322 on the `.vue` source \
+         (carrier diagnostics positively flow); got: {diags:?}"
+    );
+
+    // The diagnostic must land on the `typedNumber` declaration in the `.vue`
+    // SOURCE — proving the carrier's TSX diagnostic was mapped back through the
+    // source map, not left in companion coordinates. The decl is on the
+    // `const typedNumber: number = ...` line.
+    let decl = session.find_position(&uri, "typedNumber", 0);
+    let on_decl_line = diags.iter().any(|d| {
+        (has_code(std::slice::from_ref(d), "2322") || d.message.contains("not assignable"))
+            && d.range.start.line <= decl.line
+            && d.range.end.line >= decl.line
+    });
+    assert!(
+        on_decl_line,
+        "the TS2322 diagnostic must map back to the `typedNumber` decl line {} in the \
+         `.vue` source; got: {diags:?}",
+        decl.line
+    );
+
+    session.shutdown().await;
+}
+
+// The SAME positive TS2322 PRESENCE proof, but built THROUGH the production
+// `ResilientProvider` wrapper (`.resilient(true)`) — the seam the LSP binary
+// actually installs (`try_spawn_tsserver`). The wrapper previously did NOT
+// override `register_carrier_member`, so a published carrier registration fell
+// through to the trait no-op and NEVER reached the inner tsserver provider: the
+// carrier never joined its configured project and `semanticDiagnosticsSync`
+// returned empty. The raw-provider baseline above could not catch this because it
+// builds the bare `TsserverTypeProvider` (which has the real `register` impl). This
+// test closes that coverage hole: it fails (no TS2322) on the pre-fix wrapper and
+// passes once the wrapper forwards the registration to the inner provider.
+#[tokio::test(flavor = "multi_thread")]
+async fn vue_carrier_surfaces_semantic_type_error_through_resilient_provider_tsserver() {
+    let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
+        .fixture(FIXTURE)
+        .resilient(true)
+        .build()
+        .await
+    else {
+        return;
+    };
+    let uri = session.open_fixture_file("src/TypeErrorCarrier.vue").await;
+    let diags = session.merged_diagnostics(&uri).await;
+
+    assert!(
+        has_code(&diags, "2322") || diags.iter().any(|d| d.message.contains("not assignable")),
+        "a carrier `<script setup>` type error must surface TS2322 on the `.vue` source \
+         THROUGH the ResilientProvider wrapper — the carrier registration must FORWARD to \
+         the inner provider, not be swallowed by the trait no-op; got: {diags:?}"
+    );
+
     session.shutdown().await;
 }
 
@@ -83,7 +181,6 @@ async fn vue_carrier_resolves_aliased_import_and_ambient_under_configured_projec
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED baseline for the project-bound external-TS engine; goes green once the tsserver backend makes the carrier a configured-project member"]
 async fn svelte_carrier_resolves_aliased_import_and_ambient_under_configured_project_tsserver() {
     let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
         .fixture(FIXTURE)
@@ -112,12 +209,20 @@ async fn svelte_carrier_resolves_aliased_import_and_ambient_under_configured_pro
 
 // ── project references / solution-style (existing fixtures) ──
 
+// A solution-style root (`files: [], references: […]`) reaches its leaf
+// `tsconfig.app.json` (a config NOT named `tsconfig.json`) for an opened carrier
+// only once a configured-project load is forced. The diagnostics cold-membership
+// recovery forces that load (the `reloadProjects` lever re-evaluates project
+// structure so the leaf owns the companion), so the carrier's aliased import +
+// ambient global resolve under the leaf with no false TS2307.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED baseline for the project-bound external-TS engine; goes green once the tsserver backend makes the carrier a configured-project member"]
 async fn carrier_under_solution_style_leaf_resolves_tsserver() {
     // `tsconfig-references` is a solution-style root (`files: [], references: […]`)
-    // whose leaf `tsconfig.app.json` owns the `.vue`. Under the inferred path the
-    // carrier is not a leaf-project member; under the configured backend it is.
+    // whose leaf `tsconfig.app.json` owns the `.vue` and its `paths` / `types` /
+    // `typeRoots`. The carrier consumer (`AliasConsumer.vue`) is VUE-FREE (mirrors
+    // `external-ts-engine/AliasConsumer.vue`): a `@/`-aliased import plus an
+    // ambient global, no `import "vue"` / `defineProps`, so the ONLY resolution
+    // that can produce a TS2307 is the leaf-binding mechanism under test.
     let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
         .fixture("tsconfig-references")
         .build()
@@ -125,7 +230,7 @@ async fn carrier_under_solution_style_leaf_resolves_tsserver() {
     else {
         return;
     };
-    let uri = session.open_fixture_file("src/App.vue").await;
+    let uri = session.open_fixture_file("src/AliasConsumer.vue").await;
     let diags = session.merged_diagnostics(&uri).await;
     assert!(
         !has_code(&diags, "2307"),
@@ -135,12 +240,19 @@ async fn carrier_under_solution_style_leaf_resolves_tsserver() {
     session.shutdown().await;
 }
 
+// Two referenced leaves (`packages/app`, `packages/shared`). The app carrier's
+// cross-package import + ambient global resolve once the referenced leaf
+// configured project is loaded with its sibling-package `paths` wired. The
+// diagnostics cold-membership recovery forces that leaf load (the `reloadProjects`
+// lever), so the cross-package import resolves with no false TS2307.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RED baseline for the project-bound external-TS engine; goes green once the tsserver backend makes the carrier a configured-project member"]
 async fn carrier_in_multiroot_monorepo_resolves_cross_package_tsserver() {
     // `monorepo` has two referenced leaves (`packages/app`, `packages/shared`).
-    // A cross-package import from the app carrier resolves only when the carrier
-    // is a member of the configured app project with its references wired.
+    // The app carrier consumer (`AliasConsumer.vue`) is VUE-FREE (mirrors
+    // `external-ts-engine/AliasConsumer.vue`): a cross-package TS import plus an
+    // ambient global, no `import "vue"` / `defineProps`, so the ONLY resolution
+    // that can produce a TS2307 is the cross-package leaf-binding mechanism under
+    // test.
     let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsserver)
         .fixture("monorepo")
         .build()
@@ -148,7 +260,9 @@ async fn carrier_in_multiroot_monorepo_resolves_cross_package_tsserver() {
     else {
         return;
     };
-    let uri = session.open_fixture_file("packages/app/src/App.vue").await;
+    let uri = session
+        .open_fixture_file("packages/app/src/AliasConsumer.vue")
+        .await;
     let diags = session.merged_diagnostics(&uri).await;
     assert!(
         !has_code(&diags, "2307"),

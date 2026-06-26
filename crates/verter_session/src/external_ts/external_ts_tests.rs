@@ -475,6 +475,33 @@ fn bound_project_witness_round_trips_through_seal() {
 }
 
 #[test]
+fn bound_project_mints_from_ensure_project_request() {
+    // The foreign-backend mint path: a real `EngineBackend` in another crate
+    // obtains its `BoundProject` from `BoundProject::from_ensured(&EnsureProject,
+    // caps)`. Because an `EnsureProject` is mintable ONLY from a resolved
+    // `ProjectBinding`, this preserves `provider_op_requires_resolved_project`
+    // without exposing the raw seal. The project URI + env dims are READ FROM the
+    // request — the backend cannot substitute a different project.
+    let ws = workspace_with(&[
+        ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*"] }"#),
+        ("d:/ws/src/Foo.vue", "<template></template>"),
+    ]);
+    let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
+    let resolver =
+        WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &(test_env_dims as fn(&str) -> EnvDims));
+    let binding = match resolver.resolve("d:/ws/src/Foo.vue") {
+        ProjectResolution::ProjectBinding(b) => b,
+        other => panic!("expected ProjectBinding, got {other:?}"),
+    };
+    let request = binding.ensure_project_request();
+
+    let witness = BoundProject::from_ensured(&request, EngineCapabilities::default());
+    // The witness is bound to the SAME project + env dims the request carries.
+    assert_eq!(witness.project(), request.tsconfig_uri());
+    assert_eq!(witness.env_dims(), request.env_dims());
+}
+
+#[test]
 fn scratch_witness_is_distinct_from_bound_project() {
     // The scratch witness is a DISTINCT type usable only for non-cross-file
     // features; it cannot be passed where a production op expects a BoundProject.

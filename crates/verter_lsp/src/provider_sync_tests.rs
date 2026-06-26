@@ -22,8 +22,12 @@ fn vue_sync_state_uses_owner_key_from_tsconfig() {
         ),
     ]);
 
-    let state = carrier_sync_state_for_source(&resolver, "/workspace/pkg-a/src/App.vue", false)
-        .expect("matched Vue source should materialize provider state");
+    // `carrier_sync_state_for_source` is now private to the carrier-sync gateway;
+    // exercise the same owner-resolution + path derivation through its public
+    // close-target accessor (the gateway wraps the private resolver).
+    let state =
+        crate::external_ts::carrier_close_target(&resolver, "/workspace/pkg-a/src/App.vue", false)
+            .expect("matched Vue source should materialize provider state");
 
     assert_eq!(
         state.owner_binding,
@@ -37,7 +41,7 @@ fn vue_sync_state_uses_owner_key_from_tsconfig() {
     );
     assert_eq!(
         state.api_path.as_deref(),
-        Some("/workspace/pkg-a/src/App.vue.ts"),
+        Some("/workspace/pkg-a/src/App.vue.verter.ts"),
         "Vue public API output should still be tracked alongside the IDE artifact"
     );
 }
@@ -76,7 +80,7 @@ fn committed_binding_matches_current_detects_owner_mismatch() {
     let owned_a = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/a/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -125,13 +129,13 @@ fn stale_paths_only_include_paths_that_change() {
     let previous = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
     let next = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
 
@@ -146,13 +150,13 @@ fn owner_change_forces_stale_even_when_paths_unchanged() {
     let previous = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.old.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
     let next = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.new.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
 
@@ -168,7 +172,7 @@ fn owner_change_forces_stale_even_when_paths_unchanged() {
     )));
     assert!(stale.contains(&(
         ProviderPathKind::Api,
-        "/workspace/src/App.vue.ts".to_string()
+        "/workspace/src/App.vue.verter.ts".to_string()
     )));
 }
 
@@ -202,7 +206,7 @@ fn prepare_sync_transition_preserves_background_flags_for_unchanged_paths() {
         ProviderSyncState {
             owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ide_background_loaded: true,
             api_background_loaded: true,
             ..Default::default()
@@ -215,7 +219,7 @@ fn prepare_sync_transition_preserves_background_flags_for_unchanged_paths() {
         ProviderSyncState {
             owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
             ..Default::default()
         },
     );
@@ -259,7 +263,7 @@ fn unresolved_to_owner_aware_same_ide_path_not_stale() {
     let owner_aware = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
 
@@ -277,7 +281,7 @@ fn unresolved_to_owner_aware_different_ide_path_is_stale() {
     let owner_aware = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
 
@@ -320,7 +324,7 @@ fn open_unresolved_carrier_state_converts_prior_owned_to_unresolved() {
     let previous = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -368,7 +372,7 @@ fn open_unresolved_carrier_state_builds_local_when_no_prior_ide_path() {
     // Prior state with no IDE path is treated as "no live path".
     let prior_no_ide = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
     let rebuilt =
@@ -398,7 +402,7 @@ fn open_unresolved_carrier_state_does_not_preserve_unloaded_prior_ide_path() {
     let prev_unloaded_jsx = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old".to_string()),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: false, // never opened
         api_background_loaded: false,
         ..Default::default()
@@ -478,7 +482,7 @@ fn dropped_api_path_on_unowned_conversion_returns_stale_owner_derived_api() {
     let previous = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -490,7 +494,7 @@ fn dropped_api_path_on_unowned_conversion_returns_stale_owner_derived_api() {
         dropped,
         Some((
             ProviderPathKind::Api,
-            "/workspace/src/App.vue.ts".to_string()
+            "/workspace/src/App.vue.verter.ts".to_string()
         )),
         "the dropped owner-derived API path must be surfaced for closing, got {dropped:?}"
     );
@@ -525,13 +529,13 @@ fn dropped_api_path_on_unowned_conversion_none_when_no_api_or_unchanged() {
     let prev_with_api = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
     let still_has_api = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/new".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
     assert!(
@@ -544,7 +548,7 @@ fn dropped_api_path_on_unowned_conversion_none_when_no_api_or_unchanged() {
     let prev_unresolved_with_api = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Unresolved,
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
     let converted_unresolved = open_unresolved_carrier_state(
@@ -571,7 +575,7 @@ fn revert_unsynced_kinds_keeps_previous_path_for_failed_kind() {
     let previous = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old".to_string()),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -579,7 +583,7 @@ fn revert_unsynced_kinds_keeps_previous_path_for_failed_kind() {
     let mut committed = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/new".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: false,
         api_background_loaded: true,
         ..Default::default()
@@ -599,7 +603,7 @@ fn revert_unsynced_kinds_keeps_previous_path_for_failed_kind() {
     );
     assert_eq!(
         committed.api_path.as_deref(),
-        Some("/workspace/src/App.vue.ts"),
+        Some("/workspace/src/App.vue.verter.ts"),
         "the synced API kind keeps its new path"
     );
     assert!(committed.api_background_loaded);
@@ -611,7 +615,7 @@ fn revert_unsynced_kinds_clears_failed_kind_with_no_previous_path() {
     let mut committed = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/new".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ..Default::default()
     };
     // No previous state, IDE failed, API synced.
@@ -624,7 +628,7 @@ fn revert_unsynced_kinds_clears_failed_kind_with_no_previous_path() {
     assert!(!committed.ide_background_loaded);
     assert_eq!(
         committed.api_path.as_deref(),
-        Some("/workspace/src/App.vue.ts")
+        Some("/workspace/src/App.vue.verter.ts")
     );
 }
 
@@ -635,7 +639,7 @@ fn genuinely_stale_after_sync_gates_on_kind_and_active() {
     let committed = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old".to_string()),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -667,7 +671,7 @@ fn genuinely_stale_after_sync_kind_gate_isolated_from_active_filter() {
         // Committed IDE path is `.tsx` (NOT the stale `.jsx`), so the stale
         // `.jsx` is NOT active.
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -711,7 +715,7 @@ fn genuinely_stale_after_sync_closes_changed_synced_path() {
     let committed = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/new".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -744,7 +748,7 @@ fn genuinely_stale_after_sync_skips_same_path_rebind() {
     let committed = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/new".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -756,7 +760,7 @@ fn genuinely_stale_after_sync_skips_same_path_rebind() {
         ),
         (
             ProviderPathKind::Api,
-            "/workspace/src/App.vue.ts".to_string(),
+            "/workspace/src/App.vue.verter.ts".to_string(),
         ),
     ];
 
@@ -1128,7 +1132,7 @@ fn open_unresolved_commit_prior_owned_drops_and_surfaces_api_close() {
     let prev = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -1148,7 +1152,7 @@ fn open_unresolved_commit_prior_owned_drops_and_surfaces_api_close() {
         commit.dropped_api,
         Some((
             ProviderPathKind::Api,
-            "/workspace/src/App.vue.ts".to_string()
+            "/workspace/src/App.vue.verter.ts".to_string()
         )),
         "the owner-derived .vue.ts must be surfaced for closing, got {:?}",
         commit.dropped_api
@@ -1178,7 +1182,7 @@ fn open_unresolved_commit_prior_owned_diff_ext_sync_ok_drops_api_and_closes_old_
     let prev = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
-        api_path: Some("/workspace/src/App.vue.ts".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
         ide_background_loaded: true,
         api_background_loaded: true,
         ..Default::default()
@@ -1191,7 +1195,7 @@ fn open_unresolved_commit_prior_owned_diff_ext_sync_ok_drops_api_and_closes_old_
         commit.dropped_api,
         Some((
             ProviderPathKind::Api,
-            "/workspace/src/App.vue.ts".to_string()
+            "/workspace/src/App.vue.verter.ts".to_string()
         ))
     );
     assert_eq!(
