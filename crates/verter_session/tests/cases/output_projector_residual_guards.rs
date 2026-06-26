@@ -4184,10 +4184,21 @@ fn test_output_cap_gate_self_test_discriminates() {
 //     references (each sanctioned token is uniquely named, so even an
 //     over-resolution lands on the single genuine def), and the
 //     compiler-enforced sealed-token boundary remains the production guarantee.
-//     They are an ACCEPTED defense-in-depth debt (see
-//     `docs/arch/output-projector-residual-guard-debt.md`), NOT a tightening
-//     backlog. The disclosure is by ROOT-CAUSE CLASS (complete-by-construction —
-//     any specific instance below is subsumed by its class), NOT an exhaustive
+//     They are an ACCEPTED, codex-classified EDGE-only residual — a
+//     defense-in-depth FINAL-STATE record COLOCATED here, NOT a standing
+//     tracked-ledger row and NOT a tightening backlog.
+//     RULING PROVENANCE: the disposition is a codex-DEFER binding TERMINAL
+//     architecture consult `8a3i2-consult-8020-terminal` (2026-06-24; `gpt-5.5`
+//     / `xhigh`, neutral-framing dispatcher-verified, trailing `__DONE__`,
+//     ratified), which ruled ACCEPT / LAND with the claim narrowed. It REJECTED
+//     both (i) a directed resolver fix ("would mostly tighten adversarial
+//     shapes, not common current references") AND (ii) a conservative-fire
+//     redesign ("not required by the bar; would trade a working discriminating
+//     guard for more manual allowlist pressure"). The prior resolve-by-proof
+//     tightening approach was empirically NON-CONVERGENT across four review
+//     passes; this record is the TERMINAL decision to STOP tightening.
+//     The disclosure is by ROOT-CAUSE CLASS (complete-by-construction — any
+//     specific instance below is subsumed by its class), NOT an exhaustive
 //     per-instance list:
 //       (A) SYNTACTIC `use` collection. ALL THREE `use`-collectors
 //       (`collect_use_index` for file imports, `collect_reexport_index` for the
@@ -4214,9 +4225,15 @@ fn test_output_cap_gate_self_test_discriminates() {
 //       uniquely-named sanctioned token's single genuine def (no decoy to forge).
 //     Do NOT run further incremental resolver-hardening passes for this guard,
 //     and do NOT extend this disclosure per-instance — the two classes above are
-//     the complete characterization. This classifier is revisited only if it is
-//     promoted from residual guard to primary enforcement, or if a real
-//     production sink reference starts using one of these residual shapes.
+//     the complete characterization. This classifier is revisited only if:
+//       - it is promoted from residual guard to PRIMARY enforcement — then it
+//         must become SOUND-BY-CONSTRUCTION: a closed conservative-fire
+//         mechanism that OVER-flags rather than under-flags, with an AUDITED
+//         allowlist of resolvable shapes (not a wider classifier); OR
+//       - a real production sink reference starts using one of these residual
+//         shapes at a publication-sink boundary — in which case the correct fix
+//         is to REWRITE that reference to a rooted/proven form, NOT to extend
+//         the classifier.
 //   - TRANSITIVE on BOTH sides: a `TypeExpr`-bearing OUTPUT is decided by the
 //     field-closure over RESOLVED ids; a FORGEABLE INPUT is the same field-closure
 //     (a wrapper of a raw surface/member seed is caught). The dual-bearing
@@ -4261,7 +4278,7 @@ fn test_output_cap_gate_self_test_discriminates() {
 // scanner_justification: the transitive DTO-content + forgeable-input PAIRING across multiple sink modules is not expressible as a single Rust visibility / type-state check — the sealed admitted-token chain (private fields + private Seal) is the compiler primary, this scanner is the residual cross-module pairing supplement.
 // mechanism_ruling: 8a3-binding-ruling-2026-06-24
 // hardening_rounds: 0
-// hardening_history: adoption — replaces the name-based fix5 closed-allowlist output_sink boundary guard with a structural field-closure cross-sink transitive guard. STRUCTURAL REFINEMENT (NOT a hardening round, NOT spelling additions — the guard was made genuinely structural + fail-closed per the guard-mechanism ruling 8a3-guard-mechanism-consult-2026-06-24). A FOLLOW-UP STRUCTURAL-CORRECTNESS refinement then carried GENUINE module-qualified `(module, name)` `TypeDefId` identity through the closure graph with a CONSERVATIVE FAIL-CLOSED resolver, REPLACING the prior final-segment matching (which the prior claim called "module-qualified" but implemented only as bare-final-segment with a side `def_modules` index, so the two `IndexSignature` defs MERGED): the two `IndexSignature` defs are now DISTINCT ids; the safe-input collision check became pure anti-vacuity (the bearing-gated same-name carve-out was deleted); the dual-bearing tripwire seed side went TRANSITIVE while the forgeable carve-out stays DIRECT; and the non-authority input exemptions became qualified + anti-vacuity-checked. A LATER structural-correctness completion then closed three residual fail-OPEN spots a follow-up review found, where the qualified-identity model was claimed but not yet enforced on a bare-name / unique-name basis: (1) the qualified-path resolver arm resolved a UNIQUE final-segment candidate purely by uniqueness, ignoring the written qualifier — now a qualified path direct-matches only when the candidate's module is a suffix-or-equal of the qualifier OR is a proven `pub`/`pub(crate)` re-export of it (a cross-file re-export index + relative-qualifier normalization keep genuine re-exports resolving); (2) the input/output completeness category exemptions matched by BARE final segment — now QUALIFIER-AWARE (the category carries approved homes; a multi-segment ref must match one, a one-segment trait-bound/external is exempt only with no same-name collected def); (3) the dual-bearing tripwire's sanctioned-carrier exemption matched by BARE name — now the QUALIFIED `policy_admitted_safe_input_ids ∪ sealed_construction_chain_ids` set. A FINAL identity-correctness completion then closed the four remaining resolver-permissiveness spots a follow-up review found, where the "conservative fail-closed / module-qualified" claim was not yet fully true: (a) a too-short ANCESTOR prefix was accepted as a direct qualifier match (`crate::X` prefix-matched a deep real module) — direct matching is now SUFFIX-OR-EQUAL only, so ancestor-shortened / relative re-export references resolve through the proven `pub`/`pub(crate)` re-export rail ALONE (now genuinely load-bearing, keyed by the NORMALIZED absolute written path so a `super::…` re-export reference resolves); (b) a unique import whose target was external/unprovable fell through to the unique-collected-def shortcut (`use external::X as AdmittedPublishedMember` blessed the sanctioned token by uniqueness) — the import-shadow now PRESERVES the Unresolved import path; (c) the re-export index recorded ANY `Restricted` visibility incl `pub(self)`/`pub(in …)` — now `pub`/`pub(crate)` ONLY (a narrow scoped re-export is not a crate-wide proof other modules can write); (d) a `super` could pop the crate root, leaving a loosely-matching bare path — `super` now fails closed before escaping above the root. A SUBSEQUENT follow-up review found the resolver STILL resolved unproven identities in three same-class spots, all defense-in-depth (the production sealed-token primary is sound and untouched): (1) the import-shadow arm, after an import target failed to resolve, fell through to a UNIQUENESS shortcut for an intra-crate NON-RENAMED import (so a forged `use crate::evil::AdmittedPublishedMember` still resolved to the unique real token); (2) the re-export prover compared the re-export TARGET module by SUFFIX-or-equal (so a single-segment `pub use publication_authority::X` proved any `…::publication_authority` home); (3) an UNROOTED qualifier was accepted on a raw suffix without consulting the file's `use`-index (so a `use`-shadowed first segment, `use crate::other as publication_authority` then `publication_authority::X`, resolved to the safe token). These tightened the common paths: the resolver resolves a written reference by own-module-def, a genuine `pub`/`pub(crate)` re-export, a proven intra-crate `use`-binding chain (a module-scoped use-binding graph — narrow, intra-crate-only, non-glob, module/descendant-visibility, cycle-bounded; an unsupported `use` form contributes no binding => Unresolved), or a proven (suffix-or-equal DIRECT, EXACT-target re-export) qualifier; the uniqueness fall-through after an unresolved UNIQUE import is removed; the re-export TARGET match is EXACT; and an unrooted qualifier whose first segment the file `use`-shadows is re-resolved through the shadow. The genuine private chain (`registry_decl`'s `super::ResolvedTypeDeclaration` through the parent module's private `use`) resolves by PROOF; the forged `crate::evil::AdmittedPublishedMember` (a rooted qualifier naming no def-home) stays Unresolved. TERMINAL DISPOSITION (architect ruling `8a3i2-consult-8020-terminal`, 2026-06-24): this is an 80/20 fail-closed identity classifier for the current production reference shapes, NOT a complete Rust name resolver, and it CLEARS the acceptance bar for its defense-in-depth role behind the compiler-enforced sealed-token primary. Four residual forged shapes are ACCEPTED debt (cfg/cfg_attr-gated `use` indexed without active-cfg eval; ambiguous multi-import falling through to global uniqueness; unrooted-unshadowed raw-suffix match; no-import bare-unique global-uniqueness) — adversarial relative to this crate's common production sink-token references (each sanctioned token is uniquely named), recorded in `docs/arch/output-projector-residual-guard-debt.md`; no further incremental resolver-hardening passes are run for this guard. hardening_rounds stays 0 (identity-correctness work, not spelling/evasion increments). A COVERAGE-COMPLETENESS fix (architect ruling `facade-ruling-consult-2026-06-25`) then closed an incompleteness where `SANCTIONED_SINK_MODULES` listed `component_meta_methods` (and `typeinfo::raise`) as sinks but the manual `SINK_SCAN_PREFIXES` list OMITTED them, so the collector silently skipped their files. The scanned sink prefixes now DERIVE from `SANCTIONED_SINK_MODULES` (`sink_scan_prefixes` = the normalized mint-scope paths ∪ the intentionally-broader `SUPPLEMENTAL_SINK_SCAN_ROOTS`), and an anti-vacuity assertion fails if any sanctioned sink is ever uncovered by the scan set — removing the manual duplicate list, NOT adding spelling cases (hardening_rounds stays 0).
+// hardening_history: adoption — replaces the name-based fix5 closed-allowlist output_sink boundary guard with a structural field-closure cross-sink transitive guard. STRUCTURAL REFINEMENT (NOT a hardening round, NOT spelling additions — the guard was made genuinely structural + fail-closed per the guard-mechanism ruling 8a3-guard-mechanism-consult-2026-06-24). A FOLLOW-UP STRUCTURAL-CORRECTNESS refinement then carried GENUINE module-qualified `(module, name)` `TypeDefId` identity through the closure graph with a CONSERVATIVE FAIL-CLOSED resolver, REPLACING the prior final-segment matching (which the prior claim called "module-qualified" but implemented only as bare-final-segment with a side `def_modules` index, so the two `IndexSignature` defs MERGED): the two `IndexSignature` defs are now DISTINCT ids; the safe-input collision check became pure anti-vacuity (the bearing-gated same-name carve-out was deleted); the dual-bearing tripwire seed side went TRANSITIVE while the forgeable carve-out stays DIRECT; and the non-authority input exemptions became qualified + anti-vacuity-checked. A LATER structural-correctness completion then closed three residual fail-OPEN spots a follow-up review found, where the qualified-identity model was claimed but not yet enforced on a bare-name / unique-name basis: (1) the qualified-path resolver arm resolved a UNIQUE final-segment candidate purely by uniqueness, ignoring the written qualifier — now a qualified path direct-matches only when the candidate's module is a suffix-or-equal of the qualifier OR is a proven `pub`/`pub(crate)` re-export of it (a cross-file re-export index + relative-qualifier normalization keep genuine re-exports resolving); (2) the input/output completeness category exemptions matched by BARE final segment — now QUALIFIER-AWARE (the category carries approved homes; a multi-segment ref must match one, a one-segment trait-bound/external is exempt only with no same-name collected def); (3) the dual-bearing tripwire's sanctioned-carrier exemption matched by BARE name — now the QUALIFIED `policy_admitted_safe_input_ids ∪ sealed_construction_chain_ids` set. A FINAL identity-correctness completion then closed the four remaining resolver-permissiveness spots a follow-up review found, where the "conservative fail-closed / module-qualified" claim was not yet fully true: (a) a too-short ANCESTOR prefix was accepted as a direct qualifier match (`crate::X` prefix-matched a deep real module) — direct matching is now SUFFIX-OR-EQUAL only, so ancestor-shortened / relative re-export references resolve through the proven `pub`/`pub(crate)` re-export rail ALONE (now genuinely load-bearing, keyed by the NORMALIZED absolute written path so a `super::…` re-export reference resolves); (b) a unique import whose target was external/unprovable fell through to the unique-collected-def shortcut (`use external::X as AdmittedPublishedMember` blessed the sanctioned token by uniqueness) — the import-shadow now PRESERVES the Unresolved import path; (c) the re-export index recorded ANY `Restricted` visibility incl `pub(self)`/`pub(in …)` — now `pub`/`pub(crate)` ONLY (a narrow scoped re-export is not a crate-wide proof other modules can write); (d) a `super` could pop the crate root, leaving a loosely-matching bare path — `super` now fails closed before escaping above the root. A SUBSEQUENT follow-up review found the resolver STILL resolved unproven identities in three same-class spots, all defense-in-depth (the production sealed-token primary is sound and untouched): (1) the import-shadow arm, after an import target failed to resolve, fell through to a UNIQUENESS shortcut for an intra-crate NON-RENAMED import (so a forged `use crate::evil::AdmittedPublishedMember` still resolved to the unique real token); (2) the re-export prover compared the re-export TARGET module by SUFFIX-or-equal (so a single-segment `pub use publication_authority::X` proved any `…::publication_authority` home); (3) an UNROOTED qualifier was accepted on a raw suffix without consulting the file's `use`-index (so a `use`-shadowed first segment, `use crate::other as publication_authority` then `publication_authority::X`, resolved to the safe token). These tightened the common paths: the resolver resolves a written reference by own-module-def, a genuine `pub`/`pub(crate)` re-export, a proven intra-crate `use`-binding chain (a module-scoped use-binding graph — narrow, intra-crate-only, non-glob, module/descendant-visibility, cycle-bounded; an unsupported `use` form contributes no binding => Unresolved), or a proven (suffix-or-equal DIRECT, EXACT-target re-export) qualifier; the uniqueness fall-through after an unresolved UNIQUE import is removed; the re-export TARGET match is EXACT; and an unrooted qualifier whose first segment the file `use`-shadows is re-resolved through the shadow. The genuine private chain (`registry_decl`'s `super::ResolvedTypeDeclaration` through the parent module's private `use`) resolves by PROOF; the forged `crate::evil::AdmittedPublishedMember` (a rooted qualifier naming no def-home) stays Unresolved. TERMINAL DISPOSITION (architect ruling `8a3i2-consult-8020-terminal`, 2026-06-24): this is an 80/20 fail-closed identity classifier for the current production reference shapes, NOT a complete Rust name resolver, and it CLEARS the acceptance bar for its defense-in-depth role behind the compiler-enforced sealed-token primary. Four residual forged shapes are ACCEPTED, codex-classified EDGE-only final-state residuals (cfg/cfg_attr-gated `use` indexed without active-cfg eval; ambiguous multi-import falling through to global uniqueness; unrooted-unshadowed raw-suffix match; no-import bare-unique global-uniqueness) — adversarial relative to this crate's common production sink-token references (each sanctioned token is uniquely named), recorded as the colocated FINAL-STATE record in this guard's section header above (an accepted codex-classified EDGE-only residual, not a standing tracked-ledger row); no further incremental resolver-hardening passes are run for this guard. hardening_rounds stays 0 (identity-correctness work, not spelling/evasion increments). A COVERAGE-COMPLETENESS fix (architect ruling `facade-ruling-consult-2026-06-25`) then closed an incompleteness where `SANCTIONED_SINK_MODULES` listed `component_meta_methods` (and `typeinfo::raise`) as sinks but the manual `SINK_SCAN_PREFIXES` list OMITTED them, so the collector silently skipped their files. The scanned sink prefixes now DERIVE from `SANCTIONED_SINK_MODULES` (`sink_scan_prefixes` = the normalized mint-scope paths ∪ the intentionally-broader `SUPPLEMENTAL_SINK_SCAN_ROOTS`), and an anti-vacuity assertion fails if any sanctioned sink is ever uncovered by the scan set — removing the manual duplicate list, NOT adding spelling cases (hardening_rounds stays 0).
 // ===========================================================================
 
 /// Output-authority SEEDs as MODULE-QUALIFIED `(module, name)` IDs: a return /
@@ -5705,7 +5722,8 @@ fn resolve_use_binding_chain(
 /// remain `Unresolved` — but the accepted residuals below MAY OVER-RESOLVE (they
 /// are not a complete fail-closed guarantee). Those residual shapes — where the
 /// classifier may resolve WITHOUT proof — are called out per-arm below and
-/// tracked in `docs/arch/output-projector-residual-guard-debt.md`.
+/// recorded as the colocated final-state record in this guard's section header
+/// (an accepted codex-classified EDGE-only residual).
 ///
 ///   - A FULLY-QUALIFIED path (≥2 segments): the final segment is the name. A
 ///     candidate is matched by ONE of:
@@ -5716,7 +5734,7 @@ fn resolve_use_binding_chain(
 ///     `use`-index SHADOWS is re-resolved through the shadow binding (so a
 ///     `use crate::other as publication_authority` cannot bless
 ///     `publication_authority::X`); a too-short ANCESTOR prefix is never a direct
-///     match. RESIDUAL (accepted, debt): an UNROOTED UNSHADOWED qualifier is
+///     match. RESIDUAL (accepted EDGE-only final-state): an UNROOTED UNSHADOWED qualifier is
 ///     trusted on its RAW SUFFIX — `publication_authority::AdmittedPublishedMember`
 ///     written from a file with no shadowing `use` raw-suffix matches the unique
 ///     collected token. This is not proof; it is accepted because the token is
@@ -5743,7 +5761,7 @@ fn resolve_use_binding_chain(
 ///     `Unresolved` IMMEDIATELY (`use external::X as AdmittedPublishedMember` over
 ///     a unique `AdmittedPublishedMember` does not bless the token via this arm);
 ///     else a parent module's accessible `use`-binding chain may resolve it; else,
-///     exactly-one collected def with that name. RESIDUAL (accepted debt, class B
+///     exactly-one collected def with that name. RESIDUAL (accepted EDGE-only final-state, class B
 ///     — see the section header's root-cause classes): the `candidates.len() == 1`
 ///     global-uniqueness fallback is reached whenever a unique PROVEN import target
 ///     was not found — for a no-import bare name, an AMBIGUOUS MULTI-import
@@ -5896,7 +5914,8 @@ fn resolve_type_ref_seen(
 
     // Unqualified — the 80/20 classifier's arms (a)-(d). Common shapes (a)-(c)
     // resolve by genuine proof; (d) is the accepted-residual global-uniqueness
-    // fallback (tracked in docs/arch/output-projector-residual-guard-debt.md).
+    // fallback (an accepted codex-classified EDGE-only residual; see this guard's
+    // colocated section-header record).
     // (a) own module def.
     let own = TypeDefId::new(from_module, &final_segment);
     if candidates.contains(&own) {
@@ -5905,7 +5924,7 @@ fn resolve_type_ref_seen(
     // (b) a `use` import in this file UNIQUELY claims the name (`unique_path`
     // returns one target) — resolve its TARGET by proof and return AS-IS. If the
     // import target does NOT resolve, the name stays `Unresolved` IMMEDIATELY via
-    // this arm. RESIDUAL (class B, accepted debt): this arm is SKIPPED — falling
+    // this arm. RESIDUAL (class B, accepted EDGE-only final-state): this arm is SKIPPED — falling
     // through to the (d) global-uniqueness fallback — when `unique_path` is `None`
     // for an AMBIGUOUS MULTI-import (two `use`s claim the name) AND when the import
     // is a unique SINGLE-SEGMENT self-import (`use Foo;`, where the recursion guard
@@ -5948,7 +5967,8 @@ fn resolve_type_ref_seen(
     // names it) PLUS the accepted RESIDUAL where an AMBIGUOUS multi-import left
     // `unique_path` `None`. This is global uniqueness, not proof; accepted
     // because the sanctioned tokens are uniquely named + the sealed-token
-    // compiler boundary is the production guarantee (debt-tracked). More than
+    // compiler boundary is the production guarantee (recorded in this guard's
+    // colocated section-header final-state record). More than
     // one ⇒ AMBIGUOUS, fail-closed.
     match candidates.len() {
         1 => TypeRef::Resolved(candidates.iter().next().unwrap().clone()),
@@ -10449,8 +10469,9 @@ fn reexport_prover_requires_exact_target_module_not_suffix_self_test_discriminat
 fn unrooted_qualifier_shadowed_rebinds_but_unshadowed_suffix_match_is_characterized() {
     // CHARACTERIZATION (not a complete-proof claim): this pins TWO behaviors of
     // the unrooted-qualifier arm — the shadowed REBIND (proof; RED below) and the
-    // unshadowed RAW-SUFFIX match (ACCEPTED RESIDUAL; GREEN below, tracked in
-    // docs/arch/output-projector-residual-guard-debt.md).
+    // unshadowed RAW-SUFFIX match (ACCEPTED RESIDUAL; GREEN below — an accepted
+    // codex-classified EDGE-only residual recorded in this guard's colocated
+    // section-header record).
     //
     // The shadowed rebind (#3 RED): a file `use`-SHADOWS the first segment of an
     // UNROOTED qualifier (`use crate::other as publication_authority;`) then
@@ -10506,7 +10527,8 @@ fn unrooted_qualifier_shadowed_rebinds_but_unshadowed_suffix_match_is_characteri
     // GREEN — ACCEPTED RESIDUAL (characterization, NOT proof): with NO shadowing
     // import, a written `publication_authority::AdmittedPublishedMember` whose
     // suffix matches the token's real module resolves by RAW SUFFIX. This is the
-    // unrooted-unshadowed residual (debt-tracked): it is not proof the qualifier
+    // unrooted-unshadowed residual (recorded in this guard's colocated
+    // section-header final-state record): it is not proof the qualifier
     // genuinely names the token's module (an unrooted first segment is a genuine
     // module segment for the extern-crate-name / sibling-module case the real tree
     // relies on, but is also where a forged unrooted decoy would land). It is
