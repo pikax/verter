@@ -67,7 +67,7 @@ Role separation is required; account separation is optional. On one account, use
 - Integration-confirm MANAGER runs at phase/milestone boundaries, before dependent phases, before final close-out, and after every 5 confirmed blocks. Only `VERDICT:INTEGRATION-CONFIRMED` closes a phase.
 - Plan-end has zero open deferrals. Mid-plan deferrals require a codex-DEFER ruling and a `docs/arch` debt ledger row.
 - Binding designs live in `docs/arch/<name>-design.md` and the master-plan locked-designs index; scratch-only designs are invalid.
-- Repo cleanliness is prevent + remove, never per-file gitignore: orchestration state in `/tmp/mom` or `.feedback/`, worktrees outside repo, scoped `git add`, no `git add -A`.
+- Repo cleanliness is prevent + remove, never per-file gitignore: orchestration state in a scratch dir outside the repo (e.g. under the OS temp dir / `$TMPDIR`) or `.feedback/`, worktrees outside repo, scoped `git add`, no `git add -A`.
 - No plan/phase vocabulary in code/comments/tests or conventional commit messages; scrub at squash.
 - Stage/phase cleanup happens only after land + confirmation: remove closed worktrees/temp, preserve durable records, verify clean status.
 - Plan-end history purge of scratch/report clutter is a user-authorized destructive block with final user go-ahead at execution time.

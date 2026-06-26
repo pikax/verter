@@ -10,8 +10,8 @@ structurally true. The EXHAUSTIVE enumeration + classification of every hot mate
 settled by this 8-D deferral row. **This is a TEMPORARY debt row** (per Rule-File Integrity) — it is
 cleared when Stage-9 lands that conversion and enables the fence, not before.
 
-**Ruling source (pre-sanctioned, binding)**: the codex 2-leg RESCOPE decision at
-`/tmp/mom/STAGE8/RESCOPE/DECISION.md` — both legs exit 0, both `__DONE__`, STRONG convergence on
+**Ruling source (pre-sanctioned, binding)**: the codex 2-leg RESCOPE decision
+(recorded in the orchestration ledger) — both legs exit 0, both `__DONE__`, STRONG convergence on
 all 5 questions, ratified. Two parts of that decision sanction this move directly:
 
 - **Q3 (X3 disposition)**: "eliminate in 8-D or formally move to Stage 9 with a named gate."

@@ -252,7 +252,7 @@ The 5 failing tests are pre-existing environmental failures
 phase-05m-complete tree), confirmed by checking out the parent
 commit and running the same tests. They require a specific nuxt-ui
 repo state at `.integration-tests/repos/nuxt-ui/` that the current
-worktree's junctioned checkout (D:/dev/github/verter-test-repos/nuxt-ui
+worktree's junctioned checkout (<external-corpus>/verter-test-repos/nuxt-ui
 on branch v4) does not match. My changes introduce ZERO new
 regressions.
 
@@ -355,8 +355,8 @@ component but inlines all dependent types:
 
 The shape was extracted by reading the actual nuxt-ui sources at:
 
-- `D:/dev/github/verter-test-repos/nuxt-ui/src/runtime/components/color-mode/ColorModeSelect.vue`
-- `D:/dev/github/verter-test-repos/nuxt-ui/src/runtime/components/SelectMenu.vue`
+- `<external-corpus>/verter-test-repos/nuxt-ui/src/runtime/components/color-mode/ColorModeSelect.vue`
+- `<external-corpus>/verter-test-repos/nuxt-ui/src/runtime/components/SelectMenu.vue`
 
 The hermetic version retains the structural elements that make the
 test discriminate (cross-file imports, generic substitution,

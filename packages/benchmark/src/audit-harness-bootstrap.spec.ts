@@ -1,7 +1,7 @@
 /**
  * Discrimination test for the VFS audit-harness empty-topology bug.
  *
- * Background: V1-V5 + W1/W2 (see `D:/tmp/vfs-invest/`) traced the
+ * Background: V1-V5 + W1/W2 (see the VFS investigation scratch notes) traced the
  * misleading 19/45 semanticMiss result on `Table.vue` to two
  * independent bootstrap errors in `_audit-component.ts`:
  *

@@ -3,7 +3,7 @@
 **Branch:** `worktree-agent-a4b2c8e9d62d351ff`
 **Base commit:** `6d9b0fc3` (orchestrator-spawned)
 **Final commit:** `6fcdc486` (6 commits)
-**Plan authority:** `D:/tmp/verter-debt-and-deferred-fixes-plan.md` §2.1.1, §2.1.2, §2.1.3, §2.2
+**Plan authority:** `<scratch>/verter-debt-and-deferred-fixes-plan.md` §2.1.1, §2.1.2, §2.1.3, §2.2
 
 ## 1. Steps completed
 

@@ -61,6 +61,6 @@ Windows / PowerShell utilities:
 - `Get-ChildItem -Force` - list files including hidden.
 - `Get-ChildItem -Recurse -Filter <pattern>` - recursive file search by name.
 - `rg "pattern"` / `rg --files` - preferred fast search if available.
-- `Set-Location D:\dev\personal\verter` - change directory.
+- `Set-Location <repo-root>` - change directory.
 - `git status --short --branch`, `git log --oneline -5`, `git diff --stat` - basic git inspection.
 - `taskkill /F /PID <pid>` - kill a long-running test/dev server process on Windows.

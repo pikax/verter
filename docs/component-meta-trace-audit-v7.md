@@ -2,10 +2,10 @@
 
 Date: 2026-04-05
 
-Artifacts:
-- `/Users/carlosrodrigues/Documents/dev/verter/tmp/corpus-trace-audit-v7/full/summary.json`
-- `/Users/carlosrodrigues/Documents/dev/verter/tmp/corpus-trace-audit-v7/full/traces/`
-- `/Users/carlosrodrigues/Documents/dev/verter/tmp/corpus-trace-audit-v7/targeted/ChangelogVersion.trace.log`
+Artifacts (gitignored scratch outputs under `tmp/`, not committed):
+- `tmp/corpus-trace-audit-v7/full/summary.json`
+- `tmp/corpus-trace-audit-v7/full/traces/`
+- `tmp/corpus-trace-audit-v7/targeted/ChangelogVersion.trace.log`
 
 ## What Was Fixed
 
@@ -15,7 +15,7 @@ Artifacts:
   - `src/runtime/composables/useComponentIcons`
 - The scheduler now normalizes macro-type blocker ids and relative dependency ids through the same companion-canonicalization rules used by the host query path.
 - Regression coverage was added in:
-  - `/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/host_manage_tests.rs`
+  - `crates/verter_session/src/host_manage_tests.rs`
   - `upsert_normalizes_extensionless_macro_type_blockers_before_scheduler_workspace_read`
 
 ## Corpus Result
@@ -59,10 +59,10 @@ Desired end state:
 - route selection stays shallow and does not need repeated same-file `current_eval_state` hits while scanning the barrel
 
 Likely touchpoints:
-- `/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/host_resolve.rs`
-- `/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/host_manage.rs`
-- `/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/resolver_core/external_type_frontier.rs`
-- `/Users/carlosrodrigues/Documents/dev/verter/crates/verter_session/src/resolver_core/export_graph.rs`
+- `crates/verter_session/src/host_resolve.rs`
+- `crates/verter_session/src/host_manage.rs`
+- `crates/verter_session/src/resolver_core/external_type_frontier.rs`
+- `crates/verter_session/src/resolver_core/export_graph.rs`
 
 Non-goal for that pass:
 - do not add another eager collector or alternate resolver path

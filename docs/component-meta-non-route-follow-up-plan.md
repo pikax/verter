@@ -3,10 +3,10 @@
 Date: 2026-04-05
 
 Primary context:
-- Main cutover plan: `/Users/carlosrodrigues/.claude/plans/transient-booping-sunbeam.md`
-- Current route audit: `/Users/carlosrodrigues/Documents/dev/verter/docs/component-meta-trace-audit-v7.md`
-- Canonical repo rules: `/Users/carlosrodrigues/Documents/dev/verter/AGENTS.md`
-- Canonical architecture/invariants: `/Users/carlosrodrigues/Documents/dev/verter/CLAUDE.md`
+- Main cutover plan: the main cutover plan (developer-local Claude plans dir)
+- Current route audit: `docs/component-meta-trace-audit-v7.md`
+- Canonical repo rules: `AGENTS.md`
+- Canonical architecture/invariants: `CLAUDE.md`
 
 ## In Scope
 

@@ -3,7 +3,7 @@
 > **Sequencing authority: `docs/arch/semantic-db-overhaul-unified-remaining-plan.md`** — this file is detail/reference only; the `D:/` paths and old SHAs/branches in it are HISTORICAL. This plan **OWNS its block range `S5.B1`–`S5.B12`** under the unified cross-plan sequencing (§3.1 there): `S5.B5` is the SHARED macro-surface gate landing AFTER typeinfo U2 (and is RESCOPE-GATE-REQUIRED — its normalizer compatibility matrix is a gate deliverable), and `S5.B11`/`S5.B12` are a HARD GATE before any typeinfo U8+ work. The codex binding sign-off (Q1–Q4) is resolved in the "CODEX BINDING SIGN-OFF CORRECTIONS" section below, which overrides the earlier block sketch; the revised block list (B1 → B3 → … → B12, B2 dropped) is the live order.
 
 Branch base: integration `refactor/semantic-db-overhaul` (re-verify HEAD at each block land; was 63d682f69).
-Implements codex BINDING verdict (D:/tmp/stage5-codex-verdict.txt) + reachability (D:/tmp/stage5-reachability.md).
+Implements codex BINDING verdict (<scratch>/stage5-codex-verdict.txt) + reachability (<scratch>/stage5-reachability.md).
 Approach: port verter_compiler macro lowering off parser resolve_type/ OXC resolver → shared dispatch
 (SemanticQueryKey::ResolveMacroPayload), delivered as a compiler-OWNED DTO produced by session/host; parser macro
 parsing becomes spans-only; THEN delete the legacy rail. Four NEVERS. Each block = commit-first, lands independently.
@@ -97,7 +97,7 @@ parsing becomes spans-only; THEN delete the legacy rail. Four NEVERS. Each block
 surface.rs (DTO producer :602/:224), build.rs:3889 (5A dispatch core), script/macros.rs:152 + tsc/script.rs:1333 (compiler consumers),
 setup.rs:782 + resolve_type/{mod,infer}.rs (parser flip + deletion), architecture_guards.rs:13613/12104 (5C ledger).
 
-## ✅ CODEX BINDING SIGN-OFF CORRECTIONS (D:/tmp/stage5-signoff-verdict.txt) — these OVERRIDE the blocks above
+## ✅ CODEX BINDING SIGN-OFF CORRECTIONS (<scratch>/stage5-signoff-verdict.txt) — these OVERRIDE the blocks above
 - Q1 CONFIRMED: delete `infer_runtime_type` (type-arg walker, resolve_type/infer.rs:35, called setup.rs:841). KEEP/move the
   object-arg runtime model (extract_runtime_types_from_expr setup.rs:939; obj props setup.rs:1009/1052/1056; consumed tsc/script.rs:1391/1439).
   Do NOT keep format_runtime_types for type-arg resolution.

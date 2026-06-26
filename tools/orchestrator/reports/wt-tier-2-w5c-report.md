@@ -1,7 +1,7 @@
 # Tier 2 W5c — host_resolve.rs split
 
 **Branch base:** `refactor/legacy-to-graph-dispatch-migration` HEAD `f5a1d10e`
-**Plan:** `D:/tmp/verter-debt-and-deferred-fixes-plan.md` §4 (Tier 2)
+**Plan:** `<scratch>/verter-debt-and-deferred-fixes-plan.md` §4 (Tier 2)
 **Authority audit:** `docs/arch/debt-closure/13-god-module-split-audit/host_resolve.md`
 **Step:** `2.3`
 **Marker:** `phase-tier-2-step-2.3-w5c-complete`

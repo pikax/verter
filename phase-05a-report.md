@@ -2,11 +2,11 @@
 
 **Phase id:** 05a
 **Branch:** `wt/phase-05a-ambient-lib-infra`
-**Worktree:** `D:/dev/wt/phase-05a-ambient-lib-infra`
+**Worktree:** `<worktree>/phase-05a-ambient-lib-infra`
 **Base commit at spawn:** `d9b3f90939ed45387b8d219c01ad971875b27f4c`
 **Foundation commit on branch (preserved):** `db324056` (`feat(workspace):
 add ProjectStableKey for ambient-lib registration`)
-**Plan:** `D:/tmp/verter-architecture-cutover-phase-05.md` (r9 / r13
+**Plan:** `<scratch>/verter-architecture-cutover-phase-05.md` (r9 / r13
 anchor refresh) §5 commits 0a remainder + 0b, §6.1–§6.9, A1–A8.
 **Disposition:** success.
 

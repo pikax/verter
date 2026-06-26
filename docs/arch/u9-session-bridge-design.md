@@ -17,8 +17,7 @@ deferred/CUT-by-default; U9 closes the reachability gap via single-node lowering
 Process: source-verified recon → two independent mandate-led panelists (codex + claude-work) attacked a
 strawman → an independent claude-work adjudicator that did NOT rubber-stamp, opened every cited `file:line`,
 ran the consumer/cycle/failure greps itself, confirmed every panel finding (two with deeper evidence), added
-two new defects, and made the fork call. Artifacts:
-`/tmp/mom/U9/{STRAWMAN.md,PANEL.md,codex-panel-out.txt,adjudicator-report.md}`.
+two new defects, and made the fork call. Artifacts (the strawman, the panel, the panelist report, and the adjudicator report) are recorded in the orchestration ledger.
 
 ---
 

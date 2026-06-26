@@ -6102,7 +6102,7 @@ mod foundations_guards {
         // (`background`, `surround`). The trailing digit must be at
         // a word boundary so `roundtrip` is NOT flagged. The
         // separator-less form (`round20`) catches scratch-file path
-        // references like `D:/tmp/round20-fix2-report.md`. Scanned
+        // references like a `round20-fix2-report.md` under a temp dir. Scanned
         // against the lowercased line so every capitalisation (including
         // ALL-CAPS `ROUND-7`) trips in one pass; lowercasing preserves
         // byte indices and word-char-ness, so the word-boundary checks

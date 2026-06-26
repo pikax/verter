@@ -36,18 +36,18 @@ the HEAD JS layer against the R21.5 native binary throws
 
 **Workaround:** run the bench in the matching git worktree (so JS
 and native binary agree on protobuf version). R21.5 worktree at
-`D:/tmp/r22-final-s5/r215-wt` (built `cargo build --release
+`<scratch>/r22-final-s5/r215-wt` (built `cargo build --release
 --package verter_napi` in-tree, dropped into `packages/native/dist/`,
 ran `pnpm install --frozen-lockfile && pnpm --filter
 @verter/component-meta build && pnpm --filter @verter/types build
 && pnpm --filter @verter/type-ir build`). HEAD runs in the main
-repo at `D:/dev/personal/verter`. Both bench invocations use the
-SAME nuxt-ui corpus via `--ui-root=D:/dev/personal/verter/.integration-tests/repos/nuxt-ui`
+repo at `<repo-root>`. Both bench invocations use the
+SAME nuxt-ui corpus via `--ui-root=<repo-root>/.integration-tests/repos/nuxt-ui`
 (177 components after filtering, same set, same content).
 
 ### Paired runner
 
-`D:/tmp/r22-final-s5/paired-bench.sh` runs 7 alternating pairs:
+`<scratch>/r22-final-s5/paired-bench.sh` runs 7 alternating pairs:
 
 ```
 for i in 1..7:
@@ -78,7 +78,7 @@ Run order: R215 1 → HEAD 1 → R215 2 → HEAD 2 → … → R215 7 → HEAD 7
   the 7 paired ratios; median of each resample. CI = 2.5%–97.5%
   percentiles of the 10 000 medians.
 
-Output: `D:/tmp/r22-final-s5/runs/bootstrap-ci.json`.
+Output: `<scratch>/r22-final-s5/runs/bootstrap-ci.json`.
 
 ## Aggregate results
 
@@ -172,19 +172,19 @@ inviolable.
 
 ## Tooling
 
-- `D:/tmp/r22-final-s5/paired-bench.sh` — alternating R21.5 ↔
+- `<scratch>/r22-final-s5/paired-bench.sh` — alternating R21.5 ↔
   HEAD driver. Runs the bench in its matching git worktree to
   avoid the protobuf version skew.
-- `D:/dev/personal/verter/scripts/bench-bootstrap-ci.mjs` —
+- `<repo-root>/scripts/bench-bootstrap-ci.mjs` —
   reads paired runs, computes per-pair aggregate + per-component
   ratios, runs bootstrap CI (10 000 resamples, 95% percentiles),
   emits `bootstrap-ci.json` and prints a verdict.
 
 ## Captures
 
-- `D:/tmp/r22-final-s5/runs/r215-run{1..7}/meta-ui-verter-repo_first_pass.json`
-- `D:/tmp/r22-final-s5/runs/head-run{1..7}/meta-ui-verter-repo_first_pass.json`
-- `D:/tmp/r22-final-s5/runs/bootstrap-ci.json` — full per-component
+- `<scratch>/r22-final-s5/runs/r215-run{1..7}/meta-ui-verter-repo_first_pass.json`
+- `<scratch>/r22-final-s5/runs/head-run{1..7}/meta-ui-verter-repo_first_pass.json`
+- `<scratch>/r22-final-s5/runs/bootstrap-ci.json` — full per-component
   table + per-pair aggregate ratios + gate verdicts.
 
 ## Environment

@@ -22,9 +22,10 @@
  */
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const runsDir = process.argv[2] || "D:/tmp/r22-final-s5/runs";
+const runsDir = process.argv[2] || join(tmpdir(), "verter-bench", "r22-final-s5", "runs");
 const BENCH_FILE = "meta-ui-verter-repo_first_pass.json";
 const RESAMPLES = 10000;
 const AGGREGATE_GATE = 1.05; // +5 % over R21.5

@@ -268,7 +268,7 @@ remain unchanged.
 
 ## Deferred
 
-None. The Phase 9.2 deferred item from `D:/tmp/verter-cutover-state.json`
+None. The Phase 9.2 deferred item from `<scratch>/verter-cutover-state.json`
 is closed by Fix B's inventory document.
 
 ## Commit list

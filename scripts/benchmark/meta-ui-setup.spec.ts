@@ -33,11 +33,11 @@ describe("parseMetaUiSetupArgs", () => {
   it("returns the explicit ref, target, and unfrozen-install flag when --ref is provided", () => {
     const args = parseMetaUiSetupArgs(
       ["--ref=90a94fb162d532ada26012bfe1ab82adc9217988"],
-      "D:/dev/personal/verter",
+      "/work/verter",
     );
 
-    expect(args.repoRoot).toBe("D:/dev/personal/verter");
-    expect(args.targetRoot).toBe("D:/dev/personal/verter/.integration-tests/repos/nuxt-ui");
+    expect(args.repoRoot).toBe("/work/verter");
+    expect(args.targetRoot).toBe("/work/verter/.integration-tests/repos/nuxt-ui");
     expect(args.ref).toBe("90a94fb162d532ada26012bfe1ab82adc9217988");
     expect(args.allowUnfrozenInstall).toBe(false);
     expect(args.allowDirtyTarget).toBe(false);
@@ -46,22 +46,17 @@ describe("parseMetaUiSetupArgs", () => {
   it("Tier 6 §8.2 / T9.3 — throws when --ref is absent (strict-ref enforcement)", () => {
     // Discriminator: pre-T9.3 the parser silently fell back to the
     // floating branch HEAD. Post-T9.3 it MUST throw.
-    expect(() => parseMetaUiSetupArgs([], "D:/dev/personal/verter")).toThrow(
-      /`--ref=.*` is required/,
-    );
+    expect(() => parseMetaUiSetupArgs([], "/work/verter")).toThrow(/`--ref=.*` is required/);
   });
 
   it("Tier 6 §8.2 / T9.3 — throws when --ref is empty (`--ref=`)", () => {
-    expect(() => parseMetaUiSetupArgs(["--ref="], "D:/dev/personal/verter")).toThrow(
+    expect(() => parseMetaUiSetupArgs(["--ref="], "/work/verter")).toThrow(
       /`--ref=.*` is required/,
     );
   });
 
   it("Tier 6 §8.2 / T9.3 — surfaces the --allow-dirty-target opt-in", () => {
-    const args = parseMetaUiSetupArgs(
-      ["--ref=v0.5.0", "--allow-dirty-target"],
-      "D:/dev/personal/verter",
-    );
+    const args = parseMetaUiSetupArgs(["--ref=v0.5.0", "--allow-dirty-target"], "/work/verter");
     expect(args.allowDirtyTarget).toBe(true);
   });
 

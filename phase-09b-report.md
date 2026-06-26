@@ -1,9 +1,9 @@
 # Phase 9b — `compileBatch` Host-Backed Cutover — Implementation Report
 
-**Sub-plan:** `D:/tmp/verter-architecture-cutover-phase-09.md` (REVISION 3.2)
+**Sub-plan:** `<scratch>/verter-architecture-cutover-phase-09.md` (REVISION 3.2)
 **Branch:** `wt/phase-09b-host-backed-compile-cutover`
 **Base commit:** `4cc68fdafe39ea24921ce220ed80f9e347ae1789` (post-Phase-10a integration tip)
-**Worktree:** `D:/dev/wt/phase-09b-host-backed-compile-cutover`
+**Worktree:** `<worktree>/phase-09b-host-backed-compile-cutover`
 **Merge strategy:** Squash-merge into `refactor/semantic-db-overhaul`.
 
 ## TL;DR
@@ -24,8 +24,8 @@ None required — fresh start at `4cc68fda`. No prior 9b worktree to recover.
 
 All four gates verified at the worktree HEAD before commit 1:
 
-1. `D:/tmp/verter-architecture-cutover-phase-09.md` exists.
-2. `phase-09b.user_approved == true` recorded in `D:/tmp/verter-cutover-state.json`.
+1. `<scratch>/verter-architecture-cutover-phase-09.md` exists.
+2. `phase-09b.user_approved == true` recorded in `<scratch>/verter-cutover-state.json`.
 3. The bypass is intact: `crates/verter_napi/src/lib.rs:2314` matches
    `^use verter_compiler::compile::\{?compile\b`.
 4. `crates/verter_napi/src/lib.rs` contains a `^(fn|pub fn) compile_batch`

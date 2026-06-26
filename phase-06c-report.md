@@ -140,7 +140,7 @@ failures:
 ---- no_scheduler_backed_workspace_shim_in_session_src stdout ----
 
 thread 'no_scheduler_backed_workspace_shim_in_session_src' (2393812) panicked at crates\verter_session\tests\architecture_guards.rs:743:5:
-Phase 6c regression: production shim file `D:\dev\wt\phase-06c-scheduler-shim-removal\crates/verter_session/src\scheduler_shim.rs` must not exist after Phase 6c removal — re-introducing the scheduler-backed `WorkspaceAccess` shim is forbidden per the cutover end-state (no shims, no dual paths)
+Phase 6c regression: production shim file `<repo-root>\crates/verter_session/src\scheduler_shim.rs` must not exist after Phase 6c removal — re-introducing the scheduler-backed `WorkspaceAccess` shim is forbidden per the cutover end-state (no shims, no dual paths)
 
 failures:
     no_scheduler_backed_workspace_shim_in_session_src

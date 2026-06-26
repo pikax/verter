@@ -1,6 +1,6 @@
 # Step 1 — Sub-task 1.0 working notes: API-break inventory
 
-Source plan: `D:/tmp/architectural-debt-closure.md` (revision 10), Step 1.
+Source plan: `<scratch>/architectural-debt-closure.md` (revision 10), Step 1.
 
 This document captures the four `rg` inventories the plan's sub-task 1.0
 demands BEFORE adding the additive type extensions or rewriting any

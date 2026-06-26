@@ -2,7 +2,7 @@
 
 **Phase id:** phase-12
 **Branch:** `wt/phase-12-docs`
-**Worktree:** `D:/dev/wt/phase-12-docs`
+**Worktree:** `<worktree>/phase-12-docs`
 **Base commit at spawn:** `5bd95efb4f4454148d71b999a768d38ad7018dfa` (post-Phase-9b integration tip)
 **Work head before marker:** `ee892fb7d8dedba74ae048f84ae2ee4bb89cca0f`
 **Disposition:** success.
@@ -30,7 +30,7 @@ correctness counts match the post-Phase-9b baseline exactly:
 ### Step 0a — fmt-sweep
 
 ```
-cd D:/dev/wt/phase-12-docs
+cd <worktree>/phase-12-docs
 cargo fmt --all --check
 # exit 0 — no fmt drift; no prefix commit produced.
 ```
@@ -38,7 +38,7 @@ cargo fmt --all --check
 ### Step 0b — predecessor stuck-file check
 
 ```
-find D:/dev/personal/verter -maxdepth 2 -name "phase-*-stuck.md" -type f 2>/dev/null
+find <repo-root> -maxdepth 2 -name "phase-*-stuck.md" -type f 2>/dev/null
 # (empty output — no live stuck files; §12.2 STOP condition not triggered)
 ```
 

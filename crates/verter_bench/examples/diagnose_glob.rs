@@ -5,9 +5,24 @@
 use std::time::Instant;
 
 fn main() {
-    let root = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "d:/dev/personal/verter/.integration-tests/repos/nuxt-ui".into());
+    let root = std::env::args().nth(1).unwrap_or_else(|| {
+        // Absolute repo-root-anchored default; the corpus is gitignored.
+        // Parent-traversal (NOT textual `../..`): downstream path handling
+        // does not collapse `..`. `CARGO_MANIFEST_DIR` is always
+        // `<repo>/crates/verter_bench`.
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap() // -> <repo>/crates
+            .parent()
+            .unwrap() // -> <repo>
+            .join(".integration-tests/repos/nuxt-ui")
+            .to_string_lossy()
+            .into_owned()
+    });
+    // Normalize separators: `glob` patterns are forward-slash; a Windows
+    // backslash root (from to_string_lossy or a CLI arg) would otherwise
+    // produce a mixed/invalid pattern.
+    let root = root.replace('\\', "/");
     let pattern = format!("{root}/**/tsconfig.json");
     eprintln!("glob pattern: {pattern}");
     let started = Instant::now();

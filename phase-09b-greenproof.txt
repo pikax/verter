@@ -1,4 +1,4 @@
-   Compiling verter_session v0.0.1-beta.1 (D:\dev\wt\phase-09b-host-backed-compile-cutover\crates\verter_session)
+   Compiling verter_session v0.0.1-beta.1 (<repo-root>\crates\verter_session)
 warning: failed to parse serde attribute
   | 
   | #[serde(default, skip_serializing_if = "std::ops::Not::not")]

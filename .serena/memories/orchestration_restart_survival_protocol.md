@@ -24,7 +24,7 @@ window → the agent dies before committing → WIP lost (must be recovered by h
    lost). codex re-confirm judges test discrimination STATICALLY (reliable); the orchestrator does
    empirical revert-and-observe only if codex doubts.
 4. **Keep the existing cheap-recovery rails:** WIP patch-backup (`git -C <wt> diff HEAD >
-   D:/tmp/x.patch`); AUDIT background state at the START of every turn (git log for new commits +
+   <scratch>/x.patch`); AUDIT background state at the START of every turn (git log for new commits +
    newest mtime + `tasklist | grep cargo/rustc` + agent transcript mtime/size + the session-id dir
    to detect a restart); worktree-ABSOLUTE-path mandate (Serena + relative paths silently hit the
    MAIN repo); commit-after-every-step.

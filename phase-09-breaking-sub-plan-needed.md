@@ -231,7 +231,7 @@ Agent(
      3. Specifies the deprecation window (one release with both APIs,
         then deletion).
      4. Aligns with the user's directive: production-grade, no quick fix.
-   Output: D:/tmp/verter-architecture-cutover-phase-09.md.
+   Output: <scratch>/verter-architecture-cutover-phase-09.md.
    DO NOT IMPLEMENT — design only."
 )
 ```

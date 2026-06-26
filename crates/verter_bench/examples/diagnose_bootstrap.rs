@@ -49,7 +49,17 @@ fn main() {
     let project_root = std::env::var("VERTER_AUDIT_PROJECT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from("D:/dev/personal/verter/.integration-tests/repos/nuxt-ui")
+            // Absolute repo-root-anchored default; the corpus is gitignored.
+            // Parent-traversal (NOT textual `../..`): downstream host-id /
+            // canonicalize-path does not collapse `..`, which would split
+            // canonical identity from realpath. `CARGO_MANIFEST_DIR` is
+            // always `<repo>/crates/verter_bench`.
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap() // -> <repo>/crates
+                .parent()
+                .unwrap() // -> <repo>
+                .join(".integration-tests/repos/nuxt-ui")
         });
     let target_name = std::env::args().nth(1).unwrap_or_else(|| "Badge".into());
 

@@ -8,7 +8,7 @@ packages/verter-tsc/npm/darwin-arm64     |  WARN  Unsupported platform: want
 packages/verter-tsc/npm/darwin-x64       |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["darwin"],"libc":["any"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
 packages/verter-tsc/npm/linux-x64-gnu    |  WARN  Unsupported platform: wanted: {"cpu":["x64"],"os":["linux"],"libc":["glibc"]} (current: {"os":"win32","cpu":"x64","libc":"unknown"})
 
-> @verter/benchmark@0.0.1 bench:meta:ui D:\dev\personal\verter\packages\benchmark
+> @verter/benchmark@0.0.1 bench:meta:ui <repo-root>\packages\benchmark
 > node --expose-gc --import tsx src/meta-ui-bench.ts "--" "--scenarios=repo_first_pass" "--hard-timeout-ms=60000"
 
 Benchmarking 179 nuxt-ui components from 7593991bde4dd8f089d45f354d21de717f5648ab.

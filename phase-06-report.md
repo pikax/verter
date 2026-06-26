@@ -3,7 +3,7 @@
 **Status:** success
 **Worker branch:** `wt/phase-06-legacy-mirrors`
 **Base commit:** `87ffe437` (Phase 5b integrated)
-**Sub-plan:** `D:/tmp/verter-architecture-cutover-phase-06-edgestore-parity.md` (R7, ~1788 lines)
+**Sub-plan:** `<scratch>/verter-architecture-cutover-phase-06-edgestore-parity.md` (R7, ~1788 lines)
 
 This report supersedes the previous partial-deferred report at
 `f0d8017f` (preserved in git history). The §6.2.1 reverse_dependencies

@@ -20,8 +20,8 @@
 //!   cargo run -p verter_bench --release --example audit_real_component_meta
 //!
 //! Environment variables:
-//!   VERTER_AUDIT_PROJECT_ROOT  project root (default: .integration-tests/repos/nuxt-ui)
-//!   VERTER_AUDIT_OUT_DIR       output directory (default: D:/tmp/verter-audit-run)
+//!   VERTER_AUDIT_PROJECT_ROOT  project root (default: repo-root-anchored `.integration-tests/repos/nuxt-ui`)
+//!   VERTER_AUDIT_OUT_DIR       output directory (default: <OS temp dir>/verter-audit-run)
 //!   VERTER_AUDIT_TARGETS       comma-separated component names. Default:
 //!                              auto-discover all `*.vue` under
 //!                              `<root>/src/runtime/components/`.
@@ -661,11 +661,23 @@ fn parse_passes() -> Vec<String> {
 }
 
 fn default_project_root() -> PathBuf {
-    PathBuf::from("D:/dev/personal/verter/.integration-tests/repos/nuxt-ui")
+    // Absolute repo-root-anchored default; override with
+    // VERTER_AUDIT_PROJECT_ROOT. The corpus itself is gitignored.
+    // Parent-traversal (NOT textual `../..`): the downstream host-id /
+    // canonicalize-path machinery does not collapse `..` segments, so a
+    // literal `crates/verter_bench/../..` would split canonical identity
+    // from realpath. `CARGO_MANIFEST_DIR` is always `<repo>/crates/verter_bench`.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap() // -> <repo>/crates
+        .parent()
+        .unwrap() // -> <repo>
+        .join(".integration-tests/repos/nuxt-ui")
 }
 
 fn default_out_dir() -> PathBuf {
-    PathBuf::from("D:/tmp/verter-audit-run")
+    // Under the OS temp dir; override with VERTER_AUDIT_OUT_DIR.
+    std::env::temp_dir().join("verter-audit-run")
 }
 
 fn main() -> io::Result<()> {

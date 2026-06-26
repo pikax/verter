@@ -5,7 +5,8 @@
  * (ChatMessages.vue / Button.vue / Table.vue by default) with the
  * focused-counter JSONL emit enabled, then summarises the per-component
  * counter slice on stdout for inspection. The full JSONL
- * is written to `--jsonl-out=...` (default `D:/tmp/phase-c-counters.jsonl`).
+ * is written to `--jsonl-out=...` (default under the OS temp dir,
+ * `verter-benchmark/phase-c-counters.jsonl`).
  *
  * Audit caps stay at the Rust 10K-per-lane defaults — large enough to
  * carry typical component traffic, small enough to bound any
@@ -18,8 +19,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,9 +38,9 @@ interface Args {
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     components: ["ChatMessages", "Button", "Table"],
-    jsonlOut: "D:/tmp/phase-c-counters.jsonl",
+    jsonlOut: join(tmpdir(), "verter-benchmark", "phase-c-counters.jsonl"),
     hardTimeoutMs: 300_000,
-    scratchDir: "D:/tmp/phase-c-scratch",
+    scratchDir: join(tmpdir(), "verter-benchmark", "phase-c-scratch"),
   };
   for (const arg of argv) {
     if (arg.startsWith("--components=")) {
@@ -125,7 +127,10 @@ async function main() {
   } catch {
     // ignore
   }
-  // Reset the JSONL output (atomic — each line is one component).
+  // Reset the JSONL output (atomic — each line is one component). The JSONL
+  // owner creates its OWN parent dir, independent of scratch setup (a
+  // `--scratch` override elsewhere must not leave the JSONL parent missing).
+  mkdirSync(dirname(args.jsonlOut), { recursive: true });
   if (existsSync(args.jsonlOut)) {
     unlinkSync(args.jsonlOut);
   }

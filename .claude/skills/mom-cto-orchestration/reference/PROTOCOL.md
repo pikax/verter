@@ -101,7 +101,7 @@ codex uses highest reasoning (`gpt-5.5`/xhigh here); never downgrade reviewers. 
 
 ## Repo / Worktree
 
-Repo root: `/Users/carlosrodrigues/Documents/dev/verter`. Integration branch: `refactor/semantic-db-overhaul`; never commit directly to it. Worktree/branch/block id come from the brief. All edits use absolute paths in the worktree; all build/test commands start `cd <worktree> && ...`. Every sub-agent brief repeats this.
+Repo root: `<repo-root>`. Integration branch: `refactor/semantic-db-overhaul`; never commit directly to it. Worktree/branch/block id come from the brief. All edits use absolute paths in the worktree; all build/test commands start `cd <worktree> && ...`. Every sub-agent brief repeats this.
 
 Every phase/stage has its own worktree. Implementers may commit `wip:` checkpoints after cheap checks. After CONFIRMED, each landed block squashes to exactly ONE clean conventional commit; a stage/phase may contain multiple block commits only because multiple blocks landed independently. Only conventional commits require the full gate.
 
@@ -193,11 +193,11 @@ Implementer briefs contain ONE decided implementation path plus its steps, never
 
 ## Verification Gate
 
-Delegate heavy gates to a verify agent in the worktree and serialize globally.
+Delegate heavy gates to a verify agent in the worktree and serialize globally. `<scratch>` below is a scratch dir outside the repo (e.g. under the OS temp dir).
 
 ```bash
-cd <worktree> && cargo nextest run --workspace --no-fail-fast 2>&1 | tee /tmp/mom/<BLOCK>/gate-nextest.txt
-cd <worktree> && cargo test -p verter_session --tests 2>&1 | tee /tmp/mom/<BLOCK>/gate-session.txt
+cd <worktree> && cargo nextest run --workspace --no-fail-fast 2>&1 | tee <scratch>/<BLOCK>/gate-nextest.txt
+cd <worktree> && cargo test -p verter_session --tests 2>&1 | tee <scratch>/<BLOCK>/gate-session.txt
 cd <worktree> && cargo clippy --workspace -- -D warnings
 cd <worktree> && cargo fmt --all --check
 ```
@@ -218,7 +218,7 @@ No phase/plan refs in production: conventional commit diffs/messages, code, comm
 
 ## Repo Cleanliness
 
-Only product files land: source, tests, fixtures, tracked docs, and `docs/arch` plans/designs. Plans belong only in `docs/arch`. Temp/scratch/report/evidence/log/progress files live in `/tmp/mom` absolute paths or `.feedback/` (directory-gitignored). Worktrees are outside the repo.
+Only product files land: source, tests, fixtures, tracked docs, and `docs/arch` plans/designs. Plans belong only in `docs/arch`. Temp/scratch/report/evidence/log/progress files live in a scratch dir outside the repo (e.g. under the OS temp dir) or `.feedback/` (directory-gitignored). Worktrees are outside the repo.
 
 Before staging, inspect `git status --short` and remove only verified untracked/ignored scratch this block created; never by filename class. A tracked file is never removed as cleanup; tracked deletion is reviewed product change. Do not add per-file `.gitignore` entries for scratch. Generated outputs are gitignored by directory/glob (`playwright-report`, `test-results`, `*.junit.xml`, coverage). Scratch/temp/report in status/diff blocks land.
 
@@ -248,7 +248,7 @@ Stage/phase cleanup only after land + confirmation: `git worktree remove` + `git
 
 ## Status Reporting
 
-Write/overwrite `/tmp/mom/<BLOCK>/status.json` at milestones:
+Write/overwrite `<scratch>/<BLOCK>/status.json` (a scratch dir outside the repo, e.g. under the OS temp dir) at milestones:
 
 ```json
 { "block":"<id>", "state":"RUNNING|BLOCKED|DONE|PARTIAL",

@@ -3,7 +3,7 @@
 **Worker:** Phase 5f (fallthrough + indexed-paths + package-backed)
 **Branch:** `wt/phase-05f-fallthrough-and-indexed`
 **Base:** `034dfc70` (Phase 5e integrated post-rebase)
-**Sub-plan:** `D:/tmp/verter-architecture-cutover-phase-05.md`
+**Sub-plan:** `<scratch>/verter-architecture-cutover-phase-05.md`
 
 ## Commits
 

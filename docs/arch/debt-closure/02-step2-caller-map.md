@@ -1,6 +1,6 @@
 # Step 2 — caller-class parity matrix + walker deletion map
 
-Source plan: `D:/tmp/architectural-debt-closure.md` (revision 10), Step 2.
+Source plan: `<scratch>/architectural-debt-closure.md` (revision 10), Step 2.
 
 This document captures the surviving caller inventory after Step 1.5 closed
 Debt 1, and prescribes the deletion path each caller takes in Step 2's

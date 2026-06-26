@@ -15,10 +15,13 @@ const localTimeoutMs = 20_000;
 const directStyleRegressionScript = path.resolve(e2eDir, "scripts", "direct-style-exit-repro.mjs");
 const directStyleTimeoutMs = 20_000;
 
-const defaultNexusUiRoot = "D:/dev/accioresearch/WLS/nexus/nexus-ui";
-const nexusUiRoot = process.env.VERTER_NEXUS_UI_ROOT ?? defaultNexusUiRoot;
-const nexusUiPackageDir = path.resolve(nexusUiRoot, "packages", "ui");
-const nexusUiDistDir = path.resolve(nexusUiPackageDir, "dist");
+// The nexus-ui consumer repro is an OPT-IN check against a local checkout
+// that is not vendored: point VERTER_NEXUS_UI_ROOT at it and set
+// VERTER_RUN_NEXUS_UI=1. There is no hardcoded machine default — without
+// the env var the check is skipped.
+const nexusUiRoot = process.env.VERTER_NEXUS_UI_ROOT ?? null;
+const nexusUiPackageDir = nexusUiRoot ? path.resolve(nexusUiRoot, "packages", "ui") : null;
+const nexusUiDistDir = nexusUiPackageDir ? path.resolve(nexusUiPackageDir, "dist") : null;
 const nexusUiTimeoutMs = 60_000;
 const runNexusUiCheck = process.env.VERTER_RUN_NEXUS_UI === "1";
 
@@ -261,9 +264,17 @@ async function main() {
     return;
   }
 
+  if (!nexusUiPackageDir) {
+    throw new Error(
+      "[exit-regression] VERTER_RUN_NEXUS_UI=1 but VERTER_NEXUS_UI_ROOT is not set; " +
+        "point it at a local nexus-ui checkout or unset VERTER_RUN_NEXUS_UI",
+    );
+  }
+
   if (!existsSync(nexusUiPackageDir)) {
-    console.log(`[exit-regression] nexus-ui validation skipped: ${nexusUiPackageDir} not found`);
-    return;
+    throw new Error(
+      `[exit-regression] VERTER_RUN_NEXUS_UI=1 but nexus-ui package dir not found: ${nexusUiPackageDir}`,
+    );
   }
 
   console.log(`[exit-regression] validating the original consumer repro at ${nexusUiPackageDir}`);

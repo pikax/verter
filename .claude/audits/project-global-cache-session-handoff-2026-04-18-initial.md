@@ -2,7 +2,7 @@
 
 **Session date:** 2026-04-18
 **Branch:** `refactor/semantic-db-overhaul`
-**Plan:** `C:\Users\david\.claude\plans\component-meta-project-global-cache-overhaul.md`
+**Plan:** the component-meta project-global-cache overhaul plan (developer-local Claude plans dir)
 
 ## What landed in this session
 

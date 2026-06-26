@@ -11,15 +11,26 @@
 #
 # Requires:
 #   - LLDB installed at "/c/Program Files/LLVM/bin/lldb.exe"
-#   - Python 3.11 at /c/Users/david/AppData/Local/Programs/Python/Python311
-#     (lldb.exe links against python311.dll)
+#   - A matching LLDB-compatible Python install (lldb.exe links against
+#     its pythonNNN.dll). Point PYDIR at it via the VERTER_LLDB_PYDIR env
+#     var; otherwise the script tries the `python3` on PATH.
 #   - Target binary built with line-tables-only debug info (set
 #     `RUSTFLAGS="-C debuginfo=line-tables-only"` for the build).
 
 set -euo pipefail
 
 LLDB="/c/Program Files/LLVM/bin/lldb.exe"
-PYDIR="/c/Users/david/AppData/Local/Programs/Python/Python311"
+# PYDIR: directory of an LLDB-compatible Python install. Override via
+# VERTER_LLDB_PYDIR; otherwise derive it from the `python3` on PATH, and
+# fall back to a documented hint if none is found. The command
+# substitution is guarded so it does not abort under `set -e`.
+if [[ -n "${VERTER_LLDB_PYDIR:-}" ]]; then
+  PYDIR="$VERTER_LLDB_PYDIR"
+elif PY="$(command -v python3 2>/dev/null)"; then
+  PYDIR="$(dirname "$PY")"
+else
+  PYDIR="/path/to/your/python"
+fi
 
 if [[ -z "${1:-}" ]]; then
   echo "usage: $0 <process-name-or-pid> [output-file]" >&2

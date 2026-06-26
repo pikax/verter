@@ -5,7 +5,7 @@
  * against the Verter compat layer. Each test is tagged with a priority (P1-P4) matching
  * the compat-gaps.md analysis.
  *
- * Source: D:\tmp\meta-bench\results\compat-gaps.md
+ * Source: <scratch>/meta-bench/results/compat-gaps.md
  */
 
 import { describe, test, expect, afterAll } from "vitest";

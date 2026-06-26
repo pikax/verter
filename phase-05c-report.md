@@ -1,7 +1,7 @@
 # Phase 5c worker report — engine trampoline conversion + counter rewrite
 
 **Phase id:** 05c
-**Worktree:** `D:/dev/wt/phase-05c-trampolines`
+**Worktree:** `<worktree>/phase-05c-trampolines`
 **Branch:** `wt/phase-05c-trampolines`
 **Base commit:** `87ffe437` (Phase 5b integrated)
 **Work head before marker:** `89802fea`

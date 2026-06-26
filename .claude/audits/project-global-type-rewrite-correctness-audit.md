@@ -2,7 +2,7 @@
 
 **Audit date:** 2026-04-18
 **Branch:** `refactor/semantic-db-overhaul`
-**Plan:** `C:\Users\david\.claude\plans\component-meta-project-global-cache-overhaul.md`
+**Plan:** the component-meta project-global-cache overhaul plan (developer-local Claude plans dir)
 **Status:** **COMPLETE** — all phases landed; legacy path retired.
 
 ## Summary
@@ -61,7 +61,7 @@ Setup:
 - Corpus: the full `nuxt-ui` component set under `.integration-tests/repos/nuxt-ui/src/runtime/components/` — 177 components enumerated, 173 completed (4 dropped via timeout/crash symmetrically on both sides).
 - Harness: `scripts/benchmark/trace-component-corpus.mjs --timeout-ms=15000` against each tree's own native binary. The pre-cut worktree was set up with `pnpm install` + `pnpm run build:native` + `pnpm run build:ts`, with a symlink to the main tree's `.integration-tests/repos/nuxt-ui` fixture directory so both runs analyzed the same source files.
 
-Results (via `python D:\tmp\corpus-diff.py`):
+Results (via `python <scratch>/corpus-diff.py`):
 
 | Bucket | Count |
 | ------ | ----- |
@@ -72,7 +72,7 @@ Results (via `python D:\tmp\corpus-diff.py`):
 | Pre-only (missing in post) | 0 |
 | Post-only (missing in pre) | 0 |
 
-The one "differing" component (`prose/CodeTree.vue`) has three `missing: <absolute-path>::TreeItem` strings embedded in its `schema.schema` / `propsJsonSchema.items.enum` payloads. The prefix differs between `d:/tmp/verter-pre-cut/.integration-tests/...` and `d:/dev/personal/verter/.integration-tests/...` — a direct consequence of running the two corpora from two different worktree roots. The component-meta content itself is identical modulo that path prefix; no semantic drift in the resolver output. Future runs against a single-tree-mirrored corpus would report zero diffs.
+The one "differing" component (`prose/CodeTree.vue`) has three `missing: <absolute-path>::TreeItem` strings embedded in its `schema.schema` / `propsJsonSchema.items.enum` payloads. The prefix differs because the two corpora were run from two different checkout/scratch roots (so the absolute `.integration-tests/...` prefix embedded in each payload differs). The component-meta content itself is identical modulo that path prefix; no semantic drift in the resolver output. Future runs against a single-tree-mirrored corpus would report zero diffs.
 
 **Conclusion:** the Phase 4/5 cutover produces byte-identical component-meta payloads against the representative `nuxt-ui` corpus. Zero semantic regressions.
 

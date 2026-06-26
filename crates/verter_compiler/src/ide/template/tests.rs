@@ -1,6 +1,44 @@
 use super::*;
 use crate::code_transform::CodeTransform;
 
+/// Read a `.vue` file from an OPT-IN external corpus, located via an
+/// environment variable rather than a hardcoded machine path. Returns
+/// `None` (so the caller skips) ONLY when the corpus env var is UNSET —
+/// these tests exercise real third-party SFCs that are not vendored into
+/// the repo, so they are off by default and run only when a developer
+/// points the corpus env var at a local checkout. When the env var IS set
+/// but the referenced file is missing/unreadable, this PANICS rather than
+/// skipping: an explicitly-configured-but-broken corpus root is a real
+/// error, not a silent green pass. NOTE: these remain external-corpus
+/// tests; full testing-hermeticity (vendored fixtures or a dedicated
+/// `external-corpus` feature gate excluding them from the default run) is
+/// tracked separately and intentionally NOT addressed here.
+fn read_external_corpus_vue(corpus_root_env: &str, relative_path: &str) -> Option<String> {
+    let root = match std::env::var(corpus_root_env) {
+        Ok(r) => r,
+        // Genuinely unset → skip (corpus off by default).
+        Err(std::env::VarError::NotPresent) => return None,
+        // Set but not valid Unicode → the corpus IS configured, just
+        // broken; fail loud rather than silently skip (same posture as a
+        // set-but-unreadable file below).
+        Err(std::env::VarError::NotUnicode(v)) => panic!(
+            "external corpus env ${corpus_root_env} is set but not valid \
+             Unicode ({v:?}); fix the value or unset ${corpus_root_env} to \
+             skip these tests"
+        ),
+    };
+    let full = std::path::Path::new(&root).join(relative_path);
+    match std::fs::read_to_string(&full) {
+        Ok(s) => Some(s),
+        Err(e) => panic!(
+            "external corpus env ${corpus_root_env} is set to `{root}`, but \
+             `{}` could not be read ({e}); fix the corpus root or unset \
+             ${corpus_root_env} to skip these tests",
+            full.display()
+        ),
+    }
+}
+
 /// Helper: compile a full SFC with TSX template generation.
 /// Returns the template portion of the TSX output.
 fn gen_tsx_template(source: &str) -> String {
@@ -4239,12 +4277,11 @@ export default defineComponent({
 
 #[test]
 fn balcard_vue_full_sfc_produces_valid_tsx() {
-    let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/balancer-frontend-v2/src/components/_global/BalCard/BalCard.vue") {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("SKIP: BalCard.vue not found (test repo not available)");
-            return;
-        }
+    let Some(source) = read_external_corpus_vue(
+        "VERTER_TEST_REPOS_ROOT",
+        "balancer-frontend-v2/src/components/_global/BalCard/BalCard.vue",
+    ) else {
+        return;
     };
     let alloc = Allocator::new();
     let options = crate::compile::CodegenOptions {
@@ -4322,14 +4359,11 @@ const checked = ref<boolean>(false);
 
 #[test]
 fn ant_design_switch_basic_produces_valid_tsx() {
-    let source = match std::fs::read_to_string(
-        "d:/dev/github/verter-test-repos/ant-design-vue/components/switch/demo/basic.vue",
-    ) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("SKIP: basic.vue not found");
-            return;
-        }
+    let Some(source) = read_external_corpus_vue(
+        "VERTER_TEST_REPOS_ROOT",
+        "ant-design-vue/components/switch/demo/basic.vue",
+    ) else {
+        return;
     };
     let alloc = Allocator::new();
     let options = crate::compile::CodegenOptions {
@@ -4356,9 +4390,11 @@ fn ant_design_switch_basic_produces_valid_tsx() {
 
 #[test]
 fn activist_card_topic_selection_produces_valid_tsx() {
-    let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/activist-org-activist/frontend/app/components/card/CardTopicSelection.vue") {
-        Ok(s) => s,
-        Err(_) => { eprintln!("SKIP: file not found"); return; }
+    let Some(source) = read_external_corpus_vue(
+        "VERTER_TEST_REPOS_ROOT",
+        "activist-org-activist/frontend/app/components/card/CardTopicSelection.vue",
+    ) else {
+        return;
     };
     let alloc = Allocator::new();
     let options = crate::compile::CodegenOptions {
@@ -4384,9 +4420,11 @@ fn activist_card_topic_selection_produces_valid_tsx() {
 
 #[test]
 fn activist_machine_steps_produces_valid_tsx() {
-    let source = match std::fs::read_to_string("d:/dev/github/verter-test-repos/activist-org-activist/frontend/app/components/MachineStepsCreateEventTime.vue") {
-        Ok(s) => s,
-        Err(_) => { eprintln!("SKIP: file not found"); return; }
+    let Some(source) = read_external_corpus_vue(
+        "VERTER_TEST_REPOS_ROOT",
+        "activist-org-activist/frontend/app/components/MachineStepsCreateEventTime.vue",
+    ) else {
+        return;
     };
     let alloc = Allocator::new();
     let options = crate::compile::CodegenOptions {
@@ -4449,9 +4487,11 @@ const tag = 'div';
 
 #[test]
 fn nexus_notification_produces_valid_tsx() {
-    let source = match std::fs::read_to_string("d:/dev/accioresearch/WLS/nexus/nexus-ui/packages/ui/src/components/Notifications/components/Notification.vue") {
-        Ok(s) => s,
-        Err(_) => { eprintln!("SKIP: file not found"); return; }
+    let Some(source) = read_external_corpus_vue(
+        "VERTER_NEXUS_UI_ROOT",
+        "packages/ui/src/components/Notifications/components/Notification.vue",
+    ) else {
+        return;
     };
     let alloc = Allocator::new();
     let options = crate::compile::CodegenOptions {
@@ -4534,14 +4574,11 @@ const { msg, count } = defineProps<{
 
 #[test]
 fn nexus_bloc_produces_valid_tsx() {
-    let source = match std::fs::read_to_string(
-        "d:/dev/accioresearch/WLS/nexus/nexus-ui/packages/ui/src/components/atom/Bloc/Bloc.vue",
-    ) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("SKIP: file not found");
-            return;
-        }
+    let Some(source) = read_external_corpus_vue(
+        "VERTER_NEXUS_UI_ROOT",
+        "packages/ui/src/components/atom/Bloc/Bloc.vue",
+    ) else {
+        return;
     };
     let alloc = Allocator::new();
     let options = crate::compile::CodegenOptions {

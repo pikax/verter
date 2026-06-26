@@ -897,15 +897,15 @@ mod tests {
     /// VS Code sometimes sends `file:///d%3A/path` instead of `file:///d:/path`.
     #[test]
     fn test_uri_to_canonical_id_windows_encoded_drive() {
-        let id = uri_to_canonical_id_from_str("file:///d%3A/dev/personal/verter/examples");
-        assert_eq!(id, "d:/dev/personal/verter/examples");
+        let id = uri_to_canonical_id_from_str("file:///d%3A/dev/example/examples");
+        assert_eq!(id, "d:/dev/example/examples");
     }
 
     /// @ai-generated — Windows path with lowercase drive and normal colon
     #[test]
     fn test_uri_to_canonical_id_windows_lowercase_drive() {
-        let id = uri_to_canonical_id_from_str("file:///d:/dev/personal/verter");
-        assert_eq!(id, "d:/dev/personal/verter");
+        let id = uri_to_canonical_id_from_str("file:///d:/dev/example");
+        assert_eq!(id, "d:/dev/example");
     }
 
     /// @ai-generated — Verify the from_str variant matches the Uri variant

@@ -31,7 +31,7 @@
 > **Status: DESIGN-LOCKED.** Produced by a two-panelist design panel (codex gpt-5.5/xhigh + a claude reviewer,
 > same max-mandate question) and adjudicated by an independent fresh adjudicator who INDEPENDENTLY verified the
 > two load-bearing claims (the D2 narrowing-invalidation rail; the fi08 ownership/acyclicity) rather than
-> concurring. Panel artifacts: `/tmp/mom/U6/PANEL.md`, `panel-codex2.txt`, `panel-claude.md`, `ADJUDICATION.md`.
+> concurring. Panel artifacts (the panel, both panelist reports, and the adjudication) are recorded in the orchestration ledger.
 > The adjudicator returned a SEND-BACK against the *parent subplan's prose* (it credits the wrong D2
 > invalidation rail and leaves the CONTEXTUAL_CALLBACK fixation mechanism unowned); this doc is the re-issue
 > that folds in all seven adjudicated deltas. None of the corrections weakens a locked upstream invariant — all

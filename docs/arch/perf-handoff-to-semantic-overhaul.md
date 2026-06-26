@@ -38,7 +38,7 @@ integration).
 | **C15** ranged provider updates (CodeTransform hard-order) | spec-only (no branch) | UP.D (gov-flagged) | (HELD; no branch) |
 
 Off-tree source specs (historical, on a retired machine — NOT in this repo):
-`D:/tmp/orch/lsp/PERF-PLAN-LSP-v7.txt`, `D:/tmp/orch/lsp/GATED-ITEMS-C.md`,
-`D:/tmp/orch/lsp-bugs/GATED-ITEMS-L.md`, `D:/tmp/orch/lsp-bugs/PLAN-L-v2.txt`. The
+`<scratch>/orch/lsp/PERF-PLAN-LSP-v7.txt`, `<scratch>/orch/lsp/GATED-ITEMS-C.md`,
+`<scratch>/orch/lsp-bugs/GATED-ITEMS-L.md`, `<scratch>/orch/lsp-bugs/PLAN-L-v2.txt`. The
 broader multi-track integration model is preserved in
 [`perf-lsp-orchestration-plan.md`](./perf-lsp-orchestration-plan.md) (also historical).

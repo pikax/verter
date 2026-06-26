@@ -6,10 +6,9 @@ to a future cache-redesign block (Stage 7-ish, alongside the prepared-cache key 
 **This is a TEMPORARY debt row** (per Rule-File Integrity) — it is cleared when that block
 lands the sound cache, not before.
 
-**Ruling source (codex-DEFER, binding)**: two converged neutral codex architecture legs —
-`/tmp/mom/STAGE6/SLICE4/session8/codex/legA-OUT.txt` (finding 7) +
-`legB-OUT.txt` (finding 4) — both `__DONE__`, exit 0, framing dispatcher-verified, ratified by
-the CTO. The legs ruled Option B for the Stage-6 declaration-body storage flip and, as part of
+**Ruling source (codex-DEFER, binding)**: two converged neutral codex architecture legs
+(leg A finding 7 + leg B finding 4, recorded in the orchestration ledger) — both `__DONE__`,
+exit 0, framing dispatcher-verified, ratified by the CTO. The legs ruled Option B for the Stage-6 declaration-body storage flip and, as part of
 that ruling, that the `PreparedStructuralBodyCache` must NOT be populated with resolving-lowerer
 output this session.
 

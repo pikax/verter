@@ -1,8 +1,8 @@
 //! Block 0 substrate-audit binary.
 //!
 //! Runs the 16-claim verification table for the B0.2 substrate and emits
-//! a markdown report at the path passed via `--out` (default:
-//! `D:/tmp/block0-substrate-audit.md`).
+//! a markdown report at the path passed via `--out` (default: under the
+//! OS temp dir, `verter-xtask/block0-substrate-audit.md`).
 //!
 //! Each claim is verified by running `git grep` via
 //! [`std::process::Command`] in the current workspace root, then the
@@ -297,7 +297,9 @@ fn chrono_or_now() -> String {
 }
 
 fn main() {
-    let mut out_path = PathBuf::from("D:/tmp/block0-substrate-audit.md");
+    let mut out_path = std::env::temp_dir()
+        .join("verter-xtask")
+        .join("block0-substrate-audit.md");
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {

@@ -3,7 +3,7 @@
 > **Sequencing authority: `docs/arch/semantic-db-overhaul-unified-remaining-plan.md`** — this file is detail/reference only; the `D:/` paths and old SHAs/branches in it are HISTORICAL.
 
 Reviewers: R1=Claude grounding (ACCEPT_WITH_NITS), R2=codex compiler-hazards (REJECT), R3=codex arch-conformance (REJECT). Gate = 3/3 ACCEPT or nits-only → NOT met. Fix cycle required.
-Plan file: D:/tmp/goto-def-plan.md. Architecture (binding): D:/tmp/goto-def-architecture-decision.md.
+Plan file: <scratch>/goto-def-plan.md. Architecture (binding): <scratch>/goto-def-architecture-decision.md.
 
 ## P0 — blockers (must fix)
 - **P0-1 OQ-1 one-engine (R3 P0; R2/R1 disagree → tie-break pending).** R3: direct tsgo `get_definition` from nav = fork; semantic lookup must enter typed-IR dispatch. R2+R1: tsgo-as-backend + DefinitionEngine-as-navigation-orchestrator is rule-compliant (one-engine rule governs TYPE resolution; go-to-def is navigation; go-to-def already calls type_provider.get_definition, never SemanticQueryKey). TALLY 2-1 for tsgo-backend. → BINDING decision from codex tie-breaker (bt2yavpf5). Whatever wins, ADD a guard (P1-M) enforcing no type-resolution leaks into nav.

@@ -8,7 +8,7 @@
 //! `LargeRecord_499`.
 //!
 //! Each test here pins ONE mode-boundary contract from the type-resolution
-//! SKILL (`/Users/carlosrodrigues/Documents/dev/verter/.claude/skills/type-resolution/SKILL.md`):
+//! SKILL (`.claude/skills/type-resolution/SKILL.md`):
 //!
 //! 1. `Identity` returns declaration identity only — no body read,
 //!    no graph walk, no result shape materialisation.

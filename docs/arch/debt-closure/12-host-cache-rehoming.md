@@ -1,8 +1,8 @@
 # Off-store host caches — rehoming roadmap
 
-Source plan: `D:/tmp/verter-debt-and-deferred-fixes-plan.md` Tier 1 Step 1C
+Source plan: `<scratch>/verter-debt-and-deferred-fixes-plan.md` Tier 1 Step 1C
 (1C-α / 1C-β / 1C-γ). Originally filed under
-`D:/tmp/verter-component-meta-performance-plan.md` Phase 12.followup; the
+`<scratch>/verter-component-meta-performance-plan.md` Phase 12.followup; the
 rehoming has since been promoted from deferred follow-up into the active
 legacy → graph + dispatch migration.
 
@@ -663,7 +663,7 @@ discriminating-test contract.
 ### Hermetic-test gate (per Tier C verification protocol)
 
 ```powershell
-$hermeticWt = "D:/dev/personal/verter-wt/hermetic-verify-cache-rehoming"
+$hermeticWt = "<repo-root>-wt/hermetic-verify-cache-rehoming"
 git worktree add $hermeticWt HEAD
 Push-Location $hermeticWt
 if (Test-Path .integration-tests/repos/nuxt-ui) {

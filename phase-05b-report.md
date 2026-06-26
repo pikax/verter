@@ -2,9 +2,9 @@
 
 **Phase id:** 05b
 **Branch:** `wt/phase-05b-variants-and-seeds`
-**Worktree:** `D:/dev/wt/phase-05b-variants-and-seeds`
+**Worktree:** `<worktree>/phase-05b-variants-and-seeds`
 **Base commit at spawn:** `62e6d210dc876e5dc580796b7620482e89bd8e5b` (Phase 5a complete marker).
-**Plan:** `D:/tmp/verter-architecture-cutover-phase-05.md` r9 §5 commits 1, 2+3, 3.5, 3.6.
+**Plan:** `<scratch>/verter-architecture-cutover-phase-05.md` r9 §5 commits 1, 2+3, 3.5, 3.6.
 **Disposition:** success.
 
 ## TL;DR

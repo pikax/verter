@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-23
 **Branch:** `refactor/semantic-db-overhaul`
-**Trace data:** `D:/tmp/corpus-trace/traces/` (177 nuxt-ui components, 60s/component cap)
+**Trace data:** `<scratch>/corpus-trace/traces/` (177 nuxt-ui components, 60s/component cap)
 
 ## TL;DR
 
@@ -329,8 +329,8 @@ slow — measure separately on those.
 
 ## Trace data references
 
-- Table.vue trace: `D:/tmp/corpus-trace/traces/src__runtime__components__Table__vue.trace.log` (31,847 lines)
-- EditorToolbar.vue trace: `D:/tmp/corpus-trace/traces/src__runtime__components__EditorToolbar__vue.trace.log` (63,661 lines)
-- Per-prop child-event analysis script: `D:/tmp/analyze-walker.mjs`
+- Table.vue trace: `<scratch>/corpus-trace/traces/src__runtime__components__Table__vue.trace.log` (31,847 lines)
+- EditorToolbar.vue trace: `<scratch>/corpus-trace/traces/src__runtime__components__EditorToolbar__vue.trace.log` (63,661 lines)
+- Per-prop child-event analysis script: `<scratch>/analyze-walker.mjs`
 - Span IDs cited above are stable for the captured traces; they will not
   match a fresh run.

@@ -51,7 +51,7 @@ Recipe — sample every 10s while ChatMessage cold-path runs:
 
 ```bash
 VERTER_AUDIT_PROJECT_ROOT=.integration-tests/repos/nuxt-ui-codex-bench \
-  VERTER_AUDIT_OUT_DIR=D:/tmp/loop-dbg \
+  VERTER_AUDIT_OUT_DIR=<scratch>/loop-dbg \
   VERTER_AUDIT_TARGETS=ChatMessage \
   VERTER_AUDIT_PASSES=fresh-cold \
   VERTER_WATCHDOG_MODE=sample \

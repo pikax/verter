@@ -768,7 +768,7 @@ warning: methods `current_dependency_fact_versions` and `get_raw_analysis_snapsh
     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `verter_session` (lib) generated 71 warnings (run `cargo fix --lib -p verter_session` to apply 38 suggestions)
-   Compiling verter_session v0.0.1-beta.1 (D:\dev\wt\phase-09b-host-backed-compile-cutover\crates\verter_session)
+   Compiling verter_session v0.0.1-beta.1 (<repo-root>\crates\verter_session)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 3.14s
      Running tests\architecture_guards.rs (target\debug\deps\architecture_guards-8ea90cb84f94c452.exe)
 
@@ -782,7 +782,7 @@ failures:
 thread 'no_napi_direct_verter_compiler_emitters' (3391856) panicked at crates\verter_session\tests\architecture_guards.rs:1929:13:
 Phase 9b architecture guard violation:
 found 1 verter_compiler::compile{,_parallel} reference(s) in 1 file(s):
-  D:\dev\wt\phase-09b-host-backed-compile-cutover\crates/verter_napi/src\lib.rs -- use `compile`
+  <repo-root>\crates/verter_napi/src\lib.rs -- use `compile`
 
 NAPI production sources MUST NOT reference `verter_compiler::compile::{compile, compile_from_parsed}` or any symbol under `verter_compiler::compile_parallel::*`. Batch and single SFC compile must route through `VerterHost::compile_many` / `VerterHost::get_virtual_file`. See sub-plan §5 for the full rule set.
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

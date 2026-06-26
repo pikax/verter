@@ -73,9 +73,9 @@ warning: failed to parse serde attribute
   | #[serde(default, skip_serializing_if = "is_default_f64")]
   | 
   = note: ts-rs failed to parse this attribute. It will be ignored.
-   Compiling verter_semantic v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_semantic)
-   Compiling verter_protocol v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_protocol)
-   Compiling verter_session v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_session)
+   Compiling verter_semantic v0.0.1-beta.1 (<repo-root>\crates\verter_semantic)
+   Compiling verter_protocol v0.0.1-beta.1 (<repo-root>\crates\verter_protocol)
+   Compiling verter_session v0.0.1-beta.1 (<repo-root>\crates\verter_session)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 9.20s
      Running tests\r21_c5_cross_file_provenance.rs (target\debug\deps\r21_c5_cross_file_provenance-4e7faa22d6b2af6d.exe)
 

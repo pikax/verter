@@ -21,7 +21,7 @@ field `mirror`, this audit verifies the field is DELETED at the integration
 tip.
 
 Source of truth for classifications:
-- `D:/tmp/verter-architecture-cutover-phase-06b.md` — the §6b sub-plan
+- `<scratch>/verter-architecture-cutover-phase-06b.md` — the §6b sub-plan
   (1092 lines) authored against HEAD `3147c02f` and applied across
   9 commits landing the `wt/phase-06b-cache-mirror-inventory` branch.
 - `phase-06b-report.md` at the integration tip — the worker report

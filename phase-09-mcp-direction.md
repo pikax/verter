@@ -2,7 +2,7 @@
 
 This is the deferred Phase 9.2 informational inventory called out in
 the cutover plan §9.2 (lines 6415-6436 of
-`D:/tmp/verter-architecture-cutover.md`). It enumerates every symbol
+`<scratch>/verter-architecture-cutover.md`). It enumerates every symbol
 that crosses the `verter_lsp` ↔ `verter_mcp` crate boundary so a
 follow-up sub-plan can decide whether the direction is sound.
 

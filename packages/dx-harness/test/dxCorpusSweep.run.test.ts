@@ -13,7 +13,7 @@
 //   cargo build -p verter_dx_baseline  # target/debug/verter-dx-baseline[.exe]
 //   DX_LSP_BIN=$PWD/target/debug/verter-lsp.exe \
 //   DX_BASELINE_BIN=$PWD/target/debug/verter-dx-baseline.exe \
-//   DX_FINDINGS_OUT=/d/tmp/orch/dx \
+//   DX_FINDINGS_OUT="${TMPDIR:-/tmp}/dx" \
 //   (tsgo on PATH) pnpm -C packages/dx-harness exec vitest --run test/dxCorpusSweep.run.test.ts
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

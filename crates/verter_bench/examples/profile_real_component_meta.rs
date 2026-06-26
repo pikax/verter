@@ -7,7 +7,7 @@
 //!   cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- src/runtime/components/ContextMenuContent.vue
 //!
 //! Environment variables:
-//!   VERTER_PROFILE_PROJECT_ROOT  project root (default: .integration-tests/repos/nuxt-ui)
+//!   VERTER_PROFILE_PROJECT_ROOT  project root (default: repo-root-anchored `.integration-tests/repos/nuxt-ui`)
 //!   VERTER_PROFILE_REPEATS       request repeats (default: 1)
 
 use std::io;
@@ -102,7 +102,18 @@ fn parse_repeats() -> usize {
 }
 
 fn default_project_root() -> PathBuf {
-    PathBuf::from("D:/dev/personal/verter/.integration-tests/repos/nuxt-ui")
+    // Absolute repo-root-anchored default; override with
+    // VERTER_PROFILE_PROJECT_ROOT. The corpus itself is gitignored.
+    // Parent-traversal (NOT textual `../..`): the downstream host-id /
+    // canonicalize-path machinery does not collapse `..` segments, so a
+    // literal `crates/verter_bench/../..` would split canonical identity
+    // from realpath. `CARGO_MANIFEST_DIR` is always `<repo>/crates/verter_bench`.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap() // -> <repo>/crates
+        .parent()
+        .unwrap() // -> <repo>
+        .join(".integration-tests/repos/nuxt-ui")
 }
 
 fn resolve_target_file(project_root: &Path, token: &str) -> io::Result<PathBuf> {

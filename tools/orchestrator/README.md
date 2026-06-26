@@ -1,12 +1,12 @@
 # Verter migration orchestrator
 
-Drives the multi-tier migration described at `D:/tmp/verter-debt-and-deferred-fixes-plan.md` (revision 8).
+Drives the multi-tier migration described at `<scratch>/verter-debt-and-deferred-fixes-plan.md` (revision 8).
 
 ## Roles
 
-- **Orchestrator** — runs from the integration branch checkout (`D:/dev/personal/verter/`).
+- **Orchestrator** — runs from the integration branch checkout (`<repo-root>/`).
   Executes Tier 0 sequentially in-place (single worker), then dispatches Tier 1+ workers
-  in worktrees. Maintains state-store at `D:/tmp/verter-debt-plan-state.json`.
+  in worktrees. Maintains state-store at `<scratch>/verter-debt-plan-state.json`.
 - **Worker** — runs in a worktree at `<repo_root>-wt/<tier>/`. Implements the assigned
   tier's brief; emits a marker JSON conforming to the §12.4 schema.
 

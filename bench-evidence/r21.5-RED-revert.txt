@@ -73,7 +73,7 @@ warning: failed to parse serde attribute
   | #[serde(default, skip_serializing_if = "is_default_f64")]
   | 
   = note: ts-rs failed to parse this attribute. It will be ignored.
-   Compiling verter_session v0.0.1-beta.1 (D:\dev\personal\verter\crates\verter_session)
+   Compiling verter_session v0.0.1-beta.1 (<repo-root>\crates\verter_session)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 6.68s
      Running tests\slot_binding_shallow_publication_tests.rs (target\debug\deps\slot_binding_shallow_publication_tests-df964ea8ebd60b92.exe)
 

@@ -117,7 +117,7 @@ The R22-fix code changes:
 
 ## Empirical refutation of codex's diagnosis
 
-Codex's R22-systemic verdict (`D:/tmp/round22-systemic-codex-out.txt`):
+Codex's R22-systemic verdict (`<scratch>/round22-systemic-codex-out.txt`):
 
 > SYSTEMIC-OVERHEAD-LOCATION: a +
 > `crates/verter_semantic/src/analysis/type_expand/request.rs:52` and

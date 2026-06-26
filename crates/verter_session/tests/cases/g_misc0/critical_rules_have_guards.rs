@@ -735,6 +735,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // paths only, so a generated name is caught once
             // committed, not at generation time).
             "tracked_paths_are_portable",
+            // Content-residue half: `git ls-files -z` walk pinning that no
+            // tracked file embeds any of 64 KNOWN leaked-root markers
+            // (one dev's $HOME, one machine's checkout drive + worktree/
+            // sandbox sub-roots, another dev's Windows Claude dir, and
+            // orchestration scratch roots — use std::env::temp_dir()/
+            // os.tmpdir()/env-driven/repo-relative instead). A tombstone for
+            // those known roots, NOT a complete machine-path detector
+            // (a broad detector would false-positive the ~70 legitimate
+            // cross-platform fixtures). Reads are fail-closed. Complements
+            // the path-shape guard above.
+            "tracked_paths_no_machine_roots",
         ],
     ),
     (

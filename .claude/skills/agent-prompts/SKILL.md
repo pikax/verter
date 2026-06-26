@@ -59,7 +59,7 @@ Ask concise questions if not provided; do not invent values.
 
 Each closes a specific failure mode. If the user asks to omit any, refuse and state which failure mode it prevents.
 
-1. **Stub Prevention citation.** Name `C:/Users/david/.claude/CLAUDE.md` `# Stub Prevention` (global) and project-level `CLAUDE.md` `### Stub Prevention (CRITICAL)` if present. Restate the five anti-patterns inline:
+1. **Stub Prevention citation.** Name the developer global rules file (`$HOME/.claude/CLAUDE.md` on POSIX, `%USERPROFILE%\.claude\CLAUDE.md` on Windows) `# Stub Prevention` (global) and project-level `CLAUDE.md` `### Stub Prevention (CRITICAL)` if present. Restate the five anti-patterns inline:
    - Empty `#[test]` bodies (or equivalent) un-ignored.
    - Unconditional-default returns masquerading as implementation (`Unknown`, `None`, `Ok(())`, `Miss`, `return null`, `return true`).
    - Always-true assertions (`assert!(true)`, `|| true` predicates, `expect(true).toBe(true)`).
@@ -122,10 +122,10 @@ The `=====` delimiters make copy-paste boundaries unambiguous. Never concatenate
 Placeholders (substitute from elicited inputs):
 
 - `{{PLAN_PATH}}` — absolute plan file path.
-- `{{REPO_PATH}}` — repo root (e.g. `D:\dev\personal\verter`).
+- `{{REPO_PATH}}` — repo root (e.g. `D:\path\to\verter` on Windows, `/path/to/verter` on POSIX).
 - `{{STAGING_BRANCH}}` — e.g. `staging/d-cutover`.
 - `{{TARGET_BRANCH}}` — e.g. `refactor/semantic-db-overhaul`.
-- `{{GLOBAL_RULES}}` — `C:/Users/david/.claude/CLAUDE.md`.
+- `{{GLOBAL_RULES}}` — the developer global rules file (`$HOME/.claude/CLAUDE.md` on POSIX, `%USERPROFILE%\.claude\CLAUDE.md` on Windows).
 - `{{PROJECT_RULES}}` — `<repo>/CLAUDE.md` if it exists; else omit the line that cites it.
 - `{{GATE_SECTION}}` — plan's landing-gate section ref (e.g. `§7.5`).
 - `{{LAST_STEP_SECTION}}` — plan's squash step (e.g. `§5.13`).

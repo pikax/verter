@@ -2,7 +2,7 @@
 
 > **Sequencing authority: `docs/arch/semantic-db-overhaul-unified-remaining-plan.md`** — this file is detail/reference only; the `D:/` paths and old SHAs/branches in it are HISTORICAL. This plan **OWNS its block range `G.P1`–`G.P6/7`** under the unified cross-plan sequencing (§3.1 there): `G.P1`→`G.P2` re-land early, `G.P3` after U2, `G.P4` after U3 (with the reconciled `CompileSnapshotId`), `G.P5`→`G.P6/7` after `G.P4`.
 
-Implements the binding architecture in `D:/tmp/goto-def-architecture-decision.md` and adopts **every** binding OQ resolution and reviewer finding in `D:/tmp/consolidated-findings.md`. Breaking changes allowed. Four NEVERS bind every phase: **no shims, no legacy/dual paths, no stubs, no shortcuts.**
+Implements the binding architecture in `<scratch>/goto-def-architecture-decision.md` and adopts **every** binding OQ resolution and reviewer finding in `<scratch>/consolidated-findings.md`. Breaking changes allowed. Four NEVERS bind every phase: **no shims, no legacy/dual paths, no stubs, no shortcuts.**
 
 This revision (rev 2) resolves all 3 P0, all 10 P1, and the 5 P2 + NITs from round-1 review, and adopts the BINDING OQ-1..OQ-7 resolutions verbatim. A findings→resolution map is at the end (`§ FINDINGS RESOLUTION MAP`).
 

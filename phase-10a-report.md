@@ -2,7 +2,7 @@
 
 **Branch:** `wt/phase-10a-resolver-context`
 **Base commit:** `b0a998986319fab80ba87ebf0a2ce1f45d10b892` (post-Phase-11 integration tip on `refactor/semantic-db-overhaul`)
-**Sub-plan:** `D:/tmp/verter-architecture-cutover-phase-10a.md` (revision 3, dated 2026-05-01)
+**Sub-plan:** `<scratch>/verter-architecture-cutover-phase-10a.md` (revision 3, dated 2026-05-01)
 **Status:** SUCCESS
 
 ---

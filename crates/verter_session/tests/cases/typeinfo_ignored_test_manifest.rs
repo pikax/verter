@@ -3044,15 +3044,22 @@ fn registry_fidelity_for_row(
 /// closed `syn` extractor, CROSS-CHECKS that the body-extracted fingerprint equals
 /// the registry-projected fingerprint (so a row is captured ONLY when the registry
 /// faithfully reproduces the original query), and emits the `LIFTED_ROW_MIGRATIONS`
-/// Rust literal to a `/tmp` file. Run manually:
-///   `LIFTED_BODIES=/tmp/mom/F1F2/lifted_bodies.json \
+/// Rust literal to a file under the OS temp dir. Run manually (the
+/// `LIFTED_BODIES` env var overrides the sidecar path; the default reads
+/// `<OS temp dir>/verter-lift/lifted_bodies.json`):
+///   `LIFTED_BODIES="${TMPDIR:-/tmp}/verter-lift/lifted_bodies.json" \
 ///    cargo test -p verter_session --test main \
 ///    -- --ignored --nocapture emit_lifted_row_migrations`
 #[test]
 #[ignore = "audited lift-capture generator; run manually to (re)emit LIFTED_ROW_MIGRATIONS"]
 fn emit_lifted_row_migrations() {
-    let sidecar = std::env::var("LIFTED_BODIES")
-        .unwrap_or_else(|_| "/tmp/mom/F1F2/lifted_bodies.json".to_string());
+    let sidecar = std::env::var("LIFTED_BODIES").unwrap_or_else(|_| {
+        std::env::temp_dir()
+            .join("verter-lift")
+            .join("lifted_bodies.json")
+            .to_string_lossy()
+            .into_owned()
+    });
     let bytes = fs::read(&sidecar).unwrap_or_else(|e| panic!("read sidecar {sidecar}: {e}"));
     let rows: serde_json::Value = serde_json::from_slice(&bytes).expect("sidecar JSON");
     let rows = rows.as_array().expect("sidecar is an array");
@@ -3113,10 +3120,13 @@ fn emit_lifted_row_migrations() {
         ));
     }
     out.push_str("];\n");
-    let dest = "/tmp/mom/F1F2/lifted_row_migrations.txt";
-    fs::write(dest, &out).unwrap();
+    let dest = std::env::temp_dir()
+        .join("verter-lift")
+        .join("lifted_row_migrations.txt");
+    fs::write(&dest, &out).unwrap();
     eprintln!(
-        "emit_lifted_row_migrations: wrote {dest}; deferred {} row(s); {} fingerprint MISMATCH(es)",
+        "emit_lifted_row_migrations: wrote {}; deferred {} row(s); {} fingerprint MISMATCH(es)",
+        dest.display(),
         deferred.len(),
         mismatches.len()
     );

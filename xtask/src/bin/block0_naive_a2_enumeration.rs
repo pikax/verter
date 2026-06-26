@@ -4,10 +4,11 @@
 //! eager-invalidation deletion (the block under `host_upsert.rs` lines
 //! 432-437 and 449-471), runs `cargo test --workspace --tests --verbose`,
 //! parses failing test names, emits a markdown summary to `--out`
-//! (default: `D:/tmp/block0-naive-a2-failures.md`), then cleans up the
+//! (default: under the OS temp dir,
+//! `verter-xtask/block0-naive-a2-failures.md`), then cleans up the
 //! temp worktree.
 //!
-//! **Safety**: this binary NEVER modifies the live worktree at `D:/wt/s0/`.
+//! **Safety**: this binary NEVER modifies the live worktree.
 //! All mutations happen in a temporary directory created via
 //! `std::env::temp_dir()`.
 
@@ -225,7 +226,9 @@ fn write_report(out_path: &Path, applied: bool, success: bool, failures: &[Strin
 }
 
 fn main() {
-    let mut out_path = PathBuf::from("D:/tmp/block0-naive-a2-failures.md");
+    let mut out_path = std::env::temp_dir()
+        .join("verter-xtask")
+        .join("block0-naive-a2-failures.md");
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {

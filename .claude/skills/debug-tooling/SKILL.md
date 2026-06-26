@@ -48,7 +48,7 @@ Output: `target/release-dbg/examples/`. Use whenever attaching a debugger or cap
 
 ```bash
 VERTER_AUDIT_PROJECT_ROOT=.integration-tests/repos/nuxt-ui-codex-bench \
-  VERTER_AUDIT_OUT_DIR=D:/tmp/loop-dbg \
+  VERTER_AUDIT_OUT_DIR="${TMPDIR:-/tmp}/loop-dbg" \
   VERTER_AUDIT_TARGETS=ChatMessage \
   VERTER_AUDIT_PASSES=fresh-cold \
   VERTER_WATCHDOG_MODE=sample \

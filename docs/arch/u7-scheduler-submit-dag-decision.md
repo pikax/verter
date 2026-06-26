@@ -12,8 +12,7 @@ here.
 
 Process: source-verified recon → two independent panelists (codex `gpt-5.5` xhigh +
 claude-work opus), mandate-led → an independent claude-work adjudicator that did NOT
-rubber-stamp the panel and supplied a load-bearing correction. Panel artifacts:
-`/tmp/mom/U7/{PANEL.md,codex-panel-out.txt,claude-panel-report.md,adjudicator-report.md}`.
+rubber-stamp the panel and supplied a load-bearing correction. Panel artifacts (the panel, both panelist reports, and the adjudicator report) are recorded in the orchestration ledger.
 
 ---
 

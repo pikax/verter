@@ -12,8 +12,8 @@
     "project": "nuxt-ui",
     "repo": "nuxt/ui",
     "branch": "v4",
-    "root": "D:/dev/personal/verter/.integration-tests/repos/nuxt-ui",
-    "componentsDir": "D:/dev/personal/verter/.integration-tests/repos/nuxt-ui/src/runtime/components",
+    "root": "C:/verter-fixtures/.integration-tests/repos/nuxt-ui",
+    "componentsDir": "C:/verter-fixtures/.integration-tests/repos/nuxt-ui/src/runtime/components",
     "componentCount": 177
   },
   "config": {

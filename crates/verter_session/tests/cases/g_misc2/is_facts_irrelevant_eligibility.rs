@@ -3,7 +3,8 @@
 //! ## Why
 //!
 //! The Block 1.7 audit at
-//! `D:/tmp/block1.7-facts-irrelevant-eligibility.md` enumerates every
+//! `<OS temp dir>/verter-block1.7/block1.7-facts-irrelevant-eligibility.md`
+//! enumerates every
 //! cache in `crates/verter_session/src/` that publishes entries
 //! carrying a `fact_dep_signature` (or equivalent
 //! `read_set_signature`). For each cache, the audit answers:
@@ -89,7 +90,11 @@ const ELIGIBLE_CACHES: &[(&str, &str, &str)] = &[(
 )];
 
 fn audit_file_path() -> PathBuf {
-    PathBuf::from("D:/tmp/block1.7-facts-irrelevant-eligibility.md")
+    // Under the OS temp dir, outside the repo tree (the audit is not
+    // committed — it is regenerated per-block).
+    std::env::temp_dir()
+        .join("verter-block1.7")
+        .join("block1.7-facts-irrelevant-eligibility.md")
 }
 
 fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
@@ -143,8 +148,8 @@ fn no_is_facts_irrelevant_flag_landed_yet() {
         hits.is_empty(),
         "Block 1.7 audit asserts NO cache carries `is_facts_irrelevant: true` today. \
          A future block that introduces the flag must (1) extend `ELIGIBLE_CACHES` \
-         in `is_facts_irrelevant_eligibility.rs`, (2) extend the audit file at \
-         `D:/tmp/block1.7-facts-irrelevant-eligibility.md` with the new entry's \
+         in `is_facts_irrelevant_eligibility.rs`, (2) extend the audit file \
+         (under the OS temp dir, `verter-block1.7/block1.7-facts-irrelevant-eligibility.md`) with the new entry's \
          justification (inherently-constant inputs), and (3) extend or rewrite \
          this test's body to reflect the new eligibility surface. Found:\n{}",
         hits.iter()
@@ -158,7 +163,7 @@ fn no_is_facts_irrelevant_flag_landed_yet() {
 /// expected canonical heading. The test passes when running in any
 /// environment that has the audit available; a missing audit file is
 /// a soft skip rather than a hard fail because the audit lives
-/// outside the repo tree (in `D:/tmp/`). The audit file is not
+/// outside the repo tree (under the OS temp dir). The audit file is not
 /// committed — it is regenerated per-block.
 #[test]
 fn audit_file_present_at_documented_path() {
@@ -229,7 +234,7 @@ fn eligible_caches_surface_pinned_to_audit_conclusion() {
         "Block 1.7 audit concludes exactly ONE cache is partially eligible \
          for `is_facts_irrelevant: true` (`FallthroughResolverState.cache`). \
          If the audit conclusion changes, update both `ELIGIBLE_CACHES` and \
-         the audit file at `D:/tmp/block1.7-facts-irrelevant-eligibility.md` \
+         the audit file (under the OS temp dir, `verter-block1.7/block1.7-facts-irrelevant-eligibility.md`) \
          in lockstep."
     );
 }

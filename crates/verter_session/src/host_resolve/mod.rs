@@ -1,6 +1,6 @@
 //! `impl VerterHost` — resolve and virtual file retrieval methods,
-//! split across sub-modules per Tier 2 §4 of the
-//! `D:/tmp/verter-debt-and-deferred-fixes-plan.md` god-module split.
+//! split across sub-modules per the Tier 2 §4 god-module split
+//! (debt-and-deferred-fixes plan).
 //!
 //! Public surface unchanged: every item that was reachable through
 //! `crate::host_resolve::*` before the split is re-exported below so

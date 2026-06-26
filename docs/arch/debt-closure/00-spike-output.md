@@ -1,6 +1,6 @@
 # Step 0 — Pre-flight spike output
 
-Source plan: `D:/tmp/architectural-debt-closure.md` (revision 10).
+Source plan: `<scratch>/architectural-debt-closure.md` (revision 10).
 
 Two spike tests live in `crates/verter_session/src/meta_resolve_tests.rs`
 (at `spike_dispatch_handles_props_t_substitution_via_macro_shell` and

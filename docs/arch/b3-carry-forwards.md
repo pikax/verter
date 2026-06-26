@@ -328,10 +328,6 @@ dedicated module, then remove the `guard6_exemptions()` entry.
 
 ## Cross-references
 
-  * Round-3 fix-implementer brief: `/tmp/orchestrator/B3/fix-brief-round3.md`
-  * Round-3 review outputs: `/tmp/orchestrator/B3/codex-rereview2.txt`,
-    `/tmp/orchestrator/B3/codex2-rereview2.txt`
-  * Round-4 fix-implementer brief: `/tmp/orchestrator/B3/fix-brief-round4.md`
-  * Round-4 review outputs: `/tmp/orchestrator/B3/codex-rereview3.txt`,
-    `/tmp/orchestrator/B3/codex2-rereview3.txt`
-  * Round-5 fix-implementer brief: `/tmp/orchestrator/B3/fix-brief-round5.md`
+The round-3 through round-5 fix-implementer briefs and the per-round
+dual-review outputs are recorded in the orchestration ledger (brief and
+review artifacts).

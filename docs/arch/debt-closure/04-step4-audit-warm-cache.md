@@ -1,6 +1,6 @@
 # Step 4 — Audit warm-cache short-circuit
 
-Source plan: `D:/tmp/architectural-debt-closure.md` (revision 10), Step 4.
+Source plan: `<scratch>/architectural-debt-closure.md` (revision 10), Step 4.
 
 ## What landed in this commit
 

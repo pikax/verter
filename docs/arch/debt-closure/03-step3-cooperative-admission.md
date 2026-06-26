@@ -1,6 +1,6 @@
 # Step 3 — `cooperative_get_or_insert` extraction + DB migration plan
 
-Source plan: `D:/tmp/architectural-debt-closure.md` (revision 10), Step 3.
+Source plan: `<scratch>/architectural-debt-closure.md` (revision 10), Step 3.
 
 ## What landed in this commit
 

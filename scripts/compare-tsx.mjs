@@ -1,10 +1,11 @@
 /**
- * Compare TS Core vs Rust TSX output for .vue files across D:\dev.
+ * Compare TS Core vs Rust TSX output for .vue files across a scan root.
  *
  * Usage:
- *   node scripts/compare-tsx.mjs [--write] [--verbose] [--filter <pattern>]
+ *   node scripts/compare-tsx.mjs --root <path> [--write] [--verbose] [--filter <pattern>]
+ *   (or set VERTER_COMPARE_ROOT instead of --root)
  *
- * Scans all git repos under D:\dev for .vue files, processes each through
+ * Scans all git repos under the configured root for .vue files, processes each through
  * both the TS Core pipeline (@verter/core buildSingle) and the Rust pipeline
  * (@verter/native VerterHost), then reports structural marker differences.
  *
@@ -41,10 +42,20 @@ const verbose = args.includes("--verbose");
 const errorsOnly = args.includes("--errors-only");
 const filterIdx = args.indexOf("--filter");
 const filterPattern = filterIdx !== -1 ? args[filterIdx + 1] : null;
+const rootIdx = args.indexOf("--root");
+const rootArg = rootIdx !== -1 ? args[rootIdx + 1] : null;
 
 // ── Repo discovery ──────────────────────────────────────────────
 
-const DEV_ROOT = "D:/dev";
+// Repo-scan root is machine-specific: pass `--root <path>` or set
+// VERTER_COMPARE_ROOT. There is no hardcoded machine default.
+const DEV_ROOT = rootArg ?? process.env.VERTER_COMPARE_ROOT ?? null;
+if (!DEV_ROOT) {
+  console.error(
+    "compare-tsx: no scan root configured — pass --root <path> or set VERTER_COMPARE_ROOT",
+  );
+  process.exit(1);
+}
 
 /** Directories to scan for git repos. */
 const SCAN_DIRS = ["personal", "github", "github/verter-test-repos"];
@@ -189,7 +200,7 @@ if (writeOutput) {
   fs.mkdirSync(outputDir, { recursive: true });
 }
 
-console.log("Discovering .vue files under D:\\dev ...");
+console.log(`Discovering .vue files under ${DEV_ROOT} ...`);
 let allFiles = discoverVueFiles();
 console.log(`Found ${allFiles.length} .vue files`);
 

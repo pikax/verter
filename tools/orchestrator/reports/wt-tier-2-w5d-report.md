@@ -8,7 +8,7 @@ Split `crates/verter_session/src/resolver_core/component_meta.rs`
 ## Inputs
 
 - Base commit: `f5a1d10e8b440809b71b9e3cc3dce989a98bb747`
-- Plan: `D:/tmp/verter-debt-and-deferred-fixes-plan.md` §4
+- Plan: `<scratch>/verter-debt-and-deferred-fixes-plan.md` §4
 - Audit doc: `docs/arch/debt-closure/13-god-module-split-audit/component_meta.md`
 
 ## Split layout (each post-split module < 4000 LOC)

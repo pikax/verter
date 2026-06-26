@@ -3,7 +3,7 @@
 **Plan:** [`bench-meta-ui-latency-plan.md`](../tmp/bench-meta-ui-latency-plan.md) Step 1 (F8).
 **Branch:** `refactor/semantic-db-overhaul`
 **HEAD:** `b8e0e1b4` (descendant of plan base `4b146ff4`).
-**Profile target:** `nuxt-ui` integration repo (`D:/dev/personal/verter/.integration-tests/repos/nuxt-ui`).
+**Profile target:** `nuxt-ui` integration repo (`.integration-tests/repos/nuxt-ui`, under your checkout root).
 **Components profiled:** Table, EditorToolbar, InputMenu, NavigationMenu, Button, Alert (6 components, 1 repeat each).
 **Tool:** `cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath`.
 

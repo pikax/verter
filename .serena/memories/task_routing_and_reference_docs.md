@@ -17,4 +17,4 @@ Start with these docs by task area:
 Load only the specific reference material needed for the task. Do not bulk-read every skill.
 
 Special current-context note:
-- For component-meta performance work, also check memory `in_flight_component_meta_performance_plan.md` and then inspect `D:\tmp\verter-component-meta-performance-plan.md` for the current orchestration state before changing code.
+- For component-meta performance work, also check memory `in_flight_component_meta_performance_plan.md` and then inspect `<scratch>/verter-component-meta-performance-plan.md` for the current orchestration state before changing code.

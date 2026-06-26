@@ -26,19 +26,19 @@ deletion in S4 (commit `173ab494`).
 
 ## Capture method
 
-1. Backed up `D:/dev/personal/verter/packages/native/dist/verter-native.win32-x64-msvc.node`
+1. Backed up `<repo-root>/packages/native/dist/verter-native.win32-x64-msvc.node`
    to `/tmp/native-head-s4.node` (HEAD binary, md5
    `f9d223145ba5cd5b3cd7c013b2f3edc4`).
 2. Built HEAD binary fresh: `cargo build --release --package verter_napi`
-   at `D:/dev/personal/verter` (HEAD `173ab494`). Output copied to
-   `D:/tmp/r22-final-s5/head-native.node` (size 20 644 352 bytes).
-3. Created scratch worktree at `D:/tmp/r22-final-s5/r215-wt`
+   at `<repo-root>` (HEAD `173ab494`). Output copied to
+   `<scratch>/r22-final-s5/head-native.node` (size 20 644 352 bytes).
+3. Created scratch worktree at `<scratch>/r22-final-s5/r215-wt`
    checked out at `68daa4485` (R21.5 baseline = R21.6 revert).
 4. Built R21.5 binary: `cargo build --release --package verter_napi`
    in the worktree. Output copied to
-   `D:/tmp/r22-final-s5/r215-native.node` (size 20 631 552 bytes,
+   `<scratch>/r22-final-s5/r215-native.node` (size 20 631 552 bytes,
    md5 `ae0b9641e96da4af5cdc88e990f5692b`).
-5. Audit driver: `D:/tmp/r22-invest/audit-multi.mjs` (single
+5. Audit driver: `<scratch>/r22-invest/audit-multi.mjs` (single
    persistent `ComponentMetaHost` with `auditEnabled: true,
    footprintCapture: true`, 12-component sequence:
    Accordion → Alert → Avatar → Badge → Button → Card → Checkbox
@@ -46,12 +46,12 @@ deletion in S4 (commit `173ab494`).
 6. Swap procedure: copy R21.5 binary into
    `packages/native/dist/verter-native.win32-x64-msvc.node`
    (verified via md5), run driver writing to
-   `D:/tmp/r22-final-s5/audit-r215/`. Swap to HEAD binary, run
-   driver writing to `D:/tmp/r22-final-s5/audit-head/`.
+   `<scratch>/r22-final-s5/audit-r215/`. Swap to HEAD binary, run
+   driver writing to `<scratch>/r22-final-s5/audit-head/`.
 7. Determinism: each binary was run twice; both R21.5 and HEAD
    produced byte-identical counters across the two repeat runs
-   (verified via `D:/tmp/r22-final-s5/audit-r215-rerun/` and
-   `D:/tmp/r22-final-s5/audit-head-rerun/`).
+   (verified via `<scratch>/r22-final-s5/audit-r215-rerun/` and
+   `<scratch>/r22-final-s5/audit-head-rerun/`).
 
 ## Table.vue (primary A2 target) — full counter diff
 
@@ -161,16 +161,16 @@ also never existed in R21.5.
 
 ## Diff tooling
 
-`D:/tmp/r22-final-s5/diff-audit.mjs` — programmatic counter diff
+`<scratch>/r22-final-s5/diff-audit.mjs` — programmatic counter diff
 script. Reads `audit-r215/*.audit.json` and `audit-head/*.audit.json`,
 compares structural counters and per-event tallies, writes
-`D:/tmp/r22-final-s5/audit-diff.json` with full per-component
+`<scratch>/r22-final-s5/audit-diff.json` with full per-component
 breakdown.
 
 ## Captures
 
-- `D:/tmp/r22-final-s5/audit-r215/` — R21.5 run 1 (12 audits + summary.csv)
-- `D:/tmp/r22-final-s5/audit-r215-rerun/` — R21.5 run 2 (determinism check, identical to run 1)
-- `D:/tmp/r22-final-s5/audit-head/` — HEAD run 1 (12 audits + summary.csv)
-- `D:/tmp/r22-final-s5/audit-head-rerun/` — HEAD run 2 (determinism check, identical to run 1)
-- `D:/tmp/r22-final-s5/audit-diff.json` — programmatic per-component diff
+- `<scratch>/r22-final-s5/audit-r215/` — R21.5 run 1 (12 audits + summary.csv)
+- `<scratch>/r22-final-s5/audit-r215-rerun/` — R21.5 run 2 (determinism check, identical to run 1)
+- `<scratch>/r22-final-s5/audit-head/` — HEAD run 1 (12 audits + summary.csv)
+- `<scratch>/r22-final-s5/audit-head-rerun/` — HEAD run 2 (determinism check, identical to run 1)
+- `<scratch>/r22-final-s5/audit-diff.json` — programmatic per-component diff

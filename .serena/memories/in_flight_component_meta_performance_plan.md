@@ -1,6 +1,6 @@
 # In-Flight Component-Meta Performance Plan
 
-As of onboarding on 2026-05-02, the user noted that `D:\tmp\verter-component-meta-performance-plan.md` is actively being implemented and said it is currently in the middle of Wave 2 implementation. Treat this as ephemeral working context, not durable architecture. Before making component-meta/performance/architecture-guard changes, re-check the plan file, current branch, and git history.
+As of onboarding on 2026-05-02, the user noted that `<scratch>/verter-component-meta-performance-plan.md` is actively being implemented and said it is currently in the middle of Wave 2 implementation. Treat this as ephemeral working context, not durable architecture. Before making component-meta/performance/architecture-guard changes, re-check the plan file, current branch, and git history.
 
 Observed local state during onboarding:
 - Repository branch: `integration/component-meta-perf-landing` tracking `origin/integration/component-meta-perf-landing`.
@@ -8,7 +8,7 @@ Observed local state during onboarding:
 - Recent local commits included component-meta performance work such as indexed-access early-out, lazy projection-rescue, Pick callback-param preservation, and related tests.
 
 Plan summary:
-- File: `D:\tmp\verter-component-meta-performance-plan.md`.
+- File: `<scratch>/verter-component-meta-performance-plan.md`.
 - Title: `Verter Component-Meta Performance Plan`.
 - Scope: component-meta correctness/performance fixes plus architecture cleanup, implemented by an orchestrator with isolated worktrees/sub-agents and cherry-picked/rebased commits.
 - Core tiers: Tier A correctness, Tier B performance, Tier C architecture cleanup.
