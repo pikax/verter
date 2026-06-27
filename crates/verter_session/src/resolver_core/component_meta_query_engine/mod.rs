@@ -133,14 +133,17 @@ pub(crate) use surface::{
     project_class_a_terminal_published, project_expr_surface_expr_node,
     route_projection_node_eq_to_expr, route_projection_nodes_eq, semantic_query_error_raw,
     type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
-    type_expr_root_is_unmaterialized_sentinel, AdmittedRouteProjectionNode,
+    AdmittedRouteProjectionNode,
 };
-// `type_expr_is_expanded_surface` survives only as the `#[cfg(test)]` parity
-// ORACLE the raised-shape suite compares the bottom-up `expanded_surface` fact
-// against (production gates read the node-domain fact via `shape_engine`), so
-// its re-export is test-only.
+// `type_expr_is_expanded_surface` and `type_expr_root_is_unmaterialized_sentinel`
+// survive only as `#[cfg(test)]` parity ORACLES the raised-shape suite compares
+// the bottom-up node-domain facts against — production gates read the node-domain
+// facts (`shape_engine` `expanded_surface` / `node_root_is_unmaterialized_sentinel_with_dispatch`),
+// so their re-exports are test-only.
 #[cfg(test)]
-pub(crate) use surface::type_expr_is_expanded_surface;
+pub(crate) use surface::{
+    type_expr_is_expanded_surface, type_expr_root_is_unmaterialized_sentinel,
+};
 // Re-export ONLY the per-sink output capability TYPES so the
 // `output_materialization` owner module can name them for its explicit
 // `impl OutputProjector for <Cap>` registration pairs. The `new()`

@@ -724,6 +724,12 @@ pub(crate) fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
 /// result (Macro Type Traversal — the field that transitively depends
 /// on the unresolved name publishes partially; sibling members resolve
 /// normally), not a failed reduction.
+///
+/// Production reads the node-domain root-sentinel fact
+/// (`node_root_is_unmaterialized_sentinel_with_dispatch`); this `TypeExpr`
+/// predicate survives ONLY as the `#[cfg(test)]` parity oracle the raised-shape
+/// suite compares that node fact against.
+#[cfg(test)]
 pub(crate) fn type_expr_root_is_unmaterialized_sentinel(expr: &TypeExpr) -> bool {
     let mut current = expr;
     while let TypeExpr::Parenthesized(inner) = current {

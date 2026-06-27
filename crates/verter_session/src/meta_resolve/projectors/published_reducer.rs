@@ -174,7 +174,7 @@ pub(crate) fn classify_node_reduction_gates(
     node: SemanticNodeId,
 ) -> NodeReductionGateFacts {
     let graph = ctx.project_type_store().semantic_graph();
-    let root = peel_alias_root(&graph, node, 0);
+    let root = peel_alias_root(graph, node, 0);
     let (leaf_like, bare_carrier_ref, generic_instantiation_ref) =
         match graph.node_data(root).as_deref() {
             // `raise(Primitive | Literal)` is the peek `Leaf` arm.
@@ -198,7 +198,7 @@ pub(crate) fn classify_node_reduction_gates(
         leaf_like,
         bare_carrier_ref,
         generic_instantiation_ref,
-        contains_reducible_operator: node_contains_reducible_operator(&graph, node, 0),
+        contains_reducible_operator: node_contains_reducible_operator(graph, node, 0),
     }
 }
 

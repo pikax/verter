@@ -1321,10 +1321,11 @@ mod node_root_gate_differential_tests {
             let node = lower(&host, scope, expr);
             let node_cycle = node_root_reaches_transitive_cycle_with_fence(&host, scope, node).0;
             let mut qe = ComponentMetaQueryEngine::new(&host);
-            let expr_cycle = crate::meta_resolve::lowered_root_reaches_transitive_cycle_with_fence(
-                &mut qe, scope, expr,
-            )
-            .0;
+            // The bool variant `lowered_root_reaches_transitive_cycle` is the
+            // production interface (it forwards to the `_with_fence` body and
+            // returns `.0`), so the differential pins the same verdict.
+            let expr_cycle =
+                crate::meta_resolve::lowered_root_reaches_transitive_cycle(&mut qe, scope, expr);
             assert_eq!(
                 node_cycle, expr_cycle,
                 "node cycle gate must equal the TypeExpr front for {expr:?}"

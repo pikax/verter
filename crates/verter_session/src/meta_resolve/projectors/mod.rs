@@ -106,8 +106,8 @@ pub(crate) use emits::project_emits;
 pub(crate) use exposed::project_exposed;
 pub(crate) use options::project_options;
 pub(crate) use props::project_props;
+pub(crate) use published_reducer::classify_node_reduction_gates;
 pub(crate) use published_reducer::type_expr_contains_reducible_operator;
-pub(crate) use published_reducer::{classify_node_reduction_gates, NodeReductionGateFacts};
 pub(crate) use slots::project_slots;
 
 // The boundary-consuming publication functions live in the terminal

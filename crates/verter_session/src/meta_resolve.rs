@@ -175,12 +175,10 @@ pub use crate::host_manage::component_meta_request_impl::{
     ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
     ResolvedTypeDeclaration, ResolvedTypeRegistryMeta, SessionRequestHost,
 };
-pub(crate) use resolved_state::{
-    lowered_root_reaches_transitive_cycle, lowered_root_reaches_transitive_cycle_with_fence,
-    RegistryMaterialization,
-};
+pub(crate) use resolved_state::{lowered_root_reaches_transitive_cycle, RegistryMaterialization};
 pub use resolved_state::{ResolvedComponentMetaState, SurfaceNodeIdentities};
 pub(crate) use scoring::compare_type_expr_improvement;
+pub(crate) use scoring::{compare_node_improvement, node_root_is_explicit_selector_operator};
 // promoted to `pub(crate)` so the moved
 // `host_manage::component_meta_methods.rs` (formerly the in-tree
 // `host_methods.rs`) reaches the function via the `crate::meta_resolve`

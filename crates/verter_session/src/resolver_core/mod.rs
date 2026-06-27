@@ -89,9 +89,14 @@ pub(crate) use component_meta_query_engine::{
     instantiate_local_generic_ref_published, lower_and_project_to_expanded_node,
     lower_and_project_to_expanded_published, project_admitted_node_to_expanded_node,
     project_class_a_terminal_published, project_expr_surface_expr_node,
-    type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
-    AdmittedRouteProjectionNode,
+    type_expr_contains_semantic_miss, AdmittedRouteProjectionNode,
 };
+// `type_expr_root_is_unmaterialized_sentinel` survives only as the `#[cfg(test)]`
+// parity oracle for the node-domain root-sentinel fact (production reads
+// `node_root_is_unmaterialized_sentinel_with_dispatch`); the raised-shape suite
+// imports it through this re-export.
+#[cfg(test)]
+pub(crate) use component_meta_query_engine::type_expr_root_is_unmaterialized_sentinel;
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{
     resolve_direct_local_type_declaration, resolve_local_type_declaration,

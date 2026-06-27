@@ -13,11 +13,13 @@
 //!
 //! Every site that touches the reverse boundary lives INSIDE this sink:
 //! the raw boundary primitives ([`shell_raise_to_type_expr`] /
-//! [`seal_type_expr`] / [`unwrap_materialized`] /
-//! [`materialized_root_is_unmaterialized_sentinel`]) are MODULE-PRIVATE here,
-//! and the boundary-consuming reduction / gate / cache work
+//! [`seal_type_expr`] / [`raise_node_to_sealed_carrier`] /
+//! [`unwrap_materialized`] / [`materialize_field_value_carrier`]) are
+//! MODULE-PRIVATE here, and the boundary-consuming reduction / gate / cache work
 //! (`member_shape_peek_or_compute`, `admit_type_expr_shape_if_possible`,
-//! `reduce_field_type_expr_with_mode`) is sink-private alongside them. The sink
+//! `reduce_field_type_expr_with_mode`) is sink-private alongside them. The
+//! reduce/gate orchestrators decide on node FACTS and pass CARRIERS; only the
+//! registered terminal seals/unwraps materialise. The sink
 //! exposes ONLY policy-complete publication operations that hand back an
 //! already-published DTO — [`surface_member_to_expanded_field`] /
 //! [`project_model`] return an [`ExpandedField`], and
@@ -53,7 +55,6 @@ use crate::semantic_query::{
 use crate::types::FileAnalysisSnapshot;
 
 use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
-use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
     /// The per-member publication PROJECTORS' output-sink capability. The
@@ -146,20 +147,62 @@ fn unwrap_materialized(
     materialized.into_type_expr(&cap)
 }
 
-/// Whether the ROOT of a sealed [`MaterializedOutputTypeExpr`]'s inner
-/// [`TypeExpr`] is the unmaterialised sentinel. Mints the cap over the supplied
-/// dispatch, borrows the inner [`TypeExpr`] through the capability-gated
-/// accessor, and runs the existing root-precise sentinel predicate. The borrow
-/// (and the minted cap) are confined to this terminal sink module; only the
-/// boolean verdict escapes.
+/// Reduce a TypeExpr-start field value into a SEALED carrier through the shared
+/// TypeExpr-start materialiser, returning the carrier (node + sealed payload +
+/// dep_signature) WITHOUT unwrapping to a bare [`TypeExpr`]. The thin terminal
+/// boundary that owns the `materialize_component_meta_type_expr_until_stable_full`
+/// mint, so the per-field reducer
+/// ([`reduce_field_type_expr_with_mode`]) — a node-domain ORCHESTRATOR that gates
+/// on the INPUT expr and reads the cache-admission sentinel off the carrier
+/// NODE — never calls a materialise primitive directly.
 ///
-/// MODULE-PRIVATE to the sink.
-fn materialized_root_is_unmaterialized_sentinel(
-    materialized: &MaterializedOutputTypeExpr,
+/// TERMINAL one-shot sink: materialises ONCE and returns the carrier, making NO
+/// decision on the materialised value (the root-sentinel gate runs in the
+/// orchestrator on the carrier `node_id`).
+fn materialize_field_value_carrier(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: TypeExpr,
+    publish_mode: ProjectionMode,
+) -> MaterializedOutputTypeExpr {
+    crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable_full(
+        &expr,
+        scope_canonical_id,
+        publish_mode,
+        query_engine,
+    )
+}
+
+/// Seal a SHALLOW input `expr` (one the per-field reducer publishes verbatim,
+/// e.g. a package-backed root, a bare alias carrier, a cycle helper, or a
+/// non-reducible shape) into a [`MaterializedOutputTypeExpr`] carrier. Seals the
+/// bare `expr` as the payload. `stamp_node_id` controls whether `expr` is lowered
+/// to a Navigate-mode node for the carrier `node_id`: a downstream node-domain
+/// comparison (the publication finaliser's props loop) needs the node, but the
+/// slot / emit / binding loops that never node-compare pass `false` so they are
+/// NOT charged an extra dispatch — lowering every per-field shallow publish purely
+/// to stamp an unused node measurably bloats the per-request audit footprint on
+/// wide cyclic surfaces. The publish/admit terminal unwraps the chosen carrier
+/// exactly once.
+fn seal_input_as_carrier(
     dispatch: &ProjectSemanticDispatch<'_>,
-) -> bool {
-    let cap = MetaResolveProjectorsOutputCap::new(dispatch);
-    crate::resolver_core::type_expr_root_is_unmaterialized_sentinel(materialized.type_expr(&cap))
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+    publish_mode: ProjectionMode,
+    stamp_node_id: bool,
+    dep_signature: crate::semantic_query::DepSignature,
+) -> MaterializedOutputTypeExpr {
+    let node_id = stamp_node_id
+        .then(|| {
+            dispatch.lower_type_expr_in_scope_with_mode(scope_canonical_id, expr, publish_mode)
+        })
+        .flatten();
+    MaterializedOutputTypeExpr::from_parts(
+        node_id,
+        seal_type_expr(dispatch, expr.clone()),
+        dep_signature,
+        false,
+    )
 }
 
 /// Default model property name when `defineModel()` is called without
@@ -208,8 +251,6 @@ fn member_shape_peek_or_compute(
     admitted: &super::publication_authority::AdmittedPublishedMember<'_>,
     mode: ProjectionMode,
 ) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
-    use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
-
     // The admitted member's value graph node is the raise/reduce subject; the
     // cache key keys on the ADMITTED member (`admitted.member().value`) so an
     // arbitrary / unadmitted `SemanticNodeId` cannot be routed through the
@@ -794,7 +835,12 @@ fn reduce_field_type_expr_with_mode(
     scope_canonical_id: &str,
     expr: TypeExpr,
     publish_mode: ProjectionMode,
-) -> TypeExpr {
+    // `true` only for the props loop, which node-compares the reduced carrier
+    // against the shallow form — a shallow publish then stamps its lowered node so
+    // the comparison can score it. The slot / emit / binding loops pass `false`
+    // (they never node-compare) so a shallow publish skips the lowering.
+    stamp_shallow_node_id: bool,
+) -> MaterializedOutputTypeExpr {
     // `publish_mode` drives both the peek key and the cold-path
     // materialiser dispatch so a per-prop `Navigate` publication
     // does not collide with an `Expanded` consumer slot. The
@@ -832,17 +878,18 @@ fn reduce_field_type_expr_with_mode(
     // path) hit at peek time. Peek-time admission is cheap (no raise
     // / no reducer dispatch); the cache write is the universal-
     // caching contract.
+    // One dispatch for every shallow-carrier seal + the cold-path carrier-node
+    // reads (the cap mint stays a module-private primitive of this sink).
+    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx);
+
     if let Some(peeked) =
         super::peek_member_shape_known(query_engine, scope_canonical_id, &expr, publish_mode)
     {
         match peeked {
             super::PeekedShape::Leaf(leaf) => {
-                // F1: Leaf admission is a STRUCTURAL classification of
-                // `expr` (Primitive / Literal). It does not depend on
-                // any other file — `peek_member_shape_known` does not
-                // touch cross-file state for these arms. Empty
-                // dep_signature is correct here; the cache entry
-                // self-roots on the scope file only.
+                // F1: Leaf admission is a STRUCTURAL classification of `expr`
+                // (Primitive / Literal) — no cross-file state, so the empty
+                // dep_signature self-roots on the scope file only.
                 admit_type_expr_shape_if_possible(
                     query_engine.ctx,
                     scope_canonical_id,
@@ -851,41 +898,47 @@ fn reduce_field_type_expr_with_mode(
                     leaf.clone(),
                     Arc::from(Vec::new()),
                 );
-                return leaf;
+                return seal_input_as_carrier(
+                    &dispatch,
+                    scope_canonical_id,
+                    &leaf,
+                    publish_mode,
+                    stamp_shallow_node_id,
+                    Arc::from(Vec::new()),
+                );
             }
             super::PeekedShape::BareCarrier { .. } => {
-                // H1: skip the universal-cache admit for bare alias
-                // `Ref { type_arguments: [] }` carriers.
-                //
-                // The TypeExpr cache slot
-                // `ShapeCacheKey::type_expr_whole(scope, expr,
-                // Expanded)` is ALSO the slot
-                // `materialize_component_meta_type_expr_until_stable_full`
-                // probes BEFORE dispatching its expansion pipeline.
-                // Admitting the projector's shallow `Ref` here would
-                // poison that slot: a subsequent materializer call
-                // asking for the bare alias's EXPANDED body would
-                // short-circuit on the cached `Ref` and skip
-                // alias-body expansion.
-                //
-                // Bare alias re-resolution is cheap (a `Ref` lookup
-                // is structural — `peek_member_shape_known` classifies
-                // it in one match arm without any cross-file or
-                // reducer work). The cost of NOT admitting a shallow
-                // alias here is small; the cost of admit-collision
-                // is correctness-breaking. The `Leaf` admit above
-                // stays — `Primitive`/`Literal` are terminal shapes
-                // that the materializer cannot expand further, so
-                // the cache slot's shallow/expanded forms agree.
-                return expr;
+                // H1 (no-cache-poison): a bare alias `Ref { type_arguments: [] }`
+                // carrier is published shallow but NOT admitted to the
+                // `type_expr_whole` slot — that slot is shared with the
+                // whole-expression materialiser's pre-dispatch probe, so admitting
+                // the projector's shallow `Ref` here would poison a later EXPANDED
+                // alias-body request (it would short-circuit on the cached `Ref` and
+                // skip alias-body expansion). The `Leaf` admit above stays:
+                // Primitive/Literal are terminal, so the shallow/expanded forms
+                // agree. Re-resolving a bare alias is cheap (a structural `Ref`
+                // classification), so skipping the admit costs little while the
+                // admit-collision would be correctness-breaking.
+                return seal_input_as_carrier(
+                    &dispatch,
+                    scope_canonical_id,
+                    &expr,
+                    publish_mode,
+                    stamp_shallow_node_id,
+                    Arc::from(Vec::new()),
+                );
             }
             super::PeekedShape::Cached(_) => {
-                // Fall through to the package-backed gate; we re-peek
-                // below once the gate has cleared.
+                // Fall through to the package-backed gate; re-peek below.
             }
         }
     }
 
+    // Input-expr gates (untainted INPUT classification — no materialise): a
+    // package-backed object-like root, a transitive-cycle generic helper, or a
+    // non-reducible shape all publish the INPUT verbatim as the shallow carrier
+    // per the shallow-by-default rule. Reduction fires only when the consumer
+    // walked a path (operator-shape nodes or a generic instantiation).
     let route_is_package_backed =
         crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root(
             &expr,
@@ -893,38 +946,18 @@ fn reduce_field_type_expr_with_mode(
             query_engine,
         );
     if route_is_package_backed {
-        return expr;
+        return seal_input_as_carrier(
+            &dispatch,
+            scope_canonical_id,
+            &expr,
+            publish_mode,
+            stamp_shallow_node_id,
+            Arc::from(Vec::new()),
+        );
     }
 
-    // Shallow-by-default invariant: a *plain* alias reference (a
-    // `Ref` with empty `type_arguments`) is NEVER reduced here. The
-    // projector publishes alias names as carriers; consumers re-
-    // resolve through the registry on demand. Reduction fires only
-    // when the consumer explicitly walked a path:
-    //
-    // - operator-shape nodes (`IndexedAccess`/`KeyOf`/`TypeOf`/
-    //   `Conditional`/`Mapped`/`Infer`/`Rest`/`TemplateLiteral`),
-    // - generic instantiations (`Ref` with non-empty `type_arguments`)
-    //   such as `Pick<Foo,'a'>` / `Omit<Foo,'a'>` / `Partial<Foo>` /
-    //   `Required<Foo>` / userland generic type aliases.
-    //
-    // Recursive parameterised helpers (`type GetItemKeys<T> = ...
-    // GetItemKeys<...> ...`) carry non-empty `type_arguments` but
-    // resolve through a self-referential cycle. The shared
-    // transitive-cycle guard short-circuits reduction so the helper
-    // stays as a bare carrier — the reduction would otherwise produce
-    // a deep partially-resolved expression with `semanticMiss` shells
-    // because the cycle is broken mid-traversal.
     let is_generic_instantiation =
         matches!(&expr, TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty());
-
-    // The carrier-stop decision is dispatch-layer (demand context),
-    // not a projector-side name predicate. The dispatch's
-    // `may_reduce_operator(ctx)` predicate is structural and uniform:
-    // a userland `MyPick<T,K>` follows the same path as the builtin
-    // `Pick<T,K>`, and `Tool<INPUT, OUTPUT>` only carrier-stops when
-    // the inner `keyof T` / `Mapped` dispatches enter a non-
-    // publication context.
     if is_generic_instantiation
         && crate::meta_resolve::lowered_root_reaches_transitive_cycle(
             query_engine,
@@ -932,106 +965,77 @@ fn reduce_field_type_expr_with_mode(
             &expr,
         )
     {
-        return expr;
+        return seal_input_as_carrier(
+            &dispatch,
+            scope_canonical_id,
+            &expr,
+            publish_mode,
+            stamp_shallow_node_id,
+            Arc::from(Vec::new()),
+        );
     }
     let needs_reduction =
         super::type_expr_contains_reducible_operator(&expr) || is_generic_instantiation;
-
     if !needs_reduction {
-        return expr;
+        return seal_input_as_carrier(
+            &dispatch,
+            scope_canonical_id,
+            &expr,
+            publish_mode,
+            stamp_shallow_node_id,
+            Arc::from(Vec::new()),
+        );
     }
 
-    // Gates have cleared: re-peek the operator-shape cache. A warm
-    // `MaterializeMemoDb` hit on `(scope, expr, mode)` now safely
-    // short-circuits the bounded reducer dispatch — package-backed
-    // and cycle paths already returned above, so the cached entry's
-    // reduced shape is compatible with the projector's published
-    // surface.
+    // Gates have cleared: re-peek the operator-shape cache. A warm carrier
+    // publishes verbatim (it already observed its dep_signature) — return it
+    // WITHOUT unwrapping to a bare `TypeExpr`.
     if let Some(super::PeekedShape::Cached(materialized)) =
         super::peek_member_shape_known(query_engine, scope_canonical_id, &expr, publish_mode)
     {
-        // Publication sink: unwrap the sealed payload via the module-private
-        // boundary primitive (mint + unwrap stay confined to this sink).
-        let dispatch = ProjectSemanticDispatch::new(query_engine.ctx());
-        return unwrap_materialized(materialized, &dispatch);
+        return materialized;
     }
 
-    // The materialiser propagates the caller's `publish_mode`
-    // verbatim into the lower + raise pipeline so the per-prop
-    // publication boundary sees the shallower demand at every
-    // recursive `Instantiate` / `KeyOf` / `Mapped` dispatch.
-    // Hardcoding `ProjectionMode::Expanded` here would silently
-    // upgrade `Navigate` callers (`reduce_published_field_types` →
-    // `reduce_field_type_expr_with_mode(Navigate)`), and the
-    // upgraded path would re-enter `build_key_of` /
-    // `build_mapped_type` for inherited helpers like
-    // `Partial<EditorOptions>` / `Omit<EmblaOptionsType>` /
-    // generic-substituted carriers — emitting per-key
-    // `ProjectMember` edges for every enumerated inherited key.
-    //
-    // The materialiser's cache key is keyed on
-    // `(scope, expr, ProjectionReductionContext::published(mode))`
-    // (demand-substrate), so the demand-explicit
-    // `Published(Navigate)` slot stays disjoint from the implicit
-    // `Published(Expanded)` slot — no cache poisoning between
-    // per-prop callers and slot/model-binding callers.
-    //
-    // TypeExpr-start callers that need `Expanded` (slot bindings,
-    // model bindings, the `Pick`/`Omit`/`IndexedAccess`/`keyof`
-    // paths) enter through [`reduce_field_type_expr_with_mode`] passing
-    // `Expanded` here. Callers
-    // that explicitly name `Navigate` at
-    // `reduce_field_type_expr_with_mode` get the shallower
-    // materialisation depth instead.
-    let materialized =
-        crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable_full(
-            &expr,
+    // Cold compute: reduce through the TypeExpr-start materialiser terminal
+    // (`materialize_field_value_carrier`), which returns the sealed carrier. The
+    // caller's `publish_mode` flows verbatim into the lower + raise pipeline so the
+    // per-prop boundary sees the shallower demand at every recursive dispatch; the
+    // materialiser's `Published(mode)` cache slot stays disjoint from the implicit
+    // `Published(Expanded)` slot — no poisoning between per-prop and slot/model
+    // callers.
+    let materialized = materialize_field_value_carrier(
+        query_engine,
+        scope_canonical_id,
+        expr.clone(),
+        publish_mode,
+    );
+
+    // No-poison at the publication reducer: when the demanded reduction's ROOT
+    // came back as the unmaterialised sentinel — read off the carrier NODE via the
+    // node-domain sentinel fact, NOT by materialising a `TypeExpr` — and the input
+    // carried no sentinel, no reduction is available in this scope, so the input
+    // carrier IS the published shape (the consumer re-resolves it). The gate is
+    // ROOT-precise (a reduction that DID execute publishes even when a nested
+    // member value carries a genuine, input-independent miss).
+    let root_is_sentinel = materialized.node_id().is_some_and(|node| {
+        crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
+            &dispatch, node,
+        )
+    });
+    if root_is_sentinel && !crate::resolver_core::type_expr_contains_semantic_miss(&expr) {
+        return seal_input_as_carrier(
+            &dispatch,
             scope_canonical_id,
+            &expr,
             publish_mode,
-            query_engine,
+            stamp_shallow_node_id,
+            Arc::from(Vec::new()),
         );
-    // Publication sink: one dispatch for the sentinel borrow + the terminal
-    // by-value unwrap of the sealed payload below. The capability mint + both
-    // reads (the borrow `type_expr` and the by-value `into_type_expr`) are the
-    // module-private primitives of this terminal sink, minting from this
-    // dispatch.
-    let mat_dispatch = ProjectSemanticDispatch::new(query_engine.ctx());
-    // No-poison at the publication reducer: the TypeExpr-start
-    // materialiser lowers `expr` in the OWNER scope, but a published
-    // value raised from the shared graph can carry carriers whose
-    // declarations live in OTHER files (a heritage member's
-    // `Feat<T>` value). Re-lowering such a carrier by NAME in the
-    // owner scope misses AT THE ROOT; replacing a sentinel-free input
-    // with a root-sentinel reduction would poison the published
-    // surface. When the demanded reduction itself failed (the
-    // materialised ROOT is the unmaterialised sentinel) and the input
-    // carried no sentinel, no reduction is available in this scope —
-    // the input carrier IS the published shape (the consumer
-    // re-resolves it through the shared resolver).
-    //
-    // The gate is ROOT-precise, not a whole-tree `contains` scan: a
-    // demanded reduction that DID execute (`Partial<EditorOptions>`
-    // materialising its finite optional surface) publishes even when
-    // a nested member VALUE carries a genuine, input-independent miss
-    // (`element?: HTMLElement` with no DOM lib registered). Per the
-    // Macro Type Traversal contract, an unresolvable name inside one
-    // member publishes that member partially while sibling members
-    // resolve normally — discarding the whole materialised surface
-    // for one nested miss would revert the explicit consumer demand
-    // to the un-reduced carrier.
-    if materialized_root_is_unmaterialized_sentinel(&materialized, &mat_dispatch)
-        && !crate::resolver_core::type_expr_contains_semantic_miss(&expr)
-    {
-        return expr;
     }
-    // Publication terminal: a bare-Ref terminal of an explicit
-    // selector (`Theme['header']` resolving onto a declaration) IS the
-    // published shape — the declaration-reference carrier the consumer
-    // re-resolves on demand, exactly as if the member had been written
-    // as the plain reference. No terminal re-resolve runs here:
-    // forcing the terminal one level deeper re-expands what the
-    // publication boundary deliberately keeps shallow.
-    unwrap_materialized(materialized, &mat_dispatch)
+    // Publication terminal: a bare-Ref terminal of an explicit selector
+    // (`Theme['header']` resolving onto a declaration) IS the published shape — the
+    // carrier the consumer re-resolves on demand. No terminal re-resolve runs here.
+    materialized
 }
 
 pub(crate) fn project_model(
@@ -1197,36 +1201,71 @@ pub(crate) fn reduce_published_field_types(
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
-    use crate::meta_resolve::compare_type_expr_improvement;
     use rustc_hash::FxHashMap;
+
+    // One dispatch for the shallow-node lowering and every per-field carrier
+    // unwrap (the terminal DTO write). `reduce_published_field_types` is a genuine
+    // publication terminal: it picks the better field shape in NODE DOMAIN
+    // (`compare_node_improvement` over the reduced carriers' nodes) and
+    // materialises each chosen carrier ONCE into the published
+    // `ExpandedField.r#type` — making no decision on the materialised value.
+    let dispatch = ProjectSemanticDispatch::new(query_engine.ctx);
 
     let mut finalized_prop_types: FxHashMap<String, TypeExpr> = FxHashMap::default();
     for field in evaluated_types.props.iter_mut() {
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        let mut reduced = reduce_field_type_expr_with_mode(
+        let mut reduced_carrier = reduce_field_type_expr_with_mode(
             query_engine,
             scope_canonical_id,
             raised,
             ProjectionMode::Navigate,
+            true,
         );
 
         if let Some(shallow) = field.shallow_type_expr.as_ref() {
-            if !matches!(shallow, TypeExpr::Unknown { .. })
-                && (compare_type_expr_improvement(shallow, &reduced)
-                    || root_is_explicit_selector_operator(shallow))
-            {
-                let shallow_reduced = reduce_field_type_expr_with_mode(
-                    query_engine,
+            if !matches!(shallow, TypeExpr::Unknown { .. }) {
+                let ctx = query_engine.ctx;
+                // The shallow form is an INPUT (untainted); lower it to a node and
+                // compare in NODE DOMAIN against the reduced carrier's node — never
+                // by scoring a materialised `TypeExpr`.
+                let shallow_node = dispatch.lower_type_expr_in_scope_with_mode(
                     scope_canonical_id,
-                    shallow.clone(),
+                    shallow,
                     ProjectionMode::Navigate,
                 );
-                if compare_type_expr_improvement(&shallow_reduced, &reduced) {
-                    reduced = shallow_reduced;
+                let prefer_shallow = match (shallow_node, reduced_carrier.node_id()) {
+                    (Some(sn), Some(rn)) => {
+                        crate::meta_resolve::compare_node_improvement(ctx, sn, rn)
+                            || crate::meta_resolve::node_root_is_explicit_selector_operator(ctx, sn)
+                    }
+                    // No reduced node to compare against: prefer the shallow form
+                    // only when it is an explicit consumer-demand selector.
+                    (Some(sn), None) => {
+                        crate::meta_resolve::node_root_is_explicit_selector_operator(ctx, sn)
+                    }
+                    _ => false,
+                };
+                if prefer_shallow {
+                    let shallow_reduced_carrier = reduce_field_type_expr_with_mode(
+                        query_engine,
+                        scope_canonical_id,
+                        shallow.clone(),
+                        ProjectionMode::Navigate,
+                        true,
+                    );
+                    if let (Some(srn), Some(rn)) =
+                        (shallow_reduced_carrier.node_id(), reduced_carrier.node_id())
+                    {
+                        if crate::meta_resolve::compare_node_improvement(query_engine.ctx, srn, rn)
+                        {
+                            reduced_carrier = shallow_reduced_carrier;
+                        }
+                    }
                 }
             }
         }
 
+        let reduced = unwrap_materialized(reduced_carrier, &dispatch);
         finalized_prop_types.insert(field.name.clone(), reduced.clone());
         field.r#type = reduced;
     }
@@ -1239,63 +1278,51 @@ pub(crate) fn reduce_published_field_types(
     }
     for field in evaluated_types.emits.iter_mut() {
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        field.r#type = reduce_field_type_expr_with_mode(
+        let carrier = reduce_field_type_expr_with_mode(
             query_engine,
             scope_canonical_id,
             raised,
             ProjectionMode::Navigate,
+            false,
         );
+        field.r#type = unwrap_materialized(carrier, &dispatch);
     }
     for field in evaluated_types.slot_bindings.iter_mut() {
-        // Typed-IR fast path: synthetic slot-binding carriers are
-        // intrinsic terminal leaves. Their `binding_name` is not a
-        // workspace alias — reducing through the resolver would re-
-        // enter registry collection looking for a type that does not
-        // exist. The variant identity IS the carrier-skip signal.
+        // Typed-IR fast path: a synthetic slot-binding carrier is an intrinsic
+        // terminal leaf — its `binding_name` is not a workspace alias, so reducing
+        // it would re-enter registry collection for a type that does not exist. The
+        // variant identity IS the carrier-skip signal.
         if matches!(&field.r#type, TypeExpr::SyntheticSlotBinding(_)) {
             continue;
         }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        // Navigate (shallow-by-default), matching the props / emits reducers
-        // above: an explicit selector operator (`IndexedAccess`, finite
-        // `Pick`/`Omit`, closed conditional) still reduces path-precisely, but a
-        // symbolic `AppProps['avatar']` whose property body resolves through an
-        // open `[k: string]: any` index signature STAYS the indexed-access
-        // carrier rather than widening through the index signature to `any`.
-        field.r#type = reduce_field_type_expr_with_mode(
+        // Navigate (shallow-by-default): an explicit selector reduces
+        // path-precisely, but a symbolic `AppProps['avatar']` through an open
+        // `[k: string]: any` index signature STAYS the indexed-access carrier.
+        let carrier = reduce_field_type_expr_with_mode(
             query_engine,
             scope_canonical_id,
             raised,
             ProjectionMode::Navigate,
+            false,
         );
+        field.r#type = unwrap_materialized(carrier, &dispatch);
     }
     for field in evaluated_types.bindings.iter_mut() {
         if matches!(&field.r#type, TypeExpr::SyntheticSlotBinding(_)) {
             continue;
         }
         let raised = std::mem::replace(&mut field.r#type, TypeExpr::Unknown { raw: String::new() });
-        // Navigate (shallow-by-default), matching the props / emits /
-        // slot_bindings reducers above. Model bindings are a macro
-        // publication surface; an explicit selector still reduces
-        // path-precisely, but a plain alias / open generic carrier
-        // stays shallow rather than eagerly expanding.
-        field.r#type = reduce_field_type_expr_with_mode(
+        // Navigate (shallow-by-default), matching the props / emits / slot_bindings
+        // reducers: an explicit selector reduces path-precisely; a plain alias /
+        // open generic carrier stays shallow.
+        let carrier = reduce_field_type_expr_with_mode(
             query_engine,
             scope_canonical_id,
             raised,
             ProjectionMode::Navigate,
+            false,
         );
-    }
-}
-
-fn root_is_explicit_selector_operator(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Parenthesized(inner) => root_is_explicit_selector_operator(inner),
-        TypeExpr::IndexedAccess { .. } | TypeExpr::KeyOf(_) | TypeExpr::TypeOf(_) => true,
-        TypeExpr::Ref { name, .. } => matches!(
-            BuiltinUtility::from_name(name.as_ref()),
-            Some(BuiltinUtility::Pick | BuiltinUtility::Omit | BuiltinUtility::Record)
-        ),
-        _ => false,
+        field.r#type = unwrap_materialized(carrier, &dispatch);
     }
 }

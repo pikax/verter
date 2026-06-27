@@ -21700,6 +21700,164 @@ fn output_sink_conversions_decide_in_node_domain_not_on_materialized_type_expr()
              seal); calls seen: {member_shape:?}"
         );
     }
+
+    // ── `reduce_field_type_expr_with_mode` — returns a CARRIER; the no-poison
+    //    sentinel gate reads the node-root-sentinel fact off the carrier NODE (not
+    //    a materialised TypeExpr), and the cold mint is routed through a terminal.
+    let reduce_field = output_sink_calls_in(OUTPUT_SINK_SRC, "reduce_field_type_expr_with_mode");
+    for forbidden in [
+        // the deleted materialize-then-decide sentinel helper
+        "materialized_root_is_unmaterialized_sentinel",
+        // the orchestrator never unwraps to a bare TypeExpr (it returns a carrier)
+        "unwrap_materialized",
+        // the cold mint moved into the terminal `materialize_field_value_carrier`
+        "materialize_component_meta_type_expr_until_stable_full",
+    ] {
+        assert!(
+            !reduce_field.contains(forbidden),
+            "reduce_field_type_expr_with_mode must NOT call `{forbidden}`; calls seen: {reduce_field:?}"
+        );
+    }
+    for required in [
+        "node_root_is_unmaterialized_sentinel_with_dispatch",
+        "materialize_field_value_carrier",
+        "seal_input_as_carrier",
+    ] {
+        assert!(
+            reduce_field.contains(required),
+            "reduce_field_type_expr_with_mode must call `{required}` (node-domain sentinel / \
+             carrier seal / terminal mint); calls seen: {reduce_field:?}"
+        );
+    }
+
+    // ── `reduce_published_field_types` — the props shape selection is a NODE-domain
+    //    comparison over the reduced carriers; the materialised-TypeExpr scorer is
+    //    gone.
+    let reduce_published = output_sink_calls_in(OUTPUT_SINK_SRC, "reduce_published_field_types");
+    assert!(
+        !reduce_published.contains("compare_type_expr_improvement"),
+        "reduce_published_field_types must NOT score materialised TypeExprs via \
+         `compare_type_expr_improvement`; calls seen: {reduce_published:?}"
+    );
+    for required in [
+        "compare_node_improvement",
+        "node_root_is_explicit_selector_operator",
+    ] {
+        assert!(
+            reduce_published.contains(required),
+            "reduce_published_field_types must select the published shape in node domain via \
+             `{required}`; calls seen: {reduce_published:?}"
+        );
+    }
+}
+
+/// §1a NO-CACHE-POISON characterization: `reduce_field_type_expr_with_mode`
+/// admits a `Leaf` (Primitive / Literal — a terminal shape whose shallow/expanded
+/// forms agree) to the shared `type_expr_whole` `ShapeCacheDb` slot, but a
+/// `BareCarrier` (a bare alias `Ref { type_arguments: [] }`) is published shallow
+/// WITHOUT admitting — that slot is shared with the whole-expression materialiser's
+/// pre-dispatch probe, so admitting the projector's shallow `Ref` would poison a
+/// later EXPANDED alias-body request.
+///
+/// Discrimination: the `Leaf` match arm MUST contain `admit_type_expr_shape_if_possible`
+/// and the `BareCarrier` arm MUST NOT — re-adding the admit to the `BareCarrier`
+/// arm (the cache-poisoning regression) FAILS this test.
+#[test]
+fn reduce_field_bare_carrier_publishes_shallow_without_poisoning_shared_cache_slot() {
+    use syn::visit::Visit;
+
+    const OUTPUT_SINK_SRC: &str = include_str!("meta_resolve/projectors/output_sink.rs");
+
+    /// Within the target fn, find each `PeekedShape::Leaf` / `PeekedShape::BareCarrier`
+    /// match arm and record whether its body calls `admit_type_expr_shape_if_possible`.
+    #[derive(Default)]
+    struct ArmAdmitProbe {
+        in_reduce_field: usize,
+        leaf_admits: Option<bool>,
+        bare_carrier_admits: Option<bool>,
+    }
+    /// Whether an arm body (an `Expr`) contains a call to `target` ident.
+    fn body_calls(expr: &syn::Expr, target: &str) -> bool {
+        struct C<'a> {
+            target: &'a str,
+            hit: bool,
+        }
+        impl<'a, 'ast> Visit<'ast> for C<'a> {
+            fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+                if let syn::Expr::Path(p) = c.func.as_ref() {
+                    if p.path
+                        .segments
+                        .last()
+                        .is_some_and(|s| s.ident == self.target)
+                    {
+                        self.hit = true;
+                    }
+                }
+                syn::visit::visit_expr_call(self, c);
+            }
+        }
+        let mut c = C { target, hit: false };
+        c.visit_expr(expr);
+        c.hit
+    }
+    /// The terminal path-segment ident of a `Pat::TupleStruct` / `Pat::Path`
+    /// pattern, e.g. `Leaf` / `BareCarrier` for `super::PeekedShape::Leaf(..)`.
+    fn arm_variant(pat: &syn::Pat) -> Option<String> {
+        let path = match pat {
+            syn::Pat::TupleStruct(ts) => &ts.path,
+            syn::Pat::Path(p) => &p.path,
+            syn::Pat::Struct(s) => &s.path,
+            _ => return None,
+        };
+        path.segments.last().map(|s| s.ident.to_string())
+    }
+    impl<'ast> Visit<'ast> for ArmAdmitProbe {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            let hit = f.sig.ident == "reduce_field_type_expr_with_mode";
+            if hit {
+                self.in_reduce_field += 1;
+            }
+            syn::visit::visit_item_fn(self, f);
+            if hit {
+                self.in_reduce_field -= 1;
+            }
+        }
+        fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+            if self.in_reduce_field > 0 {
+                match arm_variant(&arm.pat).as_deref() {
+                    Some("Leaf") => {
+                        self.leaf_admits =
+                            Some(body_calls(&arm.body, "admit_type_expr_shape_if_possible"));
+                    }
+                    Some("BareCarrier") => {
+                        self.bare_carrier_admits =
+                            Some(body_calls(&arm.body, "admit_type_expr_shape_if_possible"));
+                    }
+                    _ => {}
+                }
+            }
+            syn::visit::visit_arm(self, arm);
+        }
+    }
+
+    let file = syn::parse_file(OUTPUT_SINK_SRC).expect("output_sink.rs must parse");
+    let mut probe = ArmAdmitProbe::default();
+    probe.visit_file(&file);
+
+    assert_eq!(
+        probe.leaf_admits,
+        Some(true),
+        "the `PeekedShape::Leaf` arm of reduce_field_type_expr_with_mode must admit to the \
+         shared cache slot (Primitive/Literal forms agree shallow/expanded) — arm not found or \
+         admit missing"
+    );
+    assert_eq!(
+        probe.bare_carrier_admits,
+        Some(false),
+        "the `PeekedShape::BareCarrier` arm MUST NOT admit to the shared `type_expr_whole` cache \
+         slot — admitting a shallow alias `Ref` there poisons a later EXPANDED alias-body request \
+         (re-adding the admit is the cache-poisoning regression this test guards)"
+    );
 }
 
 /// End-to-end discriminator for the dispatch-bridge `ProjectGeneration`

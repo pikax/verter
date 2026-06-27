@@ -431,7 +431,12 @@ mod carrier {
             /// Borrow the inner [`TypeExpr`]. Requires an [`OutputProjector`]
             /// capability — the unwrap-locality gate. The capability is the
             /// proof the caller is a true output sink; it is not otherwise
-            /// consulted.
+            /// consulted. The borrow read-surface (paired with the live by-value
+            /// `into_type_expr`): retained as the carrier's documented
+            /// capability-gated read accessor — the per-field sentinel gate now
+            /// reads the node-domain fact off the carrier `node_id` rather than
+            /// borrowing the `TypeExpr`, so this borrow has no current caller.
+            #[cfg_attr(not(test), allow(dead_code))]
             pub(super) fn type_expr<P: OutputProjector + ?Sized>(&self, _cap: &P) -> &TypeExpr {
                 &self.0
             }
@@ -569,9 +574,14 @@ mod carrier {
 
         /// Borrow the inner [`TypeExpr`] payload. Requires an
         /// [`OutputProjector`] capability — the compiler-enforced
-        /// unwrap-locality gate for the borrowing read sites (sentinel checks
-        /// that inspect `&type_expr` without consuming the carrier). Delegates
-        /// to the vault's capability-gated accessor.
+        /// unwrap-locality gate for the borrowing read sites. Delegates to the
+        /// vault's capability-gated accessor. The carrier's documented borrow
+        /// read-surface, paired with the live by-value [`Self::into_type_expr`]:
+        /// the per-field sentinel gate now reads the node-domain root-sentinel
+        /// fact off the carrier `node_id` instead of borrowing the `TypeExpr`, so
+        /// the borrow accessor (like the sibling `node_id` accessor) has no
+        /// current caller but stays as the carrier's read contract.
+        #[cfg_attr(not(test), allow(dead_code))]
         pub(crate) fn type_expr<P: OutputProjector + ?Sized>(&self, cap: &P) -> &TypeExpr {
             self.type_expr.0.type_expr(cap)
         }

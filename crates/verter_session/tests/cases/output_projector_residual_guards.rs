@@ -12299,6 +12299,27 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "meta_resolve/projectors/output_sink.rs",
         "raise_node_to_sealed_carrier",
     ),
+    // The TypeExpr-start field-value reduction terminal: wraps
+    // `materialize_component_meta_type_expr_until_stable_full` and returns the
+    // sealed carrier ONCE. Makes no decision on the materialised value — the
+    // per-field reducer (`reduce_field_type_expr_with_mode`) reads the cache-
+    // admission root-sentinel fact off the carrier NODE. Its `expr` param is the
+    // input it feeds straight to the materialiser (which lowers it), not a value it
+    // classifies, so the self-policing rail records no decided param.
+    (
+        "meta_resolve/projectors/output_sink.rs",
+        "materialize_field_value_carrier",
+    ),
+    // The published-field-type publication terminal: picks the better field shape
+    // in NODE DOMAIN (`compare_node_improvement` / `node_root_is_explicit_selector_operator`
+    // over the reduced carriers' NODES, decided BEFORE materialising) and unwraps
+    // each chosen carrier ONCE into the published `ExpandedField.r#type`. No
+    // decision is made on a materialised `TypeExpr`; it takes no `TypeExpr` param,
+    // so the self-policing rail seeds nothing.
+    (
+        "meta_resolve/projectors/output_sink.rs",
+        "reduce_published_field_types",
+    ),
     (
         "macro_output_expansion.rs",
         "materialize_admitted_expansion_node",
