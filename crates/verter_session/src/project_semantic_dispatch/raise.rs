@@ -4743,18 +4743,11 @@ pub(crate) fn node_raised_shape_for_eq(
 /// nodes can raise to equal shapes and vice-versa), so the raised-shape key is
 /// the comparison subject.
 //
-// Node-vs-node member of the node-domain decision API. The Kind-B callers use
-// the node-vs-`TypeExpr` form (`raised_shape_eq_node_type_expr`); this node-vs-
-// node form has no production caller yet, so the non-test build sees it as dead
-// while the parity suite exercises it as the equivalence proof.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "node-vs-node member of the node-domain decision API; exercised by the \
-                  raised-shape parity suite (the equivalence proof)"
-    )
-)]
+// Node-vs-node member of the node-domain decision API: the route fixpoint's
+// later-iteration convergence (`route_projection_nodes_eq` →
+// `solve_or_project_leaf_expr_until_stable`) compares successive admitted route
+// nodes through this form. The parity suite exercises it as the equivalence
+// proof against `raise(a) == raise(b)`.
 #[must_use]
 pub(crate) fn raised_shape_eq_nodes(
     ctx: &dyn crate::resolver_core::ResolverContext,

@@ -15,7 +15,18 @@
 use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, projected_surface_member_names, strip_parens_expr};
-use super::{ComponentMetaQueryEngine, PreparedProjectionContext};
+use super::{AdmittedRouteProjectionNode, ComponentMetaQueryEngine, PreparedProjectionContext};
+
+/// The route fixpoint's cursor. The FIRST iteration projects the input
+/// `&TypeExpr`; every later iteration re-projects the prior admitted node
+/// directly (node-base re-projection, no re-lowering / no materialisation), so
+/// the fixpoint stabilises on interned raised-shape identity with the sole
+/// publication materialisation happening once after convergence.
+#[derive(Clone, Copy)]
+enum RouteFixpointCursor<'cursor> {
+    Input(&'cursor TypeExpr),
+    Node(AdmittedRouteProjectionNode),
+}
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     /// Enumerate the literal string keys named by a `Pick`/`Omit`
@@ -901,52 +912,73 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         expr: &TypeExpr,
     ) -> Option<TypeExpr> {
-        let mut current = expr.clone();
-        let mut last = None;
+        // Node-domain fixpoint: stabilise on interned `RaisedShapeKey` identity.
+        // Each iteration projects the cursor through the NODE adapters (no
+        // materialisation); convergence compares interned raised-shape keys
+        // (`route_projection_node_eq_to_expr` against the input `expr` on
+        // iteration 1, `route_projection_nodes_eq` against the prior node on
+        // later iterations). The sole publication `TypeExpr` is materialised
+        // ONCE after convergence / exhaustion at the surface sink — there is no
+        // per-iteration materialisation.
+        let mut cursor = RouteFixpointCursor::Input(expr);
+        let mut last: Option<AdmittedRouteProjectionNode> = None;
         for _ in 0..3 {
-            // dispatch the lower+project tail and the
-            // expr-surface bridge from `meta_resolve` instead of the
-            // deprecated engine methods. The bridges share the engine's
-            // cycle-protection helpers so behavior matches the legacy
-            // method path.
-            let next = crate::meta_resolve::lower_and_project_to_expanded_via_host_threaded(
-                self,
-                scope_canonical_id,
-                &current,
-            )
-            .or_else(|| {
-                // Leak-close-2 â€” Expanded base + Expanded
-                // terminal, Published. The fixpoint loop is the
-                // engine method's "stabilise leaf via expanded"
-                // pattern; reducing either dimension below Expanded
-                // breaks fixpoint convergence for imported alias
-                // helpers like `Button['ui']` where the Navigate
-                // carrier would freeze a generic InstantiationRef at
-                // the empty-path terminal (see the documented
-                // constraint on
-                // `lower_and_project_to_expanded_via_host_threaded`).
-                // Per the consult's "Keep Expanded" hint, this
-                // callsite preserves the legacy behaviour while the
-                // helper signature itself becomes mode-explicit.
-                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                    self,
-                    scope_canonical_id,
-                    &current,
-                    crate::semantic_query::ProjectionMode::Expanded,
-                    crate::semantic_query::ProjectionMode::Expanded,
-                    crate::semantic_query::ReductionDemand::Published,
-                )
-            });
-            let Some(next) = next else {
-                return last;
+            let produced = match cursor {
+                // FIRST iteration (and any iteration whose cursor is still the
+                // input) — primary `.or_else` fallback, SAME order as the legacy
+                // TypeExpr tail: the empty-terminal Expanded lower+project, then
+                // the Expanded-base / Expanded-terminal Published surface bridge.
+                // Expanded is preserved on both dimensions because reducing
+                // either below Expanded breaks fixpoint convergence for imported
+                // alias helpers like `Button['ui']`, where a Navigate carrier
+                // would freeze a generic `InstantiationRef` at the empty-path
+                // terminal.
+                RouteFixpointCursor::Input(input) => {
+                    crate::meta_resolve::lower_and_project_to_expanded_node_via_host_threaded(
+                        self,
+                        scope_canonical_id,
+                        input,
+                    )
+                    .or_else(|| {
+                        crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
+                            self,
+                            scope_canonical_id,
+                            input,
+                            crate::semantic_query::ProjectionMode::Expanded,
+                            crate::semantic_query::ProjectionMode::Expanded,
+                            crate::semantic_query::ReductionDemand::Published,
+                        )
+                    })
+                }
+                // Later iterations — re-project the already-admitted prior node
+                // directly (node-base re-projection), no re-lowering / no
+                // materialisation.
+                RouteFixpointCursor::Node(prior) => {
+                    crate::meta_resolve::project_admitted_node_to_expanded_node_via_host_threaded(
+                        self, &prior,
+                    )
+                }
             };
-            if next == current {
-                return Some(next);
+            let Some(produced) = produced else {
+                // No projection this iteration — materialise `last` once.
+                return last
+                    .and_then(|node| super::materialize_route_projection_node(self.ctx(), &node));
+            };
+            let converged = match cursor {
+                RouteFixpointCursor::Input(input) => {
+                    super::route_projection_node_eq_to_expr(self.ctx(), &produced, input)
+                }
+                RouteFixpointCursor::Node(prior) => {
+                    super::route_projection_nodes_eq(self.ctx(), &produced, &prior)
+                }
+            };
+            if converged {
+                return super::materialize_route_projection_node(self.ctx(), &produced);
             }
-            last = Some(next.clone());
-            current = next;
+            last = Some(produced);
+            cursor = RouteFixpointCursor::Node(produced);
         }
-        last
+        last.and_then(|node| super::materialize_route_projection_node(self.ctx(), &node))
     }
 
     /// Predicate: does `expr` reference a prepared symbol that resolves

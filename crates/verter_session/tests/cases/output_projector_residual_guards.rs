@@ -12039,10 +12039,21 @@ const HOT_EXTRACTING_GATE_IDENTS: &[&str] = &[
 /// method-arg reader rail excludes them, and a terminal sink that lowers a
 /// `TypeExpr` param is a symbolic-input mint boundary (its input-shape guards
 /// are publication classification, not a materialized-value decide).
+///
+/// The list includes the two node-domain ROUTE-PROJECTION adapters
+/// (`lower_and_project_to_expanded_node` / `project_expr_surface_expr_node`):
+/// each lowers its `expr` input through `lower_type_expr_in_scope*` INTERNALLY,
+/// projects it, and returns the admitted `AdmittedRouteProjectionNode` (never a
+/// `TypeExpr`). The thin `*_published` publication terminals delegate their
+/// `expr` lowering to these adapters, so feeding `expr` to one is a pipeline
+/// feed — exactly the same symbolic-input mint boundary as a direct
+/// `lower_type_expr_in_scope*` call — not a materialized-value decide.
 const HOT_LOWERING_IDENTS: &[&str] = &[
     "lower_type_expr_in_scope",
     "lower_type_expr_in_scope_with_mode",
     "lower_type_expr_in_scope_with_context",
+    "lower_and_project_to_expanded_node",
+    "project_expr_surface_expr_node",
 ];
 
 /// Method idents that PROPAGATE taint from receiver to result (and, for the
@@ -12167,6 +12178,14 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "component_meta_query_engine/surface.rs",
         "materialize_published_node",
     ),
+    // The route-fixpoint terminal: materialises an already-admitted
+    // `AdmittedRouteProjectionNode` ONCE through `materialize_published_node`
+    // after the node-domain fixpoint converges. Pure one-shot publication — no
+    // decision on the result.
+    (
+        "component_meta_query_engine/surface.rs",
+        "materialize_route_projection_node",
+    ),
     (
         "component_meta_query_engine/surface.rs",
         "lower_and_project_to_expanded_published",
@@ -12190,6 +12209,15 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     (
         "component_meta_query_engine/registry_decl.rs",
         "materialize_member_surface_node_core",
+    ),
+    // Registry-route publication terminal: the node-domain
+    // `dispatch_routed_expr_surface_node` makes the route's materializedness
+    // decision; this wrapper materialises the admitted node ONCE at the registry
+    // sink (Whole route: publishes the SurfaceView after its node-domain gate).
+    // No decision on the materialised value.
+    (
+        "component_meta_query_engine/registry_decl.rs",
+        "dispatch_routed_expr_surface_expr",
     ),
     (
         "meta_resolve/materialize/field_types.rs",

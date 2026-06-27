@@ -914,6 +914,106 @@ pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     )
 }
 
+// ===========================================================================
+// Node-returning route fixpoint adapters.
+//
+// The route fixpoint (`solve_or_project_leaf_expr_until_stable`) stabilises on
+// node-domain `RaisedShapeKey` identity with NO per-iteration materialisation:
+// each iteration projects through these node wrappers (which return the admitted
+// `AdmittedRouteProjectionNode`, never a `TypeExpr`), the fixpoint compares
+// successive nodes by interned raised-shape key, and the sole publication
+// materialisation happens ONCE after convergence at the surface sink. The
+// node wrappers mirror the `*_via_host_threaded` TypeExpr wrappers above arm for
+// arm (same budget guard, same registry fast-path, same primary/fallback order)
+// minus the terminal raise.
+// ===========================================================================
+
+/// Node-domain counterpart of [`lower_and_project_to_expanded_via_host_threaded`]:
+/// returns the admitted route node (no materialisation).
+pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
+    scope_canonical_id: &str,
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    crate::resolver_core::lower_and_project_to_expanded_node(engine.ctx(), scope_canonical_id, expr)
+}
+
+/// Node-domain counterpart of [`project_route_surface_expr_via_host_threaded`]:
+/// returns the admitted registry-route node (no materialisation).
+pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
+    scope_canonical_id: &str,
+    root_symbol: &str,
+    route: &crate::resolver_core::RouteDemand,
+) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    engine.dispatch_routed_expr_surface_node(scope_canonical_id, root_symbol, route)
+}
+
+/// Node-domain counterpart of [`project_expr_surface_expr_via_host_threaded`]:
+/// the registry fast-path returns the admitted route node, the pure-dispatch
+/// path returns the admitted surface node — neither materialises.
+pub(crate) fn project_expr_surface_expr_node_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
+    scope_canonical_id: &str,
+    expr: &verter_type_expr::TypeExpr,
+    base_mode: ProjectionMode,
+    terminal_mode: ProjectionMode,
+    demand: crate::semantic_query::ReductionDemand,
+) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
+    use crate::resolver_core::component_meta_registry::{
+        component_meta_registry_public_indexed_access_route,
+        component_meta_registry_public_utility_route,
+    };
+
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+    {
+        if let Some(projected) = project_route_surface_node_via_host_threaded(
+            engine,
+            scope_canonical_id,
+            &root_symbol,
+            &route,
+        ) {
+            return Some(projected);
+        }
+        if let Some(solved) =
+            lower_and_project_to_expanded_node_via_host_threaded(engine, scope_canonical_id, expr)
+        {
+            return Some(solved);
+        }
+    }
+    crate::resolver_core::project_expr_surface_expr_node(
+        engine.ctx(),
+        scope_canonical_id,
+        expr,
+        base_mode,
+        terminal_mode,
+        demand,
+    )
+}
+
+/// Re-project an already-admitted route node one fixpoint step (node-base
+/// re-projection, no re-lowering, no materialisation). Used by the fixpoint for
+/// iterations after the first, where the cursor is already an admitted node.
+pub(crate) fn project_admitted_node_to_expanded_node_via_host_threaded<'ctx>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
+    prior: &crate::resolver_core::AdmittedRouteProjectionNode,
+) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
+    if engine.projection_op_budget_exhausted() {
+        return None;
+    }
+    crate::resolver_core::project_admitted_node_to_expanded_node(engine.ctx(), prior)
+}
+
 #[cfg(test)]
 mod pick_demand_api_signature_tests {
     //! Boundary-closure proof (compile-level ONLY): the routed-Pick member

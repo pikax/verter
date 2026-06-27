@@ -62,6 +62,120 @@ fn materialize_published_node(
         .map(|raised| raised.into_type_expr(&cap))
 }
 
+/// A node-domain route-projection result: the admitted `SemanticNodeId` a
+/// route/surface adapter produced AFTER its node-domain acceptance gate
+/// (`materialized && expanded_surface`), held in node-domain so the route
+/// fixpoint stabilises on interned [`shape_engine::RaisedShapeKey`] identity
+/// and materialises EXACTLY ONCE at the terminal sink.
+///
+/// SEALED carrier: the `node` field is module-private (only this `surface`
+/// leaf reads it, to materialise / compare it at a cap-gated sink) and `new` /
+/// `node` are mint-scoped to the query-engine subtree
+/// (`pub(in crate::resolver_core::component_meta_query_engine)`), so the route
+/// adapters in `surface` / `registry_decl` mint and read it while the
+/// host-threaded wrappers (`crate::meta_resolve`) and the fixpoint driver only
+/// NAME and pass it — no forgeable `SemanticNodeId → TypeExpr` adapter crosses
+/// the query-engine boundary, and materialisation stays cap-gated regardless of
+/// who holds the carrier. Modeled on `AdmittedExpansionNode`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AdmittedRouteProjectionNode {
+    node: SemanticNodeId,
+}
+
+impl AdmittedRouteProjectionNode {
+    /// Mint the carrier around an admitted route-projection node. Subtree-scoped
+    /// so only the route/surface adapters (`surface` + `registry_decl`) mint it,
+    /// after their own node-domain acceptance gate.
+    #[must_use]
+    pub(in crate::resolver_core::component_meta_query_engine) fn new(node: SemanticNodeId) -> Self {
+        Self { node }
+    }
+
+    /// The admitted node. Subtree-scoped so only the sink-owned materialise /
+    /// compare helpers read it; the materialisation it feeds stays cap-gated.
+    #[must_use]
+    pub(in crate::resolver_core::component_meta_query_engine) fn node(&self) -> SemanticNodeId {
+        self.node
+    }
+}
+
+/// Terminal sink: materialise an [`AdmittedRouteProjectionNode`] into a
+/// published `TypeExpr` ONCE, at the existing `materialize_published_node`
+/// surface sink (the sealed [`MetaQuerySurfaceOutputCap`]). The route fixpoint
+/// and the surface publication wrappers call this exactly once after their
+/// node-domain decisions converge — there is no mid-flight materialisation. The
+/// carrier's node was admitted by a route/surface adapter's node-domain gate,
+/// so this is a pure one-shot publication with no decision on the result.
+pub(crate) fn materialize_route_projection_node(
+    ctx: &dyn ResolverContext,
+    node: &AdmittedRouteProjectionNode,
+) -> Option<TypeExpr> {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    materialize_published_node(&dispatch, node.node())
+}
+
+/// Re-project an already-admitted route node ONE more fixpoint step, in
+/// node-domain: dispatch `ProjectPath { base: node, [], Published(Expanded) }`
+/// off the admitted node directly (no re-lowering, no materialisation) and
+/// re-apply the `materialized && expanded_surface` acceptance. Used by the route
+/// fixpoint for iterations after the first, where the cursor is already a node;
+/// the fixpoint's node-vs-node convergence (`route_projection_nodes_eq`) decides
+/// when to stop. Empty-path `Published(Expanded)` re-projection of an admitted
+/// expanded surface is idempotent, so a stable cursor re-projects to an
+/// equal-shaped node and converges.
+pub(crate) fn project_admitted_node_to_expanded_node(
+    ctx: &dyn ResolverContext,
+    prior: &AdmittedRouteProjectionNode,
+) -> Option<AdmittedRouteProjectionNode> {
+    use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
+
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base: prior.node(),
+        path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
+    });
+    let result_node = match read.value {
+        QueryResult::Value(node) => node,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
+    (facts.materialized && facts.expanded_surface)
+        .then(|| AdmittedRouteProjectionNode::new(result_node))
+}
+
+/// Node-domain "no-op/changed" convergence test for the route fixpoint's FIRST
+/// iteration: does `node` raise to the SAME interned shape as the input `expr`?
+/// Reads `eq_to_expr` from the single key-bearing fold — no materialisation.
+pub(crate) fn route_projection_node_eq_to_expr(
+    ctx: &dyn ResolverContext,
+    node: &AdmittedRouteProjectionNode,
+    expr: &TypeExpr,
+) -> bool {
+    use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    node_raised_shape_for_eq_with_dispatch(&dispatch, node.node(), expr)
+        .is_some_and(|shape| shape.eq_to_expr)
+}
+
+/// Node-domain convergence test for later route-fixpoint iterations: do `a` and
+/// `b` raise to the SAME interned [`shape_engine::RaisedShapeKey`]? Compares the
+/// interned raised-shape keys (carriers drop identity on raise, so the key — not
+/// the node id — is the comparison subject); no materialisation. A `None` raise
+/// on either side is treated as not-converged (`false`).
+pub(crate) fn route_projection_nodes_eq(
+    ctx: &dyn ResolverContext,
+    a: &AdmittedRouteProjectionNode,
+    b: &AdmittedRouteProjectionNode,
+) -> bool {
+    crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(ctx, a.node(), b.node())
+        == Some(true)
+}
+
 /// Demand-bound adapter for the empty-terminal Expanded publication path
 /// (former `lower_and_project_to_expanded_via_host_threaded` materialisation
 /// tail). Lower `expr` at `Expanded`, dispatch `ProjectPath { base, [],
@@ -70,11 +184,11 @@ fn materialize_published_node(
 /// (`!raised_shape_eq_node_type_expr(result, expr)`), and materialise the
 /// accepted result node ONCE at this sink. `None` on lower-miss, dispatch
 /// error/recursive, gate-reject, or raise-miss.
-pub(crate) fn lower_and_project_to_expanded_published(
+pub(crate) fn lower_and_project_to_expanded_node(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &TypeExpr,
-) -> Option<TypeExpr> {
+) -> Option<AdmittedRouteProjectionNode> {
     use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
@@ -102,8 +216,20 @@ pub(crate) fn lower_and_project_to_expanded_published(
     let shape = node_raised_shape_for_eq_with_dispatch(&dispatch, result_node, expr)?;
     let changed = !shape.eq_to_expr;
     (shape.facts.materialized && shape.facts.expanded_surface && changed)
-        .then(|| materialize_published_node(&dispatch, result_node))
-        .flatten()
+        .then(|| AdmittedRouteProjectionNode::new(result_node))
+}
+
+/// Thin publication wrapper over [`lower_and_project_to_expanded_node`]:
+/// resolve the node-domain decision, then materialise the accepted node ONCE at
+/// the surface sink. The node-domain gate (`materialized && expanded_surface &&
+/// changed`) lives in the node fn; this wrapper adds only the terminal raise.
+pub(crate) fn lower_and_project_to_expanded_published(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+) -> Option<TypeExpr> {
+    let node = lower_and_project_to_expanded_node(ctx, scope_canonical_id, expr)?;
+    materialize_route_projection_node(ctx, &node)
 }
 
 /// Demand-bound adapter for the mode-explicit dispatch-direct surface
@@ -112,14 +238,14 @@ pub(crate) fn lower_and_project_to_expanded_published(
 /// `ProjectPath { base, [], { terminal_mode, demand } }`, refuse a
 /// `semanticMiss`-bearing result (node-domain `!materialized`), then apply the
 /// mode-aware acceptance and materialise the accepted node ONCE at this sink.
-pub(crate) fn project_expr_surface_expr_published(
+pub(crate) fn project_expr_surface_expr_node(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &TypeExpr,
     base_mode: crate::semantic_query::ProjectionMode,
     terminal_mode: crate::semantic_query::ProjectionMode,
     demand: crate::semantic_query::ReductionDemand,
-) -> Option<TypeExpr> {
+) -> Option<AdmittedRouteProjectionNode> {
     use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
@@ -166,9 +292,29 @@ pub(crate) fn project_expr_surface_expr_published(
         | ProjectionMode::Navigate
         | ProjectionMode::Skeleton => true,
     };
-    accept
-        .then(|| materialize_published_node(&dispatch, result_node))
-        .flatten()
+    accept.then(|| AdmittedRouteProjectionNode::new(result_node))
+}
+
+/// Thin publication wrapper over [`project_expr_surface_expr_node`]: resolve the
+/// node-domain decision (mode-aware acceptance + `!materialized` refusal), then
+/// materialise the accepted node ONCE at the surface sink.
+pub(crate) fn project_expr_surface_expr_published(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+    base_mode: crate::semantic_query::ProjectionMode,
+    terminal_mode: crate::semantic_query::ProjectionMode,
+    demand: crate::semantic_query::ReductionDemand,
+) -> Option<TypeExpr> {
+    let node = project_expr_surface_expr_node(
+        ctx,
+        scope_canonical_id,
+        expr,
+        base_mode,
+        terminal_mode,
+        demand,
+    )?;
+    materialize_route_projection_node(ctx, &node)
 }
 
 /// Demand-bound adapter for the Class-A path-precise projection (former

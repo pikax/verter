@@ -40,16 +40,17 @@ use super::helpers::{
     is_builtin_name, resolve_imported_registry_symbol_with_budget, ImportedRegistrySymbolResolution,
 };
 use super::surface::{
-    dispatch_route_expr_is_materialized, projected_compound_root_surface_via_dispatch,
-    projected_surface_from_semantic_node, projected_surface_to_expanded_shape,
-    projected_surface_to_type_expr,
+    projected_compound_root_surface_via_dispatch, projected_surface_from_semantic_node,
+    projected_surface_to_expanded_shape, projected_surface_to_type_expr,
 };
+use super::AdmittedRouteProjectionNode;
 use super::{
     empty_semantic_args, engine_fact_signature_for_exported_type,
     local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
     DirectPreparedDeclarationResolver, ResolvedImportedRegistrySymbol, ResolvedTypeDeclaration,
 };
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
 use crate::resolver_core::{FuseTrip, RouteDemand};
 use crate::semantic_query::{
@@ -1155,9 +1156,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<ProjectedSurface> {
+        self.dispatch_projected_surface_with_node(scope_canonical_id, symbol_name)
+            .map(|(surface, _node)| surface)
+    }
+
+    /// As [`Self::dispatch_projected_surface`], but also returns the graph node
+    /// the surface was projected FROM (the instantiated root, or the decl
+    /// anchor when the compound-root composition fallback fires). The Whole
+    /// route's node-domain materializedness gate reads that node's raised-shape
+    /// facts directly instead of materializing the surface and inspecting it.
+    fn dispatch_projected_surface_with_node(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<(ProjectedSurface, SemanticNodeId)> {
         let root = self.dispatch_root_instantiated(scope_canonical_id, symbol_name)?;
         if let Some(surface) = projected_surface_from_semantic_node(self.ctx, root) {
-            return Some(surface);
+            return Some((surface, root));
         }
         // The post-`Published(Expanded)` instantiated root did not yield a
         // complete surface — for a compound root that carries a generic
@@ -1171,20 +1186,28 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // parallel walker. Returns `None` when the anchor is unresolved or
         // the composed surface is empty.
         let anchor = self.dispatch_decl_anchor(scope_canonical_id, symbol_name)?;
-        projected_compound_root_surface_via_dispatch(self.ctx, anchor)
+        let surface = projected_compound_root_surface_via_dispatch(self.ctx, anchor)?;
+        Some((surface, anchor))
     }
 
-    pub(crate) fn dispatch_routed_expr_surface_expr(
+    /// Node-domain registry route projection: resolve a route to its admitted
+    /// surface NODE, gated on the node-domain `RaisedShapeFacts.materialized`
+    /// fact (the typed equivalent of the former
+    /// `.filter(dispatch_route_expr_is_materialized)` over the materialised
+    /// route TypeExpr). The MemberPath / Pick / Omit routes carry a single
+    /// admitted node; the Whole route projects a SurfaceView (no single node)
+    /// and is served by [`Self::dispatch_routed_expr_surface_expr`] directly, so
+    /// it returns `None` here. The route fixpoint's registry fast-path projects
+    /// through THIS node-returning form so no per-iteration materialisation
+    /// happens; the publication wrapper below materialises the accepted node
+    /// once at the registry sink.
+    pub(crate) fn dispatch_routed_expr_surface_node(
         &mut self,
         scope_canonical_id: &str,
         root_symbol: &str,
         route: &RouteDemand,
-    ) -> Option<TypeExpr> {
+    ) -> Option<AdmittedRouteProjectionNode> {
         match route {
-            RouteDemand::Whole => self
-                .dispatch_projected_surface(scope_canonical_id, root_symbol)
-                .and_then(|surface| projected_surface_to_type_expr(&surface))
-                .filter(dispatch_route_expr_is_materialized),
             RouteDemand::MemberPath(path) if !path.is_empty() => {
                 let root = self.dispatch_root_instantiated(scope_canonical_id, root_symbol)?;
                 let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
@@ -1204,12 +1227,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     ),
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
-                        // Publication sink: materialize into a sealed carrier
-                        // and unwrap via the query-engine output capability.
-                        let cap = MetaQueryRegistryOutputCap::new(&dispatch);
-                        cap.materialize_output_type_expr(node)
-                            .map(|raised| raised.into_type_expr(&cap))
-                            .filter(dispatch_route_expr_is_materialized)
+                        // Node-domain materializedness gate (the typed
+                        // equivalent of the former
+                        // `.filter(dispatch_route_expr_is_materialized)`); admit
+                        // the node WITHOUT materialising it.
+                        node_raised_shape_facts_with_dispatch(&dispatch, node)
+                            .filter(|facts| facts.materialized)
+                            .map(|_| AdmittedRouteProjectionNode::new(node))
                     }
                     _ => None,
                 }
@@ -1223,20 +1247,63 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // name-only filter over the projected surface would bypass that
             // gate and leak protected/private members.
             RouteDemand::Pick(members) if !members.is_empty() => self
-                .dispatch_routed_pick_omit_via_shared_engine(
+                .dispatch_routed_pick_omit_via_shared_engine_node(
                     scope_canonical_id,
                     root_symbol,
                     "Pick",
                     members,
                 ),
             RouteDemand::Omit(members) if !members.is_empty() => self
-                .dispatch_routed_pick_omit_via_shared_engine(
+                .dispatch_routed_pick_omit_via_shared_engine_node(
                     scope_canonical_id,
                     root_symbol,
                     "Omit",
                     members,
                 ),
             _ => None,
+        }
+    }
+
+    /// Publication terminal over [`Self::dispatch_routed_expr_surface_node`]:
+    /// the Whole route projects a SurfaceView (gated on the node-domain
+    /// materializedness of the surface's producing node, then published), while
+    /// the MemberPath / Pick / Omit routes materialise their admitted node ONCE
+    /// at the registry sink (the sealed [`MetaQueryRegistryOutputCap`]). No
+    /// semantic decision is made on the materialised value — the acceptance gate
+    /// is the node-domain fact in the node form above.
+    pub(crate) fn dispatch_routed_expr_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        route: &RouteDemand,
+    ) -> Option<TypeExpr> {
+        match route {
+            RouteDemand::Whole => {
+                let (surface, surface_node) =
+                    self.dispatch_projected_surface_with_node(scope_canonical_id, root_symbol)?;
+                // Node-domain materializedness gate on the surface's producing
+                // node (the instantiated root, or the compound-root anchor) —
+                // the typed equivalent of the former
+                // `.filter(dispatch_route_expr_is_materialized)` over the
+                // materialised surface TypeExpr.
+                let materialized =
+                    node_raised_shape_facts_with_dispatch(&self.semantic_dispatch(), surface_node)
+                        .is_some_and(|facts| facts.materialized);
+                materialized
+                    .then(|| projected_surface_to_type_expr(&surface))
+                    .flatten()
+            }
+            _ => {
+                let node =
+                    self.dispatch_routed_expr_surface_node(scope_canonical_id, root_symbol, route)?;
+                // Publication sink: materialize the admitted node into a sealed
+                // carrier and unwrap via the query-engine registry output
+                // capability — ONCE, with no decision on the result.
+                let dispatch = self.semantic_dispatch();
+                let cap = MetaQueryRegistryOutputCap::new(&dispatch);
+                cap.materialize_output_type_expr(node.node())
+                    .map(|raised| raised.into_type_expr(&cap))
+            }
         }
     }
 
@@ -1372,13 +1439,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// (`build_builtin_utility`) is therefore the single owner of the Pick/Omit
     /// projection — no second name-only hand filter, so non-public class members
     /// can never be re-minted onto the routed surface.
-    fn dispatch_routed_pick_omit_via_shared_engine(
+    fn dispatch_routed_pick_omit_via_shared_engine_node(
         &mut self,
         scope_canonical_id: &str,
         root_symbol: &str,
         builtin_name: &str,
         keys: &[String],
-    ) -> Option<TypeExpr> {
+    ) -> Option<AdmittedRouteProjectionNode> {
         // Step A: instantiate the route root to a projectable body. Navigate
         // keeps generic carriers intact (the builtin engine re-projects in the
         // caller's mode), mirroring the materialiser's Step A.
@@ -1400,12 +1467,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             ),
         }) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
-                // Publication sink: materialize into a sealed carrier and
-                // unwrap via the query-engine output capability.
-                let cap = MetaQueryRegistryOutputCap::new(&dispatch);
-                cap.materialize_output_type_expr(node)
-                    .map(|raised| raised.into_type_expr(&cap))
-                    .filter(dispatch_route_expr_is_materialized)
+                // Node-domain materializedness gate (the typed equivalent of the
+                // former `.filter(dispatch_route_expr_is_materialized)`); admit
+                // the node WITHOUT materialising it — the publication wrapper
+                // materialises once at the registry sink.
+                node_raised_shape_facts_with_dispatch(&dispatch, node)
+                    .filter(|facts| facts.materialized)
+                    .map(|_| AdmittedRouteProjectionNode::new(node))
             }
             _ => None,
         }
