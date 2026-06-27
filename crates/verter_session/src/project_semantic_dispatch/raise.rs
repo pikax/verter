@@ -4678,6 +4678,20 @@ pub(crate) fn node_raised_shape_facts_with_dispatch(
     shape_engine::project_node_facts(dispatch, node)
 }
 
+/// Node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel(raise(node))`:
+/// whether `node`'s OWN raised ROOT term is an unmaterialised sentinel. A whole-
+/// raise `None` is `false` (the materialiser's `<raise miss after reduction>`
+/// fallback is not a recognised sentinel, so the `TypeExpr` recogniser also
+/// answers `false` there). DISPATCH-taking primary — the cache-admission gate
+/// reads this off the reduced-output carrier node instead of materialising it.
+#[must_use]
+pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_root_sentinel(dispatch, node).unwrap_or(false)
+}
+
 /// CTX-taking convenience over `node_raised_shape_facts_with_dispatch`.
 /// Production gates hold a dispatch and use the `_with_dispatch` primary; this
 /// boundary form is exercised by the parity suite as the FACTS-ONLY-algebra
@@ -4854,6 +4868,77 @@ mod tests {
             }
             other => panic!("expected empty Object, got {other:?}"),
         }
+    }
+
+    /// The node-domain root-sentinel fact
+    /// (`node_root_is_unmaterialized_sentinel_with_dispatch`) is ROOT-only and
+    /// agrees with `type_expr_root_is_unmaterialized_sentinel(raise(node))` — it
+    /// is NOT the whole-surface `!materialized` AND. The discriminator is an
+    /// `Array` whose ELEMENT (not root) is a miss sentinel: the root-sentinel
+    /// fact is `false` (the root is the Array) and the TypeExpr oracle agrees,
+    /// yet `facts.materialized` is `false` (the element miss makes the AND false)
+    /// — so the fact cannot be the whole-surface miss check.
+    #[test]
+    fn node_root_sentinel_is_root_only_not_whole_surface_miss() {
+        use super::{
+            node_raised_shape_facts_with_dispatch,
+            node_root_is_unmaterialized_sentinel_with_dispatch,
+        };
+        use crate::resolver_core::type_expr_root_is_unmaterialized_sentinel;
+        use crate::semantic_query::QueryError;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+        let string = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+        let array_of_miss = graph.intern_node(SemanticNodeData::Array {
+            element: miss,
+            readonly: false,
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let oracle = |node| {
+            type_expr_root_is_unmaterialized_sentinel(
+                &dispatch
+                    .raise_node_to_type_expr(node)
+                    .expect("node must raise"),
+            )
+        };
+
+        // (1) Root IS a miss sentinel → both the node-domain fact and the
+        // TypeExpr oracle say true.
+        assert!(node_root_is_unmaterialized_sentinel_with_dispatch(
+            &dispatch, miss
+        ));
+        assert!(
+            oracle(miss),
+            "TypeExpr oracle agrees the Miss root is a sentinel"
+        );
+
+        // (2) Root is a plain primitive → both false.
+        assert!(!node_root_is_unmaterialized_sentinel_with_dispatch(
+            &dispatch, string
+        ));
+        assert!(!oracle(string));
+
+        // (3) DISCRIMINATOR: root is an `Array` (not a sentinel) whose ELEMENT is
+        // the miss. Root-sentinel is false, the TypeExpr oracle agrees, yet the
+        // whole-surface `materialized` AND is false — proving the node-domain
+        // fact is ROOT-only, not `!materialized`.
+        assert!(
+            !node_root_is_unmaterialized_sentinel_with_dispatch(&dispatch, array_of_miss),
+            "an Array whose ELEMENT (not root) is a sentinel is NOT root-unmaterialized"
+        );
+        assert!(
+            !oracle(array_of_miss),
+            "TypeExpr oracle agrees the Array root is not a sentinel"
+        );
+        let facts = node_raised_shape_facts_with_dispatch(&dispatch, array_of_miss).expect("facts");
+        assert!(
+            !facts.materialized,
+            "the Array DOES carry an unmaterialised element, so root-sentinel=false is \
+             genuinely ROOT-only — not merely the absence of any sentinel"
+        );
     }
 
     #[test]

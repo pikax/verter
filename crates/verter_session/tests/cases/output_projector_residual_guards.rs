@@ -12054,6 +12054,12 @@ const HOT_LOWERING_IDENTS: &[&str] = &[
     "lower_type_expr_in_scope_with_context",
     "lower_and_project_to_expanded_node",
     "project_expr_surface_expr_node",
+    // The reduced-output materialization envelope lowers its `expr` input through
+    // this shallow-dispatch lowering primitive before reducing + raising it, so
+    // feeding `expr` to it is a pipeline feed (symbolic-input mint boundary), not
+    // a materialized-value decide — its `matches!(expr, TypeOf)` input
+    // classification is publication classification.
+    "shallow_lower_type_expr_with_context",
 ];
 
 /// Method idents that PROPAGATE taint from receiver to result (and, for the
@@ -12222,6 +12228,16 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     (
         "meta_resolve/materialize/field_types.rs",
         "materialize_component_meta_type_expr_until_stable",
+    ),
+    // The reduced-output materialization envelope: lowers `expr`, reduces, and
+    // raises the reduced node into the sealed carrier ONCE
+    // (`materialize_reduced_output_type_expr`). Its cache-admission gate reads the
+    // node-domain root-sentinel fact off the carrier node
+    // (`node_root_is_unmaterialized_sentinel_with_dispatch`), not a materialised
+    // `TypeExpr`, so it makes no decision on the materialised value.
+    (
+        "meta_resolve/materialize/field_types.rs",
+        "materialize_component_meta_type_expr_until_stable_full",
     ),
     (
         "meta_resolve/materialize/field_types.rs",

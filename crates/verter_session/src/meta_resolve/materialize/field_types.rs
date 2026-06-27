@@ -434,9 +434,11 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // the closed-source path-precise admission. Refuse only the typeof miss so
     // the next request recomputes cold and recovers. The value still flows.
     let typeof_result_root_is_miss = matches!(expr, verter_type_expr::TypeExpr::TypeOf(_))
-        && crate::resolver_core::type_expr_root_is_unmaterialized_sentinel(
-            materialized.type_expr(&cap),
-        );
+        && materialized.node_id().is_some_and(|node| {
+            crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
+                &dispatch, node,
+            )
+        });
     if !materialized.result_is_partial()
         && !observed_missing_dependency
         && !typeof_result_root_is_miss

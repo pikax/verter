@@ -52,6 +52,10 @@ mod summary {
                 expanded_surface,
             },
             tag,
+            // Only the two sentinel-leaf constructors (`unknown` / `opaque_sentinel`)
+            // set this true; every compound / non-sentinel term is `false` (its
+            // ROOT is not a sentinel, even when a child is).
+            root_unmaterialized_sentinel: false,
         }
     }
 
@@ -73,7 +77,11 @@ mod summary {
         } else {
             FactShapeTag::Other
         };
-        summary(materialized, true, tag)
+        let mut s = summary(materialized, true, tag);
+        // The ROOT term IS this `Unknown { raw }`, so it is a root sentinel iff the
+        // raw reads unmaterialised (`!materialized`).
+        s.root_unmaterialized_sentinel = !materialized;
+        s
     }
 
     /// A TYPED resolver-control sentinel (`Opaque(QueryError)` reaching the
@@ -102,7 +110,11 @@ mod summary {
         } else {
             FactShapeTag::Other
         };
-        summary(materialized, true, tag)
+        let mut s = summary(materialized, true, tag);
+        // The ROOT term IS this typed sentinel, so it is a root sentinel iff the
+        // error reads unmaterialised (`!materialized`).
+        s.root_unmaterialized_sentinel = !materialized;
+        s
     }
 
     /// `TypeOf`: a materialized leaf but NOT an expanded surface.

@@ -326,6 +326,16 @@ pub(in crate::project_semantic_dispatch) enum FactShapeTag {
 pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
     pub(in crate::project_semantic_dispatch) facts: RaisedShapeFacts,
     pub(in crate::project_semantic_dispatch) tag: FactShapeTag,
+    /// `true` when this node's OWN raised term is an unmaterialised sentinel
+    /// (`Unknown { raw }` / `Opaque(QueryError)` whose raw reads unmaterialised)
+    /// — the node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel`
+    /// applied to the ROOT term only. Distinct from `facts.materialized`, which
+    /// is the AND over all value-bearing children: a materialised object with a
+    /// nested miss member has `materialized == false` but
+    /// `root_unmaterialized_sentinel == false` (the root is the object, not a
+    /// sentinel). Carried on the summary (not `RaisedShapeFacts`) because only the
+    /// ROOT node's value is read, through [`project_node_root_sentinel`].
+    pub(in crate::project_semantic_dispatch) root_unmaterialized_sentinel: bool,
 }
 
 /// The bottom-up node-domain projection result: the interned structural key
@@ -1053,6 +1063,20 @@ pub(in crate::project_semantic_dispatch) fn project_node_facts(
     let mut alg = RaisedFactsAlg;
     let mut active = FxHashSet::default();
     Some(fold_node(&mut alg, dispatch, node, &mut active)?.facts)
+}
+
+/// Whether `node`'s OWN raised root term is an unmaterialised sentinel — the
+/// node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel(raise(node))`.
+/// Reads the ROOT node's [`RaisedShapeSummary::root_unmaterialized_sentinel`]
+/// from the facts-only fold (no key interned, no `TypeExpr` materialised).
+/// `None` when the whole raise is `None`.
+pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    let mut alg = RaisedFactsAlg;
+    let mut active = FxHashSet::default();
+    Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_unmaterialized_sentinel)
 }
 
 /// Combined facts + node-vs-`TypeExpr` equality of `node` in ONE fold: returns
