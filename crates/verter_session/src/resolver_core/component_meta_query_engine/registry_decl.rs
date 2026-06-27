@@ -1292,9 +1292,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 let (surface, surface_node) =
                     self.dispatch_projected_surface_with_node(scope_canonical_id, root_symbol)?;
                 // Node-domain materializedness gate on the surface's producing
-                // node (the instantiated root, or the compound-root anchor) —
-                // the typed equivalent of the former
-                // `.filter(dispatch_route_expr_is_materialized)` over the
+                // node (the instantiated root, or — for the compound-root
+                // fallback — the composed surface's terminal `Object` node, not
+                // the carrier-intact decl anchor) — the typed equivalent of the
+                // former `.filter(dispatch_route_expr_is_materialized)` over the
                 // materialised surface TypeExpr.
                 let materialized =
                     node_raised_shape_facts_with_dispatch(&self.semantic_dispatch(), surface_node)
