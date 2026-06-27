@@ -37,6 +37,12 @@ fn publication_score_improves(candidate: &PublicationScore, current: &Publicatio
 /// form's reduction in node domain. An unraisable node scores as the default
 /// (zero carriers, non-structural, non-unknown), matching the former node
 /// scorers' `None`-node handling.
+///
+/// SCORING-INVARIANT SCOPE: the [`publication_score_improves`] ordering is
+/// defined over RAISABLE nodes (those for which the publication score is
+/// `Some`); for an unraisable node the `unwrap_or_default()` fallback is the safe
+/// "no improvement" — its `raise → TypeExpr` ground truth is itself `None` there
+/// (no shape to publish), so the comparison is moot rather than incorrect.
 pub(crate) fn compare_node_improvement(
     ctx: &dyn crate::resolver_core::ResolverContext,
     candidate: crate::semantic_query::SemanticNodeId,
