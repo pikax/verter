@@ -34,15 +34,16 @@ fn publication_score_improves(candidate: &PublicationScore, current: &Publicatio
 /// Whether `candidate` is a strictly BETTER published shape than `current`,
 /// scored on `raise(*)` WITHOUT materialising a `TypeExpr`. Used by the
 /// publication finaliser to pick between the field's reduction and the shallow
-/// form's reduction in node domain. An unraisable node scores as the default
-/// (zero carriers, non-structural, non-unknown), matching the former node
-/// scorers' `None`-node handling.
+/// form's reduction in node domain.
 ///
 /// SCORING-INVARIANT SCOPE: the [`publication_score_improves`] ordering is
-/// defined over RAISABLE nodes (those for which the publication score is
-/// `Some`); for an unraisable node the `unwrap_or_default()` fallback is the safe
-/// "no improvement" — its `raise → TypeExpr` ground truth is itself `None` there
-/// (no shape to publish), so the comparison is moot rather than incorrect.
+/// defined over RAISABLE nodes (those whose publication score is `Some`). An
+/// UNRAISABLE node scores `None` — it has no shape to publish — and is treated
+/// as NOT an improvement (`(None, _) => false`). The symmetric `(Some, None) =>
+/// true`: a raisable candidate improves over an unraisable (shapeless) current.
+/// Scoring an unraisable node as `PublicationScore::default()` would be WRONG:
+/// its zero symbolic carriers would beat any symbolic current
+/// (`0 < current.symbolic_carriers`), wrongly preferring the shapeless candidate.
 pub(crate) fn compare_node_improvement(
     ctx: &dyn crate::resolver_core::ResolverContext,
     candidate: crate::semantic_query::SemanticNodeId,
@@ -52,14 +53,20 @@ pub(crate) fn compare_node_improvement(
     let candidate_score =
         crate::project_semantic_dispatch::raise::project_node_publication_score_with_dispatch(
             &dispatch, candidate,
-        )
-        .unwrap_or_default();
+        );
     let current_score =
         crate::project_semantic_dispatch::raise::project_node_publication_score_with_dispatch(
             &dispatch, current,
-        )
-        .unwrap_or_default();
-    publication_score_improves(&candidate_score, &current_score)
+        );
+    match (candidate_score, current_score) {
+        (Some(candidate), Some(current)) => publication_score_improves(&candidate, &current),
+        // A raisable candidate has a publishable shape; an unraisable current
+        // has none — the candidate is the improvement.
+        (Some(_), None) => true,
+        // An unraisable candidate has no shape to publish, so it is NEVER an
+        // improvement, regardless of the current's raisability.
+        (None, _) => false,
+    }
 }
 
 /// Node-domain mirror of the publication finaliser's
@@ -263,6 +270,40 @@ mod node_scoring_differential_tests {
         assert!(
             saw_true && saw_false,
             "the differential must exercise BOTH a better and a not-better verdict (genuine reach)"
+        );
+    }
+
+    #[test]
+    fn compare_node_improvement_unraisable_candidate_is_never_an_improvement() {
+        // SCORING-INVARIANT (None handling): an UNRAISABLE candidate has no
+        // publishable shape (`project_node_publication_score == None`) and must
+        // NEVER be scored as an improvement. Scoring it as
+        // `PublicationScore::default()` ({symbolic_carriers: 0, …}) makes its zero
+        // carriers beat any symbolic current (0 < current.symbolic_carriers),
+        // wrongly preferring the shapeless candidate. The invariant is
+        // `(None, _) => false`; the symmetric `(Some, None) => true`.
+        let host = build_host();
+        // A symbolic current: a bare `Foo` Ref raises to one symbolic carrier
+        // (`symbolic_carriers == 1`), so the pre-fix default-score path returns
+        // `true` here (the bug).
+        let symbolic = lower(&host, &TypeExpr::named("Foo"));
+        // An UNRAISABLE node: an absent graph id (`u64::MAX`) — its publication
+        // score is `None` (no shape to publish).
+        let unraisable = SemanticNodeId(u64::MAX);
+
+        // (None, Some): an unraisable candidate is NOT an improvement over a
+        // symbolic current. Pre-fix (`unwrap_or_default`) this returned `true`
+        // because {0,…} < {1,…}.
+        assert!(
+            !compare_node_improvement(&host, unraisable, symbolic),
+            "an unraisable candidate (publication score None) is never a publication \
+             improvement over a symbolic current"
+        );
+        // (Some, None): a raisable symbolic candidate IS an improvement over an
+        // unraisable (shapeless) current.
+        assert!(
+            compare_node_improvement(&host, symbolic, unraisable),
+            "a raisable symbolic candidate improves over an unraisable (shapeless) current"
         );
     }
 
