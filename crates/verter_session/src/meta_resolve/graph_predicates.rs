@@ -989,6 +989,354 @@ pub(crate) fn collect_ref_identities_node(
     }
 }
 
+/// Read a ROOT declaration NAME from a graph `node`, mirroring the `TypeExpr`
+/// front's `root_name` extraction in
+/// [`crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence`]:
+///
+/// - `Alias(inner)` — pass-through (graph-native; `Parenthesized` equivalent).
+/// - `IndexedAccess { object, .. }` — recurse the indexed-access root.
+/// - `Pick`/`Omit` builtin `InstantiationRef` (2 args) — the SOURCE root name
+///   from `args[0]`, NOT the `__builtin__::Pick` wrapper (the source-root trap).
+/// - `DeclRef` / `InstantiationRef` — the carried declaration name.
+/// - `BareRef` — the unresolved head name.
+/// - anything else — `None`.
+///
+/// `raise(node)` of a `DeclRef` is `Ref { name: decl_name }` and of a
+/// `Pick`/`Omit` instantiation is `Ref { name: "Pick", type_arguments }`, so this
+/// returns exactly what `root_name(raise(node))` would — parity by construction
+/// with the shared resolution tail.
+fn node_root_name(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+    depth: u32,
+) -> Option<String> {
+    use crate::semantic_query::SemanticNodeData;
+    if depth > 256 {
+        return None;
+    }
+    let data = graph.node_data(node)?;
+    match data.as_ref() {
+        SemanticNodeData::Alias(inner) => node_root_name(graph, *inner, depth + 1),
+        SemanticNodeData::IndexedAccess { object, .. } => node_root_name(graph, *object, depth + 1),
+        SemanticNodeData::InstantiationRef { base, args }
+            if base.canonical_id.as_ref() == "__builtin__"
+                && matches!(base.decl_name.as_ref(), "Pick" | "Omit")
+                && args.len() == 2 =>
+        {
+            node_ref_name(graph, args[0])
+        }
+        SemanticNodeData::DeclRef { identity } => Some(identity.decl_name.to_string()),
+        SemanticNodeData::InstantiationRef { base, .. } => Some(base.decl_name.to_string()),
+        data if data.bare_ref_head().is_some() => {
+            data.bare_ref_head().map(|head| head.0.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The declaration NAME of a single reference node (`DeclRef` / `InstantiationRef`
+/// / `BareRef`), used for the `Pick`/`Omit` source root (`args[0]`). Mirrors
+/// `component_meta_registry_ref_name(&type_arguments[0])` on the `TypeExpr` front
+/// (which returns the source `Ref`'s name); a non-reference source yields `None`.
+fn node_ref_name(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+) -> Option<String> {
+    use crate::semantic_query::SemanticNodeData;
+    let data = graph.node_data(node)?;
+    match data.as_ref() {
+        SemanticNodeData::DeclRef { identity } => Some(identity.decl_name.to_string()),
+        SemanticNodeData::InstantiationRef { base, .. } => Some(base.decl_name.to_string()),
+        data if data.bare_ref_head().is_some() => {
+            data.bare_ref_head().map(|head| head.0.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Node-domain front for the package-backed object-like-root gate. Extracts the
+/// root declaration name from `node` ([`node_root_name`], which handles the
+/// `Pick`/`Omit` source-root trap and indexed-access roots) and feeds it through
+/// the SHARED `TypeExpr` resolution + object-like + fence tail
+/// ([`crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence`])
+/// via a synthetic `Ref { name }` — so the verdict + fence are computed by the
+/// SAME body as the `TypeExpr` front (parity by construction: the only difference
+/// is where the root name is read from). A node with no extractable root name is
+/// not package-backed (empty fence — admittable, like the `TypeExpr` front's
+/// `None` root arm).
+pub(crate) fn node_package_backed_object_like_root_with_fence(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    node: crate::semantic_query::SemanticNodeId,
+) -> (bool, Option<crate::semantic_query::DepSignature>) {
+    let graph = Arc::clone(query_engine.ctx.project_type_store().semantic_graph());
+    let Some(root_name) = node_root_name(&graph, node, 0) else {
+        return (false, Some(Arc::from(Vec::new())));
+    };
+    drop(graph);
+    crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence(
+        &verter_type_expr::TypeExpr::named(root_name.as_str()),
+        scope_canonical_id,
+        query_engine,
+    )
+}
+
+/// Collect the SURFACE root declaration identities of a graph `node`, mirroring
+/// `collect_root_decl_identities` in the `TypeExpr` front
+/// ([`crate::meta_resolve::lowered_root_reaches_transitive_cycle_with_fence`]):
+/// the outer carrier's identity plus every type-argument's identity, descending
+/// only `Alias` / `IndexedAccess.object` / `InstantiationRef.args`. The node
+/// carrier already holds the RESOLVED `DeclIdentity` (`DeclRef.identity` /
+/// `InstantiationRef.base`), so no name re-resolution is needed; an unresolved
+/// `BareRef` head carries no identity and is not rooted (a missing body cannot
+/// close a cycle). `MAX_*` caps mirror the `TypeExpr` front.
+fn collect_node_root_identities(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+    depth: u32,
+    out: &mut Vec<crate::semantic_query::DeclIdentity>,
+) {
+    use crate::semantic_query::SemanticNodeData;
+    const MAX_CYCLE_ROOTS: usize = 16;
+    const MAX_ROOT_COLLECT_DEPTH: u32 = 8;
+    if out.len() >= MAX_CYCLE_ROOTS || depth >= MAX_ROOT_COLLECT_DEPTH {
+        return;
+    }
+    let Some(data) = graph.node_data(node) else {
+        return;
+    };
+    match data.as_ref() {
+        SemanticNodeData::Alias(inner) => {
+            collect_node_root_identities(graph, *inner, depth + 1, out)
+        }
+        SemanticNodeData::IndexedAccess { object, .. } => {
+            collect_node_root_identities(graph, *object, depth + 1, out)
+        }
+        SemanticNodeData::DeclRef { identity } => {
+            if !out.contains(identity) {
+                out.push(identity.clone());
+            }
+        }
+        SemanticNodeData::InstantiationRef { base, args } => {
+            if !out.contains(base) {
+                out.push(base.clone());
+            }
+            for &arg in args.iter() {
+                collect_node_root_identities(graph, arg, depth + 1, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Node-domain front for the transitive-cycle gate. Collects the surface root
+/// identities of `node` ([`collect_node_root_identities`]) and ORs the shared
+/// cached BFS ([`ref_root_reaches_transitive_cycle_node`]) over each, merging the
+/// fence exactly as the `TypeExpr` front
+/// ([`crate::meta_resolve::lowered_root_reaches_transitive_cycle_with_fence`])
+/// does — `raise(node)` raises each carrier to its `Ref`, whose
+/// `collect_root_decl_identities` resolves the SAME identity the node already
+/// carries, so the per-root BFS verdicts (and the BFS-visited fence) match by
+/// construction. Takes `ctx` (the node carries resolved identities, so no
+/// name-resolution engine is needed).
+pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    node: crate::semantic_query::SemanticNodeId,
+) -> (bool, crate::semantic_query::DepSignature) {
+    let graph = Arc::clone(ctx.project_type_store().semantic_graph());
+    let mut roots: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
+    collect_node_root_identities(&graph, node, 0, &mut roots);
+    drop(graph);
+    if roots.is_empty() {
+        return (false, Arc::from(Vec::new()));
+    }
+    let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    let mut result = false;
+    for identity in &roots {
+        if !identity.canonical_id.as_ref().is_empty()
+            && identity.canonical_id.as_ref() != "__builtin__"
+            && identity.canonical_id.as_ref() != scope_canonical_id
+        {
+            fence.push((
+                Arc::clone(&identity.canonical_id),
+                crate::semantic_query::DepVersion::WholeHash(identity.whole_hash),
+            ));
+        }
+        result |= ref_root_reaches_transitive_cycle_node(identity, ctx, &mut fence);
+    }
+    let fence_signature: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
+    crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts(ctx, &fence_signature);
+    (result, fence_signature)
+}
+
+#[cfg(test)]
+mod node_root_gate_differential_tests {
+    //! DIFFERENTIAL EQUIVALENCE: the node-domain root gates equal the `TypeExpr`
+    //! fronts, field-for-field (verdict AND fence), on inputs that genuinely reach
+    //! each path — the `Pick`/`Omit` package SOURCE-root trap, an indexed-access
+    //! root, a bare package ref, a workspace-local ref, a non-ref, and a transitive
+    //! generic cycle.
+
+    use std::sync::Arc;
+
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    use super::{
+        node_package_backed_object_like_root_with_fence,
+        node_root_reaches_transitive_cycle_with_fence,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::ComponentMetaQueryEngine;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+    use crate::types::{AnalysisLevel, HostConfig};
+    use crate::{DependencyResolution, VerterHost};
+
+    fn lower(host: &VerterHost, scope: &str, expr: &TypeExpr) -> SemanticNodeId {
+        ProjectSemanticDispatch::new(host)
+            .lower_type_expr_in_scope_with_mode(scope, expr, ProjectionMode::Navigate)
+            .expect("expr must lower")
+    }
+
+    #[test]
+    fn node_package_backed_root_matches_type_expr_front_field_for_field() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/pkg/index.d.ts".to_string(),
+            Arc::from("export interface VendorProps { a: string; b: number }\n"),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                "<script lang=\"ts\">\n\
+                 import type { VendorProps } from 'pkg'\n\
+                 export interface LocalProps { x: string }\n\
+                 </script>\n<template><div /></template>",
+            ),
+        );
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![DependencyResolution {
+                specifier: "pkg".to_string(),
+                resolved_canonical_id: Some("/src/node_modules/pkg/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        let scope = "/src/App.vue";
+
+        let cases: Vec<TypeExpr> = vec![
+            // Pick over a PACKAGE source — the source-root trap (must inspect the
+            // VendorProps source, not the `__builtin__::Pick` wrapper).
+            TypeExpr::named_with_args(
+                "Pick",
+                vec![
+                    TypeExpr::named("VendorProps"),
+                    TypeExpr::string_literal("a"),
+                ],
+            ),
+            // indexed-access over the package source
+            TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("VendorProps")),
+                index: Arc::new(TypeExpr::string_literal("a")),
+            },
+            // bare package ref (interface ⇒ object-like)
+            TypeExpr::named("VendorProps"),
+            // workspace-local ref (NOT package-backed)
+            TypeExpr::named("LocalProps"),
+            // non-ref root (no extractable root name)
+            TypeExpr::Primitive(PrimitiveName::String),
+        ];
+
+        let mut any_true = false;
+        let mut any_false = false;
+        for expr in &cases {
+            let node = lower(&host, scope, expr);
+            let mut qe_node = ComponentMetaQueryEngine::new(&host);
+            let node_result =
+                node_package_backed_object_like_root_with_fence(&mut qe_node, scope, node);
+            let mut qe_expr = ComponentMetaQueryEngine::new(&host);
+            let expr_result =
+                crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence(
+                    expr, scope, &mut qe_expr,
+                );
+            assert_eq!(
+                node_result, expr_result,
+                "node package-backed gate must equal the TypeExpr front (verdict + fence) for {expr:?}"
+            );
+            if node_result.0 {
+                any_true = true;
+            } else {
+                any_false = true;
+            }
+        }
+        // Genuine reach: the package source IS package-backed; the local ref is NOT
+        // — the cases are not vacuously all-equal.
+        assert!(
+            any_true && any_false,
+            "the differential must exercise BOTH a package-backed root and a non-package-backed \
+             one (genuine reach), not a single verdict"
+        );
+    }
+
+    #[test]
+    fn node_transitive_cycle_matches_type_expr_front() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/m.ts".to_string(),
+            Arc::from(
+                "export type A<T> = B<T>\n\
+                 export type B<T> = A<T>\n\
+                 export type C<T> = { v: T }\n",
+            ),
+        );
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/m.ts"));
+        let scope = "/src/m.ts";
+
+        // cyclic generic (A<string> → B<string> → A<string>) and a non-cyclic one.
+        let cyclic =
+            TypeExpr::named_with_args("A", vec![TypeExpr::Primitive(PrimitiveName::String)]);
+        let acyclic =
+            TypeExpr::named_with_args("C", vec![TypeExpr::Primitive(PrimitiveName::String)]);
+
+        for (expr, expect_cycle) in [(&cyclic, true), (&acyclic, false)] {
+            let node = lower(&host, scope, expr);
+            let node_cycle = node_root_reaches_transitive_cycle_with_fence(&host, scope, node).0;
+            let mut qe = ComponentMetaQueryEngine::new(&host);
+            let expr_cycle = crate::meta_resolve::lowered_root_reaches_transitive_cycle_with_fence(
+                &mut qe, scope, expr,
+            )
+            .0;
+            assert_eq!(
+                node_cycle, expr_cycle,
+                "node cycle gate must equal the TypeExpr front for {expr:?}"
+            );
+            assert_eq!(
+                node_cycle, expect_cycle,
+                "case {expr:?} must GENUINELY reach the expected cycle verdict (not vacuous)"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod carrier_descent_tests {
     //! Carrier-arg descent for the cycle-BFS ref/recursive-ref walkers.
