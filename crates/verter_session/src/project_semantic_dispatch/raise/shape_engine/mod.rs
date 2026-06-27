@@ -1079,6 +1079,24 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
     Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_unmaterialized_sentinel)
 }
 
+/// Whether `node`'s raised shape contains a semantic miss ANYWHERE in its tree —
+/// the node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`,
+/// expressed as `!RaisedShapeFacts.materialized` (the structural AND over all
+/// value-bearing children; a single nested unresolved shell makes the whole
+/// `materialized` fact `false`). `None` when the whole raise is `None`.
+///
+/// DISTINCT from [`project_node_root_sentinel`], which answers the ROOT-term-only
+/// question (`type_expr_root_is_unmaterialized_sentinel`). A materialised object
+/// whose nested member value carries a miss has `materialized == false` here but
+/// `root_unmaterialized_sentinel == false` there — the two answer different
+/// questions and must not be conflated.
+pub(in crate::project_semantic_dispatch) fn project_node_contains_semantic_miss(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    project_node_facts(dispatch, node).map(|facts| !facts.materialized)
+}
+
 /// Combined facts + node-vs-`TypeExpr` equality of `node` in ONE fold: returns
 /// the route-gate [`RaisedShapeFacts`] AND whether the node's raised shape
 /// equals `expr`, computed from a SINGLE key-bearing fold (the input `&TypeExpr`

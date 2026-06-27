@@ -4692,6 +4692,36 @@ pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
     shape_engine::project_node_root_sentinel(dispatch, node).unwrap_or(false)
 }
 
+/// Node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`:
+/// whether `node`'s raised shape carries a semantic miss ANYWHERE in its tree
+/// (`!RaisedShapeFacts.materialized`). `None` when the whole raise is `None`,
+/// letting the caller distinguish "no miss" (`Some(false)`) from "unraisable"
+/// (`None`) — DISTINCT from the root-only
+/// [`node_root_is_unmaterialized_sentinel_with_dispatch`] and from the
+/// None→`true`-collapsing [`node_contains_semantic_miss_legacy_equivalent`].
+/// DISPATCH-taking primary — a publication carrier path reads this off the
+/// reduced-output carrier node instead of materialising it to a `TypeExpr` and
+/// running `type_expr_contains_semantic_miss`.
+//
+// The production caller (the component-meta carrier path's whole-tree
+// semantic-miss gate) lands with that path's conversion; the parity suite
+// exercises it as the node-vs-`TypeExpr` equivalence proof.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "node-domain whole-tree semantic-miss accessor; the carrier-path gate consuming \
+                  it lands with that path's conversion; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_contains_semantic_miss_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    shape_engine::project_node_contains_semantic_miss(dispatch, node)
+}
+
 /// CTX-taking convenience over `node_raised_shape_facts_with_dispatch`.
 /// Production gates hold a dispatch and use the `_with_dispatch` primary; this
 /// boundary form is exercised by the parity suite as the FACTS-ONLY-algebra
@@ -4938,6 +4968,68 @@ mod tests {
             !facts.materialized,
             "the Array DOES carry an unmaterialised element, so root-sentinel=false is \
              genuinely ROOT-only — not merely the absence of any sentinel"
+        );
+    }
+
+    /// DIFFERENTIAL EQUIVALENCE + DISCRIMINATION for the whole-tree semantic-miss
+    /// node fact (`node_contains_semantic_miss_with_dispatch`): it equals
+    /// `type_expr_contains_semantic_miss(raise(node))` field-for-field, AND it is
+    /// the WHOLE-TREE `!materialized` question, NOT the root-only sentinel. The
+    /// discriminator is an `Array` whose ELEMENT is a miss: whole-tree miss is
+    /// `true` (the element miss propagates) while root-sentinel is `false` (the
+    /// root is the Array) — proving the two facts answer different questions.
+    #[test]
+    fn node_contains_semantic_miss_is_whole_tree_and_equals_type_expr_oracle() {
+        use super::{
+            node_contains_semantic_miss_with_dispatch,
+            node_root_is_unmaterialized_sentinel_with_dispatch,
+        };
+        use crate::resolver_core::type_expr_contains_semantic_miss;
+        use crate::semantic_query::QueryError;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+        let string = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+        let array_of_miss = graph.intern_node(SemanticNodeData::Array {
+            element: miss,
+            readonly: false,
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let oracle = |node| {
+            type_expr_contains_semantic_miss(
+                &dispatch
+                    .raise_node_to_type_expr(node)
+                    .expect("node must raise"),
+            )
+        };
+
+        // DIFFERENTIAL: the node fact equals the TypeExpr predicate on raise(node)
+        // for every shape (miss root, clean primitive, array-of-miss).
+        for node in [miss, string, array_of_miss] {
+            assert_eq!(
+                node_contains_semantic_miss_with_dispatch(&dispatch, node),
+                Some(oracle(node)),
+                "node-domain whole-tree miss must equal type_expr_contains_semantic_miss(raise(node))"
+            );
+        }
+
+        // DISCRIMINATOR: array-of-miss is whole-tree miss TRUE but root-sentinel
+        // FALSE — the node fact is `!materialized`, NOT the root-only sentinel.
+        assert_eq!(
+            node_contains_semantic_miss_with_dispatch(&dispatch, array_of_miss),
+            Some(true)
+        );
+        assert!(
+            !node_root_is_unmaterialized_sentinel_with_dispatch(&dispatch, array_of_miss),
+            "array-of-miss carries a whole-tree miss but its ROOT is not a sentinel — \
+             root-sentinel and whole-tree-miss are distinct facts"
+        );
+        // A clean primitive carries no miss.
+        assert_eq!(
+            node_contains_semantic_miss_with_dispatch(&dispatch, string),
+            Some(false)
         );
     }
 
