@@ -144,9 +144,14 @@ impl ScopeShadowing {
     /// dispatching through the standard `ResolveDecl` path so the
     /// userland declaration wins.
     pub(crate) fn is_shadowing_lib(&self, name: &str) -> bool {
-        self.shadowed_type_names
-            .iter()
-            .any(|entry| entry.as_ref() == name)
+        // O(1) hash-set membership. `FxHashSet<Arc<str>>` accepts a borrowed
+        // `&str` probe (`Arc<str>: Borrow<str>`, and `Arc<str>` hashes as its
+        // `str` pointee), so this is behaviour-identical to the prior
+        // `iter().any(|n| n == name)` linear scan — the same names shadow —
+        // without walking the set on every probe. Both shadow consumers (the
+        // dispatch fast-path and the materialise-path gate) get the O(1)
+        // lookup.
+        self.shadowed_type_names.contains(name)
     }
 
     /// Internal — merge a `scope_type_names` set with the keys of
