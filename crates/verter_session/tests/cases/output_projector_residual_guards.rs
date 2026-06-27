@@ -11864,49 +11864,38 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 // rewrite (inline / alias / split-helper / convergence) of a real decide cannot
 // evade detection.
 //
-// Enumerated inherent limits (FP-safe — these can only MISS, never over-fire).
-// Each is an ACCEPTED syntactic residual of a static `syn` walk over untyped
-// source, deliberate and bounded — a missed shape, never a false RED — so a
-// future reader knows it is by design, not a bug:
+// Residual claim (FROZEN — this is a supplementary tripwire, NOT the universal
+// authority). The honest statement of what this scanner does and does not prove:
 //
-//   - BARE-NAME transformer exclusion: a bare-name call whose name matches any
-//     production fn that RETURNS a `TypeExpr` (`returns_typeexpr`) is excluded
-//     from the reader rail as a transformer (propagation, not a fact-extracting
-//     decide). Conservative by construction — excluding more never turns a
-//     transformer into a false reader-decide (documented at
-//     `hot_returns_typeexpr_bare`). The reader rails key on the receiver /
-//     qualified forms, so a bare transformer name reads as forwarding.
-//   - ASSOCIATED-CONSTRUCTOR exclusion: a `Type::assoc(&mat)` call whose tail is
-//     a conventional constructor / builder / conversion name
-//     (`hot_assoc_tail_is_constructor`) CONSTRUCTS a value FROM the materialized
-//     argument (publication), so it is excluded; an associated READER
-//     (`Reader::classify(&mat)`) fires, symmetric with the method-call form.
-//     Biased toward exempting — it may MISS an unconventionally-named
-//     constructor, never over-fire on one.
-//   - EXTRACTOR name-list closure: `HOT_EXTRACTING_GATE_IDENTS` is a closed set
-//     of the known structural `TypeExpr` extractors; a PURE non-minting rename
-//     (returns a borrowed sub-expression of an already-materialized input without
-//     re-minting) is not propagated by the name-list, sound because its SOURCE
-//     mint is flagged at its own site, and a RE-minting rename is caught by the
-//     RETURN-taint rail regardless of name (documented on the constant).
-//   - AGGREGATE coverage count: the self-policing rail's `audited >= len` check
-//     proves every terminal-sink entry was LOCATED in production source, an
-//     aggregate, NOT a per-site proof that each was scanned exactly once.
-//   - MACRO-BODY blindness for non-`matches!` macros: macro bodies other than the
-//     explicitly-handled container (`vec!`) / `matches!` forms are not deeply
-//     scanned for decides — a decide hidden inside an arbitrary user macro body
-//     is a missed shape.
-//   - RECEIVER-TYPE-GENERAL callee disambiguation: distinguishing two same-named
-//     METHODS where one mints, across receiver types, requires a type checker;
-//     the guard uses fail-open scope proximity + explicit-qualifier respect +
-//     fail-closed on a distinctive minter name (the minter accessors are
-//     distinctive sealed-cap names, so the residual is empty in practice;
-//     documented at `call_returns_mat_path`).
-//   - LOCATION rail anchored at the mint SOURCE: pure forwarding of a
-//     helper-materialized value WITHOUT a decide does not flag the forwarder —
-//     the mint source is always flagged at its own definition, so
-//     forwarding-without-a-decide is not a materialize-then-decide (characterized
-//     by `hot_location_rail_anchored_at_mint_source`).
+//   - What it DOES enforce: syntactic detection of named hot-materialize calls
+//     (sealed-cap mint / host-threaded surface bridge / return-tainted helper)
+//     that feed a semantic decision, within the scanned production files, with
+//     field-precise taint, qualifier-faithful callee identity, and lexical alias
+//     scoping.
+//   - What it does NOT enforce: semantic identity of arbitrary calls; decisions
+//     hidden inside arbitrary expression-macro bodies; identity laundered through
+//     aliasing / renaming / `cfg` / macros. It is NOT the universal authority.
+//
+// The universal invariant ("no hot materialize-then-decide") is carried by the
+// STRUCTURAL rail — the `NoTypeExpr` marker trait forbidding hot carriers from
+// owning a `TypeExpr`, the sealed `OutputProjector` capability confining
+// materialization to terminal sinks, and the production conversions moving hot
+// decisions onto node-domain `RaisedShapeFacts` / `RaisedShapeKey` by
+// construction. This scanner is a supplementary residual tripwire, not the
+// guarantee. It is FROZEN as a syntactic tripwire: after the generic-minter-name
+// (`inner`) laundering escape it is not broadened further — false-positive
+// NARROWINGS stay welcome (they remove false flags); false-negative BROADENINGS
+// are refused (the gaps close structurally via the conversions that remove a
+// materialized `TypeExpr` from hot inputs, leaving nothing for a macro body or
+// trait default to hide). The named residuals (arbitrary expression-macro bodies;
+// the trait-default control-flow surface) and their structural-closure path are
+// recorded in `docs/arch/hot-materialize-tripwire-residual-deferral.md`.
+//
+// SC-first record (structured, machine-greppable):
+//   scanner_invariant: stage9_residual_hot_materialize_syntactic_tripwire
+//   scanner_justification: structural primary is OutputProjector + NoTypeExpr + node-domain facts; scanner does not prove semantic identity and is frozen after the inner-name laundering escape
+//   mechanism_ruling: codex-reconciliation-hot-materialize-sc-first-2026-06-27
+//   hardening_rounds: 2; escape_stop: meta_resolve/registry_materialize.rs:142 inner collision; no further add/broaden
 // ===========================================================================
 
 /// Direct materialize PRIMITIVE idents — obtaining a bare `TypeExpr` from the
@@ -12253,89 +12242,217 @@ fn hot_free_fn_is_direct_verb(ident: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Shared `use`-derived alias maps (consumed by BOTH the hot fence's variant
-// detection and the Unknown fence). Collection is RECURSIVE over the whole file
-// (top-level AND fn / block / mod-local `use` items), so a function-local
-// `use …::TypeExpr as TE;` is honoured everywhere.
+// File-global `TypeExpr` type-alias collection — used ONLY by the production fn
+// index's return-type alias detection. The two fence SCANNERS resolve aliases
+// LEXICALLY through the `LexicalAliasStack` below (frames per file / module / fn
+// / block), so a block-local `use …::TypeExpr as TE;` never classifies a sibling.
 // ---------------------------------------------------------------------------
 
-/// Per-file alias maps derived from every `use` tree in the file.
-#[derive(Default)]
-struct UseAliasMaps {
-    /// Idents resolving to the `TypeExpr` TYPE (`TypeExpr`, plus any rename
-    /// `use …::TypeExpr as TE;` / `use TypeExpr as TE;`).
-    typeexpr_aliases: std::collections::HashSet<String>,
-    /// Idents resolving to ANY bare-imported `TypeExpr::Variant`
-    /// (`use …::TypeExpr::Object;` → `Object`; `… as O;` → `O`) — for the hot
-    /// fence's bare-variant `matches!(x, Object(_))` detection.
-    typeexpr_variant_idents: std::collections::HashSet<String>,
-    /// The `TypeExpr::Unknown` variant subset (`use …::TypeExpr::Unknown;` →
-    /// `Unknown`; `… as U;` → `U`) — for the Unknown fence.
-    unknown_variant_idents: std::collections::HashSet<String>,
+/// File-GLOBAL `TypeExpr` type-alias idents (seeded with the canonical `TypeExpr`
+/// ident), collected RECURSIVELY over every `use` item. Used ONLY by
+/// [`build_hot_index`]'s return-type alias detection, where file-global is sound:
+/// a return type is in the signature, so it can only reference a module /
+/// file-level alias in scope at the signature, never a block-local one — lexical
+/// scoping is irrelevant for that read. Reuses the lexical-frame `use`-tree
+/// collector, keeping only the `TypeExpr`-type bindings.
+fn collect_file_typeexpr_aliases(file: &syn::File) -> std::collections::HashSet<String> {
+    #[derive(Default)]
+    struct FileAliasCollector {
+        frame: AliasFrame,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for FileAliasCollector {
+        fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
+            let mut stack = Vec::new();
+            hot_use_tree_collect_frame(&u.tree, &mut stack, &mut self.frame);
+        }
+    }
+    let mut c = FileAliasCollector::default();
+    syn::visit::Visit::visit_file(&mut c, file);
+    let mut out: std::collections::HashSet<String> = c
+        .frame
+        .binds
+        .iter()
+        .filter(|(_, b)| matches!(b, AliasBind::TypeExprType))
+        .map(|(name, _)| name.clone())
+        .collect();
+    out.insert("TypeExpr".to_string());
+    out
 }
 
-/// Walk a `use` tree accumulating the path-segment stack, recording `TypeExpr`
-/// type aliases and bare `TypeExpr::Variant` imports (incl. the `Unknown`
-/// subset).
-fn use_tree_collect(tree: &syn::UseTree, stack: &mut Vec<String>, maps: &mut UseAliasMaps) {
+/// What a `use`-introduced local name binds to, for lexical alias resolution.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AliasBind {
+    /// The local name resolves to the `TypeExpr` TYPE (`use …::TypeExpr;` /
+    /// `use …::TypeExpr as TE;`).
+    TypeExprType,
+    /// The local name resolves to a bare-imported `TypeExpr::Variant`
+    /// (`use …::TypeExpr::Object;` → `Object`).
+    Variant,
+    /// The `TypeExpr::Unknown` variant subset.
+    UnknownVariant,
+    /// The local name resolves to something UNRELATED to `TypeExpr` — it SHADOWS
+    /// an outer `TypeExpr` meaning of the same local name.
+    Other,
+}
+
+/// One lexical scope's `use`-introduced bindings (a same-name `use` twice in one
+/// scope is a Rust compile error, so one binding per local name per frame).
+#[derive(Default)]
+struct AliasFrame {
+    binds: std::collections::HashMap<String, AliasBind>,
+}
+
+/// A lexical stack of `use`-alias frames, SHARED by both fences. Resolution walks
+/// innermost-first so an inner `use … as TE` shadows an outer binding and a
+/// block-local alias is invisible to sibling scopes. The canonical `TypeExpr`
+/// ident is seeded in a permanent base frame. The merged current sets
+/// (`aliases` / `variants` / `unknown`) are recomputed on every push/pop,
+/// respecting shadowing (an inner `Other` binding hides an outer `TypeExpr`
+/// meaning of the same name).
+struct LexicalAliasStack {
+    frames: Vec<AliasFrame>,
+    cur_aliases: std::collections::HashSet<String>,
+    cur_variants: std::collections::HashSet<String>,
+    cur_unknown: std::collections::HashSet<String>,
+}
+impl LexicalAliasStack {
+    fn new() -> Self {
+        let mut base = AliasFrame::default();
+        base.binds
+            .insert("TypeExpr".to_string(), AliasBind::TypeExprType);
+        let mut s = LexicalAliasStack {
+            frames: vec![base],
+            cur_aliases: std::collections::HashSet::new(),
+            cur_variants: std::collections::HashSet::new(),
+            cur_unknown: std::collections::HashSet::new(),
+        };
+        s.recompute();
+        s
+    }
+    fn push_uses(&mut self, uses: &[&syn::ItemUse]) {
+        let mut frame = AliasFrame::default();
+        for u in uses {
+            let mut stack = Vec::new();
+            hot_use_tree_collect_frame(&u.tree, &mut stack, &mut frame);
+        }
+        self.frames.push(frame);
+        self.recompute();
+    }
+    fn pop(&mut self) {
+        self.frames.pop();
+        self.recompute();
+    }
+    fn recompute(&mut self) {
+        self.cur_aliases.clear();
+        self.cur_variants.clear();
+        self.cur_unknown.clear();
+        let mut seen = std::collections::HashSet::new();
+        // Innermost-first: the first binding of a name wins (shadowing).
+        for frame in self.frames.iter().rev() {
+            for (name, bind) in &frame.binds {
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                match bind {
+                    AliasBind::TypeExprType => {
+                        self.cur_aliases.insert(name.clone());
+                    }
+                    AliasBind::Variant => {
+                        self.cur_variants.insert(name.clone());
+                    }
+                    AliasBind::UnknownVariant => {
+                        self.cur_variants.insert(name.clone());
+                        self.cur_unknown.insert(name.clone());
+                    }
+                    AliasBind::Other => {}
+                }
+            }
+        }
+    }
+    fn aliases(&self) -> &std::collections::HashSet<String> {
+        &self.cur_aliases
+    }
+    fn variants(&self) -> &std::collections::HashSet<String> {
+        &self.cur_variants
+    }
+    fn unknown(&self) -> &std::collections::HashSet<String> {
+        &self.cur_unknown
+    }
+}
+
+/// Classify a `use` binding (`from` is the imported name under path `stack`, bound
+/// locally as `to`). A `TypeExpr` type import binds the type alias; a bare
+/// `TypeExpr::Variant` import binds the variant; anything else binds `Other`
+/// (which shadows an outer `TypeExpr` meaning of the same local name).
+fn hot_alias_bind_for(from: &str, stack: &[String]) -> AliasBind {
+    if from == "TypeExpr" {
+        AliasBind::TypeExprType
+    } else if stack.iter().any(|s| s == "TypeExpr") {
+        if from == "Unknown" {
+            AliasBind::UnknownVariant
+        } else {
+            AliasBind::Variant
+        }
+    } else {
+        AliasBind::Other
+    }
+}
+
+/// Walk a `use` tree recording EVERY leaf binding's local name → [`AliasBind`]
+/// into one lexical frame (so an inner `Other` binding can shadow an outer
+/// `TypeExpr` alias of the same name).
+fn hot_use_tree_collect_frame(
+    tree: &syn::UseTree,
+    stack: &mut Vec<String>,
+    frame: &mut AliasFrame,
+) {
     match tree {
         syn::UseTree::Path(p) => {
             stack.push(p.ident.to_string());
-            use_tree_collect(&p.tree, stack, maps);
+            hot_use_tree_collect_frame(&p.tree, stack, frame);
             stack.pop();
         }
         syn::UseTree::Name(n) => {
             let id = n.ident.to_string();
-            if id == "TypeExpr" {
-                maps.typeexpr_aliases.insert("TypeExpr".to_string());
-            }
-            if stack.iter().any(|s| s == "TypeExpr") {
-                maps.typeexpr_variant_idents.insert(id.clone());
-                if id == "Unknown" {
-                    maps.unknown_variant_idents.insert("Unknown".to_string());
-                }
-            }
+            let bind = hot_alias_bind_for(&id, stack);
+            frame.binds.insert(id, bind);
         }
         syn::UseTree::Rename(r) => {
             let from = r.ident.to_string();
             let to = r.rename.to_string();
-            if from == "TypeExpr" {
-                maps.typeexpr_aliases.insert(to);
-            } else if stack.iter().any(|s| s == "TypeExpr") {
-                maps.typeexpr_variant_idents.insert(to.clone());
-                if from == "Unknown" {
-                    maps.unknown_variant_idents.insert(to);
-                }
-            }
+            let bind = hot_alias_bind_for(&from, stack);
+            frame.binds.insert(to, bind);
         }
         syn::UseTree::Group(g) => {
             for item in &g.items {
-                use_tree_collect(item, stack, maps);
+                hot_use_tree_collect_frame(item, stack, frame);
             }
         }
         syn::UseTree::Glob(_) => {}
     }
 }
 
-/// Recursively visits EVERY `use` item in a file (top-level + fn / block / mod
-/// local) into the shared alias maps.
-#[derive(Default)]
-struct UseAliasCollector {
-    maps: UseAliasMaps,
-}
-impl<'ast> syn::visit::Visit<'ast> for UseAliasCollector {
-    fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
-        let mut stack = Vec::new();
-        use_tree_collect(&u.tree, &mut stack, &mut self.maps);
-    }
+/// The direct `use` items of a block's statements (a nested fn / mod / block has
+/// its own frame; only DIRECT `use` statements belong to this scope).
+fn hot_direct_uses_in_stmts(stmts: &[syn::Stmt]) -> Vec<&syn::ItemUse> {
+    stmts
+        .iter()
+        .filter_map(|s| match s {
+            syn::Stmt::Item(syn::Item::Use(u)) => Some(u),
+            _ => None,
+        })
+        .collect()
 }
 
-/// Collect the file's alias maps (seeded with the canonical `TypeExpr` ident).
-fn collect_use_alias_maps(file: &syn::File) -> UseAliasMaps {
-    let mut c = UseAliasCollector::default();
-    c.maps.typeexpr_aliases.insert("TypeExpr".to_string());
-    syn::visit::Visit::visit_file(&mut c, file);
-    c.maps
+/// The direct `use` items of an item list (file root / inline module body).
+fn hot_direct_uses_in_items(items: &[syn::Item]) -> Vec<&syn::ItemUse> {
+    items
+        .iter()
+        .filter_map(|i| match i {
+            syn::Item::Use(u) => Some(u),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Recursively: does `ts` mention a `TypeExpr` (alias) ident or a bare-imported
@@ -12418,6 +12535,82 @@ fn hot_collect_bound_idents(p: &syn::Pat, out: &mut Vec<String>) {
         syn::Pat::Paren(p) => hot_collect_bound_idents(&p.pat, out),
         syn::Pat::Type(pt) => hot_collect_bound_idents(&pt.pat, out),
         _ => {}
+    }
+}
+
+/// The dotted PLACE of a place-expression (`a` / `a.b` / `a.0` / `a[0]`), peeling
+/// references / parens / groups. `None` for any non-place expression (a call, a
+/// literal, a container literal, a dynamic index) — those route through the
+/// literal-projection arms instead.
+fn hot_expr_place(e: &syn::Expr) -> Option<String> {
+    match e {
+        syn::Expr::Path(p) if p.path.segments.len() == 1 => {
+            Some(p.path.segments[0].ident.to_string())
+        }
+        syn::Expr::Field(f) => {
+            let base = hot_expr_place(&f.base)?;
+            let seg = match &f.member {
+                syn::Member::Named(id) => id.to_string(),
+                syn::Member::Unnamed(idx) => idx.index.to_string(),
+            };
+            Some(format!("{base}.{seg}"))
+        }
+        syn::Expr::Index(i) => {
+            let base = hot_expr_place(&i.expr)?;
+            let idx = hot_lit_usize(&i.index)?;
+            Some(format!("{base}.{idx}"))
+        }
+        syn::Expr::Reference(r) => hot_expr_place(&r.expr),
+        syn::Expr::Paren(p) => hot_expr_place(&p.expr),
+        syn::Expr::Group(g) => hot_expr_place(&g.expr),
+        _ => None,
+    }
+}
+
+/// A `usize` literal index (`[0]` / `.1`), if the expression is a plain integer
+/// literal (a dynamic index is not a precise place).
+fn hot_lit_usize(e: &syn::Expr) -> Option<usize> {
+    if let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Int(li),
+        ..
+    }) = e
+    {
+        li.base10_parse::<usize>().ok()
+    } else {
+        None
+    }
+}
+
+/// Peel `&` / `( )` / group wrappers to the inner expression (so a container
+/// literal behind a reference still decomposes place-precisely).
+fn hot_peel_expr(e: &syn::Expr) -> &syn::Expr {
+    match e {
+        syn::Expr::Reference(r) => hot_peel_expr(&r.expr),
+        syn::Expr::Paren(p) => hot_peel_expr(&p.expr),
+        syn::Expr::Group(g) => hot_peel_expr(&g.expr),
+        _ => e,
+    }
+}
+
+/// The single binding ident of a simple `let x` / `let mut x` pattern (peeling a
+/// `: Ty` annotation / parens). `None` for a destructuring pattern (tuple /
+/// struct / tuple-struct), which keeps whole-ident binding taint.
+fn hot_simple_pat_ident(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Ident(pi) if pi.subpat.is_none() => Some(pi.ident.to_string()),
+        syn::Pat::Type(pt) => hot_simple_pat_ident(&pt.pat),
+        syn::Pat::Paren(pp) => hot_simple_pat_ident(&pp.pat),
+        _ => None,
+    }
+}
+
+/// Whether an expression is a decomposable container LITERAL (struct / tuple /
+/// array / `vec!`) whose elements can be tainted place-precisely.
+fn hot_is_decomposable_container(e: &syn::Expr) -> bool {
+    match e {
+        syn::Expr::Struct(_) | syn::Expr::Tuple(_) | syn::Expr::Array(_) => true,
+        syn::Expr::Macro(m) => m.mac.path.is_ident("vec"),
+        _ => false,
     }
 }
 
@@ -12585,6 +12778,50 @@ fn hot_common_prefix_len(a: &[String], b: &[String]) -> usize {
     a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
+/// Whether `prefix` is a leading prefix of `full` (segment-wise). Used for
+/// nested-fn reachability: a nested fn is reachable only when its declaring scope
+/// is a prefix of the caller's scope (the caller is inside the enclosing fn).
+fn hot_scope_is_prefix(prefix: &[String], full: &[String]) -> bool {
+    full.len() >= prefix.len() && full[..prefix.len()] == *prefix
+}
+
+/// The qualifier-comparable name of a declaring-scope segment: an `impl(SelfTy)` /
+/// `impl(Trait for SelfTy)` frame yields the Self type's leading ident, a
+/// `trait(T)` frame yields `T`, and a module / fn segment is returned unchanged.
+/// This lets a written `Type::method` qualifier match an `impl(Type)` frame
+/// without a substring test.
+fn hot_scope_seg_self_name(seg: &str) -> String {
+    let inner = if let Some(rest) = seg.strip_prefix("impl(") {
+        rest.strip_suffix(')').unwrap_or(rest)
+    } else if let Some(rest) = seg.strip_prefix("trait(") {
+        rest.strip_suffix(')').unwrap_or(rest)
+    } else {
+        return seg.to_string();
+    };
+    // `Trait for SelfTy` -> `SelfTy`; strip generics; take the final `::`
+    // component; take the last whitespace token (the frame is ws-normalized).
+    let ty = inner.rsplit(" for ").next().unwrap_or(inner);
+    let ty = ty.split('<').next().unwrap_or(ty).trim();
+    let ty = ty.rsplit("::").next().unwrap_or(ty).trim();
+    ty.split_whitespace().last().unwrap_or(ty).to_string()
+}
+
+/// Whether the written call qualifier (the segments before the callee name)
+/// matches a candidate's declaring scope by EXACT normalized suffix: the
+/// qualifier equals the trailing segments of the scope, each scope segment
+/// compared by its [`hot_scope_seg_self_name`]. No substring match, no
+/// penultimate-only shortcut.
+fn hot_qualifier_matches_suffix(qualifier: &[String], decl_scope: &[String]) -> bool {
+    if qualifier.is_empty() || decl_scope.len() < qualifier.len() {
+        return false;
+    }
+    let tail = &decl_scope[decl_scope.len() - qualifier.len()..];
+    qualifier
+        .iter()
+        .zip(tail)
+        .all(|(q, s)| *q == hot_scope_seg_self_name(s))
+}
+
 /// Whether a return type names `TypeExpr` — directly OR through a `use`-alias
 /// (`use …::TypeExpr as TE;` → a `-> Option<TE>` return is TypeExpr-bearing).
 /// Wrapper layers (`Option` / `Result` / `Vec` / tuple / `Box` / `Arc`) are seen
@@ -12617,10 +12854,29 @@ struct HotFnEntry {
     returns_type_expr: bool,
     has_direct: bool,
     has_bridge: bool,
-    /// Bare callee names invoked directly in this fn's own body (nested fns +
-    /// test bodies excluded — each is indexed on its own).
-    calls: std::collections::BTreeSet<String>,
+    /// Whether this fn is declared INSIDE another fn (a nested fn), so it is only
+    /// reachable as a bare / method call from within its enclosing fn — never from
+    /// an unrelated scope. This closes the generic-minter-name (`inner`) collision:
+    /// a cross-scope `recv.inner()` / `other::inner()` cannot resolve to a nested
+    /// minting `…::inner`.
+    is_nested: bool,
+    /// QUALIFIED callee identities invoked directly in this fn's own body. A
+    /// method call carries no path qualifier (its callee depends on the receiver
+    /// type); a path call carries its full segment path so the return-taint
+    /// fixpoint resolves it qualifier-faithfully instead of by bare name. Nested
+    /// fns + test bodies excluded — each is indexed on its own.
+    calls: std::collections::BTreeSet<HotCallId>,
 }
+
+/// A call's CALLEE identity as written. `Method` carries no path qualifier;
+/// `Path` carries the full segment path so a written qualifier (`other::inner` /
+/// `Type::method`) is matched faithfully instead of collapsed to the bare name.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum HotCallId {
+    Method(String),
+    Path(Vec<String>),
+}
+
 impl HotFnEntry {
     fn bare(&self) -> &str {
         self.key.last().map(String::as_str).unwrap_or_default()
@@ -12646,69 +12902,107 @@ impl HotFnIndex {
             .push(i);
         self.entries.push(e);
     }
-    /// Resolve a bare callee invoked from `caller_scope` (the calling fn's full
-    /// qualified key) to the candidate entry indices tied at maximal scope
-    /// proximity: one index on a clean resolution, several only on a genuine
-    /// equal-distance ambiguity (which callers treat fail-closed).
-    fn resolve(&self, caller_scope: &[String], bare: &str) -> Vec<usize> {
-        let Some(cands) = self.by_bare.get(bare) else {
+    /// Pick the candidate indices tied at maximal scope proximity to
+    /// `caller_scope` from a reachability-filtered candidate list.
+    fn proximity_winners(&self, caller_scope: &[String], cands: Vec<usize>) -> Vec<usize> {
+        if cands.is_empty() {
             return Vec::new();
-        };
+        }
         let best = cands
             .iter()
             .map(|&i| hot_common_prefix_len(caller_scope, self.entries[i].decl_scope()))
             .max()
             .unwrap_or(0);
         cands
-            .iter()
-            .copied()
+            .into_iter()
             .filter(|&i| hot_common_prefix_len(caller_scope, self.entries[i].decl_scope()) == best)
             .collect()
     }
-    /// Resolve a (possibly QUALIFIED) call PATH from `caller_scope`. A bare
-    /// single-segment path uses pure scope proximity ([`Self::resolve`]). A
-    /// qualified path (`other::helper` / `Type::helper`) respects the written
-    /// qualifier: candidates are first FILTERED to those whose declaring scope is
-    /// consistent with the penultimate segment (a module / impl-type in the
-    /// candidate's `decl_scope`), then proximity runs WITHIN that filtered set —
-    /// so a qualified call can never collapse to the NEAREST same-named bare
-    /// `helper`. Fail-OPEN to bare proximity when the qualifier matches no indexed
-    /// candidate (e.g. an external `serde_json::to_vec`), so detection is never
-    /// reduced below the bare baseline.
+    /// Candidates named `bare` that are REACHABLE for a bare / method call from
+    /// `caller_scope`: a NESTED fn is reachable only when its declaring scope is a
+    /// prefix of the caller's scope (the caller is inside the enclosing fn); a
+    /// module / impl / top-level fn is always a candidate.
+    fn reachable_bare(&self, caller_scope: &[String], bare: &str) -> Vec<usize> {
+        let Some(cands) = self.by_bare.get(bare) else {
+            return Vec::new();
+        };
+        cands
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let e = &self.entries[i];
+                !e.is_nested || hot_scope_is_prefix(e.decl_scope(), caller_scope)
+            })
+            .collect()
+    }
+    /// Resolve a bare callee (or a method callee, which carries no path qualifier)
+    /// invoked from `caller_scope` to the candidate entry indices tied at maximal
+    /// scope proximity AMONG the reachable candidates — one index on a clean
+    /// resolution, several only on a genuine equal-distance ambiguity (callers
+    /// treat fail-closed). The reachability filter drops a nested-fn candidate the
+    /// caller cannot reach, so a `recv.inner()` in an unrelated module never
+    /// resolves to a nested minting `…::inner`.
+    fn resolve(&self, caller_scope: &[String], bare: &str) -> Vec<usize> {
+        let reachable = self.reachable_bare(caller_scope, bare);
+        self.proximity_winners(caller_scope, reachable)
+    }
+    /// Resolve a recorded [`HotCallId`] from `caller_scope`: a `Method` resolves
+    /// by reachable bare proximity, a `Path` resolves qualifier-faithfully.
+    fn resolve_call(&self, caller_scope: &[String], call: &HotCallId) -> Vec<usize> {
+        match call {
+            HotCallId::Method(m) => self.resolve(caller_scope, m),
+            HotCallId::Path(segs) => self.resolve_path_segs(caller_scope, segs),
+        }
+    }
+    /// Resolve a (possibly QUALIFIED) call PATH from `caller_scope`.
     fn resolve_path(&self, caller_scope: &[String], path: &syn::Path) -> Vec<usize> {
         let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        self.resolve_path_segs(caller_scope, &segs)
+    }
+    /// Resolve a call PATH given as segments. A bare single-segment path uses
+    /// reachable scope proximity ([`Self::resolve`]). A `self::` / `Self::` /
+    /// `super::` / `crate::` relative-or-absolute root resolves by proximity (the
+    /// nearest in-scope candidate is the intended callee). A CONCRETE module /
+    /// type qualifier (`other::helper` / `Type::helper`) matches candidates by
+    /// EXACT normalized-suffix of their declaring scope (an `impl(SelfTy)` /
+    /// `trait(T)` frame compares by its Self-type / trait ident) — no substring,
+    /// no penultimate-only shortcut — then proximity runs WITHIN that set. A
+    /// written concrete qualifier that matches NO candidate names a callee that is
+    /// not one of ours (`other::inner()` / `TypeInfoGraphRequest::inner()`) and
+    /// resolves to NOTHING — it does NOT fail open to bare proximity (that
+    /// fail-open was the `inner` collision).
+    fn resolve_path_segs(&self, caller_scope: &[String], segs: &[String]) -> Vec<usize> {
         let Some(bare) = segs.last() else {
             return Vec::new();
         };
         if segs.len() < 2 {
             return self.resolve(caller_scope, bare);
         }
-        let qualifier = &segs[segs.len() - 2];
+        let qualifier = &segs[..segs.len() - 1];
+        if matches!(qualifier[0].as_str(), "self" | "Self" | "super" | "crate") {
+            return self.resolve(caller_scope, bare);
+        }
         let Some(cands) = self.by_bare.get(bare.as_str()) else {
             return Vec::new();
         };
-        let filtered: Vec<usize> = cands
+        let matching: Vec<usize> = cands
             .iter()
             .copied()
+            .filter(|&i| hot_qualifier_matches_suffix(qualifier, self.entries[i].decl_scope()))
+            .collect();
+        if matching.is_empty() {
+            return Vec::new();
+        }
+        // Reachability filter as for bare resolution (a nested-fn candidate the
+        // caller cannot reach is excluded even when its qualifier matches).
+        let reachable: Vec<usize> = matching
+            .into_iter()
             .filter(|&i| {
-                self.entries[i]
-                    .decl_scope()
-                    .iter()
-                    .any(|seg| seg == qualifier || seg.contains(qualifier.as_str()))
+                let e = &self.entries[i];
+                !e.is_nested || hot_scope_is_prefix(e.decl_scope(), caller_scope)
             })
             .collect();
-        if filtered.is_empty() {
-            return self.resolve(caller_scope, bare);
-        }
-        let best = filtered
-            .iter()
-            .map(|&i| hot_common_prefix_len(caller_scope, self.entries[i].decl_scope()))
-            .max()
-            .unwrap_or(0);
-        filtered
-            .into_iter()
-            .filter(|&i| hot_common_prefix_len(caller_scope, self.entries[i].decl_scope()) == best)
-            .collect()
+        self.proximity_winners(caller_scope, reachable)
     }
 }
 
@@ -12716,7 +13010,7 @@ impl HotFnIndex {
 /// fn items (each is indexed on its own).
 #[derive(Default)]
 struct HotCallCollector {
-    calls: std::collections::BTreeSet<String>,
+    calls: std::collections::BTreeSet<HotCallId>,
     has_direct: bool,
     has_bridge: bool,
 }
@@ -12731,20 +13025,25 @@ impl<'ast> syn::visit::Visit<'ast> for HotCallCollector {
         if HOT_MAT_BRIDGE_IDENTS.contains(&m.as_str()) {
             self.has_bridge = true;
         }
-        self.calls.insert(m);
+        self.calls.insert(HotCallId::Method(m));
         syn::visit::visit_expr_method_call(self, mc);
     }
     fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
         if let syn::Expr::Path(p) = &*c.func {
-            if let Some(seg) = p.path.segments.last() {
-                let id = seg.ident.to_string();
+            let segs: Vec<String> = p
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
+            if let Some(id) = segs.last().cloned() {
                 if hot_free_fn_is_direct_verb(&id) {
                     self.has_direct = true;
                 }
                 if HOT_MAT_BRIDGE_IDENTS.contains(&id.as_str()) {
                     self.has_bridge = true;
                 }
-                self.calls.insert(id);
+                self.calls.insert(HotCallId::Path(segs));
             }
         }
         syn::visit::visit_expr_call(self, c);
@@ -12769,11 +13068,15 @@ impl<'a> HotIndexCollector<'a> {
         key.extend(self.fn_stack.iter().cloned());
         let mut cc = HotCallCollector::default();
         syn::visit::Visit::visit_block(&mut cc, block);
+        // A nested fn (declared inside another fn) has a fn-stack depth > 1 at
+        // record time — the current fn name was pushed before `record`.
+        let is_nested = self.fn_stack.len() > 1;
         self.index.push(HotFnEntry {
             key,
             returns_type_expr: hot_return_type_is_typeexpr(&sig.output, self.aliases),
             has_direct: cc.has_direct,
             has_bridge: cc.has_bridge,
+            is_nested,
             calls: cc.calls,
         });
     }
@@ -12842,7 +13145,7 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotIndexCollector<'a> {
 fn build_hot_index(parsed: &[(String, syn::File)]) -> HotFnIndex {
     let mut index = HotFnIndex::default();
     for (rel, file) in parsed {
-        let aliases = collect_use_alias_maps(file).typeexpr_aliases;
+        let aliases = collect_file_typeexpr_aliases(file);
         let mut c = HotIndexCollector {
             mod_path: hot_mod_path_from_rel(rel),
             impl_stack: Vec::new(),
@@ -12871,9 +13174,12 @@ fn hot_returns_materialized(index: &HotFnIndex) -> std::collections::HashSet<usi
             }
             let mints = e.has_direct
                 || e.has_bridge
-                || e.calls
-                    .iter()
-                    .any(|c| index.resolve(&e.key, c).iter().any(|j| set.contains(j)));
+                || e.calls.iter().any(|c| {
+                    index
+                        .resolve_call(&e.key, c)
+                        .iter()
+                        .any(|j| set.contains(j))
+                });
             if mints {
                 set.insert(i);
                 changed = true;
@@ -12986,10 +13292,12 @@ struct HotMaterializeScanner<'a> {
     /// excludes them: passing a materialized value to a `TypeExpr`-returning
     /// transformer is propagation, not a decide.
     returns_typeexpr: &'a std::collections::HashSet<String>,
-    /// The file's `TypeExpr` type aliases / bare-imported variant idents, so an
-    /// aliased `TE::Object` / bare-imported `Object` variant is recognised.
-    typeexpr_aliases: &'a std::collections::HashSet<String>,
-    typeexpr_variants: &'a std::collections::HashSet<String>,
+    /// The lexically-scoped `TypeExpr` aliases / bare-imported variant idents
+    /// (frames pushed / popped per file / module / fn / block), so an aliased
+    /// `TE::Object` / bare-imported `Object` variant is recognised ONLY within the
+    /// scope its `use` is visible — a block-local alias never classifies a sibling
+    /// scope.
+    aliases: LexicalAliasStack,
     /// Allowlist SELF-POLICING mode: seed each fn's `TypeExpr`-typed params as
     /// tainted and treat every fn as NON-terminal (so the reader / unknown-helper
     /// rails fire), to prove an allowlisted terminal does not decide on a
@@ -13097,8 +13405,33 @@ impl<'a> HotMaterializeScanner<'a> {
             }
         }
     }
-    fn taint_kind(&self, id: &str) -> Option<HotTaintKind> {
-        self.tainted_stack.last().and_then(|s| s.get(id).copied())
+    /// The taint provenance of a PLACE (a dotted root + field/index projection
+    /// path, e.g. `dto`, `dto.ty`, `t.0`). A place is tainted when (a) it OR an
+    /// ANCESTOR place is tainted — a projection inherits an enclosing aggregate's
+    /// taint — OR (b) a DESCENDANT place is tainted — a WHOLE read (`.iter()` /
+    /// passing the aggregate) reads its materialized sub-places. A SIBLING
+    /// projection is neither, so `Dto { ty: mat, name }.name` (only `dto.ty`
+    /// tainted) is untainted: the field-precise narrowing. A simple ident is a
+    /// 0-projection place, so `taint_kind("x")` is the plain whole-local lookup.
+    fn taint_kind(&self, place: &str) -> Option<HotTaintKind> {
+        let set = self.tainted_stack.last()?;
+        // self + ancestors
+        let mut p = place;
+        loop {
+            if let Some(k) = set.get(p) {
+                return Some(*k);
+            }
+            match p.rfind('.') {
+                Some(i) => p = &p[..i],
+                None => break,
+            }
+        }
+        // descendants (a whole read reads its tainted sub-places)
+        let prefix = format!("{place}.");
+        set.iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(_, v)| Some(*v))
+            .fold(None, HotTaintKind::join)
     }
     fn is_tainted(&self, id: &str) -> bool {
         self.taint_kind(id).is_some()
@@ -13170,8 +13503,13 @@ impl<'a> HotMaterializeScanner<'a> {
             syn::Expr::Paren(p) => self.expr_taint_kind(&p.expr),
             syn::Expr::Group(g) => self.expr_taint_kind(&g.expr),
             syn::Expr::Try(t) => self.expr_taint_kind(&t.expr),
-            syn::Expr::Field(f) => self.expr_taint_kind(&f.base),
-            syn::Expr::Index(i) => self.expr_taint_kind(&i.expr),
+            // FIELD / INDEX projection — path-precise. A pure place
+            // (`a.b` / `a.0` / `a[0]`) reads through the place taint map; a direct
+            // projection of a container LITERAL (`Dto { ty: mat, name }.name`,
+            // `(mat, count).1`, `[mat, c][1]`) taints ONLY the projected element,
+            // so a sibling projection stays untainted.
+            syn::Expr::Field(f) => self.field_taint(e, &f.base, &f.member),
+            syn::Expr::Index(i) => self.index_taint(e, &i.expr, &i.index),
             syn::Expr::Await(a) => self.expr_taint_kind(&a.base),
             syn::Expr::Cast(c) => self.expr_taint_kind(&c.expr),
             // A materialized value bound from a branch — `let m = if … {
@@ -13222,6 +13560,132 @@ impl<'a> HotMaterializeScanner<'a> {
     /// discarded) — the boolean view used for taint propagation / binding.
     fn expr_taint(&self, e: &syn::Expr) -> bool {
         self.expr_taint_kind(e).is_some()
+    }
+    /// Path-precise taint of a `base.member` field read. A pure place
+    /// (`hot_expr_place` succeeds) reads the place map; a direct projection of a
+    /// struct / tuple LITERAL taints ONLY the projected element (so a sibling
+    /// field stays untainted); a non-container base keeps whole-base taint (no
+    /// false negative for `make().field`).
+    fn field_taint(
+        &self,
+        whole: &syn::Expr,
+        base: &syn::Expr,
+        member: &syn::Member,
+    ) -> Option<HotTaintKind> {
+        if let Some(place) = hot_expr_place(whole) {
+            return self.taint_kind(&place);
+        }
+        match hot_peel_expr(base) {
+            syn::Expr::Struct(s) => {
+                if let syn::Member::Named(name) = member {
+                    for fv in &s.fields {
+                        if matches!(&fv.member, syn::Member::Named(fname) if fname == name) {
+                            return self.expr_taint_kind(&fv.expr);
+                        }
+                    }
+                }
+                None
+            }
+            syn::Expr::Tuple(t) => {
+                if let syn::Member::Unnamed(idx) = member {
+                    return t
+                        .elems
+                        .get(idx.index as usize)
+                        .and_then(|el| self.expr_taint_kind(el));
+                }
+                None
+            }
+            other => self.expr_taint_kind(other),
+        }
+    }
+    /// Path-precise taint of a `base[index]` read. A pure place reads the place
+    /// map; a literal index into an array LITERAL projects that element (a dynamic
+    /// index joins all, conservative); a non-array base keeps whole-base taint.
+    fn index_taint(
+        &self,
+        whole: &syn::Expr,
+        base: &syn::Expr,
+        index: &syn::Expr,
+    ) -> Option<HotTaintKind> {
+        if let Some(place) = hot_expr_place(whole) {
+            return self.taint_kind(&place);
+        }
+        match hot_peel_expr(base) {
+            syn::Expr::Array(arr) => match hot_lit_usize(index) {
+                Some(i) => arr.elems.get(i).and_then(|el| self.expr_taint_kind(el)),
+                None => arr
+                    .elems
+                    .iter()
+                    .map(|el| self.expr_taint_kind(el))
+                    .fold(None, HotTaintKind::join),
+            },
+            other => self.expr_taint_kind(other),
+        }
+    }
+    /// Taint the place(s) a `let PAT = INIT` binds. A single simple ident bound
+    /// from a container LITERAL taints precise sub-places (`dto.ty`), so a later
+    /// sibling projection (`dto.name`) stays untainted; every other shape
+    /// (destructuring pattern, non-container init) keeps whole-ident taint.
+    fn taint_binding(&mut self, pat: &syn::Pat, init: &syn::Expr, kind: HotTaintKind) {
+        if let Some(root) = hot_simple_pat_ident(pat) {
+            if hot_is_decomposable_container(hot_peel_expr(init)) {
+                self.taint_container_places(&root, init);
+                return;
+            }
+        }
+        let mut ids = Vec::new();
+        hot_collect_bound_idents(pat, &mut ids);
+        for id in ids {
+            self.mark_tainted(id, kind);
+        }
+    }
+    /// Taint the precise sub-places of a container literal bound at `root`
+    /// (`root.field` / `root.index`), recursing into nested containers and
+    /// tainting each leaf with ITS OWN provenance; an untainted leaf taints
+    /// nothing.
+    fn taint_container_places(&mut self, root: &str, init: &syn::Expr) {
+        match hot_peel_expr(init) {
+            syn::Expr::Struct(s) => {
+                for fv in &s.fields {
+                    let seg = match &fv.member {
+                        syn::Member::Named(id) => id.to_string(),
+                        syn::Member::Unnamed(idx) => idx.index.to_string(),
+                    };
+                    let place = format!("{root}.{seg}");
+                    self.taint_place_recursive(&place, &fv.expr);
+                }
+            }
+            syn::Expr::Tuple(t) => {
+                for (i, el) in t.elems.iter().enumerate() {
+                    let place = format!("{root}.{i}");
+                    self.taint_place_recursive(&place, el);
+                }
+            }
+            syn::Expr::Array(a) => {
+                for (i, el) in a.elems.iter().enumerate() {
+                    let place = format!("{root}.{i}");
+                    self.taint_place_recursive(&place, el);
+                }
+            }
+            syn::Expr::Macro(m) if m.mac.path.is_ident("vec") => {
+                for (i, el) in hot_macro_arg_exprs(&m.mac.tokens).iter().enumerate() {
+                    let place = format!("{root}.{i}");
+                    self.taint_place_recursive(&place, el);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// Taint one container element at `place`: descend precisely into a nested
+    /// container, else taint the place with the leaf's own provenance when the
+    /// leaf is materialized (an untainted leaf taints nothing).
+    fn taint_place_recursive(&mut self, place: &str, expr: &syn::Expr) {
+        let peeled = hot_peel_expr(expr);
+        if hot_is_decomposable_container(peeled) {
+            self.taint_container_places(place, peeled);
+        } else if let Some(k) = self.expr_taint_kind(expr) {
+            self.mark_tainted(place.to_string(), k);
+        }
     }
     /// The provenance of a block's tail expression.
     fn block_tail_taint_kind(&self, block: &syn::Block) -> Option<HotTaintKind> {
@@ -13345,7 +13809,7 @@ impl<'a> HotMaterializeScanner<'a> {
         }
         for input in &sig.inputs {
             if let syn::FnArg::Typed(pt) = input {
-                if hot_type_tokens_name_typeexpr(&pt.ty.to_token_stream(), self.typeexpr_aliases) {
+                if hot_type_tokens_name_typeexpr(&pt.ty.to_token_stream(), self.aliases.aliases()) {
                     let mut ids = Vec::new();
                     hot_collect_bound_idents(&pt.pat, &mut ids);
                     for id in ids {
@@ -13382,6 +13846,21 @@ impl<'a> HotMaterializeScanner<'a> {
 }
 
 impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
+    fn visit_file(&mut self, f: &'ast syn::File) {
+        let uses = hot_direct_uses_in_items(&f.items);
+        self.aliases.push_uses(&uses);
+        syn::visit::visit_file(self, f);
+        self.aliases.pop();
+    }
+    fn visit_block(&mut self, b: &'ast syn::Block) {
+        // Each block opens a lexical alias scope: its DIRECT `use` items (a
+        // fn-body / nested-block `use …::TypeExpr as TE;`) are visible only within
+        // it, never in a sibling scope.
+        let uses = hot_direct_uses_in_stmts(&b.stmts);
+        self.aliases.push_uses(&uses);
+        syn::visit::visit_block(self, b);
+        self.aliases.pop();
+    }
     fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
         if hot_attrs_are_excluded(&f.attrs) {
             return;
@@ -13405,7 +13884,16 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
             return;
         }
         self.mod_path.push(m.ident.to_string());
+        {
+            let uses = m
+                .content
+                .as_ref()
+                .map(|(_, items)| hot_direct_uses_in_items(items))
+                .unwrap_or_default();
+            self.aliases.push_uses(&uses);
+        }
         syn::visit::visit_item_mod(self, m);
+        self.aliases.pop();
         self.mod_path.pop();
     }
     fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
@@ -13444,18 +13932,14 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
             if init_kind.is_some()
                 && hot_pat_has_typeexpr_variant(
                     &l.pat,
-                    self.typeexpr_aliases,
-                    self.typeexpr_variants,
+                    self.aliases.aliases(),
+                    self.aliases.variants(),
                 )
             {
                 self.record_decide(&init.expr, "let TypeExpr::… of materialized value");
             }
             if let Some(kind) = init_kind {
-                let mut ids = Vec::new();
-                hot_collect_bound_idents(&l.pat, &mut ids);
-                for id in ids {
-                    self.mark_tainted(id, kind);
-                }
+                self.taint_binding(&l.pat, &init.expr, kind);
             }
         }
         syn::visit::visit_local(self, l);
@@ -13463,16 +13947,16 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
     fn visit_expr_let(&mut self, el: &'ast syn::ExprLet) {
         let kind = self.expr_taint_kind(&el.expr);
         if kind.is_some()
-            && hot_pat_has_typeexpr_variant(&el.pat, self.typeexpr_aliases, self.typeexpr_variants)
+            && hot_pat_has_typeexpr_variant(
+                &el.pat,
+                self.aliases.aliases(),
+                self.aliases.variants(),
+            )
         {
             self.record_decide(&el.expr, "if-let TypeExpr::… of materialized value");
         }
         if let Some(kind) = kind {
-            let mut ids = Vec::new();
-            hot_collect_bound_idents(&el.pat, &mut ids);
-            for id in ids {
-                self.mark_tainted(id, kind);
-            }
+            self.taint_binding(&el.pat, &el.expr, kind);
         }
         syn::visit::visit_expr_let(self, el);
     }
@@ -13486,7 +13970,14 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
         if let Some(kind) = self.expr_taint_kind(&a.right) {
             if let syn::Expr::Path(p) = &*a.left {
                 if p.path.segments.len() == 1 {
-                    self.mark_tainted(p.path.segments[0].ident.to_string(), kind);
+                    let root = p.path.segments[0].ident.to_string();
+                    // A container-literal RHS taints precise sub-places (`x.0`);
+                    // any other RHS taints the whole reassigned local.
+                    if hot_is_decomposable_container(hot_peel_expr(&a.right)) {
+                        self.taint_container_places(&root, &a.right);
+                    } else {
+                        self.mark_tainted(root, kind);
+                    }
                 }
             }
         }
@@ -13494,7 +13985,7 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
     }
     fn visit_expr_match(&mut self, em: &'ast syn::ExprMatch) {
         if em.arms.iter().any(|a| {
-            hot_pat_has_typeexpr_variant(&a.pat, self.typeexpr_aliases, self.typeexpr_variants)
+            hot_pat_has_typeexpr_variant(&a.pat, self.aliases.aliases(), self.aliases.variants())
         }) {
             self.record_decide(&em.expr, "match TypeExpr::… of materialized value");
         }
@@ -13670,8 +14161,8 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
         if mac.path.is_ident("matches")
             && hot_token_stream_has_typeexpr(
                 &mac.tokens,
-                self.typeexpr_aliases,
-                self.typeexpr_variants,
+                self.aliases.aliases(),
+                self.aliases.variants(),
             )
         {
             if let Some(scrut) = hot_matches_scrutinee_expr(&mac.tokens) {
@@ -13704,7 +14195,6 @@ fn hot_materialize_violations_in_src(
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
-    let maps = collect_use_alias_maps(&file);
     let mut scanner = HotMaterializeScanner {
         scan_rel: rel,
         mod_path: hot_mod_path_from_rel(rel),
@@ -13714,8 +14204,7 @@ fn hot_materialize_violations_in_src(
         index,
         returns_mat,
         returns_typeexpr,
-        typeexpr_aliases: &maps.typeexpr_aliases,
-        typeexpr_variants: &maps.typeexpr_variant_idents,
+        aliases: LexicalAliasStack::new(),
         self_policing: false,
         per_fn: BTreeMap::new(),
     };
@@ -13813,7 +14302,6 @@ fn hot_self_policing_summaries(
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
-    let maps = collect_use_alias_maps(&file);
     let mut scanner = HotMaterializeScanner {
         scan_rel: rel,
         mod_path: hot_mod_path_from_rel(rel),
@@ -13823,8 +14311,7 @@ fn hot_self_policing_summaries(
         index,
         returns_mat,
         returns_typeexpr,
-        typeexpr_aliases: &maps.typeexpr_aliases,
-        typeexpr_variants: &maps.typeexpr_variant_idents,
+        aliases: LexicalAliasStack::new(),
         self_policing: true,
         per_fn: BTreeMap::new(),
     };
@@ -13918,6 +14405,106 @@ fn hot_path_never_calls_materialize_type_expr() {
     );
 }
 
+/// Counts production fn DEFINITIONS named `target` (free fns, impl methods,
+/// nested fns, provided trait-default bodies — every definition form the fence
+/// indexes), skipping `#[cfg(test)]` / oracle-gen items. The "located" notion for
+/// allowlist accounting is fn EXISTENCE, INDEPENDENT of whether the self-policing
+/// scan produced a signal: a pure terminal that neither mints nor decides nor
+/// takes a `TypeExpr` param (e.g. `model_prop_fields`, which only re-anchors
+/// already-analyzed prop fields) produces no self-policing summary yet genuinely
+/// exists and must count as located.
+struct HotFnDefCounter {
+    target: String,
+    count: usize,
+}
+impl<'ast> syn::visit::Visit<'ast> for HotFnDefCounter {
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        if f.sig.ident == self.target {
+            self.count += 1;
+        }
+        syn::visit::visit_item_fn(self, f);
+    }
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        if f.sig.ident == self.target {
+            self.count += 1;
+        }
+        syn::visit::visit_impl_item_fn(self, f);
+    }
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        if hot_attrs_are_excluded(&m.attrs) {
+            return;
+        }
+        syn::visit::visit_item_mod(self, m);
+    }
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        if hot_attrs_are_excluded(&i.attrs) {
+            return;
+        }
+        syn::visit::visit_item_impl(self, i);
+    }
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        if hot_attrs_are_excluded(&f.attrs) {
+            return;
+        }
+        if f.default.is_some() && f.sig.ident == self.target {
+            self.count += 1;
+        }
+        syn::visit::visit_trait_item_fn(self, f);
+    }
+}
+
+/// Count production fn definitions named `fname` in one parsed file.
+fn hot_count_fn_defs_in_file(file: &syn::File, fname: &str) -> usize {
+    let mut c = HotFnDefCounter {
+        target: fname.to_string(),
+        count: 0,
+    };
+    syn::visit::Visit::visit_file(&mut c, file);
+    c.count
+}
+
+/// Per-entry allowlist accounting for [`HOT_TERMINAL_SINKS`]: every
+/// `(file_suffix, fn_name)` tuple must be listed exactly once AND located in at
+/// least one production fn. Returns the offending tuples by name — a DUPLICATE
+/// allowlist tuple (the same pair listed more than once) and a MISSING / stale
+/// entry (located in zero production fns) each report independently. Empty result
+/// == accounted. This replaces the prior aggregate `audited >= len` check, which
+/// passed even when one entry located zero fns and another located two (the total
+/// still cleared the bar); per-entry accounting fails the zero-located entry by
+/// name. The located count is `>= 1` (NOT `== 1`): a single fn name legitimately
+/// has several production definitions (the sealed `into_type_expr` / `type_expr`
+/// carrier chain), so "located" means present, while "exactly once" governs the
+/// allowlist tuple's own listing.
+fn hot_terminal_allowlist_accounting_failures(
+    entries: &[(&str, &str)],
+    located: &[usize],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (i, (suf, fname)) in entries.iter().enumerate() {
+        if entries[..i].contains(&(*suf, *fname)) {
+            failures.push(format!(
+                "DUPLICATE allowlist entry `{suf}::{fname}` (listed more than once in \
+                 HOT_TERMINAL_SINKS — each terminal-sink tuple must appear exactly once)"
+            ));
+        }
+    }
+    for (i, (suf, fname)) in entries.iter().enumerate() {
+        if located.get(i).copied().unwrap_or(0) == 0 {
+            failures.push(format!(
+                "MISSING terminal sink `{suf}::{fname}` — located in ZERO production fns (a stale \
+                 allowlist entry whose fn was renamed/removed, or a wrong file suffix)"
+            ));
+        }
+    }
+    failures
+}
+
 /// Allowlist SELF-POLICING: every `HOT_TERMINAL_SINKS` entry must be a genuine
 /// pure one-shot publication sink, not a mislabeled materialize-then-decide site.
 ///
@@ -13943,8 +14530,20 @@ fn hot_terminal_allowlist_entries_are_pure_one_shot_sinks() {
     let returns_mat = hot_returns_materialized(&index);
     let returns_typeexpr = hot_returns_typeexpr_bare(&index);
 
+    // Per-entry "located" = the terminal-sink fn DEFINITION exists in production
+    // source (counted over the parsed files), INDEPENDENT of whether the
+    // self-policing scan produced a summary for it.
+    let mut located: Vec<usize> = vec![0; HOT_TERMINAL_SINKS.len()];
+    for (idx, (suf, fname)) in HOT_TERMINAL_SINKS.iter().enumerate() {
+        for (rel, file) in &parsed {
+            if !rel.ends_with(suf) {
+                continue;
+            }
+            located[idx] += hot_count_fn_defs_in_file(file, fname);
+        }
+    }
+
     let mut failures: Vec<String> = Vec::new();
-    let mut audited = 0usize;
     for (suf, fname) in HOT_TERMINAL_SINKS {
         for (rel, src) in production_src_files() {
             if !rel.ends_with(suf) {
@@ -13956,7 +14555,6 @@ fn hot_terminal_allowlist_entries_are_pure_one_shot_sinks() {
                 if &summary.innermost != fname {
                     continue;
                 }
-                audited += 1;
                 if summary.fails() {
                     failures.push(format!(
                         "{suf}::{fname} decides on a MATERIALIZED value (a fresh mint, or a seeded \
@@ -13969,11 +14567,16 @@ fn hot_terminal_allowlist_entries_are_pure_one_shot_sinks() {
             }
         }
     }
+    // Per-entry accounting: each allowlist tuple listed exactly once AND located
+    // in >= 1 production fn. (The prior aggregate `audited >= len` passed even
+    // when one entry located zero and a sibling located two.)
+    let accounting = hot_terminal_allowlist_accounting_failures(HOT_TERMINAL_SINKS, &located);
     assert!(
-        audited >= HOT_TERMINAL_SINKS.len(),
-        "self-policing must locate every terminal sink fn in production source; \
-         audited {audited} of {} entries",
-        HOT_TERMINAL_SINKS.len()
+        accounting.is_empty(),
+        "TERMINAL ALLOWLIST ACCOUNTING: {} entry(ies) are unaccounted (duplicate listing or \
+         located in zero production fns):\n{}",
+        accounting.len(),
+        accounting.join("\n")
     );
     assert!(
         failures.is_empty(),
@@ -13982,6 +14585,51 @@ fn hot_terminal_allowlist_entries_are_pure_one_shot_sinks() {
          allowlisted as a pure terminal:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+/// Discrimination self-test for the W1 per-entry allowlist accounting: a MISSING
+/// entry (located in zero production fns) fails EVEN WHEN a sibling over-locates
+/// so the aggregate total still clears `>= len` (the exact gap the prior
+/// `audited >= len` check left open); a DUPLICATE allowlist tuple fails; a clean
+/// list (each tuple once, each located `>= 1`, a legitimate multi-definition
+/// sibling located twice) is accounted.
+#[test]
+fn hot_terminal_allowlist_accounting_is_per_entry_not_aggregate() {
+    // (W1-a) DISCRIMINATING: one entry located ZERO, a sibling located TWO. The
+    //        aggregate (0 + 2 = 2) >= 2 entries would PASS the old check; per-entry
+    //        accounting FAILS the zero-located entry by name.
+    let missing =
+        hot_terminal_allowlist_accounting_failures(&[("a.rs", "foo"), ("b.rs", "bar")], &[0, 2]);
+    assert!(
+        missing
+            .iter()
+            .any(|m| m.contains("MISSING") && m.contains("a.rs::foo")),
+        "self-test (W1-a): a zero-located entry MUST fail per-entry accounting even when the \
+         aggregate total clears `>= len` (an over-locating sibling); got: {missing:?}"
+    );
+    assert!(
+        !missing.iter().any(|m| m.contains("b.rs::bar")),
+        "self-test (W1-a): a sibling located TWICE (a legitimate multi-definition fn) must NOT \
+         be reported — located means `>= 1`, not `== 1`; got: {missing:?}"
+    );
+
+    // (W1-b) DUPLICATE allowlist tuple fails by name.
+    let dup =
+        hot_terminal_allowlist_accounting_failures(&[("a.rs", "foo"), ("a.rs", "foo")], &[1, 1]);
+    assert!(
+        dup.iter()
+            .any(|m| m.contains("DUPLICATE") && m.contains("a.rs::foo")),
+        "self-test (W1-b): a duplicate allowlist tuple MUST fail by name; got: {dup:?}"
+    );
+
+    // (W1-c) A clean list (each tuple once, each located `>= 1`) is accounted.
+    let clean =
+        hot_terminal_allowlist_accounting_failures(&[("a.rs", "foo"), ("b.rs", "bar")], &[1, 2]);
+    assert!(
+        clean.is_empty(),
+        "self-test (W1-c): a list with every tuple listed once and located `>= 1` must be \
+         accounted (empty); got: {clean:?}"
     );
 }
 
@@ -14489,6 +15137,302 @@ fn hot_materialize_fence_self_test_closes_evasions() {
         !honest_sig.lowered_symbolic_params.is_empty() && !honest_sig.fails(),
         "self-test (U2): a symbolic-input terminal that LOWERS its `TypeExpr` param is exempt \
          (its input-shape guard is publication classification, not a materialized-value decide)"
+    );
+}
+
+/// Discrimination self-test for FP1 FIELD / INDEX / PATH-PRECISE taint: a
+/// materialized value placed in ONE field / element of an aggregate taints only
+/// THAT projection, not the whole aggregate, so a SIBLING-projection decide stays
+/// GREEN while the MATERIALIZED-projection decide still FIRES. Covers both the
+/// bound form (`let dto = Dto { ty: mat, .. }; dto.name`) and the direct literal
+/// projection (`Dto { ty: mat, .. }.name` / `(mat, c).1`), for struct fields and
+/// tuple indices. The GREEN assertions are the discriminating ones: pre-fix the
+/// whole-aggregate taint fired on the sibling.
+#[test]
+fn hot_materialize_fence_field_index_precise_taint() {
+    let scan = |src: &str| hot_scan_snippet("foo/route_keys.rs", src);
+    // Shared minting helper: returns a materialized `TypeExpr` (return-tainted),
+    // so the consumer fns below receive a materialized value WITHOUT minting
+    // themselves (a consumer that minted would be flagged by the location rail
+    // regardless, defeating the green assertions).
+    let helper = r#"
+        fn mat_step(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+        }
+    "#;
+
+    // (FP1-a) BOUND STRUCT — sibling field decide STAYS GREEN; materialized field
+    //         path decide FIRES.
+    let bound_struct = format!(
+        "{helper}\n\
+         fn sibling_green(x: &TypeExpr) -> bool {{\n\
+            let dto = Dto {{ ty: mat_step(x), name: String::new() }};\n\
+            dto.name.is_empty()\n\
+         }}\n\
+         fn materialized_field_fires(x: &TypeExpr) {{\n\
+            let dto = Dto {{ ty: mat_step(x), name: String::new() }};\n\
+            let _hit = matches!(dto.ty, TypeExpr::Object(_));\n\
+         }}\n"
+    );
+    let v = scan(&bound_struct);
+    assert!(
+        !v.iter().any(|m| m.contains("::sibling_green ")),
+        "self-test (FP1-a): `let dto = Dto {{ ty: mat, name }}; dto.name.is_empty()` decides on a \
+         SIBLING field (not materialized) and MUST STAY GREEN (field-precise taint); got: {v:?}"
+    );
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::materialized_field_fires ") && m.contains("decide")),
+        "self-test (FP1-a): a `matches!(dto.ty, TypeExpr::…)` decide on the MATERIALIZED field path \
+         MUST fire; got: {v:?}"
+    );
+
+    // (FP1-b) BOUND TUPLE — sibling index decide STAYS GREEN; materialized index
+    //         decide FIRES.
+    let bound_tuple = format!(
+        "{helper}\n\
+         fn tuple_sibling_green(x: &TypeExpr) -> bool {{\n\
+            let t = (mat_step(x), 0usize);\n\
+            t.1 == 0\n\
+         }}\n\
+         fn tuple_materialized_fires(x: &TypeExpr) {{\n\
+            let t = (mat_step(x), 0usize);\n\
+            let _hit = matches!(t.0, TypeExpr::Object(_));\n\
+         }}\n"
+    );
+    let v = scan(&bound_tuple);
+    assert!(
+        !v.iter().any(|m| m.contains("::tuple_sibling_green ")),
+        "self-test (FP1-b): `let t = (mat, count); t.1 == 0` decides on a SIBLING index (not \
+         materialized) and MUST STAY GREEN; got: {v:?}"
+    );
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::tuple_materialized_fires ") && m.contains("decide")),
+        "self-test (FP1-b): a `matches!(t.0, TypeExpr::…)` decide on the MATERIALIZED tuple index \
+         MUST fire; got: {v:?}"
+    );
+
+    // (FP1-c) DIRECT LITERAL PROJECTION (no binding) — sibling projection STAYS
+    //         GREEN; materialized projection FIRES.
+    let direct = format!(
+        "{helper}\n\
+         fn direct_sibling_green(x: &TypeExpr) -> bool {{\n\
+            Dto {{ ty: mat_step(x), name: String::new() }}.name.is_empty()\n\
+         }}\n\
+         fn direct_tuple_sibling_green(x: &TypeExpr) -> bool {{\n\
+            (mat_step(x), 0usize).1 == 0\n\
+         }}\n\
+         fn direct_materialized_fires(x: &TypeExpr) {{\n\
+            let _hit = matches!((mat_step(x), 0usize).0, TypeExpr::Object(_));\n\
+         }}\n"
+    );
+    let v = scan(&direct);
+    assert!(
+        !v.iter().any(|m| m.contains("::direct_sibling_green ")),
+        "self-test (FP1-c): `Dto {{ ty: mat, name }}.name.is_empty()` (direct sibling projection) \
+         MUST STAY GREEN; got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::direct_tuple_sibling_green ")),
+        "self-test (FP1-c): `(mat, count).1 == 0` (direct sibling index) MUST STAY GREEN; got: {v:?}"
+    );
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::direct_materialized_fires ") && m.contains("decide")),
+        "self-test (FP1-c): a `matches!((mat, count).0, TypeExpr::…)` decide on the MATERIALIZED \
+         direct index MUST fire; got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for FP2 QUALIFIER-FAITHFUL callee identity: a written
+/// concrete qualifier matches a candidate by EXACT normalized-suffix (so
+/// `bar::helper()` does NOT resolve to indexed `foobar::helper` — no substring
+/// match), a written qualifier that matches nothing resolves to nothing (so a
+/// benign `TypeInfoGraphRequest::inner` does not fall open to the unrelated
+/// minting `…::inner`), a NESTED minting `inner` is unreachable from an unrelated
+/// scope (so a cross-module `recv.inner()` is not tainted), and a genuinely-local
+/// minter call STILL taints. The GREEN assertions are the discriminating ones:
+/// pre-fix the `contains` substring match + fail-open-to-bare-proximity fired.
+#[test]
+fn hot_materialize_fence_qualifier_faithful_callee_identity() {
+    let scan = |src: &str| hot_scan_snippet("foo/route_keys.rs", src);
+
+    // (FP2-a) `bar::helper()` must NOT resolve to indexed `foobar::helper`
+    //         (`foobar`.contains("bar") was the bug); a SAME-module bare
+    //         `helper(x)` call to the local minter STILL taints.
+    let module_qualified = r#"
+        mod foobar {
+            pub fn helper(x: &TypeExpr) -> TypeExpr {
+                let cap = Cap::new();
+                cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+            }
+            fn local_consumer(x: &TypeExpr) {
+                let v = helper(x);
+                let _hit = matches!(v, TypeExpr::Object(_));
+            }
+        }
+        mod other {
+            fn cross_consumer(x: &TypeExpr) {
+                let v = bar::helper(x);
+                let _hit = matches!(v, TypeExpr::Object(_));
+            }
+        }
+    "#;
+    let v = scan(module_qualified);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("foobar::local_consumer ") && m.contains("decide")),
+        "self-test (FP2-a): a SAME-module bare `helper(x)` call to the local minter MUST taint \
+         (genuinely-local minter call still taints); got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::cross_consumer ")),
+        "self-test (FP2-a): `bar::helper(x)` must NOT resolve to `foobar::helper` (exact suffix, \
+         not `contains`) so `cross_consumer` STAYS GREEN; got: {v:?}"
+    );
+
+    // (FP2-b) The `inner` collision: a NESTED minting `inner` plus a cross-module
+    //         `recv.inner()` (method) and `TypeInfoGraphRequest::inner(..)`
+    //         (qualified) — both consumers STAY GREEN; the nested minter FIRES.
+    let inner_collision = r#"
+        fn materialize_component_meta_registry_structural_expr(x: &TypeExpr) -> TypeExpr {
+            fn inner(x: &TypeExpr) -> TypeExpr {
+                let cap = Cap::new();
+                cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+            }
+            inner(x)
+        }
+        mod unrelated {
+            fn method_consumer(recv: &Recv) {
+                let v = recv.inner();
+                let _hit = matches!(v, TypeExpr::Object(_));
+            }
+            fn assoc_consumer(req: &Req) {
+                let v = TypeInfoGraphRequest::inner(req);
+                let _hit = matches!(v, TypeExpr::Object(_));
+            }
+        }
+    "#;
+    let v = scan(inner_collision);
+    assert!(
+        v.iter().any(|m| {
+            m.contains("materialize_component_meta_registry_structural_expr::inner ")
+                && m.contains("materialize")
+        }),
+        "self-test (FP2-b): the NESTED minting `…::inner` MUST fire at its own mint; got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::method_consumer ")),
+        "self-test (FP2-b): a cross-module `recv.inner()` must NOT be tainted by the unreachable \
+         nested minting `…::inner` (the `inner` FP is closed) — `method_consumer` STAYS GREEN; \
+         got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::assoc_consumer ")),
+        "self-test (FP2-b): a benign `TypeInfoGraphRequest::inner(..)` (qualifier matches no \
+         candidate) must NOT fall open to the minting `…::inner` — `assoc_consumer` STAYS GREEN; \
+         got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for FP3 LEXICAL alias scoping (shared by both
+/// fences): a block-local `use …::TypeExpr as TE` classifies the aliased variant
+/// ONLY within its scope (a sibling scope is NOT classified), an inner alias
+/// SHADOWS an outer one, and the Unknown fence no longer FPs on a scoped alias.
+/// The GREEN assertions are the discriminating ones: pre-fix the file-global
+/// alias collection leaked the alias to sibling scopes.
+#[test]
+fn hot_materialize_fence_lexical_alias_scoping() {
+    let scan = |src: &str| hot_scan_snippet("foo/route_keys.rs", src);
+
+    // (FP3-a) HOT FENCE — an in-scope block-local alias classifies; a SIBLING
+    //         fn's `TE::…` (TE not in scope) STAYS GREEN.
+    let block_local = r#"
+        fn mat_step(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+        }
+        fn has_local_alias(x: &TypeExpr) {
+            use real::TypeExpr as TE;
+            let raised = mat_step(x);
+            let _hit = matches!(raised, TE::Object(_));
+        }
+        fn sibling(x: &TypeExpr) {
+            let raised = mat_step(x);
+            let _hit = matches!(raised, TE::Object(_));
+        }
+    "#;
+    let v = scan(block_local);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::has_local_alias ") && m.contains("decide")),
+        "self-test (FP3-a): an in-scope block-local `use …::TypeExpr as TE; matches!(raised, \
+         TE::…)` decide MUST fire; got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::sibling ")),
+        "self-test (FP3-a): a SIBLING fn's `matches!(raised, TE::…)` where `TE` is NOT in scope \
+         MUST STAY GREEN (a block-local alias does not leak to a sibling); got: {v:?}"
+    );
+
+    // (FP3-b) SHADOWING — an inner `use other::Thing as TE` shadows the outer
+    //         `use …::TypeExpr as TE`; the inner `matches!(raised, TE::…)` (TE =
+    //         Thing) is NOT classified and the fn STAYS GREEN.
+    let shadowing = r#"
+        fn mat_step(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+        }
+        fn only_inner_shadowed(x: &TypeExpr) {
+            use real::TypeExpr as TE;
+            {
+                use other::Thing as TE;
+                let raised = mat_step(x);
+                let _hit = matches!(raised, TE::Object(_));
+            }
+        }
+    "#;
+    let v = scan(shadowing);
+    assert!(
+        !v.iter().any(|m| m.contains("::only_inner_shadowed ")),
+        "self-test (FP3-b): an inner `use other::Thing as TE` MUST shadow the outer \
+         `use …::TypeExpr as TE`, so the inner `matches!(raised, TE::…)` is not classified and \
+         the fn STAYS GREEN; got: {v:?}"
+    );
+
+    // (FP3-c) UNKNOWN FENCE — a block-local `TypeExpr` alias in one fn must NOT
+    //         make a SIBLING fn's `TE::Unknown { raw: <sentinel> }` an Unknown
+    //         construction.
+    let unknown_scoped = r#"
+        fn owner_uses_alias() {
+            use real::TypeExpr as TE;
+            let _ = TE::Object(());
+        }
+        fn sibling_unknown() {
+            let _ = TE::Unknown { raw: "semanticMiss".to_string() };
+        }
+    "#;
+    assert!(
+        unknown_sentinel_constructions_in_src(unknown_scoped).is_empty(),
+        "self-test (FP3-c): a block-local `TypeExpr` alias in one fn must NOT make a SIBLING fn's \
+         `TE::Unknown {{ raw: <sentinel> }}` an Unknown construction (no file-global leak); got: {:?}",
+        unknown_sentinel_constructions_in_src(unknown_scoped)
+    );
+    // Positive control: an IN-SCOPE aliased `TE::Unknown { raw: <sentinel> }` DOES
+    // fire — the lexical alias is honoured within its own scope (so the green
+    // assertions above are not vacuous).
+    let unknown_in_scope = r#"
+        fn fabricate() {
+            use real::TypeExpr as TE;
+            let _ = TE::Unknown { raw: "semanticMiss".to_string() };
+        }
+    "#;
+    assert!(
+        !unknown_sentinel_constructions_in_src(unknown_in_scope).is_empty(),
+        "self-test (FP3-c2): an IN-SCOPE block-local `use …::TypeExpr as TE; TE::Unknown \
+         {{ raw: <sentinel> }}` MUST fire (the lexical alias is honoured within its scope)"
     );
 }
 
@@ -15137,17 +16081,20 @@ fn unknown_raw_expr_is_sentinel(raw_expr: &syn::Expr) -> bool {
 
 /// Collects `TypeExpr::Unknown { raw: <sentinel> }` constructions in production
 /// fns (skipping `#[cfg(test)]` fns/mods), recognising aliased / bare-variant
-/// forms and field-shorthand raw-taint. The alias maps are the SHARED
-/// [`UseAliasMaps`] collected RECURSIVELY over the whole file (top-level AND
-/// fn / block-local `use` items), so a function-local
-/// `use …::TypeExpr as TE; TE::Unknown { … }` is caught.
-struct UnknownSentinelScanner<'a> {
+/// forms and field-shorthand raw-taint. Aliases resolve through the LEXICALLY
+/// scoped [`LexicalAliasStack`] (frames per file / module / fn / block), so a
+/// function-local `use …::TypeExpr as TE; TE::Unknown { … }` is caught WITHIN its
+/// scope and a block-local alias never FPs on a sibling.
+struct UnknownSentinelScanner {
     fn_stack: Vec<String>,
     raw_tainted_stack: Vec<std::collections::HashSet<String>>,
-    maps: &'a UseAliasMaps,
+    /// Lexically-scoped alias stack (the SAME mechanism as the hot fence), so a
+    /// block-local `use …::TypeExpr as TE;` classifies `TE::Unknown` ONLY within
+    /// the scope its `use` is visible and never FPs on a sibling scope.
+    aliases: LexicalAliasStack,
     hits: Vec<(String, String)>,
 }
-impl<'a> UnknownSentinelScanner<'a> {
+impl UnknownSentinelScanner {
     fn ident(&self) -> String {
         if self.fn_stack.is_empty() {
             "<file-scope>".to_string()
@@ -15173,13 +16120,25 @@ impl<'a> UnknownSentinelScanner<'a> {
         let Some(last) = segs.last() else {
             return false;
         };
-        if last == "Unknown" && segs.iter().any(|s| self.maps.typeexpr_aliases.contains(s)) {
+        if last == "Unknown" && segs.iter().any(|s| self.aliases.aliases().contains(s)) {
             return true;
         }
-        segs.len() == 1 && self.maps.unknown_variant_idents.contains(&segs[0])
+        segs.len() == 1 && self.aliases.unknown().contains(&segs[0])
     }
 }
-impl<'a, 'ast> syn::visit::Visit<'ast> for UnknownSentinelScanner<'a> {
+impl<'ast> syn::visit::Visit<'ast> for UnknownSentinelScanner {
+    fn visit_file(&mut self, f: &'ast syn::File) {
+        let uses = hot_direct_uses_in_items(&f.items);
+        self.aliases.push_uses(&uses);
+        syn::visit::visit_file(self, f);
+        self.aliases.pop();
+    }
+    fn visit_block(&mut self, b: &'ast syn::Block) {
+        let uses = hot_direct_uses_in_stmts(&b.stmts);
+        self.aliases.push_uses(&uses);
+        syn::visit::visit_block(self, b);
+        self.aliases.pop();
+    }
     fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
         if attrs_are_test_gated(&f.attrs) {
             return;
@@ -15206,7 +16165,16 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for UnknownSentinelScanner<'a> {
         if attrs_are_test_gated(&m.attrs) {
             return;
         }
+        {
+            let uses = m
+                .content
+                .as_ref()
+                .map(|(_, items)| hot_direct_uses_in_items(items))
+                .unwrap_or_default();
+            self.aliases.push_uses(&uses);
+        }
         syn::visit::visit_item_mod(self, m);
+        self.aliases.pop();
     }
     fn visit_local(&mut self, l: &'ast syn::Local) {
         if let Some(init) = &l.init {
@@ -15261,11 +16229,10 @@ fn unknown_sentinel_constructions_in_src(src: &str) -> Vec<(String, String)> {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
-    let maps = collect_use_alias_maps(&file);
     let mut scanner = UnknownSentinelScanner {
         fn_stack: Vec::new(),
         raw_tainted_stack: Vec::new(),
-        maps: &maps,
+        aliases: LexicalAliasStack::new(),
         hits: Vec::new(),
     };
     syn::visit::Visit::visit_file(&mut scanner, &file);
