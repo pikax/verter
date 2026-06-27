@@ -107,7 +107,8 @@ pub(crate) use dispatch_helpers::{
 pub(crate) use dispatch_helpers::project_route_surface_expr_via_host_threaded;
 pub(crate) use graph_predicates::{
     build_keys_union_node, component_meta_ref_resolves_to_package_node,
-    extract_route_root_identity_node, ref_root_reaches_transitive_cycle_node,
+    extract_route_root_identity_node, node_package_backed_object_like_root_with_fence,
+    node_root_reaches_transitive_cycle_with_fence, ref_root_reaches_transitive_cycle_node,
 };
 // / clippy cleanup — these graph-native predicates
 // have no non-test consumers in the landed tree but are exercised by

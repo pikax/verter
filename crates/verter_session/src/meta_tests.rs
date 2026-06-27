@@ -21668,6 +21668,38 @@ fn output_sink_conversions_decide_in_node_domain_not_on_materialized_type_expr()
         "project_model must decide reducibility via `classify_node_reduction_gates` (node \
          domain); calls seen: {project_model:?}"
     );
+
+    // ── `member_shape_peek_or_compute` — package-backed / cycle / reducibility
+    //    gates run on the member-value NODE; the carrier seals through the
+    //    node→carrier terminal, never via `shell_raise_to_type_expr` + a
+    //    `TypeExpr` gate predicate.
+    let member_shape = output_sink_calls_in(OUTPUT_SINK_SRC, "member_shape_peek_or_compute");
+    for forbidden in [
+        "shell_raise_to_type_expr",
+        "seal_type_expr",
+        "type_expr_has_package_backed_object_like_root_with_fence",
+        "lowered_root_reaches_transitive_cycle_with_fence",
+        "type_expr_contains_reducible_operator",
+        "peek_member_shape_known",
+    ] {
+        assert!(
+            !member_shape.contains(forbidden),
+            "member_shape_peek_or_compute must NOT call `{forbidden}` (materialize-then-decide on \
+             the raised TypeExpr); calls seen: {member_shape:?}"
+        );
+    }
+    for required in [
+        "node_package_backed_object_like_root_with_fence",
+        "classify_node_reduction_gates",
+        "node_root_reaches_transitive_cycle_with_fence",
+        "raise_node_to_sealed_carrier",
+    ] {
+        assert!(
+            member_shape.contains(required),
+            "member_shape_peek_or_compute must call `{required}` (node-domain gate / terminal \
+             seal); calls seen: {member_shape:?}"
+        );
+    }
 }
 
 /// End-to-end discriminator for the dispatch-bridge `ProjectGeneration`

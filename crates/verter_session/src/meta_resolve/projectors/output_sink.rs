@@ -104,6 +104,33 @@ fn seal_type_expr(dispatch: &ProjectSemanticDispatch<'_>, type_expr: TypeExpr) -
     wrap_output_type_expr(&cap, type_expr)
 }
 
+/// Raw raise of a graph `node` into a SEALED [`MaterializedOutputTypeExpr`]
+/// carrier — the node-domain seal the publication gates use after their
+/// node-fact decisions have been made. Mints the cap, materialises the node into
+/// the sealed `OutputTypeExpr` payload (NO `into_type_expr` — never produces a
+/// bare [`TypeExpr`]), and assembles the carrier with the supplied
+/// `dep_signature`. A raise miss seals an `Unknown` shell so the per-member slot
+/// still publishes a carrier.
+///
+/// TERMINAL one-shot sink: materialises ONCE and builds the carrier, making NO
+/// decision on the materialised value. The node-fact gate decisions happen on the
+/// `node` BEFORE this is called, so the gates never touch a materialised
+/// `TypeExpr`. The carrier `node_id` is the producing `node`, so a downstream
+/// consumer reads node facts off it (e.g. the root-sentinel gate) instead of
+/// re-materialising.
+fn raise_node_to_sealed_carrier(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    dep_signature: crate::semantic_query::DepSignature,
+) -> MaterializedOutputTypeExpr {
+    let cap = MetaResolveProjectorsOutputCap::new(dispatch);
+    let sealed = match cap.materialize_output_type_expr(node) {
+        Some(sealed) => sealed,
+        None => wrap_output_type_expr(&cap, TypeExpr::Unknown { raw: String::new() }),
+    };
+    MaterializedOutputTypeExpr::from_parts(Some(node), sealed, dep_signature, false)
+}
+
 /// Read the inner [`TypeExpr`] out of a sealed [`MaterializedOutputTypeExpr`],
 /// consuming it, through the projectors output capability. Mints the cap over
 /// the supplied dispatch and unwraps by value. The published member `TypeExpr`
@@ -218,194 +245,92 @@ fn member_shape_peek_or_compute(
         return cached;
     }
 
-    // (2) Cold path: raise once into a sealed carrier, then unwrap via the
-    // module-private boundary primitive for the projector-side shallow gates.
-    let raised = shell_raise_to_type_expr(&dispatch, member_value)
-        .unwrap_or(TypeExpr::Unknown { raw: String::new() });
-
-    // (3) Shallow gates on the raised TypeExpr — same predicates
-    // `reduce_field_type_expr_with_mode` runs. Gates run BEFORE the
-    // operator-shape peek consultation: `MaterializeMemoDb` is shared
-    // across the typed-IR materialiser callers (model resolution /
-    // registry candidate materialisation) which do not apply these
-    // projector shallow gates. Honouring the gates first ensures a
-    // warm cache hit on `External['x']` (or any package-backed root)
-    // publishes as the shallow carrier the shallow-by-default rule
-    // requires, rather than as the reduced body the cache happens to
-    // hold.
+    // (2) Node-domain package-backed gate on `member_value` — decided from the
+    // node's root identity (Pick/Omit source-root trap + indexed-access roots
+    // handled), NEVER by materialising the value first. Gates run BEFORE any
+    // reduction: `MaterializeMemoDb` is shared with the typed-IR materialiser
+    // callers (model / registry candidate materialisation) which do not apply
+    // these projector shallow gates, so honouring the gates first publishes a
+    // package-backed root (`External['x']`) as the shallow carrier the
+    // shallow-by-default rule requires.
     //
-    // F1: capture the gate-observed dep fences so the admit paths
-    // below thread them into the cache entry's `fact_dep_signature`.
-    // Without this, gate-shortcut entries would self-root only on the
-    // scope file's whole_hash — stale on cross-file edits to the
-    // declaring helper / package-backing file / cycle BFS roots.
-    //
-    // H2: the gate's fence is now `Option<DepSignature>`. `None`
-    // means "refuse shared admission" — the gate observed an
-    // unavailable `authoritative_current_content_hash` for a
-    // contributing canonical and cannot root the verdict on the
-    // file state it was actually decided against. Callers MUST
-    // skip the admit and return the value verbatim.
+    // F1: thread the gate's cross-file fence into the admit so an edit to the
+    // package-backing declaration file invalidates the gate-shortcut entry.
+    // H2: the fence is `Option<DepSignature>`; `None` means "refuse shared
+    // admission" (a contributing canonical's `authoritative_current_content_hash`
+    // was unavailable, so the verdict cannot be rooted on the file state it was
+    // decided against) — the caller returns the carrier verbatim without admitting.
     let (route_is_package_backed, package_backed_fence_opt) =
-        crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence(
-            &raised,
-            scope_canonical_id,
+        crate::meta_resolve::node_package_backed_object_like_root_with_fence(
             query_engine,
+            scope_canonical_id,
+            member_value,
         );
     if route_is_package_backed {
-        // Gate short-circuit: the published shape stays as the
-        // raised carrier (package-backed roots are shallow). Admit
-        // so sibling members of the same package-backed parent
-        // (e.g. siblings of `Foo['a']` when `Foo` is from a package)
-        // reuse this verdict at peek time rather than re-running the
-        // package-backed predicate.
-        // F1: thread the gate's cross-file fence into the admit so
-        // edits to the package-backing declaration file invalidate.
-        // H2: refuse admission if the gate refused.
-        let Some(package_backed_fence) = package_backed_fence_opt.clone() else {
-            // Refused fence — return the verdict verbatim without
-            // admitting to the shared cache. A subsequent call
-            // recomputes the verdict against the then-current
-            // file state.
-            return MaterializedOutputTypeExpr::from_parts(
-                Some(member_value),
-                seal_type_expr(&dispatch, raised),
-                Arc::from(Vec::new()),
-                false,
-            );
+        // Package-backed roots stay shallow carriers. Admit so sibling members of
+        // the same package-backed parent reuse the verdict at peek time.
+        let Some(package_backed_fence) = package_backed_fence_opt else {
+            return raise_node_to_sealed_carrier(&dispatch, member_value, Arc::from(Vec::new()));
         };
-        let value = MaterializedOutputTypeExpr::from_parts(
-            Some(member_value),
-            seal_type_expr(&dispatch, raised),
-            package_backed_fence,
-            false,
-        );
+        let value = raise_node_to_sealed_carrier(&dispatch, member_value, package_backed_fence);
         return admit_member_shape_if_possible(ctx, &key, value);
     }
-    // Non-package-backed path: unwrap the gate's fence Option. The
-    // gate refuses (`None`) only when a contributing canonical's
-    // authoritative hash is unavailable; for non-package-backed
-    // verdicts the gate returns `Some(empty_fence)` because there
-    // ARE no contributing cross-file canonicals to root.
+    // Non-package-backed: the gate returns `Some(empty)` unless a contributing
+    // canonical's authoritative hash was unavailable mid-gate, in which case it
+    // refuses (`None`) and the carrier is returned without admission.
     let Some(package_backed_fence) = package_backed_fence_opt else {
-        // The gate refused for some reason that surfaced even on
-        // the non-package-backed return path (a pre-emption between
-        // the workspace check and the fence push). Refuse admission
-        // for any downstream cache path that depends on this gate.
-        return MaterializedOutputTypeExpr::from_parts(
-            Some(member_value),
-            seal_type_expr(&dispatch, raised),
-            Arc::from(Vec::new()),
-            false,
-        );
+        return raise_node_to_sealed_carrier(&dispatch, member_value, Arc::from(Vec::new()));
     };
-    // F1: cycle-gate fence — computed lazily because the cycle gate
-    // only fires on generic instantiations. For non-generic raised
-    // shapes the cycle fence stays empty.
-    let is_generic_instantiation =
-        matches!(&raised, TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty());
-    let cycle_fence: crate::semantic_query::DepSignature = if is_generic_instantiation {
+
+    // (3) Node reduction gates — the leaf / bare-carrier / generic-instantiation /
+    // reducible-operator facts read off `member_value` directly (no materialise).
+    let gates = super::classify_node_reduction_gates(ctx, member_value);
+
+    // (4) Cycle gate — only a generic instantiation can reach a transitive cycle,
+    // so the BFS fires lazily on that fact. A recursive parameterised helper stays
+    // a shallow carrier (the cycle prevents finite reduction); admit so subsequent
+    // peeks skip the BFS.
+    let cycle_fence: crate::semantic_query::DepSignature = if gates.generic_instantiation_ref {
         let (reaches_cycle, fence) =
-            crate::meta_resolve::lowered_root_reaches_transitive_cycle_with_fence(
-                query_engine,
+            crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
+                ctx,
                 scope_canonical_id,
-                &raised,
+                member_value,
             );
         if reaches_cycle {
-            // Recursive parameterised helper: the published shape stays
-            // as the raised carrier (the cycle prevents finite reduction).
-            // Admit so subsequent peeks skip the cycle BFS.
-            // F1: combine both gate fences (package-backed + cycle BFS)
-            // so the admit's `fact_dep_signature` invalidates on edits
-            // to any visited declaration file.
+            // F1: combine both gate fences (package-backed + cycle BFS) so the
+            // admit's `fact_dep_signature` invalidates on edits to any visited
+            // declaration file.
             let combined_fence =
                 combine_dep_signatures(&package_backed_fence, &fence, scope_canonical_id);
-            let value = MaterializedOutputTypeExpr::from_parts(
-                Some(member_value),
-                seal_type_expr(&dispatch, raised),
-                combined_fence,
-                false,
-            );
+            let value = raise_node_to_sealed_carrier(&dispatch, member_value, combined_fence);
             return admit_member_shape_if_possible(ctx, &key, value);
         }
         fence
     } else {
         Arc::from(Vec::new())
     };
-    // The carrier-stop decision lives on the dispatch-layer
-    // reduction-demand context, NOT on a projector-side name
-    // predicate. The demand axis lives on every `Instantiate` /
-    // `KeyOf` / `MappedType` key, so a userland `MyPick<T,K>` and
-    // the builtin `Pick<T,K>` follow the same path. Generic
-    // instantiations enter the reducer; the dispatch carrier-stops
-    // downstream operators when the context does not admit reduction.
-    let needs_reduction =
-        super::type_expr_contains_reducible_operator(&raised) || is_generic_instantiation;
-    // F1: combined gate fence threaded through every remaining admit
-    // path so the cache entries do not self-root on the scope file
-    // only.
+
+    // The carrier-stop decision lives on the dispatch-layer reduction-demand
+    // context, NOT on a projector-side name predicate. A generic instantiation
+    // enters the reducer; the dispatch carrier-stops downstream operators when the
+    // context does not admit reduction.
+    let needs_reduction = gates.contains_reducible_operator || gates.generic_instantiation_ref;
+    // F1: combined gate fence threaded through the remaining admit paths so the
+    // cache entries do not self-root on the scope file only.
     let gate_fence =
         combine_dep_signatures(&package_backed_fence, &cycle_fence, scope_canonical_id);
     if !needs_reduction {
-        // Universal-caching invariant: a shape that resolves to a
-        // non-reducible TypeExpr (primitive / literal / bare alias /
-        // closed object / function / union / intersection without
-        // operator nodes) is a STABLE shape — admit it so sibling
-        // members hitting the same `SurfaceMember.value` (or the
-        // same `(scope, node, mode)` triple from a downstream call)
-        // short-circuit at peek time.
-        let value = MaterializedOutputTypeExpr::from_parts(
-            Some(member_value),
-            seal_type_expr(&dispatch, raised),
-            gate_fence,
-            false,
-        );
+        // Universal-caching invariant: a non-reducible shape (primitive / literal /
+        // bare alias / closed object / function / union / intersection without
+        // operator nodes) is a STABLE shape — admit it as the shallow carrier so
+        // sibling members hitting the same `SurfaceMember.value` short-circuit at
+        // peek time.
+        let value = raise_node_to_sealed_carrier(&dispatch, member_value, gate_fence);
         return admit_member_shape_if_possible(ctx, &key, value);
     }
 
-    // Gates have cleared: consult the operator-shape peek. A warm
-    // `ShapeCacheDb` hit on `(scope, raised, mode)` now SAFELY
-    // short-circuits the cold reducer dispatch — the entry's
-    // semantics are compatible with the projector's published shape
-    // because the package-backed and cycle paths already returned
-    // above.
-    //
-    // Universal-caching invariant: when the peek returns `Leaf` /
-    // `BareCarrier` we still admit a SemanticNode-subject entry to
-    // the cache via `admit_computed` so subsequent member peeks
-    // short-circuit at peek time.
-    if let Some(peeked) =
-        super::peek_member_shape_known(query_engine, scope_canonical_id, &raised, mode)
-    {
-        match peeked {
-            super::PeekedShape::Leaf(leaf) => {
-                let value = MaterializedOutputTypeExpr::from_parts(
-                    Some(member_value),
-                    seal_type_expr(&dispatch, leaf),
-                    gate_fence,
-                    false,
-                );
-                return admit_member_shape_if_possible(ctx, &key, value);
-            }
-            super::PeekedShape::BareCarrier { .. } => {
-                let value = MaterializedOutputTypeExpr::from_parts(
-                    Some(member_value),
-                    seal_type_expr(&dispatch, raised),
-                    gate_fence,
-                    false,
-                );
-                return admit_member_shape_if_possible(ctx, &key, value);
-            }
-            super::PeekedShape::Cached(materialized) => {
-                // Warm operator-shape hit AFTER gate validation. The
-                // cached entry already observed `dep_signature`; the
-                // peek bubbled it. Return verbatim.
-                return materialized;
-            }
-        }
-    }
-
-    // (4) Cold compute via the graph-native reducer. Single-shot —
+    // (5) Cold compute via the graph-native reducer. Single-shot —
     // pre-computed ONCE outside the cache call (single-compute
     // pattern). The cache's `get_or_compute` closure either captures
     // and moves the pre-computed `materialized` into the cache entry,

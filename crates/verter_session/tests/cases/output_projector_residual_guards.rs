@@ -12289,6 +12289,16 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "meta_resolve/projectors/output_sink.rs",
         "unwrap_materialized",
     ),
+    // The node→carrier raw-raise seal: mints the node into the sealed
+    // `OutputTypeExpr` payload ONCE and assembles the `MaterializedOutputTypeExpr`
+    // carrier (NO `into_type_expr` — never produces a bare `TypeExpr`). The
+    // per-member gates decide on the NODE before calling this, so it makes no
+    // decision on the materialised value. Takes a `SemanticNodeId` (not a
+    // `TypeExpr`) param, so the self-policing rail seeds nothing.
+    (
+        "meta_resolve/projectors/output_sink.rs",
+        "raise_node_to_sealed_carrier",
+    ),
     (
         "macro_output_expansion.rs",
         "materialize_admitted_expansion_node",
