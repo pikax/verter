@@ -49,7 +49,6 @@ mod publication;
 
 pub(in crate::project_semantic_dispatch) use materialize::fold_to_type_expr;
 use node_domain::{type_expr_to_key, RaisedFactsAlg, RaisedShapeAlg};
-pub(crate) use publication::PublicationScore;
 pub(in crate::project_semantic_dispatch) use publication::{
     project_node_publication_score, type_expr_publication_score,
 };
@@ -276,6 +275,37 @@ impl ShapeInterner {
 // ===========================================================================
 // Bottom-up facts computed alongside the key — NO `TypeExpr` allocation.
 // ===========================================================================
+
+/// The publication-scoring facts of a raised shape — the inputs the
+/// publication-finaliser comparison ([`crate::meta_resolve::compare_node_improvement`]
+/// / [`crate::meta_resolve::compare_type_expr_improvement`]) reads. Computed
+/// bottom-up by the [`publication`] algebra; `symbolic_carriers` / `generic_detail`
+/// are WHOLE-TREE sums while `structural_top_level` / `exact_unknown_root` are
+/// ROOT-only (set by the outermost arm, never propagated from a child). Defined
+/// HERE (not in the `publication` child) so the one-hop `raise` crate re-export
+/// resolves it — `pub(crate)` because the comparison formula lives in
+/// `crate::meta_resolve::scoring`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PublicationScore {
+    /// The symbolic-carrier penalty — `count_symbolic_carriers_in_expr(raise(node))`:
+    /// each reference carrier (`Ref` / `ImportType` / `RecursiveRef`),
+    /// `IndexedAccess` / `Conditional` / `Mapped` / `TemplateLiteral`, and each
+    /// `TypeOf` / `TypeParameter` / `SyntheticSlotBinding` / `Infer` / `Unknown`
+    /// leaf costs `+1`; compound shapes recurse without a self-penalty.
+    pub(crate) symbolic_carriers: usize,
+    /// The type-parameter detail — `count_generic_detail_in_expr(raise(node))`: a
+    /// declared `TypeParameter` (standalone OR on a function signature) costs
+    /// `+1` plus its constraint/default detail.
+    pub(crate) generic_detail: usize,
+    /// Whether the raised ROOT is a concrete structural shape (NOT a symbolic
+    /// reference / operator carrier) — `type_expr_has_structural_top_level(raise(node))`.
+    pub(crate) structural_top_level: bool,
+    /// Whether the raised ROOT term is exactly `TypeExpr::Unknown { .. }` —
+    /// `matches!(raise(node), TypeExpr::Unknown { .. })`, the first clause of the
+    /// improvement comparison. A `RecursiveRef` root is NOT unknown (it raises to
+    /// `TypeExpr::RecursiveRef`, a structural carrier).
+    pub(crate) exact_unknown_root: bool,
+}
 
 /// Facts about the shape a node raises to, derived bottom-up from the
 /// POST-NORMALIZED raised shape (NOT the raw graph kind). `pub(crate)` because

@@ -28,42 +28,16 @@ use rustc_hash::FxHashSet;
 use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr};
 
 use super::super::ProjectSemanticDispatch;
-use super::{FactShapeTag, FoldedFunction, FoldedTupleElement, RaisedShapeAlgebra};
+use super::{
+    FactShapeTag, FoldedFunction, FoldedTupleElement, PublicationScore, RaisedShapeAlgebra,
+};
 use crate::resolver_core::component_meta_query_engine::SEMANTIC_OBJECT_SURFACE;
 use crate::semantic_query::{QueryError, SemanticNodeId};
 
-// ===========================================================================
-// The publication-scoring facts.
-// ===========================================================================
-
-/// The publication-scoring facts of a raised shape — the inputs the
-/// publication-finaliser comparison ([`crate::meta_resolve::compare_node_improvement`]
-/// / [`crate::meta_resolve::compare_type_expr_improvement`]) reads. Computed
-/// bottom-up; `symbolic_carriers` / `generic_detail` are WHOLE-TREE sums while
-/// `structural_top_level` / `exact_unknown_root` are ROOT-only (set by the
-/// outermost arm, never propagated from a child). `pub(crate)` because the
-/// comparison formula lives in `crate::meta_resolve::scoring`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct PublicationScore {
-    /// The symbolic-carrier penalty — `count_symbolic_carriers_in_expr(raise(node))`:
-    /// each reference carrier (`Ref` / `ImportType` / `RecursiveRef`),
-    /// `IndexedAccess` / `Conditional` / `Mapped` / `TemplateLiteral`, and each
-    /// `TypeOf` / `TypeParameter` / `SyntheticSlotBinding` / `Infer` / `Unknown`
-    /// leaf costs `+1`; compound shapes recurse without a self-penalty.
-    pub(crate) symbolic_carriers: usize,
-    /// The type-parameter detail — `count_generic_detail_in_expr(raise(node))`: a
-    /// declared `TypeParameter` (standalone OR on a function signature) costs
-    /// `+1` plus its constraint/default detail.
-    pub(crate) generic_detail: usize,
-    /// Whether the raised ROOT is a concrete structural shape (NOT a symbolic
-    /// reference / operator carrier) — `type_expr_has_structural_top_level(raise(node))`.
-    pub(crate) structural_top_level: bool,
-    /// Whether the raised ROOT term is exactly `TypeExpr::Unknown { .. }` —
-    /// `matches!(raise(node), TypeExpr::Unknown { .. })`, the first clause of the
-    /// improvement comparison. A `RecursiveRef` root is NOT unknown (it raises to
-    /// `TypeExpr::RecursiveRef`, a structural carrier).
-    pub(crate) exact_unknown_root: bool,
-}
+// The [`PublicationScore`] facts type is defined in the parent `shape_engine`
+// module alongside `RaisedShapeFacts` / `NodeShapeEq` (so the one-hop crate
+// re-export through `raise` resolves it); this child owns the algebra that folds
+// it.
 
 /// The publication score of a folded FUNCTION signature (the `RaisedShapeAlgebra::Fn`
 /// for [`PublicationScoreAlg`]). A function carries no root-fact of its own here —
