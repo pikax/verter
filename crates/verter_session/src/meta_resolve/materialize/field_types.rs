@@ -711,13 +711,28 @@ fn type_expr_root_identity(
     }
 }
 
-/// Whether `name` resolves to the BUILTIN `Pick`/`Omit` utility at
-/// `scope_canonical_id` — resolver-aware (NOT a string match). The builtin is
-/// active ONLY when no userland declaration shadows the name: a userland
-/// `type Pick`/`interface Pick`/imported `Pick` resolves to a real declaration
-/// (kind != `Unknown`), so it is its OWN root, NOT the builtin source-descent.
+/// Whether `name` is the UNSHADOWED builtin `Pick`/`Omit` utility at
+/// `scope_canonical_id` — the SAME builtin/shadow decision dispatch's
+/// [`resolve_bare_ref_head`](crate::project_semantic_dispatch) makes before
+/// minting a `__builtin__::Pick`/`Omit` carrier: `name` is a recognised
+/// object-filter utility ([`BuiltinUtility::from_name`]) AND no userland
+/// declaration shadows it.
+///
+/// Shadowing is decided by the SINGLE-SOURCE-OF-TRUTH
+/// [`ScopeShadowing::is_shadowing_lib`](crate::resolver_core::scope_shadowing::ScopeShadowing::is_shadowing_lib),
+/// the same authority the dispatch path consults — it folds the owner scope's
+/// local type names, script-setup type bindings, AND import bindings, so a local
+/// `type Pick`, an imported `Pick`, OR an imported-but-unresolved `Pick` (its
+/// module resolves but the symbol is absent) ALL shadow the builtin and resolve
+/// to their OWN root, never a source-descent into the utility's argument.
+///
 /// This is the `TypeExpr`-front mirror of the node front's
-/// `InstantiationRef.base.canonical_id == "__builtin__"` check.
+/// `InstantiationRef.base.canonical_id == "__builtin__"` check — which reads the
+/// SAME `is_shadowing_lib`-gated identity dispatch already minted — so the two
+/// fronts agree by construction rather than via a parallel heuristic. A prior
+/// `resolve_type_declaration(...).kind == Unknown` check diverged here: it
+/// conflated "imported-but-unresolved" (kind == Unknown, yet shadowing) with
+/// "ambient builtin" (kind == Unknown, NOT shadowing).
 fn is_builtin_pick_or_omit(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
@@ -731,12 +746,11 @@ fn is_builtin_pick_or_omit(
     ) {
         return false;
     }
-    matches!(
-        query_engine
-            .resolve_type_declaration(scope_canonical_id, name)
-            .kind,
-        crate::resolver_core::ResolvedDeclarationKind::Unknown
+    !crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+        query_engine.ctx,
+        scope_canonical_id,
     )
+    .is_shadowing_lib(name)
 }
 
 /// Resolve a bare `Ref` `name` (at `scope_canonical_id`) to its ROOT declaration
