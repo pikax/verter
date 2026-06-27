@@ -1235,7 +1235,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     // `deep_resolve_type_refs` / `deep_resolve_fn_refs` previously
     // walked Object members / Function params / Array elements /
     // Union / Intersection arms and dispatched every `TypeExpr::Ref`
-    // through `project_expr_surface_expr_via_host_threaded(Expanded,
+    // through the expr-domain surface bridge at `(Expanded,
     // Expanded, Published)`. That per-Ref Expanded recursion was the
     // ChatMessages `outputSchema|execute` audit-footprint leak —
     // walking `UIMessage<M,D,U>` slot-bindings expanded `UITools<…>`

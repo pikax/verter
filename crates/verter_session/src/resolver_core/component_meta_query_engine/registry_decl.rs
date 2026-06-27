@@ -1391,6 +1391,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // NODE DOMAIN: resolve the admitted route NODE (routes here are only
         // MemberPath / Pick / Omit, never `Whole`), then build the shape from its
         // SurfaceView; a non-object node → empty shape (the prior unconditional `Some`).
+        //
+        // `unwrap_or_else(empty)` matches the retired `type_expr_to_object_shape`
+        // arm, not a swallow of arm 2/3: the admitted node here passed the route's
+        // node-domain `materialized` gate, and a non-`Object` terminal (primitive /
+        // function) yields `None` from the projection EXACTLY where the retired
+        // `type_expr_to_object_shape(materialise(node))` yielded the empty shape — so
+        // arm-1 returns `Some(empty)` in both worlds, never falling through. The
+        // retired path only fell through when the route did NOT materialise (the
+        // `dispatch_routed_expr_surface_node == None` branch above), which this arm
+        // skips identically.
         if let Some((root_symbol, route)) =
             component_meta_registry_public_indexed_access_route(expr)
                 .or_else(|| component_meta_registry_public_utility_route(expr))

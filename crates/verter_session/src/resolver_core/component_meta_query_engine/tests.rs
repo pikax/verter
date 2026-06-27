@@ -476,14 +476,15 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
         "/src/App.vue",
         &target_expr,
     );
-    let projected_target = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+    let projected_target = crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
         &mut query_engine,
         "/src/App.vue",
         &target_expr,
         crate::semantic_query::ProjectionMode::Expanded,
         crate::semantic_query::ProjectionMode::Expanded,
         crate::semantic_query::ReductionDemand::Published,
-    );
+    )
+    .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node));
     let shape = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
         &mut query_engine,
 "/src/App.vue", &expr)
@@ -616,7 +617,7 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
         index: Arc::new(TypeExpr::string_literal("color")),
     };
 
-    let projected = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+    let projected = crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
         &mut query_engine,
         "/src/App.vue",
         &expr,
@@ -624,6 +625,7 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
         crate::semantic_query::ProjectionMode::Expanded,
         crate::semantic_query::ReductionDemand::Published,
     )
+    .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
     .expect("nested indexed-access helper should project");
 
     let TypeExpr::Union(members) = &projected else {
@@ -1776,7 +1778,7 @@ import theme from './theme'
 ///
 /// Discriminator: `projected_target_shape`'s dispatch arms
 /// (`project_expr_surface_shape_via_host_threaded` /
-/// `project_expr_surface_expr_via_host_threaded`) must resolve the concrete
+/// `project_expr_surface_expr_node_via_host_threaded`) must resolve the concrete
 /// `{ value; label }` surface via dispatch alone. The positive
 /// `{ value; label }` + all-optional assertions flip RED on a mangled
 /// surface.
@@ -2415,7 +2417,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         index: Arc::new(TypeExpr::string_literal("color")),
     };
 
-    let projected = crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
+    let projected = crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
         &mut query_engine,
         "/src/Button.vue",
         &expr,
@@ -2423,6 +2425,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         crate::semantic_query::ProjectionMode::Expanded,
         crate::semantic_query::ReductionDemand::Published,
     )
+    .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
     .expect("component-config indexed access route should project");
 
     let TypeExpr::Union(members) = &projected else {
@@ -4740,6 +4743,301 @@ fn index_signature_only_surface_registry_admits_direct_utility_rejects() {
             .is_none(),
         "direct-utility `shape_has_surface` IGNORES index signatures, so \
          Partial<IndexSig> (index-sig-only) must project NO surface (None)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// DIFFERENTIAL: node-domain object-shape projection vs the retired
+// `materialize + type_expr_to_object_shape` path.
+//
+// `project_expr_to_surface_shape` arm-1 (the registry route) now projects an
+// admitted route NODE through `project_admitted_route_node_to_expanded_object_shape`
+// (SurfaceView → `surface_view_to_expanded_shape`) instead of materialising the
+// node to a `TypeExpr` and running `type_expr_to_object_shape` over it. These
+// tests compare, for the SAME admitted route node, the NEW node projection
+// against the OLD `type_expr_to_object_shape(materialize_route_projection_node(..))`
+// shape, field-for-field — to RESOLVE EMPIRICALLY whether the conversion is
+// byte-exact behaviour-preserving.
+//
+// OUTCOME (recorded): they agree on the common object case (test c —
+// equivalence CONFIRMED) but DIVERGE on two edge classes — union-arm
+// requiredness (test a) and single-call-signature collapse (test b) — because
+// the node-domain path unifies onto the shared `macro_object_surface` resolver
+// instead of the retired `type_expr_to_object_shape` standalone, and the two use
+// different conventions. The divergence direction is an ESCALATED architecture
+// decision (see the B2a-fix report); tests a/b PIN the measured delta.
+//
+// All three EXERCISE THE NEW PATH (not the unchanged general arm): each `expr` is
+// an indexed-access route (`Foo['x']`), asserted to reach
+// `component_meta_registry_public_indexed_access_route`, and the node is acquired
+// through `dispatch_routed_expr_surface_node` — arm-1's exact node acquisition.
+// A bare local `Foo` would route through the general arm and is NOT used.
+// ─────────────────────────────────────────────────────────────────
+
+/// Field-for-field equivalence of the NEW node-domain object shape and the OLD
+/// `type_expr_to_object_shape(materialize(..))` shape. Properties are compared
+/// NAME-keyed: the OLD union arm collects properties through an `FxHashMap`,
+/// whose iteration order is non-deterministic, so a positional `Vec` compare
+/// would be order-flaky. Call/index signatures compare positionally (both paths
+/// emit them in deterministic source order). Per-property the comparison covers
+/// optional, readonly, visibility, and the member type.
+fn assert_route_shape_new_equals_old(
+    new_shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    old_shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    label: &str,
+) {
+    use std::collections::BTreeMap;
+    let new_props: BTreeMap<&str, _> = new_shape
+        .properties
+        .iter()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
+    let old_props: BTreeMap<&str, _> = old_shape
+        .properties
+        .iter()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
+    assert_eq!(
+        new_props.keys().collect::<Vec<_>>(),
+        old_props.keys().collect::<Vec<_>>(),
+        "{label}: property NAME set must match (new node projection vs old materialize+shape)"
+    );
+    for (name, old_p) in &old_props {
+        let new_p = new_props
+            .get(name)
+            .unwrap_or_else(|| panic!("{label}: new shape missing property `{name}`"));
+        assert_eq!(
+            new_p.optional, old_p.optional,
+            "{label}: `{name}` optional flag mismatch"
+        );
+        assert_eq!(
+            new_p.readonly, old_p.readonly,
+            "{label}: `{name}` readonly flag mismatch"
+        );
+        assert_eq!(
+            new_p.visibility, old_p.visibility,
+            "{label}: `{name}` visibility mismatch"
+        );
+        assert_eq!(new_p.ty, old_p.ty, "{label}: `{name}` member type mismatch");
+    }
+    assert_eq!(
+        new_shape.call_signatures, old_shape.call_signatures,
+        "{label}: call signatures must match (new vs old)"
+    );
+    assert_eq!(
+        new_shape.index_signatures, old_shape.index_signatures,
+        "{label}: index signatures must match (new vs old)"
+    );
+}
+
+/// Drive the registry arm-1 route for `expr` and return the (NEW, OLD) object
+/// shapes projected from the SAME admitted route node:
+///   NEW = `project_admitted_route_node_to_expanded_object_shape(node)`
+///   OLD = `type_expr_to_object_shape(materialize_route_projection_node(node))`
+///
+/// PROVES the test exercises the NEW path: `expr` MUST reach the registry route
+/// (asserted via `component_meta_registry_public_*_route`), and the node is
+/// acquired through `dispatch_routed_expr_surface_node` — the exact node
+/// acquisition arm-1 performs. Also cross-checks that the production
+/// `project_expr_to_surface_shape` (which IS arm-1) returns the NEW shape, so the
+/// equivalence the test pins is the one production actually publishes.
+fn differential_route_shapes(
+    query_engine: &mut ComponentMetaQueryEngine<'_>,
+    scope: &str,
+    expr: &TypeExpr,
+    label: &str,
+) -> (
+    verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) {
+    use crate::resolver_core::component_meta_registry::{
+        component_meta_registry_public_indexed_access_route,
+        component_meta_registry_public_utility_route,
+    };
+
+    // PROVE arm-1 reach (else the test would be vacuous — a bare local `Foo`
+    // routes through the unchanged general arm).
+    let (root_symbol, route) = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+        .unwrap_or_else(|| {
+            panic!(
+                "{label}: `expr` must reach the registry route (arm-1) — else the test is vacuous"
+            )
+        });
+    // Arm-1's exact node acquisition.
+    let node = query_engine
+        .dispatch_routed_expr_surface_node(scope, &root_symbol, &route)
+        .unwrap_or_else(|| panic!("{label}: registry route must admit a surface node"));
+    let ctx = query_engine.ctx;
+    // NEW: node-domain SurfaceView → ExpandedObjectShape.
+    let new_shape =
+        super::surface::project_admitted_route_node_to_expanded_object_shape(ctx, &node)
+            .unwrap_or_else(|| panic!("{label}: NEW node projection must produce a shape"));
+    // OLD: materialise the SAME node to a `TypeExpr`, then `type_expr_to_object_shape`.
+    let materialized = super::surface::materialize_route_projection_node(ctx, &node)
+        .unwrap_or_else(|| {
+            panic!("{label}: OLD materialize_route_projection_node must produce a TypeExpr")
+        });
+    let old_shape =
+        verter_semantic::analysis::type_expand::type_expr_to_object_shape(&materialized);
+    // Cross-check: the PRODUCTION arm-1 (`project_expr_to_surface_shape`) returns NEW.
+    let production = query_engine
+        .project_expr_to_surface_shape(scope, expr)
+        .unwrap_or_else(|| {
+            panic!("{label}: production project_expr_to_surface_shape must project")
+        });
+    assert_eq!(
+        production, new_shape,
+        "{label}: production arm-1 `project_expr_to_surface_shape` must equal the NEW node \
+         projection (so the pinned equivalence is what production publishes)"
+    );
+    (new_shape, old_shape)
+}
+
+/// DIFFERENTIAL (a) — CHARACTERIZED DIVERGENCE (escalated, see the B2a-fix
+/// report). A union-of-object|primitive terminal (`Foo['x']` where
+/// `x: { a: string } | string`).
+///
+/// The retired `type_expr_to_object_shape` union arm SKIPS the non-object
+/// `string` variant (empty shape), so `a` is present in 1-of-1 OBJECT variants
+/// and stays REQUIRED. The NEW node projection routes the union through the
+/// shared `macro_object_surface` reducer, which optional-promotes `a` across
+/// ALL arms (the non-object `string` arm counts toward the denominator), so `a`
+/// becomes OPTIONAL.
+///
+/// This is a REAL behaviour difference: the node-domain conversion unifies onto
+/// the shared resolver instead of the retired standalone, and the two use
+/// different union-requiredness conventions. Matching the retired convention
+/// EXACTLY would require either changing the shared reducer (broad — every
+/// consumer) or re-implementing `type_expr_to_object_shape`'s union arm in node
+/// domain (a second shape-extraction path the cutover is removing). The
+/// direction is an architecture decision (reproduce the retired quirk vs accept
+/// the shared-resolver behaviour) — ESCALATED. This test PINS the current
+/// measured delta so the eventual decision is taken against a recorded baseline.
+#[test]
+fn differential_route_shape_union_arm_diverges_node_domain_vs_retired_object_shape() {
+    let host = surface_shape_host("export interface Foo { x: { a: string } | string }");
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("Foo")),
+        index: Arc::new(TypeExpr::string_literal("x")),
+    };
+    let (new_shape, old_shape) = differential_route_shapes(
+        &mut query_engine,
+        "/src/App.vue",
+        &expr,
+        "union object|primitive",
+    );
+
+    // Both keep the object arm's `a` member (same name set).
+    let new_a = new_shape
+        .properties
+        .iter()
+        .find(|p| p.name == "a")
+        .expect("NEW: union terminal must keep the object arm's `a` member");
+    let old_a = old_shape
+        .properties
+        .iter()
+        .find(|p| p.name == "a")
+        .expect("OLD: union terminal must keep the object arm's `a` member");
+    // The DELTA: NEW optional-promotes `a` (true); the retired path keeps it
+    // required (false). Recorded, not blessed.
+    assert!(
+        new_a.optional,
+        "NEW node projection optional-promotes `a` across ALL union arms"
+    );
+    assert!(
+        !old_a.optional,
+        "retired `type_expr_to_object_shape` keeps `a` REQUIRED (skips the non-object arm)"
+    );
+    assert_ne!(
+        new_a.optional, old_a.optional,
+        "the union requiredness convention DIVERGES between the node-domain path and the \
+         retired type_expr_to_object_shape (escalated)"
+    );
+}
+
+/// DIFFERENTIAL (b) — CHARACTERIZED DIVERGENCE (escalated, see the B2a-fix
+/// report). A single-call-signature-only terminal (`Foo['cb']` where
+/// `cb: { (e: number): void }`).
+///
+/// The retired path materialises the node, and `materialize_output_type_expr`
+/// COLLAPSES a single-call-signature-only surface to `TypeExpr::Function`, which
+/// `type_expr_to_object_shape` then maps to an EMPTY shape (the call signature is
+/// dropped). The NEW node projection reads the node's `SurfaceView` directly and
+/// PRESERVES the call signature.
+///
+/// Matching the retired path EXACTLY would mean reproducing the call-signature
+/// DROP (publishing an empty shape for a callable member) — reproducing a quirk
+/// of the retired standalone. ESCALATED alongside (a) as one decision. This test
+/// PINS the current measured delta.
+#[test]
+fn differential_route_shape_single_call_sig_diverges_node_domain_vs_retired_object_shape() {
+    let host = surface_shape_host("export interface Foo { cb: { (e: number): void } }");
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("Foo")),
+        index: Arc::new(TypeExpr::string_literal("cb")),
+    };
+    let (new_shape, old_shape) = differential_route_shapes(
+        &mut query_engine,
+        "/src/App.vue",
+        &expr,
+        "single call-signature-only",
+    );
+
+    // The DELTA: NEW preserves the call signature; the retired path collapses to
+    // `Function` and yields an EMPTY shape. Recorded, not blessed.
+    assert_eq!(
+        new_shape.call_signatures.len(),
+        1,
+        "NEW node projection preserves the single call signature"
+    );
+    assert!(
+        old_shape.call_signatures.is_empty() && old_shape.properties.is_empty(),
+        "retired `materialize + type_expr_to_object_shape` collapses single-call-sig to \
+         `Function` → EMPTY shape (the call signature is dropped)"
+    );
+    assert_ne!(
+        new_shape.call_signatures.len(),
+        old_shape.call_signatures.len(),
+        "the single-call-signature surface DIVERGES between the node-domain path and the \
+         retired type_expr_to_object_shape (escalated)"
+    );
+}
+
+/// DIFFERENTIAL (c): a rich terminal carrying optional + readonly properties, a
+/// call signature, and an index signature (`Foo['obj']` where
+/// `obj: { a?: string; readonly b: number; (e: number): void; [k: string]: number }`).
+/// Every shape facet (per-property optional/readonly/visibility/type, call
+/// signatures, index signatures) must match the OLD path field-for-field.
+#[test]
+fn differential_route_shape_optional_readonly_call_index_matches_materialize_then_shape() {
+    let host = surface_shape_host(
+        "export interface Foo { \
+         obj: { a?: string; readonly b: number; (e: number): void; [k: string]: number } }",
+    );
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("Foo")),
+        index: Arc::new(TypeExpr::string_literal("obj")),
+    };
+    let (new_shape, old_shape) = differential_route_shapes(
+        &mut query_engine,
+        "/src/App.vue",
+        &expr,
+        "optional/readonly + call/index sigs",
+    );
+    assert_route_shape_new_equals_old(
+        &new_shape,
+        &old_shape,
+        "optional/readonly + call/index sigs",
     );
 }
 

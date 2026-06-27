@@ -820,114 +820,6 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
     )
 }
 
-/// Mode-explicit dispatch-direct surface projection. Caller states
-/// `(base_mode, terminal_mode, demand)` so each callsite expresses
-/// its publication intent explicitly rather than defaulting to
-/// `Expanded`/`Expanded`.
-///
-/// Behaviour:
-/// 1. **Registry-route fast-path** — `Pick<…>` / `Omit<…>` /
-///    `Button['ui']` shapes route through the engine's
-///    `dispatch_routed_expr_surface_expr` / `lower_and_project_to_expanded`
-///    helpers. The fast-path returns the registry's pre-computed
-///    Expanded shape regardless of caller mode; downstream caches store
-///    one canonical entry per route, so reusing it on a Shallow request
-///    does not introduce a new leak.
-/// 2. **Pure-dispatch path** — lower the whole expression at
-///    `base_mode`, dispatch
-///    `ProjectPath { base, path: [], context: { mode: terminal_mode, demand } }`
-///    against the lowered base. The empty-path form performs no
-///    IndexedAccess decomposition, which callers depend on (e.g.
-///    `solve_or_project_leaf_expr_until_stable`).
-///
-/// Mode-aware result filter:
-///   - `terminal_mode == Expanded`: gate on `type_expr_is_expanded_surface`
-///     so only fully-materialised surfaces pass (no deferred
-///     `KeyOf` / `IndexedAccess` / `Mapped` / `TypeOf` / `Conditional`
-///     shells).
-///   - `terminal_mode == Shallow`: admit Ref carriers and one-level
-///     Object surfaces — do NOT call `type_expr_is_expanded_surface`,
-///     which would reject the carrier form the caller explicitly asked
-///     for.
-///   - either way: refuse `semanticMiss`-bearing results.
-///
-/// Diagnostic propagation: `QueryResult::Error` and
-/// `QueryResult::Recursive` map to `None` so the macro-shape
-/// diagnostic flow at `produce_one_macro_object_shape*` keeps emitting
-/// the `MacroExpansionDiagnostics` envelope without observing a
-/// synthesised `TypeExpr::Error`.
-///
-/// Caller note on `base_mode` vs `terminal_mode`: per the empty-
-/// terminal Expanded constraint documented on
-/// [`lower_and_project_to_expanded_via_host_threaded`], the base must
-/// be a structural surface that `expand_empty_path_terminal` can walk.
-/// A `Navigate` carrier would freeze a generic `InstantiationRef` and
-/// the expanded-surface filter would reject. Callers that need
-/// Expanded terminal output on arbitrary inputs MUST pass
-/// `base_mode = Expanded`; callers on the empty-terminal Shallow
-/// path may pass `base_mode = Navigate` (carrier-preserving) per the
-/// sister [`project_expr_surface_shape_via_host_threaded`] pattern.
-///
-/// Production-orphaned: the `projected_target_shape` caller moved to the node
-/// bridge [`project_expr_surface_expr_node_via_host_threaded`]. This materialising
-/// expr bridge is retained for its `#[cfg(test)]` callers and remains in the
-/// reverse-materialization fence inventory until its own node-domain conversion
-/// block; the lib build has no caller, so the dead-code lint is scoped off there.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "materialising expr bridge orphaned by the projected_target_shape node \
-                  conversion; retained for test callers + its own later node-conversion block"
-    )
-)]
-pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
-    scope_canonical_id: &str,
-    expr: &verter_type_expr::TypeExpr,
-    base_mode: ProjectionMode,
-    terminal_mode: ProjectionMode,
-    demand: crate::semantic_query::ReductionDemand,
-) -> Option<verter_type_expr::TypeExpr> {
-    use crate::resolver_core::component_meta_registry::{
-        component_meta_registry_public_indexed_access_route,
-        component_meta_registry_public_utility_route,
-    };
-
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
-        .or_else(|| component_meta_registry_public_utility_route(expr))
-    {
-        if let Some(projected) = project_route_surface_expr_via_host_threaded(
-            engine,
-            scope_canonical_id,
-            &root_symbol,
-            &route,
-        ) {
-            return Some(projected);
-        }
-        if let Some(solved) =
-            lower_and_project_to_expanded_via_host_threaded(engine, scope_canonical_id, expr)
-        {
-            return Some(solved);
-        }
-    }
-    // Pure-dispatch path: the lower(base_mode) + ProjectPath(terminal_mode) +
-    // node-domain gate (`!materialized` reject; mode-aware acceptance) +
-    // publication materialisation are confined to the registered surface sink
-    // (M4), so no mid-flight raise happens here.
-    crate::resolver_core::project_expr_surface_expr_published(
-        engine.ctx(),
-        scope_canonical_id,
-        expr,
-        base_mode,
-        terminal_mode,
-        demand,
-    )
-}
-
 // ===========================================================================
 // Node-returning route fixpoint adapters.
 //
@@ -969,9 +861,11 @@ pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
     engine.dispatch_routed_expr_surface_node(scope_canonical_id, root_symbol, route)
 }
 
-/// Node-domain counterpart of [`project_expr_surface_expr_via_host_threaded`]:
-/// the registry fast-path returns the admitted route node, the pure-dispatch
-/// path returns the admitted surface node — neither materialises.
+/// Node-domain mode-explicit dispatch-direct surface projection: the caller
+/// states `(base_mode, terminal_mode, demand)` and the registry fast-path
+/// returns the admitted route node while the pure-dispatch path returns the
+/// admitted surface node — neither materialises. The sole publication
+/// materialisation happens once, downstream, at the surface sink.
 pub(crate) fn project_expr_surface_expr_node_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,

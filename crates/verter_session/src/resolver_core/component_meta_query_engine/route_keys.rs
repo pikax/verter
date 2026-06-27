@@ -585,7 +585,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // (2) Node-domain fallback: project the target's admitted surface NODE
             // arm-for-arm (registry fast-path → Expanded fallback →
             // Navigate-base/Shallow-terminal pure-dispatch — the EXACT routing of
-            // the former `project_expr_surface_expr_via_host_threaded`), then build
+            // the expr-domain surface bridge), then build
             // the shape from the admitted node's SurfaceView. NO mid-flight
             // materialise; `shape_has_surface` decides on a node-domain shape (so
             // it ignores index signatures exactly as before).

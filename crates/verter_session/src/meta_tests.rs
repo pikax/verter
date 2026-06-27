@@ -21424,16 +21424,13 @@ fn c5_route_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
         "C5 fixpoint must NOT converge by `==`/`!=` on a materialised `TypeExpr` cursor — \
          re-introducing the legacy `if next == current` per-iteration compare FAILS here"
     );
-    for forbidden in [
-        "lower_and_project_to_expanded_via_host_threaded",
-        "project_expr_surface_expr_via_host_threaded",
-    ] {
-        assert!(
-            !characterization.called.contains(forbidden),
-            "C5 fixpoint must NOT call the materialising host-threaded bridge `{forbidden}` \
-             (a per-iteration `TypeExpr` materialise)"
-        );
-    }
+    assert!(
+        !characterization
+            .called
+            .contains("lower_and_project_to_expanded_via_host_threaded"),
+        "C5 fixpoint must NOT call the materialising host-threaded bridge \
+         `lower_and_project_to_expanded_via_host_threaded` (a per-iteration `TypeExpr` materialise)"
+    );
 }
 
 /// §1a DISCRIMINATION: the two surface-shape projections
@@ -21532,7 +21529,6 @@ fn surface_shape_conversions_run_node_domain_not_materialize_then_shape() {
     let pts = collect_calls(ROUTE_KEYS_SRC, "projected_target_shape");
     for forbidden in [
         "type_expr_to_object_shape",
-        "project_expr_surface_expr_via_host_threaded",
         "project_expr_surface_shape_via_host_threaded",
     ] {
         assert!(

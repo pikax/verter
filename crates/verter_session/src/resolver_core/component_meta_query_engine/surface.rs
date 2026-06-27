@@ -248,8 +248,7 @@ pub(crate) fn lower_and_project_to_expanded_published(
 }
 
 /// Demand-bound adapter for the mode-explicit dispatch-direct surface
-/// projection (former `project_expr_surface_expr_via_host_threaded`
-/// materialisation tail). Lower `expr` at `base_mode`, dispatch
+/// projection. Lower `expr` at `base_mode`, dispatch
 /// `ProjectPath { base, [], { terminal_mode, demand } }`, refuse a
 /// `semanticMiss`-bearing result (node-domain `!materialized`), then apply the
 /// mode-aware acceptance and materialise the accepted node ONCE at this sink.
@@ -308,42 +307,6 @@ pub(crate) fn project_expr_surface_expr_node(
         | ProjectionMode::Skeleton => true,
     };
     accept.then(|| AdmittedRouteProjectionNode::new(result_node))
-}
-
-/// Thin publication wrapper over [`project_expr_surface_expr_node`]: resolve the
-/// node-domain decision (mode-aware acceptance + `!materialized` refusal), then
-/// materialise the accepted node ONCE at the surface sink.
-///
-/// Production-orphaned by the `projected_target_shape` node-domain conversion
-/// (its sole production caller, the `project_expr_surface_expr_via_host_threaded`
-/// bridge, lost its last production caller). Retained as a registered terminal
-/// sink for its `#[cfg(test)]` callers + the bridge's own later node-conversion
-/// block; the lib build sees no caller, so the dead-code lint is scoped off there.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "terminal sink orphaned by the projected_target_shape node conversion; \
-                  retained for test callers + the expr bridge's later node-conversion block"
-    )
-)]
-pub(crate) fn project_expr_surface_expr_published(
-    ctx: &dyn ResolverContext,
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-    base_mode: crate::semantic_query::ProjectionMode,
-    terminal_mode: crate::semantic_query::ProjectionMode,
-    demand: crate::semantic_query::ReductionDemand,
-) -> Option<TypeExpr> {
-    let node = project_expr_surface_expr_node(
-        ctx,
-        scope_canonical_id,
-        expr,
-        base_mode,
-        terminal_mode,
-        demand,
-    )?;
-    materialize_route_projection_node(ctx, &node)
 }
 
 /// Demand-bound NODE adapter for the Class-A path-precise projection (former

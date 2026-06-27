@@ -12004,7 +12004,6 @@ const HOT_MAT_DIRECT_IDENTS: &[&str] = &[
 /// (not to another bridge in this set), so they are not self-flagged.
 const HOT_MAT_BRIDGE_IDENTS: &[&str] = &[
     "lower_and_project_to_expanded_via_host_threaded",
-    "project_expr_surface_expr_via_host_threaded",
     "project_expr_surface_shape_via_host_threaded",
     "project_type_surface_expr_via_host_threaded",
     "project_route_surface_expr_via_host_threaded",
@@ -12234,10 +12233,6 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     (
         "component_meta_query_engine/surface.rs",
         "lower_and_project_to_expanded_published",
-    ),
-    (
-        "component_meta_query_engine/surface.rs",
-        "project_expr_surface_expr_published",
     ),
     (
         "component_meta_query_engine/surface.rs",

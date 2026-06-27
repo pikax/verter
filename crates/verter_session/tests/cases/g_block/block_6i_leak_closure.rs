@@ -6,10 +6,9 @@
 //! `crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve.rs`.
 //! The chain previously walked Object members / Function params /
 //! Array elements / Union and Intersection arms and dispatched every
-//! `TypeExpr::Ref` through
-//! `project_expr_surface_expr_via_host_threaded(Expanded, Expanded,
-//! Published)`. That per-Ref Expanded recursion was the ChatMessages
-//! `outputSchema|execute` audit-footprint leak.
+//! `TypeExpr::Ref` through the expr-domain surface bridge at
+//! `(Expanded, Expanded, Published)`. That per-Ref Expanded recursion
+//! was the ChatMessages `outputSchema|execute` audit-footprint leak.
 //!
 //! ## Discrimination
 //!
