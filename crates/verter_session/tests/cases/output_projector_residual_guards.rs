@@ -11968,8 +11968,12 @@ const HOT_DECIDE_TAINTED_GATE_IDENTS: &[&str] = &[
 /// `slots_from_typeinfo_surface → slot_callable_param_and_return → …` chain
 /// tainted end-to-end instead of laundering the extracted sub-expr to untainted.
 ///
-/// Enumerated inherent limit (FP-safe — can only MISS, never over-fire): this is
-/// a CLOSED set of the known structural `TypeExpr` extractors. A PURE NON-MINTING
+/// Enumerated inherent limit — a syntactic / name-based heuristic, NOT a
+/// universal-soundness claim. The universal no-hot-materialize-then-decide
+/// guarantee is STRUCTURAL (the `NoTypeExpr` marker trait, the sealed
+/// `OutputProjector`, and the node-domain `RaisedShapeFacts` / `RaisedShapeKey`
+/// conversions); this name-list is a supplementary residual tripwire. It is a
+/// CLOSED set of the known structural `TypeExpr` extractors. A PURE NON-MINTING
 /// rename — a renamed helper that returns a BORROWED sub-expression of an
 /// already-materialized input WITHOUT re-minting (`fn first_param(x: &TypeExpr)
 /// -> Option<TypeExpr>` destructuring `x`) — is not propagated by this name-list.
@@ -12248,13 +12252,17 @@ fn hot_free_fn_is_direct_verb(ident: &str) -> bool {
 // / block), so a block-local `use …::TypeExpr as TE;` never classifies a sibling.
 // ---------------------------------------------------------------------------
 
-/// File-GLOBAL `TypeExpr` type-alias idents (seeded with the canonical `TypeExpr`
-/// ident), collected RECURSIVELY over every `use` item. Used ONLY by
-/// [`build_hot_index`]'s return-type alias detection, where file-global is sound:
-/// a return type is in the signature, so it can only reference a module /
-/// file-level alias in scope at the signature, never a block-local one — lexical
-/// scoping is irrelevant for that read. Reuses the lexical-frame `use`-tree
-/// collector, keeping only the `TypeExpr`-type bindings.
+/// MODULE-level `TypeExpr` type-alias idents (seeded with the canonical
+/// `TypeExpr` ident), collected over every FILE- / MODULE-scoped `use` item —
+/// NOT block- or fn-local ones. Used ONLY by [`build_hot_index`]'s return-type
+/// alias detection. A return type lives in the signature, so it can only
+/// reference an alias VISIBLE at module scope, never a block-local one; collecting
+/// only module-level `use`s is therefore lexically sound for that read — a
+/// block-local `use …::TypeExpr as TE;` must not classify a sibling / top-level
+/// `-> TE` signature. The `visit_block` override stops descent into any block (fn
+/// bodies, nested blocks, const-initializer blocks), so only module-scoped `use`
+/// items are seen; nested `mod` items are still descended. Reuses the
+/// lexical-frame `use`-tree collector, keeping only the `TypeExpr`-type bindings.
 fn collect_file_typeexpr_aliases(file: &syn::File) -> std::collections::HashSet<String> {
     #[derive(Default)]
     struct FileAliasCollector {
@@ -12265,6 +12273,13 @@ fn collect_file_typeexpr_aliases(file: &syn::File) -> std::collections::HashSet<
             let mut stack = Vec::new();
             hot_use_tree_collect_frame(&u.tree, &mut stack, &mut self.frame);
         }
+        /// Do NOT descend into any block — a block-local `use` is not visible to
+        /// the enclosing module's signatures, so it must not enter the
+        /// return-type alias set. Every block-local `use` (fn body, nested block,
+        /// const-initializer block) lives inside a `syn::Block`; module-scoped
+        /// `use` items are `Item::Use` reached before any block, so they are
+        /// unaffected.
+        fn visit_block(&mut self, _b: &'ast syn::Block) {}
     }
     let mut c = FileAliasCollector::default();
     syn::visit::Visit::visit_file(&mut c, file);
@@ -12729,9 +12744,10 @@ fn hot_call_is_type_associated(path: &syn::Path) -> bool {
 /// a constructor: feeding a materialized value to `Foo::from(mat)` CONSTRUCTS a
 /// value from it (propagation / publication), it does not READ/classify its
 /// structure. A non-constructor associated tail (`Reader::classify`) is a
-/// fact-extracting decide and fires. Biased toward EXEMPTING (the fence may MISS
-/// an unconventionally-named constructor; it must never over-fire on one — the
-/// enumerated-inherent-limit, FP-safe direction).
+/// fact-extracting decide and fires. This is a syntactic / name-based heuristic,
+/// NOT a universal-soundness claim — it is biased toward EXEMPTING (the fence may
+/// MISS an unconventionally-named constructor); the universal no-hot-materialize
+/// guarantee is STRUCTURAL, not carried by this name match.
 fn hot_assoc_tail_is_constructor(tail: &str) -> bool {
     matches!(
         tail,
@@ -12960,17 +12976,40 @@ impl HotFnIndex {
         self.resolve_path_segs(caller_scope, &segs)
     }
     /// Resolve a call PATH given as segments. A bare single-segment path uses
-    /// reachable scope proximity ([`Self::resolve`]). A `self::` / `Self::` /
-    /// `super::` / `crate::` relative-or-absolute root resolves by proximity (the
-    /// nearest in-scope candidate is the intended callee). A CONCRETE module /
-    /// type qualifier (`other::helper` / `Type::helper`) matches candidates by
-    /// EXACT normalized-suffix of their declaring scope (an `impl(SelfTy)` /
-    /// `trait(T)` frame compares by its Self-type / trait ident) — no substring,
-    /// no penultimate-only shortcut — then proximity runs WITHIN that set. A
-    /// written concrete qualifier that matches NO candidate names a callee that is
-    /// not one of ours (`other::inner()` / `TypeInfoGraphRequest::inner()`) and
-    /// resolves to NOTHING — it does NOT fail open to bare proximity (that
-    /// fail-open was the `inner` collision).
+    /// reachable scope proximity ([`Self::resolve`]). A ROOTED path is NORMALIZED
+    /// against the caller's scope before matching, never collapsed to bare
+    /// proximity when a concrete tail module is written:
+    ///
+    /// - `Self::method` (the impl-proximity special case, and ONLY this — a `Self`
+    ///   qualifier with no further path) resolves the same-impl method by scope
+    ///   proximity. A `Self::Assoc::method` with a further concrete tail matches
+    ///   that tail concretely (below).
+    /// - `crate::a::b::callee` is ABSOLUTE: the written qualifier is already
+    ///   crate-rooted, so it matches a candidate's declaring scope by
+    ///   normalized-suffix — which, because `crate` occurs only at scope position
+    ///   0, is a FULL match from the root. `crate::foo::helper()` resolves to the
+    ///   physical `foo::helper` and never to a nearer `bar::helper`.
+    /// - `self::TAIL::callee` / `super(::super)*::TAIL::callee` are RELATIVE: the
+    ///   CONCRETE `TAIL` (after the leading `self` / `super` keywords) matches a
+    ///   candidate by normalized-suffix. `self::x::mk()` resolves to the concrete
+    ///   `x::mk`, never a nearer bare `mk`. A bare `self::callee` / `super::callee`
+    ///   (no concrete tail) is a same-/ancestor-module sibling, resolved by
+    ///   proximity (the correct answer for that form, not a fail-open).
+    /// - For ALL of the rooted forms above, when the written MODULE PATH matches no
+    ///   physical declaration the callee is RE-EXPORTED (declared in a submodule
+    ///   and `pub use`d at the written path — e.g. `crate::resolver_core::f` for an
+    ///   `f` physically in `resolver_core::<submodule>`) or external; the per-file
+    ///   declaration index does NOT model the re-export edge, so the rooted form
+    ///   falls back to bare-name scope proximity (the re-exported callee is
+    ///   reachable by its bare name). The exact-physical-match is PREFERRED, so a
+    ///   written path that DOES physically match never falls back to the nearer
+    ///   bare sibling (the FP2 fix is preserved).
+    /// - A PLAIN CONCRETE module / type qualifier (`other::helper` / `Type::helper`,
+    ///   not rooted) matches candidates by EXACT normalized-suffix of their
+    ///   declaring scope (an `impl(SelfTy)` / `trait(T)` frame compares by its
+    ///   Self-type / trait ident) — no substring, no penultimate-only shortcut —
+    ///   and a NON-match resolves to NOTHING (it does NOT fall open to bare
+    ///   proximity; that fail-open was the `inner` collision).
     fn resolve_path_segs(&self, caller_scope: &[String], segs: &[String]) -> Vec<usize> {
         let Some(bare) = segs.last() else {
             return Vec::new();
@@ -12979,10 +13018,79 @@ impl HotFnIndex {
             return self.resolve(caller_scope, bare);
         }
         let qualifier = &segs[..segs.len() - 1];
-        if matches!(qualifier[0].as_str(), "self" | "Self" | "super" | "crate") {
-            return self.resolve(caller_scope, bare);
+        match qualifier[0].as_str() {
+            // `Self::method` only — the impl-proximity special case. A
+            // `Self::Assoc::method` with a concrete tail matches that tail.
+            "Self" => {
+                let tail = &qualifier[1..];
+                if tail.is_empty() {
+                    self.resolve(caller_scope, bare)
+                } else {
+                    self.resolve_rooted_qualifier(caller_scope, tail, bare)
+                }
+            }
+            // `crate::…` is ABSOLUTE — the crate-rooted qualifier suffix-matches as
+            // a full path (crate occurs only at position 0).
+            "crate" => self.resolve_rooted_qualifier(caller_scope, qualifier, bare),
+            // `self::…` / `super(::super)*::…` are RELATIVE — strip the leading
+            // root keywords and suffix-match the concrete tail; a bare
+            // `self::callee` / `super::callee` is a sibling, resolved by proximity.
+            "self" | "super" => {
+                let mut start = 0;
+                while start < qualifier.len()
+                    && matches!(qualifier[start].as_str(), "self" | "super")
+                {
+                    start += 1;
+                }
+                let tail = &qualifier[start..];
+                if tail.is_empty() {
+                    self.resolve(caller_scope, bare)
+                } else {
+                    self.resolve_rooted_qualifier(caller_scope, tail, bare)
+                }
+            }
+            // A CONCRETE module / type qualifier — exact normalized-suffix match,
+            // NO fail-open (a non-matching `other::helper` / `Type::helper` names a
+            // callee that is not one of ours and resolves to NOTHING).
+            _ => self.resolve_concrete_qualifier(caller_scope, qualifier, bare),
         }
-        let Some(cands) = self.by_bare.get(bare.as_str()) else {
+    }
+    /// Resolve a ROOTED (`crate` / `self` / `super` / `Self`) concrete qualifier:
+    /// PREFER an exact physical-path suffix match (so `crate::foo::helper` resolves
+    /// to the physical `foo::helper`, never a nearer same-bare sibling — the
+    /// qualifier-faithful FP2 fix). When the written MODULE PATH matches no
+    /// physical declaration the callee is RE-EXPORTED (e.g. `crate::resolver_core::f`
+    /// for an `f` physically declared in `resolver_core::<submodule>` and
+    /// `pub use`d at the parent) or external — a graph the per-file declaration
+    /// index does NOT model — so fall back to bare-name scope proximity (the
+    /// re-exported callee is reachable by its bare name). This restores re-export
+    /// call resolution without re-introducing the nearer-bare mis-resolution for a
+    /// written path that DOES physically match.
+    fn resolve_rooted_qualifier(
+        &self,
+        caller_scope: &[String],
+        qualifier: &[String],
+        bare: &str,
+    ) -> Vec<usize> {
+        let exact = self.resolve_concrete_qualifier(caller_scope, qualifier, bare);
+        if !exact.is_empty() {
+            return exact;
+        }
+        self.resolve(caller_scope, bare)
+    }
+    /// Suffix-match a CONCRETE qualifier (root keywords already normalized away)
+    /// against the `bare` candidates by EXACT normalized-suffix of each declaring
+    /// scope, then proximity WITHIN the reachable matches. An empty match set
+    /// resolves to NOTHING — the caller (a plain concrete qualifier, or a rooted
+    /// qualifier via [`Self::resolve_rooted_qualifier`]) decides whether to stop or
+    /// fall back.
+    fn resolve_concrete_qualifier(
+        &self,
+        caller_scope: &[String],
+        qualifier: &[String],
+        bare: &str,
+    ) -> Vec<usize> {
+        let Some(cands) = self.by_bare.get(bare) else {
             return Vec::new();
         };
         let matching: Vec<usize> = cands
@@ -13433,6 +13541,24 @@ impl<'a> HotMaterializeScanner<'a> {
             .map(|(_, v)| Some(*v))
             .fold(None, HotTaintKind::join)
     }
+    /// Self-or-ancestor taint of a place (NO descendant scan) — the WHOLE-value
+    /// taint of `place` (a tainted ancestor means the enclosing aggregate, hence
+    /// `place`, is materialized). Used by struct-update rest propagation to
+    /// distinguish a wholly-tainted base from one with only some tainted
+    /// sub-places (which propagate path-precisely, not as a whole-place taint).
+    fn place_whole_taint(&self, place: &str) -> Option<HotTaintKind> {
+        let set = self.tainted_stack.last()?;
+        let mut p = place;
+        loop {
+            if let Some(k) = set.get(p) {
+                return Some(*k);
+            }
+            match p.rfind('.') {
+                Some(i) => p = &p[..i],
+                None => return None,
+            }
+        }
+    }
     fn is_tainted(&self, id: &str) -> bool {
         self.taint_kind(id).is_some()
     }
@@ -13541,11 +13667,19 @@ impl<'a> HotMaterializeScanner<'a> {
                 .iter()
                 .map(|e| self.expr_taint_kind(e))
                 .fold(None, HotTaintKind::join),
-            syn::Expr::Struct(s) => s
-                .fields
-                .iter()
-                .map(|f| self.expr_taint_kind(&f.expr))
-                .fold(None, HotTaintKind::join),
+            syn::Expr::Struct(s) => {
+                // A WHOLE read of a struct literal reads its explicit fields AND
+                // the fields copied from a functional-update `..rest` base, so a
+                // tainted base taints the whole-struct read (the pre-field-precise
+                // coverage for `S { clean, ..base }`).
+                let explicit = s
+                    .fields
+                    .iter()
+                    .map(|f| self.expr_taint_kind(&f.expr))
+                    .fold(None, HotTaintKind::join);
+                let rest = s.rest.as_deref().and_then(|r| self.expr_taint_kind(r));
+                HotTaintKind::join(explicit, rest)
+            }
             syn::Expr::Repeat(r) => self.expr_taint_kind(&r.expr),
             syn::Expr::Macro(mac) if mac.mac.path.is_ident("vec") => {
                 hot_macro_arg_exprs(&mac.mac.tokens)
@@ -13577,12 +13711,27 @@ impl<'a> HotMaterializeScanner<'a> {
         }
         match hot_peel_expr(base) {
             syn::Expr::Struct(s) => {
+                // An explicitly-written field reads that field's value precisely.
                 if let syn::Member::Named(name) = member {
                     for fv in &s.fields {
                         if matches!(&fv.member, syn::Member::Named(fname) if fname == name) {
                             return self.expr_taint_kind(&fv.expr);
                         }
                     }
+                }
+                // A member NOT written explicitly is sourced from the `..rest`
+                // base: read it path-precisely from the base PLACE, else
+                // conservatively from the whole rest (the pre-field-precise
+                // coverage for that form — a tainted base taints the rest member).
+                if let Some(rest) = s.rest.as_deref() {
+                    if let Some(pbase) = hot_expr_place(rest) {
+                        let seg = match member {
+                            syn::Member::Named(id) => id.to_string(),
+                            syn::Member::Unnamed(idx) => idx.index.to_string(),
+                        };
+                        return self.taint_kind(&format!("{pbase}.{seg}"));
+                    }
+                    return self.expr_taint_kind(rest);
                 }
                 None
             }
@@ -13654,6 +13803,9 @@ impl<'a> HotMaterializeScanner<'a> {
                     let place = format!("{root}.{seg}");
                     self.taint_place_recursive(&place, &fv.expr);
                 }
+                if let Some(rest) = s.rest.as_deref() {
+                    self.taint_struct_rest(root, rest, &s.fields);
+                }
             }
             syn::Expr::Tuple(t) => {
                 for (i, el) in t.elems.iter().enumerate() {
@@ -13674,6 +13826,50 @@ impl<'a> HotMaterializeScanner<'a> {
                 }
             }
             _ => {}
+        }
+    }
+    /// Propagate a struct functional-update `..base` taint into the bound `root`.
+    /// Path-precise when `base` is a pure place: a wholly-tainted base taints
+    /// `root` whole, and each tainted `base.<seg>…` sub-place whose leading
+    /// `<seg>` is NOT an explicitly-written field is mirrored onto `root.<seg>…`
+    /// (so an explicit clean field stays untainted — the field-precise narrowing
+    /// survives rest propagation). A non-place base taints `root` whole when
+    /// materialized (conservative, sound — never a missed rest-sourced field).
+    fn taint_struct_rest(
+        &mut self,
+        root: &str,
+        rest: &syn::Expr,
+        explicit: &syn::punctuated::Punctuated<syn::FieldValue, syn::token::Comma>,
+    ) {
+        if let Some(pbase) = hot_expr_place(rest) {
+            let explicit_names: std::collections::HashSet<String> = explicit
+                .iter()
+                .map(|fv| match &fv.member {
+                    syn::Member::Named(id) => id.to_string(),
+                    syn::Member::Unnamed(idx) => idx.index.to_string(),
+                })
+                .collect();
+            let whole = self.place_whole_taint(&pbase);
+            let prefix = format!("{pbase}.");
+            let mut copies: Vec<(String, HotTaintKind)> = Vec::new();
+            if let Some(set) = self.tainted_stack.last() {
+                for (place, kind) in set.iter() {
+                    if let Some(suffix) = place.strip_prefix(&prefix) {
+                        let seg = suffix.split('.').next().unwrap_or(suffix);
+                        if !explicit_names.contains(seg) {
+                            copies.push((suffix.to_string(), *kind));
+                        }
+                    }
+                }
+            }
+            if let Some(k) = whole {
+                self.mark_tainted(root.to_string(), k);
+            }
+            for (suffix, kind) in copies {
+                self.mark_tainted(format!("{root}.{suffix}"), kind);
+            }
+        } else if let Some(k) = self.expr_taint_kind(rest) {
+            self.mark_tainted(root.to_string(), k);
         }
     }
     /// Taint one container element at `place`: descend precisely into a nested
@@ -15511,6 +15707,326 @@ fn hot_fence_scans_trait_default_method_bodies() {
     );
 }
 
+/// Discrimination self-test for ROOTED-qualifier faithfulness: a `crate::`-rooted
+/// call resolves to its ABSOLUTE target (never a nearer same-bare sibling), and a
+/// `self::x::callee` resolves to the concrete `x::callee` (never a nearer bare
+/// `callee`). Pre-fix both rooted forms fail-opened to bare scope proximity, so a
+/// nearer same-named candidate was selected. The GREEN assertions are the
+/// discriminating ones (pre-fix the fail-open picked the wrong candidate).
+#[test]
+fn hot_materialize_fence_rooted_qualifier_faithful() {
+    // `mod.rs` roots the snippet at the crate root (`mod_path == ["crate"]`), so a
+    // written `crate::foo::…` / `self::x::…` matches the snippet's own modules.
+    let scan = |src: &str| hot_scan_snippet("mod.rs", src);
+    const MINT_BODY: &str = "let cap = Cap::new(); \
+        cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())";
+
+    // (CRATE) `crate::foo::helper(x)` MUST resolve to the ABSOLUTE minting
+    //         `foo::helper`, NOT the nearer non-minting `bar::helper` — so the
+    //         caller receives a materialized value and the decide FIRES. Pre-fix
+    //         the fail-open picked the nearer non-minter → caller GREEN.
+    let crate_to_minter = format!(
+        "mod foo {{ pub fn helper(x: &TypeExpr) -> TypeExpr {{ {MINT_BODY} }} }}\n\
+         mod bar {{\n\
+            pub fn helper(x: TypeExpr) -> TypeExpr {{ x }}\n\
+            fn caller(x: &TypeExpr) {{\n\
+                let v = crate::foo::helper(x);\n\
+                let _hit = matches!(v, TypeExpr::Object(_));\n\
+            }}\n\
+         }}\n"
+    );
+    let v = scan(&crate_to_minter);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::caller ") && m.contains("decide")),
+        "self-test (CRATE): `crate::foo::helper(x)` MUST resolve to the absolute minting \
+         `foo::helper`, so the caller's decide FIRES — not the nearer non-minting `bar::helper`; \
+         got: {v:?}"
+    );
+
+    // (CRATE-inverse) the absolute target is the NON-minter and the nearer sibling
+    //         is the minter — the `crate::`-rooted call STAYS GREEN (no fail-open
+    //         to the nearer minter).
+    let crate_to_nonminter = format!(
+        "mod foo {{ pub fn helper(x: TypeExpr) -> TypeExpr {{ x }} }}\n\
+         mod bar {{\n\
+            pub fn helper(x: &TypeExpr) -> TypeExpr {{ {MINT_BODY} }}\n\
+            fn caller(x: &TypeExpr) {{\n\
+                let v = crate::foo::helper(x);\n\
+                let _hit = matches!(v, TypeExpr::Object(_));\n\
+            }}\n\
+         }}\n"
+    );
+    let v = scan(&crate_to_nonminter);
+    assert!(
+        !v.iter().any(|m| m.contains("::caller ")),
+        "self-test (CRATE-inverse): `crate::foo::helper(x)` resolving to the NON-minting absolute \
+         `foo::helper` MUST STAY GREEN — it must NOT fall open to the nearer minting `bar::helper`; \
+         got: {v:?}"
+    );
+
+    // (SELF) `self::x::mk(w)` MUST resolve to the concrete `x::mk`, NOT the nearer
+    //        bare `mk`. With `x::mk` a NON-minter and the bare `mk` a MINTER, the
+    //        caller STAYS GREEN. Pre-fix the fail-open picked the nearer minting
+    //        bare `mk` and fired.
+    let self_to_nonminter = format!(
+        "mod m {{\n\
+            pub fn mk(x: &TypeExpr) -> TypeExpr {{ {MINT_BODY} }}\n\
+            mod x {{ pub fn mk(z: TypeExpr) -> TypeExpr {{ z }} }}\n\
+            fn caller(w: &TypeExpr) {{\n\
+                let v = self::x::mk(w);\n\
+                let _hit = matches!(v, TypeExpr::Object(_));\n\
+            }}\n\
+         }}\n"
+    );
+    let v = scan(&self_to_nonminter);
+    assert!(
+        !v.iter().any(|m| m.contains("::caller ")),
+        "self-test (SELF): `self::x::mk(w)` MUST resolve to the concrete NON-minting `x::mk`, not \
+         the nearer minting bare `mk` — caller STAYS GREEN (pre-fix the fail-open picked the bare \
+         minter and fired); got: {v:?}"
+    );
+
+    // (SELF-control) when the concrete `x::mk` IS the minter (bare `mk` non-minter),
+    //        `self::x::mk(w)` reaches `x::mk` and the decide FIRES — pinning the
+    //        resolution to `x::mk`, not the bare `mk` (so the green above is not a
+    //        blanket disable).
+    let self_to_minter = format!(
+        "mod m {{\n\
+            pub fn mk(z: TypeExpr) -> TypeExpr {{ z }}\n\
+            mod x {{ pub fn mk(x: &TypeExpr) -> TypeExpr {{ {MINT_BODY} }} }}\n\
+            fn caller(w: &TypeExpr) {{\n\
+                let v = self::x::mk(w);\n\
+                let _hit = matches!(v, TypeExpr::Object(_));\n\
+            }}\n\
+         }}\n"
+    );
+    let v = scan(&self_to_minter);
+    assert!(
+        v.iter().any(|m| m.contains("::caller ") && m.contains("decide")),
+        "self-test (SELF-control): `self::x::mk(w)` reaching the minting concrete `x::mk` MUST fire \
+         the caller's decide (resolution pinned to `x::mk`); got: {v:?}"
+    );
+
+    // (RE-EXPORT) `crate::a::helper(x)` where `helper` is physically declared in a
+    //        SUBMODULE `a::b` and re-exported at `crate::a::` — the written module
+    //        path matches no physical declaration, so the rooted form falls back to
+    //        bare-name proximity (the re-exported minter is reachable by name) and
+    //        the decide FIRES. A strict no-fail-open would DROP this genuine call;
+    //        the exact-physical-match preference above keeps a true physical path
+    //        from falling back.
+    let reexport = format!(
+        "mod a {{\n\
+            mod b {{ pub fn helper(x: &TypeExpr) -> TypeExpr {{ {MINT_BODY} }} }}\n\
+            fn caller(x: &TypeExpr) {{\n\
+                let v = crate::a::helper(x);\n\
+                let _hit = matches!(v, TypeExpr::Object(_));\n\
+            }}\n\
+         }}\n"
+    );
+    let v = scan(&reexport);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::caller ") && m.contains("decide")),
+        "self-test (RE-EXPORT): `crate::a::helper(x)` where `helper` is physically in `a::b` (a \
+         re-export the per-file index does not model) MUST fall back to bare-name resolution and \
+         FIRE — never silently drop a genuine materialized-return call; got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for STRUCT-UPDATE `..rest` taint (an ordinary-syntax
+/// taint-soundness completion of the FP1 field-precise narrowing): a struct-update
+/// `S { clean, ..base }` whose `..base` carries a materialized field propagates
+/// taint to the rest-sourced member (direct projection AND bound), while a clean
+/// explicit sibling and a fully-clean struct-update STAY GREEN (rest propagation
+/// stays field-precise, not whole-aggregate over-taint). Pre-fix `ExprStruct::rest`
+/// was ignored, so a rest-sourced materialized field read as untainted.
+#[test]
+fn hot_materialize_fence_struct_update_rest_taint() {
+    let scan = |src: &str| hot_scan_snippet("foo/route_keys.rs", src);
+    let helper = r#"
+        fn mat_step(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+        }
+    "#;
+
+    // (REST-a) DIRECT struct-update projection of a rest-sourced materialized field
+    //          FIRES; a fully-clean struct-update STAYS GREEN.
+    let direct = format!(
+        "{helper}\n\
+         fn rest_materialized_fires(x: &TypeExpr) {{\n\
+            let base = Dto {{ ty: mat_step(x), name: String::new() }};\n\
+            let _hit = matches!(Dto {{ name: String::new(), ..base }}.ty, TypeExpr::Object(_));\n\
+         }}\n\
+         fn clean_rest_green(x: &TypeExpr) -> bool {{\n\
+            let base = Dto {{ ty: String::new(), name: String::new() }};\n\
+            Dto {{ name: String::new(), ..base }}.name.is_empty()\n\
+         }}\n"
+    );
+    let v = scan(&direct);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::rest_materialized_fires ") && m.contains("decide")),
+        "self-test (REST-a): a `matches!(Dto {{ name, ..base }}.ty, …)` decide on a REST-sourced \
+         materialized field MUST fire; got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::clean_rest_green ")),
+        "self-test (REST-a): a fully-clean struct-update read MUST STAY GREEN; got: {v:?}"
+    );
+
+    // (REST-b) BOUND struct-update — a decide on the rest-sourced materialized field
+    //          FIRES; a decide on the clean EXPLICIT sibling STAYS GREEN (the rest
+    //          propagation is field-precise, NOT a whole-aggregate over-taint).
+    let bound = format!(
+        "{helper}\n\
+         fn bound_rest_fires(x: &TypeExpr) {{\n\
+            let base = Dto {{ ty: mat_step(x), name: String::new() }};\n\
+            let updated = Dto {{ name: String::new(), ..base }};\n\
+            let _hit = matches!(updated.ty, TypeExpr::Object(_));\n\
+         }}\n\
+         fn bound_clean_sibling_green(x: &TypeExpr) -> bool {{\n\
+            let base = Dto {{ ty: mat_step(x), name: String::new() }};\n\
+            let updated = Dto {{ name: String::new(), ..base }};\n\
+            updated.name.is_empty()\n\
+         }}\n"
+    );
+    let v = scan(&bound);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::bound_rest_fires ") && m.contains("decide")),
+        "self-test (REST-b): a `matches!(updated.ty, …)` decide on the bound rest-sourced \
+         materialized field MUST fire; got: {v:?}"
+    );
+    assert!(
+        !v.iter().any(|m| m.contains("::bound_clean_sibling_green ")),
+        "self-test (REST-b): a decide on the CLEAN EXPLICIT sibling `updated.name` MUST STAY GREEN \
+         (rest propagation stays field-precise, not whole-aggregate); got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for the return-type alias collector's LEXICAL scoping:
+/// a block- / fn-local `use …::TypeExpr as TE;` must NOT classify a sibling /
+/// top-level `-> TE` signature as `TypeExpr`-returning. Pre-fix the file-global
+/// collector visited every `ItemUse` (including block-local ones), so the leaked
+/// `TE` alias polluted a sibling's return-taint and a consumer's decide fired. The
+/// module-level positive control proves the scoping is real, not a blanket disable.
+#[test]
+fn hot_materialize_fence_return_type_alias_lexically_scoped() {
+    let scan = |src: &str| hot_scan_snippet("foo/route_keys.rs", src);
+
+    // Block-local `use …::TypeExpr as TE;` must NOT leak to the sibling `-> TE`.
+    let block_local = r#"
+        fn mint(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+        }
+        fn uses_te_locally() {
+            use real::TypeExpr as TE;
+            let _t: TE = make();
+        }
+        fn forwards(x: &TypeExpr) -> TE {
+            mint(x)
+        }
+        fn consume(x: &TypeExpr) {
+            let r = forwards(x);
+            let _hit = matches!(r, TypeExpr::Object(_));
+        }
+    "#;
+    let v = scan(block_local);
+    assert!(
+        !v.iter().any(|m| m.contains("::consume ")),
+        "self-test (return-alias-scope): a block-local `use …::TypeExpr as TE` must NOT make the \
+         sibling `fn forwards(..) -> TE` return-`TypeExpr`-classified, so `forwards` is NOT \
+         return-tainted and `consume`'s decide on its result STAYS GREEN; got: {v:?}"
+    );
+
+    // Positive control: a MODULE-level `use …::TypeExpr as TE` DOES classify `-> TE`,
+    // so `forwards` IS return-tainted and `consume` FIRES.
+    let module_level = r#"
+        use real::TypeExpr as TE;
+        fn mint(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+        }
+        fn forwards(x: &TypeExpr) -> TE {
+            mint(x)
+        }
+        fn consume(x: &TypeExpr) {
+            let r = forwards(x);
+            let _hit = matches!(r, TypeExpr::Object(_));
+        }
+    "#;
+    let v = scan(module_level);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::consume ") && m.contains("decide")),
+        "self-test (return-alias-scope control): a MODULE-level `use …::TypeExpr as TE` DOES \
+         classify `fn forwards(..) -> TE` as return-`TypeExpr`, so `forwards` is return-tainted \
+         and `consume` FIRES; got: {v:?}"
+    );
+}
+
+/// Discrimination self-test for the Unknown-fence trait-DEFAULT reconciliation: a
+/// `#[cfg(test)]` trait-default sentinel `Unknown` construction MUST NOT fire (the
+/// cfg-test exclusion now gates the trait-default scan, killing the FP from syn's
+/// accidental default-visitor descent); a NON-test trait-default sentinel IS caught
+/// with proper fn attribution (not `<file-scope>`); and a raw-tainted field
+/// shorthand inside a trait default fires through the per-fn raw-taint frame.
+#[test]
+fn unknown_fence_trait_default_reconcile() {
+    // (cfg-test) a `#[cfg(test)]`-gated trait-default sentinel MUST NOT fire.
+    let cfg_test_default = r#"
+        trait Surface {
+            #[cfg(test)]
+            fn classify(&self) -> TypeExpr {
+                TypeExpr::Unknown { raw: "semanticMiss".to_string() }
+            }
+        }
+    "#;
+    assert!(
+        unknown_sentinel_constructions_in_src(cfg_test_default).is_empty(),
+        "self-test (cfg-test): a `#[cfg(test)]` trait-DEFAULT `Unknown {{ raw: <sentinel> }}` MUST \
+         NOT fire (cfg-test-gated trait defaults are skipped, at parity with the hot fence); got: {:?}",
+        unknown_sentinel_constructions_in_src(cfg_test_default)
+    );
+
+    // (non-test) a NON-test trait-default sentinel IS caught, attributed to the
+    //            trait-default fn (`classify`), NOT `<file-scope>`.
+    let nontest_default = r#"
+        trait Surface {
+            fn classify(&self) -> TypeExpr {
+                TypeExpr::Unknown { raw: "semanticMiss".to_string() }
+            }
+        }
+    "#;
+    let hits = unknown_sentinel_constructions_in_src(nontest_default);
+    assert!(
+        hits.iter().any(|(ident, _)| ident == "classify"),
+        "self-test (non-test): a non-test trait-DEFAULT sentinel `Unknown` MUST fire and attribute \
+         to the trait-default fn `classify` (not `<file-scope>`); got: {hits:?}"
+    );
+
+    // (field-shorthand) a raw-tainted field shorthand inside a trait default fires
+    //            through the per-fn raw-taint frame (pre-fix there was no frame, so
+    //            the shorthand form was missed).
+    let field_shorthand_default = r#"
+        trait Surface {
+            fn classify(&self, err: &QueryError) -> TypeExpr {
+                let raw = semantic_query_error_raw(err);
+                TypeExpr::Unknown { raw }
+            }
+        }
+    "#;
+    let hits = unknown_sentinel_constructions_in_src(field_shorthand_default);
+    assert!(
+        hits.iter().any(|(ident, _)| ident == "classify"),
+        "self-test (field-shorthand): a raw-tainted field-shorthand `Unknown {{ raw }}` inside a \
+         trait default MUST fire via the per-fn raw-taint frame, attributed to `classify`; got: {hits:?}"
+    );
+}
+
 /// Discrimination self-test for the VALUE-SCOPED self-policing exemption: the
 /// `lowers_param` exemption is PER-PARAMETER. A lowering terminal that ALSO
 /// decides on a fresh mint (or reads one, or decides on a SEPARATE un-lowered
@@ -16158,6 +16674,26 @@ impl<'ast> syn::visit::Visit<'ast> for UnknownSentinelScanner {
         self.raw_tainted_stack
             .push(std::collections::HashSet::new());
         syn::visit::visit_impl_item_fn(self, f);
+        self.raw_tainted_stack.pop();
+        self.fn_stack.pop();
+    }
+    /// A trait-DEFAULT (provided) method body is production code and is scanned
+    /// with the SAME `#[cfg(test)]` exclusion + per-fn raw-taint frame + fn
+    /// attribution as a free / impl fn (parity with the hot fence's
+    /// `visit_trait_item_fn`). This replaces syn's accidental default-visitor
+    /// descent, which scanned a trait-default sentinel construction WITHOUT
+    /// cfg-test gating (a `#[cfg(test)]` trait default would have FP'd), without a
+    /// raw-taint frame (a field-shorthand `Unknown { raw }` form was missed), and
+    /// without fn attribution (a hit read `<file-scope>`). A signature-only trait
+    /// method has no default body, so the recursion scans nothing.
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        if attrs_are_test_gated(&f.attrs) {
+            return;
+        }
+        self.fn_stack.push(f.sig.ident.to_string());
+        self.raw_tainted_stack
+            .push(std::collections::HashSet::new());
+        syn::visit::visit_trait_item_fn(self, f);
         self.raw_tainted_stack.pop();
         self.fn_stack.pop();
     }
