@@ -4581,6 +4581,17 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::resolver_core::component_meta_query_engine::surface",
         "projected_compound_root_surface_via_dispatch",
     ),
+    // The route-fixpoint terminal raiser: materialises the sealed
+    // `AdmittedRouteProjectionNode` (minted only by the in-subtree route/surface
+    // adapters after their node-domain acceptance gate) into the published
+    // `TypeExpr` through the existing `materialize_published_node` surface sink.
+    // Sink-internal, confined to the `component_meta_query_engine` subtree — same
+    // category as the surface-projection raisers above; the admitted node is the
+    // input, not a caller-forged surface/member.
+    (
+        "crate::resolver_core::component_meta_query_engine::surface",
+        "materialize_route_projection_node",
+    ),
     // The framework-surface member raisers — confined to `vue_exec`, reachable
     // only through a token-gated normalizer.
     (
