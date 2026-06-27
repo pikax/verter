@@ -104,24 +104,4 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .materialize_structure_db()
             .live_count()
     }
-
-    /// A debug counter read by behavior-assertion tests that compare against
-    /// `materialize_structure_db().live_count()`.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_prepared_type_decl_query_count(&self) -> usize {
-        self.prepared_type_decl_query_count
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_prepared_shared_surface_hit_count(&self) -> usize {
-        self.prepared_shared_surface_hit_count
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_prepared_shared_member_hit_count(&self) -> usize {
-        self.prepared_shared_member_hit_count
-    }
 }

@@ -565,12 +565,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
-    #[cfg(test)]
-    #[allow(dead_code)]
-    prepared_shared_surface_hit_count: usize,
-    #[cfg(test)]
-    #[allow(dead_code)]
-    prepared_shared_member_hit_count: usize,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
     /// Ambient declaration-scope chain accumulated during
@@ -922,10 +916,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_type_decls: FxHashMap::default(),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
-            #[cfg(test)]
-            prepared_shared_surface_hit_count: 0,
-            #[cfg(test)]
-            prepared_shared_member_hit_count: 0,
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
             projection_chain_scopes: Vec::new(),
