@@ -107,6 +107,7 @@ use crate::semantic_query::SemanticNodeId;
 // `surface` child module. The `pub(crate) use` block re-exports the
 // existing public-API symbols so external `crate::resolver_core::component_meta_query_engine::<name>`
 // paths remain stable.
+mod engine_accessors;
 mod helpers;
 mod registry_decl;
 mod route_keys;

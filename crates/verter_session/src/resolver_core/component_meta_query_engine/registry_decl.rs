@@ -13,25 +13,19 @@
 //!   resolve_direct_prepared_type_declaration_metadata`, `pub fn
 //!   resolve_type_declaration`, `pub fn resolve_final_prepared_type_target`,
 //!   `pub fn can_resolve_registry_symbol`, `pub fn owner_collection_expr`,
-//!   `pub fn named_decl_body`, `pub fn prepared_member_raw_type`,
-//!   `pub fn enter_member_surface`, `pub fn exit_member_surface`,
-//!   `pub fn allow_wildcard_route`,
-//!   `pub fn allow_imported_root`, `pub fn allow_registry_deepening`,
-//!   `pub fn allow_union_member`, `pub fn reset_union_members`,
-//!   `pub fn has_fuse_tripped`, `pub fn fuse_trips` — all `pub` on the
-//!   engine, callable from outside the crate.
+//!   `pub fn named_decl_body`, `pub fn prepared_member_raw_type` — all `pub`
+//!   on the engine, callable from outside the crate.
 //! - `pub(crate) fn materialize_member_surface_expr`,
-//!   `pub(crate) fn projection_op_budget_exhausted`,
-//!   `pub(crate) fn imported_registry_symbol_cache_len`,
-//!   `pub(crate) fn materialized_member_surface_cache_len`,
-//!   `pub(crate) fn debug_*`, `pub(crate) fn prepared_type_decl`,
-//!   `pub(crate) fn ctx`,
+//!   `pub(crate) fn prepared_type_decl`, `pub(crate) fn ctx`,
 //!   `pub(crate) fn dispatch_projected_surface`,
 //!   `pub(crate) fn dispatch_routed_expr_surface_expr` — crate-visible
 //!   helpers used by `meta_resolve` and other engine impl methods.
 //! - Private methods (`semantic_dispatch`, `dispatch_root_instantiated`)
 //!   stay private and are visible inside the
 //!   `component_meta_query_engine` folder via parent-private locality.
+//!
+//! The engine's fuse / fanout-budget / cache-length / debug accessors live in
+//! the sibling `engine_accessors` module.
 
 use verter_semantic::analysis::type_solver::query_engine::ProjectedSurface;
 use verter_type_expr::TypeExpr;
@@ -53,7 +47,7 @@ use super::{
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-use crate::resolver_core::{FuseTrip, RouteDemand};
+use crate::resolver_core::RouteDemand;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
     SemanticQueryOutput,
@@ -838,125 +832,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<TypeExpr> {
         self.prepared_type_decl(canonical_id, symbol_name)
             .and_then(|prepared| prepared.member(member_name).map(|member| member.ty.clone()))
-    }
-
-    pub fn enter_member_surface(&mut self) -> bool {
-        self.fuse_state.push_member_recursion();
-        !self
-            .fuse_state
-            .check_member_recursion_depth(&self.fuse_budgets)
-    }
-
-    pub fn exit_member_surface(&mut self) {
-        self.fuse_state.pop_member_recursion();
-    }
-
-    /// `pub(crate)` accessor for the projection-op fuse
-    /// budget check. Used by the bridge helpers in `meta_resolve.rs`
-    /// (post engine-method deletion) to gate the same-budget check the
-    /// retired engine methods enforced.
-    pub(crate) fn projection_op_budget_exhausted(&mut self) -> bool {
-        self.fuse_state
-            .check_projection_op_count(&self.fuse_budgets)
-    }
-
-    /// Check wildcard route fanout budget. Returns `true` if within budget.
-    pub fn allow_wildcard_route(&mut self) -> bool {
-        !self
-            .fuse_state
-            .check_wildcard_route_fanout(&self.fuse_budgets)
-    }
-
-    /// Check imported-root fanout budget. Returns `true` if within budget.
-    pub fn allow_imported_root(&mut self) -> bool {
-        !self
-            .fuse_state
-            .check_imported_root_fanout(&self.fuse_budgets)
-    }
-
-    /// Check registry deepening fanout budget. Returns `true` if within budget.
-    pub fn allow_registry_deepening(&mut self) -> bool {
-        !self
-            .fuse_state
-            .check_registry_deepening_fanout(&self.fuse_budgets)
-    }
-
-    /// Check union/member explosion budget. Returns `true` if within budget.
-    pub fn allow_union_member(&mut self) -> bool {
-        !self
-            .fuse_state
-            .check_union_member_explosion(&self.fuse_budgets)
-    }
-
-    /// Reset union member counter for per-member branch counting.
-    pub fn reset_union_members(&mut self) {
-        self.fuse_state.reset_union_members();
-    }
-
-    /// Whether any fuse has tripped.
-    pub fn has_fuse_tripped(&self) -> bool {
-        self.fuse_state.has_tripped()
-    }
-
-    /// Get fuse trip details for provenance/tracing.
-    pub fn fuse_trips(&self) -> &[FuseTrip] {
-        &self.fuse_state.trips
-    }
-
-    #[cfg(test)]
-    pub(crate) fn imported_registry_symbol_cache_len(&self) -> usize {
-        self.imported_registry_symbols.borrow().len()
-    }
-
-    /// Pre-consume the wildcard-route fuse so exactly `remaining`
-    /// further `allow_wildcard_route()` calls stay within budget. With
-    /// `remaining == 1`, the next slow-lane resolution is permitted and
-    /// a second would trip `wildcard_route_fanout` — the near-fanout
-    /// boundary that discriminates the imported-registry recompute bug.
-    #[cfg(test)]
-    pub(crate) fn prime_wildcard_route_fuse_for_tests(&mut self, remaining: usize) {
-        self.fuse_state.wildcard_sources_processed = self
-            .fuse_budgets
-            .wildcard_route_fanout
-            .saturating_sub(remaining);
-    }
-
-    /// Number of `allow_wildcard_route()` calls observed so far — the
-    /// live wildcard-route fuse consumption count.
-    #[cfg(test)]
-    pub(crate) fn wildcard_route_fuse_consumed_for_tests(&self) -> usize {
-        self.fuse_state.wildcard_sources_processed
-    }
-
-    /// Cache size for the structural materialiser's final-result
-    /// cache (ctx-owned `MaterializeStructureDb::live_count()`).
-    #[cfg(test)]
-    pub(crate) fn materialized_member_surface_cache_len(&self) -> usize {
-        self.ctx
-            .project_type_store()
-            .materialize_structure_db()
-            .live_count()
-    }
-
-    /// The corresponding test assertions migrated to behavior
-    /// assertions / ctx `materialize_structure_db().live_count()` checks.
-    /// Field + accessor retained until the broader counter cleanup.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_prepared_type_decl_query_count(&self) -> usize {
-        self.prepared_type_decl_query_count
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_prepared_shared_surface_hit_count(&self) -> usize {
-        self.prepared_shared_surface_hit_count
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_prepared_shared_member_hit_count(&self) -> usize {
-        self.prepared_shared_member_hit_count
     }
 
     pub(crate) fn prepared_type_decl(
