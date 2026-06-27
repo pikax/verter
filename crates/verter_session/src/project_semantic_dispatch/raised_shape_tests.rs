@@ -35,7 +35,8 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 use super::raise::{
     node_can_shell_raise, node_contains_semantic_miss_legacy_equivalent,
     node_is_expanded_surface_legacy_equivalent, node_raised_shape_facts, node_raised_shape_for_eq,
-    raised_shape_eq_node_type_expr, raised_shape_eq_nodes,
+    project_node_publication_score_with_dispatch, raised_shape_eq_node_type_expr,
+    raised_shape_eq_nodes, type_expr_publication_score, PublicationScore,
 };
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta_query_engine::{
@@ -2186,5 +2187,538 @@ fn raised_shape_key_is_an_interned_id_not_a_typeexpr() {
          an id, it does not own the materialised shape",
         std::mem::size_of::<RaisedShapeKey>(),
         std::mem::size_of::<TypeExpr>(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Publication-scoring differential: the node-front publication score
+// (`project_node_publication_score`) and the `&TypeExpr`-front score
+// (`type_expr_publication_score`) must agree per-fact on `raise(node)`, and the
+// node-domain improvement verdict (`compare_node_improvement`) must equal the
+// `TypeExpr` verdict (`compare_type_expr_improvement`) over the raised shapes.
+//
+// These fixtures hit the classes where the FORMER hand-rolled node scorers
+// diverged from the `TypeExpr` predicates (the divergence this fix closes):
+// a `Mapped` whose `source == key_space` (the double-count), a `Mapped` over a
+// free `TypeParam` (the missing-`TypeParam` arm), and an `Opaque(RecursiveRef)`
+// root (the unknown-root + structural-misclassification). Because both fronts now
+// feed the SAME shared per-arm rules and the node front rides the SAME
+// `fold_node`, they agree by construction.
+// ---------------------------------------------------------------------------
+
+/// A `Mapped { source, mapper.key_space, value }` direct fixture. The fold reads
+/// `mapper.key_space` (KeyOf-aware) as the source child and `value_expr` as the
+/// value — NEVER the `source` field — so a fixture with `source == key_space`
+/// (both `key_space`) exercises the former double-count.
+fn mapped_fixture(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    source: SemanticNodeId,
+    key_space: SemanticNodeId,
+    value_expr: SemanticNodeId,
+) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Mapped {
+        source,
+        mapper: MapperKey {
+            parameter_node: source,
+            key_space,
+            value_expr,
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+            kind: MapperKind::Computed,
+        },
+    })
+}
+
+#[test]
+fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
+    let host = host();
+    let graph = graph_of(&host);
+
+    let foo = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl_identity_unscoped("/w/m.ts", "Foo"),
+    });
+    let bar = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl_identity_unscoped("/w/m.ts", "Bar"),
+    });
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    // `Foo<Bar>` — a generic instantiation, symbolic-carrier penalty 2, no divergence.
+    let foo_of_bar = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: decl_identity_unscoped("/w/m.ts", "Foo"),
+        args: Arc::from(vec![bar].into_boxed_slice()),
+    });
+
+    // Mapped whose `source == key_space == Foo` — the former double-count fixture
+    // (correct carriers = 2; the former node scorer counted 3).
+    let mapped_double = mapped_fixture(&graph, foo, foo, string);
+
+    // Mapped over a free `TypeParam` — the former missing-`TypeParam` fixture
+    // (correct carriers = 3; the former node scorer counted 1).
+    let tp = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_unscoped("/w/m.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let v_tp = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_unscoped("/w/m.ts", "V"),
+        param_index: 1,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("V"),
+    });
+    let keyof_tp = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
+    let mapped_tp = mapped_fixture(&graph, tp, keyof_tp, v_tp);
+
+    // A Conditional with carrier penalty 3 (matches `mapped_tp`'s correct penalty).
+    let cond = graph.intern_node(SemanticNodeData::Conditional {
+        check: foo,
+        extends: bar,
+        true_branch_ref: string,
+        false_branch_ref: string,
+        distributive: false,
+    });
+
+    // `Opaque(RecursiveRef)` — raises to `TypeExpr::RecursiveRef`: a STRUCTURAL,
+    // NON-unknown carrier (the former node scorer mis-read it as unknown-root and
+    // non-structural).
+    let rr = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+        name: Arc::from("Loop"),
+    }));
+
+    // (candidate, current) pairs. Each verdict is asserted equal to the verdict
+    // the `TypeExpr` comparator returns on the RAISED shapes.
+    let pairs: &[(SemanticNodeId, SemanticNodeId, &str)] = &[
+        // Divergent classes (the former node scorers got these WRONG):
+        (mapped_double, cond, "mapped-double-count-vs-conditional"),
+        (foo_of_bar, mapped_tp, "generic-vs-mapped-typeparam"),
+        (foo, rr, "ref-vs-recursive-ref-root"),
+        (rr, foo, "recursive-ref-vs-ref-root"),
+        // Controls (no divergence; pin a TRUE and a FALSE verdict):
+        (string, foo, "primitive-beats-ref"),
+        (foo, string, "ref-does-not-beat-primitive"),
+    ];
+
+    let mut saw_true = false;
+    let mut saw_false = false;
+    for (candidate, current, label) in pairs {
+        let node_verdict =
+            crate::meta_resolve::compare_node_improvement(&host, *candidate, *current);
+        let cand_raise = raise_oracle(&host, *candidate).expect("candidate raises");
+        let cur_raise = raise_oracle(&host, *current).expect("current raises");
+        let expr_verdict =
+            crate::meta_resolve::compare_type_expr_improvement(&cand_raise, &cur_raise);
+        assert_eq!(
+            node_verdict, expr_verdict,
+            "[{label}] compare_node_improvement must equal \
+             compare_type_expr_improvement(raise(candidate), raise(current)) \
+             (cand_raise = {cand_raise:?}, cur_raise = {cur_raise:?})"
+        );
+        if expr_verdict {
+            saw_true = true;
+        } else {
+            saw_false = true;
+        }
+    }
+    assert!(
+        saw_true && saw_false,
+        "the differential must exercise BOTH a better and a not-better verdict"
+    );
+}
+
+/// A corpus of DIRECT node fixtures covering EVERY `SemanticNodeData` variant that
+/// raises to a `TypeExpr` shape, plus the classes where the FORMER hand-rolled
+/// node scorers diverged (`Mapped` with `source == key_space`; `Mapped` over a
+/// free `TypeParam`; a `TypeParam` with constraint+default; `Opaque(RecursiveRef)`
+/// / `Opaque(Miss)`; `RawFallback` raw + sentinel; `BareRef` / `ImportType` with
+/// type args). Each entry is `(label, node)`; the per-fact differential and the
+/// coverage guard both route every fixture.
+fn publication_score_corpus(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+) -> Vec<(&'static str, SemanticNodeId)> {
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let foo = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl_identity_unscoped("/w/m.ts", "Foo"),
+    });
+    let bar = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: decl_identity_unscoped("/w/m.ts", "Bar"),
+    });
+    let obj_a = graph.intern_node(SemanticNodeData::Object(object_surface(&[("a", string)])));
+    let obj_b = graph.intern_node(SemanticNodeData::Object(object_surface(&[("b", number)])));
+
+    let tp = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_unscoped("/w/m.ts", "T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let v_tp = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_unscoped("/w/m.ts", "V"),
+        param_index: 1,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("V"),
+    });
+    let tp_bounded = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: decl_identity_unscoped("/w/m.ts", "B"),
+        param_index: 2,
+        constraint: Some(foo),
+        default: Some(bar),
+        display_name: Arc::from("B"),
+    });
+    let keyof_tp = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
+
+    let function = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(
+            vec![FunctionParam::synthetic(
+                Some(Arc::from("a")),
+                string,
+                false,
+                false,
+            )]
+            .into_boxed_slice(),
+        ),
+        return_type: number,
+        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+
+    vec![
+        ("primitive", string),
+        (
+            "literal",
+            graph.intern_node(SemanticNodeData::Literal(
+                crate::semantic_query::LiteralValue::String("idle".to_string()),
+            )),
+        ),
+        ("alias", graph.intern_node(SemanticNodeData::Alias(foo))),
+        (
+            "union",
+            graph.intern_node(SemanticNodeData::Union(Arc::from(
+                vec![string, number].into_boxed_slice(),
+            ))),
+        ),
+        (
+            "intersection",
+            graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+                vec![foo, bar].into_boxed_slice(),
+            ))),
+        ),
+        (
+            "array",
+            graph.intern_node(SemanticNodeData::Array {
+                element: string,
+                readonly: false,
+            }),
+        ),
+        (
+            "tuple",
+            graph.intern_node(SemanticNodeData::Tuple {
+                elements: Arc::from(
+                    vec![crate::semantic_query::TupleElement {
+                        label: None,
+                        value: foo,
+                        optional: false,
+                        rest: false,
+                    }]
+                    .into_boxed_slice(),
+                ),
+                readonly: false,
+            }),
+        ),
+        ("object", obj_a),
+        (
+            "merged_decl",
+            graph.intern_node(SemanticNodeData::MergedDecl {
+                contributors: Arc::from(vec![obj_a, obj_b].into_boxed_slice()),
+            }),
+        ),
+        (
+            "conditional",
+            graph.intern_node(SemanticNodeData::Conditional {
+                check: foo,
+                extends: bar,
+                true_branch_ref: string,
+                false_branch_ref: number,
+                distributive: false,
+            }),
+        ),
+        (
+            "template_literal",
+            graph.intern_node(SemanticNodeData::TemplateLiteral {
+                quasis: Arc::from(
+                    vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice(),
+                ),
+                expressions: Arc::from(vec![foo].into_boxed_slice()),
+            }),
+        ),
+        ("key_of", keyof_tp),
+        (
+            "indexed_access",
+            graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: foo,
+                index: IndexKey::String(Arc::from("a")),
+            }),
+        ),
+        // Mapped, `source == key_space == Foo` — the former double-count fixture.
+        ("mapped_double", mapped_fixture(graph, foo, foo, string)),
+        // Mapped over a free `TypeParam` — the former missing-`TypeParam` fixture.
+        (
+            "mapped_typeparam",
+            mapped_fixture(graph, tp, keyof_tp, v_tp),
+        ),
+        (
+            "typeof",
+            graph.intern_node(SemanticNodeData::new_typeof(
+                ValueRootKey {
+                    scope: ScopeId {
+                        canonical_id: Arc::from("/m.ts"),
+                        local_scope: None,
+                    },
+                    name: Arc::from("factory"),
+                },
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                Arc::from(Vec::new().into_boxed_slice()),
+            )),
+        ),
+        ("type_param", tp),
+        ("type_param_bounded", tp_bounded),
+        (
+            "infer",
+            graph.intern_node(SemanticNodeData::Infer {
+                name: Arc::from("U"),
+            }),
+        ),
+        (
+            "opaque_recursive_ref",
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+                name: Arc::from("Loop"),
+            })),
+        ),
+        (
+            "opaque_miss",
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        ),
+        (
+            "opaque_surface_sentinel",
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::UnrepresentableSurface)),
+        ),
+        (
+            "vue_macro_elements",
+            graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
+                verter_compiler::utils::oxc::script::type_surface::ResolvedElements::default(),
+            ))),
+        ),
+        ("function", function),
+        ("constructor_type", {
+            graph.intern_node(SemanticNodeData::ConstructorType {
+                signature: function,
+            })
+        }),
+        ("decl_ref", foo),
+        (
+            "instantiation_ref",
+            graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: decl_identity_unscoped("/w/m.ts", "Foo"),
+                args: Arc::from(vec![bar].into_boxed_slice()),
+            }),
+        ),
+        (
+            "bare_ref",
+            graph.intern_node(SemanticNodeData::new_bare_ref(
+                Arc::from("Bare"),
+                NodeScopeId::Global,
+                Arc::from(Vec::new().into_boxed_slice()),
+            )),
+        ),
+        (
+            "bare_ref_with_args",
+            graph.intern_node(SemanticNodeData::new_bare_ref(
+                Arc::from("Bare"),
+                NodeScopeId::Global,
+                Arc::from(vec![foo, string].into_boxed_slice()),
+            )),
+        ),
+        (
+            "import_type",
+            graph.intern_node(SemanticNodeData::new_import_type(
+                Arc::from("./m"),
+                Arc::from(vec![Arc::<str>::from("A")].into_boxed_slice()),
+                Arc::from(Vec::new().into_boxed_slice()),
+                false,
+            )),
+        ),
+        (
+            "import_type_with_args",
+            graph.intern_node(SemanticNodeData::new_import_type(
+                Arc::from("./m"),
+                Arc::from(vec![Arc::<str>::from("A")].into_boxed_slice()),
+                Arc::from(vec![foo].into_boxed_slice()),
+                false,
+            )),
+        ),
+        (
+            "raw_fallback",
+            graph.intern_node(SemanticNodeData::RawFallback {
+                raw: Arc::from("SomeRawText"),
+            }),
+        ),
+        (
+            "raw_fallback_sentinel",
+            graph.intern_node(SemanticNodeData::RawFallback {
+                raw: Arc::from("semanticAliasCycle"),
+            }),
+        ),
+        (
+            "synthetic_binding",
+            graph.intern_node(SemanticNodeData::SyntheticBinding {
+                id: crate::semantic_query::SyntheticBindingId {
+                    scope_canonical_id: Arc::from("/Comp.vue"),
+                    surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+                    slot_name: Some(Arc::from("default")),
+                    binding_name: Arc::from("row"),
+                },
+                value_node: foo.0,
+            }),
+        ),
+    ]
+}
+
+/// NON-VACUOUS PER-FACT DIFFERENTIAL: for EVERY corpus fixture, the node-front
+/// publication score (`project_node_publication_score`) must equal the
+/// `&TypeExpr`-front score (`type_expr_publication_score`) applied to `raise(node)`
+/// — field-for-field (`symbolic_carriers`, `generic_detail`, `structural_top_level`,
+/// `exact_unknown_root`). This is what locks the two fronts: the former
+/// hand-rolled node scorers diverged here (the `Mapped` double-count, the missing
+/// `TypeParam` / `RawFallback` / `SyntheticBinding` arms, the
+/// `Opaque(RecursiveRef)` misclassification); riding the SAME `fold_node` makes
+/// them agree by construction.
+#[test]
+fn node_publication_score_matches_type_expr_score_per_fact() {
+    let host = host();
+    let graph = graph_of(&host);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    for (label, node) in publication_score_corpus(&graph) {
+        let node_score = project_node_publication_score_with_dispatch(&dispatch, node);
+        let expr_score: Option<PublicationScore> =
+            raise_oracle(&host, node).map(|e| type_expr_publication_score(&e));
+        assert_eq!(
+            node_score,
+            expr_score,
+            "[{label}] node publication score must equal \
+             type_expr_publication_score(raise(node)) per-fact (raise = {:?})",
+            raise_oracle(&host, node)
+        );
+    }
+}
+
+/// COVERAGE GUARD: every `SemanticNodeData` variant must be exercised by the
+/// publication-score corpus. The exhaustive `variant_label` match (NO wildcard)
+/// fails to COMPILE if a new variant is added without classification; the runtime
+/// assertion below fails if a variant is added to `variant_label` but NOT given a
+/// corpus fixture — so a new variant cannot silently bypass the per-fact
+/// differential.
+#[test]
+fn publication_score_corpus_covers_every_semantic_node_data_variant() {
+    use rustc_hash::FxHashSet;
+
+    /// Exhaustive label for a `SemanticNodeData` discriminant — NO wildcard, so a
+    /// new variant forces a new arm here (the compile-time coverage tripwire).
+    fn variant_label(data: &SemanticNodeData) -> &'static str {
+        match data {
+            SemanticNodeData::Primitive(_) => "primitive",
+            SemanticNodeData::Literal(_) => "literal",
+            SemanticNodeData::Alias(_) => "alias",
+            SemanticNodeData::Union(_) => "union",
+            SemanticNodeData::Intersection(_) => "intersection",
+            SemanticNodeData::Array { .. } => "array",
+            SemanticNodeData::Tuple { .. } => "tuple",
+            SemanticNodeData::Object(_) => "object",
+            SemanticNodeData::MergedDecl { .. } => "merged_decl",
+            SemanticNodeData::Conditional { .. } => "conditional",
+            SemanticNodeData::TemplateLiteral { .. } => "template_literal",
+            SemanticNodeData::KeyOf { .. } => "key_of",
+            SemanticNodeData::IndexedAccess { .. } => "indexed_access",
+            SemanticNodeData::Mapped { .. } => "mapped",
+            SemanticNodeData::TypeOf(_) => "typeof",
+            SemanticNodeData::TypeParam { .. } => "type_param",
+            SemanticNodeData::Infer { .. } => "infer",
+            SemanticNodeData::Opaque(_) => "opaque",
+            SemanticNodeData::VueMacroElements(_) => "vue_macro_elements",
+            SemanticNodeData::Function { .. } => "function",
+            SemanticNodeData::DeclRef { .. } => "decl_ref",
+            SemanticNodeData::InstantiationRef { .. } => "instantiation_ref",
+            SemanticNodeData::BareRef(_) => "bare_ref",
+            SemanticNodeData::ImportType(_) => "import_type",
+            SemanticNodeData::RawFallback { .. } => "raw_fallback",
+            SemanticNodeData::ConstructorType { .. } => "constructor_type",
+            SemanticNodeData::SyntheticBinding { .. } => "synthetic_binding",
+        }
+    }
+
+    // The complete discriminant set the corpus must cover (the distinct values
+    // `variant_label` can return).
+    const EXPECTED: &[&str] = &[
+        "primitive",
+        "literal",
+        "alias",
+        "union",
+        "intersection",
+        "array",
+        "tuple",
+        "object",
+        "merged_decl",
+        "conditional",
+        "template_literal",
+        "key_of",
+        "indexed_access",
+        "mapped",
+        "typeof",
+        "type_param",
+        "infer",
+        "opaque",
+        "vue_macro_elements",
+        "function",
+        "decl_ref",
+        "instantiation_ref",
+        "bare_ref",
+        "import_type",
+        "raw_fallback",
+        "constructor_type",
+        "synthetic_binding",
+    ];
+
+    let host = host();
+    let graph = graph_of(&host);
+
+    let mut covered: FxHashSet<&'static str> = FxHashSet::default();
+    for (_label, node) in publication_score_corpus(&graph) {
+        let data = graph
+            .node_data(node)
+            .expect("a corpus fixture node must exist in the graph");
+        covered.insert(variant_label(&data));
+        // Every corpus fixture must score (it raises to a real shape).
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        assert!(
+            project_node_publication_score_with_dispatch(&dispatch, node).is_some(),
+            "every corpus fixture must yield a publication score"
+        );
+    }
+
+    let expected: FxHashSet<&'static str> = EXPECTED.iter().copied().collect();
+    assert_eq!(
+        covered,
+        expected,
+        "the publication-score corpus must cover EXACTLY every SemanticNodeData discriminant — a \
+         new variant added to `variant_label` without a corpus fixture (or an extra label) fails \
+         here. Missing: {:?}; Extra: {:?}",
+        expected.difference(&covered).collect::<Vec<_>>(),
+        covered.difference(&expected).collect::<Vec<_>>(),
     );
 }

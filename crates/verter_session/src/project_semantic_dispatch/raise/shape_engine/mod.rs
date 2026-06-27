@@ -45,9 +45,14 @@ use crate::semantic_query::{
 // trait + the interned term stay here, in the parent module).
 mod materialize;
 mod node_domain;
+mod publication;
 
 pub(in crate::project_semantic_dispatch) use materialize::fold_to_type_expr;
 use node_domain::{type_expr_to_key, RaisedFactsAlg, RaisedShapeAlg};
+pub(crate) use publication::PublicationScore;
+pub(in crate::project_semantic_dispatch) use publication::{
+    project_node_publication_score, type_expr_publication_score,
+};
 
 // ===========================================================================
 // The interned structural raised-shape term + key.

@@ -1,616 +1,59 @@
-//! Symbolic-penalty + materialization-improvement scoring helpers.
+//! Publication-shape improvement comparison.
 //!
-//! domain 10 — TypeExpr-walking helpers used by the materialization
-//! pipeline to choose between candidate surfaces. These are pure leaf helpers:
-//! no shared state, no host access, no graph access.
+//! The publication finaliser picks between two candidate published-field shapes.
+//! Both the node-domain comparison ([`compare_node_improvement`]) and the
+//! `TypeExpr` comparison ([`compare_type_expr_improvement`]) read the SAME
+//! publication-scoring facts ([`crate::project_semantic_dispatch::raise::PublicationScore`])
+//! and apply the SAME [`publication_score_improves`] formula — there is exactly
+//! ONE scoring algebra (the node front rides the shared `SemanticNodeData` fold;
+//! the `TypeExpr` front feeds the same per-arm rules), so the two comparisons can
+//! never drift. [`node_root_is_explicit_selector_operator`] reads the carrier kind
+//! directly and is a separate, non-scoring predicate.
 
-pub(crate) fn count_symbolic_carriers_in_expr(expr: &verter_type_expr::TypeExpr) -> usize {
-    use verter_type_expr::{ObjectMember, TypeExpr};
+use crate::project_semantic_dispatch::raise::PublicationScore;
 
-    let mut score = 0usize;
-    let mut stack = vec![expr];
-
-    while let Some(current) = stack.pop() {
-        match current {
-            TypeExpr::Primitive(_) | TypeExpr::Literal(_) => {}
-            TypeExpr::Parenthesized(inner)
-            | TypeExpr::Array { element: inner, .. }
-            | TypeExpr::KeyOf(inner)
-            | TypeExpr::Rest(inner) => stack.push(inner),
-            TypeExpr::Tuple { elements, .. } => {
-                for element in elements.iter().rev() {
-                    stack.push(&element.ty);
-                }
-            }
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                for ty in types.iter().rev() {
-                    stack.push(ty);
-                }
-            }
-            TypeExpr::Object(object) => {
-                for member in object.properties.iter().rev() {
-                    match member {
-                        ObjectMember::Property(property) => stack.push(&property.ty),
-                        ObjectMember::Method(method) => {
-                            if let Some(return_type) = method.function.return_type.as_deref() {
-                                stack.push(return_type);
-                            }
-                            for parameter in method.function.parameters.iter().rev() {
-                                stack.push(&parameter.ty);
-                            }
-                        }
-                        ObjectMember::IndexSignature(signature) => {
-                            stack.push(&signature.value_type);
-                            stack.push(&signature.key_type);
-                        }
-                        ObjectMember::CallSignature(function)
-                        | ObjectMember::ConstructSignature(function) => {
-                            if let Some(return_type) = function.return_type.as_deref() {
-                                stack.push(return_type);
-                            }
-                            for parameter in function.parameters.iter().rev() {
-                                stack.push(&parameter.ty);
-                            }
-                        }
-                    }
-                }
-            }
-            // A constructor type carries the same `FunctionExpr` payload as a
-            // function type; its signature is walked identically.
-            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
-                if let Some(return_type) = function.return_type.as_deref() {
-                    stack.push(return_type);
-                }
-                for parameter in function.parameters.iter().rev() {
-                    stack.push(&parameter.ty);
-                }
-            }
-            TypeExpr::Ref { type_arguments, .. } => {
-                score += 1;
-                for argument in type_arguments.iter().rev() {
-                    stack.push(argument);
-                }
-            }
-            // Mirrors the `Ref` arm: an import-type is a symbolic carrier
-            // (count +1) and its nested `type_arguments` are recursed.
-            TypeExpr::ImportType { type_arguments, .. } => {
-                score += 1;
-                for argument in type_arguments.iter().rev() {
-                    stack.push(argument);
-                }
-            }
-            TypeExpr::IndexedAccess { object, index } => {
-                score += 1;
-                stack.push(index);
-                stack.push(object);
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                score += 1;
-                stack.push(false_type);
-                stack.push(true_type);
-                stack.push(extends);
-                stack.push(check);
-            }
-            TypeExpr::Mapped {
-                source,
-                value,
-                name_type,
-                ..
-            } => {
-                score += 1;
-                if let Some(name_type) = name_type.as_deref() {
-                    stack.push(name_type);
-                }
-                stack.push(value);
-                stack.push(source);
-            }
-            TypeExpr::TemplateLiteral { expressions, .. } => {
-                score += 1;
-                for expression in expressions.iter().rev() {
-                    stack.push(expression);
-                }
-            }
-            TypeExpr::RecursiveRef { type_arguments, .. } => {
-                score += 1;
-                for argument in type_arguments.iter().rev() {
-                    stack.push(argument);
-                }
-            }
-            TypeExpr::TypeOf(_)
-            | TypeExpr::Unknown { .. }
-            | TypeExpr::TypeParameter(_)
-            // Synthetic slot-binding carrier IS itself a symbolic
-            // carrier (an unresolved binding identity); count it as one.
-            | TypeExpr::SyntheticSlotBinding(_)
-            | TypeExpr::Infer { .. } => {
-                score += 1;
-            }
-        }
+/// Whether `candidate` is a strictly BETTER published shape than `current`,
+/// scored over the publication-scoring facts. The SINGLE comparison formula both
+/// [`compare_node_improvement`] (node front) and [`compare_type_expr_improvement`]
+/// (`TypeExpr` front) delegate to:
+///
+/// 1. a concrete shape beats an exact-`Unknown` root;
+/// 2. else: fewer symbolic carriers wins;
+/// 3. else: a structural top-level wins over a symbolic one;
+/// 4. else (equal carriers): more generic detail wins.
+fn publication_score_improves(candidate: &PublicationScore, current: &PublicationScore) -> bool {
+    if current.exact_unknown_root && !candidate.exact_unknown_root {
+        return true;
     }
-
-    score
+    candidate.symbolic_carriers < current.symbolic_carriers
+        || (candidate.structural_top_level && !current.structural_top_level)
+        || (candidate.symbolic_carriers == current.symbolic_carriers
+            && candidate.generic_detail > current.generic_detail)
 }
 
-fn count_generic_detail_in_expr(expr: &verter_type_expr::TypeExpr) -> usize {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-
-    let mut score = 0usize;
-    let mut stack = vec![expr];
-
-    while let Some(current) = stack.pop() {
-        match current {
-            TypeExpr::TypeParameter(parameter) => {
-                score += 1;
-                if let Some(default) = parameter.default.as_deref() {
-                    stack.push(default);
-                }
-                if let Some(constraint) = parameter.constraint.as_deref() {
-                    stack.push(constraint);
-                }
-            }
-            TypeExpr::Parenthesized(inner)
-            | TypeExpr::Array { element: inner, .. }
-            | TypeExpr::KeyOf(inner)
-            | TypeExpr::Rest(inner) => stack.push(inner),
-            TypeExpr::Tuple { elements, .. } => {
-                for element in elements.iter().rev() {
-                    stack.push(&element.ty);
-                }
-            }
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                for ty in types.iter().rev() {
-                    stack.push(ty);
-                }
-            }
-            TypeExpr::Object(object) => {
-                for member in object.properties.iter().rev() {
-                    match member {
-                        ObjectMember::Property(property) => stack.push(&property.ty),
-                        ObjectMember::Method(method) => {
-                            for type_parameter in method.function.type_parameters.iter().rev() {
-                                score += 1;
-                                if let Some(default) = type_parameter.default.as_deref() {
-                                    stack.push(default);
-                                }
-                                if let Some(constraint) = type_parameter.constraint.as_deref() {
-                                    stack.push(constraint);
-                                }
-                            }
-                            if let Some(return_type) = method.function.return_type.as_deref() {
-                                stack.push(return_type);
-                            }
-                            for parameter in method.function.parameters.iter().rev() {
-                                stack.push(&parameter.ty);
-                            }
-                        }
-                        ObjectMember::IndexSignature(signature) => {
-                            stack.push(&signature.value_type);
-                            stack.push(&signature.key_type);
-                        }
-                        ObjectMember::CallSignature(function)
-                        | ObjectMember::ConstructSignature(function) => {
-                            for type_parameter in function.type_parameters.iter().rev() {
-                                score += 1;
-                                if let Some(default) = type_parameter.default.as_deref() {
-                                    stack.push(default);
-                                }
-                                if let Some(constraint) = type_parameter.constraint.as_deref() {
-                                    stack.push(constraint);
-                                }
-                            }
-                            if let Some(return_type) = function.return_type.as_deref() {
-                                stack.push(return_type);
-                            }
-                            for parameter in function.parameters.iter().rev() {
-                                stack.push(&parameter.ty);
-                            }
-                        }
-                    }
-                }
-            }
-            // A constructor type's signature (type-parameters, return,
-            // parameters) is walked identically to a function type's.
-            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
-                for type_parameter in function.type_parameters.iter().rev() {
-                    score += 1;
-                    if let Some(default) = type_parameter.default.as_deref() {
-                        stack.push(default);
-                    }
-                    if let Some(constraint) = type_parameter.constraint.as_deref() {
-                        stack.push(constraint);
-                    }
-                }
-                if let Some(return_type) = function.return_type.as_deref() {
-                    stack.push(return_type);
-                }
-                for parameter in function.parameters.iter().rev() {
-                    stack.push(&parameter.ty);
-                }
-            }
-            TypeExpr::Ref { type_arguments, .. }
-            | TypeExpr::RecursiveRef { type_arguments, .. }
-            // An import-type carries no generic detail of its own; like a
-            // `Ref`, only its nested `type_arguments` are recursed.
-            | TypeExpr::ImportType { type_arguments, .. } => {
-                for argument in type_arguments.iter().rev() {
-                    stack.push(argument);
-                }
-            }
-            TypeExpr::IndexedAccess { object, index } => {
-                stack.push(index);
-                stack.push(object);
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                stack.push(false_type);
-                stack.push(true_type);
-                stack.push(extends);
-                stack.push(check);
-            }
-            TypeExpr::Mapped {
-                source,
-                value,
-                name_type,
-                ..
-            } => {
-                if let Some(name_type) = name_type.as_deref() {
-                    stack.push(name_type);
-                }
-                stack.push(value);
-                stack.push(source);
-            }
-            TypeExpr::TemplateLiteral { expressions, .. } => {
-                for expression in expressions.iter().rev() {
-                    stack.push(expression);
-                }
-            }
-            TypeExpr::Primitive(_)
-            | TypeExpr::Literal(_)
-            | TypeExpr::TypeOf(_)
-            | TypeExpr::Unknown { .. }
-            // Synthetic carriers carry no generic detail.
-            | TypeExpr::SyntheticSlotBinding(_)
-            | TypeExpr::Infer { .. } => {}
-        }
-    }
-
-    score
-}
-
-fn type_expr_has_structural_top_level(expr: &verter_type_expr::TypeExpr) -> bool {
-    use verter_type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Parenthesized(inner) => type_expr_has_structural_top_level(inner),
-        TypeExpr::Ref { .. }
-        | TypeExpr::IndexedAccess { .. }
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::Unknown { .. }
-        // Synthetic carriers are intrinsic terminal carriers, not a
-        // concrete structural shape — treat as non-structural.
-        | TypeExpr::SyntheticSlotBinding(_)
-        // An import-type is a symbolic cross-file reference (like a `Ref`),
-        // not a concrete structural shape — non-structural.
-        | TypeExpr::ImportType { .. }
-        | TypeExpr::Infer { .. } => false,
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Object(_)
-        | TypeExpr::Function(_)
-        // A constructor type is a concrete structural shape, like a function.
-        | TypeExpr::ConstructorType(_)
-        | TypeExpr::Array { .. }
-        | TypeExpr::Tuple { .. }
-        | TypeExpr::Union(_)
-        | TypeExpr::Intersection(_)
-        | TypeExpr::KeyOf(_)
-        | TypeExpr::Rest(_)
-        | TypeExpr::TemplateLiteral { .. }
-        | TypeExpr::RecursiveRef { .. } => true,
-    }
-}
-
-// ===========================================================================
-// Node-domain mirrors of the scoring helpers, computed on `raise(node)` WITHOUT
-// materialising a `TypeExpr`. The publication-finaliser compares two candidate
-// published-field NODES (the field's reduction vs the shallow form's reduction)
-// in node domain and materialises only the winner. Parity-locked field-for-field
-// against the `TypeExpr` scoring via a differential test.
-// ===========================================================================
-
-/// Node-domain mirror of [`count_symbolic_carriers_in_expr`]: the symbolic-carrier
-/// penalty of `raise(node)`. A reference carrier (`DeclRef` / `InstantiationRef` /
-/// `BareRef` — all raise to `Ref`), `ImportType`, `IndexedAccess`, `Conditional`,
-/// `Mapped`, `TemplateLiteral`, and a `TypeOf` / `Opaque` / `Infer` leaf each cost
-/// `+1`; `KeyOf` / `Alias` / compound shapes recurse without a self-penalty;
-/// `Primitive` / `Literal` cost `0`. `depth` fuses at 256.
-fn count_symbolic_carriers_in_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
-    depth: u32,
-) -> usize {
-    use crate::semantic_query::{IndexKey, SemanticNodeData};
-    if depth > 256 {
-        return 0;
-    }
-    let Some(data) = graph.node_data(node) else {
-        return 0;
-    };
-    let recur = |n: crate::semantic_query::SemanticNodeId| {
-        count_symbolic_carriers_in_node(graph, n, depth + 1)
-    };
-    match data.as_ref() {
-        SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_) => 0,
-        // Reference carriers raise to `Ref { type_arguments }` → +1 plus the args.
-        SemanticNodeData::DeclRef { .. } => 1,
-        SemanticNodeData::InstantiationRef { args, .. } => {
-            1 + args.iter().map(|&a| recur(a)).sum::<usize>()
-        }
-        // `ImportType` raises to `TypeExpr::ImportType` (+1 + args); a `BareRef`
-        // raises to `Ref` (+1 + args). Both descend `carrier_type_args`.
-        SemanticNodeData::ImportType(_) => {
-            1 + data
-                .carrier_type_args()
-                .iter()
-                .map(|&a| recur(a))
-                .sum::<usize>()
-        }
-        d if d.bare_ref_head().is_some() => {
-            1 + d
-                .carrier_type_args()
-                .iter()
-                .map(|&a| recur(a))
-                .sum::<usize>()
-        }
-        SemanticNodeData::IndexedAccess { object, index } => {
-            let idx = match index {
-                IndexKey::TypeNode(n) => recur(*n),
-                _ => 0,
-            };
-            1 + recur(*object) + idx
-        }
-        SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            ..
-        } => {
-            1 + recur(*check) + recur(*extends) + recur(*true_branch_ref) + recur(*false_branch_ref)
-        }
-        SemanticNodeData::Mapped { source, mapper } => {
-            let remap = mapper.name_remap.map_or(0, recur);
-            1 + recur(*source) + recur(mapper.key_space) + recur(mapper.value_expr) + remap
-        }
-        SemanticNodeData::TemplateLiteral { expressions, .. } => {
-            1 + expressions.iter().map(|&e| recur(e)).sum::<usize>()
-        }
-        // `TypeOf` / `Opaque` (raises to `Unknown`) / `Infer` are symbolic leaves.
-        SemanticNodeData::TypeOf(_)
-        | SemanticNodeData::Opaque(_)
-        | SemanticNodeData::Infer { .. } => 1,
-        // `KeyOf` recurses without a self-penalty (the `TypeExpr` `KeyOf(inner)`
-        // arm pushes `inner`, no `+1`).
-        SemanticNodeData::KeyOf { base } => recur(*base),
-        SemanticNodeData::Alias(inner) => recur(*inner),
-        SemanticNodeData::Array { element, .. } => recur(*element),
-        SemanticNodeData::Tuple { elements, .. } => elements.iter().map(|el| recur(el.value)).sum(),
-        SemanticNodeData::Union(members)
-        | SemanticNodeData::Intersection(members)
-        | SemanticNodeData::MergedDecl {
-            contributors: members,
-        } => members.iter().map(|&m| recur(m)).sum(),
-        SemanticNodeData::Object(surface) => {
-            surface
-                .members
-                .iter()
-                .map(|m| recur(m.value))
-                .sum::<usize>()
-                + surface
-                    .index_signatures
-                    .iter()
-                    .map(|sig| recur(sig.key_type) + recur(sig.value_type))
-                    .sum::<usize>()
-                + surface
-                    .call_signatures
-                    .iter()
-                    .map(|&c| recur(c))
-                    .sum::<usize>()
-                + surface
-                    .construct_signatures
-                    .iter()
-                    .map(|&c| recur(c))
-                    .sum::<usize>()
-        }
-        SemanticNodeData::Function {
-            params,
-            return_type,
-            ..
-        } => params.iter().map(|p| recur(p.ty)).sum::<usize>() + recur(*return_type),
-        SemanticNodeData::ConstructorType { signature } => recur(*signature),
-        _ => 0,
-    }
-}
-
-/// Node-domain mirror of `count_generic_detail_in_expr`: the type-parameter detail
-/// of `raise(node)`. A `Function`'s declared `type_parameters` each cost `+1`
-/// (plus their constraint / default); reference carriers and compound shapes
-/// recurse without a self cost. `depth` fuses at 256. (A standalone free type
-/// parameter has no node variant — it only enters through a `Function`'s
-/// `type_parameters`, which are counted here.)
-fn count_generic_detail_in_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
-    depth: u32,
-) -> usize {
-    use crate::semantic_query::{IndexKey, SemanticNodeData};
-    if depth > 256 {
-        return 0;
-    }
-    let Some(data) = graph.node_data(node) else {
-        return 0;
-    };
-    let recur = |n: crate::semantic_query::SemanticNodeId| {
-        count_generic_detail_in_node(graph, n, depth + 1)
-    };
-    let type_params = |tps: &[crate::semantic_query::TypeParamDecl]| -> usize {
-        tps.iter()
-            .map(|tp| 1 + tp.constraint.map_or(0, recur) + tp.default.map_or(0, recur))
-            .sum()
-    };
-    match data.as_ref() {
-        SemanticNodeData::InstantiationRef { args, .. } => args.iter().map(|&a| recur(a)).sum(),
-        SemanticNodeData::ImportType(_) => data.carrier_type_args().iter().map(|&a| recur(a)).sum(),
-        d if d.bare_ref_head().is_some() => d.carrier_type_args().iter().map(|&a| recur(a)).sum(),
-        SemanticNodeData::IndexedAccess { object, index } => {
-            let idx = match index {
-                IndexKey::TypeNode(n) => recur(*n),
-                _ => 0,
-            };
-            recur(*object) + idx
-        }
-        SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            ..
-        } => recur(*check) + recur(*extends) + recur(*true_branch_ref) + recur(*false_branch_ref),
-        SemanticNodeData::Mapped { source, mapper } => {
-            let remap = mapper.name_remap.map_or(0, recur);
-            recur(*source) + recur(mapper.key_space) + recur(mapper.value_expr) + remap
-        }
-        SemanticNodeData::KeyOf { base } => recur(*base),
-        SemanticNodeData::Alias(inner) => recur(*inner),
-        SemanticNodeData::Array { element, .. } => recur(*element),
-        SemanticNodeData::Tuple { elements, .. } => elements.iter().map(|el| recur(el.value)).sum(),
-        SemanticNodeData::Union(members)
-        | SemanticNodeData::Intersection(members)
-        | SemanticNodeData::MergedDecl {
-            contributors: members,
-        } => members.iter().map(|&m| recur(m)).sum(),
-        SemanticNodeData::Object(surface) => {
-            surface
-                .members
-                .iter()
-                .map(|m| recur(m.value))
-                .sum::<usize>()
-                + surface
-                    .index_signatures
-                    .iter()
-                    .map(|sig| recur(sig.key_type) + recur(sig.value_type))
-                    .sum::<usize>()
-                + surface
-                    .call_signatures
-                    .iter()
-                    .map(|&c| recur(c))
-                    .sum::<usize>()
-                + surface
-                    .construct_signatures
-                    .iter()
-                    .map(|&c| recur(c))
-                    .sum::<usize>()
-        }
-        SemanticNodeData::Function {
-            params,
-            return_type,
-            type_parameters,
-            ..
-        } => {
-            type_params(type_parameters)
-                + params.iter().map(|p| recur(p.ty)).sum::<usize>()
-                + recur(*return_type)
-        }
-        SemanticNodeData::ConstructorType { signature } => recur(*signature),
-        SemanticNodeData::TemplateLiteral { expressions, .. } => {
-            expressions.iter().map(|&e| recur(e)).sum()
-        }
-        _ => 0,
-    }
-}
-
-/// Node-domain mirror of `type_expr_has_structural_top_level`: whether
-/// `raise(node)`'s ROOT is a concrete structural shape (NOT a symbolic reference /
-/// operator carrier). Reference carriers, `IndexedAccess`, `Conditional`,
-/// `Mapped`, `TypeOf`, `Opaque`, `SyntheticSlotBinding`, `ImportType`, `Infer` are
-/// non-structural; `Primitive` / `Literal` / `Object` / `Function` /
-/// `ConstructorType` / `Array` / `Tuple` / `Union` / `Intersection` / `KeyOf` /
-/// `TemplateLiteral` / `MergedDecl` are structural; `Alias` peels through.
-fn node_has_structural_top_level(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
-) -> bool {
-    use crate::semantic_query::SemanticNodeData;
-    let Some(data) = graph.node_data(node) else {
-        return false;
-    };
-    match data.as_ref() {
-        SemanticNodeData::Alias(inner) => node_has_structural_top_level(graph, *inner),
-        SemanticNodeData::Primitive(_)
-        | SemanticNodeData::Literal(_)
-        | SemanticNodeData::Object(_)
-        | SemanticNodeData::Function { .. }
-        | SemanticNodeData::ConstructorType { .. }
-        | SemanticNodeData::Array { .. }
-        | SemanticNodeData::Tuple { .. }
-        | SemanticNodeData::Union(_)
-        | SemanticNodeData::Intersection(_)
-        | SemanticNodeData::KeyOf { .. }
-        | SemanticNodeData::TemplateLiteral { .. }
-        | SemanticNodeData::MergedDecl { .. } => true,
-        _ => false,
-    }
-}
-
-/// Whether `raise(node)`'s ROOT is an unmaterialised-miss sentinel — the
-/// node-domain mirror of `matches!(current, TypeExpr::Unknown { .. })` the
-/// scoring's first clause tests. A graph `Opaque` carrier raises to
-/// `TypeExpr::Unknown`.
-fn node_root_is_unknown(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
-) -> bool {
-    use crate::semantic_query::SemanticNodeData;
-    match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::Alias(inner)) => node_root_is_unknown(graph, *inner),
-        Some(SemanticNodeData::Opaque(_)) => true,
-        _ => false,
-    }
-}
-
-/// Node-domain mirror of [`compare_type_expr_improvement`]: whether `candidate`
-/// is a strictly BETTER published shape than `current`, scored on `raise(*)`
-/// without materialising. Used by the publication finaliser to pick between the
-/// field's reduction and the shallow form's reduction in node domain.
+/// Whether `candidate` is a strictly BETTER published shape than `current`,
+/// scored on `raise(*)` WITHOUT materialising a `TypeExpr`. Used by the
+/// publication finaliser to pick between the field's reduction and the shallow
+/// form's reduction in node domain. An unraisable node scores as the default
+/// (zero carriers, non-structural, non-unknown), matching the former node
+/// scorers' `None`-node handling.
 pub(crate) fn compare_node_improvement(
     ctx: &dyn crate::resolver_core::ResolverContext,
     candidate: crate::semantic_query::SemanticNodeId,
     current: crate::semantic_query::SemanticNodeId,
 ) -> bool {
-    let graph = ctx.project_type_store().semantic_graph();
-    if node_root_is_unknown(graph, current) && !node_root_is_unknown(graph, candidate) {
-        return true;
-    }
-    let candidate_score = count_symbolic_carriers_in_node(graph, candidate, 0);
-    let current_score = count_symbolic_carriers_in_node(graph, current, 0);
-    candidate_score < current_score
-        || (node_has_structural_top_level(graph, candidate)
-            && !node_has_structural_top_level(graph, current))
-        || (candidate_score == current_score
-            && count_generic_detail_in_node(graph, candidate, 0)
-                > count_generic_detail_in_node(graph, current, 0))
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let candidate_score =
+        crate::project_semantic_dispatch::raise::project_node_publication_score_with_dispatch(
+            &dispatch, candidate,
+        )
+        .unwrap_or_default();
+    let current_score =
+        crate::project_semantic_dispatch::raise::project_node_publication_score_with_dispatch(
+            &dispatch, current,
+        )
+        .unwrap_or_default();
+    publication_score_improves(&candidate_score, &current_score)
 }
 
 /// Node-domain mirror of the publication finaliser's
@@ -654,24 +97,21 @@ pub(crate) fn node_root_is_explicit_selector_operator(
     }
 }
 
+/// Whether `candidate` is a strictly BETTER published shape than `current`,
+/// scored over the `TypeExpr` front of the SHARED publication formula. Reproduces
+/// the historical symbolic-penalty / structural-top-level / generic-detail
+/// comparison EXACTLY (it now reads [`PublicationScore`] instead of three
+/// standalone walks), so this function's existing callers (e.g.
+/// `host_manage::component_meta_extract`) see byte-identical verdicts.
 pub(crate) fn compare_type_expr_improvement(
     candidate: &verter_type_expr::TypeExpr,
     current: &verter_type_expr::TypeExpr,
 ) -> bool {
-    if matches!(current, verter_type_expr::TypeExpr::Unknown { .. })
-        && !matches!(candidate, verter_type_expr::TypeExpr::Unknown { .. })
-    {
-        return true;
-    }
-
-    let candidate_score = count_symbolic_carriers_in_expr(candidate);
-    let current_score = count_symbolic_carriers_in_expr(current);
-
-    candidate_score < current_score
-        || (type_expr_has_structural_top_level(candidate)
-            && !type_expr_has_structural_top_level(current))
-        || (candidate_score == current_score
-            && count_generic_detail_in_expr(candidate) > count_generic_detail_in_expr(current))
+    let candidate_score =
+        crate::project_semantic_dispatch::raise::type_expr_publication_score(candidate);
+    let current_score =
+        crate::project_semantic_dispatch::raise::type_expr_publication_score(current);
+    publication_score_improves(&candidate_score, &current_score)
 }
 
 // promoted from `pub(super)` to `pub(crate)` so the moved

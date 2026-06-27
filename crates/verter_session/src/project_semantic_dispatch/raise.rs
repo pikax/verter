@@ -4562,11 +4562,38 @@ fn instantiation_base_is_resolvable(
 /// the Kind-B sink adapters read both the route-gate facts AND the no-op/changed
 /// decision from a single projection.
 pub(crate) use shape_engine::NodeShapeEq;
+/// The publication-scoring facts of a raised shape (`symbolic_carriers` /
+/// `generic_detail` / `structural_top_level` / `exact_unknown_root`). Re-exported
+/// so `crate::meta_resolve::scoring`'s comparison formula reads the SAME facts the
+/// node front and the `&TypeExpr` front both produce.
+pub(crate) use shape_engine::PublicationScore;
 /// Facts about the shape a node raises to, computed bottom-up by the shared
 /// [`shape_engine`] (NOT by materialising a `TypeExpr`). Re-exported from
 /// [`shape_engine`] so the existing `super::raise::RaisedShapeFacts` path stays
 /// stable.
 pub(crate) use shape_engine::RaisedShapeFacts;
+
+/// The [`PublicationScore`] of `node` — folded through the publication algebra
+/// over the shared [`shape_engine`] traversal, WITHOUT materialising a
+/// `TypeExpr`. `None` when the whole raise is `None`. DISPATCH-taking primary —
+/// the publication finaliser scores both candidate carriers' nodes through this.
+#[must_use]
+pub(crate) fn project_node_publication_score_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<PublicationScore> {
+    shape_engine::project_node_publication_score(dispatch, node)
+}
+
+/// The [`PublicationScore`] of an existing `&TypeExpr` — the TypeExpr front of the
+/// SHARED publication formula. Reproduces the historical
+/// `count_*_in_expr`/`type_expr_has_structural_top_level`/`matches!(_, Unknown)`
+/// semantics EXACTLY, so `compare_type_expr_improvement`'s existing callers see
+/// byte-identical verdicts.
+#[must_use]
+pub(crate) fn type_expr_publication_score(expr: &TypeExpr) -> PublicationScore {
+    shape_engine::type_expr_publication_score(expr)
+}
 
 // The node-domain decision API is exposed in two signature forms:
 //
