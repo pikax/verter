@@ -652,102 +652,209 @@ pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
 ) -> (bool, Option<crate::semantic_query::DepSignature>) {
     use std::sync::Arc;
 
-    fn root_name(expr: &verter_type_expr::TypeExpr) -> Option<String> {
-        use verter_type_expr::TypeExpr;
-
-        match expr {
-            TypeExpr::Parenthesized(inner) => root_name(inner),
-            TypeExpr::IndexedAccess { object, .. } => root_name(object),
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } if matches!(name.as_ref(), "Pick" | "Omit") && type_arguments.len() == 2 => {
-                crate::resolver_core::component_meta_registry::component_meta_registry_ref_name(
-                    &type_arguments[0],
-                )
-                .map(str::to_string)
-            }
-            TypeExpr::Ref { name, .. } => Some(name.to_string()),
-            _ => None,
-        }
-    }
-
     // Empty fence carries no cross-file deps but is still safe to
     // admit on: the caller's `engine_fact_signature_for_materialize_memo`
     // self-roots on `scope_canonical_id` alone, and there are no
     // additional canonicals to root.
     let empty_fence: crate::semantic_query::DepSignature = Arc::from(Vec::new());
 
-    let Some(root_name) = root_name(expr) else {
+    let Some(root_identity) = type_expr_root_identity(query_engine, scope_canonical_id, expr)
+    else {
         return (false, Some(empty_fence));
     };
+    package_backed_object_like_root_identity_with_fence(
+        query_engine,
+        scope_canonical_id,
+        &root_identity,
+    )
+}
 
-    let declaration = query_engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
-    let declaration_scope = if declaration.canonical_source.is_empty() {
-        scope_canonical_id.to_string()
+/// Extract the package-backed gate's ROOT declaration IDENTITY from a `TypeExpr` —
+/// the `TypeExpr` front of the SHARED root-identity tail
+/// ([`package_backed_object_like_root_identity_with_fence`]). Resolver-aware: a
+/// `Pick`/`Omit` SOURCE-root descent (into `args[0]`) fires ONLY when `name`
+/// actually resolves to the builtin utility (no userland `type Pick` shadow), so
+/// it agrees with the node front's `base.canonical_id == "__builtin__"` check.
+/// `Alias`/`Parenthesized` peels and `IndexedAccess` descends to the object root,
+/// exactly as the node front does.
+fn type_expr_root_identity(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<crate::semantic_query::DeclIdentity> {
+    use verter_type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(inner) => {
+            type_expr_root_identity(query_engine, scope_canonical_id, inner)
+        }
+        TypeExpr::IndexedAccess { object, .. } => {
+            type_expr_root_identity(query_engine, scope_canonical_id, object)
+        }
+        // `Pick<Source, K>` / `Omit<Source, K>` — descend to the SOURCE root, but
+        // ONLY when `name` is the BUILTIN utility (a userland `type Pick` shadow is
+        // its OWN root, never a source descent).
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.len() == 2
+            && is_builtin_pick_or_omit(query_engine, scope_canonical_id, name) =>
+        {
+            type_expr_root_identity(query_engine, scope_canonical_id, &type_arguments[0])
+        }
+        TypeExpr::Ref { name, .. } => Some(resolve_ref_to_root_identity(
+            query_engine,
+            scope_canonical_id,
+            name,
+        )),
+        _ => None,
+    }
+}
+
+/// Whether `name` resolves to the BUILTIN `Pick`/`Omit` utility at
+/// `scope_canonical_id` — resolver-aware (NOT a string match). The builtin is
+/// active ONLY when no userland declaration shadows the name: a userland
+/// `type Pick`/`interface Pick`/imported `Pick` resolves to a real declaration
+/// (kind != `Unknown`), so it is its OWN root, NOT the builtin source-descent.
+/// This is the `TypeExpr`-front mirror of the node front's
+/// `InstantiationRef.base.canonical_id == "__builtin__"` check.
+fn is_builtin_pick_or_omit(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    name: &str,
+) -> bool {
+    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+
+    if !matches!(
+        BuiltinUtility::from_name(name),
+        Some(BuiltinUtility::Pick | BuiltinUtility::Omit)
+    ) {
+        return false;
+    }
+    matches!(
+        query_engine
+            .resolve_type_declaration(scope_canonical_id, name)
+            .kind,
+        crate::resolver_core::ResolvedDeclarationKind::Unknown
+    )
+}
+
+/// Resolve a bare `Ref` `name` (at `scope_canonical_id`) to its ROOT declaration
+/// [`crate::semantic_query::DeclIdentity`] — the resolved declaring file +
+/// declaration name + that file's whole-hash. Mirrors the cycle front's
+/// `collect_root_decl_identities` identity construction so both fronts root on
+/// the SAME identity.
+fn resolve_ref_to_root_identity(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    name: &str,
+) -> crate::semantic_query::DeclIdentity {
+    use std::sync::Arc;
+
+    let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
+    let canonical_id: Arc<str> = if declaration.canonical_source.is_empty() {
+        Arc::from(scope_canonical_id)
     } else {
-        declaration.canonical_source.clone()
+        Arc::from(declaration.canonical_source.as_str())
     };
-    // Issue #11 / route the package-backed classification
-    // through `WorkspaceRead::is_package_backed` (NOT a path-substring
-    // check on `node_modules`). The realpath-based classification
-    // correctly handles pnpm-symlinks and workspace-packages-inside-
-    // node_modules.
+    let decl_name: Arc<str> = if declaration.resolved_name.is_empty() {
+        Arc::from(name)
+    } else {
+        Arc::from(declaration.resolved_name.as_str())
+    };
+    let whole_hash = query_engine
+        .ctx
+        .shallow_file_state(canonical_id.as_ref())
+        .map(|state| state.whole_hash)
+        .unwrap_or_default();
+    crate::semantic_query::DeclIdentity {
+        canonical_id,
+        whole_hash,
+        decl_name,
+    }
+}
+
+/// Append `canonical`'s authoritative current-content hash to `fence` (skipping
+/// the keyed `scope` self-entry + empties), or set `refused` when the hash is
+/// unavailable. The fence oracle is `authoritative_current_content_hash` — the
+/// SAME oracle `resolve_type_declaration` / `named_decl_body` observe, so the
+/// admit's fact signature invalidates on a contributing-file edit. A `None` hash
+/// (evicted / tombstoned canonical) refuses shared admission: rooting on a
+/// stand-in `WholeHash(0)` sentinel would not validate the file state.
+fn push_decl_scope_fence(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    canonical: &str,
+    scope_canonical_id: &str,
+    fence: &mut Vec<(std::sync::Arc<str>, crate::semantic_query::DepVersion)>,
+    refused: &mut bool,
+) {
+    if *refused {
+        return;
+    }
+    // Skip the keyed scope itself — the cache entry already self-roots on it via
+    // `engine_fact_signature_for_materialize_memo`'s `FileWholeHash`.
+    if canonical == scope_canonical_id || canonical.is_empty() {
+        return;
+    }
+    match ctx.authoritative_current_content_hash(canonical) {
+        Some(whole_hash) => fence.push((
+            std::sync::Arc::<str>::from(canonical),
+            crate::semantic_query::DepVersion::WholeHash(whole_hash),
+        )),
+        None => *refused = true,
+    }
+}
+
+/// The SHARED root-identity tail of the package-backed object-like gate: given a
+/// RESOLVED root declaration `root_identity` (the declaring file + name, already
+/// resolved by either front — NEVER a name re-resolved from `scope`), decide
+/// whether that declaration is a package-backed object-like surface, and collect
+/// the cross-file fence.
+///
+/// IDENTITY-PRESERVING: the kind / final-target resolution runs at
+/// `root_identity.canonical_id` (the declaration's OWN file), so a node carrier
+/// whose identity points at file X is never re-resolved by name from `scope` (the
+/// former synthetic `TypeExpr::named(name)` bridge could hit a DIFFERENT symbol).
+///
+/// The second tuple element is `Option<DepSignature>`: `Some(fence)` is rooted on
+/// `authoritative_current_content_hash` for every contributing canonical;
+/// `None` means a contributing canonical's hash was unavailable, so callers MUST
+/// refuse cache admission of the verdict.
+pub(crate) fn package_backed_object_like_root_identity_with_fence(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    root_identity: &crate::semantic_query::DeclIdentity,
+) -> (bool, Option<crate::semantic_query::DepSignature>) {
+    use std::sync::Arc;
+
+    let empty_fence: crate::semantic_query::DepSignature = Arc::from(Vec::new());
+
+    let declaration_scope = root_identity.canonical_id.as_ref();
+    // Issue #11 / route the package-backed classification through
+    // `WorkspaceRead::is_package_backed` (NOT a path-substring check on
+    // `node_modules`). The realpath-based classification correctly handles
+    // pnpm-symlinks and workspace-packages-inside-node_modules.
     if !query_engine
         .ctx
-        .workspace_is_package_backed(declaration_scope.as_str())
+        .workspace_is_package_backed(declaration_scope)
     {
         return (false, Some(empty_fence));
     }
 
-    // Fence collection: record each contributing canonical via
-    // `authoritative_current_content_hash` — the SAME oracle
-    // `resolve_type_declaration`'s `get_or_compute` observes
-    // (registry_decl.rs `observed_keyed_hash`) and `named_decl_body`
-    // routes through. A different oracle (a plain
-    // `shallow_file_state(canonical).whole_hash` read) would open a race
-    // window: a dependency edit between the gate verdict and the
-    // fence read could admit the stale verdict against a fresh
-    // whole-hash; immediate revalidation would then succeed and future
-    // reads would reuse stale shape data.
-    //
-    // If any contributing canonical's authoritative current-content
-    // hash is UNAVAILABLE (`None` — canonical was evicted /
-    // tombstoned / cannot be authoritatively resolved without
-    // permissive fallback), refuse the fence by returning `None`.
-    // The caller MUST then refuse cache admission for the verdict;
-    // rooting on a stand-in hash (`WholeHash(0)` sentinel) does NOT
-    // validate the actual file state.
     let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
     let mut refused = false;
-    {
-        let mut push_scope_fence = |canonical: &str| {
-            if refused {
-                return;
-            }
-            // Skip the keyed scope itself — the cache entry already self-roots
-            // on it via `engine_fact_signature_for_materialize_memo`'s
-            // `FileWholeHash` for `scope_canonical_id`.
-            if canonical == scope_canonical_id || canonical.is_empty() {
-                return;
-            }
-            match query_engine
-                .ctx
-                .authoritative_current_content_hash(canonical)
-            {
-                Some(whole_hash) => {
-                    fence.push((
-                        Arc::<str>::from(canonical),
-                        crate::semantic_query::DepVersion::WholeHash(whole_hash),
-                    ));
-                }
-                None => {
-                    refused = true;
-                }
-            }
-        };
-        push_scope_fence(declaration_scope.as_str());
-    }
+    push_decl_scope_fence(
+        query_engine.ctx,
+        declaration_scope,
+        scope_canonical_id,
+        &mut fence,
+        &mut refused,
+    );
+
+    // Resolve the declaration KIND at its OWN file (identity-preserving — never a
+    // re-resolve from `scope`).
+    let declaration =
+        query_engine.resolve_type_declaration(declaration_scope, root_identity.decl_name.as_ref());
 
     if matches!(
         declaration.kind,
@@ -762,41 +869,22 @@ pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
     }
 
     let declaration_name = if declaration.resolved_name.is_empty() {
-        root_name.clone()
+        root_identity.decl_name.to_string()
     } else {
         declaration.resolved_name
     };
     let (target_scope, target_name) = query_engine
-        .resolve_final_prepared_type_target(declaration_scope.as_str(), declaration_name.as_str());
-    // Record the prepared-target scope too when it diverges from the
-    // declaration scope (e.g. cross-file `export type X = Y` re-export
-    // chain). The prepared resolver may walk arbitrarily far; the
-    // terminal scope is the one whose `named_decl_body` we read below.
-    {
-        let mut push_scope_fence = |canonical: &str| {
-            if refused {
-                return;
-            }
-            if canonical == scope_canonical_id || canonical.is_empty() {
-                return;
-            }
-            match query_engine
-                .ctx
-                .authoritative_current_content_hash(canonical)
-            {
-                Some(whole_hash) => {
-                    fence.push((
-                        Arc::<str>::from(canonical),
-                        crate::semantic_query::DepVersion::WholeHash(whole_hash),
-                    ));
-                }
-                None => {
-                    refused = true;
-                }
-            }
-        };
-        push_scope_fence(target_scope.as_str());
-    }
+        .resolve_final_prepared_type_target(declaration_scope, declaration_name.as_str());
+    // Record the prepared-target scope too when it diverges from the declaration
+    // scope (e.g. cross-file `export type X = Y` re-export chain) — the terminal
+    // scope is the one whose `named_decl_body` is read below.
+    push_decl_scope_fence(
+        query_engine.ctx,
+        target_scope.as_str(),
+        scope_canonical_id,
+        &mut fence,
+        &mut refused,
+    );
     let verdict = query_engine
         .named_decl_body(target_scope.as_str(), target_name.as_str())
         .is_some_and(|body| {

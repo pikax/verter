@@ -23,10 +23,15 @@ pub(crate) use field_types::{
     lowered_preserve_package_backed_symbolic_refs,
     materialize_component_meta_type_expr_until_stable,
     materialize_component_meta_type_expr_until_stable_full,
+    package_backed_object_like_root_identity_with_fence,
     reduce_member_value_graph_native_with_context, type_expr_has_package_backed_object_like_root,
-    type_expr_has_package_backed_object_like_root_with_fence,
     type_expr_materialize_reduction_context, type_expr_materializer_context,
 };
+// The `_with_fence` TypeExpr front is reached in production only INTERNALLY (via
+// the bare `type_expr_has_package_backed_object_like_root` wrapper); the crate
+// re-export is consumed solely by the node-vs-TypeExpr front differential.
+#[cfg(test)]
+pub(crate) use field_types::type_expr_has_package_backed_object_like_root_with_fence;
 // Re-export ONLY the per-sink output capability TYPE so the
 // `output_materialization` owner module can name it for its explicit
 // `impl OutputProjector for MetaResolveFieldTypesOutputCap` registration pair.

@@ -555,25 +555,39 @@ fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallo
     ))
     .expect("read field_types.rs");
 
-    let gate_fn_marker = "pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(";
-    let gate_fn_idx = gate_src
-        .find(gate_fn_marker)
-        .expect("guard: gate function must remain in field_types.rs");
-    // Bound the slice at the next top-level `pub(crate) fn` / `fn `
-    // so the substring search below does not pick up unrelated calls
-    // in other functions of the same module.
-    let after_marker = &gate_src[gate_fn_idx..];
-    let end_idx = after_marker
-        .find("\npub(crate) fn ")
-        .or_else(|| after_marker.find("\nfn "))
-        .unwrap_or(after_marker.len());
-    let gate_body = &after_marker[..end_idx];
+    /// Slice one function body, bounded at the next top-level `fn`.
+    fn fn_body<'a>(src: &'a str, marker: &str) -> &'a str {
+        let idx = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("guard: `{marker}` must remain in field_types.rs"));
+        let after = &src[idx..];
+        let end = after
+            .find("\npub(crate) fn ")
+            .or_else(|| after.find("\nfn "))
+            .unwrap_or(after.len());
+        &after[..end]
+    }
+
+    // The fence collection now lives in the shared helper `push_decl_scope_fence`
+    // (called by the shared identity-tail). Both fronts (TypeExpr + node) feed the
+    // SAME tail, so the H2 invariant holds for BOTH through this one helper.
+    let fence_helper = fn_body(&gate_src, "fn push_decl_scope_fence(");
+    // The refusal `(verdict, None)` arms live in the shared identity-tail.
+    let identity_tail = fn_body(
+        &gate_src,
+        "pub(crate) fn package_backed_object_like_root_identity_with_fence(",
+    );
+    // The TypeExpr-front entry that callers (and the wrapper) name.
+    let front = fn_body(
+        &gate_src,
+        "pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(",
+    );
 
     // Invariant 1: the fence-collection arm consults
     // `authoritative_current_content_hash`.
     assert!(
-        gate_body.contains("authoritative_current_content_hash"),
-        "H2 invariant 1: the gate's fence-collection arm MUST consult \
+        fence_helper.contains("authoritative_current_content_hash"),
+        "H2 invariant 1: the gate's fence-collection helper MUST consult \
          `authoritative_current_content_hash` (the view-aware oracle the \
          declaration lookup observes internally). Without this, the gate \
          and the declaration lookup observe different oracles → race \
@@ -583,43 +597,39 @@ fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallo
 
     // Invariant 1b: the pre-H2 `.shallow_file_state(canonical)` CALL
     // pattern MUST be absent from the gate's fence-collection arm.
-    // Detection uses the `.shallow_file_state(canonical)` method-call
-    // form so docstring mentions of the oracle name (e.g.
-    // `pre-H2 shallow_file_state.whole_hash read`) do not trip the
-    // guard. A future refactor that ADDED
-    // `authoritative_current_content_hash` but left a method call to
-    // `.shallow_file_state(canonical)` in the fence-collection arm
-    // would re-open the race.
+    // A future refactor that ADDED `authoritative_current_content_hash`
+    // but left a method call to `.shallow_file_state(canonical)` in the
+    // fence-collection arm would re-open the race.
     assert!(
-        !gate_body.contains(".shallow_file_state(canonical)"),
-        "H2 invariant 1b: the gate's fence-collection arm MUST NOT \
+        !fence_helper.contains(".shallow_file_state(canonical)"),
+        "H2 invariant 1b: the gate's fence-collection helper MUST NOT \
          call `.shallow_file_state(canonical)` — that oracle opened \
          the H2 race window because it observes a different content view \
          than the declaration lookup's internal `authoritative_current_content_hash`.",
     );
 
-    // Invariant 2: the function returns `Option<DepSignature>`. The
-    // signature snippet covers both the `fn` declaration's return type
-    // and the wrapper at line 400 (which extracts `.0`).
-    assert!(
-        gate_body.contains("Option<crate::semantic_query::DepSignature>")
-            || gate_body.contains("Option<DepSignature>"),
-        "H2 invariant 2: the gate's return type MUST be \
-         `(bool, Option<DepSignature>)` — the `Option` discriminator is \
-         the structural signal callers use to refuse admission when the \
-         gate refuses the fence.",
-    );
+    // Invariant 2: both the front and the shared tail return
+    // `Option<DepSignature>` — the `Option` discriminator is the structural
+    // signal callers use to refuse admission when the gate refuses the fence.
+    for (label, body) in [("front", front), ("identity-tail", identity_tail)] {
+        assert!(
+            body.contains("Option<crate::semantic_query::DepSignature>")
+                || body.contains("Option<DepSignature>"),
+            "H2 invariant 2 ({label}): the gate's return type MUST be \
+             `(bool, Option<DepSignature>)`.",
+        );
+    }
 
-    // Invariant 3: the gate returns a `(verdict, None)` refusal arm.
+    // Invariant 3: the shared tail returns a `(verdict, None)` refusal arm.
     // Without this the `None` path is unreachable; with it, callers
     // observe the refusal whenever a contributing canonical's
     // authoritative hash is unavailable.
-    let returns_none_arm =
-        gate_body.contains("return (true, None);") || gate_body.contains("return (verdict, None);");
+    let returns_none_arm = identity_tail.contains("return (true, None);")
+        || identity_tail.contains("return (verdict, None);");
     assert!(
         returns_none_arm,
-        "H2 invariant 3: the gate MUST contain an explicit `return \
-         (verdict, None)` (or `(true, None)`) refusal arm so the \
+        "H2 invariant 3: the gate's identity-tail MUST contain an explicit \
+         `return (verdict, None)` (or `(true, None)`) refusal arm so the \
          `None` return is reachable when a contributing canonical's \
          `authoritative_current_content_hash` is unavailable.",
     );
