@@ -333,22 +333,24 @@ mod node_root_gate_differential_tests {
     }
 
     /// §3 PACKAGE-ROOT BUILTIN/SHADOW SINGLE SOURCE OF TRUTH: an IMPORTED `Pick`
-    /// whose module RESOLVES but does NOT export `Pick` (an unresolved-imported
-    /// shadow) shadows the ambient builtin — its import binding is in the
-    /// owner-scope shadow set, so `ScopeShadowing::is_shadowing_lib("Pick")` is
-    /// `true` and dispatch's `resolve_bare_ref_head` suppresses the `__builtin__`
-    /// route. The node front therefore returns `false` (NO builtin source-descent
-    /// to the package `VendorProps`). The `TypeExpr` front MUST agree via the SAME
-    /// shadow predicate.
+    /// whose module RESOLVES but does NOT export `Pick` (a module-resolved,
+    /// symbol-absent import) shadows the ambient builtin — the resolved import
+    /// binding is in the owner-scope shadow set (`prepared_decl` records the binding
+    /// once the module resolves, independent of whether `Pick` is actually
+    /// exported), so `ScopeShadowing::is_shadowing_lib("Pick")` is `true` and
+    /// dispatch's `resolve_bare_ref_head` suppresses the `__builtin__` route. The
+    /// node front therefore returns `false` (NO builtin source-descent to the
+    /// package `VendorProps`). The `TypeExpr` front MUST agree via the SAME shadow
+    /// predicate.
     ///
-    /// The former `resolve_type_declaration(scope, name).kind == Unknown` builtin
-    /// heuristic conflated "imported-but-unresolved" (kind == Unknown, but
-    /// shadowing) with "ambient builtin" (kind == Unknown, NOT shadowing): it
-    /// wrongly treated the imported `Pick` as the builtin, descended into
-    /// `VendorProps`, and reported package-backed — diverging from the node front.
-    /// This test constructs exactly that divergence; it FAILS against the
-    /// `kind == Unknown` helper and PASSES once both fronts route through
-    /// `ScopeShadowing::is_shadowing_lib`.
+    /// A `resolve_type_declaration(scope, name).kind == Unknown` builtin heuristic
+    /// MISCLASSIFIES this case: it cannot tell "imported, module resolves" (kind ==
+    /// Unknown, yet shadowing) apart from "ambient builtin" (kind == Unknown, NOT
+    /// shadowing), so it would treat the imported `Pick` as the builtin, descend
+    /// into `VendorProps`, and report package-backed — disagreeing with the node
+    /// front. This test pins both fronts to `ScopeShadowing::is_shadowing_lib`; it
+    /// FAILS against a `kind == Unknown` helper and PASSES through the shadow
+    /// predicate.
     #[test]
     fn unresolved_imported_pick_shadow_is_not_a_builtin_source_descent() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -419,18 +421,18 @@ mod node_root_gate_differential_tests {
         // already returns `false` via dispatch's `__builtin__` suppression).
         assert_eq!(
             node_result, expr_result,
-            "node front must equal the TypeExpr front for an unresolved-imported `Pick` shadow \
+            "node front must equal the TypeExpr front for a module-resolved, symbol-absent `Pick` shadow \
              (verdict + fence)"
         );
         // The imported `Pick` shadow is the root — NOT a builtin descent to the
         // package `VendorProps`.
         assert!(
             !node_result.0,
-            "node front: an unresolved-imported `Pick` shadow is not a package-backed root"
+            "node front: a module-resolved, symbol-absent `Pick` shadow is not a package-backed root"
         );
         assert!(
             !expr_result.0,
-            "TypeExpr front: an unresolved-imported `Pick` shadow must NOT descend into the \
+            "TypeExpr front: a module-resolved, symbol-absent `Pick` shadow must NOT descend into the \
              package `VendorProps` — the `kind == Unknown` heuristic wrongly reported \
              package-backed here"
         );
