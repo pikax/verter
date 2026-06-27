@@ -123,10 +123,6 @@ pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
 /// the node-domain mirror of the shape decisions the per-member publication path
 /// runs on `raise(node)`:
 ///
-/// - `leaf_like` — `raise(node)` is a `Primitive` / `Literal` (the peek `Leaf`
-///   arm): a terminal shape, never reduced.
-/// - `bare_carrier_ref` — `raise(node)` is a `Ref { type_arguments: [] }` (the
-///   peek `BareCarrier` arm): a plain alias name, published shallow.
 /// - `generic_instantiation_ref` — `raise(node)` is a `Ref` with NON-EMPTY type
 ///   arguments (`is_generic_instantiation`): a generic application that enters
 ///   the reducer and roots the cycle guard.
@@ -137,8 +133,6 @@ pub(crate) fn type_expr_contains_reducible_operator(expr: &TypeExpr) -> bool {
 /// the graph through [`node_contains_reducible_operator`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NodeReductionGateFacts {
-    pub(crate) leaf_like: bool,
-    pub(crate) bare_carrier_ref: bool,
     pub(crate) generic_instantiation_ref: bool,
     pub(crate) contains_reducible_operator: bool,
 }
@@ -174,29 +168,18 @@ pub(crate) fn classify_node_reduction_gates(
     node: SemanticNodeId,
 ) -> NodeReductionGateFacts {
     let graph = ctx.project_type_store().semantic_graph();
+    // Peel a single `Alias` chain so the root classification reads the underlying
+    // carrier kind (the reverse boundary unwraps an `Alias` before raising).
     let root = peel_alias_root(graph, node, 0);
-    let (leaf_like, bare_carrier_ref, generic_instantiation_ref) =
-        match graph.node_data(root).as_deref() {
-            // `raise(Primitive | Literal)` is the peek `Leaf` arm.
-            Some(SemanticNodeData::Primitive(_)) | Some(SemanticNodeData::Literal(_)) => {
-                (true, false, false)
-            }
-            // `raise(DeclRef)` is `Ref { type_arguments: [] }` — the bare carrier.
-            Some(SemanticNodeData::DeclRef { .. }) => (false, true, false),
-            // `raise(InstantiationRef)` is `Ref` with NON-EMPTY type arguments.
-            Some(SemanticNodeData::InstantiationRef { .. }) => (false, false, true),
-            // An unresolved `BareRef` raises to `Ref { name, type_args }`: empty args
-            // ⇒ bare carrier, non-empty ⇒ generic instantiation (matching the raised
-            // `Ref`'s `type_arguments` cardinality).
-            Some(data) if data.bare_ref_head().is_some() => {
-                let empty = data.carrier_type_args().is_empty();
-                (false, empty, !empty)
-            }
-            _ => (false, false, false),
-        };
+    let generic_instantiation_ref = match graph.node_data(root).as_deref() {
+        // `raise(InstantiationRef)` is `Ref` with NON-EMPTY type arguments.
+        Some(SemanticNodeData::InstantiationRef { .. }) => true,
+        // An unresolved `BareRef` raises to `Ref { name, type_args }`: a generic
+        // instantiation iff it carries type arguments.
+        Some(data) if data.bare_ref_head().is_some() => !data.carrier_type_args().is_empty(),
+        _ => false,
+    };
     NodeReductionGateFacts {
-        leaf_like,
-        bare_carrier_ref,
         generic_instantiation_ref,
         contains_reducible_operator: node_contains_reducible_operator(graph, node, 0),
     }
@@ -385,27 +368,21 @@ mod node_reduction_gate_tests {
         }
 
         // NON-reducible classification cases, each with a discriminating gate fact.
-        // bare carrier (plain alias `Foo`)
+        // bare carrier (plain alias `Foo`) — NOT a generic instantiation, NOT reducible.
         let facts = classify_node_reduction_gates(&host, lower_in(&host, scope, &foo()));
         assert!(
-            !facts.contains_reducible_operator
-                && facts.bare_carrier_ref
-                && !facts.generic_instantiation_ref
-                && !facts.leaf_like,
-            "a plain alias `Foo` is a bare carrier, NOT reducible/generic/leaf; got {facts:?}"
+            !facts.contains_reducible_operator && !facts.generic_instantiation_ref,
+            "a plain alias `Foo` is NOT reducible/generic; got {facts:?}"
         );
 
-        // leaf (primitive)
+        // leaf (primitive) — NOT a generic instantiation, NOT reducible.
         let facts = classify_node_reduction_gates(
             &host,
             lower_in(&host, scope, &TypeExpr::Primitive(PrimitiveName::String)),
         );
         assert!(
-            facts.leaf_like
-                && !facts.bare_carrier_ref
-                && !facts.generic_instantiation_ref
-                && !facts.contains_reducible_operator,
-            "a primitive is a leaf, NOT a carrier/generic/reducible; got {facts:?}"
+            !facts.generic_instantiation_ref && !facts.contains_reducible_operator,
+            "a primitive is NOT generic/reducible; got {facts:?}"
         );
 
         // generic instantiation that is NOT reducible (non-builtin, primitive args)
@@ -424,10 +401,7 @@ mod node_reduction_gate_tests {
             "a non-builtin generic with primitive args is NOT reducible; node must agree with oracle"
         );
         assert!(
-            facts.generic_instantiation_ref
-                && !facts.contains_reducible_operator
-                && !facts.bare_carrier_ref
-                && !facts.leaf_like,
+            facts.generic_instantiation_ref && !facts.contains_reducible_operator,
             "Tool<string, number> is a generic instantiation but not reducible; got {facts:?}"
         );
     }

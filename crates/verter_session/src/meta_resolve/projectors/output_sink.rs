@@ -221,21 +221,19 @@ const DEFAULT_MODEL_NAME: &str = "modelValue";
 ///     [`crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr`]
 ///     WITHOUT paying any raise or gate cost — the goal of the cache
 ///     is that the per-member hot path returns in `peek` time.
-///  2. **Cold path raises once.** A cold miss raises
-///     `member_value` to a `TypeExpr` shell via
-///     [`crate::project_semantic_dispatch::ProjectSemanticDispatch::raise_node_to_type_expr`],
-///     then runs the same shallow gates `reduce_field_type_expr_with_mode`
-///     runs (`type_expr_has_package_backed_object_like_root` +
-///     `lowered_root_reaches_transitive_cycle` +
-///     `type_expr_contains_reducible_operator`). The gates stay
-///     TypeExpr-keyed here per the noted caveat — migrating
-///     them to graph-native predicates widens blast radius into the
-///     cycle module and is punted to a follow-up.
-///  3. **Gate-rejected outcomes do NOT admit.** The raised TypeExpr
-///     is returned verbatim wrapped in a `MaterializedOutputTypeExpr`
-///     envelope. Admitting a gate-rejected entry would store the
-///     raised input verbatim — the cache would grow for no compute
-///     win, since the gates are cheap to re-run.
+///  2. **Cold path runs NODE-domain gates, then seals once.** A cold miss
+///     runs the same shallow gates `reduce_field_type_expr_with_mode` runs,
+///     but in NODE DOMAIN off `member_value` directly — never by materialising
+///     a `TypeExpr` first: `node_package_backed_object_like_root_with_fence` +
+///     `node_root_reaches_transitive_cycle_with_fence` +
+///     `classify_node_reduction_gates`. A gate-stop publishes the shallow
+///     carrier via the node→carrier terminal `raise_node_to_sealed_carrier`
+///     (one terminal materialize, no decide on the result).
+///  3. **Gate-rejected outcomes do NOT admit.** The node is sealed into a
+///     `MaterializedOutputTypeExpr` carrier and returned verbatim. Admitting a
+///     gate-rejected entry would store the input shape verbatim — the cache
+///     would grow for no compute win, since the node-domain gates are cheap to
+///     re-run.
 ///  4. **Cold compute is single-shot.** When a reduction is required,
 ///     `reduce_member_value_graph_native` runs ONCE
 ///     (single-compute pattern). The cache's

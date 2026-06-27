@@ -1095,6 +1095,10 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
 /// whose nested member value carries a miss has `materialized == false` here but
 /// `root_unmaterialized_sentinel == false` there — the two answer different
 /// questions and must not be conflated.
+///
+/// TEST-ONLY: its sole caller (the `raise::node_contains_semantic_miss_with_dispatch`
+/// accessor) is itself test-only until the component-meta carrier-path consumer lands.
+#[cfg(test)]
 pub(in crate::project_semantic_dispatch) fn project_node_contains_semantic_miss(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,

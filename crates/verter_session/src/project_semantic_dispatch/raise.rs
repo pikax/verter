@@ -4654,7 +4654,7 @@ pub(crate) fn node_can_shell_raise(
     )
 )]
 #[must_use]
-pub(crate) fn node_contains_semantic_miss_legacy_equivalent(
+pub(crate) fn node_contains_semantic_miss_or_unraisable(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: SemanticNodeId,
 ) -> bool {
@@ -4669,7 +4669,7 @@ pub(crate) fn node_contains_semantic_miss_legacy_equivalent(
 /// whole-raise `None` is `false` (no surface to be open).
 //
 // Named single-fact member of the node-domain decision API (see
-// `node_contains_semantic_miss_legacy_equivalent`): the sink adapters read both
+// `node_contains_semantic_miss_or_unraisable`): the sink adapters read both
 // facts via `node_raised_shape_facts_with_dispatch`, so this single-fact
 // accessor has no production caller; the parity suite exercises it as the
 // equivalence proof.
@@ -4725,22 +4725,17 @@ pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
 /// letting the caller distinguish "no miss" (`Some(false)`) from "unraisable"
 /// (`None`) — DISTINCT from the root-only
 /// [`node_root_is_unmaterialized_sentinel_with_dispatch`] and from the
-/// None→`true`-collapsing [`node_contains_semantic_miss_legacy_equivalent`].
+/// None→`true`-collapsing [`node_contains_semantic_miss_or_unraisable`].
 /// DISPATCH-taking primary — a publication carrier path reads this off the
 /// reduced-output carrier node instead of materialising it to a `TypeExpr` and
 /// running `type_expr_contains_semantic_miss`.
 //
-// The production caller (the component-meta carrier path's whole-tree
-// semantic-miss gate) lands with that path's conversion; the parity suite
-// exercises it as the node-vs-`TypeExpr` equivalence proof.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "node-domain whole-tree semantic-miss accessor; the carrier-path gate consuming \
-                  it lands with that path's conversion; exercised by the parity suite"
-    )
-)]
+// TEST-ONLY accessor: the production consumer (the component-meta carrier path's
+// whole-tree semantic-miss gate) does not exist yet, so this is gated `#[cfg(test)]`
+// rather than left as dead `pub(crate)` production surface behind
+// `allow(dead_code)`. The parity suite exercises it as the node-vs-`TypeExpr`
+// equivalence proof; when the carrier path lands its consumer, ungate it.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn node_contains_semantic_miss_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,

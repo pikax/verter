@@ -544,11 +544,11 @@ mod carrier {
 
         /// The producing reduced [`SemanticNodeId`] (facts-rail metadata —
         /// always readable, NOT the laundering surface). Part of the carrier's
-        /// documented readable-metadata contract; currently exercised by the
-        /// reduce-then-raise carrier tests (a production reader was the former
-        /// `MaterializedTypeExpr` rebuild, removed as redundant), so the
-        /// non-test dead-code lint is suppressed to keep the accessor.
-        #[cfg_attr(not(test), allow(dead_code))]
+        /// documented readable-metadata contract, read in production by the
+        /// publication pipeline off the reduced-output carrier: the no-poison
+        /// root-sentinel gate in `reduce_field_type_expr_with_mode` and the
+        /// node-domain shape comparison in `reduce_published_field_types` read
+        /// node facts off this id instead of re-materialising a `TypeExpr`.
         pub(crate) fn node_id(&self) -> Option<SemanticNodeId> {
             self.node_id
         }

@@ -7,7 +7,7 @@
 //! tests assert each node-domain classifier EQUALS the legacy `TypeExpr`
 //! predicate applied to the raised oracle output:
 //!
-//! - `node_contains_semantic_miss_legacy_equivalent(node) == match raise(node)
+//! - `node_contains_semantic_miss_or_unraisable(node) == match raise(node)
 //!   { Some(e) => type_expr_contains_semantic_miss(&e), None => true }`
 //! - `node_is_expanded_surface_legacy_equivalent(node) == match raise(node)
 //!   { Some(e) => type_expr_is_expanded_surface(&e), None => false }`
@@ -33,7 +33,7 @@ use std::sync::Arc;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::raise::{
-    node_can_shell_raise, node_contains_semantic_miss_legacy_equivalent,
+    node_can_shell_raise, node_contains_semantic_miss_or_unraisable,
     node_is_expanded_surface_legacy_equivalent, node_raised_shape_facts, node_raised_shape_for_eq,
     project_node_publication_score_with_dispatch, raised_shape_eq_node_type_expr,
     raised_shape_eq_nodes, type_expr_publication_score, PublicationScore,
@@ -81,7 +81,7 @@ fn assert_classifier_parity(host: &VerterHost, node: SemanticNodeId, label: &str
         None => true,
     };
     assert_eq!(
-        node_contains_semantic_miss_legacy_equivalent(host, node),
+        node_contains_semantic_miss_or_unraisable(host, node),
         expect_miss,
         "[{label}] node_contains_semantic_miss must equal \
          type_expr_contains_semantic_miss(raise(node)) (oracle = {oracle:?})"
@@ -195,7 +195,7 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     assert_classifier_parity(&host, miss, "opaque-miss");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, miss),
+        node_contains_semantic_miss_or_unraisable(&host, miss),
         "Opaque(Miss) raises to a sentinel ⇒ contains-semantic-miss must be true"
     );
 
@@ -207,7 +207,7 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
     ))));
     assert_classifier_parity(&host, other, "opaque-other-nonsentinel");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, other),
+        !node_contains_semantic_miss_or_unraisable(&host, other),
         "Opaque(Other(\"custom\")) is a non-sentinel Unknown ⇒ NOT a semantic miss"
     );
 
@@ -223,7 +223,7 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
     )));
     assert_classifier_parity(&host, budget, "opaque-budget-exceeded");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, budget),
+        node_contains_semantic_miss_or_unraisable(&host, budget),
         "Opaque(BudgetExceeded) raises to the budget prefix sentinel ⇒ semantic miss"
     );
 
@@ -234,7 +234,7 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
     }));
     assert_classifier_parity(&host, recursive, "opaque-recursive-ref");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, recursive),
+        !node_contains_semantic_miss_or_unraisable(&host, recursive),
         "Opaque(RecursiveRef) raises to RecursiveRef ⇒ materialized, NOT a miss"
     );
 
@@ -252,7 +252,7 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
     });
     assert_classifier_parity(&host, raw, "raw-fallback-nonsentinel");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, raw),
+        !node_contains_semantic_miss_or_unraisable(&host, raw),
         "RawFallback(non-sentinel text) ⇒ materialized"
     );
 
@@ -263,7 +263,7 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
     });
     assert_classifier_parity(&host, raw_sentinel, "raw-fallback-sentinel-text");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, raw_sentinel),
+        node_contains_semantic_miss_or_unraisable(&host, raw_sentinel),
         "RawFallback whose raw IS a sentinel string ⇒ semantic miss"
     );
 
@@ -276,7 +276,7 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
     )));
     assert_classifier_parity(&host, vue, "vue-macro-elements");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, vue),
+        node_contains_semantic_miss_or_unraisable(&host, vue),
         "VueMacroElements raises to the `VueMacroElements` sentinel ⇒ semantic miss"
     );
 }
@@ -475,7 +475,7 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
         "semanticMiss",
     ))));
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, adversarial),
+        node_contains_semantic_miss_or_unraisable(&host, adversarial),
         "Opaque(Other(\"semanticMiss\")) must read as a semantic miss in the node domain \
          (the text-bearing delegation); a reverted delegation would report NOT-a-miss here"
     );
@@ -501,7 +501,7 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
     // Sanity: the lone arm raises to the object-surface sentinel ⇒ a semantic miss
     // (it IS the arm we expect the intersection to drop).
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, object_surface_sentinel_arm),
+        node_contains_semantic_miss_or_unraisable(&host, object_surface_sentinel_arm),
         "Opaque(Other(\"semanticObjectSurface\")) raises to the SEMANTIC_OBJECT_SURFACE sentinel \
          ⇒ a semantic miss"
     );
@@ -521,7 +521,7 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
          tag delegation keeps the arm and breaks this collapse"
     );
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, inter_sentinel_real),
+        !node_contains_semantic_miss_or_unraisable(&host, inter_sentinel_real),
         "the sentinel-arm-dropped intersection collapses to the real object ⇒ materialized"
     );
 }
@@ -579,7 +579,7 @@ fn parity_alias_cycle_sentinel_string_classification() {
     });
     assert_classifier_parity(&host, alias_cycle_sentinel, "alias-cycle-sentinel-mirror");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, alias_cycle_sentinel),
+        node_contains_semantic_miss_or_unraisable(&host, alias_cycle_sentinel),
         "the alias-cycle sentinel string ⇒ semantic miss"
     );
 
@@ -593,7 +593,7 @@ fn parity_alias_cycle_sentinel_string_classification() {
     });
     assert_classifier_parity(&host, tp_cycle, "typeparam-cycle-materialized-mirror");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, tp_cycle),
+        !node_contains_semantic_miss_or_unraisable(&host, tp_cycle),
         "the type-param-cycle string is NOT a sentinel ⇒ materialized"
     );
 }
@@ -619,7 +619,7 @@ fn parity_merged_decl_peer_merges_to_object() {
     });
     assert_classifier_parity(&host, merged, "merged-decl-two-objects");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, merged),
+        !node_contains_semantic_miss_or_unraisable(&host, merged),
         "a merged decl of two concrete objects raises to a materialized Object"
     );
     assert!(
@@ -683,7 +683,7 @@ fn parity_lazy_carriers() {
          placeholder; the outer Ref constructs)"
     );
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, instref_miss_arg),
+        !node_contains_semantic_miss_or_unraisable(&host, instref_miss_arg),
         "the `<raise miss>` placeholder is NOT in the sentinel set ⇒ the carrier reads materialized"
     );
 
@@ -722,7 +722,7 @@ fn parity_lazy_carriers() {
         "a raised-root TypeOf is an open deferred shell ⇒ NOT an expanded surface"
     );
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, typeof_node),
+        !node_contains_semantic_miss_or_unraisable(&host, typeof_node),
         "a raised TypeOf is a materialized leaf, not a sentinel"
     );
 
@@ -759,7 +759,7 @@ fn parity_object_edge_cases() {
     }));
     assert_classifier_parity(&host, empty, "object-empty");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, empty),
+        !node_contains_semantic_miss_or_unraisable(&host, empty),
         "an empty object is the representable {{}} ⇒ materialized"
     );
 
@@ -781,7 +781,7 @@ fn parity_object_edge_cases() {
     )])));
     assert_classifier_parity(&host, obj_with_miss, "object-member-miss");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, obj_with_miss),
+        node_contains_semantic_miss_or_unraisable(&host, obj_with_miss),
         "an object whose member raises to the Miss sentinel contains a semantic miss"
     );
 
@@ -831,7 +831,7 @@ fn parity_intersection_arm_drop_and_collapse() {
     )));
     assert_classifier_parity(&host, inter_empty_real, "intersection-empty-and-real");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, inter_empty_real),
+        !node_contains_semantic_miss_or_unraisable(&host, inter_empty_real),
         "({{}} & RealObject) collapses to RealObject ⇒ materialized"
     );
 
@@ -880,7 +880,7 @@ fn parity_intersection_arm_drop_and_collapse() {
     // sentinel, not an incidental materialized shape).
     assert_classifier_parity(&host, surface_sentinel, "object-surface-sentinel");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, surface_sentinel),
+        node_contains_semantic_miss_or_unraisable(&host, surface_sentinel),
         "an Object whose only construct-signature raises to a non-Function shape raises to the \
          SEMANTIC_OBJECT_SURFACE sentinel ⇒ semantic miss"
     );
@@ -893,7 +893,7 @@ fn parity_intersection_arm_drop_and_collapse() {
     )));
     assert_classifier_parity(&host, inter_sentinel_real, "intersection-sentinel-and-real");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, inter_sentinel_real),
+        !node_contains_semantic_miss_or_unraisable(&host, inter_sentinel_real),
         "(SurfaceSentinel & RealObject) drops the sentinel arm and collapses to RealObject ⇒ \
          materialized"
     );
@@ -1056,7 +1056,7 @@ fn parity_union_and_terminals_and_none() {
     )));
     assert_classifier_parity(&host, union_with_miss, "union-with-miss");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, union_with_miss),
+        node_contains_semantic_miss_or_unraisable(&host, union_with_miss),
         "a union with a Miss arm contains a semantic miss"
     );
 
@@ -1072,7 +1072,7 @@ fn parity_union_and_terminals_and_none() {
         "absent ⇒ cannot shell-raise"
     );
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, absent),
+        node_contains_semantic_miss_or_unraisable(&host, absent),
         "absent ⇒ contains-miss is true (None treated as miss)"
     );
     assert!(
@@ -1210,10 +1210,8 @@ fn discrimination_oracle_separates_the_facts() {
     // corpus — a constant classifier cannot match both.
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    assert!(node_contains_semantic_miss_legacy_equivalent(&host, miss));
-    assert!(!node_contains_semantic_miss_legacy_equivalent(
-        &host, string_id
-    ));
+    assert!(node_contains_semantic_miss_or_unraisable(&host, miss));
+    assert!(!node_contains_semantic_miss_or_unraisable(&host, string_id));
 
     // expanded_surface is BOTH true (Object) and false (KeyOf) — a constant
     // classifier cannot match both.
@@ -1330,7 +1328,7 @@ fn parity_function_and_constructor_type() {
     });
     assert_classifier_parity(&host, func, "function-materialized");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, func),
+        !node_contains_semantic_miss_or_unraisable(&host, func),
         "a Function with all-materialized params + return ⇒ NOT a semantic miss"
     );
     assert!(
@@ -1360,7 +1358,7 @@ fn parity_function_and_constructor_type() {
     });
     assert_classifier_parity(&host, func_miss_param, "function-miss-param");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, func_miss_param),
+        node_contains_semantic_miss_or_unraisable(&host, func_miss_param),
         "a Function whose param raises to the Miss sentinel contains a semantic miss (the miss \
          predicate recurses the param — NOT a leaf)"
     );
@@ -1372,7 +1370,7 @@ fn parity_function_and_constructor_type() {
     let ctor = graph.intern_node(SemanticNodeData::ConstructorType { signature: func });
     assert_classifier_parity(&host, ctor, "constructor-type-materialized");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, ctor),
+        !node_contains_semantic_miss_or_unraisable(&host, ctor),
         "a ConstructorType over a materialized signature ⇒ NOT a semantic miss"
     );
 
@@ -1383,7 +1381,7 @@ fn parity_function_and_constructor_type() {
     });
     assert_classifier_parity(&host, ctor_miss, "constructor-type-miss-param");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, ctor_miss),
+        node_contains_semantic_miss_or_unraisable(&host, ctor_miss),
         "a ConstructorType whose signature param misses contains a semantic miss"
     );
 }
@@ -1405,7 +1403,7 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
     });
     assert_classifier_parity(&host, template, "template-literal-materialized-expr");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, template),
+        !node_contains_semantic_miss_or_unraisable(&host, template),
         "a raised TemplateLiteral is a LEAF for the miss predicate ⇒ NOT a miss"
     );
 
@@ -1422,7 +1420,7 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
     });
     assert_classifier_parity(&host, template_miss_expr, "template-literal-miss-expr-leaf");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, template_miss_expr),
+        !node_contains_semantic_miss_or_unraisable(&host, template_miss_expr),
         "a TemplateLiteral whose expr raises to a sentinel STILL reads materialized — the miss \
          predicate treats the raised TemplateLiteral as a LEAF (leaf-vs-recurse divergence, \
          matched to LEGACY)"
@@ -1459,7 +1457,7 @@ fn parity_type_param_with_constraint_and_default() {
         "a TypeParam with constraint + default raises"
     );
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, tp),
+        !node_contains_semantic_miss_or_unraisable(&host, tp),
         "a raised TypeParameter is a LEAF for the miss predicate ⇒ NOT a miss"
     );
 
@@ -1478,7 +1476,7 @@ fn parity_type_param_with_constraint_and_default() {
     });
     assert_classifier_parity(&host, tp_miss_constraint, "typeparam-miss-constraint-leaf");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, tp_miss_constraint),
+        !node_contains_semantic_miss_or_unraisable(&host, tp_miss_constraint),
         "a TypeParam whose constraint/default raise to a sentinel STILL reads materialized — the \
          miss predicate treats the raised TypeParameter as a LEAF (matched to LEGACY)"
     );
@@ -1523,7 +1521,7 @@ fn parity_real_index_signature_member() {
         "object-real-index-signature-string-number",
     );
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, string_keyed),
+        !node_contains_semantic_miss_or_unraisable(&host, string_keyed),
         "an Object with a real `[k: string]: number` index signature ⇒ materialized"
     );
     assert!(
@@ -1554,7 +1552,7 @@ fn parity_real_index_signature_member() {
     }));
     assert_classifier_parity(&host, idx_value_miss, "object-index-signature-value-miss");
     assert!(
-        node_contains_semantic_miss_legacy_equivalent(&host, idx_value_miss),
+        node_contains_semantic_miss_or_unraisable(&host, idx_value_miss),
         "an index signature whose value type raises to the Miss sentinel contains a semantic miss"
     );
 }
@@ -1578,7 +1576,7 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     ));
     assert_classifier_parity(&host, bare_arg, "bare-ref-with-arg");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, bare_arg),
+        !node_contains_semantic_miss_or_unraisable(&host, bare_arg),
         "a BareRef<number> raises to a Ref leaf ⇒ NOT a miss"
     );
 
@@ -1600,7 +1598,7 @@ fn parity_carriers_with_type_args_and_raise_miss() {
          Ref constructs)"
     );
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, bare_miss_arg),
+        !node_contains_semantic_miss_or_unraisable(&host, bare_miss_arg),
         "the `<raise miss>` carrier-arg placeholder is NOT a sentinel ⇒ the BareRef reads \
          materialized (the carrier-arg miss does not taint the parent)"
     );
@@ -1617,7 +1615,7 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     ));
     assert_classifier_parity(&host, import_arg, "import-type-with-arg");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, import_arg),
+        !node_contains_semantic_miss_or_unraisable(&host, import_arg),
         "an ImportType<number> raises to an ImportType leaf ⇒ NOT a miss"
     );
 
@@ -1632,7 +1630,7 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     assert_classifier_parity(&host, import_miss_arg, "import-type-raise-miss-arg");
     assert!(
         node_can_shell_raise(&host, import_miss_arg)
-            && !node_contains_semantic_miss_legacy_equivalent(&host, import_miss_arg),
+            && !node_contains_semantic_miss_or_unraisable(&host, import_miss_arg),
         "an ImportType with an absent type-arg materialises the arg as <raise miss>; the carrier \
          reads materialized"
     );
@@ -1655,7 +1653,7 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     ));
     assert_classifier_parity(&host, typeof_arg, "typeof-with-arg");
     assert!(
-        !node_contains_semantic_miss_legacy_equivalent(&host, typeof_arg),
+        !node_contains_semantic_miss_or_unraisable(&host, typeof_arg),
         "a raised TypeOf is a LEAF for the miss predicate ⇒ NOT a miss"
     );
     assert!(
@@ -1680,7 +1678,7 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     assert_classifier_parity(&host, typeof_miss_arg, "typeof-raise-miss-arg");
     assert!(
         node_can_shell_raise(&host, typeof_miss_arg)
-            && !node_contains_semantic_miss_legacy_equivalent(&host, typeof_miss_arg),
+            && !node_contains_semantic_miss_or_unraisable(&host, typeof_miss_arg),
         "a TypeOf with an absent instantiation arg materialises it as <raise miss>; the carrier \
          reads materialized"
     );

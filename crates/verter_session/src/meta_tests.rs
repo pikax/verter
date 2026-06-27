@@ -21751,6 +21751,81 @@ fn output_sink_conversions_decide_in_node_domain_not_on_materialized_type_expr()
     }
 }
 
+/// AUDIT-FOOTPRINT BOUND: `reduce_published_field_types` must stamp a lowered
+/// shallow `node_id` (`reduce_field_type_expr_with_mode(.., stamp_shallow_node_id =
+/// true)`) ONLY on the props loop — which node-compares the reduced carrier against
+/// the shallow form and so needs the shallow node lowered to score it. The emits /
+/// slot_bindings / bindings loops NEVER node-compare and pass `false`. Stamping on
+/// EVERY shallow seal lowered each field's expr, bloating the per-request audit
+/// footprint (>64 KiB on the 30-slot cyclic `defineSlots` fixture). This is the
+/// source-precise bound: flipping ANY non-props loop's stamp back to `true`
+/// re-introduces the per-field lowering bloat and changes the (true, false) tally,
+/// failing here.
+#[test]
+fn reduce_published_stamps_shallow_node_id_only_on_the_props_loop() {
+    use syn::visit::Visit;
+
+    const OUTPUT_SINK_SRC: &str = include_str!("meta_resolve/projectors/output_sink.rs");
+
+    /// Within `reduce_published_field_types`, collect the LAST positional argument
+    /// (the `stamp_shallow_node_id` bool literal) of every
+    /// `reduce_field_type_expr_with_mode` call.
+    #[derive(Default)]
+    struct StampArgCollector {
+        depth: usize,
+        stamps: Vec<bool>,
+    }
+    impl<'ast> Visit<'ast> for StampArgCollector {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            let hit = f.sig.ident == "reduce_published_field_types";
+            if hit {
+                self.depth += 1;
+            }
+            syn::visit::visit_item_fn(self, f);
+            if hit {
+                self.depth -= 1;
+            }
+        }
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if self.depth > 0 {
+                if let syn::Expr::Path(p) = c.func.as_ref() {
+                    let is_target = p
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|s| s.ident == "reduce_field_type_expr_with_mode");
+                    if is_target {
+                        if let Some(syn::Expr::Lit(lit)) = c.args.last() {
+                            if let syn::Lit::Bool(b) = &lit.lit {
+                                self.stamps.push(b.value);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+    }
+
+    let file = syn::parse_file(OUTPUT_SINK_SRC).expect("parse output_sink.rs");
+    let mut collector = StampArgCollector::default();
+    collector.visit_file(&file);
+
+    // props loop stamps `true` on BOTH the field reduction AND the shallow-form
+    // reduction (it node-compares them); emits / slot_bindings / bindings each pass
+    // `false`. ⇒ exactly 2 `true` and 3 `false`.
+    let trues = collector.stamps.iter().filter(|&&b| b).count();
+    let falses = collector.stamps.iter().filter(|&&b| !b).count();
+    assert_eq!(
+        (trues, falses),
+        (2, 3),
+        "reduce_published_field_types must stamp `stamp_shallow_node_id = true` ONLY on the two \
+         props-loop reductions and `false` on the emits / slot_bindings / bindings loops (the \
+         audit-footprint bound); observed stamp args = {:?}",
+        collector.stamps
+    );
+}
+
 /// §1a NO-CACHE-POISON characterization: `reduce_field_type_expr_with_mode`
 /// admits a `Leaf` (Primitive / Literal — a terminal shape whose shallow/expanded
 /// forms agree) to the shared `type_expr_whole` `ShapeCacheDb` slot, but a
