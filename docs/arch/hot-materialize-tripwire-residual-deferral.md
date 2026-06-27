@@ -37,7 +37,7 @@ The trait-default facet is now RECONCILED; one residual remains.
    (`no_new_semantic_unknown_control_flow_outside_owner`) scans free / impl / module AND
    trait-DEFAULT (provided) method bodies for a non-owner `TypeExpr::Unknown { raw: <sentinel> }`
    construction, with the SAME `#[cfg(test)]` exclusion, per-fn raw-taint frame, and fn attribution
-   as a free / impl fn (`UnknownSentinelScanner::visit_trait_item_fn`, at parity with the hot fence).
+   as a free / impl fn within the same scanner (`UnknownSentinelScanner::visit_trait_item_fn`).
    A sentinel-`Unknown` fabricated inside a NON-test trait default body IS caught (direct
    construction, `TypeExpr` alias, bare-variant import, and the field-shorthand raw-taint form); a
    `#[cfg(test)]`-gated trait default is skipped. This facet is no longer a syntactic gap — the

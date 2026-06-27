@@ -11871,10 +11871,40 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 //     (sealed-cap mint / host-threaded surface bridge / return-tainted helper)
 //     that feed a semantic decision, within the scanned production files, with
 //     field-precise taint, qualifier-faithful callee identity, and lexical alias
-//     scoping.
-//   - What it does NOT enforce: semantic identity of arbitrary calls; decisions
-//     hidden inside arbitrary expression-macro bodies; identity laundered through
-//     aliasing / renaming / `cfg` / macros. It is NOT the universal authority.
+//     scoping for body/expression scanning and block-local return-alias
+//     exclusion.
+//   - What it does NOT enforce — the COMPLETE accepted-residual set of this
+//     backstop tripwire (each a known, accepted limit of a syntactic tripwire,
+//     closed structurally, NOT by broadening the scanner):
+//       1. Re-export / no-physical-match proximity (BOTH directions). A rooted
+//          path whose written module path matches no physical declaration (a
+//          `pub use` re-export or an external path) is approximated by bare-name
+//          proximity to preserve the genuine re-export call — accepting a
+//          same-bare-name collision residual in BOTH directions: a false
+//          POSITIVE (a benign re-export call colliding with a nearer unrelated
+//          minter) AND a false NEGATIVE (a re-exported MINTER masked by a nearer
+//          non-minter — a silently missed site).
+//       2. Sibling-inline-module return-alias residual. Additional accepted
+//          residual: return-type alias seeding is file-scoped, not a full Rust
+//          module-name resolver. An inline-module `use ...::TypeExpr as TE` can
+//          classify, shadow, or suppress a sibling inline module's `fn -> TE`
+//          return-taint seed. This may produce a false positive or false
+//          negative in the frozen syntactic tripwire, and is accepted as an
+//          aliasing/renaming identity residual; the universal invariant is
+//          closed structurally by removing materialized `TypeExpr` from hot
+//          inputs.
+//       3. Macro-body blindness (FN4): decisions hidden inside arbitrary
+//          expression-macro bodies (beyond the handled `matches!` / `vec!`
+//          forms) are not syntactically caught.
+//       4. Trait-default / typed-degradation (FN5): the Unknown-control-flow
+//          fence's trait-default scan is RECONCILED — it scans trait-default
+//          bodies with the same `#[cfg(test)]` exclusion + per-fn frame + fn
+//          attribution as a free / impl fn within that scanner; the only
+//          remaining FN5 residual is the typed-degradation end-state, a
+//          downstream typed-state refinement that replaces the
+//          `TypeExpr::Unknown` control sentinel (recorded in the deferral doc).
+//     Identity laundered through arbitrary aliasing / renaming / `cfg` / macros
+//     is likewise out of syntactic reach. It is NOT the universal authority.
 //
 // The universal invariant ("no hot materialize-then-decide") is carried by the
 // STRUCTURAL rail — the `NoTypeExpr` marker trait forbidding hot carriers from
@@ -11888,8 +11918,10 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 // are refused (the gaps close structurally via the conversions that remove a
 // materialized `TypeExpr` from hot inputs, leaving nothing for a macro body or
 // trait default to hide). The named residuals (arbitrary expression-macro bodies;
-// the trait-default control-flow surface) and their structural-closure path are
-// recorded in `docs/arch/hot-materialize-tripwire-residual-deferral.md`.
+// the typed-degradation end-state of the Unknown control-flow fence — its
+// trait-default scan facet is RECONCILED, not a standing residual) and their
+// structural-closure path are recorded in
+// `docs/arch/hot-materialize-tripwire-residual-deferral.md`.
 //
 // SC-first record (structured, machine-greppable):
 //   scanner_invariant: stage9_residual_hot_materialize_syntactic_tripwire
@@ -15988,7 +16020,7 @@ fn unknown_fence_trait_default_reconcile() {
     assert!(
         unknown_sentinel_constructions_in_src(cfg_test_default).is_empty(),
         "self-test (cfg-test): a `#[cfg(test)]` trait-DEFAULT `Unknown {{ raw: <sentinel> }}` MUST \
-         NOT fire (cfg-test-gated trait defaults are skipped, at parity with the hot fence); got: {:?}",
+         NOT fire (cfg-test-gated trait defaults are skipped, the same `#[cfg(test)]` exclusion as a free / impl fn within the Unknown scanner); got: {:?}",
         unknown_sentinel_constructions_in_src(cfg_test_default)
     );
 
@@ -16679,8 +16711,9 @@ impl<'ast> syn::visit::Visit<'ast> for UnknownSentinelScanner {
     }
     /// A trait-DEFAULT (provided) method body is production code and is scanned
     /// with the SAME `#[cfg(test)]` exclusion + per-fn raw-taint frame + fn
-    /// attribution as a free / impl fn (parity with the hot fence's
-    /// `visit_trait_item_fn`). This replaces syn's accidental default-visitor
+    /// attribution as a free / impl fn within this same `UnknownSentinelScanner`
+    /// (not a claim of full parity with the separate hot fence). This replaces
+    /// syn's accidental default-visitor
     /// descent, which scanned a trait-default sentinel construction WITHOUT
     /// cfg-test gating (a `#[cfg(test)]` trait default would have FP'd), without a
     /// raw-taint frame (a field-shorthand `Unknown { raw }` form was missed), and
