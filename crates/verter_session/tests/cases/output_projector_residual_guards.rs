@@ -12336,6 +12336,14 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "meta_resolve/projectors/output_sink.rs",
         "surface_member_to_expanded_field",
     ),
+    // The `defineModel` publication terminal: resolves the macro payload node,
+    // decides reducibility on the payload NODE (`classify_node_reduction_gates`),
+    // materialises the payload ONCE (raise + a conditional
+    // `materialize_component_meta_type_expr_until_stable`), and builds the model
+    // `ExpandedField` DTO. No decision is made on the materialised value — the
+    // only branch is the node-domain reducibility fact. Takes NO `TypeExpr`
+    // param, so the self-policing rail seeds nothing.
+    ("meta_resolve/projectors/output_sink.rs", "project_model"),
 ];
 
 /// Whether a fn/mod/impl is compile-absent from a default production build —

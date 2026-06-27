@@ -1152,7 +1152,7 @@ pub(crate) fn project_model(
     let _member_cursor = cursor.descend_published_member(&model_name)?;
 
     let ctx: &dyn ResolverContext = query_engine.ctx;
-    let (raised, exactness, raise_failed) = {
+    let (raised, exactness, raise_failed, contains_reducible) = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         // `project_model` is a ROOT publication path that keeps a root cursor
         // (the `descend_published_member` gate above). It resolves + admits the
@@ -1190,7 +1190,12 @@ pub(crate) fn project_model(
             None => (TypeExpr::Unknown { raw: String::new() }, true),
         };
         let exactness = classify_node(&dispatch, payload_node);
-        (raised, exactness, raise_failed)
+        // Reducibility is decided on the payload NODE (node-domain), NOT on the
+        // raised `TypeExpr` — `project_model` materialises once below and makes
+        // no decision on the materialised result.
+        let contains_reducible =
+            super::classify_node_reduction_gates(ctx, payload_node).contains_reducible_operator;
+        (raised, exactness, raise_failed, contains_reducible)
     };
 
     if raise_failed {
@@ -1209,7 +1214,7 @@ pub(crate) fn project_model(
     // path-precisely. A bare carrier (`defineModel<Tool<I, O>>`) has
     // no operator node, so `raised` is returned verbatim — published
     // as a carrier.
-    let r#type = if super::type_expr_contains_reducible_operator(&raised) {
+    let r#type = if contains_reducible {
         crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable(
             &raised,
             file,

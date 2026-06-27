@@ -21572,6 +21572,104 @@ fn surface_shape_conversions_run_node_domain_not_materialize_then_shape() {
     }
 }
 
+/// Collect every call ident (free/assoc-fn last path segment + method-call name)
+/// syntactically reachable inside the fn named `target` (a nested `fn` or an impl
+/// method), with depth tracking so sibling fns never leak.
+#[cfg(test)]
+fn output_sink_calls_in(src: &str, target: &str) -> std::collections::BTreeSet<String> {
+    use std::collections::BTreeSet;
+    use syn::visit::Visit;
+
+    #[derive(Default)]
+    struct CallCollector {
+        target: String,
+        depth: usize,
+        found: bool,
+        calls: BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for CallCollector {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            let hit = f.sig.ident == self.target;
+            if hit {
+                self.found = true;
+                self.depth += 1;
+            }
+            syn::visit::visit_item_fn(self, f);
+            if hit {
+                self.depth -= 1;
+            }
+        }
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            let hit = f.sig.ident == self.target;
+            if hit {
+                self.found = true;
+                self.depth += 1;
+            }
+            syn::visit::visit_impl_item_fn(self, f);
+            if hit {
+                self.depth -= 1;
+            }
+        }
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if self.depth > 0 {
+                if let syn::Expr::Path(p) = c.func.as_ref() {
+                    if let Some(seg) = p.path.segments.last() {
+                        self.calls.insert(seg.ident.to_string());
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            if self.depth > 0 {
+                self.calls.insert(m.method.to_string());
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+    }
+
+    let file = syn::parse_file(src).expect("output_sink.rs must parse");
+    let mut collector = CallCollector {
+        target: target.to_string(),
+        ..Default::default()
+    };
+    collector.visit_file(&file);
+    assert!(
+        collector.found,
+        "target fn `{target}` not found in output_sink.rs (renamed/removed?) — the \
+         characterization must not vacuously pass"
+    );
+    collector.calls
+}
+
+/// §1a DISCRIMINATION: the converted `output_sink` publication/reduction fns make
+/// their shape decisions in NODE DOMAIN — they consult the node-fact APIs and do
+/// NOT materialise a `TypeExpr` and then run a `TypeExpr` predicate on it.
+///
+/// Discrimination: each FORBIDDEN call is exactly the materialize-then-decide the
+/// conversion removed, so re-introducing any of them FAILS this test (it was
+/// present on the pre-change tree); each REQUIRED call is the node-domain fact the
+/// conversion routes through.
+#[test]
+fn output_sink_conversions_decide_in_node_domain_not_on_materialized_type_expr() {
+    const OUTPUT_SINK_SRC: &str = include_str!("meta_resolve/projectors/output_sink.rs");
+
+    // ── `project_model` — reducibility decided on the payload NODE, not on the
+    //    raised `TypeExpr` (the `type_expr_contains_reducible_operator(&raised)`
+    //    decide is gone; `classify_node_reduction_gates(node)` replaces it).
+    let project_model = output_sink_calls_in(OUTPUT_SINK_SRC, "project_model");
+    assert!(
+        !project_model.contains("type_expr_contains_reducible_operator"),
+        "project_model must NOT run `type_expr_contains_reducible_operator` on the raised \
+         TypeExpr (materialize-then-decide); calls seen: {project_model:?}"
+    );
+    assert!(
+        project_model.contains("classify_node_reduction_gates"),
+        "project_model must decide reducibility via `classify_node_reduction_gates` (node \
+         domain); calls seen: {project_model:?}"
+    );
+}
+
 /// End-to-end discriminator for the dispatch-bridge `ProjectGeneration`
 /// conversion.
 ///
