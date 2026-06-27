@@ -721,18 +721,32 @@ fn type_expr_root_identity(
 /// Shadowing is decided by the SINGLE-SOURCE-OF-TRUTH
 /// [`ScopeShadowing::is_shadowing_lib`](crate::resolver_core::scope_shadowing::ScopeShadowing::is_shadowing_lib),
 /// the same authority the dispatch path consults — it folds the owner scope's
-/// local type names, script-setup type bindings, AND import bindings, so a local
-/// `type Pick`, an imported `Pick`, OR an imported-but-unresolved `Pick` (its
-/// module resolves but the symbol is absent) ALL shadow the builtin and resolve
-/// to their OWN root, never a source-descent into the utility's argument.
+/// local type names, script-setup type bindings, AND RESOLVED import bindings (an
+/// import whose module resolves to a canonical id, even when that module does not
+/// actually export the name). So a local `type Pick`, a script-setup
+/// `generic="Pick"`, OR an imported `Pick` whose module resolves ALL shadow the
+/// builtin and resolve to their OWN root, never a source-descent into the
+/// utility's argument.
 ///
 /// This is the `TypeExpr`-front mirror of the node front's
 /// `InstantiationRef.base.canonical_id == "__builtin__"` check — which reads the
 /// SAME `is_shadowing_lib`-gated identity dispatch already minted — so the two
-/// fronts agree by construction rather than via a parallel heuristic. A prior
-/// `resolve_type_declaration(...).kind == Unknown` check diverged here: it
-/// conflated "imported-but-unresolved" (kind == Unknown, yet shadowing) with
-/// "ambient builtin" (kind == Unknown, NOT shadowing).
+/// fronts agree by construction rather than via a parallel heuristic. A
+/// `resolve_type_declaration(...).kind == Unknown` check would MISCLASSIFY this:
+/// it cannot tell "imported, module resolves" (kind == Unknown, yet shadowing)
+/// apart from "ambient builtin" (kind == Unknown, NOT shadowing) — which is why
+/// the gate reads the shadow set directly.
+///
+/// [debt] Shared-`ScopeShadowing` limitation (resolver_core), shared with the
+/// dispatch path: the shadow set is built from `import_bindings`, which omits an
+/// UNRESOLVED-SPECIFIER import (`import { Pick } from "./missing"` whose module
+/// resolves to no canonical id — `prepared_decl` records a binding only when the
+/// module resolves). Such an import escapes the shadow set, so a builtin-colliding
+/// name imported from an unresolvable module is classified as the builtin here AND
+/// in dispatch's `resolve_bare_ref_head` (the two stay in agreement). Closing it
+/// is a shared-owner follow-up: carry a lexical import-name set in the scope
+/// payload (from `import_targets` / `import_locals`, independent of resolution)
+/// and consult it in `ScopeShadowing`.
 fn is_builtin_pick_or_omit(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
@@ -746,11 +760,19 @@ fn is_builtin_pick_or_omit(
     ) {
         return false;
     }
-    !crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
-        query_engine.ctx,
-        scope_canonical_id,
-    )
-    .is_shadowing_lib(name)
+    // Reuse the engine's cached `DeclarationScopePayload` (built once per scope)
+    // rather than rebuilding the shadow set from the prepared-decl bundle on every
+    // Pick/Omit field. The package-root gate runs once per published field, so a
+    // per-field `from_host_scope` rebuild is O(fields × scope names/imports). The
+    // payload-derived shadow set is identical to the bundle-derived one: both fold
+    // the scope's local type names, script-setup type bindings, and resolved import
+    // bindings (`DeclarationScopePayload::from_bundle` carries the same three sets
+    // `from_host_scope` reads off the bundle).
+    let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+        scope_payload.as_deref(),
+    );
+    !shadowing.is_shadowing_lib(name)
 }
 
 /// Resolve a bare `Ref` `name` (at `scope_canonical_id`) to its ROOT declaration
