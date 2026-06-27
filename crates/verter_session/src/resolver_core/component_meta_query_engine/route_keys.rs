@@ -961,8 +961,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             };
             let Some(produced) = produced else {
                 // No projection this iteration — materialise `last` once.
-                return last
-                    .and_then(|node| super::materialize_route_projection_node(self.ctx(), &node));
+                return last.and_then(|node| {
+                    super::surface::materialize_route_projection_node(self.ctx(), &node)
+                });
             };
             let converged = match cursor {
                 RouteFixpointCursor::Input(input) => {
@@ -973,12 +974,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
             };
             if converged {
-                return super::materialize_route_projection_node(self.ctx(), &produced);
+                return super::surface::materialize_route_projection_node(self.ctx(), &produced);
             }
             last = Some(produced);
             cursor = RouteFixpointCursor::Node(produced);
         }
-        last.and_then(|node| super::materialize_route_projection_node(self.ctx(), &node))
+        last.and_then(|node| super::surface::materialize_route_projection_node(self.ctx(), &node))
     }
 
     /// Predicate: does `expr` reference a prepared symbol that resolves

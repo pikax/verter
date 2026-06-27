@@ -3945,6 +3945,158 @@ export interface Derived extends ButtonProps {
     );
 }
 
+// ── Whole-route publication gate: composed-surface materializedness ──
+// The registry Whole route gates publication on the node-domain
+// materializedness of the surface BEING PUBLISHED. For a compound root
+// (Union / Intersection / `Omit`-heritage) the projected surface is the
+// SHALLOW-COMPOSED surface the walker reconstructs from the decl anchor —
+// NOT the carrier-intact anchor declaration itself. The gate must fold its
+// materializedness over that composed surface node, so that a partial
+// composed surface (one bearing an unresolved `semanticMiss` member) is
+// REJECTED exactly as the surface-materialization filter rejected it,
+// while a clean composed surface is ADMITTED.
+
+/// Discriminating: a compound-root component whose composed Whole surface
+/// carries an own-body member that resolves to a `semanticMiss` carrier
+/// (`import('./ghost').Ghost` — the module is absent). `Omit`-heritage makes
+/// the instantiated root an Intersection, so the surface composes from the
+/// carrier-intact decl anchor.
+///
+/// The Whole route must REJECT this partial surface (return `None`), matching
+/// the surface-materialization filter that rejects a surface bearing such a
+/// sentinel member. Gating on the anchor declaration instead spuriously
+/// ADMITS it: the anchor's own raise keeps `Ghost` as an unresolved
+/// `ImportType` carrier (which reads materialized), whereas the composed
+/// shallow walk resolves the absent import to a `semanticMiss`.
+#[test]
+fn whole_route_gate_rejects_partial_compound_surface() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+type Item = { label?: string }
+export interface BaseG<T> { keep?: T }
+export interface Derived extends Omit<BaseG<Item>, 'nothing'> {
+  bad?: import('./ghost').Ghost
+}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view_read().into_owned_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // The compound-root surface itself COMPOSES (it is non-empty: `keep` from the
+    // `Omit` heritage and the own-body `bad`). It is the publication GATE, not
+    // emptiness, that must reject the partial surface.
+    let composed = query_engine.dispatch_projected_surface("/src/App.vue", "Derived");
+    assert!(
+        composed.is_some(),
+        "the compound-root surface composes (non-empty); the gate, not emptiness, rejects the partial",
+    );
+
+    // The Whole route must REJECT the partial composed surface — its `bad` member
+    // is an unresolved `semanticMiss` carrier. Gating on the carrier-intact decl
+    // anchor instead ADMITS it (`Some`), the divergence this test pins.
+    let whole = query_engine.dispatch_routed_expr_surface_expr(
+        "/src/App.vue",
+        "Derived",
+        &crate::resolver_core::RouteDemand::Whole,
+    );
+    assert!(
+        whole.is_none(),
+        "Whole route must REJECT a partial compound surface (a `semanticMiss` member) to match \
+         the surface-materialization filter; the anchor-proxy gate spuriously admitted it: {whole:?}",
+    );
+}
+
+/// Control (behaviour-preservation): a CLEAN compound-root surface — every
+/// composed member materialises — must still be ADMITTED by the Whole gate,
+/// keeping the inherited members and dropping the `Omit`-ed key. Folding the
+/// gate over the composed surface (rather than the anchor) must not over-reject
+/// the clean case.
+#[test]
+fn whole_route_gate_admits_clean_compound_surface() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/base.ts".to_string(),
+        Arc::from(
+            r#"
+export interface RootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  modelValue?: T
+}
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { RootProps } from './base'
+
+type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
+  items?: T
+}
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+
+    let _store_view = host.resolver_store_view_read().into_owned_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let whole = query_engine
+        .dispatch_routed_expr_surface_expr(
+            "/src/App.vue",
+            "ColorModeSelectProps",
+            &crate::resolver_core::RouteDemand::Whole,
+        )
+        .expect("Whole route must ADMIT a clean compound surface (all members materialise)");
+
+    let names = projected_object_member_names(&whole);
+    for kept in ["open", "defaultOpen", "disabled"] {
+        assert!(
+            names.iter().any(|name| name == kept),
+            "admitted clean compound surface keeps inherited `{kept}`; got {names:?}",
+        );
+    }
+    assert!(
+        !names.iter().any(|name| name == "items"),
+        "admitted clean compound surface drops the `Omit`-ed `items`; got {names:?}",
+    );
+}
+
 // ── `projected_surface_to_type_expr` span re-emit (D1) ──────────────
 // These two unit tests pin the span-threading invariants of the kept
 // `projected_surface_to_type_expr` reconstruction directly from a

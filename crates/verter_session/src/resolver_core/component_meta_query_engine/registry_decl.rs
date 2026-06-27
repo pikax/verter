@@ -1161,10 +1161,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// As [`Self::dispatch_projected_surface`], but also returns the graph node
-    /// the surface was projected FROM (the instantiated root, or the decl
-    /// anchor when the compound-root composition fallback fires). The Whole
+    /// whose raised surface IS the projected surface: the instantiated root
+    /// (whose own `Object` surface the projector read), or — when the
+    /// compound-root composition fallback fires — the terminal `Object` node the
+    /// shallow walker COMPOSED (NOT the carrier-intact decl anchor). The Whole
     /// route's node-domain materializedness gate reads that node's raised-shape
-    /// facts directly instead of materializing the surface and inspecting it.
+    /// facts directly instead of materializing the surface and inspecting it, so
+    /// for BOTH cases the gate folds over the exact surface being published.
     fn dispatch_projected_surface_with_node(
         &mut self,
         scope_canonical_id: &str,
@@ -1185,9 +1188,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // one shared resolver driven from the non-lossy base — not a
         // parallel walker. Returns `None` when the anchor is unresolved or
         // the composed surface is empty.
+        //
+        // The gate node is the COMPOSED surface's terminal `Object` node (the
+        // surface being published), NOT the carrier-intact anchor: the anchor's
+        // own raise keeps heritage / import carriers unresolved (materialized)
+        // and would admit a partial composed surface the surface-materialization
+        // filter rejects.
         let anchor = self.dispatch_decl_anchor(scope_canonical_id, symbol_name)?;
-        let surface = projected_compound_root_surface_via_dispatch(self.ctx, anchor)?;
-        Some((surface, anchor))
+        let (surface, composed_surface_node) =
+            projected_compound_root_surface_via_dispatch(self.ctx, anchor)?;
+        Some((surface, composed_surface_node))
     }
 
     /// Node-domain registry route projection: resolve a route to its admitted

@@ -122,14 +122,18 @@ mod surface;
 // via `use super::surface::`). Out-of-subtree callers route through the
 // engine's sink-local methods (`dispatch_projected_surface_to_type_expr` /
 // `projected_expanded_shape_from_node` / the routed-surface methods).
+// `materialize_route_projection_node` is NOT re-exported: it is scoped
+// `pub(in …::component_meta_query_engine)` so only in-subtree route/surface
+// adapters and the route fixpoint reach the node→`TypeExpr` materialisation
+// (via `super::surface::`), compiler-enforcing the sink confinement.
 pub(crate) use surface::{
     instantiate_local_generic_ref_published, lower_and_project_to_expanded_node,
-    lower_and_project_to_expanded_published, materialize_route_projection_node,
-    project_admitted_node_to_expanded_node, project_class_a_terminal_published,
-    project_expr_surface_expr_node, project_expr_surface_expr_published,
-    route_projection_node_eq_to_expr, route_projection_nodes_eq, semantic_query_error_raw,
-    type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
-    type_expr_root_is_unmaterialized_sentinel, AdmittedRouteProjectionNode,
+    lower_and_project_to_expanded_published, project_admitted_node_to_expanded_node,
+    project_class_a_terminal_published, project_expr_surface_expr_node,
+    project_expr_surface_expr_published, route_projection_node_eq_to_expr,
+    route_projection_nodes_eq, semantic_query_error_raw, type_expr_contains_semantic_miss,
+    type_expr_is_budget_exceeded_sentinel, type_expr_root_is_unmaterialized_sentinel,
+    AdmittedRouteProjectionNode,
 };
 // `type_expr_is_expanded_surface` survives only as the `#[cfg(test)]` parity
 // ORACLE the raised-shape suite compares the bottom-up `expanded_surface` fact

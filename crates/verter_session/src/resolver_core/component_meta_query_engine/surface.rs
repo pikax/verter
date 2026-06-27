@@ -76,7 +76,16 @@ fn materialize_published_node(
 /// host-threaded wrappers (`crate::meta_resolve`) and the fixpoint driver only
 /// NAME and pass it — no forgeable `SemanticNodeId → TypeExpr` adapter crosses
 /// the query-engine boundary, and materialisation stays cap-gated regardless of
-/// who holds the carrier. Modeled on `AdmittedExpansionNode`.
+/// who holds the carrier.
+///
+/// Same admitted-node carrier shape as the macro-output `AdmittedExpansionNode`,
+/// but DELIBERATELY widened: `AdmittedExpansionNode` is fully module-private,
+/// whereas the type here is `pub(crate)` ON PURPOSE so the cross-subtree
+/// `meta_resolve::dispatch_helpers` host-threaded wrappers can NAME and pass the
+/// carrier across the query-engine boundary. They cannot FORGE one: `new` / `node`
+/// stay subtree-mint-scoped (`pub(in …::component_meta_query_engine)`) and
+/// materialisation stays cap-gated, so widening the type's name does not widen the
+/// mint or the materialise.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdmittedRouteProjectionNode {
     node: SemanticNodeId,
@@ -106,7 +115,13 @@ impl AdmittedRouteProjectionNode {
 /// node-domain decisions converge — there is no mid-flight materialisation. The
 /// carrier's node was admitted by a route/surface adapter's node-domain gate,
 /// so this is a pure one-shot publication with no decision on the result.
-pub(crate) fn materialize_route_projection_node(
+///
+/// Subtree-scoped (`pub(in …::component_meta_query_engine)`): every caller is a
+/// route/surface adapter or the route fixpoint inside this subtree, so the
+/// confinement is COMPILER-enforced — no out-of-subtree site can reach the
+/// node→`TypeExpr` materialisation except through the engine's sink-local
+/// publication methods.
+pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_projection_node(
     ctx: &dyn ResolverContext,
     node: &AdmittedRouteProjectionNode,
 ) -> Option<TypeExpr> {
@@ -463,15 +478,22 @@ fn projected_surface_from_semantic_node_inner(
 /// anchor still carries the carrier intact). Returns `None` when the walker
 /// resolves no `Object` terminal OR the composed surface is empty (an empty
 /// surface is never a COMPLETE compound-root projection).
+///
+/// Returns the composed `ProjectedSurface` PAIRED with the terminal `Object`
+/// NODE the walker read it from. That node IS the composed surface, so the
+/// Whole-route publication gate folds its node-domain materializedness over
+/// THAT node — never over the carrier-intact `node` decl anchor, whose own
+/// raise keeps heritage / import carriers unresolved (materialized) and would
+/// admit a partial composed surface the surface-materialization filter rejects.
 pub(super) fn projected_compound_root_surface_via_dispatch(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
-) -> Option<ProjectedSurface> {
+) -> Option<(ProjectedSurface, SemanticNodeId)> {
     use crate::semantic_query::{
         ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
     };
 
-    let surface = ctx.dispatch().resolve_typeinfo_surface_view(
+    let (surface, surface_node) = ctx.dispatch().resolve_typeinfo_surface_view_with_node(
         node,
         ProjectionReductionContext::macro_object_surface(
             ProjectionMode::Shallow,
@@ -482,7 +504,7 @@ pub(super) fn projected_compound_root_surface_via_dispatch(
     if projected_surface_is_empty(&projected) {
         return None;
     }
-    Some(projected)
+    Some((projected, surface_node))
 }
 
 pub(crate) fn surface_view_to_projected_surface(

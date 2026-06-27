@@ -308,6 +308,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::SurfaceView> {
+        self.resolve_typeinfo_surface_view_with_node(base, context)
+            .map(|(view, _terminal)| view)
+    }
+
+    /// As [`Self::resolve_typeinfo_surface_view`], but also returns the terminal
+    /// `Object` NODE the one-level surface was read from. The node IS the
+    /// composed surface (the same `SurfaceView` it carries), so folding the
+    /// node-domain raised-shape facts over it yields the EXACT materializedness
+    /// of the composed surface — distinct from the carrier-intact `base` decl
+    /// anchor, whose own raise keeps heritage / import carriers unresolved.
+    pub(crate) fn resolve_typeinfo_surface_view_with_node(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
         debug_assert_eq!(
             context.mode,
             crate::semantic_query::ProjectionMode::Shallow,
@@ -329,7 +344,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::QueryResult::Error(_) => return None,
         };
         match self.graph().node_data(terminal).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some(view.clone()),
+            Some(SemanticNodeData::Object(view)) => Some((view.clone(), terminal)),
             _ => None,
         }
     }
