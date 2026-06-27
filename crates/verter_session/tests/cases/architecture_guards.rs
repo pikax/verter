@@ -16111,7 +16111,7 @@ mod single_resolution_engine_guards {
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            467,
+            468,
             "fn read_surface_members(",
         ),
         (

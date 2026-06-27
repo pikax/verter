@@ -145,66 +145,65 @@ fn reduce_field_type_expr_consults_cached_peek_after_gate() {
 }
 
 // ---------------------------------------------------------------------------
-// Guard 3: `member_shape_peek_or_compute` runs the package-backed gate
-//          BEFORE the cached operator-shape peek. The gate-before-cache
+// Guard 3: `member_shape_peek_or_compute` decides the shallow gates on the
+//          member-value NODE (node-domain facts) and runs the package-backed
+//          gate BEFORE the graph-native reducer. The gate-before-reducer
 //          ordering is the load-bearing correctness invariant:
 //          `MaterializeMemoDb` is shared across the typed-IR materialiser
-//          callers (model / registry paths) that do NOT apply the
-//          projector's shallow gate, so consulting the cache first would
-//          publish the reduced body for a package-backed root —
-//          violating the shallow-by-default invariant.
+//          callers (model / registry paths) that do NOT apply the projector's
+//          shallow gate, so reducing first would publish the reduced body for a
+//          package-backed root — violating the shallow-by-default invariant. The
+//          decisions run on the NODE, never on a raised TypeExpr: there is no
+//          up-front `shell_raise_to_type_expr(member_value)` and no shared
+//          `peek_member_shape_known` operator-shape peek.
 // ---------------------------------------------------------------------------
 #[test]
-fn member_shape_peek_or_compute_runs_gates_before_cached_peek() {
-    // `member_shape_peek_or_compute` now lives IN the terminal `output_sink`
-    // sink module (the only module that touches the reverse boundary), so the
-    // raise step calls the now-MODULE-PRIVATE `shell_raise_to_type_expr`
-    // primitive directly (same-module — no `output_sink::` prefix).
+fn member_shape_peek_or_compute_runs_node_gates_before_graph_native_reducer() {
+    // `member_shape_peek_or_compute` lives IN the terminal `output_sink` sink
+    // module; its gates decide on the member-value NODE through the node-domain
+    // fact APIs, and materialisation happens only at the terminal seal / the
+    // graph-native reducer.
     let content = read_output_sink();
     let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
 
-    // The raise-to-TypeExpr step goes through the sink-private boundary
-    // primitive `shell_raise_to_type_expr(&dispatch, member_value)`. Match the
-    // primitive call, with defensive fallbacks to the older inline boundary-fn
-    // spellings so the guard survives a future reshape; the ANCHOR is "the
-    // raise-to-TypeExpr step" whatever its current spelling.
-    let raise_idx = body
-        .find("shell_raise_to_type_expr(&dispatch, member_value)")
-        .or_else(|| body.find("shell_raise_to_type_expr("))
-        .or_else(|| body.find("materialize_output_type_expr(member_value)"))
-        .or_else(|| body.find("raise_node_to_type_expr(member_value)"))
-        .expect(
-            "guard: the output raise step (shell_raise_to_type_expr(&dispatch, \
-             member_value)) must remain in `member_shape_peek_or_compute`.",
-        );
-    // The gate is invoked via the `_with_fence` variant
-    // so the gate's cross-file dep facts thread into the admit's
-    // `fact_dep_signature`. Match either the bare or the `_with_fence`
-    // form so the guard survives a hypothetical
-    // future rename back. Document the intent: do NOT remove the gate
-    // entirely; rename only to a fence-bearing successor.
-    let gate_idx = body
-        .find("type_expr_has_package_backed_object_like_root_with_fence(")
-        .or_else(|| body.find("type_expr_has_package_backed_object_like_root("))
-        .expect("guard: package-backed gate must remain as cold fallback.");
-    let peek_idx = body
-        .find("peek_member_shape_known(")
-        .expect("guard: `member_shape_peek_or_compute` MUST invoke `peek_member_shape_known`.");
-
+    // NODE-DOMAIN: no up-front raise of member_value to a TypeExpr, no shared
+    // operator-shape peek — re-introducing either reverts to materialize-then-gate.
     assert!(
-        raise_idx < gate_idx,
-        "guard: the package-backed gate must follow the raise step so \
-         it operates on the raised TypeExpr.",
+        !body.contains("shell_raise_to_type_expr(&dispatch, member_value)"),
+        "guard: `member_shape_peek_or_compute` must NOT raise member_value to a TypeExpr up front \
+         — the package-backed / reducibility / cycle gates decide on the NODE.",
     );
     assert!(
-        gate_idx < peek_idx,
-        "guard: the package-backed gate \
-         (`type_expr_has_package_backed_object_like_root`) MUST run \
-         BEFORE the `peek_member_shape_known` cached-shape short-circuit. \
-         `MaterializeMemoDb` is shared across non-projector callers \
-         that do not apply this shallow gate; consulting the cache \
-         first would publish the reduced body for a package-backed \
-         root, violating the shallow-by-default invariant.",
+        !body.contains("peek_member_shape_known("),
+        "guard: `member_shape_peek_or_compute` must NOT consult the shared \
+         `peek_member_shape_known` operator-shape cache (the graph-native reducer's own memo \
+         covers it); re-adding it reverts to a materialize-then-decide shared-slot peek.",
+    );
+
+    // The node-domain package-backed gate (fence-bearing successor of the
+    // TypeExpr `type_expr_has_package_backed_object_like_root`).
+    let gate_idx = body
+        .find("node_package_backed_object_like_root_with_fence(")
+        .expect(
+            "guard: the node-domain package-backed gate \
+             (`node_package_backed_object_like_root_with_fence`) must remain in \
+             `member_shape_peek_or_compute`.",
+        );
+    let reducer_idx = body
+        .find("reduce_member_value_graph_native_with_context(")
+        .expect(
+            "guard: `member_shape_peek_or_compute` MUST reduce the reducible / generic case \
+             through the graph-native reducer.",
+        );
+
+    assert!(
+        gate_idx < reducer_idx,
+        "guard: the node-domain package-backed gate \
+         (`node_package_backed_object_like_root_with_fence`) MUST run BEFORE the graph-native \
+         reducer (`reduce_member_value_graph_native_with_context`). `MaterializeMemoDb` is shared \
+         across non-projector callers that do not apply this shallow gate; reducing first would \
+         publish the reduced body for a package-backed root, violating the shallow-by-default \
+         invariant.",
     );
 }
 
