@@ -40,6 +40,7 @@ use super::helpers::{
     is_builtin_name, resolve_imported_registry_symbol_with_budget, ImportedRegistrySymbolResolution,
 };
 use super::surface::{
+    project_admitted_route_node_to_expanded_object_shape,
     projected_compound_root_surface_via_dispatch, projected_surface_from_semantic_node,
     projected_surface_to_expanded_shape, projected_surface_to_type_expr,
 };
@@ -1386,16 +1387,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             SemanticQueryOutput,
         };
 
-        // (1) Registry public-indexed-access / public-utility route.
+        // (1) Registry public-indexed-access / public-utility route — projected in
+        // NODE DOMAIN: resolve the admitted route NODE (routes here are only
+        // MemberPath / Pick / Omit, never `Whole`), then build the shape from its
+        // SurfaceView; a non-object node → empty shape (the prior unconditional `Some`).
         if let Some((root_symbol, route)) =
             component_meta_registry_public_indexed_access_route(expr)
                 .or_else(|| component_meta_registry_public_utility_route(expr))
         {
-            if let Some(projected) =
-                self.dispatch_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
+            if let Some(node) =
+                self.dispatch_routed_expr_surface_node(scope_canonical_id, &root_symbol, &route)
             {
                 return Some(
-                    verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected),
+                    project_admitted_route_node_to_expanded_object_shape(self.ctx, &node)
+                        .unwrap_or_else(
+                            verter_semantic::analysis::type_expand::ExpandedObjectShape::empty,
+                        ),
                 );
             }
         }

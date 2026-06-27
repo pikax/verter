@@ -21436,6 +21436,146 @@ fn c5_route_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
     }
 }
 
+/// §1a DISCRIMINATION: the two surface-shape projections
+/// (`route_keys.rs` `project_direct_utility_surface_shape::projected_target_shape`
+/// and `registry_decl.rs` `project_expr_to_surface_shape`) build their
+/// `ExpandedObjectShape` in NODE DOMAIN — they resolve an admitted route /
+/// surface NODE and project it through `project_admitted_route_node_to_expanded_object_shape`
+/// (which reads the node's `SurfaceView` and materialises only terminal leaves),
+/// NEVER by materialising the whole object `TypeExpr` and calling
+/// `type_expr_to_object_shape` or the materialising host-threaded surface
+/// bridges.
+///
+/// Discrimination: FAILS against the pre-change tree (where `projected_target_shape`
+/// calls the `project_expr_surface_*_via_host_threaded` bridges +
+/// `type_expr_to_object_shape`, and `project_expr_to_surface_shape` calls
+/// `dispatch_routed_expr_surface_expr` + `type_expr_to_object_shape`) and PASSES
+/// against the node-domain conversion. Re-introducing ANY materialize-then-shape
+/// bridge / standalone gate in either fn FAILS here.
+#[test]
+fn surface_shape_conversions_run_node_domain_not_materialize_then_shape() {
+    use std::collections::BTreeSet;
+    use syn::visit::Visit;
+
+    /// Collect every call ident (free/assoc-fn last path segment + method-call
+    /// name) syntactically reachable inside the fn named `target` (a nested
+    /// `fn` or an impl method), with depth tracking so sibling fns never leak.
+    #[derive(Default)]
+    struct CallCollector {
+        target: String,
+        depth: usize,
+        found: bool,
+        calls: BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for CallCollector {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            let hit = f.sig.ident == self.target;
+            if hit {
+                self.found = true;
+                self.depth += 1;
+            }
+            syn::visit::visit_item_fn(self, f);
+            if hit {
+                self.depth -= 1;
+            }
+        }
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            let hit = f.sig.ident == self.target;
+            if hit {
+                self.found = true;
+                self.depth += 1;
+            }
+            syn::visit::visit_impl_item_fn(self, f);
+            if hit {
+                self.depth -= 1;
+            }
+        }
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if self.depth > 0 {
+                if let syn::Expr::Path(p) = c.func.as_ref() {
+                    if let Some(seg) = p.path.segments.last() {
+                        self.calls.insert(seg.ident.to_string());
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            if self.depth > 0 {
+                self.calls.insert(m.method.to_string());
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+    }
+
+    fn collect_calls(src: &str, target: &str) -> BTreeSet<String> {
+        let file = syn::parse_file(src).expect("source must parse");
+        let mut collector = CallCollector {
+            target: target.to_string(),
+            ..Default::default()
+        };
+        collector.visit_file(&file);
+        assert!(
+            collector.found,
+            "target fn `{target}` not found (renamed/removed?) — the \
+             characterization must not vacuously pass"
+        );
+        collector.calls
+    }
+
+    const ROUTE_KEYS_SRC: &str =
+        include_str!("resolver_core/component_meta_query_engine/route_keys.rs");
+    const REGISTRY_DECL_SRC: &str =
+        include_str!("resolver_core/component_meta_query_engine/registry_decl.rs");
+
+    // ── Direct-utility `projected_target_shape` (nested fn in route_keys.rs) ──
+    let pts = collect_calls(ROUTE_KEYS_SRC, "projected_target_shape");
+    for forbidden in [
+        "type_expr_to_object_shape",
+        "project_expr_surface_expr_via_host_threaded",
+        "project_expr_surface_shape_via_host_threaded",
+    ] {
+        assert!(
+            !pts.contains(forbidden),
+            "projected_target_shape must NOT call `{forbidden}` (materialize-then-shape); \
+             calls seen: {pts:?}"
+        );
+    }
+    for required in [
+        "project_admitted_route_node_to_expanded_object_shape",
+        "project_expr_surface_expr_node_via_host_threaded",
+    ] {
+        assert!(
+            pts.contains(required),
+            "projected_target_shape must call `{required}` (node-domain projection); \
+             calls seen: {pts:?}"
+        );
+    }
+
+    // ── Registry `project_expr_to_surface_shape` (impl method in registry_decl.rs) ──
+    let pes = collect_calls(REGISTRY_DECL_SRC, "project_expr_to_surface_shape");
+    for forbidden in [
+        "type_expr_to_object_shape",
+        "dispatch_routed_expr_surface_expr",
+    ] {
+        assert!(
+            !pes.contains(forbidden),
+            "project_expr_to_surface_shape must NOT call `{forbidden}` (materialize-then-shape); \
+             calls seen: {pes:?}"
+        );
+    }
+    for required in [
+        "dispatch_routed_expr_surface_node",
+        "project_admitted_route_node_to_expanded_object_shape",
+    ] {
+        assert!(
+            pes.contains(required),
+            "project_expr_to_surface_shape must call `{required}` (node-domain projection); \
+             calls seen: {pes:?}"
+        );
+    }
+}
+
 /// End-to-end discriminator for the dispatch-bridge `ProjectGeneration`
 /// conversion.
 ///

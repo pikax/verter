@@ -564,48 +564,57 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             scope_canonical_id: &str,
             target: &TypeExpr,
         ) -> Option<ExpandedObjectShape> {
-            // route through the dispatch-based bridges in
-            // `meta_resolve` instead of the deprecated engine methods.
-            // The bridges compose dispatch + the engine's surviving
-            // `pub(crate)` cycle-protected helpers, preserving the
-            // engine method's "lower whole expr, dispatch with empty
-            // path" semantics (no IndexedAccess decomposition).
-            if let Some(shape) = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
-                query_engine,
-                scope_canonical_id,
-                target,
-            ) {
-                if shape_has_surface(&shape) {
-                    return Some(shape);
-                }
+            // Budget guard preserved from the former host-threaded bridges (both
+            // bailed on an exhausted projection budget before projecting).
+            if query_engine.projection_op_budget_exhausted() {
+                return None;
             }
-            if let Some(projected) =
-                // Leak-close-2 — Navigate base + Shallow
-                // terminal, Published. The sister
-                // `project_expr_surface_shape_via_host_threaded` at
-                // the line above already uses Navigate+Shallow; this
-                // fallback was the asymmetric Expanded path that the
-                // 3-way consult identified as a leak source for
-                // utility-route fallbacks.
-                crate::meta_resolve::project_expr_surface_expr_via_host_threaded(
-                        query_engine,
-                        scope_canonical_id,
-                        target,
-                        crate::semantic_query::ProjectionMode::Navigate,
-                        crate::semantic_query::ProjectionMode::Shallow,
-                        crate::semantic_query::ReductionDemand::Published,
-                    )
+            // (1) The node-domain surface-shape demand API (registry route /
+            // direct-utility / general node path), reused DIRECTLY — no
+            // host-threaded surface bridge, no `TypeExpr` materialise. This is the
+            // node-domain successor of the former
+            // `project_expr_surface_shape_via_host_threaded` bridge (which only
+            // delegated to this same engine method).
+            if let Some(shape) =
+                query_engine.project_expr_to_surface_shape(scope_canonical_id, target)
             {
-                let shape =
-                    verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
                 if shape_has_surface(&shape) {
                     return Some(shape);
                 }
             }
-            // No structural-substitution fallback: the dispatch surface
-            // bridges above (Navigate+Shallow+Published) are the sole
-            // authority for the utility-route target shape, including
-            // generic-alias instantiation. A miss here is a clean `None`.
+            // (2) Node-domain fallback: project the target's admitted surface NODE
+            // arm-for-arm (registry fast-path → Expanded fallback →
+            // Navigate-base/Shallow-terminal pure-dispatch — the EXACT routing of
+            // the former `project_expr_surface_expr_via_host_threaded`), then build
+            // the shape from the admitted node's SurfaceView. NO mid-flight
+            // materialise; `shape_has_surface` decides on a node-domain shape (so
+            // it ignores index signatures exactly as before).
+            if let Some(node) =
+                crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
+                    query_engine,
+                    scope_canonical_id,
+                    target,
+                    crate::semantic_query::ProjectionMode::Navigate,
+                    crate::semantic_query::ProjectionMode::Shallow,
+                    crate::semantic_query::ReductionDemand::Published,
+                )
+            {
+                if let Some(shape) =
+                    super::surface::project_admitted_route_node_to_expanded_object_shape(
+                        query_engine.ctx(),
+                        &node,
+                    )
+                {
+                    if shape_has_surface(&shape) {
+                        return Some(shape);
+                    }
+                }
+            }
+            // No structural-substitution fallback: the node-domain surface
+            // projections above (the demand API + the arm-for-arm Navigate/Shallow
+            // node bridge) are the sole authority for the utility-route target
+            // shape, including generic-alias instantiation. A miss here is a clean
+            // `None`.
             None
         }
 

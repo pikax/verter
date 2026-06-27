@@ -4592,6 +4592,26 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::resolver_core::component_meta_query_engine::surface",
         "materialize_route_projection_node",
     ),
+    // The SurfaceView → `ExpandedObjectShape` DTO projector — the exact analog of
+    // `surface_view_to_projected_surface` above: it delegates to that registered
+    // surface sink (which mints each terminal leaf once) plus the pure
+    // `projected_surface_to_expanded_shape` map, materialising ONLY terminal
+    // member/signature/index leaves into the DTO with no decision on them — never
+    // the whole object. Sink-internal, in-subtree.
+    (
+        "crate::resolver_core::component_meta_query_engine::surface",
+        "surface_view_to_expanded_shape",
+    ),
+    // The admitted-route-node → `ExpandedObjectShape` projector — same category as
+    // `materialize_route_projection_node` above: its input is the SEALED
+    // `AdmittedRouteProjectionNode` (minted only by the in-subtree route/surface
+    // adapters after their node-domain acceptance gate), not a caller-forged
+    // surface/member. It resolves the admitted node's composed SurfaceView through
+    // the shared walker and projects it via `surface_view_to_expanded_shape`.
+    (
+        "crate::resolver_core::component_meta_query_engine::surface",
+        "project_admitted_route_node_to_expanded_object_shape",
+    ),
     // The framework-surface member raisers — confined to `vue_exec`, reachable
     // only through a token-gated normalizer.
     (
@@ -12051,20 +12071,28 @@ const HOT_EXTRACTING_GATE_IDENTS: &[&str] = &[
 /// `TypeExpr` param is a symbolic-input mint boundary (its input-shape guards
 /// are publication classification, not a materialized-value decide).
 ///
-/// The list includes the two node-domain ROUTE-PROJECTION adapters
-/// (`lower_and_project_to_expanded_node` / `project_expr_surface_expr_node`):
-/// each lowers its `expr` input through `lower_type_expr_in_scope*` INTERNALLY,
-/// projects it, and returns the admitted `AdmittedRouteProjectionNode` (never a
-/// `TypeExpr`). The thin `*_published` publication terminals delegate their
-/// `expr` lowering to these adapters, so feeding `expr` to one is a pipeline
-/// feed — exactly the same symbolic-input mint boundary as a direct
-/// `lower_type_expr_in_scope*` call — not a materialized-value decide.
+/// The list includes the three node-domain ROUTE-PROJECTION adapters
+/// (`lower_and_project_to_expanded_node` / `project_expr_surface_expr_node` /
+/// `project_class_a_terminal_node`): each lowers its `expr` input through
+/// `lower_type_expr_in_scope*` INTERNALLY, projects it, and returns the admitted
+/// `AdmittedRouteProjectionNode` (never a `TypeExpr`). The thin `*_published`
+/// publication terminals delegate their `expr` lowering to these adapters, so
+/// feeding `expr` to one is a pipeline feed — exactly the same symbolic-input
+/// mint boundary as a direct `lower_type_expr_in_scope*` call — not a
+/// materialized-value decide.
 const HOT_LOWERING_IDENTS: &[&str] = &[
     "lower_type_expr_in_scope",
     "lower_type_expr_in_scope_with_mode",
     "lower_type_expr_in_scope_with_context",
     "lower_and_project_to_expanded_node",
     "project_expr_surface_expr_node",
+    // Class-A path-precise node adapter: decomposes the IndexedAccess chain,
+    // lowers its `expr` / chain-root input through `lower_type_expr_in_scope*`
+    // INTERNALLY, projects `ProjectPath`, and returns the admitted node (never a
+    // `TypeExpr`). Its thin `project_class_a_terminal_published` terminal delegates
+    // its `expr` lowering here, so feeding `expr` to it is a pipeline feed, not a
+    // materialized-value decide.
+    "project_class_a_terminal_node",
     // The reduced-output materialization envelope lowers its `expr` input through
     // this shallow-dispatch lowering primitive before reducing + raising it, so
     // feeding `expr` to it is a pipeline feed (symbolic-input mint boundary), not

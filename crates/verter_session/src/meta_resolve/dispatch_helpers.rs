@@ -867,6 +867,20 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 /// `base_mode = Expanded`; callers on the empty-terminal Shallow
 /// path may pass `base_mode = Navigate` (carrier-preserving) per the
 /// sister [`project_expr_surface_shape_via_host_threaded`] pattern.
+///
+/// Production-orphaned: the `projected_target_shape` caller moved to the node
+/// bridge [`project_expr_surface_expr_node_via_host_threaded`]. This materialising
+/// expr bridge is retained for its `#[cfg(test)]` callers and remains in the
+/// reverse-materialization fence inventory until its own node-domain conversion
+/// block; the lib build has no caller, so the dead-code lint is scoped off there.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "materialising expr bridge orphaned by the projected_target_shape node \
+                  conversion; retained for test callers + its own later node-conversion block"
+    )
+)]
 pub(crate) fn project_expr_surface_expr_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,

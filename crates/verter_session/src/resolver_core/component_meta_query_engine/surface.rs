@@ -313,6 +313,20 @@ pub(crate) fn project_expr_surface_expr_node(
 /// Thin publication wrapper over [`project_expr_surface_expr_node`]: resolve the
 /// node-domain decision (mode-aware acceptance + `!materialized` refusal), then
 /// materialise the accepted node ONCE at the surface sink.
+///
+/// Production-orphaned by the `projected_target_shape` node-domain conversion
+/// (its sole production caller, the `project_expr_surface_expr_via_host_threaded`
+/// bridge, lost its last production caller). Retained as a registered terminal
+/// sink for its `#[cfg(test)]` callers + the bridge's own later node-conversion
+/// block; the lib build sees no caller, so the dead-code lint is scoped off there.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "terminal sink orphaned by the projected_target_shape node conversion; \
+                  retained for test callers + the expr bridge's later node-conversion block"
+    )
+)]
 pub(crate) fn project_expr_surface_expr_published(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
@@ -332,18 +346,20 @@ pub(crate) fn project_expr_surface_expr_published(
     materialize_route_projection_node(ctx, &node)
 }
 
-/// Demand-bound adapter for the Class-A path-precise projection (former
+/// Demand-bound NODE adapter for the Class-A path-precise projection (former
 /// `project_expr_class_a_via_dispatch_threaded` pure-dispatch tail). Decompose
 /// the IndexedAccess chain INTERNALLY, lower the base (empty path → lower the
 /// whole `expr` at `Expanded`; non-empty path → lower the chain root at
 /// `Navigate`), dispatch `ProjectPath { base, path, Published(Expanded) }`,
-/// gate on `materialized && expanded_surface`, and materialise the accepted
-/// node ONCE at this sink. The lowering happens here so no raw node crosses in.
-pub(crate) fn project_class_a_terminal_published(
+/// gate on NODE-DOMAIN facts (`materialized && expanded_surface`), and return
+/// the admitted node — NO materialisation. The lowering happens here so no raw
+/// node crosses in; the `*_published` wrapper materialises the accepted node
+/// ONCE at the surface sink.
+pub(crate) fn project_class_a_terminal_node(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &TypeExpr,
-) -> Option<TypeExpr> {
+) -> Option<AdmittedRouteProjectionNode> {
     use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
@@ -383,8 +399,20 @@ pub(crate) fn project_class_a_terminal_published(
     // Facts-only gate — reuses the dispatch above; no structural key interned.
     let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
     (facts.materialized && facts.expanded_surface)
-        .then(|| materialize_published_node(&dispatch, result_node))
-        .flatten()
+        .then(|| AdmittedRouteProjectionNode::new(result_node))
+}
+
+/// Thin publication wrapper over [`project_class_a_terminal_node`]: resolve the
+/// node-domain Class-A decision, then materialise the accepted node ONCE at the
+/// surface sink. The node-domain gate (`materialized && expanded_surface`) lives
+/// in the node fn; this wrapper adds only the terminal raise.
+pub(crate) fn project_class_a_terminal_published(
+    ctx: &dyn ResolverContext,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+) -> Option<TypeExpr> {
+    let node = project_class_a_terminal_node(ctx, scope_canonical_id, expr)?;
+    materialize_route_projection_node(ctx, &node)
 }
 
 /// Demand-bound adapter for local generic-`Ref` instantiation (former
@@ -1018,6 +1046,63 @@ pub(crate) fn projected_surface_to_expanded_shape(
         index_signatures,
         call_signatures,
     }
+}
+
+/// Build an [`ExpandedObjectShape`](verter_semantic::analysis::type_expand::ExpandedObjectShape)
+/// DTO directly from a one-level [`SurfaceView`], materialising ONLY the
+/// terminal leaves (member value types, call/construct-signature parameters +
+/// returns, index-signature key/value leaves) into the DTO — NEVER the whole
+/// object `TypeExpr`, and NEVER `type_expr_to_object_shape`. The composition is
+/// [`surface_view_to_projected_surface`] (the registered surface sink that mints
+/// each leaf ONCE) + [`projected_surface_to_expanded_shape`] (a pure
+/// `ProjectedSurface -> ExpandedObjectShape` map: no mint, no decision). The
+/// produced shape carries the FULL surface (properties + call signatures + index
+/// signatures); each CONSUMER applies its own has-surface gate (the direct-utility
+/// `shape_has_surface` ignores index signatures, the registry general arm counts
+/// them) — this builder makes no decision, it is a terminal DTO writer.
+pub(super) fn surface_view_to_expanded_shape(
+    ctx: &dyn ResolverContext,
+    surface: &SurfaceView,
+) -> verter_semantic::analysis::type_expand::ExpandedObjectShape {
+    let projected = surface_view_to_projected_surface(ctx, surface);
+    projected_surface_to_expanded_shape(&projected)
+}
+
+/// Project an admitted route / surface NODE to its
+/// [`ExpandedObjectShape`](verter_semantic::analysis::type_expand::ExpandedObjectShape)
+/// in NODE DOMAIN: resolve the node's one-level [`SurfaceView`] through the
+/// shared empty-path Shallow surface walker
+/// ([`ProjectSemanticDispatch::resolve_typeinfo_surface_view`](crate::project_semantic_dispatch::ProjectSemanticDispatch::resolve_typeinfo_surface_view)),
+/// then build the DTO via [`surface_view_to_expanded_shape`] — materialising only
+/// the surface's terminal leaves, never the whole object `TypeExpr`.
+///
+/// For a compound root (`A | B`, `A & B`, a `Pick<…>` / `Omit<…>` carrier) the
+/// walker COMPOSES the one-level surface off the admitted node — which IS the
+/// composed surface, NOT the carrier-intact decl anchor that would collapse a
+/// generic heritage / `Omit` arm to `Opaque(Miss)` (the admitted route node is
+/// projected `Navigate`-mode, carriers intact, so it re-resolves cleanly). The
+/// `MacroObjectSurface` demand selects union-OF-members for a union root, matching
+/// the retired `type_expr_to_object_shape` union semantics.
+///
+/// Takes the SEALED [`AdmittedRouteProjectionNode`] carrier (never a raw forgeable
+/// `SemanticNodeId`), so no node crosses the query-engine boundary. `None` when
+/// the node resolves to no one-level object surface.
+pub(crate) fn project_admitted_route_node_to_expanded_object_shape(
+    ctx: &dyn ResolverContext,
+    node: &AdmittedRouteProjectionNode,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    use crate::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
+    };
+
+    let surface = ctx.dispatch().resolve_typeinfo_surface_view(
+        node.node(),
+        ProjectionReductionContext::macro_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        ),
+    )?;
+    Some(surface_view_to_expanded_shape(ctx, &surface))
 }
 
 pub(super) fn type_expr_references_names(

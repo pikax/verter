@@ -4560,6 +4560,190 @@ export class C {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Behaviour-preservation anchors for the node-domain surface-shape
+// projection (`project_expr_to_surface_shape` registry route +
+// `project_direct_utility_surface_shape` → `projected_target_shape`).
+//
+// These pin the EXACT shape / decision the materialize +
+// `type_expr_to_object_shape` path produced, so the node-domain
+// conversion (admitted route node → SurfaceView →
+// `surface_view_to_expanded_shape`) must reproduce it byte-for-byte.
+// They are characterization invariants: GREEN against both the
+// pre-change (materialize+shape) tree and the post-change (node-domain)
+// tree.
+// ─────────────────────────────────────────────────────────────────
+
+/// Build a Full-analysis host over a single `.vue` script-only fixture and
+/// return it ready for a `ComponentMetaQueryEngine`.
+fn surface_shape_host(src: &str) -> VerterHost {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(format!(
+            "<script lang=\"ts\">\n{src}\n</script>\n<template><div /></template>"
+        )),
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host
+}
+
+fn shape_property_names(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> std::collections::BTreeSet<String> {
+    shape
+        .properties
+        .iter()
+        .map(|property| property.name.clone())
+        .collect()
+}
+
+/// CHARACTERIZATION: `project_expr_to_surface_shape` over a registry public
+/// UTILITY route (`Pick<Foo, 'a'>`) projects exactly the picked member, with
+/// the other members dropped — the node-domain admitted-route projection must
+/// reproduce the materialize + `type_expr_to_object_shape` shape.
+#[test]
+fn registry_surface_shape_pick_route_pins_picked_member() {
+    let host = surface_shape_host("export interface Foo { a: string; b: number; c: boolean }");
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let pick = TypeExpr::named_with_args(
+        "Pick",
+        vec![TypeExpr::named("Foo"), TypeExpr::string_literal("a")],
+    );
+    let shape = query_engine
+        .project_expr_to_surface_shape("/src/App.vue", &pick)
+        .expect("Pick<Foo, 'a'> must project a surface shape");
+    assert_eq!(
+        shape_property_names(&shape),
+        ["a".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<String>>(),
+        "Pick<Foo, 'a'> must publish exactly `a` (picked), not `b`/`c`"
+    );
+}
+
+/// CHARACTERIZATION: `project_expr_to_surface_shape` over a registry public
+/// utility `Omit` route (`Omit<Foo, 'c'>`) keeps the un-omitted members.
+#[test]
+fn registry_surface_shape_omit_route_pins_remaining_members() {
+    let host = surface_shape_host("export interface Foo { a: string; b: number; c: boolean }");
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let omit = TypeExpr::named_with_args(
+        "Omit",
+        vec![TypeExpr::named("Foo"), TypeExpr::string_literal("c")],
+    );
+    let shape = query_engine
+        .project_expr_to_surface_shape("/src/App.vue", &omit)
+        .expect("Omit<Foo, 'c'> must project a surface shape");
+    assert_eq!(
+        shape_property_names(&shape),
+        ["a".to_string(), "b".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<String>>(),
+        "Omit<Foo, 'c'> must publish `a`/`b` and drop `c`"
+    );
+}
+
+/// CHARACTERIZATION: `project_expr_to_surface_shape` over a registry public
+/// INDEXED-ACCESS route (`Foo['obj']`) projects the terminal member surface.
+#[test]
+fn registry_surface_shape_member_path_route_pins_terminal_surface() {
+    let host =
+        surface_shape_host("export interface Foo { obj: { nested: string; flag: boolean } }");
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let route = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("Foo")),
+        index: Arc::new(TypeExpr::string_literal("obj")),
+    };
+    let shape = query_engine
+        .project_expr_to_surface_shape("/src/App.vue", &route)
+        .expect("Foo['obj'] must project the terminal member surface");
+    assert_eq!(
+        shape_property_names(&shape),
+        ["nested".to_string(), "flag".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<String>>(),
+        "Foo['obj'] must publish the terminal `{{ nested; flag }}` surface"
+    );
+}
+
+/// CHARACTERIZATION: `project_expr_to_surface_shape` over a plain registry
+/// alias (`Foo`, the general arm — NOT a route) publishes the full surface.
+/// Pins that the general arm is untouched by the route-arm conversion.
+#[test]
+fn registry_surface_shape_plain_alias_pins_full_surface() {
+    let host = surface_shape_host("export interface Foo { a: string; b: number }");
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let shape = query_engine
+        .project_expr_to_surface_shape("/src/App.vue", &TypeExpr::named("Foo"))
+        .expect("plain `Foo` must project its full surface shape");
+    assert_eq!(
+        shape_property_names(&shape),
+        ["a".to_string(), "b".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<String>>(),
+        "plain `Foo` must publish the full `{{ a; b }}` surface"
+    );
+}
+
+/// CHARACTERIZATION + INDEX-SIGNATURE ASYMMETRY (consult §7): an
+/// index-signature-ONLY surface (`{ [k: string]: number }`) is admitted by the
+/// registry `project_expr_to_surface_shape` (its general-arm gate COUNTS index
+/// signatures) but REJECTED by `project_direct_utility_surface_shape`'s
+/// `shape_has_surface` decide (which counts only properties / call signatures,
+/// IGNORING index signatures). The node-domain conversion must preserve EACH
+/// site's behaviour — `surface_view_to_expanded_shape` carries the index
+/// signature into the shape, and each consumer applies its own gate.
+#[test]
+fn index_signature_only_surface_registry_admits_direct_utility_rejects() {
+    let host = surface_shape_host("export type IndexSig = { [k: string]: number }");
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    // REGISTRY side: the bare alias surface admits index-signature-only — a
+    // non-empty shape carrying the index signature, no properties.
+    let registry_shape = query_engine
+        .project_expr_to_surface_shape("/src/App.vue", &TypeExpr::named("IndexSig"))
+        .expect("registry project_expr_to_surface_shape COUNTS index signatures");
+    assert!(
+        registry_shape.properties.is_empty(),
+        "an index-signature-only surface has no named properties: {:?}",
+        shape_property_names(&registry_shape)
+    );
+    assert!(
+        !registry_shape.index_signatures.is_empty(),
+        "the registry shape MUST carry the index signature (registry counts it)"
+    );
+
+    // DIRECT-UTILITY side: `Partial<IndexSig>` is REJECTED — `shape_has_surface`
+    // ignores index signatures, so an index-signature-only surface is no-surface.
+    let utility = TypeExpr::named_with_args("Partial", vec![TypeExpr::named("IndexSig")]);
+    assert!(
+        query_engine
+            .project_direct_utility_surface_shape("/src/App.vue", &utility)
+            .is_none(),
+        "direct-utility `shape_has_surface` IGNORES index signatures, so \
+         Partial<IndexSig> (index-sig-only) must project NO surface (None)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Wildcard-route fuse-trip is a PARTIAL, not an absent.
 // A route-only symbol whose wildcard-route fuse is exhausted was NEVER
 // looked up: its `None` MUST NOT admit an ImportedRegistryDb warm

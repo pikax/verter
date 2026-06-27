@@ -96,9 +96,20 @@ pub(crate) use dispatch_helpers::{
     lower_and_project_to_expanded_node_via_host_threaded,
     project_admitted_node_to_expanded_node_via_host_threaded, project_expr_class_a_via_dispatch,
     project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_node_via_host_threaded,
-    project_expr_surface_expr_via_host_threaded, project_expr_surface_shape_via_host_threaded,
-    project_type_surface_expr_via_host_threaded,
+    project_expr_surface_shape_via_host_threaded, project_type_surface_expr_via_host_threaded,
 };
+// Re-exported only for `#[cfg(test)]` callers (`crate::meta_resolve::…`): the
+// materialising expr bridge lost its production caller when `projected_target_shape`
+// moved to `project_expr_surface_expr_node_via_host_threaded`. Scoped off the
+// lib-build unused-import lint without dropping the re-export tests rely on.
+#[cfg_attr(
+    not(test),
+    allow(
+        unused_imports,
+        reason = "test-only re-export after the projected_target_shape node conversion"
+    )
+)]
+pub(crate) use dispatch_helpers::project_expr_surface_expr_via_host_threaded;
 // Test-only re-export — exercised by the kept dispatch-route-helper
 // coverage tests (`project_route_surface_expr_pick_*` in the engine
 // tests + the routed-surface classification fixture). This is the
