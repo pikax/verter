@@ -4774,12 +4774,16 @@ fn index_signature_only_surface_registry_admits_direct_utility_rejects() {
 /// Drive the registry arm-1 route for `expr` and return the projected
 /// `ExpandedObjectShape` that production publishes.
 ///
-/// PROVES the test exercises arm-1: `expr` MUST reach the registry route
-/// (asserted via `component_meta_registry_public_*_route`) — a bare local `Foo`
-/// routes through the unchanged general arm and would make the test vacuous. The
-/// returned shape is exactly what `project_expr_to_surface_shape` (arm-1)
-/// projects via `project_admitted_route_node_to_expanded_object_shape`, so the
-/// locked invariant is the one production actually publishes.
+/// LOCKS arm-1 reach with TWO gates, so the test cannot silently fall through to
+/// the general arm: (1) `expr` MUST be accepted by the registry route extractor
+/// (`component_meta_registry_public_*_route`) — a bare local `Foo` is not a route
+/// and would make the test vacuous; (2) the extracted `(root_symbol, route)` MUST
+/// admit a node via `dispatch_routed_expr_surface_node` — route DETECTION alone
+/// does not prove arm-1 fires, since a route that admits no node skips arm-1 and
+/// falls through to the general arm. The returned shape is exactly what
+/// `project_expr_to_surface_shape` (arm-1) projects via
+/// `project_admitted_route_node_to_expanded_object_shape`, so the locked invariant
+/// is the one production actually publishes.
 fn project_registry_route_shape(
     query_engine: &mut ComponentMetaQueryEngine<'_>,
     scope: &str,
@@ -4791,13 +4795,26 @@ fn project_registry_route_shape(
         component_meta_registry_public_utility_route,
     };
 
-    // PROVE arm-1 reach (else the test would be vacuous — a bare local `Foo`
-    // routes through the unchanged general arm).
+    // (1) Route detected: `expr` is accepted by the registry route extractor — a
+    // bare local `Foo` is not a route and would route through the general arm,
+    // making the test vacuous.
+    let (root_symbol, route) = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+        .unwrap_or_else(|| {
+            panic!(
+                "{label}: `expr` must reach the registry route (arm-1) — else the test is vacuous"
+            )
+        });
+    // (2) Node admitted: route DETECTION alone does not prove arm-1 fires — a route
+    // that admits no node (`dispatch_routed_expr_surface_node == None`) skips arm-1
+    // and falls through to the general arm. Asserting the node is admitted locks
+    // that arm-1 is what projects the shape returned below.
     assert!(
-        component_meta_registry_public_indexed_access_route(expr)
-            .or_else(|| component_meta_registry_public_utility_route(expr))
+        query_engine
+            .dispatch_routed_expr_surface_node(scope, &root_symbol, &route)
             .is_some(),
-        "{label}: `expr` must reach the registry route (arm-1) — else the test is vacuous"
+        "{label}: arm-1 route must admit a node (dispatch_routed_expr_surface_node) — \
+         else project_expr_to_surface_shape falls through to the general arm"
     );
     query_engine
         .project_expr_to_surface_shape(scope, expr)
