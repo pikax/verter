@@ -20,7 +20,7 @@ mod node_root_gate_differential_tests {
     };
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::ComponentMetaQueryEngine;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+    use crate::semantic_query::{DeclIdentity, ProjectionMode, SemanticNodeData, SemanticNodeId};
     use crate::types::{AnalysisLevel, HostConfig};
     use crate::{DependencyResolution, VerterHost};
 
@@ -330,6 +330,203 @@ mod node_root_gate_differential_tests {
                  the package source"
             );
         }
+    }
+
+    /// §3 PACKAGE-ROOT BUILTIN/SHADOW SINGLE SOURCE OF TRUTH: an IMPORTED `Pick`
+    /// whose module RESOLVES but does NOT export `Pick` (an unresolved-imported
+    /// shadow) shadows the ambient builtin — its import binding is in the
+    /// owner-scope shadow set, so `ScopeShadowing::is_shadowing_lib("Pick")` is
+    /// `true` and dispatch's `resolve_bare_ref_head` suppresses the `__builtin__`
+    /// route. The node front therefore returns `false` (NO builtin source-descent
+    /// to the package `VendorProps`). The `TypeExpr` front MUST agree via the SAME
+    /// shadow predicate.
+    ///
+    /// The former `resolve_type_declaration(scope, name).kind == Unknown` builtin
+    /// heuristic conflated "imported-but-unresolved" (kind == Unknown, but
+    /// shadowing) with "ambient builtin" (kind == Unknown, NOT shadowing): it
+    /// wrongly treated the imported `Pick` as the builtin, descended into
+    /// `VendorProps`, and reported package-backed — diverging from the node front.
+    /// This test constructs exactly that divergence; it FAILS against the
+    /// `kind == Unknown` helper and PASSES once both fronts route through
+    /// `ScopeShadowing::is_shadowing_lib`.
+    #[test]
+    fn unresolved_imported_pick_shadow_is_not_a_builtin_source_descent() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/pkg/index.d.ts".to_string(),
+            Arc::from("export interface VendorProps { a: string; b: number }\n"),
+        );
+        // A RESOLVED local module that does NOT export `Pick` — the import binding
+        // shadows the ambient builtin, yet `Pick` resolves to kind == Unknown.
+        ws.inject_file(
+            "/src/other.ts".to_string(),
+            Arc::from("export interface Other { z: string }\n"),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                "<script lang=\"ts\">\n\
+                 import type { VendorProps } from 'pkg'\n\
+                 import type { Pick } from './other'\n\
+                 </script>\n<template><div /></template>",
+            ),
+        );
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![
+                DependencyResolution {
+                    specifier: "pkg".to_string(),
+                    resolved_canonical_id: Some("/src/node_modules/pkg/index.d.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                DependencyResolution {
+                    specifier: "./other".to_string(),
+                    resolved_canonical_id: Some("/src/other.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+        let scope = "/src/App.vue";
+
+        let imported_pick = TypeExpr::named_with_args(
+            "Pick",
+            vec![
+                TypeExpr::named("VendorProps"),
+                TypeExpr::string_literal("a"),
+            ],
+        );
+        let node = lower(&host, scope, &imported_pick);
+        let mut qe_node = ComponentMetaQueryEngine::new(&host);
+        let node_result =
+            node_package_backed_object_like_root_with_fence(&mut qe_node, scope, node);
+        let mut qe_expr = ComponentMetaQueryEngine::new(&host);
+        let expr_result =
+            crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence(
+                &imported_pick, scope, &mut qe_expr,
+            );
+
+        // BOTH fronts agree on the resolver-aware shadow decision (the node front
+        // already returns `false` via dispatch's `__builtin__` suppression).
+        assert_eq!(
+            node_result, expr_result,
+            "node front must equal the TypeExpr front for an unresolved-imported `Pick` shadow \
+             (verdict + fence)"
+        );
+        // The imported `Pick` shadow is the root — NOT a builtin descent to the
+        // package `VendorProps`.
+        assert!(
+            !node_result.0,
+            "node front: an unresolved-imported `Pick` shadow is not a package-backed root"
+        );
+        assert!(
+            !expr_result.0,
+            "TypeExpr front: an unresolved-imported `Pick` shadow must NOT descend into the \
+             package `VendorProps` — the `kind == Unknown` heuristic wrongly reported \
+             package-backed here"
+        );
+    }
+
+    /// IDENTITY-PRESERVING ROOT (belt-and-braces): the shared package-backed tail
+    /// ([`crate::meta_resolve::materialize::package_backed_object_like_root_identity_with_fence`])
+    /// resolves the declaration KIND at the CARRIER's own
+    /// [`DeclIdentity::canonical_id`] (file X), NEVER by re-resolving the bare
+    /// declaration NAME from `scope` (file Y). Here the carrier's identity points
+    /// at a PACKAGE `Shared` (file X), while the SAME name `Shared` re-resolves in
+    /// `scope` to a DISTINCT workspace-local `Shared` (file Y). The package-backed
+    /// verdict MUST follow the carrier identity (file X ⇒ `true`); reverting the
+    /// tail to the deleted synthetic `TypeExpr::named(name)` bridge would
+    /// re-resolve `Shared` in `scope` and yield the workspace-local `false`,
+    /// failing this test.
+    #[test]
+    fn package_backed_root_uses_carrier_identity_not_scope_reresolution() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        // File X — a PACKAGE `Shared` (object-like, package-backed).
+        ws.inject_file(
+            "/src/node_modules/pkgx/index.d.ts".to_string(),
+            Arc::from("export interface Shared { a: string }\n"),
+        );
+        // File Y (scope) — a DISTINCT workspace-local `Shared` (object-like, NOT
+        // package-backed). Same name, different declaring file.
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                "<script lang=\"ts\">\n\
+                 export interface Shared { x: string }\n\
+                 </script>\n<template><div /></template>",
+            ),
+        );
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/node_modules/pkgx/index.d.ts"));
+        assert!(host.ensure_loaded("/src/App.vue"));
+        let scope = "/src/App.vue";
+        let file_x = "/src/node_modules/pkgx/index.d.ts";
+
+        // Harvest the file-X `Shared` identity by lowering it in file X's OWN scope
+        // (so the carrier's `canonical_id` is genuinely file X, with its real
+        // whole-hash), then DIRECT-CONSTRUCT a clean `DeclRef` carrier from it.
+        let file_x_shared: DeclIdentity = {
+            let node = lower(&host, file_x, &TypeExpr::named("Shared"));
+            let graph = host.project_type_store().semantic_graph();
+            match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+                Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+                other => panic!("expected file-X `Shared` to lower to a DeclRef, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            file_x_shared.canonical_id.as_ref(),
+            file_x,
+            "the carrier identity must point at file X (the package `Shared`)"
+        );
+        let carrier = {
+            let graph = host.project_type_store().semantic_graph();
+            graph.intern_node(SemanticNodeData::DeclRef {
+                identity: file_x_shared,
+            })
+        };
+
+        // The carrier (file-X identity) is package-backed — resolved at file X, NOT
+        // re-resolved by name from `scope`.
+        let mut qe = ComponentMetaQueryEngine::new(&host);
+        let (carrier_verdict, _fence) =
+            node_package_backed_object_like_root_with_fence(&mut qe, scope, carrier);
+        assert!(
+            carrier_verdict,
+            "the carrier's preserved file-X identity (a PACKAGE `Shared`) is package-backed; the \
+             gate must resolve at the carrier's own file, not re-resolve `Shared` from `scope`"
+        );
+
+        // Non-vacuity: the SAME name `Shared` resolved in `scope` is the
+        // workspace-local file-Y `Shared` (NOT package-backed). A name-based bridge
+        // would collapse the carrier verdict to THIS `false`, so the `true` above
+        // can only come from identity preservation.
+        let scope_local = lower(&host, scope, &TypeExpr::named("Shared"));
+        let mut qe_scope = ComponentMetaQueryEngine::new(&host);
+        let (scope_local_verdict, _) =
+            node_package_backed_object_like_root_with_fence(&mut qe_scope, scope, scope_local);
+        assert!(
+            !scope_local_verdict,
+            "the scope-local `Shared` (file Y) is workspace-local, not package-backed — proving \
+             the carrier verdict is identity-driven, never name-driven"
+        );
     }
 }
 
