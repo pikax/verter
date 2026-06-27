@@ -11870,15 +11870,19 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 //   - What it DOES enforce: syntactic detection of named hot-materialize calls
 //     (sealed-cap mint / host-threaded surface bridge / return-tainted helper)
 //     that feed a semantic decision, within the scanned production files, with
-//     field-precise taint, qualifier-faithful callee identity, and lexical alias
-//     scoping for body/expression scanning and block-local return-alias
-//     exclusion.
-//   - What it does NOT enforce — the COMPLETE accepted-residual set of this
-//     backstop tripwire (each a known, accepted limit of a syntactic tripwire,
-//     closed structurally, NOT by broadening the scanner):
+//     field-precise taint, qualifier-faithful identity for explicit path /
+//     associated calls (receiver-dispatched method calls remain
+//     scope-proximity approximated), and lexical alias scoping for
+//     body/expression scanning and block-local return-alias exclusion.
+//   - What it does NOT enforce — the principal accepted residuals of this
+//     backstop tripwire (a non-exhaustive disclosure of the known limit
+//     classes; the catch-all below sweeps the rest; each a known, accepted
+//     limit of a syntactic tripwire, closed structurally, NOT by broadening
+//     the scanner):
 //       1. Re-export / no-physical-match proximity (BOTH directions). A rooted
-//          path whose written module path matches no physical declaration (a
-//          `pub use` re-export or an external path) is approximated by bare-name
+//          path with no physical-declaration match (a `pub use` re-export — a
+//          rooted `crate`/`self`/`super`/`Self` path whose written module path
+//          matches no physical declaration) is approximated by bare-name
 //          proximity to preserve the genuine re-export call — accepting a
 //          same-bare-name collision residual in BOTH directions: a false
 //          POSITIVE (a benign re-export call colliding with a nearer unrelated
@@ -11903,8 +11907,15 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 //          remaining FN5 residual is the typed-degradation end-state, a
 //          downstream typed-state refinement that replaces the
 //          `TypeExpr::Unknown` control sentinel (recorded in the deferral doc).
-//     Identity laundered through arbitrary aliasing / renaming / `cfg` / macros
-//     is likewise out of syntactic reach. It is NOT the universal authority.
+//     More generally, any callee or identity this syntactic tripwire cannot
+//     statically resolve is out of reach and accepted — including
+//     receiver-dispatched method-call identity (approximated by scope
+//     proximity, not the written receiver type), name-heuristic
+//     extractor/constructor classification, dynamic or otherwise
+//     semantically-resolved call targets, and identity laundered through
+//     arbitrary aliasing / renaming / `cfg` / macros. None of these is enforced
+//     syntactically; the universal invariant is carried structurally (see
+//     below). It is NOT the universal authority.
 //
 // The universal invariant ("no hot materialize-then-decide") is carried by the
 // STRUCTURAL rail — the `NoTypeExpr` marker trait forbidding hot carriers from
