@@ -5236,3 +5236,85 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
          resolvable — a cached fuse-trip `false` would spuriously report it unresolvable",
     );
 }
+
+/// PERF INVARIANT — the per-scope [`ScopeShadowing`] is built ONCE per scope and
+/// memoized on the engine beside `scope_payloads`, NOT folded fresh on every
+/// Pick/Omit package-root gate probe.
+///
+/// Discriminating identity check: two probes for the SAME scope return the SAME
+/// cached `Arc<ScopeShadowing>` (`Arc::ptr_eq`). A per-field
+/// `ScopeShadowing::from_scope_payload` rebuild (the pre-memo behaviour the gate
+/// used to run on every published field) mints a fresh `Arc` on each call and
+/// FAILS this assertion. A DIFFERENT scope gets its own distinct instance (no
+/// cross-scope aliasing), and each cached shadowing observes ITS scope's
+/// userland shadow names (behaviour preserved).
+#[test]
+fn scope_shadowing_is_built_once_per_scope_and_memoized() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    // Scope A declares a userland `Pick` (shadows the ambient builtin).
+    ws.inject_file(
+        "/src/A.vue".to_string(),
+        Arc::from(
+            "<script lang=\"ts\">\n\
+             export type Pick<T, K extends keyof T> = { [P in K]: T[P] }\n\
+             </script>\n<template><div /></template>",
+        ),
+    );
+    // Scope B declares NO userland `Pick`.
+    ws.inject_file(
+        "/src/B.vue".to_string(),
+        Arc::from(
+            "<script lang=\"ts\">\n\
+             export interface OtherProps { z: string }\n\
+             </script>\n<template><div /></template>",
+        ),
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/A.vue"));
+    assert!(host.ensure_loaded("/src/B.vue"));
+
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+
+    // Two probes for the SAME scope reuse ONE cached instance — the
+    // discriminating identity check. A per-field `from_scope_payload` rebuild
+    // returns two distinct `Arc`s and FAILS `ptr_eq`.
+    let first = engine.scope_shadowing_for_scope("/src/A.vue");
+    let second = engine.scope_shadowing_for_scope("/src/A.vue");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "the per-scope ScopeShadowing must be built ONCE and memoized — both probes \
+         for the same scope must return the SAME Arc (a per-field from_scope_payload \
+         rebuild fails this identity check)",
+    );
+
+    // Behaviour preserved: the cached shadowing observes scope A's userland
+    // `Pick` and does NOT over-shadow an undeclared builtin.
+    assert!(
+        first.is_shadowing_lib("Pick"),
+        "scope A's userland `type Pick` must shadow the ambient builtin",
+    );
+    assert!(
+        !first.is_shadowing_lib("Omit"),
+        "scope A declares no `Omit`, so that builtin stays unshadowed",
+    );
+
+    // A DIFFERENT scope gets its OWN distinct cached instance (no aliasing) and
+    // observes ITS scope's shadow names (no userland `Pick` there).
+    let other = engine.scope_shadowing_for_scope("/src/B.vue");
+    assert!(
+        !Arc::ptr_eq(&first, &other),
+        "distinct scopes must not alias to one shared ScopeShadowing instance",
+    );
+    assert!(
+        !other.is_shadowing_lib("Pick"),
+        "scope B declares no userland `Pick`; the builtin stays unshadowed there",
+    );
+}

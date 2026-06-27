@@ -88,6 +88,7 @@ use super::declaration_metadata::{
     ResolvedTypeDeclaration,
 };
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
+use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::resolver_core::ResolverContext;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::semantic_query::SemanticNodeId;
@@ -521,6 +522,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `imported_registry_symbols` | (b) | Caches `(canonical, name) → ResolvedImportedRegistrySymbol` at TypeExpr level. Dispatch's `ResolveDecl` memo operates on `SemanticNodeId`s; cannot subsume the pre-lowering identity. |
 /// | `declarations` / `resolvable` / `owner_collection_exprs` | (b) | Same kind — pre-lowering memos keyed on `(canonical, name)` strings. |
 /// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is ctx-owned, this just reuses the Arc within one request. |
+/// | `scope_shadowings` | (a) | Per-request `Arc<ScopeShadowing>` memo derived from `scope_payloads`; built once per scope so the Pick/Omit gate is O(1) per field. Shares `scope_payloads`'s request-local lifecycle. |
 /// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
@@ -561,6 +563,16 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// bundle-derived names/bindings within one request so repeated projections
     /// do not keep recloning them.
     scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
+    /// Request-local memo of the per-scope [`ScopeShadowing`] derived from the
+    /// cached `scope_payloads` entry. Built ONCE per scope and reused across
+    /// every Pick/Omit package-root gate probe in that scope, so the gate is
+    /// O(1) per field instead of folding a fresh shadow set (`FxHashSet` +
+    /// `Arc<str>` entries) on each probe. Shares `scope_payloads`'s
+    /// request-local lifecycle exactly — seeded empty per engine, no
+    /// independent invalidation (a fresh engine per request is the cache
+    /// boundary) — so it can never observe a shadow set the payload cache
+    /// does not.
+    scope_shadowings: FxHashMap<String, std::sync::Arc<ScopeShadowing>>,
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
         (String, String),
@@ -916,6 +928,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             resolvable: RefCell::new(FxHashMap::default()),
             owner_collection_exprs: RefCell::new(FxHashMap::default()),
             scope_payloads: FxHashMap::default(),
+            scope_shadowings: FxHashMap::default(),
             prepared_type_decls: FxHashMap::default(),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
@@ -954,6 +967,40 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     })
             })
             .clone()
+    }
+
+    /// Returns the per-scope [`ScopeShadowing`] for `scope_canonical_id`,
+    /// built ONCE from the cached [`scope_payload_for_scope`] entry and
+    /// memoized for the engine's request lifetime.
+    ///
+    /// The Pick/Omit package-root gate
+    /// ([`crate::meta_resolve::materialize`]'s `is_builtin_pick_or_omit`)
+    /// probes this per published field; folding the scope's local type
+    /// names, script-setup type bindings, and resolved import bindings into a
+    /// fresh shadow set on every probe is O(fields × scope names/imports).
+    /// Building it once here and reusing the cached [`ScopeShadowing`] across
+    /// every probe makes the gate O(1) per field (the
+    /// [`ScopeShadowing::is_shadowing_lib`] lookup is a hash-set membership
+    /// check). The shadow set is byte-equivalent to the
+    /// [`ScopeShadowing::from_host_scope`] bundle-derived one dispatch
+    /// consumes — both fold the same three sets — so the two lowering fronts
+    /// still observe identical shadow decisions.
+    ///
+    /// [`scope_payload_for_scope`]: Self::scope_payload_for_scope
+    pub(crate) fn scope_shadowing_for_scope(
+        &mut self,
+        scope_canonical_id: &str,
+    ) -> std::sync::Arc<ScopeShadowing> {
+        if let Some(shadowing) = self.scope_shadowings.get(scope_canonical_id) {
+            return std::sync::Arc::clone(shadowing);
+        }
+        let payload = self.scope_payload_for_scope(scope_canonical_id);
+        let shadowing = std::sync::Arc::new(ScopeShadowing::from_scope_payload(payload.as_deref()));
+        self.scope_shadowings.insert(
+            scope_canonical_id.to_string(),
+            std::sync::Arc::clone(&shadowing),
+        );
+        shadowing
     }
 }
 

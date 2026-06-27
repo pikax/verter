@@ -760,19 +760,18 @@ fn is_builtin_pick_or_omit(
     ) {
         return false;
     }
-    // Reuse the engine's cached `DeclarationScopePayload` (built once per scope)
-    // rather than rebuilding the shadow set from the prepared-decl bundle on every
-    // Pick/Omit field. The package-root gate runs once per published field, so a
-    // per-field `from_host_scope` rebuild is O(fields × scope names/imports). The
-    // payload-derived shadow set is identical to the bundle-derived one: both fold
-    // the scope's local type names, script-setup type bindings, and resolved import
-    // bindings (`DeclarationScopePayload::from_bundle` carries the same three sets
-    // `from_host_scope` reads off the bundle).
-    let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
-    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
-        scope_payload.as_deref(),
-    );
-    !shadowing.is_shadowing_lib(name)
+    // The per-scope shadow set is built ONCE (memoized on the engine beside the
+    // scope payload) and reused across every Pick/Omit probe, so this gate is
+    // O(1) per published field — a hash-set membership check — rather than
+    // folding a fresh shadow set (`FxHashSet` + `Arc<str>` entries) from the
+    // prepared-decl bundle on each field. The cached shadow set is identical to
+    // the `from_host_scope` bundle-derived one dispatch consumes: both fold the
+    // scope's local type names, script-setup type bindings, and resolved import
+    // bindings, so the `TypeExpr` front and the dispatch front agree by
+    // construction.
+    !query_engine
+        .scope_shadowing_for_scope(scope_canonical_id)
+        .is_shadowing_lib(name)
 }
 
 /// Resolve a bare `Ref` `name` (at `scope_canonical_id`) to its ROOT declaration
