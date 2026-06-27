@@ -4747,109 +4747,45 @@ fn index_signature_only_surface_registry_admits_direct_utility_rejects() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// DIFFERENTIAL: node-domain object-shape projection vs the retired
-// `materialize + type_expr_to_object_shape` path.
+// Registry route object-shape projection — locked invariants.
 //
-// `project_expr_to_surface_shape` arm-1 (the registry route) now projects an
+// `project_expr_to_surface_shape` arm-1 (the registry route) projects an
 // admitted route NODE through `project_admitted_route_node_to_expanded_object_shape`
-// (SurfaceView → `surface_view_to_expanded_shape`) instead of materialising the
-// node to a `TypeExpr` and running `type_expr_to_object_shape` over it. These
-// tests compare, for the SAME admitted route node, the NEW node projection
-// against the OLD `type_expr_to_object_shape(materialize_route_projection_node(..))`
-// shape, field-for-field — to RESOLVE EMPIRICALLY whether the conversion is
-// byte-exact behaviour-preserving.
+// (SurfaceView -> `surface_view_to_expanded_shape` -> `ExpandedObjectShape`).
+// These tests lock the object-shape projection semantics arm-1 publishes:
 //
-// OUTCOME (recorded): they agree on the common object case (test c —
-// equivalence CONFIRMED) but DIVERGE on two edge classes — union-arm
-// requiredness (test a) and single-call-signature collapse (test b) — because
-// the node-domain path unifies onto the shared `macro_object_surface` resolver
-// instead of the retired `type_expr_to_object_shape` standalone, and the two use
-// different conventions. The divergence direction is an ESCALATED architecture
-// decision (see the B2a-fix report); tests a/b PIN the measured delta.
+//   * A member present in only SOME arms of a union root is published OPTIONAL
+//     (a non-object arm contributes no members, so a member any legal arm omits
+//     widens to optional).
+//   * A single-call-signature object surface PRESERVES its call signature.
+//   * A rich object surface projects every member facet (optional / readonly /
+//     call signatures / index signatures) path-precisely.
 //
-// All three EXERCISE THE NEW PATH (not the unchanged general arm): each `expr` is
-// an indexed-access route (`Foo['x']`), asserted to reach
-// `component_meta_registry_public_indexed_access_route`, and the node is acquired
-// through `dispatch_routed_expr_surface_node` — arm-1's exact node acquisition.
-// A bare local `Foo` would route through the general arm and is NOT used.
+// Every test EXERCISES arm-1 (not the unchanged general arm): each `expr` is an
+// indexed-access route (`Foo['x']`) asserted to reach
+// `component_meta_registry_public_indexed_access_route`, and the shape is read
+// from the production `project_expr_to_surface_shape` — arm-1 itself. A bare
+// local `Foo` would route through the general arm and is NOT used. The
+// `…_via_imported_sfc` locks additionally drive a CROSS-FILE imported root
+// through a wired SFC import, so they fail if either the projection or the
+// cross-file route regresses.
 // ─────────────────────────────────────────────────────────────────
 
-/// Field-for-field equivalence of the NEW node-domain object shape and the OLD
-/// `type_expr_to_object_shape(materialize(..))` shape. Properties are compared
-/// NAME-keyed: the OLD union arm collects properties through an `FxHashMap`,
-/// whose iteration order is non-deterministic, so a positional `Vec` compare
-/// would be order-flaky. Call/index signatures compare positionally (both paths
-/// emit them in deterministic source order). Per-property the comparison covers
-/// optional, readonly, visibility, and the member type.
-fn assert_route_shape_new_equals_old(
-    new_shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    old_shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    label: &str,
-) {
-    use std::collections::BTreeMap;
-    let new_props: BTreeMap<&str, _> = new_shape
-        .properties
-        .iter()
-        .map(|p| (p.name.as_str(), p))
-        .collect();
-    let old_props: BTreeMap<&str, _> = old_shape
-        .properties
-        .iter()
-        .map(|p| (p.name.as_str(), p))
-        .collect();
-    assert_eq!(
-        new_props.keys().collect::<Vec<_>>(),
-        old_props.keys().collect::<Vec<_>>(),
-        "{label}: property NAME set must match (new node projection vs old materialize+shape)"
-    );
-    for (name, old_p) in &old_props {
-        let new_p = new_props
-            .get(name)
-            .unwrap_or_else(|| panic!("{label}: new shape missing property `{name}`"));
-        assert_eq!(
-            new_p.optional, old_p.optional,
-            "{label}: `{name}` optional flag mismatch"
-        );
-        assert_eq!(
-            new_p.readonly, old_p.readonly,
-            "{label}: `{name}` readonly flag mismatch"
-        );
-        assert_eq!(
-            new_p.visibility, old_p.visibility,
-            "{label}: `{name}` visibility mismatch"
-        );
-        assert_eq!(new_p.ty, old_p.ty, "{label}: `{name}` member type mismatch");
-    }
-    assert_eq!(
-        new_shape.call_signatures, old_shape.call_signatures,
-        "{label}: call signatures must match (new vs old)"
-    );
-    assert_eq!(
-        new_shape.index_signatures, old_shape.index_signatures,
-        "{label}: index signatures must match (new vs old)"
-    );
-}
-
-/// Drive the registry arm-1 route for `expr` and return the (NEW, OLD) object
-/// shapes projected from the SAME admitted route node:
-///   NEW = `project_admitted_route_node_to_expanded_object_shape(node)`
-///   OLD = `type_expr_to_object_shape(materialize_route_projection_node(node))`
+/// Drive the registry arm-1 route for `expr` and return the projected
+/// `ExpandedObjectShape` that production publishes.
 ///
-/// PROVES the test exercises the NEW path: `expr` MUST reach the registry route
-/// (asserted via `component_meta_registry_public_*_route`), and the node is
-/// acquired through `dispatch_routed_expr_surface_node` — the exact node
-/// acquisition arm-1 performs. Also cross-checks that the production
-/// `project_expr_to_surface_shape` (which IS arm-1) returns the NEW shape, so the
-/// equivalence the test pins is the one production actually publishes.
-fn differential_route_shapes(
+/// PROVES the test exercises arm-1: `expr` MUST reach the registry route
+/// (asserted via `component_meta_registry_public_*_route`) — a bare local `Foo`
+/// routes through the unchanged general arm and would make the test vacuous. The
+/// returned shape is exactly what `project_expr_to_surface_shape` (arm-1)
+/// projects via `project_admitted_route_node_to_expanded_object_shape`, so the
+/// locked invariant is the one production actually publishes.
+fn project_registry_route_shape(
     query_engine: &mut ComponentMetaQueryEngine<'_>,
     scope: &str,
     expr: &TypeExpr,
     label: &str,
-) -> (
-    verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    verter_semantic::analysis::type_expand::ExpandedObjectShape,
-) {
+) -> verter_semantic::analysis::type_expand::ExpandedObjectShape {
     use crate::resolver_core::component_meta_registry::{
         component_meta_registry_public_indexed_access_route,
         component_meta_registry_public_utility_route,
@@ -4857,65 +4793,66 @@ fn differential_route_shapes(
 
     // PROVE arm-1 reach (else the test would be vacuous — a bare local `Foo`
     // routes through the unchanged general arm).
-    let (root_symbol, route) = component_meta_registry_public_indexed_access_route(expr)
-        .or_else(|| component_meta_registry_public_utility_route(expr))
-        .unwrap_or_else(|| {
-            panic!(
-                "{label}: `expr` must reach the registry route (arm-1) — else the test is vacuous"
-            )
-        });
-    // Arm-1's exact node acquisition.
-    let node = query_engine
-        .dispatch_routed_expr_surface_node(scope, &root_symbol, &route)
-        .unwrap_or_else(|| panic!("{label}: registry route must admit a surface node"));
-    let ctx = query_engine.ctx;
-    // NEW: node-domain SurfaceView → ExpandedObjectShape.
-    let new_shape =
-        super::surface::project_admitted_route_node_to_expanded_object_shape(ctx, &node)
-            .unwrap_or_else(|| panic!("{label}: NEW node projection must produce a shape"));
-    // OLD: materialise the SAME node to a `TypeExpr`, then `type_expr_to_object_shape`.
-    let materialized = super::surface::materialize_route_projection_node(ctx, &node)
-        .unwrap_or_else(|| {
-            panic!("{label}: OLD materialize_route_projection_node must produce a TypeExpr")
-        });
-    let old_shape =
-        verter_semantic::analysis::type_expand::type_expr_to_object_shape(&materialized);
-    // Cross-check: the PRODUCTION arm-1 (`project_expr_to_surface_shape`) returns NEW.
-    let production = query_engine
-        .project_expr_to_surface_shape(scope, expr)
-        .unwrap_or_else(|| {
-            panic!("{label}: production project_expr_to_surface_shape must project")
-        });
-    assert_eq!(
-        production, new_shape,
-        "{label}: production arm-1 `project_expr_to_surface_shape` must equal the NEW node \
-         projection (so the pinned equivalence is what production publishes)"
+    assert!(
+        component_meta_registry_public_indexed_access_route(expr)
+            .or_else(|| component_meta_registry_public_utility_route(expr))
+            .is_some(),
+        "{label}: `expr` must reach the registry route (arm-1) — else the test is vacuous"
     );
-    (new_shape, old_shape)
+    query_engine
+        .project_expr_to_surface_shape(scope, expr)
+        .unwrap_or_else(|| panic!("{label}: arm-1 project_expr_to_surface_shape must project"))
 }
 
-/// DIFFERENTIAL (a) — CHARACTERIZED DIVERGENCE (escalated, see the B2a-fix
-/// report). A union-of-object|primitive terminal (`Foo['x']` where
-/// `x: { a: string } | string`).
-///
-/// The retired `type_expr_to_object_shape` union arm SKIPS the non-object
-/// `string` variant (empty shape), so `a` is present in 1-of-1 OBJECT variants
-/// and stays REQUIRED. The NEW node projection routes the union through the
-/// shared `macro_object_surface` reducer, which optional-promotes `a` across
-/// ALL arms (the non-object `string` arm counts toward the denominator), so `a`
-/// becomes OPTIONAL.
-///
-/// This is a REAL behaviour difference: the node-domain conversion unifies onto
-/// the shared resolver instead of the retired standalone, and the two use
-/// different union-requiredness conventions. Matching the retired convention
-/// EXACTLY would require either changing the shared reducer (broad — every
-/// consumer) or re-implementing `type_expr_to_object_shape`'s union arm in node
-/// domain (a second shape-extraction path the cutover is removing). The
-/// direction is an architecture decision (reproduce the retired quirk vs accept
-/// the shared-resolver behaviour) — ESCALATED. This test PINS the current
-/// measured delta so the eventual decision is taken against a recorded baseline.
+/// Build a two-file host whose `.vue` SFC imports `Foo` from a sibling `.ts`
+/// module and references an indexed access of it in `defineProps`, with the
+/// `./types` dependency wired so the registry route resolves `Foo` CROSS-FILE.
+/// `foo_decl` is the `/src/types.ts` body; `prop_type` is the prop's annotation
+/// in `/src/App.vue`'s `defineProps`.
+fn imported_foo_surface_host(foo_decl: &str, prop_type: &str) -> VerterHost {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/types.ts".to_string(),
+        Arc::from(format!("{foo_decl}\n")),
+    );
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(format!(
+            "<script setup lang=\"ts\">\n\
+             import type {{ Foo }} from './types'\n\
+             defineProps<{{ p: {prop_type} }}>()\n\
+             </script>\n<template><div /></template>"
+        )),
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    assert!(host.ensure_loaded("/src/types.ts"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host
+}
+
+/// A union-of-object|primitive terminal (`Foo['x']` where
+/// `x: { a: string } | string`) publishes member `a` OPTIONAL: the non-object
+/// `string` arm contributes no `a`, so `a` is absent from a legal branch and is
+/// widened to optional across the union of arms. The published surface is the
+/// union OF members, and a member one arm omits cannot be guaranteed present.
 #[test]
-fn differential_route_shape_union_arm_diverges_node_domain_vs_retired_object_shape() {
+fn route_shape_union_arm_publishes_absent_member_optional() {
     let host = surface_shape_host("export interface Foo { x: { a: string } | string }");
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
@@ -4924,57 +4861,41 @@ fn differential_route_shape_union_arm_diverges_node_domain_vs_retired_object_sha
         object: Arc::new(TypeExpr::named("Foo")),
         index: Arc::new(TypeExpr::string_literal("x")),
     };
-    let (new_shape, old_shape) = differential_route_shapes(
+    let shape = project_registry_route_shape(
         &mut query_engine,
         "/src/App.vue",
         &expr,
         "union object|primitive",
     );
 
-    // Both keep the object arm's `a` member (same name set).
-    let new_a = new_shape
+    let member_a = shape
         .properties
         .iter()
-        .find(|p| p.name == "a")
-        .expect("NEW: union terminal must keep the object arm's `a` member");
-    let old_a = old_shape
-        .properties
-        .iter()
-        .find(|p| p.name == "a")
-        .expect("OLD: union terminal must keep the object arm's `a` member");
-    // The DELTA: NEW optional-promotes `a` (true); the retired path keeps it
-    // required (false). Recorded, not blessed.
+        .find(|property| property.name == "a")
+        .expect("union terminal must keep the object arm's `a` member");
+    // Locked behaviour: `a` is OPTIONAL.
     assert!(
-        new_a.optional,
-        "NEW node projection optional-promotes `a` across ALL union arms"
+        member_a.optional,
+        "union-arm-absent member `a` must be published OPTIONAL (the non-object `string` arm \
+         contributes no `a`)"
     );
+    // NEGATIVE: no REQUIRED `a` may survive — a member a legal arm omits cannot
+    // be guaranteed present.
     assert!(
-        !old_a.optional,
-        "retired `type_expr_to_object_shape` keeps `a` REQUIRED (skips the non-object arm)"
-    );
-    assert_ne!(
-        new_a.optional, old_a.optional,
-        "the union requiredness convention DIVERGES between the node-domain path and the \
-         retired type_expr_to_object_shape (escalated)"
+        !shape
+            .properties
+            .iter()
+            .any(|property| property.name == "a" && !property.optional),
+        "no REQUIRED `a` may be published for a union with a non-object arm"
     );
 }
 
-/// DIFFERENTIAL (b) — CHARACTERIZED DIVERGENCE (escalated, see the B2a-fix
-/// report). A single-call-signature-only terminal (`Foo['cb']` where
-/// `cb: { (e: number): void }`).
-///
-/// The retired path materialises the node, and `materialize_output_type_expr`
-/// COLLAPSES a single-call-signature-only surface to `TypeExpr::Function`, which
-/// `type_expr_to_object_shape` then maps to an EMPTY shape (the call signature is
-/// dropped). The NEW node projection reads the node's `SurfaceView` directly and
-/// PRESERVES the call signature.
-///
-/// Matching the retired path EXACTLY would mean reproducing the call-signature
-/// DROP (publishing an empty shape for a callable member) — reproducing a quirk
-/// of the retired standalone. ESCALATED alongside (a) as one decision. This test
-/// PINS the current measured delta.
+/// A single-call-signature-only terminal (`Foo['cb']` where
+/// `cb: { (e: number): void }`) PRESERVES the call signature in the projected
+/// shape — a callable member surface is published with its call signature
+/// intact, never collapsed away into an empty shape.
 #[test]
-fn differential_route_shape_single_call_sig_diverges_node_domain_vs_retired_object_shape() {
+fn route_shape_single_call_sig_preserves_call_signature() {
     let host = surface_shape_host("export interface Foo { cb: { (e: number): void } }");
     let _store_view = host.resolver_store_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
@@ -4983,40 +4904,33 @@ fn differential_route_shape_single_call_sig_diverges_node_domain_vs_retired_obje
         object: Arc::new(TypeExpr::named("Foo")),
         index: Arc::new(TypeExpr::string_literal("cb")),
     };
-    let (new_shape, old_shape) = differential_route_shapes(
+    let shape = project_registry_route_shape(
         &mut query_engine,
         "/src/App.vue",
         &expr,
         "single call-signature-only",
     );
 
-    // The DELTA: NEW preserves the call signature; the retired path collapses to
-    // `Function` and yields an EMPTY shape. Recorded, not blessed.
+    // Locked behaviour: the single call signature is PRESERVED.
     assert_eq!(
-        new_shape.call_signatures.len(),
+        shape.call_signatures.len(),
         1,
-        "NEW node projection preserves the single call signature"
+        "single-call-signature terminal must preserve its call signature in the projected shape"
     );
+    // NEGATIVE: the shape is NOT empty — the call signature is not dropped.
     assert!(
-        old_shape.call_signatures.is_empty() && old_shape.properties.is_empty(),
-        "retired `materialize + type_expr_to_object_shape` collapses single-call-sig to \
-         `Function` → EMPTY shape (the call signature is dropped)"
-    );
-    assert_ne!(
-        new_shape.call_signatures.len(),
-        old_shape.call_signatures.len(),
-        "the single-call-signature surface DIVERGES between the node-domain path and the \
-         retired type_expr_to_object_shape (escalated)"
+        !(shape.call_signatures.is_empty() && shape.properties.is_empty()),
+        "a callable-member surface must NOT project to an empty shape (the call signature must \
+         not be dropped)"
     );
 }
 
-/// DIFFERENTIAL (c): a rich terminal carrying optional + readonly properties, a
-/// call signature, and an index signature (`Foo['obj']` where
-/// `obj: { a?: string; readonly b: number; (e: number): void; [k: string]: number }`).
-/// Every shape facet (per-property optional/readonly/visibility/type, call
-/// signatures, index signatures) must match the OLD path field-for-field.
+/// A rich terminal carrying optional + readonly properties, a call signature,
+/// and an index signature (`Foo['obj']` where
+/// `obj: { a?: string; readonly b: number; (e: number): void; [k: string]: number }`)
+/// projects every member facet path-precisely.
 #[test]
-fn differential_route_shape_optional_readonly_call_index_matches_materialize_then_shape() {
+fn route_shape_rich_object_projects_all_member_facets() {
     let host = surface_shape_host(
         "export interface Foo { \
          obj: { a?: string; readonly b: number; (e: number): void; [k: string]: number } }",
@@ -5028,16 +4942,120 @@ fn differential_route_shape_optional_readonly_call_index_matches_materialize_the
         object: Arc::new(TypeExpr::named("Foo")),
         index: Arc::new(TypeExpr::string_literal("obj")),
     };
-    let (new_shape, old_shape) = differential_route_shapes(
+    let shape = project_registry_route_shape(
         &mut query_engine,
         "/src/App.vue",
         &expr,
         "optional/readonly + call/index sigs",
     );
-    assert_route_shape_new_equals_old(
-        &new_shape,
-        &old_shape,
-        "optional/readonly + call/index sigs",
+
+    assert_eq!(
+        shape_property_names(&shape),
+        ["a".to_string(), "b".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<String>>(),
+        "rich object must publish exactly `a` and `b`"
+    );
+    let member_a = shape
+        .properties
+        .iter()
+        .find(|property| property.name == "a")
+        .expect("member `a` present");
+    assert!(member_a.optional, "`a?` must project OPTIONAL");
+    assert!(!member_a.readonly, "`a` is not readonly");
+    let member_b = shape
+        .properties
+        .iter()
+        .find(|property| property.name == "b")
+        .expect("member `b` present");
+    assert!(member_b.readonly, "`readonly b` must project READONLY");
+    assert!(!member_b.optional, "`b` is required");
+    assert_eq!(
+        shape.call_signatures.len(),
+        1,
+        "the `(e: number): void` call signature must be projected"
+    );
+    assert_eq!(
+        shape.index_signatures.len(),
+        1,
+        "the `[k: string]: number` index signature must be projected"
+    );
+}
+
+/// SFC LOCK — an SFC whose prop type is an IMPORTED type's indexed access
+/// yielding `{ a: string } | string` publishes member `a` OPTIONAL through the
+/// cross-file registry route. Fails if arm-1 regresses to a path that keeps `a`
+/// required.
+#[test]
+fn route_shape_union_arm_publishes_absent_member_optional_via_imported_sfc() {
+    let host = imported_foo_surface_host(
+        "export interface Foo { x: { a: string } | string }",
+        "Foo['x']",
+    );
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("Foo")),
+        index: Arc::new(TypeExpr::string_literal("x")),
+    };
+    let shape = project_registry_route_shape(
+        &mut query_engine,
+        "/src/App.vue",
+        &expr,
+        "imported union object|primitive",
+    );
+
+    let member_a = shape
+        .properties
+        .iter()
+        .find(|property| property.name == "a")
+        .expect("imported union terminal must keep the object arm's `a` member");
+    assert!(
+        member_a.optional,
+        "imported union-arm-absent member `a` must be published OPTIONAL"
+    );
+    assert!(
+        !shape
+            .properties
+            .iter()
+            .any(|property| property.name == "a" && !property.optional),
+        "no REQUIRED `a` may be published for the imported union with a non-object arm"
+    );
+}
+
+/// SFC LOCK — an SFC whose prop type is an IMPORTED single-call-signature-only
+/// object's indexed access PRESERVES the call signature through the cross-file
+/// registry route. Fails if arm-1 regresses to a path that collapses the call
+/// signature to an empty shape.
+#[test]
+fn route_shape_single_call_sig_preserves_call_signature_via_imported_sfc() {
+    let host = imported_foo_surface_host(
+        "export interface Foo { cb: { (e: number): void } }",
+        "Foo['cb']",
+    );
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = ComponentMetaQueryEngine::new(&host);
+
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("Foo")),
+        index: Arc::new(TypeExpr::string_literal("cb")),
+    };
+    let shape = project_registry_route_shape(
+        &mut query_engine,
+        "/src/App.vue",
+        &expr,
+        "imported single call-signature-only",
+    );
+
+    assert_eq!(
+        shape.call_signatures.len(),
+        1,
+        "imported single-call-signature terminal must preserve its call signature"
+    );
+    assert!(
+        !(shape.call_signatures.is_empty() && shape.properties.is_empty()),
+        "the imported callable-member surface must NOT project to an empty shape"
     );
 }
 

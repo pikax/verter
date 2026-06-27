@@ -1390,17 +1390,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // (1) Registry public-indexed-access / public-utility route — projected in
         // NODE DOMAIN: resolve the admitted route NODE (routes here are only
         // MemberPath / Pick / Omit, never `Whole`), then build the shape from its
-        // SurfaceView; a non-object node → empty shape (the prior unconditional `Some`).
+        // SurfaceView; a non-object node → empty shape.
         //
-        // `unwrap_or_else(empty)` matches the retired `type_expr_to_object_shape`
-        // arm, not a swallow of arm 2/3: the admitted node here passed the route's
-        // node-domain `materialized` gate, and a non-`Object` terminal (primitive /
-        // function) yields `None` from the projection EXACTLY where the retired
-        // `type_expr_to_object_shape(materialise(node))` yielded the empty shape — so
-        // arm-1 returns `Some(empty)` in both worlds, never falling through. The
-        // retired path only fell through when the route did NOT materialise (the
-        // `dispatch_routed_expr_surface_node == None` branch above), which this arm
-        // skips identically.
+        // `unwrap_or_else(empty)` is this arm's correct terminal, not a swallow of
+        // arms 2/3: the admitted node already passed the route's node-domain
+        // `materialized` gate, so the route DID resolve. A non-`Object` terminal (a
+        // primitive / function leaf) projects to no one-level object surface and
+        // yields `None`, which this arm publishes as the empty shape — a
+        // resolved-but-non-object route has an empty object surface; it does not
+        // fall through. The arm is only ENTERED when the route admits a materialised
+        // node: a route that admits no node (`dispatch_routed_expr_surface_node ==
+        // None`) skips this arm and still reaches arms 2/3.
         if let Some((root_symbol, route)) =
             component_meta_registry_public_indexed_access_route(expr)
                 .or_else(|| component_meta_registry_public_utility_route(expr))

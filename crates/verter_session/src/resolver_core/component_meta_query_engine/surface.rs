@@ -1023,6 +1023,12 @@ pub(crate) fn projected_surface_to_expanded_shape(
 /// signatures); each CONSUMER applies its own has-surface gate (the direct-utility
 /// `shape_has_surface` ignores index signatures, the registry general arm counts
 /// them) — this builder makes no decision, it is a terminal DTO writer.
+///
+/// The projected shape preserves every member facet the `SurfaceView` carries —
+/// per-member optionality (a member a union arm omits stays optional) and call
+/// signatures (a single-call-signature surface keeps its call signature). See
+/// [`project_admitted_route_node_to_expanded_object_shape`] for the full object-
+/// shape projection invariant.
 pub(super) fn surface_view_to_expanded_shape(
     ctx: &dyn ResolverContext,
     surface: &SurfaceView,
@@ -1044,8 +1050,17 @@ pub(super) fn surface_view_to_expanded_shape(
 /// composed surface, NOT the carrier-intact decl anchor that would collapse a
 /// generic heritage / `Omit` arm to `Opaque(Miss)` (the admitted route node is
 /// projected `Navigate`-mode, carriers intact, so it re-resolves cleanly). The
-/// `MacroObjectSurface` demand selects union-OF-members for a union root, matching
-/// the retired `type_expr_to_object_shape` union semantics.
+/// `MacroObjectSurface` demand selects union-OF-members for a union root.
+///
+/// INVARIANT — object-shape projection semantics this function upholds:
+/// - A member present in only SOME arms of a union root is published
+///   OPTIONAL. A non-object arm (e.g. a bare primitive) contributes no
+///   members, so any member that a legal arm omits is widened to optional —
+///   the surface is the union OF members across every arm, and a member
+///   absent from one arm cannot be guaranteed present.
+/// - A single-call-signature object surface PRESERVES its call signature in
+///   the projected shape: a callable member surface is published with its
+///   call signature intact, never collapsed away into an empty shape.
 ///
 /// Takes the SEALED [`AdmittedRouteProjectionNode`] carrier (never a raw forgeable
 /// `SemanticNodeId`), so no node crosses the query-engine boundary. `None` when
