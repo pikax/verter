@@ -25773,9 +25773,9 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
 // =============================================================================
 mod component_meta_scope_shadowing_memo {
     use syn::visit::Visit;
-    use syn::{Attribute, ExprPath, ItemMod, Meta, Type};
+    use syn::{ExprPath, ItemMod, Type};
 
-    use super::{read_workspace_file, workspace_root};
+    use super::{attrs_test_gate, read_workspace_file, workspace_root};
 
     /// The four `ScopeShadowing` associated constructors a component-meta hot
     /// path must NOT call directly — it must obtain the per-scope
@@ -25872,51 +25872,41 @@ mod component_meta_scope_shadowing_memo {
         }
     }
 
-    /// `true` when `expr`'s ROOT RECEIVER is the bare `engine` binding — the
-    /// signal that a `None` arm of THIS match is the engine-less fallback. A
-    /// method-call chain rooted at `engine` (`engine.as_deref_mut()`,
-    /// `engine.as_mut()`, `engine.as_deref()`), a parenthesised / grouped /
-    /// referenced `engine`, or a bare `engine` path all root at the binding. A
-    /// field access (`other.engine` / `self.engine`) or an arbitrary call
-    /// (`get_opt_that_mentions_engine()`) do NOT root at the binding — the token
-    /// `engine` merely appearing in the scrutinee is not enough.
-    fn expr_root_receiver_is_engine(expr: &syn::Expr) -> bool {
+    /// `true` when `expr` is EXACTLY the sanctioned engine-less scrutinee
+    /// `engine.as_deref_mut()` — a no-argument `as_deref_mut` method call whose
+    /// receiver is the bare `engine` binding (`Expr::Path` `is_ident("engine")`,
+    /// no qself), modulo enclosing parens / groups around the scrutinee. This is
+    /// the ONE production shape whose `None` arm provably runs with no engine
+    /// present, so its `None` arm may host the single sanctioned direct build.
+    ///
+    /// Any other `engine`-rooted scrutinee — `engine.filter(..)`,
+    /// `engine.and_then(..)`, a longer chain, a bare `engine` path, or a field
+    /// access (`self.engine` / `other.engine`) — can take its `None` arm with an
+    /// engine PRESENT, so it is NOT the sanctioned shape and a direct build in
+    /// its `None` arm fires.
+    fn expr_is_engine_as_deref_mut(expr: &syn::Expr) -> bool {
         match expr {
-            syn::Expr::MethodCall(mc) => expr_root_receiver_is_engine(&mc.receiver),
-            syn::Expr::Paren(p) => expr_root_receiver_is_engine(&p.expr),
-            syn::Expr::Group(g) => expr_root_receiver_is_engine(&g.expr),
-            syn::Expr::Reference(r) => expr_root_receiver_is_engine(&r.expr),
-            syn::Expr::Path(p) => p.qself.is_none() && p.path.is_ident("engine"),
+            syn::Expr::Paren(p) => expr_is_engine_as_deref_mut(&p.expr),
+            syn::Expr::Group(g) => expr_is_engine_as_deref_mut(&g.expr),
+            syn::Expr::MethodCall(mc) => {
+                mc.method == "as_deref_mut"
+                    && mc.args.is_empty()
+                    && matches!(
+                        mc.receiver.as_ref(),
+                        syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("engine")
+                    )
+            }
             _ => false,
         }
     }
 
-    /// `true` when any of `attrs` is a `#[cfg(test)]` (or `cfg(any(test, …))` /
-    /// `cfg(all(…, test, …))`) attribute — mirrors the cfg-test helper used by
-    /// the other `syn`-scanner guards in this file. Used to skip inline
-    /// test-only items inside a production source file so the "production-only"
-    /// scope is honest.
-    fn has_cfg_test(attrs: &[Attribute]) -> bool {
-        attrs.iter().any(|a| {
-            if !a.path().is_ident("cfg") {
-                return false;
-            }
-            let rendered = match &a.meta {
-                Meta::List(list) => list.tokens.to_string(),
-                _ => return false,
-            };
-            rendered
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .any(|token| token == "test")
-        })
-    }
-
     /// Walks a single production source file's AST, tracking the enclosing fn
-    /// name, the `#[cfg(test)]` depth (inline test items are skipped — the
-    /// guard is production-only), the match-nesting depth, and whether the
-    /// cursor is inside the `None` arm of a TOP-LEVEL `engine`-rooted match,
-    /// and records every non-allowlisted direct `ScopeShadowing` constructor
-    /// call.
+    /// name, the cfg-test depth (items whose `#[cfg(...)]` ENTAILS test are
+    /// skipped via `attrs_test_gate` — the guard is production-only; a bare
+    /// `mod tests` with no cfg gate is NOT skipped), the match-nesting depth,
+    /// and whether the cursor is inside the `None` arm of a TOP-LEVEL match
+    /// whose scrutinee is exactly `engine.as_deref_mut()`, and records every
+    /// non-allowlisted direct `ScopeShadowing` constructor call.
     struct Scanner {
         rel_path: String,
         is_dispatch_helpers: bool,
@@ -25930,11 +25920,11 @@ mod component_meta_scope_shadowing_memo {
 
     impl<'ast> Visit<'ast> for Scanner {
         fn visit_item_mod(&mut self, node: &'ast ItemMod) {
-            // Inline `#[cfg(test)] mod ...` / `mod tests` items are NOT
-            // production — skip their constructions (the guard is
-            // production-only). Mirrors the cfg-test depth pattern used by the
-            // other `syn`-scanner guards in this file.
-            let entered_test = has_cfg_test(&node.attrs) || node.ident == "tests";
+            // A module is test-only ONLY when its `#[cfg(...)]` ENTAILS test
+            // (via `attrs_test_gate`). A bare `mod tests` with no cfg gate
+            // compiles into production Rust and IS scanned — the module name
+            // alone is not a build gate.
+            let entered_test = attrs_test_gate(&node.attrs);
             if entered_test {
                 self.cfg_test_depth += 1;
             }
@@ -25945,7 +25935,7 @@ mod component_meta_scope_shadowing_memo {
         }
 
         fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-            let entered_test = has_cfg_test(&node.attrs);
+            let entered_test = attrs_test_gate(&node.attrs);
             if entered_test {
                 self.cfg_test_depth += 1;
             }
@@ -25971,7 +25961,7 @@ mod component_meta_scope_shadowing_memo {
         }
 
         fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-            let entered_test = has_cfg_test(&node.attrs);
+            let entered_test = attrs_test_gate(&node.attrs);
             if entered_test {
                 self.cfg_test_depth += 1;
             }
@@ -25994,13 +25984,55 @@ mod component_meta_scope_shadowing_memo {
             }
         }
 
+        fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+            // A `#[cfg(test)] impl` block is test-only — its methods carry no
+            // cfg of their own, so the test gate lives on the impl. Track the
+            // cfg-test depth here so inner builds are skipped (the guard is
+            // production-only).
+            let entered_test = attrs_test_gate(&node.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_impl(self, node);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+            // A `#[cfg(test)] const` initializer (e.g. a closure body) is
+            // test-only; gate its constructions out of the production scope.
+            let entered_test = attrs_test_gate(&node.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_const(self, node);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+            // A `#[cfg(test)] static` initializer is test-only; gate its
+            // constructions out of the production scope (parity with const).
+            let entered_test = attrs_test_gate(&node.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_static(self, node);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
         fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
             // The allowlisted construction is the `None` arm of a TOP-LEVEL
-            // (depth-0) match whose scrutinee ROOT RECEIVER is the `engine`
-            // binding. A nested match (depth >= 1) resets the flag so an inner
-            // `None` arm cannot inherit OR re-establish the allowance.
+            // (depth-0) match whose scrutinee is EXACTLY `engine.as_deref_mut()`
+            // — the one production shape whose `None` arm provably runs with no
+            // engine present. A nested match (depth >= 1) resets the flag so an
+            // inner `None` arm cannot inherit OR re-establish the allowance.
             let top_level = self.match_depth == 0;
-            let scrutinee_is_engine = expr_root_receiver_is_engine(&node.expr);
+            let scrutinee_is_engine = expr_is_engine_as_deref_mut(&node.expr);
 
             // The scrutinee is evaluated OUTSIDE any arm — clear the flag for it.
             let saved = self.in_engine_none_arm;
@@ -26145,18 +26177,31 @@ mod component_meta_scope_shadowing_memo {
 /// plus a `SCOPE_SHADOWING_CTORS` constructor segment; inline `#[cfg(test)]`
 /// items are out of scope (the guard is production-only).
 ///
-/// DISCLOSED RESIDUAL (inherent to any name-based source scanner; NOT enforced):
-/// identity-laundering forms that do not spell `ScopeShadowing` at the call
-/// site — a renamed `use ...ScopeShadowing as SS; SS::from_host_scope(...)`
-/// import, a `type SS = ScopeShadowing;` alias, a function-pointer / value
-/// capture (`let f = ScopeShadowing::from_host_scope; f(...)`), and
-/// macro-expanded construction. These launder the type identity and are closed
-/// only by the structural end-state (the shared-`ResolverContext` per-scope
-/// memo that lets the constructors seal to `pub(in crate::resolver_core)`),
-/// recorded in `docs/arch/scope-shadowing-memo-structural-deferral.md`. An
-/// OBSERVED such evasion is a laundering escape that freezes the scanner per
-/// Structural-Confinement-First and makes that structural migration the
-/// required fix.
+/// DISCLOSED RESIDUAL (inherent to any name-based syntactic source scanner; NOT
+/// enforced). The 80/20 bound leaves TWO residual classes to the structural
+/// end-state rather than chasing further AST shapes:
+///
+/// 1. Identity-laundering forms that do not spell `ScopeShadowing` at the call
+///    site — a renamed `use ...ScopeShadowing as SS; SS::from_host_scope(...)`
+///    import, a `type SS = ScopeShadowing;` alias, a function-pointer / value
+///    capture or other call-form wrapper INCLUDING a parenthesized callee
+///    (`let f = ScopeShadowing::from_host_scope; f(...)`,
+///    `(ScopeShadowing::from_host_scope)(...)`), and macro-expanded construction.
+///    These launder the type identity past the literal path-call match.
+///
+/// 2. Runtime / control-flow MULTIPLICITY inside the sanctioned `None` arm — the
+///    scanner enforces ONE syntactic direct call expression in the allowlisted
+///    arm, NOT "at most once at runtime". A single sanctioned call placed inside
+///    a loop, a closure, or a guarded sub-arm within that `None` arm builds many
+///    times at runtime while reading as one syntactic call, and is not detected.
+///
+/// Universal confinement of BOTH classes belongs to the tracked structural
+/// end-state, NOT this scanner: the shared-`ResolverContext` per-scope memo that
+/// lets the constructors seal to `pub(in crate::resolver_core)`, recorded in
+/// `docs/arch/scope-shadowing-memo-structural-deferral.md`. An OBSERVED such
+/// evasion is a laundering escape that freezes the scanner per
+/// Structural-Confinement-First and makes that structural migration the required
+/// fix.
 ///
 /// ── SC-first guard-local record ────────────────────────────────────────────
 /// `scanner_invariant`: `component_meta_hot_path_scope_shadowing_memo_routing`.
@@ -26191,7 +26236,13 @@ mod component_meta_scope_shadowing_memo {
 /// `hardening_rounds`: 0 (adoption).
 ///
 /// `hardening_history`: adoption under the 2026-06-28 codex SC-first
-///   architecture ruling.
+///   architecture ruling. Pre-land (block-branch, pre-integration) review-driven
+///   soundness corrections — the cfg-entailment classification, the bare
+///   `mod tests` scan, the exact `engine.as_deref_mut()` scrutinee, and the
+///   impl / const / static cfg gating — are ADOPTION SHAPING and do NOT
+///   increment `hardening_rounds`; the counter starts once the scanner is
+///   integrated / landed (or a landed scanner is later broadened). No laundering
+///   escape has occurred.
 /// ────────────────────────────────────────────────────────────────────────────
 #[test]
 fn component_meta_hot_paths_obtain_scope_shadowing_from_the_per_scope_memo() {
@@ -26546,5 +26597,212 @@ fn component_meta_hot_paths_self_test_inline_cfg_test_build_is_ignored() {
         v.is_empty(),
         "a `ScopeShadowing` build inside an inline `#[cfg(test)]` module must be \
          ignored (the guard is production-only); got: {v:?}"
+    );
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_cfg_not_test_and_any_test_fire() {
+    // PRODUCTION-SATISFIABLE cfgs are NOT test-only. A `#[cfg(not(test))]` item
+    // compiles into every non-test build, and `#[cfg(any(test, feature = "x"))]`
+    // compiles whenever the feature is on (a non-test config satisfies it). A
+    // token-search-for-`test` classifier wrongly skips both (the token `test`
+    // appears in the predicate); the entailment classifier (`attrs_test_gate`)
+    // scans them. Both builds MUST fire.
+    let planted = r#"
+        #[cfg(not(test))]
+        fn f() {
+            let _ = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+        }
+
+        #[cfg(any(test, feature = "x"))]
+        fn g() {
+            let _ = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+        planted,
+    );
+    // A token-search classifier skips both production-satisfiable cfgs (0); the
+    // entailment classifier scans both (2).
+    assert_eq!(
+        v.len(),
+        2,
+        "`#[cfg(not(test))]` and `#[cfg(any(test, feature = \"x\"))]` are \
+         PRODUCTION-satisfiable, so direct builds under them MUST fire; got: {v:?}"
+    );
+    assert!(v.iter().any(|x| x.method == "from_scope_payload"));
+    assert!(v.iter().any(|x| x.method == "empty"));
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_genuinely_test_only_cfg_ignored() {
+    // Companion negative control: a cfg that genuinely ENTAILS test
+    // (`#[cfg(test)]`, `#[cfg(all(test, unix))]` — every satisfying config has
+    // `test = true`) is test-only and is IGNORED. Pins the entailment classifier
+    // against the OPPOSITE failure (scanning every cfg).
+    let planted = r#"
+        #[cfg(test)]
+        fn t() {
+            let _ = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+        }
+
+        #[cfg(all(test, unix))]
+        fn u() {
+            let _ = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+        planted,
+    );
+    assert!(
+        v.is_empty(),
+        "`#[cfg(test)]` and `#[cfg(all(test, unix))]` ENTAIL test and must be \
+         ignored (the guard is production-only); got: {v:?}"
+    );
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_bare_mod_tests_is_scanned() {
+    // A bare `mod tests` with NO `#[cfg(test)]` gate compiles into PRODUCTION
+    // Rust — the module name alone is not a build gate. A name-based skip
+    // (`ident == "tests"`) wrongly ignores its builds; only a cfg that entails
+    // test gates a module out of the build. The build MUST fire.
+    let planted = r#"
+        mod tests {
+            fn t() {
+                let _ =
+                    crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+            }
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+        planted,
+    );
+    // A bare-name `mod tests` skip ignores this (0); cfg-entailment gating scans
+    // it (1).
+    assert_eq!(
+        v.len(),
+        1,
+        "a bare production `mod tests` (no `#[cfg(test)]`) compiles into \
+         production and MUST be scanned; got: {v:?}"
+    );
+    assert_eq!(v[0].method, "from_scope_payload");
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_non_canonical_engine_scrutinee_fires() {
+    // Only `match engine.as_deref_mut() { None => ... }` provably runs its `None`
+    // arm with NO engine present. `match engine.filter(..)` and
+    // `match engine.and_then(..)` can take their `None` arm with an engine
+    // PRESENT, so a direct build there is NOT the sanctioned engine-less
+    // fallback. Both builds MUST fire even inside the allowlisted fn.
+    let planted = r#"
+        fn project_expr_class_a_via_dispatch_threaded(
+            ctx: &dyn ResolverContext,
+            mut engine: Option<&mut ComponentMetaQueryEngine>,
+            scope_canonical_id: &str,
+        ) {
+            let a = match engine.filter(|_| false) {
+                Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
+                None => std::sync::Arc::new(
+                    crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                        ctx,
+                        scope_canonical_id,
+                    ),
+                ),
+            };
+            let b = match engine.and_then(|_| None) {
+                Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
+                None => std::sync::Arc::new(
+                    crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                        ctx,
+                        scope_canonical_id,
+                    ),
+                ),
+            };
+            let _ = (a, b);
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/dispatch_helpers.rs",
+        planted,
+    );
+    // A "root receiver is engine" scan sanctions BOTH `None` arms — the first
+    // consumes the single allowance, so it yields 1; the exact
+    // `engine.as_deref_mut()` match sanctions NEITHER (2).
+    assert_eq!(
+        v.len(),
+        2,
+        "a `from_host_scope` build in the `None` arm of `match engine.filter(..)` \
+         or `match engine.and_then(..)` MUST fire — only `engine.as_deref_mut()` \
+         is the sanctioned engine-less scrutinee; got: {v:?}"
+    );
+    assert!(v.iter().all(|x| x.method == "from_host_scope"));
+    assert!(v
+        .iter()
+        .all(|x| x.fn_name == "project_expr_class_a_via_dispatch_threaded"));
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_cfg_test_impl_block_is_ignored() {
+    // The cfg-test gate applies to the ENCLOSING `impl` block, not just the
+    // method: a `#[cfg(test)] impl Foo { fn t() { ScopeShadowing::.. } }` is
+    // test-only and its inner builds must be IGNORED. Without impl-level cfg
+    // depth the inner method (which carries no cfg of its own) is scanned — a
+    // false positive.
+    let planted = r#"
+        struct Foo;
+
+        #[cfg(test)]
+        impl Foo {
+            fn t() {
+                let _ =
+                    crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+            }
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+        planted,
+    );
+    // No impl-level cfg depth scans the inner method (1); impl-level cfg gating
+    // ignores it (0).
+    assert!(
+        v.is_empty(),
+        "a build inside a `#[cfg(test)] impl` block is test-only and must be \
+         ignored; got: {v:?}"
+    );
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_cfg_test_item_initializer_is_ignored() {
+    // A `#[cfg(test)]` `const`/`static` item is test-only; its initializer (here
+    // a closure body) compiles only under test, so a `ScopeShadowing` build
+    // inside it must be IGNORED. Without const/static cfg depth the initializer
+    // is scanned — a false positive.
+    let planted = r#"
+        #[cfg(test)]
+        const SAMPLE_CTOR: fn() = || {
+            let _ = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+        };
+
+        #[cfg(test)]
+        static SAMPLE_BUILDER: fn() = || {
+            let _ = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
+        };
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+        planted,
+    );
+    // No const/static cfg depth scans both initializers (2); item-level cfg
+    // gating ignores them (0).
+    assert!(
+        v.is_empty(),
+        "builds inside `#[cfg(test)]` `const`/`static` initializers are test-only \
+         and must be ignored; got: {v:?}"
     );
 }

@@ -22,7 +22,9 @@ to `meta_resolve.rs` + `meta_resolve/**` production, allowlisting EXACTLY the on
 genuinely engine-less `None`-arm `ScopeShadowing::from_host_scope` fallback in
 `project_expr_class_a_via_dispatch_threaded` (arm-precise). Guard-local SC-first record:
 `scanner_invariant = component_meta_hot_path_scope_shadowing_memo_routing`;
-`mechanism_ruling = SCF-SCOPE-SHADOWING-MEMO-2026-06-28`; `hardening_rounds = 0`.
+`mechanism_ruling = SCF-SCOPE-SHADOWING-MEMO-2026-06-28`; `hardening_rounds = 0` (pre-land,
+block-branch soundness corrections are adoption shaping and do NOT increment the counter; it
+starts at integration / land).
 
 ## Why a scanner-supplement, not a compiler seal (the ruling)
 
@@ -47,15 +49,25 @@ fully-qualified) AND the UFCS / qself form `<ScopeShadowing>::<ctor>` — both m
 structurally on the `ScopeShadowing` ident plus a sanctioned constructor segment; inline
 `#[cfg(test)]` items are out of scope (the guard is production-only).
 
-Disclosed residual (inherent to any name-based source scanner; NOT enforced): identity-
-laundering forms that do not spell `ScopeShadowing` at the call site — a renamed
-`use ...ScopeShadowing as SS; SS::from_host_scope(...)` import, a `type SS = ScopeShadowing;`
-alias, a function-pointer / value capture (`let f = ScopeShadowing::from_host_scope; f(...)`),
-and macro-expanded construction. These launder the type identity and are closed only by the
-structural end-state below (the shared-`ResolverContext` per-scope memo, after which the
-constructors seal and a direct hot-path build will not compile). An observed evasion is a
-laundering escape that freezes the scanner per Structural-Confinement-First, at which point
-the structural replacement below becomes the required fix.
+Disclosed residual (inherent to any name-based syntactic source scanner; NOT enforced). The
+80/20 bound leaves TWO residual classes to the structural end-state rather than chasing
+further AST shapes:
+
+1. Identity-laundering forms that do not spell `ScopeShadowing` at the call site — a renamed
+   `use ...ScopeShadowing as SS; SS::from_host_scope(...)` import, a `type SS = ScopeShadowing;`
+   alias, a function-pointer / value capture or other call-form wrapper INCLUDING a
+   parenthesized callee (`let f = ScopeShadowing::from_host_scope; f(...)`,
+   `(ScopeShadowing::from_host_scope)(...)`), and macro-expanded construction.
+2. Runtime / control-flow multiplicity inside the sanctioned `None` arm — the scanner enforces
+   ONE syntactic direct call expression in the allowlisted arm, NOT "at most once at runtime";
+   a single sanctioned call inside a loop, closure, or guarded sub-arm builds many times at
+   runtime while reading as one syntactic call.
+
+Universal confinement of BOTH classes belongs to the structural end-state below (the
+shared-`ResolverContext` per-scope memo, after which the constructors seal and a direct
+hot-path build will not compile), NOT this scanner. An observed evasion is a laundering escape
+that freezes the scanner per Structural-Confinement-First, at which point the structural
+replacement below becomes the required fix.
 
 ## The structural end-state that retires the scanner
 
