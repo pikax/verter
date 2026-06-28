@@ -1259,6 +1259,69 @@ fn runes_component_import_plan_clears_legacy_flag() {
 }
 
 // ---------------------------------------------------------------------------
+// The topology helper-recorder must apply the SAME host-attribute gate as the
+// emitter (`compile_client`): for an invalid host shape (a `bind:checked` with no
+// `type`, a `bind:group` with a valueless `type`), the emitter FAILS CLOSED, so the
+// topology recorder must record NO bind helper — otherwise the structural oracle and
+// the emitter would DISAGREE. RED before the fix (the recorder called
+// `resolve_runtime_bind` directly, recording the helper for a host shape the emitter
+// refuses); GREEN after routing the recorder through `host_attr_gate_passes`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn topology_records_no_bind_helper_for_checked_without_type() {
+    let alloc = Allocator::default();
+    // `<input bind:checked>` with NO `type` attr: official ERRORs ("`bind:checked`
+    // can only be used with `<input type="checkbox">`") and `compile_client` fails
+    // closed, so the topology recorder must NOT record `BindChecked`.
+    let src = "<script>let c = $state(false);</script>\n<input bind:checked={c} />\n";
+    let ir = lower(src, &alloc);
+    let plan = plan_static_templates(&ir);
+    let topo = plan_client_topology(&ir, &plan);
+    assert!(
+        !topo.helpers.uses(SvelteHelper::BindChecked),
+        "a refused `bind:checked` (no type) must record NO bind helper (the recorder \
+         must apply the same host-attr gate as the emitter):\n{:?}",
+        topo.helpers.helper_set()
+    );
+}
+
+#[test]
+fn topology_records_no_bind_helper_for_group_with_valueless_type() {
+    let alloc = Allocator::default();
+    // `<input type bind:group>` (VALUELESS type): official ERRORs ("'type' attribute
+    // must be a static text value if input uses two-way binding") and
+    // `compile_client` fails closed, so the topology recorder must NOT record
+    // `BindGroup`.
+    let src = "<script>let g = $state(\"\");</script>\n<input type bind:group={g} value=\"a\" />\n";
+    let ir = lower(src, &alloc);
+    let plan = plan_static_templates(&ir);
+    let topo = plan_client_topology(&ir, &plan);
+    assert!(
+        !topo.helpers.uses(SvelteHelper::BindGroup),
+        "a refused `bind:group` (valueless type) must record NO bind helper:\n{:?}",
+        topo.helpers.helper_set()
+    );
+}
+
+#[test]
+fn topology_still_records_bind_helper_for_valid_group() {
+    let alloc = Allocator::default();
+    // POSITIVE control: a VALID `<input type="radio" bind:group>` (static type) is
+    // accepted by the emitter, so the topology recorder must STILL record `BindGroup`
+    // (the gate must not over-refuse). Verified against svelte@5.56.3.
+    let src = "<script>let g = $state(\"\");</script>\n<input type=\"radio\" bind:group={g} value=\"a\" />\n";
+    let ir = lower(src, &alloc);
+    let plan = plan_static_templates(&ir);
+    let topo = plan_client_topology(&ir, &plan);
+    assert!(
+        topo.helpers.uses(SvelteHelper::BindGroup),
+        "a valid static-type `bind:group` must still record the bind helper:\n{:?}",
+        topo.helpers.helper_set()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // U4 — runtime mode inference honors an explicit `<svelte:options runes={…}>`
 // override (Svelte's own forced-mode switch), shared with the IDE projector via
 // the parser-owned `forced_runes_option`. `runes={true}` forces RUNES mode even with zero
@@ -3525,6 +3588,16 @@ mod topology_oracle {
         SvelteHelper::Head,
         SvelteHelper::BindThis,
         SvelteHelper::BindValue,
+        // The 5c DOM-hosted bind family + the textarea prelude.
+        SvelteHelper::BindSelectValue,
+        SvelteHelper::BindChecked,
+        SvelteHelper::BindGroup,
+        SvelteHelper::BindCurrentTime,
+        SvelteHelper::BindPaused,
+        SvelteHelper::BindPlayed,
+        SvelteHelper::BindElementSize,
+        SvelteHelper::BindContentEditable,
+        SvelteHelper::BindProperty,
         SvelteHelper::AttributeEffect,
     ];
 
@@ -3665,17 +3738,12 @@ mod topology_oracle {
     /// Every divergence surfaced by the matrix that is NOT here is an in-scope bug
     /// that must be FIXED, not added here.
     const DEFERRAL_LEDGER: &[LedgerRow] = &[
-        // `bind:group` / `bind:value` static input-default removal: official strips
-        // a static `value`/`checked`/`group` default from the template when a
-        // `bind:` targets the same input (emitting `$.remove_input_defaults`).
-        LedgerRow {
-            fixture: "bindings/bind_checked_group.svelte",
-            axis: TopologyAxis::Skeleton,
-            owning_layer: "the bind-aware input-default removal layer",
-            reason: "official strips the static `value` default from a `bind:group` input; \
-                     the runtime-IR substrate preserves the static default (the bind-aware \
-                     stripping is the bindings-breadth layer's concern)",
-        },
+        // (The `bindings/bind_checked_group.svelte` Skeleton ledger row was REMOVED:
+        // 5c's bind-aware default stripping now pulls the static `value` out of a
+        // `bind:group` input's skeleton, so the planned skeleton MATCHES official —
+        // the matrix asserts it. The fixture as a whole still fails closed elsewhere on
+        // the checkbox-group `$state([])` array-proxy, owned by 5g.)
+        //
         // CSS scope-class injection: official injects the `svelte-<hash>` scoped
         // class into the skeleton; the scope-hash computation + injection is the
         // CSS-scoping layer, not the runtime-IR template plan.

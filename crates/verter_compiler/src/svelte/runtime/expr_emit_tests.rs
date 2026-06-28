@@ -8,9 +8,8 @@
 use oxc_allocator::Allocator;
 
 use crate::svelte::runtime::expr::{
-    bind_target_is_ts_wrapped, classify_bind_target, BindTargetKind, BindingInfo,
-    BindingRuntimeKind, BindingTable, BindingUseSet, ScopeGraph, ScopeId, StateClassification,
-    StateLowering, StateRuneKind,
+    BindTargetFact, BindTargetKind, BindingInfo, BindingRuntimeKind, BindingTable, BindingUseSet,
+    ScopeGraph, ScopeId, StateClassification, StateLowering, StateRuneKind,
 };
 use crate::svelte::runtime::expr_emit::{
     self, props_shape, state_decl_shape, PropsShape, StateDeclShape,
@@ -475,68 +474,203 @@ fn ts_cast_inside_a_ternary_arm_is_stripped() {
 
 #[test]
 fn classify_bind_target_is_structural() {
-    // F8: the bind-target lvalue shape is classified STRUCTURALLY from the parsed
-    // node, not a `source.contains('.')` text scan.
+    // The bind-target lvalue shape is classified STRUCTURALLY from the parsed node (the
+    // shared `BindTargetFact`, computed once per expression), not a `source.contains('.')`
+    // text scan.
     let alloc = Allocator::default();
+    let kind = |s: &str| BindTargetFact::from_source(&alloc, s).kind;
     // A bare identifier → reassignment.
-    assert_eq!(
-        classify_bind_target(&alloc, "name"),
-        Some(BindTargetKind::Identifier)
-    );
+    assert_eq!(kind("name"), Some(BindTargetKind::Identifier));
     // A member target → deep mutation.
-    assert_eq!(
-        classify_bind_target(&alloc, "o.x"),
-        Some(BindTargetKind::Member)
-    );
+    assert_eq!(kind("o.x"), Some(BindTargetKind::Member));
     // A computed member → deep mutation.
-    assert_eq!(
-        classify_bind_target(&alloc, "arr[i]"),
-        Some(BindTargetKind::Member)
-    );
+    assert_eq!(kind("arr[i]"), Some(BindTargetKind::Member));
     // A parenthesised / non-null-asserted identifier still classifies as the bare
     // identifier (the text heuristic would have no `.` here, but the structural
     // path unwraps to the lvalue core).
-    assert_eq!(
-        classify_bind_target(&alloc, "(name)"),
-        Some(BindTargetKind::Identifier)
-    );
-    assert_eq!(
-        classify_bind_target(&alloc, "name!"),
-        Some(BindTargetKind::Identifier)
-    );
+    assert_eq!(kind("(name)"), Some(BindTargetKind::Identifier));
+    assert_eq!(kind("name!"), Some(BindTargetKind::Identifier));
     // A NON-LVALUE (a call / a binary expression) is rejected — the old
     // `contains('.')` heuristic would have mis-classified `f().x` as a member
     // target; the structural path returns the member core, but a bare call /
     // literal is `None`.
-    assert_eq!(classify_bind_target(&alloc, "f()"), None);
-    assert_eq!(classify_bind_target(&alloc, "a + b"), None);
-    assert_eq!(classify_bind_target(&alloc, "42"), None);
+    assert_eq!(kind("f()"), None);
+    assert_eq!(kind("a + b"), None);
+    assert_eq!(kind("42"), None);
 }
 
 #[test]
-fn bind_target_ts_wrapper_detection_is_structural() {
-    // The TS-wrapper gate is STRUCTURAL: a TS type operator (`!` / `as` /
-    // `satisfies` / `<T>`) on the target's lvalue spine — possibly under parens — is
-    // a wrapped target. A clean lvalue is NOT, and a `!` inside a computed-member
-    // INDEX (`a[b!]`) does not wrap the target lvalue itself.
+fn bind_target_lvalue_ts_detection_is_structural_anywhere() {
+    // The TS-in-lvalue fact is STRUCTURAL (the shared `BindTargetFact`) and catches — ANYWHERE
+    // in the would-be lvalue spine (the spine TOP, a member-OBJECT chain link, OR a
+    // computed-INDEX expression) — a node whose TSX parse diverges from a plain-MJS parse: a
+    // TS-ONLY operator (`!` / `as` / `satisfies` / `<T>` / a bare `f<T>` instantiation) OR a
+    // call / new / tagged-template carrying TS type arguments (`g<a,b>(c)`). A clean lvalue is
+    // NOT flagged; a SEQUENCE (function-pair) is excluded (its TS rejection is owned by the
+    // plain-JS function-pair lane).
+    //
+    // TYPE-ARGUMENT boundary (oracle-verified svelte@5.56.3): a node carrying TS type arguments
+    // IS flagged (fail-closed) — both a BARE instantiation (`f<T>` / `arr[g<T>]`, an OXC
+    // `TSInstantiationExpression` with no trailing call) AND a CALL / new / tagged-template that
+    // carries type arguments (`arr[g<a,b>(c)]`, an OXC `CallExpression` with `type_arguments`).
+    // Official PARSE-REJECTS the bare instantiation (`js_parse_error`) and parses the call form
+    // as the plain-JS relational/comma `arr[(g < a, b > c)]` — so Verter's TSX-strip lane would
+    // otherwise DELETE the type arguments and emit the DIVERGENT index `arr[g(c)]` (a behavioral
+    // divergence). Failing both closed is never-wrong; the exact relational emit is owned by the
+    // shared plain-MJS template-expression authority (D-26), not this lvalue fail-close scan.
     let alloc = Allocator::default();
-    // ── TS-wrapped (true) ──
-    // The postfix non-null + the `as` / `satisfies` operators (the forms valid in a
-    // TSX-parsed expression; the prefix `<T>x` assertion is JSX in TSX mode, so it is
-    // not a reachable bind-target shape and is handled at the integration boundary).
-    assert!(bind_target_is_ts_wrapped(&alloc, "name!"));
-    assert!(bind_target_is_ts_wrapped(&alloc, "(name!)"));
-    assert!(bind_target_is_ts_wrapped(&alloc, "name as string"));
-    assert!(bind_target_is_ts_wrapped(&alloc, "name satisfies string"));
-    assert!(bind_target_is_ts_wrapped(&alloc, "o.x!"));
-    assert!(bind_target_is_ts_wrapped(&alloc, "((o.x as T))"));
-    // ── NOT TS-wrapped (false) — clean lvalues ──
-    assert!(!bind_target_is_ts_wrapped(&alloc, "name"));
-    assert!(!bind_target_is_ts_wrapped(&alloc, "(name)"));
-    assert!(!bind_target_is_ts_wrapped(&alloc, "o.x"));
-    assert!(!bind_target_is_ts_wrapped(&alloc, "arr[i]"));
-    // A `!` inside the computed INDEX wraps the index, not the target lvalue spine.
-    assert!(!bind_target_is_ts_wrapped(&alloc, "arr[i!]"));
+    let lvalue_ts = |s: &str| BindTargetFact::from_source(&alloc, s).lvalue_contains_ts;
+    // ── TS anywhere (true) ──
+    // Root wrappers (the postfix non-null + the `as` / `satisfies` operators; the prefix
+    // `<T>x` assertion is JSX in TSX mode, handled at the integration boundary).
+    assert!(lvalue_ts("name!"));
+    assert!(lvalue_ts("(name!)"));
+    assert!(lvalue_ts("name as string"));
+    assert!(lvalue_ts("name satisfies string"));
+    assert!(lvalue_ts("o.x!"));
+    assert!(lvalue_ts("((o.x as T))"));
+    // NON-ROOT TS: a member-OBJECT non-null, a computed-INDEX cast, a computed-INDEX
+    // non-null — all caught by the spine walk (the F1 fix vs the prior top-node-only gate).
+    assert!(lvalue_ts("o!.x"));
+    assert!(lvalue_ts("a[x as T]"));
+    assert!(lvalue_ts("a[i!]"));
+    // A BARE instantiation (`f<T>` root, `arr[g<T>]` index — OXC `TSInstantiationExpression`,
+    // no trailing call) IS flagged: official svelte@5.56.3 REJECTS both (`js_parse_error`),
+    // so the structural fail-close agrees with official (it does NOT over-refuse here).
+    assert!(
+        lvalue_ts("f<T>"),
+        "a bare `f<T>` instantiation root is flagged (official rejects it: js_parse_error)"
+    );
+    assert!(
+        lvalue_ts("arr[g<T>]"),
+        "a bare `g<T>` instantiation index is flagged (official rejects it: js_parse_error)"
+    );
+    // A CALL / new / tagged-template carrying TS type arguments — `arr[g<a,b>(c)]` (computed
+    // index) / `f<a,b>(c)` (root), each an OXC `CallExpression` with `type_arguments` — IS
+    // flagged: the TSX-strip lane would otherwise DELETE the type arguments and emit a DIVERGENT
+    // index (`arr[g(c)]`), whereas official parses the plain-JS relational form. Failing closed
+    // is never-wrong (the exact relational emit stays D-26).
+    assert!(
+        lvalue_ts("arr[g<a,b>(c)]"),
+        "a type-argument call-index must be flagged (the TSX-strip lane would emit a divergent index)"
+    );
+    assert!(
+        lvalue_ts("f<a,b>(c)"),
+        "a type-argument call root must be flagged (the TSX-strip lane would emit a divergent index)"
+    );
+    // A TS-only node embedded in a SUB-expression of the index — a typed arrow / function-expr
+    // param, or a typed local inside an IIFE body — is also flagged: the surrounding JS is
+    // valid, so the TSX-strip lane would DELETE the annotation and emit a divergent setter,
+    // whereas official parses it as plain JS and rejects the TS. The wholesale scan closes this
+    // class by construction (any TS / non-ECMAScript node), not per-form enumeration.
+    assert!(
+        lvalue_ts("arr[((x: number) => x)(0)]"),
+        "a typed arrow param inside the index must be flagged (the strip lane would delete `: number`)"
+    );
+    assert!(
+        lvalue_ts("arr[(function(y: number){ return y; })(0)]"),
+        "a typed function-expr param inside the index must be flagged"
+    );
+    assert!(
+        lvalue_ts("arr[(() => { const k: number = 0; return k; })()]"),
+        "a typed local inside an IIFE-body index must be flagged"
+    );
+    // ── NOT TS anywhere (false) — clean lvalues ──
+    assert!(!lvalue_ts("name"));
+    assert!(!lvalue_ts("(name)"));
+    assert!(!lvalue_ts("o.x"));
+    assert!(!lvalue_ts("arr[i]"));
+    assert!(!lvalue_ts("obj.a.b"));
+    // A plain CALL index WITHOUT type arguments (`f(c)` — an OXC `CallExpression` with no
+    // `type_arguments`) is plain JS and stays UNflagged: only the type-argument class fails
+    // closed, never all calls.
+    assert!(
+        !lvalue_ts("arr[f(c)]"),
+        "a plain `f(c)` call-index (no type arguments) must NOT be flagged TS (no over-refusal)"
+    );
+    // A plain (untyped) IIFE index has NO TS node and stays UNflagged — the wholesale scan is
+    // precise (valid JS sub-expressions are never over-refused).
+    assert!(
+        !lvalue_ts("arr[(() => 0)()]"),
+        "a plain untyped IIFE index must NOT be flagged TS (no over-refusal)"
+    );
+    // A SEQUENCE (function-pair) target is NOT an lvalue spine — excluded even if an element
+    // carries TS (the plain-JS function-pair lane owns that rejection).
+    assert!(!lvalue_ts("get, set"));
+}
+
+#[test]
+fn bind_target_fact_carries_the_consolidated_bundle() {
+    // F3: the SINGLE `BindTargetFact` carries EVERY datum the bind consumers previously
+    // re-derived with a per-consumer reparse — kind, sequence presence, TS-wrapper
+    // validity, root identifier, and the plain-JS function-pair slices — from ONE parse.
+    let alloc = Allocator::default();
+
+    // A member target: kind=Member, root="o", not a sequence, no function pair.
+    let member = BindTargetFact::from_source(&alloc, "o.x.y");
+    assert_eq!(member.kind, Some(BindTargetKind::Member));
+    assert_eq!(member.root_ident.as_deref(), Some("o"));
+    assert!(!member.is_sequence);
+    assert!(member.function_pair.is_none());
+
+    // A two-element function-pair: kind=FunctionPair, is_sequence, the two element slices.
+    let pair = BindTargetFact::from_source(&alloc, "get, set");
+    assert_eq!(pair.kind, Some(BindTargetKind::FunctionPair));
+    assert!(pair.is_sequence);
+    assert_eq!(
+        pair.function_pair,
+        Some(("get".to_string(), "set".to_string()))
+    );
+
+    // A 3-element sequence: is_sequence=true (the F1 identifier/member-only policy signal)
+    // but kind=None and NO valid two-element function pair.
+    let triple = BindTargetFact::from_source(&alloc, "a, b, c");
+    assert!(triple.is_sequence);
+    assert_eq!(triple.kind, None);
+    assert!(triple.function_pair.is_none());
+
+    // A non-lvalue: every field empty/false.
+    let non_lvalue = BindTargetFact::from_source(&alloc, "f()");
+    assert_eq!(non_lvalue.kind, None);
+    assert!(!non_lvalue.is_sequence);
+    assert!(non_lvalue.root_ident.is_none());
+    assert!(non_lvalue.function_pair.is_none());
+}
+
+#[test]
+fn bind_target_keypath_matches_official_extract_all_identifiers() {
+    // Finding A (R4): `target_keypath` mirrors svelte's
+    // `extract_all_identifiers_from_expression` keypath — the `bind:group` accumulator
+    // grouping identity. Pinned, structural (NEVER raw-source): a bare identifier and a
+    // static-member chain serialize their dotted names; a DIRECT identifier/literal computed
+    // index is bracketed (`[i]` / `["x"]` / `[0]`); a NON-TRIVIAL index (`i+j`, `f()`, `b.c`)
+    // surfaces its inner identifiers as plain VALUE-position names, so it is OPERATOR- and
+    // WHITESPACE-insensitive.
+    let alloc = Allocator::default();
+    let keypath = |s: &str| BindTargetFact::from_source(&alloc, s).target_keypath;
+
+    assert_eq!(keypath("v").as_deref(), Some("v"));
+    assert_eq!(keypath("o.x.y").as_deref(), Some("o.x.y"));
+    assert_eq!(keypath("a[i]").as_deref(), Some("a.[i]"));
+    assert_eq!(keypath("a[0]").as_deref(), Some("a.[0]"));
+    // `a.x` (static) and `a["x"]` (computed string) stay DISTINCT — the distinction
+    // official preserves.
+    assert_eq!(keypath("a.x").as_deref(), Some("a.x"));
+    assert_eq!(keypath("a[\"x\"]").as_deref(), Some("a.[\"x\"]"));
+    assert_ne!(keypath("a.x"), keypath("a[\"x\"]"));
+    // OPERATOR- and WHITESPACE-insensitive: `g[i+j]`, `g[i + j]`, `g[i*j]` collapse to ONE
+    // key (the operator is not an identifier, so it never enters the keypath).
+    assert_eq!(keypath("g[i+j]").as_deref(), Some("g.i.j"));
+    assert_eq!(keypath("g[i + j]").as_deref(), Some("g.i.j"));
+    assert_eq!(keypath("g[i*j]").as_deref(), Some("g.i.j"));
+    assert_eq!(keypath("g[i+j]"), keypath("g[i*j]"));
+    // A parenthesized index keys the same as the bare index (parens are transparent).
+    assert_eq!(keypath("a[(i)]").as_deref(), Some("a.[i]"));
+    // A computed call index surfaces the callee identifier in value position.
+    assert_eq!(keypath("g[f()]").as_deref(), Some("g.f"));
+    // NEGATIVE: the keypath is NOT the old per-index serialization (`a[i]`, never `a.i`-less)
+    // and NEVER the raw source spelling.
+    assert_ne!(keypath("g[i+j]").as_deref(), Some("g[i+j]"));
 }
 
 #[test]
@@ -691,7 +825,7 @@ fn signal_read_inside_labeled_and_class_body_is_rewritten() {
 
 // NOTE: the broad instance-script LOWERING (`lower_instance_declarations`) was
 // removed in favor of the strict finite `SupportedInstanceScriptItem` allowlist
-// (`classify_supported_instance_items` + `lower_supported_instance_items`). The
+// (`classify_supported_instance_items` + `lower_simple_instance_item`). The
 // removed-path characterization tests (TS-strip of a non-primitive `$state` init /
 // a bare typed `let` / a `$props()` default; the one-hop object-state proxy follow
 // inside an instance FUNCTION body) covered shapes that now FAIL CLOSED — a

@@ -17,9 +17,12 @@ use oxc_ast::ast::{BindingPattern, Expression, Statement, VariableDeclarationKin
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::expr::{
-    bind_target_is_ts_wrapped, classify_bind_target, is_derived_callee, is_props_callee,
-    reparse_module, state_rune_call, BindTargetKind, BindingRuntimeKind, BindingTable, ScopeGraph,
-    ScopeId,
+    is_derived_callee, is_props_callee, reparse_module, state_rune_call, AnalyzedExpr,
+    BindTargetKind, BindingRuntimeKind, BindingTable, ScopeGraph, ScopeId,
+};
+use super::ir::AttrIr;
+use crate::svelte::bind_contract::{
+    bind_target_policy, resolve_runtime_bind, BindTargetPolicy, RuntimeBindRouting, RuntimeHelper,
 };
 use verter_span::Span;
 
@@ -340,38 +343,130 @@ pub(super) fn text_chunk_is_simple_ascii(chunk: &str) -> bool {
 
 /// The accepted shape of a supported `bind:` directive.
 ///
-/// The supported boundary: `bind:value` on an `<input>` to a bare IDENTIFIER
-/// resolving to a reactive `$state` signal, and `bind:this` on an intrinsic element
-/// to a bare non-prop IDENTIFIER. A `bind:value` to a plain local, a PROP ident, a
-/// member (`obj.x`), a non-lvalue (`{f()}`), a sequence get/set pair, a non-`input`
-/// host, or a `bind:this` to a member / prop all fail closed (5c).
+/// The supported boundary (5c, DOM-hosted binds):
+/// - `bind:this` on an intrinsic element to a bare non-prop IDENTIFIER, OR a
+///   two-element getter/setter FUNCTION-PAIR (`bind:this={get, set}`) — both the
+///   [`This`](Self::This) shape (discriminated by its [`BindGetSetForm`]).
+/// - the DOM-value/property bind family on an ordinary DOM-element host — `value`
+///   (`<input>`/`<textarea>`/`<select>`), `checked`, `group`, media
+///   (`currentTime`/`paused`/`duration`/`played`/…), dimensions
+///   (`clientWidth`/…), contenteditable (`innerHTML`/…), and the generic DOM
+///   property (`open`/…) — each carrying the typed [`RuntimeBindRouting`] the
+///   plan/emitter consume DATA-DRIVEN ([`DomBind`](Self::DomBind)). The bound
+///   lvalue is a state signal / plain local / member (resolved at plan time);
+///   a `$props()`-rooted / `$derived` / import-rooted target fails closed.
+///
+/// A `bind:value` to a PROP ident, a member rooted at a non-`$state` binding, a
+/// non-lvalue (`{f()}`), a sequence target on an identifier/member-only bind
+/// (`bind:group={get, set}`), a non-two-element sequence, an unsupported `(name, host)`
+/// pair, or a `bind:this` to a member / prop all fail closed (5c). A two-element
+/// function-pair `{get, set}` on a policy-allowed bind (`bind:value`/`bind:checked`/…)
+/// IS admitted (`FunctionPair`); only identifier/member-only binds refuse a sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ClientBindShape {
-    /// `bind:value={ident}` on an `<input>`, the target a reactive signal binding.
-    ValueSignalIdent,
-    /// `bind:this={ident}` on an intrinsic element, the target a non-prop binding.
-    ThisIdent,
+    /// A DOM-hosted value/property bind (`value`/`checked`/`group`/media/dimension/
+    /// contenteditable/property) on an ordinary DOM element, carrying the typed
+    /// runtime emission routing (helper / arity / event / prelude). The bound
+    /// lvalue's signal-vs-plain-vs-member shape is resolved at plan time.
+    DomBind {
+        /// The bind directive's local NAME (`value` / `clientWidth` / `open` /
+        /// `innerHTML` / …) — the subject the property/dimension/content-editable
+        /// helpers pass as a string-literal arg. Carried on the shape so a node with
+        /// MULTIPLE binds (`<video bind:currentTime bind:paused …>`) emits each bind's
+        /// correct name, never the node's first bind name.
+        name: String,
+        /// The typed runtime emission routing (the `$.bind_*` / `bind_property`
+        /// form, arity, event, prelude) for this `(name, host)`.
+        routing: RuntimeBindRouting,
+        /// How the bound get/set reach the helper. A TARGET-LVALUE bind synthesizes
+        /// the get/set THUNKS from a reassignable lvalue (`() => GET` / `($$value) =>
+        /// SET`); a FUNCTION-PAIR bind (`bind:value={get, set}`) passes the two
+        /// USER-supplied (and signal-rewritten) get/set expressions DIRECTLY, with no
+        /// generated thunk wrapper. The two emit the SAME per-helper argument
+        /// structure (which slots carry get vs set), differing only in the wrapper.
+        getset: BindGetSetForm,
+        /// The `bind:group` accumulator GROUPING key — `Some` ONLY for a `Group` routing,
+        /// `None` for every other DOM bind. Two `bind:group` inputs binding the SAME
+        /// structural target in the SAME scope carry an EQUAL key (they share one
+        /// `binding_group` accumulator); distinct targets carry distinct keys (each gets its
+        /// own accumulator). The emitter allocates ONE collision-safe accumulator name per
+        /// DISTINCT key in source order (`binding_group`, `binding_group_1`, …) and the
+        /// `$.bind_group(<name>, …)` call reads the name back through this key — never a
+        /// single component-wide name.
+        group_key: Option<GroupBindKey>,
+    },
+    /// `bind:this` on an intrinsic element — either a bare non-prop IDENTIFIER target
+    /// ([`TargetLvalue`](BindGetSetForm::TargetLvalue): `$.bind_this(el, ($$value) => SET,
+    /// () => GET)`) or a two-element getter/setter FUNCTION-PAIR `bind:this={get, set}`
+    /// ([`FunctionPair`](BindGetSetForm::FunctionPair): the user-supplied get/set passed
+    /// DIRECTLY — `$.bind_this(el, set, get)`). The `getset` form discriminates the two
+    /// emit shapes, mirroring the `DomBind` get/set wrapper rule. (Component `bind:this`
+    /// fails closed upstream at the component-element gate, never reaching here.)
+    This {
+        /// How the host-instance get/set reach `$.bind_this`: a `TargetLvalue` identifier
+        /// target synthesizes the get/set thunks; a `FunctionPair` passes the two
+        /// user-supplied (signal-rewritten) expressions directly.
+        getset: BindGetSetForm,
+    },
+}
+
+/// The GROUPING identity of a `bind:group` accumulator — the structural bind TARGET
+/// (`keypath`, derived from the typed bind-target fact, never a raw-source compare) plus the
+/// lexical `scope`. Mirrors official svelte@5.56.3's `[keypath, bindings]` group identity:
+/// two `bind:group` inputs binding the same target in the same scope share ONE accumulator;
+/// a different target (or the same spelling in a different scope) gets its own. The emitter
+/// maps each distinct key to one allocated `binding_group[_N]` name (in source order).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct GroupBindKey {
+    /// The lexical scope the bind target resolves in (so the same spelling in two scopes
+    /// stays two groups).
+    pub(super) scope: ScopeId,
+    /// The structural identifier keypath of the bound target (`"a"`, `"o.x"`, `"g.i.j"`, …),
+    /// the [`BindTargetFact::target_keypath`](super::expr::BindTargetFact) — a PURELY
+    /// STRUCTURAL key (svelte's operator-/whitespace-insensitive
+    /// `extract_all_identifiers_from_expression`), NEVER a raw-source compare and never a
+    /// source fallback.
+    pub(super) keypath: String,
+}
+
+/// How a DOM-value/property bind's getter + setter reach the `$.bind_*` helper.
+///
+/// A `bind:value={lvalue}` synthesizes the get/set as THUNKS over a reassignable
+/// target ([`TargetLvalue`](Self::TargetLvalue)); a `bind:value={get, set}`
+/// function-pair passes the two user-supplied expressions DIRECTLY
+/// ([`FunctionPair`](Self::FunctionPair)) — official does not re-wrap them. The
+/// emitter reads this to decide whether to wrap the plan's getter/setter strings in
+/// `() => …` / `($$value) => …` thunks or emit them verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BindGetSetForm {
+    /// The get/set are synthesized lvalue THUNKS (`() => GET` / `($$value) => SET`)
+    /// over a reassignable target.
+    TargetLvalue,
+    /// The get/set are the two user-supplied expressions of a `{get, set}` pair,
+    /// passed DIRECTLY to the helper (already signal-rewritten, no thunk wrapper).
+    FunctionPair,
 }
 
 /// Classify a supported `bind:` directive into its accepted [`ClientBindShape`], or
 /// fail closed.
 ///
 /// `target` is the bind target (`value` / `this`); `tag` is the host element tag;
-/// `expr_source` is the bound expression source. Both supported binds REQUIRE an
-/// explicit bound-expression source — a sourceless bind (`expr_source: None`) fails
-/// closed, because runtime-op collection emits `$.bind_value` / `$.bind_this` only
-/// for an `AttrIr::Bind { expr: Some(_) }`; accepting a sourceless bind would record
-/// a shape the emitter then silently drops. (The shorthand `bind:value` reaches here
-/// as `Some("value")` — its lowering synthesizes the bound `value` identifier.) The
-/// scope-aware binding lookup resolves the target identifier's kind. ONLY a
-/// `bind:value` on an `<input>` to a reactive `$state` signal IDENTIFIER and a
-/// `bind:this` to a non-prop IDENTIFIER are accepted; a plain-local / prop / member /
-/// non-lvalue / sourceless target fails closed (5c).
+/// `expr` is the analyzed bound expression (carrying its source AND the shared
+/// [`BindTargetFact`](super::expr::BindTargetFact) — the single bind-target authority,
+/// computed once at analysis time, so this classifier never re-parses the expression).
+/// Both supported binds REQUIRE an explicit bound expression — a sourceless bind
+/// (`expr: None`) fails closed, because runtime-op collection emits `$.bind_value` /
+/// `$.bind_this` only for an `AttrIr::Bind { expr: Some(_) }`; accepting a sourceless bind
+/// would record a shape the emitter then silently drops. The scope-aware binding lookup
+/// resolves the target identifier's kind. ONLY a `bind:value` on an `<input>` to a reactive
+/// `$state` signal IDENTIFIER and a `bind:this` to a non-prop IDENTIFIER are accepted; a
+/// plain-local / prop / member / non-lvalue / sourceless target fails closed (5c).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn classify_bind_shape(
     target: &str,
     tag: &str,
-    expr_source: Option<&str>,
+    host_attrs: &[AttrIr],
+    expr: Option<&AnalyzedExpr<'_>>,
     scope: ScopeId,
     bindings: &BindingTable,
     scopes: &ScopeGraph,
@@ -389,27 +484,59 @@ pub(super) fn classify_bind_shape(
     // deferral, so a TS-wrapped target fails closed (5c) — only a CLEAN identifier
     // lvalue is supported. Checked structurally over the parsed target, BEFORE the
     // lvalue classification (which unwraps the TS spine).
-    if let Some(source) = expr_source {
-        let alloc = Allocator::default();
-        if bind_target_is_ts_wrapped(&alloc, source) {
+    //
+    // Oracle-verified scoping (svelte@5.56.3): a TS-wrapped bind target is REACHABLE
+    // only inside a `<script lang="ts">` component — in a plain `<script>` the
+    // official compiler PARSE-REJECTS `bind:value={name!}` (`Expected token }`). A
+    // `lang="ts"` component is a settled broad deferral that fails closed ENTIRELY as
+    // `TypeScript` at the parse gate, BEFORE any bind classification (characterized by
+    // `lang_ts_component_with_bind_targets_fails_closed`). So this TS-wrapped refusal
+    // is MOOT for the 5c-reachable surface (a defense-in-depth stop, not a live 5c
+    // boundary); the canonical-lvalue-from-TS widening belongs to whenever `lang="ts"`
+    // components are opened (a TypeScript-script block), NOT 5c — the underlying
+    // TS-spine strip already exists (`expr::expr_wrapped_ident`). Read from the shared
+    // bind-target fact (computed once at analysis time) — no per-call reparse.
+    //
+    // SCOPE: `lvalue_contains_ts` flags a TS-ONLY operator ANYWHERE in the would-be lvalue
+    // spine — the spine TOP (`name!` / `name as T` / `(name!)`), a member-OBJECT non-null
+    // (`o!.x`), OR a computed-INDEX cast (`a[x as T]` / `a[x!]`). All fail closed here: each
+    // is a plain-`<script>` PARSE error in official (`expected_token` / `js_parse_error`,
+    // oracle-verified), so Verter must NOT accept-and-strip them to valid JS. The EXACT
+    // diagnostic-code parity (`expected_token`/`js_parse_error` vs this structural
+    // fail-closed) stays D-26 (the shared `.mjs` template-expression parse authority, which
+    // rejects plain-script TS UNIFORMLY across every value position) — this is the structural
+    // fail-closed, NOT a bind-only TS code gate. Read from the shared bind-target fact
+    // (computed once at analysis time) — no per-call reparse, no source-text scan.
+    if let Some(e) = expr {
+        if e.bind_target.lvalue_contains_ts {
             return Err(refuse());
         }
     }
     match target {
-        // `bind:this` — an intrinsic element binding to a DECLARED non-prop IDENTIFIER
-        // only (the §1.2-core shape-3 `let el;` local). A member `bind:this={refs[0]}`
-        // / a prop target / a FREE-or-undeclared target is the deferral-ledger
-        // member-bind / prop-bind / declared-target-completion form (5c).
+        // `bind:this` on an INTRINSIC element (a component `bind:this` fails closed
+        // upstream at the component-element gate, never reaching here). Two accepted
+        // shapes: (1) a DECLARED non-prop IDENTIFIER target (the §1.2-core shape-3
+        // `let el;` local) → the identifier `$.bind_this(el, ($$value) => SET, () => GET)`;
+        // (2) a two-element getter/setter FUNCTION-PAIR (`bind:this={get, set}`) → the
+        // user-supplied get/set passed DIRECTLY (`$.bind_this(el, set, get)`), matching
+        // official svelte@5.56.3. A member `bind:this={refs[0]}` / a prop target / a
+        // FREE-or-undeclared identifier target is the deferral-ledger member-bind /
+        // prop-bind / declared-target-completion form (5c).
         "this" => {
-            // The shorthand `bind:this` is not valid Svelte; an explicit identifier
-            // target is required.
-            let Some(source) = expr_source else {
+            // The shorthand `bind:this` is not valid Svelte; an explicit target is required.
+            let Some(e) = expr else {
                 return Err(refuse());
             };
-            let alloc = Allocator::default();
-            match classify_bind_target(&alloc, source) {
+            match e.bind_target.kind {
                 Some(BindTargetKind::Identifier) => {
-                    let name = source.trim();
+                    // The identifier ROOT comes from the typed bind-target fact
+                    // (`root_ident`), NOT `source.trim()` — so a parenthesized identifier
+                    // (`bind:this={(el)}`) resolves its root `el`, matching official (which
+                    // accepts author parens around a single identifier). An Identifier kind
+                    // always carries a root; a missing root fails closed defensively.
+                    let Some(name) = e.bind_target.root_ident.as_deref() else {
+                        return Err(refuse());
+                    };
                     // A FREE / UNDECLARED `bind:this` target is official-accepted but
                     // outside the core: official reserves a fresh local for it (`var
                     // button_1`), while Verter's element-local allocation would COLLIDE
@@ -427,50 +554,252 @@ pub(super) fn classify_bind_shape(
                         Some(BindingRuntimeKind::Prop) | Some(BindingRuntimeKind::BindableProp) => {
                             Err(refuse())
                         }
-                        _ => Ok(ClientBindShape::ThisIdent),
+                        _ => Ok(ClientBindShape::This {
+                            getset: BindGetSetForm::TargetLvalue,
+                        }),
+                    }
+                }
+                // A two-element getter/setter FUNCTION-PAIR `bind:this={get, set}` on an
+                // intrinsic element — the user owns the get/set, so there is no lvalue root
+                // to validate (mirroring the DOM-value function-pair lane). Acceptance reads
+                // the fact's DEFAULT-CLOSED plain-Svelte-JS function-pair slices (parsed
+                // `mjs`, exactly two elements, NO TS-only construct); a parenthesized
+                // sequence (`bind:this={(get, set)}`) was already rejected upstream as
+                // `bind_invalid_parens`. A CLEAN pair passes the supplied get/set DIRECTLY to
+                // `$.bind_this` (signal-rewritten at plan time).
+                Some(BindTargetKind::FunctionPair) => {
+                    if e.bind_target.is_parenthesized_sequence {
+                        return Err(refuse());
+                    }
+                    if e.bind_target.function_pair.is_some() {
+                        Ok(ClientBindShape::This {
+                            getset: BindGetSetForm::FunctionPair,
+                        })
+                    } else {
+                        Err(refuse())
                     }
                 }
                 _ => Err(refuse()),
             }
         }
-        // `bind:value` — an `<input>` only, to a reactive `$state` signal IDENTIFIER.
-        // A textarea/select/checkbox/group bind, a plain-local / prop target, a
-        // member, or a non-lvalue is the deferral-ledger bind vertical (5c).
-        "value" if tag == "input" => {
-            // An accepted `bind:value` REQUIRES an explicit bound-expression source
-            // (an identifier). Runtime-op collection emits `$.bind_value` only for an
-            // `AttrIr::Bind { expr: Some(_) }`; a bind whose lowering produced NO
-            // bound expression (`expr_source: None`) would record an accepted shape
-            // the emitter then silently drops (an accept-then-drop divergence — the
-            // same class as the earlier `defaultValue` attr leak). So a sourceless
-            // bind fails closed here: ACCEPTED == EMITTABLE. (The shorthand
-            // `bind:value` is unaffected — its lowering synthesizes the bound `value`
-            // identifier, reaching this classifier as `Some("value")`.)
-            let Some(source) = expr_source else {
+        // Every other bind name routes through the SHARED runtime-bind router (the
+        // DATA-DRIVEN authority): `value`/`checked` (builtin form-control binds) +
+        // the wide `bind:` family (`group`/media/dimension/contenteditable/property).
+        // An unsupported `(name, host)` pair has no routing and fails closed (5c/5f).
+        // The host's typed attributes feed the official host-attribute gates.
+        name => {
+            classify_dom_value_bind(name, tag, host_attrs, expr, scope, bindings, scopes, refuse)
+        }
+    }
+}
+
+/// Classify a DOM value/property bind (`value`/`checked`/`group`/media/dimension/
+/// contenteditable/property) on the host `tag`, resolving its runtime routing through
+/// the SHARED [`resolve_runtime_bind`] authority and validating the bound target.
+///
+/// The routing is DATA-DRIVEN — there is NO per-name match arm pile. An accepted bind
+/// REQUIRES an explicit bound-expression source (ACCEPTED == EMITTABLE: a sourceless
+/// bind would record a shape the emitter drops). The accepted target taxonomy (driven
+/// from the typed [`BindTargetKind`] + the scope-aware binding table, NEVER a text
+/// scan):
+///
+/// - a CLEAN (non-TS-wrapped) bare-identifier target whose binding is a reactive
+///   `$state` signal (`$.set(name, $$value)`) OR a PLAIN local (`name = $$value`);
+/// - a CLEAN member target (`o.x` / `a[i]`) whose ROOT identifier is a reactive
+///   `$state` signal (`$.get(o).x = $$value`) OR a PLAIN local (`o.x = $$value`);
+/// - a two-element FUNCTION-PAIR `{get, set}`, whose user-supplied get/set are passed
+///   directly to the helper (signal-rewritten, no synthesized lvalue thunk).
+///
+/// A `$props()` / `$bindable` / `$derived` / import root fails closed as a CONSERVATIVE
+/// boundary: a `$props()` / `$bindable` write IS a divergent protocol (a `$.prop` flag-7
+/// setter), but the IMPORT and `$derived`-member cases fail closed because their
+/// correctness depends on import / derived semantics not yet modelled in this vertical —
+/// NOT because official uses a divergent accessor (for an import root official emits the
+/// identical plain-member form, and a `$derived` member is a plain member write). 5c
+/// keeps these fail-closed until that semantics is owned. Object/array `$state`
+/// (`BareProxy` / `StateProxy`) roots are not reachable here — the object/array `$state`
+/// DECLARATION fails closed upstream at the `$state()` non-primitive-init gate (its
+/// lowering is owned by the runes-completion vertical), so only PLAIN-local and
+/// `$state`-SIGNAL roots reach this classifier.
+#[allow(clippy::too_many_arguments)]
+fn classify_dom_value_bind(
+    name: &str,
+    tag: &str,
+    host_attrs: &[AttrIr],
+    expr: Option<&AnalyzedExpr<'_>>,
+    scope: ScopeId,
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+    refuse: impl Fn() -> UnsupportedSvelteRuntimeSurface,
+) -> Result<ClientBindShape, UnsupportedSvelteRuntimeSurface> {
+    // The runtime routing for this `(name, host)`. No routing ⇒ an unsupported DOM
+    // bind (or a component/window-host bind, not yet supported, owned by 5f) ⇒ fail closed.
+    let Some(routing) = resolve_runtime_bind(name, tag) else {
+        return Err(refuse());
+    };
+    // The official HOST-ATTRIBUTE gates — a bind that is valid ONLY when its host
+    // carries a specific STATIC attribute (svelte@5.56.3 raises a COMPILE ERROR
+    // otherwise). The runtime router only sees `(name, tag)`, so without these gates
+    // an invalid bind would emit a divergent / runtime-broken module. Driven from the
+    // host's typed `AttrIr` inventory (NEVER a source-text scan).
+    if !super::host_attr_gate::host_attr_gate_passes(name, tag, &routing, host_attrs) {
+        return Err(refuse());
+    }
+    // ACCEPTED == EMITTABLE: a sourceless bind fails closed (the emitter only emits a
+    // bind for an `AttrIr::Bind { expr: Some(_) }`). The shared bind-target fact
+    // (computed once at analysis time) is the SOLE classification authority below — no
+    // per-call reparse.
+    let Some(e) = expr else {
+        return Err(refuse());
+    };
+    let fact = &e.bind_target;
+    // The `bind:group` accumulator grouping key — the structural target keypath + scope,
+    // computed ONLY for a `Group` routing (every other DOM bind carries `None`). Two inputs
+    // binding the SAME structural target in the SAME scope produce an EQUAL key (they share
+    // one accumulator); a distinct target produces a distinct key. The keypath is the typed
+    // bind-target fact (svelte's operator-/whitespace-insensitive identifier keypath), a
+    // PURELY STRUCTURAL key — NEVER a raw-source compare. An accepted `bind:group` target
+    // (Identifier/Member) always has a keypath; a target that yields none fails the group
+    // bind CLOSED rather than falling back to raw source.
+    let group_key = if routing.helper == RuntimeHelper::Group {
+        let Some(keypath) = fact.target_keypath.clone() else {
+            return Err(refuse());
+        };
+        Some(GroupBindKey { scope, keypath })
+    } else {
+        None
+    };
+    let accept = |getset| {
+        Ok(ClientBindShape::DomBind {
+            name: name.to_string(),
+            routing,
+            getset,
+            group_key: group_key.clone(),
+        })
+    };
+    match fact.kind {
+        // A bare-identifier target: accepted when its binding is a reactive `$state`
+        // signal (setter `$.set(name, $$value)`) OR a PLAIN local (setter `name =
+        // $$value`). A `$props()` / `$bindable` / `$derived` / import root needs a
+        // divergent official protocol and fails closed (the locked-down boundaries).
+        Some(BindTargetKind::Identifier) => {
+            // The identifier ROOT comes from the typed bind-target fact (`root_ident`), NOT
+            // `source.trim()` — so a parenthesized identifier (`bind:value={(v)}`) resolves
+            // its root `v` (official accepts author parens around a single identifier). An
+            // Identifier kind always carries a root; a missing root fails closed defensively.
+            let Some(root_name) = &fact.root_ident else {
                 return Err(refuse());
             };
-            let alloc = Allocator::default();
-            match classify_bind_target(&alloc, source) {
-                Some(BindTargetKind::Identifier) => {
-                    // ONLY a reactive `$state` signal target is supported (sets the
-                    // signal via `$.set`). A plain local (a `name = $$value` direct
-                    // assign), a PROP / `$bindable` target (the flag-7 2-arg
-                    // `$.bind_value` form), or a `$derived` memo is a deferral (5c).
-                    let resolved = bindings.resolve_kind(scopes, scope, source.trim());
-                    match resolved {
-                        Some(k) if is_signal_binding(k) => Ok(ClientBindShape::ValueSignalIdent),
-                        _ => Err(refuse()),
-                    }
-                }
-                // A member target (`obj.x` / `a[i]`), a non-lvalue (`bind:value={f()}`),
-                // or a sequence get/set pair fails closed (5c).
-                _ => Err(refuse()),
+            if bind_root_is_writable_target(bindings, scopes, scope, root_name) {
+                accept(BindGetSetForm::TargetLvalue)
+            } else {
+                Err(refuse())
             }
         }
-        // Every other bind target (`checked`, `group`, `value` on a non-input, …) is
-        // the deferral-ledger bind vertical (5c).
-        _ => Err(refuse()),
+        // A member target (`o.x` / `a[i]`): accepted when its ROOT identifier is a
+        // reactive `$state` signal (`$.get(o).x = $$value`) OR a PLAIN local (`o.x =
+        // $$value`). A member rooted at a `$props()` / `$bindable` / `$derived` /
+        // import binding is a divergent official surface and fails closed.
+        Some(BindTargetKind::Member) => {
+            let Some(root_name) = &fact.root_ident else {
+                return Err(refuse());
+            };
+            if bind_root_is_writable_target(bindings, scopes, scope, root_name) {
+                accept(BindGetSetForm::TargetLvalue)
+            } else {
+                Err(refuse())
+            }
+        }
+        // A two-element function-pair `{get, set}`: the user owns the get/set, so there
+        // is no lvalue root to validate. Acceptance reads the fact's DEFAULT-CLOSED
+        // plain-Svelte-JS function-pair slices (parsed as plain JS `SourceType::mjs()`,
+        // mirroring official's Acorn parse, exactly two elements, NO TS-only construct).
+        // A TS construct inside either element — `get as any` / `get!` / a typed arrow
+        // param, OR a TS-only class/member field, decorator, `implements`,
+        // auto-`accessor` — is a plain-`.svelte` PARSE ERROR in official, so the fact's
+        // `function_pair` is `None` and it fails closed (the `lang="ts"` widening is a
+        // separate surface). A CLEAN pair is accepted; the supplied get/set are passed
+        // DIRECTLY to the helper (signal-rewritten through the plain-JS rewrite lane at
+        // plan time).
+        Some(BindTargetKind::FunctionPair) => {
+            // DEFENSIVE fail-CLOSED: an identifier/member-only bind (`bind:group`) NEVER
+            // accepts a function-pair (`SequenceExpression`) target — official throws
+            // `bind_group_invalid_expression`. The official-reject gate's bind-validation pass
+            // (`scan_bind_shape_violations`) already rejects this upstream for BOTH
+            // the bare `{get,set}` and the quoted `"{get,set}"` forms; this belt-and-
+            // suspenders check means even a future attribute representation that slips
+            // past the gate refuses here rather than emitting a wrong `$.bind_group(get,
+            // set)`. Data-driven from the contract policy column (no `name == "group"`).
+            if matches!(
+                bind_target_policy(name, tag),
+                BindTargetPolicy::IdentifierOrMemberOnly { .. }
+            ) {
+                return Err(refuse());
+            }
+            // DEFENSIVE fail-CLOSED: author PARENTHESES around the sequence
+            // (`bind:value={(get, set)}`) are the official `bind_invalid_parens` reject. The
+            // official-reject gate's bind-validation pass (`scan_bind_shape_violations`) already
+            // rejects this upstream; this belt-and-suspenders check refuses a parenthesized
+            // sequence that slips past the gate rather than emitting a wrong
+            // `$.bind_value(el, get, set)` (the author parens transparently dropped).
+            if fact.is_parenthesized_sequence {
+                return Err(refuse());
+            }
+            if fact.function_pair.is_some() {
+                accept(BindGetSetForm::FunctionPair)
+            } else {
+                Err(refuse())
+            }
+        }
+        // A non-lvalue target (`bind:value={f()}` — a call, a literal, a binary, or a
+        // non-two-element sequence) fails closed (5c).
+        None => Err(refuse()),
     }
+}
+
+/// Whether a bind target's ROOT binding is a WRITABLE target-lvalue root — a reactive
+/// `$state` signal (the setter writes via `$.set` / `$.get(obj).x = …`) OR a PLAIN
+/// local (the setter assigns directly: `name = $$value` / `o.x = $$value`). These are
+/// the two roots whose plain-assignment setter is byte-correct against official.
+///
+/// A `$props()` / `$bindable` / `$derived` / import root is NOT writable here as a
+/// CONSERVATIVE boundary: a `$props()` / `$bindable` write IS a divergent protocol (a
+/// `$.prop` flag-7 accessor), but the IMPORT and `$derived`-member cases fail closed
+/// because their correctness depends on import / derived semantics not yet modelled in
+/// this vertical — NOT because official uses a divergent accessor (an import root emits
+/// the identical plain-member form; a `$derived` member is a plain member write). An
+/// UNRESOLVED root (no binding row) likewise fails closed (a free / undeclared target is
+/// not an emittable lvalue here).
+fn bind_root_is_writable_target(
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+    scope: ScopeId,
+    root_name: &str,
+) -> bool {
+    matches!(
+        bindings.resolve_kind(scopes, scope, root_name),
+        Some(k) if is_writable_bind_root(k)
+    )
+}
+
+/// Whether a binding kind is an ASSIGNMENT-VALID bind root — the ONLY kinds a two-way
+/// `bind:` may legally REASSIGN: a `$state` SIGNAL (`$.set(name, $$value)`), a
+/// `$.state($.proxy)` reassignable proxy, or a PLAIN local (`name = $$value`). The
+/// read-oriented signal kinds — `$derived`, an `{#each}` item, an `{#await}` binding, and a
+/// `{@const}` derived — are READABLE but are NOT assignment targets, so they are EXCLUDED.
+///
+/// This is deliberately NARROWER than the read-shape classifier [`is_signal_binding`]
+/// (which admits `Derived` / `EachSignal` / `AwaitSignal` / `LegacyConstDerived` for
+/// interpolation/runtime READ decisions): a signal being READABLE does not make it a valid
+/// bind WRITE target. The write decision ([`bind_root_is_writable_target`]) consults this
+/// predicate; the read decisions keep [`is_signal_binding`].
+fn is_writable_bind_root(kind: BindingRuntimeKind) -> bool {
+    matches!(
+        kind,
+        BindingRuntimeKind::StateSignal { .. }
+            | BindingRuntimeKind::StateProxy
+            | BindingRuntimeKind::PlainLocal
+    )
 }
 
 /// Whether a binding kind is a reactive SIGNAL (a `bind:value` to it sets the
@@ -736,390 +1065,6 @@ pub(super) fn classify_rune_declaration_kind(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Instance-script item allowlist (the strict finite supported-shape set)
-// ---------------------------------------------------------------------------
-
-/// A TYPED supported instance-script item — the closed allowlist of top-level
-/// instance-script declaration shapes the client core lowers. This is the
-/// script-side analogue of [`SupportedHtmlElement`](super::client_allowlist::SupportedHtmlElement):
-/// the classifier ([`classify_supported_instance_items`]) admits ONLY these three
-/// shapes and the lowering ([`super::expr_emit::lower_supported_instance_items`])
-/// consumes ONLY this enum — there is NO "emit any non-rune statement" path. Every
-/// OTHER top-level item (a function / class / enum / namespace / interface / type /
-/// plain non-rune `let`-`const`-`var` / arbitrary statement / `$:` label /
-/// `$`-`$$`-prefixed binding) fails closed BY CONSTRUCTION at the classifier.
-///
-/// Each variant carries the FULLY-RESOLVED lowering inputs (a binding name, the
-/// init payload text), so the lowering is a thin per-variant transform that never
-/// re-walks an arbitrary statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum SupportedInstanceScriptItem {
-    /// `let name = $state(<primitive literal>);` — one declarator, `let` only,
-    /// identifier binding, no TS annotation, a 0-1-arg `$state()` with a primitive
-    /// literal init. Carries the binding name and the init payload (the primitive
-    /// literal source text, or `None` for the no-arg `$state()` ⇒ `void 0` form).
-    StatePrimitive {
-        /// The declared signal name.
-        name: String,
-        /// The primitive-literal init source text (`'world'`, `0`, `-1`, `true`,
-        /// `null`, …), or `None` for the no-arg `$state()` form.
-        init: Option<String>,
-    },
-    /// A single no-default `$props()` destructure (`let { a } = $props()` /
-    /// `let { a: b } = $props()`). A no-default destructure emits NO component-body
-    /// declaration (the props are read directly off `$$props`), so this variant
-    /// carries no lowering payload — it is the classification fact that the props
-    /// destructure was accepted (the props reads are projected separately).
-    PropsDestructure,
-    /// `let el;` — a bare (no-init, no-annotation) `let` identifier used SOLELY as a
-    /// supported `bind:this` target. Carries the binding name (lowered to `let el;`).
-    BindThisLocal {
-        /// The declared local name.
-        name: String,
-    },
-}
-
-/// Classify the instance script's TOP-LEVEL items into the strict finite
-/// [`SupportedInstanceScriptItem`] allowlist, or fail closed on the FIRST
-/// out-of-allowlist item.
-///
-/// The three supported shapes are EXACTLY:
-/// 1. `let name = $state(<primitive literal>);`
-/// 2. a single no-default `$props()` destructure;
-/// 3. `let el;` used solely as a supported `bind:this` target.
-///
-/// `bind_this_targets` is the set of local names used as a supported `bind:this`
-/// target (from the accepted bind shapes) — a bare `let el;` is admitted ONLY when
-/// its name is in this set; an unused / plain bare local fails closed.
-///
-/// Everything else fails closed: a plain `let x = 0`, a `const` / `var`, a top-level
-/// function / class / enum / namespace / interface / type, an arbitrary expression /
-/// control-flow / empty statement, a `$:` reactive label, an import / export, a
-/// `$` / `$$`-prefixed binding, and the magic refs `$$slots` / `$$props` /
-/// `$$restProps`. The decision is driven from the typed OXC AST (statement kind,
-/// declarator pattern, init shape, TS-annotation presence), never a text scan.
-///
-/// Two whole-program pre-passes run FIRST so their PRECISE diagnostics win over the
-/// generic item refusal: the rune-form / rune-position scan (owned by
-/// [`super::client_surface`]) and the magic-identifier scan ([`scan_magic_identifiers`]).
-pub(super) fn classify_supported_instance_items(
-    instance_source: &str,
-    bind_this_targets: &[String],
-) -> Result<Vec<SupportedInstanceScriptItem>, UnsupportedSvelteRuntimeSurface> {
-    let alloc = Allocator::default();
-    let Some(program) = reparse_module(&alloc, instance_source) else {
-        // An unparseable instance script is recorded as a script-parse diagnostic
-        // upstream; classify yields no items (the upstream parse gate owns the refusal).
-        return Ok(Vec::new());
-    };
-
-    let mut items = Vec::new();
-    for stmt in &program.body {
-        items.push(classify_instance_statement(
-            stmt,
-            instance_source,
-            bind_this_targets,
-        )?);
-    }
-    Ok(items)
-}
-
-/// Classify ONE top-level instance-script statement into its supported item, or
-/// fail closed. The supported statements are EXACTLY a `let`-variable declaration
-/// matching shape 1/2/3; every other statement kind fails closed with a precise
-/// `construct` label.
-fn classify_instance_statement(
-    stmt: &Statement<'_>,
-    instance_source: &str,
-    bind_this_targets: &[String],
-) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
-    match stmt {
-        Statement::VariableDeclaration(decl) => {
-            classify_instance_variable_decl(decl, instance_source, bind_this_targets)
-        }
-        // Every NON-variable top-level statement fails closed with its construct
-        // label. The labels are precise so the completeness gate can pin each family.
-        other => Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
-            construct: top_level_statement_label(other),
-            span: stmt_span(other),
-        }),
-    }
-}
-
-/// Classify a top-level `VariableDeclaration` into shape 1/2/3, or fail closed.
-///
-/// A `var` / `const` declaration, a multi-declarator declaration, or any declarator
-/// that is not exactly one of the three supported shapes fails closed.
-fn classify_instance_variable_decl(
-    decl: &oxc_ast::ast::VariableDeclaration<'_>,
-    instance_source: &str,
-    bind_this_targets: &[String],
-) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
-    let refuse = |construct: &'static str| UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
-        construct,
-        span: Span::new(decl.span.start, decl.span.end),
-    };
-    // (1) `let` ONLY — a `const` / `var` declaration is a distinct official surface
-    // (`var` reads use `$.safe_get`, a read-only `const $state` constant-folds), and
-    // a plain `const`/`var` local is not core. Fail closed.
-    if decl.kind != VariableDeclarationKind::Let {
-        return Err(refuse(match decl.kind {
-            VariableDeclarationKind::Const => "const declaration",
-            VariableDeclarationKind::Var => "var declaration",
-            _ => "non-let declaration",
-        }));
-    }
-    // (2) EXACTLY ONE declarator — a multi-declarator `let a = $state(0), b = 1;`
-    // mixes shapes and is not core. Fail closed.
-    let [d] = decl.declarations.as_slice() else {
-        return Err(refuse("multi-declarator let"));
-    };
-    // (3) NO TS annotation — `let c: number = $state(0)` / a definite `let c!: T`
-    // is a TS-leniency form (a plain `<script>` parsed as TSX accepts the
-    // annotation). The supported shapes carry NO annotation. Fail closed.
-    if d.type_annotation.is_some() || d.definite {
-        return Err(refuse("ts-annotated let"));
-    }
-    // (4) The binding name (an identifier pattern). A destructure pattern is handled
-    // by the `$props()` shape below; an array pattern / non-identifier non-props
-    // declarator is not core.
-    match &d.id {
-        BindingPattern::BindingIdentifier(id) => {
-            let name = id.name.as_str();
-            // A `$` / `$$`-prefixed binding (`let $$anchor`, `let $foo`) is reserved
-            // (the `$$`-prefix is the compiler-magic namespace; the `$`-prefix is the
-            // store-subscription namespace). Fail closed BEFORE the init shape.
-            if name.starts_with('$') {
-                return Err(refuse("$-prefixed binding"));
-            }
-            classify_identifier_declarator(d, name, decl, instance_source, bind_this_targets)
-        }
-        BindingPattern::ObjectPattern(_) => {
-            // The ONLY supported destructure is a no-default `$props()` call. The
-            // detailed shape (no defaults / rest / computed / nested / `$bindable`)
-            // is enforced by `props_shape` upstream; here the declarator must be a
-            // `$props()` call destructure.
-            let Some(Expression::CallExpression(call)) = &d.init else {
-                return Err(refuse("object-destructure let"));
-            };
-            if !is_props_callee(&call.callee) {
-                return Err(refuse("object-destructure let"));
-            }
-            Ok(SupportedInstanceScriptItem::PropsDestructure)
-        }
-        BindingPattern::ArrayPattern(_) => Err(refuse("array-destructure let")),
-        BindingPattern::AssignmentPattern(_) => Err(refuse("default-pattern let")),
-    }
-}
-
-/// Classify a `let <ident> …` declarator (the identifier already known non-`$`-prefixed)
-/// into shape 1 (`$state(<primitive>)`) or shape 3 (bare `let el;` bind:this target),
-/// or fail closed.
-fn classify_identifier_declarator(
-    d: &oxc_ast::ast::VariableDeclarator<'_>,
-    name: &str,
-    decl: &oxc_ast::ast::VariableDeclaration<'_>,
-    instance_source: &str,
-    bind_this_targets: &[String],
-) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
-    let refuse = |construct: &'static str| UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
-        construct,
-        span: Span::new(decl.span.start, decl.span.end),
-    };
-    match &d.init {
-        // Shape 3: a bare `let el;` (no init) — admitted ONLY when used solely as a
-        // supported `bind:this` target. An unused / plain bare local fails closed.
-        None => {
-            if bind_this_targets.iter().any(|t| t == name) {
-                Ok(SupportedInstanceScriptItem::BindThisLocal {
-                    name: name.to_string(),
-                })
-            } else {
-                Err(refuse("unused bare let"))
-            }
-        }
-        // Shape 1: `let name = $state(<primitive literal>)`. The `$state` family,
-        // arity (0-1), and primitive-literal init are validated here; the destructure
-        // / non-primitive / multi-arg / `$state.raw` forms are owned by the upstream
-        // `state_decl_shape` gate (which fails them as `AdvancedRune`), so on the
-        // accept path a `$state(<primitive>)` identifier declarator reaches here.
-        Some(Expression::CallExpression(call)) => {
-            // A `$state` / `$state.raw` call.
-            if state_rune_call(call).is_some() {
-                // The init payload: the primitive-literal source text, or `None`
-                // for the no-arg `$state()` form (lowered to `void 0`).
-                let init = state_primitive_init_text(call, instance_source);
-                return Ok(SupportedInstanceScriptItem::StatePrimitive {
-                    name: name.to_string(),
-                    init,
-                });
-            }
-            // A `$derived` / `$props()` / other call init for an IDENTIFIER binding
-            // is not a supported shape (a `$derived` identifier is a deferral; a
-            // `$props()` identifier is a whole-object binding). Fail closed.
-            if is_derived_callee(&call.callee) {
-                return Err(refuse("$derived declarator"));
-            }
-            if is_props_callee(&call.callee) {
-                return Err(refuse("$props() whole-object"));
-            }
-            // A plain non-rune call init (`let x = makeIt()`) is not core.
-            Err(refuse("plain let with call init"))
-        }
-        // A plain non-rune `let x = 0` (a literal / object / array / member / …
-        // init) is NOT core — a template read is only a reactive `$state` signal or
-        // a no-default prop, never a plain local. Fail closed.
-        Some(_) => Err(refuse("plain let")),
-    }
-}
-
-/// The primitive-literal init source text of a `$state(<arg>)` call, or `None` for
-/// the no-arg `$state()` form. A primitive literal carries NO signal read and NO TS
-/// syntax, so its source slice is emitted verbatim (matching official). The
-/// over-arity / non-primitive forms are refused upstream, so the first argument is a
-/// primitive literal here. The argument span is absolute into `instance_source` (the
-/// SAME buffer the program was parsed from), so the slice is the exact user text.
-fn state_primitive_init_text(
-    call: &oxc_ast::ast::CallExpression<'_>,
-    instance_source: &str,
-) -> Option<String> {
-    use oxc_span::GetSpan;
-    let arg = call.arguments.first()?.as_expression()?;
-    let span = arg.span();
-    Some(instance_source[span.start as usize..span.end as usize].to_string())
-}
-
-/// Scan an instance-script (or template-expression) program for a compiler-MAGIC
-/// identifier reference (`$$slots` / `$$props` / `$$restProps`). Returns the FIRST
-/// magic-identifier surface, or `None`. A LOCAL binding shadowing the name (a
-/// function param / nested `let` of the same name) is NOT a magic reference — the
-/// scan reuses the shared lexical [`super::expr::ShadowStack`] model so the
-/// shadowing semantics match the rune scan.
-pub(super) fn scan_magic_identifiers(source: &str) -> Option<UnsupportedSvelteRuntimeSurface> {
-    let alloc = Allocator::default();
-    let program = reparse_module(&alloc, source)?;
-    let mut scan = MagicIdentScan {
-        scopes: super::expr::ShadowStack::default(),
-        found: None,
-    };
-    use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
-    scan.found
-}
-
-/// The Svelte compiler-MAGIC identifier names (the auto-injected legacy magic
-/// objects). A reference to one of these in the runes client output would bind an
-/// undefined identifier (a runtime `ReferenceError`).
-const MAGIC_IDENT_NAMES: &[&str] = &["$$slots", "$$props", "$$restProps"];
-
-/// The scope-aware scan state for a magic-identifier reference.
-struct MagicIdentScan {
-    scopes: super::expr::ShadowStack,
-    found: Option<UnsupportedSvelteRuntimeSurface>,
-}
-
-impl<'a> oxc_ast_visit::Visit<'a> for MagicIdentScan {
-    fn visit_program(&mut self, it: &oxc_ast::ast::Program<'a>) {
-        let mut frame = rustc_hash::FxHashSet::default();
-        super::expr::collect_direct_decls(&it.body, &mut frame);
-        super::expr::collect_var_hoists(&it.body, &mut frame);
-        self.scopes.push(frame);
-        oxc_ast_visit::walk::walk_program(self, it);
-        self.scopes.pop();
-    }
-
-    fn visit_function(
-        &mut self,
-        it: &oxc_ast::ast::Function<'a>,
-        flags: oxc_syntax::scope::ScopeFlags,
-    ) {
-        self.scopes.push(super::expr::function_scope_names(it));
-        oxc_ast_visit::walk::walk_function(self, it, flags);
-        self.scopes.pop();
-    }
-
-    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
-        self.scopes.push(super::expr::arrow_scope_names(it));
-        oxc_ast_visit::walk::walk_arrow_function_expression(self, it);
-        self.scopes.pop();
-    }
-
-    fn visit_block_statement(&mut self, it: &oxc_ast::ast::BlockStatement<'a>) {
-        self.scopes.push(super::expr::block_scope_names(it));
-        oxc_ast_visit::walk::walk_block_statement(self, it);
-        self.scopes.pop();
-    }
-
-    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
-        let name = it.name.as_str();
-        if self.found.is_none()
-            && MAGIC_IDENT_NAMES.contains(&name)
-            && !self.scopes.is_shadowed(name)
-        {
-            let magic: &'static str = match name {
-                "$$slots" => "$$slots",
-                "$$props" => "$$props",
-                "$$restProps" => "$$restProps",
-                _ => "$$magic",
-            };
-            self.found = Some(UnsupportedSvelteRuntimeSurface::MagicIdentifier {
-                name: magic,
-                span: Span::new(it.span.start, it.span.end),
-            });
-        }
-        oxc_ast_visit::walk::walk_identifier_reference(self, it);
-    }
-}
-
-/// A short construct label for a top-level instance-script statement that is NOT a
-/// variable declaration. Each kind gets a precise label so the completeness gate
-/// pins the family (function / class / enum / namespace / interface / type / `$:` /
-/// import / export / expression / control-flow / empty / …).
-fn top_level_statement_label(stmt: &Statement<'_>) -> &'static str {
-    match stmt {
-        Statement::FunctionDeclaration(_) => "function",
-        Statement::ClassDeclaration(_) => "class",
-        Statement::TSEnumDeclaration(_) => "enum",
-        Statement::TSModuleDeclaration(_) => "namespace",
-        Statement::TSInterfaceDeclaration(_) => "interface",
-        Statement::TSTypeAliasDeclaration(_) => "type alias",
-        Statement::TSImportEqualsDeclaration(_) => "import-equals",
-        Statement::LabeledStatement(_) => "$: label",
-        Statement::ImportDeclaration(_) => "import",
-        Statement::ExportNamedDeclaration(_)
-        | Statement::ExportAllDeclaration(_)
-        | Statement::ExportDefaultDeclaration(_) => "export",
-        Statement::ExpressionStatement(_) => "expression statement",
-        Statement::IfStatement(_)
-        | Statement::ForStatement(_)
-        | Statement::ForInStatement(_)
-        | Statement::ForOfStatement(_)
-        | Statement::WhileStatement(_)
-        | Statement::DoWhileStatement(_)
-        | Statement::SwitchStatement(_)
-        | Statement::TryStatement(_)
-        | Statement::BlockStatement(_)
-        | Statement::ThrowStatement(_)
-        | Statement::ReturnStatement(_)
-        | Statement::BreakStatement(_)
-        | Statement::ContinueStatement(_)
-        | Statement::WithStatement(_) => "control-flow statement",
-        Statement::EmptyStatement(_) => "empty statement",
-        Statement::DebuggerStatement(_) => "debugger statement",
-        // Any other statement kind (a `using` declaration, …) is still
-        // out-of-allowlist.
-        _ => "instance-script statement",
-    }
-}
-
-/// The verter span of a top-level statement (for the fail-closed diagnostic).
-fn stmt_span(stmt: &Statement<'_>) -> Span {
-    use oxc_span::GetSpan;
-    let span = stmt.span();
-    Span::new(span.start, span.end)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1140,6 +1085,15 @@ mod tests {
         (bindings, graph, root)
     }
 
+    /// Build a real [`AnalyzedExpr`] for `source` through the SAME single-parse analysis
+    /// path the runtime uses (so the test exercises the actual shared `BindTargetFact`,
+    /// not a synthetic stand-in).
+    fn analyzed_expr(source: &'static str, scope: ScopeId) -> AnalyzedExpr<'static> {
+        let facts = crate::svelte::runtime::expr::collect_expr_references(source)
+            .expect("test bind expression parses cleanly");
+        AnalyzedExpr::interned(source, scope, facts)
+    }
+
     #[test]
     fn classify_bind_value_requires_an_explicit_bound_expression_source() {
         // ACCEPTED == EMITTABLE: a `bind:value` with NO bound-expression source
@@ -1154,7 +1108,14 @@ mod tests {
         let locals = rustc_hash::FxHashSet::default();
         let span = Span::new(0, 0);
         let res = classify_bind_shape(
-            "value", "input", /* expr_source = */ None, root, &bindings, &scopes, &locals,
+            "value",
+            "input",
+            /* host_attrs = */ &[],
+            /* expr = */ None,
+            root,
+            &bindings,
+            &scopes,
+            &locals,
             span,
         );
         assert!(
@@ -1180,21 +1141,40 @@ mod tests {
         let (bindings, scopes, root) = signal_value_env();
         let locals = rustc_hash::FxHashSet::default();
         let span = Span::new(0, 0);
+        let value_expr = analyzed_expr("value", root);
         let res = classify_bind_shape(
             "value",
             "input",
-            /* expr_source = */ Some("value"),
+            /* host_attrs = */ &[],
+            /* expr = */ Some(&value_expr),
             root,
             &bindings,
             &scopes,
             &locals,
             span,
         );
-        assert_eq!(
-            res,
-            Ok(ClientBindShape::ValueSignalIdent),
-            "an explicit `bind:value={{value}}` to a $state signal must be accepted"
-        );
+        // An explicit `bind:value={value}` to a $state signal is accepted as a DOM
+        // value bind carrying the `$.bind_value` routing.
+        match res {
+            Ok(ClientBindShape::DomBind {
+                name,
+                routing,
+                getset,
+                group_key,
+            }) => {
+                assert_eq!(name, "value");
+                assert_eq!(
+                    routing.helper,
+                    crate::svelte::bind_contract::RuntimeHelper::Value
+                );
+                // A bare-identifier signal target synthesizes the lvalue thunks.
+                assert_eq!(getset, BindGetSetForm::TargetLvalue);
+                // NEGATIVE: a non-`group` DOM bind carries NO group key (the accumulator
+                // grouping is `bind:group`-only).
+                assert_eq!(group_key, None, "a bind:value carries no group key");
+            }
+            other => panic!("expected a DomBind(Value) shape, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1210,10 +1190,12 @@ mod tests {
         locals.insert("el".to_string());
 
         // DECLARED target `el` (a bare local, not a binding-table row) — accepted.
+        let el_expr = analyzed_expr("el", root);
         let declared = classify_bind_shape(
             "this",
             "div",
-            Some("el"),
+            /* host_attrs = */ &[],
+            Some(&el_expr),
             root,
             &bindings,
             &scopes,
@@ -1222,15 +1204,19 @@ mod tests {
         );
         assert_eq!(
             declared,
-            Ok(ClientBindShape::ThisIdent),
-            "a declared `let el;` bind:this target is the supported shape-3"
+            Ok(ClientBindShape::This {
+                getset: BindGetSetForm::TargetLvalue
+            }),
+            "a declared `let el;` bind:this target is the supported identifier shape-3"
         );
 
         // FREE target `button` (undeclared) — fails closed.
+        let button_expr = analyzed_expr("button", root);
         let free = classify_bind_shape(
             "this",
             "button",
-            Some("button"),
+            /* host_attrs = */ &[],
+            Some(&button_expr),
             root,
             &bindings,
             &scopes,
@@ -1244,5 +1230,83 @@ mod tests {
             ),
             "a free / undeclared bind:this target must fail closed (5c): {free:?}"
         );
+    }
+
+    /// A scope graph holding ONE binding of the given `kind` named `root` — so the
+    /// writability decision can be exercised for each binding-runtime kind.
+    fn env_with_root_kind(kind: BindingRuntimeKind) -> (BindingTable, ScopeGraph, ScopeId) {
+        let (mut graph, root) = ScopeGraph::with_root();
+        let mut bindings = BindingTable::new();
+        let id = bindings.push(BindingInfo {
+            name: "root".to_string(),
+            scope: root,
+            kind,
+            state: None,
+        });
+        graph.declare(root, "root", id);
+        (bindings, graph, root)
+    }
+
+    #[test]
+    fn bind_root_writability_admits_only_assignment_valid_kinds() {
+        // The WRITE decision (`bind_root_is_writable_target`) must admit ONLY the
+        // assignment-valid roots — a `$state` SIGNAL, a `$.state($.proxy)` reassignable
+        // proxy, and a PLAIN local — and must EXCLUDE the read-oriented signal kinds a
+        // bind cannot legally reassign: `$derived`, an `{#each}` item, an `{#await}`
+        // binding, and a `{@const}` derived. RED before the fix: the write decision reused
+        // the read-oriented `is_signal_binding`, which admits `Derived` / `EachSignal` /
+        // `AwaitSignal` / `LegacyConstDerived` — so a read-only root was wrongly treated as
+        // writable.
+        for kind in [
+            BindingRuntimeKind::StateSignal { raw: false },
+            BindingRuntimeKind::StateSignal { raw: true },
+            BindingRuntimeKind::StateProxy,
+            BindingRuntimeKind::PlainLocal,
+        ] {
+            let (bindings, scopes, root) = env_with_root_kind(kind);
+            assert!(
+                bind_root_is_writable_target(&bindings, &scopes, root, "root"),
+                "an assignment-valid root ({kind:?}) must be writable"
+            );
+        }
+        for kind in [
+            BindingRuntimeKind::Derived,
+            BindingRuntimeKind::EachSignal,
+            BindingRuntimeKind::AwaitSignal,
+            BindingRuntimeKind::LegacyConstDerived,
+        ] {
+            let (bindings, scopes, root) = env_with_root_kind(kind);
+            assert!(
+                !bind_root_is_writable_target(&bindings, &scopes, root, "root"),
+                "a read-only signal root ({kind:?}) must NOT be writable (no bind reassignment)"
+            );
+        }
+    }
+
+    #[test]
+    fn is_writable_bind_root_admits_only_assignment_valid_kinds() {
+        // The writable predicate admits EXACTLY the assignment-valid kinds (a `$state`
+        // signal, a reassignable proxy, a plain local) and EXCLUDES the read-oriented signal
+        // kinds the read classifier (`is_signal_binding`) admits — `Derived` / `EachSignal` /
+        // `AwaitSignal` / `LegacyConstDerived`. A signal being READABLE does not make it a
+        // valid bind WRITE target.
+        assert!(is_writable_bind_root(BindingRuntimeKind::StateSignal {
+            raw: false
+        }));
+        assert!(is_writable_bind_root(BindingRuntimeKind::StateSignal {
+            raw: true
+        }));
+        assert!(is_writable_bind_root(BindingRuntimeKind::StateProxy));
+        assert!(is_writable_bind_root(BindingRuntimeKind::PlainLocal));
+        assert!(!is_writable_bind_root(BindingRuntimeKind::Derived));
+        assert!(!is_writable_bind_root(BindingRuntimeKind::EachSignal));
+        assert!(!is_writable_bind_root(BindingRuntimeKind::AwaitSignal));
+        assert!(!is_writable_bind_root(
+            BindingRuntimeKind::LegacyConstDerived
+        ));
+        // Read-only signal kinds the read classifier admits are NOT writable — the explicit
+        // split this predicate enforces.
+        assert!(is_signal_binding(BindingRuntimeKind::Derived));
+        assert!(!is_writable_bind_root(BindingRuntimeKind::Derived));
     }
 }

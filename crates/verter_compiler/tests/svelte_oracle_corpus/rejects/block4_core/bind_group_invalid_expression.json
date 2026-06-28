@@ -1,0 +1,4 @@
+{
+  "rule": "BindGroupInvalidExpression",
+  "official_code": "bind_group_invalid_expression"
+}

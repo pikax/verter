@@ -10,8 +10,10 @@
 //! `HTMLElementTagNameMap`, captured as [`HTML_TAG_UNIVERSE`]) plus explicit corpora
 //! for Svelte specials (`slot` / `svelte:*`), the full Svelte `RESERVED_WORDS`,
 //! hyphenated/custom tags, and special-content tags. The expected SUPPORTED set is
-//! EXACTLY `{a, button, div, h1, input, p, video}`; EVERY other tag compiles
-//! fail-closed with NO `Main` module. (Hermetic: the tag universe is committed, so the gate runs
+//! EXACTLY `{a, audio, button, details, div, h1, input, option, p, select, textarea,
+//! video}`; EVERY other tag compiles fail-closed with NO `Main` module. (The 5c bind
+//! hosts `textarea`/`select`/`option` emit a bare clone frame for empty content; their
+//! special-content interiors are content-gated.) (Hermetic: the tag universe is committed, so the gate runs
 //! with no `node` / no `node_modules` at test runtime; the
 //! [`html_tag_universe_is_complete`] freshness check — feature-gated behind a live
 //! `node_modules` read — keeps the committed list honest.)
@@ -53,9 +55,15 @@ fn emits_main(source: &str) -> bool {
 
 /// The EXACT supported element set (the finite client-core allowlist). Any change to
 /// this set is a deliberate enum + golden change, asserted by
-/// [`element_matrix_supports_exactly_the_seven_core_tags`]. `video` joined the set in
-/// the media host for the `muted` DOM-property write.
-const SUPPORTED_ELEMENTS: &[&str] = &["a", "button", "div", "h1", "input", "p", "video"];
+/// [`element_matrix_supports_exactly_the_twelve_core_tags`]. `video` joined as the
+/// media host for the `muted` DOM-property write; `textarea`/`select`/`option`/
+/// `audio`/`details` joined as the 5c bindings-breadth DOM-bind hosts (each emits a
+/// bare clone frame with empty content; their special-content / non-bind interiors are
+/// content-gated, not element-gated).
+const SUPPORTED_ELEMENTS: &[&str] = &[
+    "a", "audio", "button", "details", "div", "h1", "input", "option", "p", "select", "textarea",
+    "video",
+];
 
 /// The full HTML tag universe (the TS DOM lib `HTMLElementTagNameMap`,
 /// svelte/TS-pinned). COMMITTED so the matrix is hermetic. Every tag NOT in
@@ -283,12 +291,15 @@ fn skeleton_clones_tag(source: &str, tag: &str) -> bool {
 }
 
 #[test]
-fn element_matrix_supports_exactly_the_seven_core_tags() {
-    // The POSITIVE half: EXACTLY the seven allowlist tags emit a `Main` that CLONES the
-    // tag as an intrinsic element; the count and membership are both pinned (a shrink
-    // OR a widen fails here). The Svelte-special-parse tags (`script` / `style` / …)
-    // are excluded from the positive set — they never lower to an intrinsic element
-    // (a `<script>` becomes the script block), so they cannot be "supported elements".
+fn element_matrix_supports_exactly_the_twelve_core_tags() {
+    // The POSITIVE half: EXACTLY the twelve allowlist tags emit a `Main` that CLONES
+    // the tag as an intrinsic element; the count and membership are both pinned (a
+    // shrink OR a widen fails here). The Svelte-special-parse tags (`script` / `style`
+    // / …) are excluded from the positive set — they never lower to an intrinsic
+    // element (a `<script>` becomes the script block), so they cannot be "supported
+    // elements". (The 5c bind hosts emit a bare clone frame for the empty-content
+    // `component_with_element` source; their special-content interiors are content-
+    // gated separately.)
     let mut supported: Vec<&str> = HTML_TAG_UNIVERSE
         .iter()
         .copied()
@@ -303,15 +314,15 @@ fn element_matrix_supports_exactly_the_seven_core_tags() {
     expected.sort_unstable();
     assert_eq!(
         supported, expected,
-        "the element allowlist must support EXACTLY {{a, button, div, h1, input, p, video}} — \
-         a tag cloned into a Main outside that set is a leak; a tag in the set failing to \
-         emit is an over-reach"
+        "the element allowlist must support EXACTLY {{a, audio, button, details, div, h1, \
+         input, option, p, select, textarea, video}} — a tag cloned into a Main outside \
+         that set is a leak; a tag in the set failing to emit is an over-reach"
     );
     // Belt-and-suspenders on the cardinality (the convergence count gate).
     assert_eq!(
         supported.len(),
-        7,
-        "exactly seven elements are in the client-core allowlist"
+        12,
+        "exactly twelve elements are in the client-core allowlist"
     );
 }
 
@@ -352,22 +363,17 @@ fn element_matrix_every_non_allowlisted_html_tag_fails_closed_with_no_main() {
 }
 
 #[test]
-fn element_matrix_special_content_tags_fail_closed() {
-    // The special-content-model tags the restructure intentionally DEMOTED
-    // (`textarea` / `select` / `option` / `optgroup` / `selectedcontent` / `datalist`)
-    // each fail closed at the element gate — none of them is in the allowlist.
-    for tag in [
-        "textarea",
-        "select",
-        "option",
-        "optgroup",
-        "selectedcontent",
-        "datalist",
-    ] {
+fn element_matrix_still_demoted_special_content_tags_fail_closed() {
+    // The special-content-model tags NOT yet supported (`optgroup` / `selectedcontent`
+    // / `datalist`) still fail closed at the element gate — none is in the allowlist.
+    // (`textarea` / `select` / `option` MOVED to the allowlist as 5c bind hosts; they
+    // emit a bare clone frame for empty content — see the positive matrix above — and
+    // their special-content interiors are gated by the content-model test below.)
+    for tag in ["optgroup", "selectedcontent", "datalist"] {
         let src = component_with_element(tag);
         assert!(
             !emits_main(&src),
-            "the special-content tag <{tag}> must fail closed (no Main)"
+            "the still-demoted special-content tag <{tag}> must fail closed (no Main)"
         );
         assert!(
             matches!(
@@ -378,6 +384,55 @@ fn element_matrix_special_content_tags_fail_closed() {
             ),
             "<{tag}> must fail closed with the regular-element refusal"
         );
+    }
+}
+
+#[test]
+fn element_matrix_allowed_bind_hosts_fail_closed_on_unsupported_special_content() {
+    // The 5c bind hosts are accepted as ELEMENTS but their SPECIAL-CONTENT-MODEL
+    // interiors (the surfaces 5c does not emit) fail closed at the content gate, not
+    // the element gate: a `<textarea>` with interior text/interpolation is the raw-text
+    // value surface; an `<option>` with an interpolation child is the `option.__value`
+    // tracking surface. Each must fail closed (no divergent Main).
+    let cases = [
+        // textarea with static text content (the raw-text-value surface).
+        (
+            "textarea_static_content",
+            "<script>let c = $state(0);</script>\n<textarea>hi</textarea>\n<button onclick={() => c++}>{c}</button>\n",
+            "textarea",
+        ),
+        // textarea with interpolation content.
+        (
+            "textarea_interp_content",
+            "<script>let c = $state(0);</script>\n<textarea>{c}</textarea>\n<button onclick={() => c++}>{c}</button>\n",
+            "textarea",
+        ),
+        // option with interpolation content (the __value tracking surface).
+        (
+            "option_interp_content",
+            "<script>let c = $state(0);</script>\n<select><option>{c}</option></select>\n<button onclick={() => c++}>{c}</button>\n",
+            "option",
+        ),
+    ];
+    for (label, src, expected_tag) in cases {
+        assert!(
+            !emits_main(src),
+            "{label}: the unsupported special content must fail closed (no Main)"
+        );
+        match compile(src) {
+            Err(ClientCompileError::Unsupported(
+                verter_compiler::svelte::runtime::UnsupportedSvelteRuntimeSurface::Element {
+                    tag,
+                    ..
+                },
+            )) => {
+                assert_eq!(
+                    tag, expected_tag,
+                    "{label}: must fail closed on the special-content host <{expected_tag}>"
+                );
+            }
+            other => panic!("{label}: expected a content-gate Element refusal, got {other:?}"),
+        }
     }
 }
 

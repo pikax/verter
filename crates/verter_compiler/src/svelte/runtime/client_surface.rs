@@ -25,11 +25,12 @@ use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::{is_svelte_reserved_word, SupportedHtmlElement, SupportedStaticAttr};
 use super::client_shapes::{
     self, ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape,
-    ClientInterpolationShape, ClientPropsUsage, SupportedInstanceScriptItem,
+    ClientInterpolationShape, ClientPropsUsage,
 };
 use super::expr::{BindingRuntimeKind, ExprRefKind};
 use super::expr_emit::{self, PropsShape, StateDeclShape};
 use super::html::{synthesize_region, TemplateFactory};
+use super::instance_items::{self, SupportedInstanceScriptItem};
 use super::ir::{
     AttrIr, BlockIr, DeclKind, EscapeMode, IrNode, NodeId, SpecialKind, SvelteRuntimeIr, TagIr,
 };
@@ -61,8 +62,20 @@ pub(super) struct ClassifiedClientSurface {
     /// event op consumes (the broad classifier accepts an event FAMILY; this
     /// pins the exact handler sub-shape — the §1.2-class `$state`-write arrow).
     pub(super) event_shapes: Vec<(NodeId, ClientEventHandlerShape)>,
-    /// The accepted bind shape per target node — the FACT a `bind:` op consumes.
-    pub(super) bind_shapes: Vec<(NodeId, ClientBindShape)>,
+    /// The accepted bind shape per (target node, bind NAME) — the FACT a `bind:` op
+    /// consumes. The bind NAME is part of the key because ONE element can carry
+    /// MULTIPLE binds (e.g. `<video bind:currentTime bind:paused bind:duration>`), each
+    /// with its own routing; keying on the node alone would collapse them.
+    pub(super) bind_shapes: Vec<(NodeId, String, ClientBindShape)>,
+    /// The `bind:group` VALUE literal per group-input node — the `value="X"` source the
+    /// emitter writes as `input.value = input.__value = 'X'` (the static `value` is
+    /// stripped from the skeleton). Empty for a non-group component.
+    pub(super) group_values: Vec<(NodeId, String)>,
+    /// The `bind:group` input nodes carrying a DYNAMIC/mixed `value={…}` — the plan reads
+    /// each node's `value` attr from the IR and builds the structured `GroupDynamicValue`
+    /// (the static-literal case stays in `group_values`). Empty for a non-group component or
+    /// a group with only static values.
+    pub(super) group_dynamic_value_nodes: Vec<NodeId>,
     /// The accepted interpolation shape per interpolation node — the FACT proving
     /// the interpolation is a bare signal / no-default-prop read (the §1.2-class
     /// reactive-text surface), carried so the plan reads a typed classification.
@@ -146,10 +159,21 @@ impl ClientSyntaxSurface {
         // (5) Template-node classification: walk every node + attribute, ACCUMULATING
         // the per-node accepted event/bind/interp shape facts. Every node maps to a
         // supported `ClientNodeKind` or REFUSES (no wildcard accept).
+        //
+        // The DECLARED module + instance top-level locals are computed ONCE here (they
+        // are loop-invariant — they depend only on the module/instance script source,
+        // which does not change during the walk) and threaded down to the per-attr bind
+        // classifier, rather than re-parsing the scripts per bind attribute.
+        let alloc = Allocator::default();
+        let declared_root_names = super::reactive_analysis::collect_declared_root_names(
+            &alloc,
+            ir.analysis.scripts.module_source,
+            ir.analysis.scripts.instance_source,
+        );
         let facts = RefCell::new(SurfaceFacts::default());
         for scope in &ir.template_scopes {
             for &root in &scope.roots {
-                classify_node(ir, root, Namespace::Html, &facts)?;
+                classify_node(ir, root, Namespace::Html, &declared_root_names, &facts)?;
             }
         }
 
@@ -179,8 +203,19 @@ impl ClientSyntaxSurface {
         // `build_script_items` consumes ONLY these typed items, so the broad
         // statement-rewrite path is structurally unreachable.
         let script_items = if let Some(instance) = ir.analysis.scripts.instance_source {
+            use super::bind_target_names::{
+                collect_bind_function_pair_names, collect_bind_lvalue_roots,
+                collect_bind_this_targets,
+            };
             let bind_this_targets = collect_bind_this_targets(ir);
-            client_shapes::classify_supported_instance_items(instance, &bind_this_targets)?
+            let bind_lvalue_roots = collect_bind_lvalue_roots(ir);
+            let bind_function_pair_names = collect_bind_function_pair_names(ir);
+            instance_items::classify_supported_instance_items(
+                instance,
+                &bind_this_targets,
+                &bind_lvalue_roots,
+                &bind_function_pair_names,
+            )?
         } else {
             Vec::new()
         };
@@ -190,6 +225,8 @@ impl ClientSyntaxSurface {
             element_facts: facts.element_facts,
             event_shapes: facts.event_shapes,
             bind_shapes: facts.bind_shapes,
+            group_values: facts.group_values,
+            group_dynamic_value_nodes: facts.group_dynamic_value_nodes,
             interp_shapes: facts.interp_shapes,
             dynamic_attr_shapes: facts.dynamic_attr_shapes,
             html_nodes: facts.html_nodes,
@@ -200,51 +237,6 @@ impl ClientSyntaxSurface {
     }
 }
 
-/// Collect the local names used as a supported `bind:this` target, resolved from the
-/// IR's bind attributes. A bare `let el;` instance-script declaration is admitted by
-/// the script-item allowlist ONLY when its name is in this set (so an UNUSED bare
-/// local fails closed). Driven from the typed `AttrIr` inventory + the analyzed
-/// bind-expression source, never a raw scan.
-fn collect_bind_this_targets(ir: &SvelteRuntimeIr) -> Vec<String> {
-    let mut targets = Vec::new();
-    for node in &ir.nodes {
-        let IrNode::Element(el) = node else {
-            continue;
-        };
-        for attr in &el.attrs {
-            let AttrIr::Bind {
-                target,
-                expr: Some(expr_id),
-            } = attr
-            else {
-                continue;
-            };
-            if target != "this" {
-                continue;
-            }
-            let analyzed = ir.analysis.expressions.get(*expr_id);
-            let name = analyzed.source.trim();
-            // Only a bare-identifier `bind:this={el}` target contributes a name (a
-            // member `bind:this={refs[0]}` is refused at the bind classifier).
-            if is_plain_identifier(name) {
-                targets.push(name.to_string());
-            }
-        }
-    }
-    targets
-}
-
-/// Whether a string is a single plain JS identifier (`/^[A-Za-z_$][A-Za-z0-9_$]*$/`),
-/// the only `bind:this` target shape that names a supported bare-local declaration.
-fn is_plain_identifier(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-}
-
 /// The per-node accepted shape facts accumulated during the template-node walk.
 #[derive(Default)]
 struct SurfaceFacts {
@@ -253,8 +245,13 @@ struct SurfaceFacts {
     element_facts: Vec<(NodeId, SupportedHtmlElement)>,
     /// The accepted event-handler shape per target node.
     event_shapes: Vec<(NodeId, ClientEventHandlerShape)>,
-    /// The accepted bind shape per target node.
-    bind_shapes: Vec<(NodeId, ClientBindShape)>,
+    /// The accepted bind shape per (target node, bind NAME) — keyed by name so an
+    /// element with multiple binds keeps each bind's routing distinct.
+    bind_shapes: Vec<(NodeId, String, ClientBindShape)>,
+    /// The `bind:group` value literal per group-input node.
+    group_values: Vec<(NodeId, String)>,
+    /// The `bind:group` input nodes carrying a DYNAMIC/mixed `value={…}`.
+    group_dynamic_value_nodes: Vec<NodeId>,
     /// The accepted interpolation shape per interpolation node.
     interp_shapes: Vec<(NodeId, ClientInterpolationShape)>,
     /// The accepted dynamic-attr / class / style shape per (node, attribute index).
@@ -571,13 +568,13 @@ fn classify_script_items(ir: &SvelteRuntimeIr) -> Result<(), UnsupportedSvelteRu
     // precise `MagicIdentifier` diagnostic wins over the generic instance-script-item
     // refusal the allowlist would otherwise produce.
     if let Some(instance) = ir.analysis.scripts.instance_source {
-        if let Some(reason) = client_shapes::scan_magic_identifiers(instance) {
+        if let Some(reason) = instance_items::scan_magic_identifiers(instance) {
             return Err(reason);
         }
     }
     for expr in ir.analysis.expressions.all() {
         let wrapped = format!("({});", expr.source);
-        if let Some(reason) = client_shapes::scan_magic_identifiers(&wrapped) {
+        if let Some(reason) = instance_items::scan_magic_identifiers(&wrapped) {
             return Err(reason);
         }
     }
@@ -684,12 +681,15 @@ fn scan_unsupported_rune_forms(
 /// Classify one template node + its descendants, ACCUMULATING the per-node accepted
 /// event/bind/interp shape facts. `namespace` is the DOM namespace the node renders
 /// in (HTML at the region root, propagated into an `<svg>` / `<math>` subtree).
-/// Every node maps to a supported [`ClientNodeKind`] or REFUSES — there is NO
-/// wildcard accept arm.
+/// `declared_root_names` is the loop-invariant set of declared module + instance
+/// top-level locals (computed once per compile, threaded down to the per-attr bind
+/// classifier). Every node maps to a supported [`ClientNodeKind`] or REFUSES — there is
+/// NO wildcard accept arm.
 fn classify_node(
     ir: &SvelteRuntimeIr,
     node_id: NodeId,
     namespace: Namespace,
+    declared_root_names: &rustc_hash::FxHashSet<String>,
     facts: &RefCell<SurfaceFacts>,
 ) -> Result<(), UnsupportedSvelteRuntimeSurface> {
     match ir.node(node_id) {
@@ -806,6 +806,19 @@ fn classify_node(
                 });
             };
             facts.borrow_mut().element_facts.push((node_id, element));
+            // (5c) SPECIAL-CONTENT-MODEL gate for the bindings-breadth hosts
+            // (`textarea` / `select` / `option`). These elements have a SPECIAL
+            // official content model (raw-text for `<textarea>`, the `__value`/
+            // option-tracking surface for `<select>`/`<option>`) that 5c does NOT
+            // emit: 5c emits them ONLY as the `bind:value` host shapes the pinned
+            // oracle proves (`<textarea bind:value></textarea>` cleared empty;
+            // `<select bind:value><option>static</option></select>`). Any other
+            // interior content — a `<textarea>` with text/interpolation children, an
+            // `<option>` with an INTERPOLATION child (the `option.__value` tracking
+            // surface), a `<select>` child that is not a static `<option>` — is the
+            // special-content surface 5c does not own; it fails closed HERE (before
+            // the per-attr / child walk) so a divergent module is never emitted.
+            refuse_unsupported_special_content(ir, element, el, el.span)?;
             // A SPREAD on the element switches its WHOLE attribute strategy to the single
             // `$.attribute_effect` fold. The fold models only the directly-foldable attr
             // set; an event / `bind:` / `use:` / `transition:` / `let:` directive on a
@@ -822,11 +835,20 @@ fn classify_node(
             // element already failed closed at step (2), so the attr walk sees only an
             // allowlisted element.
             for (attr_idx, attr) in el.attrs.iter().enumerate() {
-                classify_attr(ir, node_id, attr_idx, element, attr, el.span, facts)?;
+                classify_attr(
+                    ir,
+                    node_id,
+                    attr_idx,
+                    element,
+                    attr,
+                    el.span,
+                    declared_root_names,
+                    facts,
+                )?;
             }
             let child_namespace = determine_namespace_for_children(element_namespace, &el.tag);
             for &child in &el.children {
-                classify_node(ir, child, child_namespace, facts)?;
+                classify_node(ir, child, child_namespace, declared_root_names, facts)?;
             }
             Ok(())
         }
@@ -948,6 +970,102 @@ fn element_carries_is_attribute(el: &super::ir::ElementIr) -> bool {
     })
 }
 
+/// Refuse a bindings-breadth special-content host (`<textarea>` / `<select>` /
+/// `<option>`) whose INTERIOR content is not the supported `bind:value` host shape.
+///
+/// 5c emits these elements ONLY as the DOM-bind hosts the pinned `svelte@5.56.3`
+/// oracle proves: a `<textarea bind:value>` is cleared EMPTY (`$.remove_textarea_child`
+/// strips its content), and a `<select bind:value>` carries STATIC `<option>`
+/// children (`<select><option>a</option></select>`). The official compiler gives
+/// these elements a SPECIAL content model 5c does not own — a `<textarea>` with
+/// text/interpolation content is the raw-text-value surface, and an `<option>` with
+/// an INTERPOLATION child is the `option.__value` / `option_value` reactive-tracking
+/// surface. Those forms are refused HERE (before the per-attr / child walk) so a
+/// divergent module is never emitted.
+///
+/// The decision is STRUCTURAL over the typed IR children (the node kinds), never a
+/// raw-source scan. A non-special element (`element` not in the special set) returns
+/// `Ok(())` immediately.
+fn refuse_unsupported_special_content(
+    ir: &SvelteRuntimeIr,
+    element: SupportedHtmlElement,
+    el: &super::ir::ElementIr,
+    el_span: Span,
+) -> Result<(), UnsupportedSvelteRuntimeSurface> {
+    let refuse = || {
+        Err(UnsupportedSvelteRuntimeSurface::Element {
+            tag: el.tag.clone(),
+            span: el_span,
+        })
+    };
+    match element {
+        // `<textarea>`: the supported shape is the `bind:value` host. With EMPTY content
+        // it clears nothing; with a STATIC-TEXT fallback child AND a `bind:value` the
+        // existing `$.remove_textarea_child` prelude strips the baked child at runtime, so
+        // the static-text fallback is supported (the official `<textarea
+        // bind:value>fallback</textarea>` bakes the text into the cloned skeleton, then
+        // clears it — the bind is unaffected). A DYNAMIC / interpolation child is the
+        // official `$.set_value(textarea, expr)` content channel 5c does NOT own (a
+        // distinct surface owned by a later content-model layer — ledger D-22), so it
+        // still fails closed. A static-text child WITHOUT a `bind:value` is also out of
+        // the supported empty/bind-host shape and fails closed.
+        SupportedHtmlElement::Textarea => {
+            if el.children.is_empty() {
+                return Ok(());
+            }
+            let has_value_bind = el
+                .attrs
+                .iter()
+                .any(|a| matches!(a, AttrIr::Bind { target, .. } if target == "value"));
+            let all_children_static_text = el
+                .children
+                .iter()
+                .all(|&child| matches!(ir.node(child), IrNode::Text { .. }));
+            if has_value_bind && all_children_static_text {
+                Ok(())
+            } else {
+                refuse()
+            }
+        }
+        // `<option>`: the supported shape carries STATIC text only (the
+        // `<select><option>a</option></select>` form). An INTERPOLATION child is the
+        // `option.__value` reactive-tracking surface; a nested element child is a
+        // non-core option interior. Only literal text children are accepted.
+        SupportedHtmlElement::Option => {
+            for &child in &el.children {
+                if !matches!(ir.node(child), IrNode::Text { .. }) {
+                    return refuse();
+                }
+            }
+            Ok(())
+        }
+        // `<select>`: the supported shape's children are STATIC `<option>` elements
+        // (each itself gated by the `Option` arm when the child walk reaches it).
+        // A non-`<option>` child (text other than insignificant whitespace, an
+        // interpolation, a block) is not the supported select-host interior.
+        SupportedHtmlElement::Select => {
+            for &child in &el.children {
+                match ir.node(child) {
+                    // A child `<option>` element is the supported select interior (it
+                    // is itself content-gated when the child walk classifies it).
+                    IrNode::Element(child_el) if child_el.tag == "option" => {}
+                    // Insignificant whitespace-only text between options is fine (the
+                    // whitespace cleaner drops it); significant text / interpolation /
+                    // any other node is not a supported select child.
+                    IrNode::Text { text, .. } if text.trim().is_empty() => {}
+                    _ => return refuse(),
+                }
+            }
+            Ok(())
+        }
+        // Every other element (including `<audio>` / `<video>` / `<details>`, whose
+        // bind-host forms are content-empty in the oracle but whose static interiors
+        // are NOT special-content-model surfaces and flow through the ordinary child
+        // walk) has no special-content restriction here.
+        _ => Ok(()),
+    }
+}
+
 /// A short namespace label for a fail-closed diagnostic.
 fn namespace_label(ns: Namespace) -> &'static str {
     match ns {
@@ -1054,6 +1172,14 @@ fn element_has_class_directive(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
         if el.attrs.iter().any(|a| matches!(a, AttrIr::Class { .. })))
 }
 
+/// Whether the element carries a `bind:group` directive — the trigger that turns a
+/// co-located static `value="X"` into the per-input `input.value = input.__value =
+/// 'X'` group-value write (rather than a baked static attr).
+fn element_has_group_bind(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
+    matches!(ir.node(node_id), IrNode::Element(el)
+        if el.attrs.iter().any(|a| matches!(a, AttrIr::Bind { target, .. } if target == "group")))
+}
+
 /// Whether the element at `node_id` carries any `style:` directive (so a static
 /// `style` on it is the base value of the merged `$.set_style`, not a baked attr).
 fn element_has_style_directive(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
@@ -1072,6 +1198,7 @@ fn element_has_style_directive(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
 /// explicitly. `attr_idx` is the attribute's position in the element's `AttrIr` list,
 /// recorded with the accepted dynamic-attr shape so the plan maps each op back to its
 /// emission decision.
+#[allow(clippy::too_many_arguments)]
 fn classify_attr(
     ir: &SvelteRuntimeIr,
     node_id: NodeId,
@@ -1079,6 +1206,7 @@ fn classify_attr(
     element: SupportedHtmlElement,
     attr: &AttrIr,
     el_span: Span,
+    declared_root_names: &rustc_hash::FxHashSet<String>,
     facts: &RefCell<SurfaceFacts>,
 ) -> Result<(), UnsupportedSvelteRuntimeSurface> {
     // The accepted element's tag string (for the bind classifier's `input` host
@@ -1141,12 +1269,52 @@ fn classify_attr(
                     .push((node_id, attr_idx, shape));
                 return Ok(());
             }
+            // (a3) A static `value="X"` on an `<input>` that ALSO carries a
+            // `bind:group` is the GROUP VALUE source (the official `bind:group` form
+            // emits `input.value = input.__value = 'X'` as a per-input runtime write,
+            // NOT a baked static `value` attr). 5c accepts it as the group-value fact;
+            // the serializer strips it from the skeleton and the emitter writes the
+            // `__value`. (A static `value` on a NON-group input is still the
+            // form-control deferral and fails closed at (b).)
+            //
+            // The RAW attribute span is ENTITY-DECODED here (the storage site) before it
+            // becomes the group-value fact — official runs the static value through the
+            // attribute-value entity decoder, so `value="a&amp;b"` writes `'a&b'`. The
+            // emitter (`client_bind.rs`) is the QUOTING point; storing the decoded value
+            // keeps decoding owned at one place and matches every other static attribute.
+            if name == "value"
+                && element == SupportedHtmlElement::Input
+                && element_has_group_bind(ir, node_id)
+            {
+                let literal = value
+                    .as_ref()
+                    .map(|v| super::entity_decode::decode_attr_entities(&v.value))
+                    .unwrap_or_default();
+                facts.borrow_mut().group_values.push((node_id, literal));
+                return Ok(());
+            }
+            // (a4) A static `defaultValue` / `defaultChecked` CO-LOCATED with its MATCHING
+            // bind is the form-default write the official compiler emits as a property
+            // write (`input.defaultValue = 'x'` / `input.defaultChecked = true`) BEFORE the
+            // bind — and the default attr SUPPRESSES the `remove_input_defaults` prelude.
+            // `defaultValue` pairs with `bind:value` (on an `<input>` OR `<textarea>`);
+            // `defaultChecked` pairs with `bind:checked` (on an `<input>`). 5c accepts ONLY
+            // the co-located form — the property-write op is already projected from the IR
+            // (`NonStaticProperty`), so the accept just lets the attr through the gate. A
+            // STANDALONE default (no matching bind) stays the form-default deferral and
+            // fails closed at (b); a MISMATCHED default+bind (`defaultChecked` with
+            // `bind:value`) is a CONSERVATIVE refusal — NARROWER than official, which
+            // accepts the mixed form, but 5c keeps the strict co-location boundary.
+            if super::bind_target_names::default_attr_has_matching_bind(name, element, ir, node_id)
+            {
+                return Ok(());
+            }
             // (b) The STRICT FINITE static-attr allowlist is the SOLE acceptance
             // authority for a baked static attr: `SupportedStaticAttr::classify`
             // accepts ONLY the enumerated `(name, element, value)` shapes. EVERY other
-            // name (`is`, `defaultValue`, `defaultChecked`, `dir`, `style`, input
-            // `value`/`checked`, …) fails closed BEFORE emission — so an accepted attr
-            // can NEVER be the one the serializer would silently drop.
+            // name (`is`, a standalone `defaultValue`/`defaultChecked`, `dir`, `style`,
+            // input `value`/`checked`, …) fails closed BEFORE emission — so an accepted
+            // attr can NEVER be the one the serializer would silently drop.
             let literal = value.as_ref().map(|v| v.value.as_str());
             if SupportedStaticAttr::classify(name, element, literal).is_none() {
                 return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
@@ -1157,6 +1325,20 @@ fn classify_attr(
             Ok(())
         }
         AttrIr::Dynamic { name, .. } | AttrIr::Mixed { name, .. } => {
+            // A DYNAMIC/mixed `value={…}` on an `<input>` that ALSO carries a `bind:group` is
+            // the group-value source (official emits the per-input `input.value = input.__value
+            // = …` write — change-tracked via `$.template_effect` when reactive — NOT a generic
+            // dynamic form-control attr). Record the node; the plan reads the `value` attr from
+            // the IR and builds the structured `GroupDynamicValue` (it owns the rewriter +
+            // reactivity analysis). The static-literal case is handled by the `AttrIr::Static`
+            // arm (`group_values`).
+            if name == "value"
+                && element == SupportedHtmlElement::Input
+                && element_has_group_bind(ir, node_id)
+            {
+                facts.borrow_mut().group_dynamic_value_nodes.push(node_id);
+                return Ok(());
+            }
             // A dynamic / mixed `class` / `style` PLAIN attribute (`class={c}` /
             // `class="a {b}"` / `style={s}`) is the class / style surface (`$.set_class`
             // / `$.set_style`), NOT a generic attribute — route it to the Class / Style
@@ -1229,31 +1411,41 @@ fn classify_attr(
             // an identifier. A PROP target, a non-lvalue (`{f()}`), a sequence
             // get/set pair, or a member `bind:this` fails closed (5c). Drives the
             // SCOPE-AWARE prop/signal resolution from the binding table.
-            let expr_source = expr.map(|e| ir.analysis.expressions.get(e).source);
-            let scope = expr
-                .map(|e| ir.analysis.expressions.get(e).scope)
+            // The analyzed bound expression carries its source AND the shared
+            // bind-target fact; the classifier reads both from it (no reparse).
+            let analyzed = expr.map(|e| ir.analysis.expressions.get(e));
+            let scope = analyzed
+                .map(|a| a.scope)
                 .unwrap_or_else(|| ir.root_scope().scope);
             // The DECLARED instance + module script top-level locals — a `bind:this`
             // target must name one of these (the §1.2-core shape-3 `let el;` local);
             // a free / undeclared target fails closed (5c), mooting the DOM-local
-            // collision an undeclared target would otherwise cause.
-            let alloc = oxc_allocator::Allocator::default();
-            let instance_locals = super::reactive_analysis::collect_declared_root_names(
-                &alloc,
-                ir.analysis.scripts.module_source,
-                ir.analysis.scripts.instance_source,
-            );
+            // collision an undeclared target would otherwise cause. Computed ONCE per
+            // compile and threaded in (loop-invariant), never re-parsed per bind attr.
+            // The host element's typed attribute inventory — the input to the
+            // official host-attribute bind gates (`bind:checked` needs a static
+            // `type="checkbox"`, contenteditable binds need a static
+            // `contenteditable`, `<select multiple bind:value>` needs a static
+            // `multiple`). Read from the typed `ElementIr`, never a source scan.
+            let host_attrs: &[AttrIr] = match ir.node(node_id) {
+                IrNode::Element(el) => &el.attrs,
+                _ => &[],
+            };
             let shape = client_shapes::classify_bind_shape(
                 target,
                 tag,
-                expr_source,
+                host_attrs,
+                analyzed,
                 scope,
                 &ir.analysis.bindings,
                 &ir.analysis.scopes,
-                &instance_locals,
+                declared_root_names,
                 el_span,
             )?;
-            facts.borrow_mut().bind_shapes.push((node_id, shape));
+            facts
+                .borrow_mut()
+                .bind_shapes
+                .push((node_id, target.clone(), shape));
             Ok(())
         }
         AttrIr::Event {

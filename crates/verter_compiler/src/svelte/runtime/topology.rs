@@ -132,16 +132,21 @@ fn walk_node_topology(
 ) {
     match ir.node(node) {
         IrNode::Element(el) => {
+            // The host element's full typed attribute inventory feeds the official
+            // host-attribute bind gate (the SAME gate the emitter applies), so a
+            // refused host shape records NO bind helper.
             for attr in &el.attrs {
-                record_attr_topology(attr, helpers, delegated);
+                record_attr_topology(attr, Some(&el.tag), &el.attrs, helpers, delegated);
             }
             for &child in &el.children {
                 walk_node_topology(ir, child, helpers, delegated);
             }
         }
         IrNode::Component(c) => {
+            // A component-host bind is NOT a DOM-element bind (component hosts are not yet
+            // supported, owned by 5f); pass no DOM host tag so no DOM bind helper records.
             for attr in &c.attrs {
-                record_attr_topology(attr, helpers, delegated);
+                record_attr_topology(attr, None, &[], helpers, delegated);
             }
             for &child in &c.children {
                 walk_node_topology(ir, child, helpers, delegated);
@@ -151,8 +156,10 @@ fn walk_node_topology(
             if s.kind == SpecialKind::Head {
                 helpers.call(SvelteHelper::Head);
             }
+            // A special-element (`<svelte:*>`) bind has no DOM host (special-element hosts
+            // are not yet supported, owned by 5f).
             for attr in &s.attrs {
-                record_attr_topology(attr, helpers, delegated);
+                record_attr_topology(attr, None, &[], helpers, delegated);
             }
             for &child in &s.children {
                 walk_node_topology(ir, child, helpers, delegated);
@@ -206,7 +213,21 @@ fn walk_node_topology(
 }
 
 /// Record the helper topology + delegated events for one attribute.
-fn record_attr_topology(attr: &AttrIr, helpers: &mut HelperTrace, delegated: &mut DelegatedEvents) {
+///
+/// `host_tag` is the DOM host tag for an `IrNode::Element` attribute, or `None` for a
+/// component / special-element host (whose hosts are not yet supported, owned by 5f, and
+/// record no DOM bind helper). `host_attrs` is the host element's full typed attribute
+/// inventory — fed to the official host-attribute bind gate (the SAME gate the
+/// emitter applies), empty for a component/special host. The bind helper + its
+/// prelude are resolved DATA-DRIVEN from the shared bind routing — never a per-name
+/// match arm pile.
+fn record_attr_topology(
+    attr: &AttrIr,
+    host_tag: Option<&str>,
+    host_attrs: &[AttrIr],
+    helpers: &mut HelperTrace,
+    delegated: &mut DelegatedEvents,
+) {
     match attr {
         AttrIr::Event {
             event_type,
@@ -223,11 +244,54 @@ fn record_attr_topology(attr: &AttrIr, helpers: &mut HelperTrace, delegated: &mu
         AttrIr::Bind { target, .. } => {
             if target == "this" {
                 helpers.call(SvelteHelper::BindThis);
-            } else if target == "value" {
-                helpers.call(SvelteHelper::BindValue);
+                return;
             }
+            // A DOM value/property bind on an element host: resolve its routing and
+            // record the bind helper DATA-DRIVEN. A component/special host
+            // (`host_tag == None`) or an unsupported `(name, host)` records nothing
+            // (the bind fails closed). The per-host PRELUDE cleanup
+            // (`remove_input_defaults` / `remove_textarea_child`) is a DOM-walk-level
+            // helper, NOT part of the structural-topology owned subset, so it is not
+            // recorded here (the emitter places it during the walk).
+            let Some(tag) = host_tag else {
+                return;
+            };
+            let Some(routing) = crate::svelte::bind_contract::resolve_runtime_bind(target, tag)
+            else {
+                return;
+            };
+            // Apply the SAME official host-attribute gate the emitter
+            // (`classify_dom_value_bind`) applies: a host shape the emitter refuses
+            // (`<input bind:checked>` with no `type`, `<input type bind:group>`, …)
+            // records NOTHING here, so the structural oracle and the emitter never
+            // disagree. Single gate authority — reuses `host_attr_gate_passes` (no
+            // duplicated gate logic).
+            if !super::host_attr_gate::host_attr_gate_passes(target, tag, &routing, host_attrs) {
+                return;
+            }
+            helpers.call(bind_helper_for(routing.helper));
         }
         AttrIr::Spread { .. } => helpers.call(SvelteHelper::AttributeEffect),
         _ => {}
+    }
+}
+
+/// Map a runtime bind [`RuntimeHelper`](crate::svelte::bind_contract::RuntimeHelper)
+/// to its structural [`SvelteHelper`] — the single mapping authority shared by the
+/// topology recorder and the emitter's helper vocabulary.
+fn bind_helper_for(helper: crate::svelte::bind_contract::RuntimeHelper) -> SvelteHelper {
+    use crate::svelte::bind_contract::RuntimeHelper;
+    match helper {
+        RuntimeHelper::Value => SvelteHelper::BindValue,
+        RuntimeHelper::SelectValue => SvelteHelper::BindSelectValue,
+        RuntimeHelper::Checked => SvelteHelper::BindChecked,
+        RuntimeHelper::Group => SvelteHelper::BindGroup,
+        RuntimeHelper::CurrentTime => SvelteHelper::BindCurrentTime,
+        RuntimeHelper::Paused => SvelteHelper::BindPaused,
+        RuntimeHelper::Played => SvelteHelper::BindPlayed,
+        RuntimeHelper::ElementSize => SvelteHelper::BindElementSize,
+        RuntimeHelper::ContentEditable => SvelteHelper::BindContentEditable,
+        RuntimeHelper::Property => SvelteHelper::BindProperty,
+        RuntimeHelper::This => SvelteHelper::BindThis,
     }
 }

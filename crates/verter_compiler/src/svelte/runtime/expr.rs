@@ -390,6 +390,12 @@ pub struct AnalyzedExpr<'a> {
     /// a literal / template / binary value emits RAW, every other kind wraps in `$.clsx`).
     /// Computed on the same transparent-paren-unwrapped root.
     pub unwrapped_root_kind: UnwrappedRootKind,
+    /// The ONE owned `bind:` target fact (classification / sequence presence / TS-wrapper
+    /// validity / root identifier / plain-JS function-pair slices), computed ONCE from the
+    /// SAME parse that produced this expression — the SINGLE authority every bind consumer
+    /// reads instead of re-parsing the expression per consumer. Empty (default) for a
+    /// non-bind expression (no `bind:` consumer reads it).
+    pub bind_target: BindTargetFact,
 }
 
 /// The KIND of a value expression's transparent-paren-unwrapped root, restricted to the
@@ -421,11 +427,13 @@ impl<'a> AnalyzedExpr<'a> {
             direct_zero_arg_call_callee: facts.direct_zero_arg_call_callee,
             unwrapped_is_sequence: facts.unwrapped_is_sequence,
             unwrapped_root_kind: facts.unwrapped_root_kind,
+            bind_target: facts.bind_target,
         }
     }
 
     /// Build the analyzed expression for a TORN parse (the fragment did not parse cleanly):
-    /// no references, treated as a non-sequence root with an unknown root kind.
+    /// no references, treated as a non-sequence root with an unknown root kind and an empty
+    /// bind-target fact (a torn bind target fails closed downstream).
     pub(crate) fn torn(source: &'a str, scope: ScopeId) -> Self {
         Self {
             source,
@@ -434,6 +442,7 @@ impl<'a> AnalyzedExpr<'a> {
             direct_zero_arg_call_callee: None,
             unwrapped_is_sequence: false,
             unwrapped_root_kind: UnwrappedRootKind::Other,
+            bind_target: BindTargetFact::default(),
         }
     }
 }
@@ -546,9 +555,7 @@ pub fn reparse_module<'a>(alloc: &'a Allocator, text: &str) -> Option<Program<'a
     Some(parsed.program)
 }
 
-pub use super::bind_target::{
-    bind_target_is_ts_wrapped, bind_target_root_ident, classify_bind_target, BindTargetKind,
-};
+pub use super::bind_target::{BindTargetFact, BindTargetKind};
 
 /// Whether a callee expression is the `$state(…)` rune (vs `$state.raw` / a
 /// shadowing local). Returns the declared flavour when it is a `$state` family
@@ -1425,6 +1432,10 @@ pub(crate) struct ExprAnalysisFacts {
     /// The KIND of the transparent-paren-unwrapped root (for the `class={…}` `$.clsx`
     /// decision).
     pub unwrapped_root_kind: UnwrappedRootKind,
+    /// The owned `bind:` target fact, derived from the SAME parsed expression (the
+    /// structural fields reuse this parse; the function-pair plain-JS slices come from one
+    /// optional `mjs` parse gated on sequence presence).
+    pub bind_target: BindTargetFact,
 }
 
 /// Collect the FREE identifier references of a single template-expression text,
@@ -1502,11 +1513,20 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
         }
         None => (false, UnwrappedRootKind::Other),
     };
+    // The `bind:` target fact, derived from the SAME parsed `body_expr` (NO extra parse for
+    // the structural fields). The plain-JS function-pair slices come from at most one
+    // optional `mjs` parse INSIDE the constructor, gated on sequence presence — stored ONCE
+    // here so no downstream bind consumer re-parses the expression. A non-bind expression
+    // (no `body_expr`, or a non-bind shape) yields the empty default fact.
+    let bind_target = body_expr
+        .map(|expr| BindTargetFact::from_parsed_target(expr, &alloc, text))
+        .unwrap_or_default();
     Ok(ExprAnalysisFacts {
         references: collector.refs,
         direct_zero_arg_call_callee,
         unwrapped_is_sequence,
         unwrapped_root_kind,
+        bind_target,
     })
 }
 

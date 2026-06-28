@@ -181,6 +181,26 @@ pub fn rewrite_expression_with_props(
 /// context.
 pub type ProxyInitMap = FxHashMap<String, ProxyInit>;
 
+/// The SOURCE DIALECT a rewrite parses + lowers in. The two surfaces differ ONLY in
+/// the parser source type and whether the TypeScript-strip pass runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExprDialect {
+    /// TS-lenient (`SourceType::tsx()`) parse, followed by the TypeScript-strip pass —
+    /// the default for template expressions, event handlers, lvalue thunks, and
+    /// instance-script `function` declarations (a `<script>` may carry TS syntax that
+    /// lowers stripped).
+    Tsx,
+    /// PLAIN Svelte JS (`SourceType::mjs()`) parse, with NO TypeScript-strip pass — the
+    /// FUNCTION-PAIR bind element lane ONLY. Official svelte@5.56.3 parses a binding
+    /// expression as plain JS (any TS construct is a parse error, refused upstream by
+    /// `parse_plain_svelte_function_pair`), so a valid-JS element that LOOKS like TS to
+    /// the TSX parser — e.g. ``tag<string>`x` `` (a relational compare, NOT a tagged
+    /// template with type arguments) — must be parsed as plain JS and NOT TS-stripped,
+    /// or the strip corrupts it (``tag`x` ``). Scoped to function-pair elements; do not
+    /// route other expression callers through this dialect.
+    PlainJs,
+}
+
 /// Like [`rewrite_expression_with_props`] but ALSO threading the per-script
 /// one-hop proxy-init map, so a `$.set(o, prim[, true])` reassignment matches the
 /// official scope-aware `should_proxy(rhs)` (a one-hop identifier follow to a
@@ -199,12 +219,69 @@ pub fn rewrite_expression_full(
     prop_reads: &PropReads,
     proxy_inits: &ProxyInitMap,
 ) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
+    rewrite_expression_dialect(
+        source,
+        scope,
+        bindings,
+        scopes,
+        prop_reads,
+        proxy_inits,
+        ExprDialect::Tsx,
+    )
+}
+
+/// Like [`rewrite_expression_full`] but in the PLAIN-JS ([`ExprDialect::PlainJs`])
+/// dialect — the FUNCTION-PAIR bind element lane. The source is parsed as
+/// `SourceType::mjs()` and the TypeScript-strip pass is OMITTED, so a valid-JS element
+/// that the TSX parser would reinterpret as TS (e.g. ``tag<string>`x` `` — a relational
+/// compare, not a tagged template with type arguments) is rewritten faithfully instead
+/// of being corrupted by the strip. The signal-rewrite collection is identical (signals
+/// are plain identifiers/calls, dialect-independent). Acceptance + element extraction is
+/// the caller's responsibility via the shared
+/// [`BindTargetFact::function_pair`](super::expr::BindTargetFact) slices, which already
+/// refused any TS-bearing element upstream; this lane only rewrites a known-clean element.
+pub fn rewrite_expression_plain_js(
+    source: &str,
+    scope: ScopeId,
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+    prop_reads: &PropReads,
+    proxy_inits: &ProxyInitMap,
+) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
+    rewrite_expression_dialect(
+        source,
+        scope,
+        bindings,
+        scopes,
+        prop_reads,
+        proxy_inits,
+        ExprDialect::PlainJs,
+    )
+}
+
+/// The shared source-preserving expression-rewrite core, parameterised by source
+/// [`ExprDialect`]. `Tsx` parses TS-lenient + strips TypeScript; `PlainJs` parses
+/// `mjs` + omits the strip. Everything else (the two-pass signal-rewrite, the
+/// CodeTransform composition, the inner-expression slice) is dialect-independent.
+fn rewrite_expression_dialect(
+    source: &str,
+    scope: ScopeId,
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+    prop_reads: &PropReads,
+    proxy_inits: &ProxyInitMap,
+    dialect: ExprDialect,
+) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
     let alloc = Allocator::default();
     // Wrap the expression in `(…)` so an arrow / object literal / sequence parses
     // as a single expression statement. The single `(` prefix means an AST span
     // `s` indexes `wrapped[s..]` directly.
     let wrapped = format!("({source})");
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    let source_type = match dialect {
+        ExprDialect::Tsx => SourceType::tsx(),
+        ExprDialect::PlainJs => SourceType::mjs(),
+    };
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         // A fragment that does not parse is a refusal — never emit it verbatim.
         return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
@@ -241,8 +318,14 @@ pub fn rewrite_expression_full(
     // `as`/`satisfies`/`!`/type assertions/instantiation type args), the SAME path
     // the statement lowering uses. The strip and the signal-read rewrites are
     // DISJOINT (a TS type span never overlaps a runtime read leaf), so they compose
-    // on one transform.
-    crate::strip_types::typescript::strip_typescript_from_expression(inner, &mut ct, 0, &wrapped);
+    // on one transform. SKIPPED in the `PlainJs` dialect: the element parsed as plain
+    // JS carries no TS nodes, and stripping would mis-handle a valid-JS form the TSX
+    // parser reinterprets as TS (the ``tag<string>`x` `` trap).
+    if dialect == ExprDialect::Tsx {
+        crate::strip_types::typescript::strip_typescript_from_expression(
+            inner, &mut ct, 0, &wrapped,
+        );
+    }
     // (2) Apply the signal read/write rewrites.
     for edit in &edits {
         match edit {

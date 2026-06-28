@@ -1,0 +1,66 @@
+{
+  "slug": "matrix/bind_textarea_value.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_textarea_value",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "remove_textarea_child",
+    "bind_value",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_value",
+    "from_html",
+    "get",
+    "remove_textarea_child",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "remove_textarea_child": 1,
+    "bind_value": 1,
+    "get": 1,
+    "set": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<textarea></textarea>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<textarea></textarea>`); export default function bind_textarea_value($$anchor) {let v = $.state(\"\"); var textarea = root(); $.remove_textarea_child(textarea); $.bind_value(textarea, () => $.get(v), ($$value) => $.set(v, $$value)); $.append($$anchor, textarea);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

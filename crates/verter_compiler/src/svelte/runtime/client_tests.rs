@@ -880,6 +880,34 @@ fn parses_as_js(code: &str) -> bool {
     !ret.panicked && ret.errors.is_empty()
 }
 
+/// Count the DECLARED occurrences of a binding `name` (any scope) in the emitted
+/// module via an OXC AST walk over `BindingIdentifier`s. A `bind:group` accumulator
+/// that collides with a user binding of the same name would declare the name TWICE
+/// (an invalid redeclaration); the collision-aware allocator renames the accumulator
+/// so each name is declared at most once. References (`IdentifierReference`) are NOT
+/// `BindingIdentifier`s, so a `$.bind_group(name, …)` USE is not counted.
+fn count_declared_binding(code: &str, name: &str) -> usize {
+    use oxc_ast::ast::BindingIdentifier;
+    use oxc_ast_visit::Visit;
+    struct Counter<'n> {
+        name: &'n str,
+        count: usize,
+    }
+    impl<'a> Visit<'a> for Counter<'_> {
+        fn visit_binding_identifier(&mut self, it: &BindingIdentifier<'a>) {
+            if it.name.as_str() == self.name {
+                self.count += 1;
+            }
+        }
+    }
+    let alloc = Allocator::default();
+    let source_type = oxc_span::SourceType::default().with_module(true);
+    let ret = oxc_parser::Parser::new(&alloc, code, source_type).parse();
+    let mut counter = Counter { name, count: 0 };
+    counter.visit_program(&ret.program);
+    counter.count
+}
+
 // ── Naming (built from the oracle's actual official output) ──────────────────
 
 #[test]
@@ -1621,6 +1649,169 @@ fn input_spread_with_a_value_attr_keeps_the_trailing_tail() {
 }
 
 #[test]
+fn input_default_value_with_bind_value_emits_property_write_before_bind() {
+    // (5c) A static `defaultValue` CO-LOCATED with a `bind:value` on an `<input>` IS a
+    // supported 5c surface: official emits the `input.defaultValue = 'x'` property write
+    // BEFORE the bind, and the default attribute SUPPRESSES the `$.remove_input_defaults`
+    // prelude (the default is set explicitly). Verified against svelte@5.56.3:
+    //   input.defaultValue = 'x';
+    //   $.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value));
+    // RED against the pre-fix classifier, which fell `defaultValue` through to the
+    // static-attr allowlist and refused it (`DynamicAttribute { name: "defaultValue" }`).
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input defaultValue=\"x\" bind:value={v} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("input.defaultValue = 'x'"),
+        "a co-located defaultValue must emit the property write:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "the bind must still emit:\n{js}"
+    );
+    // The property write comes BEFORE the bind call (official emission order).
+    let dv = js
+        .find("input.defaultValue = 'x'")
+        .expect("defaultValue write");
+    let bv = js.find("$.bind_value(input").expect("bind_value call");
+    assert!(
+        dv < bv,
+        "input.defaultValue must be written BEFORE $.bind_value:\n{js}"
+    );
+    // The `defaultValue` SUPPRESSES the input-defaults prelude (the default is explicit).
+    assert!(
+        !js.contains("$.remove_input_defaults"),
+        "a co-located defaultValue must suppress $.remove_input_defaults:\n{js}"
+    );
+}
+
+#[test]
+fn input_default_value_after_bind_still_emits_property_write_before_bind() {
+    // (5c) Source attribute ORDER does not matter: `<input bind:value={v} defaultValue="x">`
+    // (default attr AFTER the bind in source) still emits `input.defaultValue = 'x'` BEFORE
+    // the `$.bind_value` call. Verified against svelte@5.56.3 (identical output to the
+    // before-order case). RED would be an order-sensitive emission that placed the write
+    // after the bind.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={v} defaultValue=\"x\" />\n",
+        "App.svelte",
+    );
+    let dv = js
+        .find("input.defaultValue = 'x'")
+        .expect("defaultValue write");
+    let bv = js.find("$.bind_value(input").expect("bind_value call");
+    assert!(
+        dv < bv,
+        "input.defaultValue must be written BEFORE $.bind_value regardless of source order:\n{js}"
+    );
+}
+
+#[test]
+fn input_default_checked_with_bind_checked_emits_property_write_before_bind() {
+    // (5c) A valueless static `defaultChecked` CO-LOCATED with a `bind:checked` on a
+    // checkbox `<input>` IS supported: official emits `input.defaultChecked = true` BEFORE
+    // the bind, suppressing `$.remove_input_defaults`. Verified against svelte@5.56.3:
+    //   input.defaultChecked = true;
+    //   $.bind_checked(input, () => $.get(c), ($$value) => $.set(c, $$value));
+    // RED against the pre-fix classifier (refused `defaultChecked` at the static-attr gate).
+    let js = emit(
+        "<script>let c = $state(false);</script>\n<input type=\"checkbox\" defaultChecked bind:checked={c} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("input.defaultChecked = true"),
+        "a co-located defaultChecked must emit the boolean property write:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_checked(input, () => $.get(c), ($$value) => $.set(c, $$value))"),
+        "the bind:checked must still emit:\n{js}"
+    );
+    let dc = js
+        .find("input.defaultChecked = true")
+        .expect("defaultChecked write");
+    let bc = js.find("$.bind_checked(input").expect("bind_checked call");
+    assert!(
+        dc < bc,
+        "defaultChecked must be written BEFORE the bind:\n{js}"
+    );
+    assert!(
+        !js.contains("$.remove_input_defaults"),
+        "a co-located defaultChecked must suppress $.remove_input_defaults:\n{js}"
+    );
+}
+
+#[test]
+fn textarea_default_value_with_bind_value_emits_property_write_and_keeps_child_clear() {
+    // (5c) A static `defaultValue` co-located with `bind:value` on a `<textarea>` IS
+    // supported. Verified against svelte@5.56.3: the `$.remove_textarea_child` prelude is
+    // NOT suppressed (only `$.remove_input_defaults` is), and the property write lands
+    // between the child-clear and the bind:
+    //   $.remove_textarea_child(textarea);
+    //   textarea.defaultValue = 'x';
+    //   $.bind_value(textarea, () => $.get(v), ($$value) => $.set(v, $$value));
+    // RED against the pre-fix classifier (refused `defaultValue` at the static-attr gate).
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<textarea defaultValue=\"x\" bind:value={v}></textarea>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.remove_textarea_child(textarea)"),
+        "a textarea defaultValue must NOT suppress remove_textarea_child:\n{js}"
+    );
+    assert!(
+        js.contains("textarea.defaultValue = 'x'"),
+        "a co-located textarea defaultValue must emit the property write:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_value(textarea, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "the textarea bind must still emit:\n{js}"
+    );
+}
+
+#[test]
+fn standalone_default_value_without_bind_still_fails_closed() {
+    // NEGATIVE control: a standalone static `defaultValue` with NO matching `bind:value`
+    // STAYS fail-closed at the static-attr allowlist (`DynamicAttribute { name:
+    // "defaultValue" }`). The acceptance is gated on the co-located `bind:value`, so a
+    // bare `<input defaultValue="x">` (the form-default family without a bind) is NOT
+    // globally whitelisted. RED would be a blanket defaultValue acceptance. (A trailing
+    // `$state` keeps the component in RUNES mode so the attr gate is reached.)
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<input defaultValue=\"x\" />\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "defaultValue"),
+    );
+}
+
+#[test]
+fn standalone_default_checked_without_bind_still_fails_closed() {
+    // F3 NEGATIVE control (DEFER-NEW, D-27): a standalone `defaultChecked` with NO matching
+    // `bind:checked` STAYS fail-closed at the static-attr allowlist (`DynamicAttribute { name:
+    // "defaultChecked" }`). Official svelte@5.56.3 ACCEPTS it (oracle-verified: emits
+    // `input.defaultChecked = true;`), but standalone form-default PROPERTY-attribute emission
+    // is OUT of 5c's ordinary-DOM `bind:*` charter (D-27). The acceptance is gated on a
+    // co-located MATCHING bind, so a bare `<input defaultChecked>` is NOT whitelisted. RED
+    // would be a blanket defaultChecked acceptance.
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<input defaultChecked />\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "defaultChecked"),
+    );
+}
+
+#[test]
+fn default_checked_with_mismatched_bind_value_fails_closed() {
+    // NEGATIVE control: `defaultChecked` co-located with the WRONG bind (`bind:value`,
+    // not `bind:checked`) STAYS fail-closed. The acceptance pairs `defaultValue`↔`bind:value`
+    // and `defaultChecked`↔`bind:checked` ONLY — a mismatched default+bind is a conservative
+    // refusal (NARROWER than official, which accepts the mixed form; 5c keeps the strict
+    // co-location boundary). RED would be an acceptance keyed on "any default + any bind".
+    assert_fail_closed(
+        "<script>let v = $state(\"\");</script>\n<input defaultChecked bind:value={v} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "defaultChecked"),
+    );
+}
+
+#[test]
 fn html_paren_member_callee_emits_source_preserving_thunk() {
     // A `{@html (o.render)()}` is NOT a bare-identifier call (the callee `(o.render)` peels
     // to a MEMBER, not an Identifier), so it does NOT elide to a bare callee; it routes to the
@@ -2027,10 +2218,925 @@ fn spread_element_with_event_still_refuses() {
 }
 
 #[test]
-fn checked_bind_fails_closed() {
+fn no_value_radio_group_bind_still_declares_binding_group() {
+    // FIX 3: a `bind:group` WITHOUT a `value` attr. Official svelte@5.56.3 STILL
+    // declares `const binding_group = []` and calls `$.bind_group(binding_group,
+    // [], input, get, set)` (verified against the pinned compiler). Verter declared
+    // `binding_group` ONLY when `group_values` was non-empty (the static-value
+    // path) but emitted the `$.bind_group(binding_group, …)` call regardless — so a
+    // no-value group emitted a reference to an UNDECLARED `binding_group` (a runtime
+    // ReferenceError). RED before the fix (the call present, the declaration
+    // missing); GREEN after.
+    let js = emit(
+        "<script>let g = $state('');</script>\n<input type=\"radio\" bind:group={g} />\n",
+        "App.svelte",
+    );
+    // The declaration MUST be present (the bug: it was missing without a value).
+    assert!(
+        js.contains("const binding_group = [];"),
+        "a no-value bind:group must STILL declare `const binding_group = []`:\n{js}"
+    );
+    // It is the first component-function body statement (component-fn scope, not
+    // module scope — per-instance isolation).
+    assert!(
+        js.contains("export default function App($$anchor) {\n\tconst binding_group = [];"),
+        "binding_group must be the first component-function body statement:\n{js}"
+    );
+    // The `$.bind_group(binding_group, [], …)` call references the now-declared
+    // accumulator.
+    assert!(
+        js.contains("$.bind_group(binding_group, [], input, () => $.get(g), ($$value) => $.set(g, $$value))"),
+        "the bind_group call must reference the declared binding_group:\n{js}"
+    );
+    // NEGATIVE: with NO value attr there is NO per-input `input.value = input.__value`
+    // write (that write only exists for a static value).
+    assert!(
+        !js.contains(".__value = "),
+        "a no-value group must NOT emit an __value write:\n{js}"
+    );
+    // NEGATIVE: no `bind_group(binding_group, …)` reference to an UNDECLARED
+    // accumulator — the declaration must precede the call.
+    let decl_idx = js.find("const binding_group = [];");
+    let call_idx = js.find("$.bind_group(binding_group");
+    assert!(
+        matches!((decl_idx, call_idx), (Some(d), Some(c)) if d < c),
+        "the binding_group declaration must precede its bind_group reference:\n{js}"
+    );
+}
+
+#[test]
+fn radio_group_bind_emits_component_fn_scoped_binding_group_and_per_input_value() {
+    // 5c: radio `bind:group` (primitive `$state('')`) EMITS (oracle CASE `group`):
+    // a component-FUNCTION-scoped `const binding_group = []`, per-input
+    // `$.remove_input_defaults` + `input.value = input.__value = '<value>'`, and a
+    // per-input `$.bind_group(binding_group, [], input, () => $.get(g), ($$value) =>
+    // $.set(g, $$value))`. RED against the pre-5c tree (which refused `bind:group`).
+    let js = emit(
+        "<script>let g = $state('');</script>\n\
+         <input type=\"radio\" bind:group={g} value=\"a\" />\n\
+         <input type=\"radio\" bind:group={g} value=\"b\" />\n",
+        "App.svelte",
+    );
+    // The component-FUNCTION-scoped accumulator (NOT module scope — module scope would
+    // share group state across instances, a correctness bug).
+    assert!(
+        js.contains("export default function App($$anchor) {\n\tconst binding_group = [];"),
+        "binding_group must be the first component-function body statement:\n{js}"
+    );
+    // It must NOT be at module scope (between the imports and the export).
+    assert!(
+        !js.contains("const binding_group = [];\n\nexport default")
+            && !js.contains("const binding_group = [];\nexport default"),
+        "binding_group must NOT be module-scoped (per-instance isolation):\n{js}"
+    );
+    // Per-input value writes + the two bind_group calls.
+    assert!(
+        js.contains("input.value = input.__value = 'a'"),
+        "first input value write:\n{js}"
+    );
+    assert!(
+        js.contains("input_1.value = input_1.__value = 'b'"),
+        "second input value write:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_group(binding_group, [], input, () => $.get(g), ($$value) => $.set(g, $$value))"),
+        "first bind_group call:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_group(binding_group, [], input_1, () => $.get(g), ($$value) => $.set(g, $$value))"),
+        "second bind_group call:\n{js}"
+    );
+    // The static `value` must NOT appear in the cloned skeleton (pulled out to the
+    // runtime __value write) — the template is a bare `<input type="radio"/>`.
+    assert!(
+        js.contains("$.from_html(`<input type=\"radio\"/> <input type=\"radio\"/>`"),
+        "the group input skeleton must NOT bake the static value:\n{js}"
+    );
+    // NEGATIVE: no DOM setter carries the `, $$value, true)` proxy flag.
+    assert!(
+        !js.contains(", $$value, true)"),
+        "a DOM bind:group setter must be 2-arg (no should_proxy flag):\n{js}"
+    );
+}
+
+#[test]
+fn quoted_bind_value_function_pair_still_emits_bind_value() {
+    // A QUOTED single-expression function-pair (`bind:value="{get, set}"`, a `Mixed`
+    // value) is official-VALID and emits `$.bind_value(input, get, set)` (verified
+    // svelte@5.56.3) — the bind-expr lowering unwraps the quoted single-`{…}` inner, so
+    // the function-pair classification is identical to the bare form. This is the
+    // POSITIVE CONTROL for FIX 1: the Mixed-aware group-reject gate + the defensive
+    // identifier/member-only classifier check must NOT over-refuse a NON-group quoted
+    // function-pair. Bare `bind:value={get, set}` is covered by
+    // `bind_value_named_function_pair_lowers_decls_and_passes_idents`.
+    let js = emit(
+        "<script>let value = $state(0); function get(){ return value; } function set(next){ value = next; }</script>\n<input bind:value=\"{get, set}\" />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, get, set)"),
+        "a QUOTED bind:value function-pair must still emit $.bind_value(input, get, set):\n{js}"
+    );
+    // NEGATIVE: it must NOT fail closed / drop the bind, and must NOT reject.
+    assert!(
+        js.contains("function get()") && js.contains("function set(next)"),
+        "the quoted function-pair's named get/set declarations must be lowered:\n{js}"
+    );
+}
+
+#[test]
+fn bind_group_accumulator_renames_on_user_binding_collision() {
+    // FIX 2: the `bind:group` accumulator must be allocated through the SAME seeded,
+    // collision-aware name allocator the DOM-var stems use — NOT a hardcoded
+    // `binding_group` constant. When the user declares their OWN `binding_group`,
+    // official svelte@5.56.3 renames the accumulator to `binding_group_1` (keeping the
+    // user's `binding_group`); verified shape:
+    //   let binding_group = 0;
+    //   const binding_group_1 = [];
+    //   $.bind_group(binding_group_1, [], input, () => $.get(selected), ($$value) => …);
+    // RED before the fix: the emitter used the hardcoded `binding_group` const for BOTH
+    // the user's local AND the accumulator → a DUPLICATE `binding_group` declaration in
+    // the component function scope (invalid JS, wrong routing).
+    let js = emit(
+        "<script>let binding_group = $state(0); let selected = $state('a');</script>\n<input type=\"radio\" bind:group={selected} value=\"a\">\n<input type=\"radio\" bind:group={selected} value=\"b\">\n",
+        "App.svelte",
+    );
+    // OXC-PARSED no-duplicate proof: the name `binding_group` is DECLARED exactly once
+    // (the user's `let`), and the accumulator is the renamed `binding_group_1`.
+    assert_eq!(
+        count_declared_binding(&js, "binding_group"),
+        1,
+        "the user's `binding_group` must be the SOLE `binding_group` declaration (no \
+         colliding accumulator declaration):\n{js}"
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group_1"),
+        1,
+        "the accumulator must be renamed to `binding_group_1` (one declaration):\n{js}"
+    );
+    // The renamed accumulator is declared as `[]` and is what the bind_group calls use.
+    assert!(
+        js.contains("const binding_group_1 = [];"),
+        "the renamed accumulator must be declared `const binding_group_1 = [];`:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_group(binding_group_1, [], input,")
+            && js.contains("$.bind_group(binding_group_1, [], input_1,"),
+        "both bind_group calls must reference the renamed `binding_group_1`:\n{js}"
+    );
+    // NEGATIVE: the colliding `const binding_group = [];` accumulator must NOT appear.
+    assert!(
+        !js.contains("const binding_group = [];"),
+        "the accumulator must NOT collide with the user's `binding_group`:\n{js}"
+    );
+}
+
+#[test]
+fn bind_group_accumulator_keeps_binding_group_without_collision() {
+    // POSITIVE CONTROL for FIX 2: with NO user `binding_group`, the accumulator keeps the
+    // canonical `binding_group` name (the seeded allocator's stem is unclaimed) — the
+    // rename only triggers on a real collision. Guards against the allocator spuriously
+    // renaming when there is no clash.
+    let js = emit(
+        "<script>let selected = $state('a');</script>\n<input type=\"radio\" bind:group={selected} value=\"a\">\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const binding_group = [];")
+            && js.contains("$.bind_group(binding_group, [], input,"),
+        "with no collision the accumulator must stay `binding_group`:\n{js}"
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group"),
+        1,
+        "the sole `binding_group` declaration is the accumulator:\n{js}"
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group_1"),
+        0,
+        "no spurious `binding_group_1` when there is no collision:\n{js}"
+    );
+}
+
+#[test]
+fn independent_bind_groups_get_distinct_accumulators_in_source_order() {
+    // FIX 1 (R3c): two INDEPENDENT radio groups (`bind:group={a}` ×2, `bind:group={b}` ×2)
+    // must each get their OWN accumulator. Official svelte@5.56.3 emits `const binding_group =
+    // []` AND `const binding_group_1 = []` — ONE accumulator per DISTINCT bound group target,
+    // allocated in SOURCE ORDER (the first-appearing group is `binding_group`, the next
+    // `binding_group_1`); inputs sharing a target share one. The `a`-inputs reference
+    // `binding_group`, the `b`-inputs reference `binding_group_1`.
+    //
+    // RED before the fix: a single component-wide `group_binding_name` cross-registered EVERY
+    // group onto ONE accumulator (`binding_group`) — wrong codegen (the two radio groups would
+    // share selection state, so picking a `b` radio would uncheck the `a` selection).
+    let js = emit(
+        "<script>let a = $state('x'); let b = $state('y');</script>\n\
+         <input type=\"radio\" bind:group={a} value=\"1\" />\n\
+         <input type=\"radio\" bind:group={a} value=\"2\" />\n\
+         <input type=\"radio\" bind:group={b} value=\"3\" />\n\
+         <input type=\"radio\" bind:group={b} value=\"4\" />\n",
+        "App.svelte",
+    );
+    // Two DISTINCT accumulators, each DECLARED exactly once (OXC-parsed `BindingIdentifier`
+    // walk — a single component-wide name would declare only `binding_group`).
+    assert_eq!(
+        count_declared_binding(&js, "binding_group"),
+        1,
+        "the first group's accumulator must be declared exactly once:\n{js}"
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group_1"),
+        1,
+        "the second INDEPENDENT group must get its OWN accumulator `binding_group_1`:\n{js}"
+    );
+    assert!(
+        js.contains("const binding_group = [];") && js.contains("const binding_group_1 = [];"),
+        "both accumulators must be declared as `[]`:\n{js}"
+    );
+    // SOURCE ORDER: `binding_group` (group `a`, first appearance) is declared BEFORE
+    // `binding_group_1` (group `b`, second), matching official's insertion-order decl loop.
+    let idx0 = js.find("const binding_group = [];").unwrap();
+    let idx1 = js.find("const binding_group_1 = [];").unwrap();
+    assert!(
+        idx0 < idx1,
+        "accumulators must be declared in source order (a before b):\n{js}"
+    );
+    // WIRING: the `a`-inputs (input, input_1) bind `binding_group`; the `b`-inputs (input_2,
+    // input_3) bind `binding_group_1` — each group on its own accumulator.
+    assert!(
+        js.contains(
+            "$.bind_group(binding_group, [], input, () => $.get(a), ($$value) => $.set(a, $$value))"
+        ),
+        "a input 0 must bind binding_group:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "$.bind_group(binding_group, [], input_1, () => $.get(a), ($$value) => $.set(a, $$value))"
+        ),
+        "a input 1 must bind binding_group:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "$.bind_group(binding_group_1, [], input_2, () => $.get(b), ($$value) => $.set(b, $$value))"
+        ),
+        "b input 2 must bind binding_group_1:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "$.bind_group(binding_group_1, [], input_3, () => $.get(b), ($$value) => $.set(b, $$value))"
+        ),
+        "b input 3 must bind binding_group_1:\n{js}"
+    );
+    // NEGATIVE: the SECOND group's inputs must NOT cross-register onto the FIRST accumulator
+    // (the pre-fix single-name bug).
+    assert!(
+        !js.contains("$.bind_group(binding_group, [], input_2,")
+            && !js.contains("$.bind_group(binding_group, [], input_3,"),
+        "the second group's inputs must NOT cross-register onto the first accumulator:\n{js}"
+    );
+    // NEGATIVE: no spurious THIRD accumulator (only two distinct groups exist).
+    assert_eq!(
+        count_declared_binding(&js, "binding_group_2"),
+        0,
+        "no spurious third accumulator for two distinct groups:\n{js}"
+    );
+    // The emitted module is valid JS.
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must parse as JS:\n{js}"
+    );
+}
+
+#[test]
+fn bind_group_keypath_is_whitespace_and_operator_insensitive() {
+    // Finding A (R4): the `bind:group` accumulator key is the STRUCTURAL keypath
+    // (svelte's `extract_all_identifiers_from_expression`, which is OPERATOR- and
+    // WHITESPACE-insensitive), NOT a raw-source compare. Two computed-member group
+    // targets with a NON-TRIVIAL index that the previous `target_keypath` could not
+    // serialize (`g[i+j]`) fell back to the trimmed SOURCE, so a whitespace or
+    // operator difference split them into TWO accumulators. Official svelte@5.56.3
+    // shares ONE accumulator for `g[i+j]` / `g[i + j]` (whitespace) AND `g[i+j]` /
+    // `g[i*j]` (operators are not part of the identifier keypath `g.i.j`).
+    //
+    // RED before the fix: the raw-source fallback (`source.trim()`) gave the two
+    // spellings DIFFERENT keys → `binding_group` + `binding_group_1`.
+    let whitespace = emit(
+        "<script>let g = $state(0); let i = $state(0); let j = $state(0);</script>\n\
+         <input type=\"checkbox\" bind:group={g[i+j]} />\n\
+         <input type=\"checkbox\" bind:group={g[i + j]} />\n",
+        "App.svelte",
+    );
+    assert_eq!(
+        count_declared_binding(&whitespace, "binding_group"),
+        1,
+        "`g[i+j]` and `g[i + j]` are the SAME structural target → ONE accumulator:\n{whitespace}"
+    );
+    assert_eq!(
+        count_declared_binding(&whitespace, "binding_group_1"),
+        0,
+        "a whitespace difference must NOT split the group (no `binding_group_1`):\n{whitespace}"
+    );
+
+    let operator = emit(
+        "<script>let g = $state(0); let i = $state(0); let j = $state(0);</script>\n\
+         <input type=\"checkbox\" bind:group={g[i+j]} />\n\
+         <input type=\"checkbox\" bind:group={g[i*j]} />\n",
+        "App.svelte",
+    );
+    // Official limitation pinned: `g[i+j]` and `g[i*j]` share ONE accumulator because the
+    // operator is NOT in the identifier keypath (`g.i.j`). A divergent operator-preserving
+    // signature would over-split here vs official.
+    assert_eq!(
+        count_declared_binding(&operator, "binding_group"),
+        1,
+        "`g[i+j]` and `g[i*j]` share ONE accumulator (operator-insensitive keypath):\n{operator}"
+    );
+    assert_eq!(
+        count_declared_binding(&operator, "binding_group_1"),
+        0,
+        "an operator difference must NOT split the group (no `binding_group_1`):\n{operator}"
+    );
+    assert!(
+        parses_as_js(&operator),
+        "the emitted module must parse as JS:\n{operator}"
+    );
+}
+
+#[test]
+fn bind_group_keypath_distinguishes_static_member_from_computed_string() {
+    // Finding A (R4): the structural keypath PRESERVES the distinctions official keeps.
+    // `a.x` (static member, keypath `a.x`) and `a["x"]` (computed string index, keypath
+    // `a.["x"]`) are DISTINCT group identities in svelte@5.56.3 → TWO accumulators. The
+    // keypath must NOT canonicalize the two member forms together.
+    let js = emit(
+        "<script>let a = $state(0);</script>\n\
+         <input type=\"checkbox\" bind:group={a.x} />\n\
+         <input type=\"checkbox\" bind:group={a[\"x\"]} />\n",
+        "App.svelte",
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group"),
+        1,
+        "the first distinct target gets `binding_group`:\n{js}"
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group_1"),
+        1,
+        "`a.x` and `a[\"x\"]` are DISTINCT targets → a second accumulator `binding_group_1`:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must parse as JS:\n{js}"
+    );
+}
+
+#[test]
+fn element_bind_this_function_pair_emits_direct_bind_this() {
+    // Finding C (R4): an INTRINSIC element `bind:this={get, set}` (a getter/setter
+    // function-pair) is IN 5c scope. Official svelte@5.56.3 accepts it and emits
+    // `$.bind_this(div, <set>, <get>)` — the user-supplied get/set passed DIRECTLY (setter
+    // slot FIRST, getter slot SECOND), NO synthesized `($$value) =>` / `() =>` thunk wrapper.
+    //
+    // RED before the fix: the `bind:this` classifier accepted ONLY an identifier target, so
+    // a function-pair `bind:this` fell to the `_ => Err(refuse())` arm → the whole component
+    // failed closed (the `emit` helper would panic).
+    let js = emit(
+        "<script>let el = $state(null);</script>\n\
+         <div bind:this={() => el, (v) => el = v}></div>\n",
+        "App.svelte",
+    );
+    // The user-supplied arrows are passed DIRECTLY (signal-rewritten), setter slot first.
+    assert!(
+        js.contains("$.bind_this(div, (v) => $.set(el, v, true), () => $.get(el));"),
+        "element bind:this function-pair must emit the direct `$.bind_this(el, set, get)`:\n{js}"
+    );
+    // NEGATIVE: the function-pair form does NOT synthesize the identifier-target `($$value)
+    // =>` setter thunk (that wrapper is the identifier `bind:this={el}` shape, not this one).
+    assert!(
+        !js.contains("$.bind_this(div, ($$value) =>"),
+        "the function-pair form must NOT wrap the setter in a synthesized `($$value) =>` thunk:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must parse as JS:\n{js}"
+    );
+}
+
+#[test]
+fn element_bind_this_identifier_still_emits_thunked_bind_this() {
+    // POSITIVE CONTROL for the `This` shape refactor: the IDENTIFIER `bind:this={el}` form
+    // must STILL emit the synthesized get/set thunks (`($$value) => …` / `() => …`) —
+    // the refactor to `This { getset }` must not regress the identifier shape.
+    let js = emit(
+        "<script>let el = $state();</script>\n<div bind:this={el}>x</div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_this(div, ($$value) => $.set(el, $$value), () => $.get(el));"),
+        "the identifier bind:this must keep its synthesized lvalue thunks:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must parse as JS:\n{js}"
+    );
+}
+
+#[test]
+fn element_bind_this_named_function_pair_emits_direct_bind_this() {
+    // Finding C (R4): the NAMED getter/setter form `bind:this={getEl, setEl}` — the named
+    // `function getEl`/`function setEl` declarations are admitted (the function-pair
+    // name-collector now includes `bind:this`), and official emits `$.bind_this(div, setEl,
+    // getEl)` (setter slot first, getter slot second, passed directly).
+    let js = emit(
+        "<script>\n\tlet el = $state(null);\n\tfunction getEl() { return el; }\n\
+         \tfunction setEl(v) { el = v; }\n</script>\n<div bind:this={getEl, setEl}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_this(div, setEl, getEl);"),
+        "the named bind:this pair must emit `$.bind_this(div, setEl, getEl)`:\n{js}"
+    );
+    // The named function declarations are admitted (lowered into the component body).
+    assert!(
+        js.contains("function getEl()") && js.contains("function setEl("),
+        "the named get/set function declarations must be admitted:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must parse as JS:\n{js}"
+    );
+}
+
+#[test]
+fn component_bind_this_function_pair_fails_closed() {
+    // Finding C boundary (R4): COMPONENT `bind:this={get, set}` stays 5f (D-21) — it must
+    // FAIL CLOSED (the component element is an unsupported native-client surface). Only the
+    // INTRINSIC-element function-pair `bind:this` is opened in 5c. RED would be an emitted
+    // module for a component bind:this function-pair.
+    let res = emit_result(
+        "<script>let el = $state(null);</script>\n\
+         <MyComponent bind:this={() => el, (v) => el = v} />\n",
+    );
+    assert!(
+        res.is_err(),
+        "a COMPONENT bind:this function-pair must fail closed (5f / D-21):\n{res:?}"
+    );
+}
+
+#[test]
+fn shared_bind_group_target_shares_one_accumulator() {
+    // FIX 1 (R3c): two inputs binding the SAME group target (`bind:group={g}` ×2) share ONE
+    // accumulator — official svelte@5.56.3 emits a single `const binding_group = []` and both
+    // `$.bind_group` calls reference it. The distinct-group key is the structural bind target +
+    // scope, so the same target collapses to one slot (the positive control that the per-group
+    // accumulator does NOT over-split a shared target).
+    let js = emit(
+        "<script>let g = $state('x');</script>\n\
+         <input type=\"radio\" bind:group={g} value=\"1\" />\n\
+         <input type=\"radio\" bind:group={g} value=\"2\" />\n",
+        "App.svelte",
+    );
+    // EXACTLY ONE accumulator (OXC-parsed) — a shared target must NOT mint a second.
+    assert_eq!(
+        count_declared_binding(&js, "binding_group"),
+        1,
+        "two inputs sharing a target must share ONE accumulator:\n{js}"
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group_1"),
+        0,
+        "a shared target must NOT mint a second accumulator:\n{js}"
+    );
+    assert!(
+        js.contains("const binding_group = [];"),
+        "the shared accumulator must be declared as `[]`:\n{js}"
+    );
+    // Both inputs reference the SAME accumulator.
+    assert!(
+        js.contains(
+            "$.bind_group(binding_group, [], input, () => $.get(g), ($$value) => $.set(g, $$value))"
+        ),
+        "input 0 must bind binding_group:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "$.bind_group(binding_group, [], input_1, () => $.get(g), ($$value) => $.set(g, $$value))"
+        ),
+        "input 1 must bind the SAME binding_group:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must parse as JS:\n{js}"
+    );
+}
+
+#[test]
+fn independent_bind_groups_renumber_past_a_user_binding_group_collision() {
+    // FIX 1 (R3c) × FIX-R3b: with a user-declared `binding_group` AND two INDEPENDENT groups,
+    // the collision-aware/seeded allocator bumps BOTH accumulators (`binding_group_1` /
+    // `binding_group_2`) past the user's `binding_group`, each group still wired to its own.
+    // Verified against svelte@5.56.3:
+    //   const binding_group_1 = [];
+    //   const binding_group_2 = [];
+    //   let binding_group = 0;
+    //   $.bind_group(binding_group_1, [], input, () => $.get(a), …);
+    //   $.bind_group(binding_group_2, [], input_1, () => $.get(b), …);
+    let js = emit(
+        "<script>let binding_group = $state(0); let a = $state('x'); let b = $state('y');</script>\n\
+         <input type=\"radio\" bind:group={a} value=\"1\" />\n\
+         <input type=\"radio\" bind:group={b} value=\"2\" />\n",
+        "App.svelte",
+    );
+    // The user's `binding_group` is the SOLE `binding_group` declaration; each group's
+    // accumulator is renumbered past it (OXC-parsed declaration counts).
+    assert_eq!(
+        count_declared_binding(&js, "binding_group"),
+        1,
+        "the user's `binding_group` must be the sole `binding_group` declaration:\n{js}"
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group_1"),
+        1,
+        "the first group's accumulator must be renumbered to `binding_group_1`:\n{js}"
+    );
+    assert_eq!(
+        count_declared_binding(&js, "binding_group_2"),
+        1,
+        "the second group's accumulator must be renumbered to `binding_group_2`:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_group(binding_group_1, [], input, () => $.get(a),"),
+        "group a must bind binding_group_1:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_group(binding_group_2, [], input_1, () => $.get(b),"),
+        "group b must bind binding_group_2:\n{js}"
+    );
+    // NEGATIVE: no accumulator may collide with the user's `binding_group`.
+    assert!(
+        !js.contains("const binding_group = [];"),
+        "no accumulator may be declared `const binding_group = []` (would collide):\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must parse as JS:\n{js}"
+    );
+}
+
+#[test]
+fn radio_group_bind_entity_decodes_the_static_value_attr() {
+    // (5c) The static `bind:group` `value` attribute is ENTITY-DECODED before the
+    // `input.value = input.__value` write — official runs the static value through the
+    // attribute-value entity decoder, exactly like every other static attribute. Verified
+    // against svelte@5.56.3 for `value="a&amp;b"`:
+    //   input.value = input.__value = 'a&b';
+    // RED against the pre-fix tree, which stored the RAW attribute span and quoted it
+    // directly as `'a&amp;b'` (the entity left un-decoded).
+    let js = emit(
+        "<script>let g = $state(\"\");</script>\n<input type=\"radio\" bind:group={g} value=\"a&amp;b\" />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("input.value = input.__value = 'a&b'"),
+        "a static bind:group value must be entity-decoded before the __value write:\n{js}"
+    );
+    // NEGATIVE: the raw, undecoded `&amp;` must NOT survive into the value write.
+    assert!(
+        !js.contains("'a&amp;b'"),
+        "the raw entity must not survive un-decoded in the group value write:\n{js}"
+    );
+}
+
+#[test]
+fn checked_bind_now_emits_remove_input_defaults_and_bind_checked() {
+    // 5c: `bind:checked` on an `<input type="checkbox">` EMITS (it used to fail
+    // closed). The pinned svelte@5.56.3 shape (oracle CASE `checked`) is
+    // `$.remove_input_defaults(input)` then `$.bind_checked(input, () => $.get(c),
+    // ($$value) => $.set(c, $$value))`. RED against the pre-5c tree (which refused it).
+    let js = emit(
+        "<script>let c = $state(false);</script>\n<input type=\"checkbox\" bind:checked={c} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.remove_input_defaults(input)"),
+        "checked bind must clear input defaults:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_checked(input, () => $.get(c), ($$value) => $.set(c, $$value))"),
+        "checked bind must emit the get/set $.bind_checked shape:\n{js}"
+    );
+    // NEGATIVE: the DOM setter must NOT carry the `, $$value, true)` proxy flag (that
+    // is a component/window-host policy, never a DOM bind).
+    assert!(
+        !js.contains(", $$value, true)"),
+        "a DOM bind:checked setter must be 2-arg (no should_proxy flag):\n{js}"
+    );
+}
+
+// ── FIX 2: official HOST-ATTRIBUTE gates (typed-IR driven) ─────────────────────
+//
+// Several binds are valid ONLY when the host element carries a specific STATIC
+// attribute; official svelte@5.56.3 raises a COMPILE ERROR otherwise. The runtime
+// router only sees `(name, tag)`, so it would accept these invalid binds and emit
+// a divergent / runtime-broken module. The classifier now inspects the host's
+// typed `ElementIr` attributes (NEVER a source-text scan) to enforce the gates.
+
+#[test]
+fn bind_checked_without_type_attr_fails_closed() {
+    // Official: "`bind:checked` can only be used with `<input type="checkbox">`".
+    // An `<input bind:checked>` with NO `type` attr fails closed. RED before the
+    // fix (Verter accepted it — routing only saw `(checked, input)`).
     assert_fail_closed(
-        "<script>let on = $state(false);</script>\n<input type=\"checkbox\" bind:checked={on} />\n",
+        "<script>let c = $state(false);</script>\n<input bind:checked={c} />\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "checked"),
+    );
+}
+
+#[test]
+fn bind_checked_with_non_checkbox_type_fails_closed() {
+    // Official: same error for `<input type="text" bind:checked>`. A non-checkbox
+    // static `type` fails closed. RED before the fix.
+    assert_fail_closed(
+        "<script>let c = $state(false);</script>\n<input type=\"text\" bind:checked={c} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "checked"),
+    );
+}
+
+#[test]
+fn bind_checked_with_dynamic_type_fails_closed() {
+    // A DYNAMIC `type={t}` is not a static `type="checkbox"`, so `bind:checked`
+    // fails closed (the static-attr gate requires the literal value). RED before
+    // the fix.
+    assert_fail_closed(
+        "<script>let c = $state(false); let t = $state(\"checkbox\");</script>\n<input type={t} bind:checked={c} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "checked"),
+    );
+}
+
+#[test]
+fn bind_checked_with_static_checkbox_type_still_emits() {
+    // POSITIVE: the VALID form `<input type="checkbox" bind:checked>` must STILL
+    // emit (the gate must not over-refuse). The pinned shape is
+    // `$.remove_input_defaults(input)` + `$.bind_checked(input, get, set)`.
+    let js = emit(
+        "<script>let c = $state(false);</script>\n<input type=\"checkbox\" bind:checked={c} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_checked(input, () => $.get(c), ($$value) => $.set(c, $$value))"),
+        "a static type=checkbox bind:checked must still emit:\n{js}"
+    );
+}
+
+#[test]
+fn bind_inner_html_without_contenteditable_fails_closed() {
+    // Official: "'contenteditable' attribute is required for textContent, innerHTML
+    // and innerText two-way bindings". A `<div bind:innerHTML>` with NO
+    // `contenteditable` attr fails closed. RED before the fix (Verter accepted it —
+    // the contract `tags: "contenteditable"` admits any element for the IDE, but the
+    // RUNTIME must require the actual static attribute).
+    assert_fail_closed(
+        "<script>let h = $state(\"\");</script>\n<div bind:innerHTML={h}></div>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "innerHTML"),
+    );
+}
+
+#[test]
+fn bind_inner_text_without_contenteditable_fails_closed() {
+    // The same gate for `bind:innerText`.
+    assert_fail_closed(
+        "<script>let t = $state(\"\");</script>\n<div bind:innerText={t}></div>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "innerText"),
+    );
+}
+
+#[test]
+fn bind_text_content_without_contenteditable_fails_closed() {
+    // The same gate for `bind:textContent`.
+    assert_fail_closed(
+        "<script>let t = $state(\"\");</script>\n<div bind:textContent={t}></div>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "textContent"),
+    );
+}
+
+#[test]
+fn bind_inner_html_with_dynamic_contenteditable_fails_closed() {
+    // Official: "'contenteditable' attribute cannot be dynamic if element uses
+    // two-way binding". A DYNAMIC `contenteditable={e}` with `bind:innerHTML` fails
+    // closed. RED before the fix.
+    assert_fail_closed(
+        "<script>let h = $state(\"\"); let e = $state(true);</script>\n<div contenteditable={e} bind:innerHTML={h}></div>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "innerHTML"),
+    );
+}
+
+#[test]
+fn bind_inner_html_with_static_contenteditable_still_emits() {
+    // POSITIVE: the VALID form `<div contenteditable bind:innerHTML>` must STILL
+    // emit `$.bind_content_editable('innerHTML', div, get, set)` (the gate must not
+    // over-refuse a valueless static `contenteditable`).
+    let js = emit(
+        "<script>let h = $state(\"\");</script>\n<div contenteditable bind:innerHTML={h}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_content_editable('innerHTML', div, () => $.get(h), ($$value) => $.set(h, $$value))"),
+        "a static contenteditable bind:innerHTML must still emit:\n{js}"
+    );
+}
+
+#[test]
+fn bind_inner_html_with_static_contenteditable_value_still_emits() {
+    // POSITIVE: a static `contenteditable="true"` (with a literal value) also
+    // satisfies the gate — official accepts a static value.
+    let js = emit(
+        "<script>let h = $state(\"\");</script>\n<div contenteditable=\"true\" bind:innerHTML={h}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_content_editable('innerHTML', div, () => $.get(h), ($$value) => $.set(h, $$value))"),
+        "a static contenteditable=\"true\" bind:innerHTML must still emit:\n{js}"
+    );
+}
+
+#[test]
+fn bind_select_value_with_dynamic_multiple_fails_closed() {
+    // Official: "'multiple' attribute must be static if select uses two-way
+    // binding". A DYNAMIC `<select multiple={m} bind:value>` fails closed,
+    // independent of the value type (verified against svelte@5.56.3 with a string
+    // `$state` value). A primitive `$state('')` value reaches the bind gate (an
+    // array `$state` would fail at the script gate first); the dynamic `multiple`
+    // is the surface under test. RED before the fix (Verter accepted it — routing
+    // only saw `(value, select)`).
+    assert_fail_closed(
+        "<script>let v = $state(\"\"); let m = $state(true);</script>\n<select multiple={m} bind:value={v}><option>a</option></select>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_select_value_with_static_multiple_still_emits() {
+    // POSITIVE: a STATIC `multiple` with `bind:value` is valid — official emits
+    // `$.bind_select_value` (verified against svelte@5.56.3 with a string value).
+    // The gate must not over-refuse the static form.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<select multiple bind:value={v}><option>a</option></select>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_select_value(select, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "a static multiple bind:value must still emit:\n{js}"
+    );
+}
+
+#[test]
+fn bind_select_value_single_still_emits() {
+    // POSITIVE: a single (no `multiple`) `<select bind:value>` stays valid.
+    let js = emit(
+        "<script>let v = $state(\"a\");</script>\n<select bind:value={v}><option>a</option></select>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_select_value(select, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "a single-select bind:value must still emit:\n{js}"
+    );
+}
+
+// ── official `<input type>` requirement for EVERY input bind (typed-IR driven) ──
+//
+// official svelte@5.56.3: "'type' attribute must be a static text value if input
+// uses two-way binding". For an `<input>` bind, a `type` attribute — when PRESENT —
+// must be a STATIC TEXT VALUE (`Static(Some)`). A valueless `type` (`Static(None)`)
+// is invalid for EVERY input bind; a DYNAMIC `type={t}` is invalid for every input
+// bind EXCEPT `bind:value` (where a dynamic type is ALLOWED). An ABSENT `type` is
+// allowed (the `checked`-specific `type="checkbox"` value gate is separate). The
+// runtime router only sees `(name, tag)`, so without this gate an invalid program
+// emits a divergent / runtime-broken module. Driven from the typed `ElementIr`
+// attributes, NEVER a source-text scan.
+
+#[test]
+fn bind_value_with_valueless_type_fails_closed() {
+    // Official: `<input type bind:value={v}>` (VALUELESS type) → COMPILE ERROR. A
+    // valueless `type` (`HostAttr::Static(None)`) is invalid even for `bind:value`.
+    // RED before the fix (the input-type gate was checked applied to value).
+    assert_fail_closed(
+        "<script>let v = $state(\"\");</script>\n<input type bind:value={v} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_group_with_valueless_type_fails_closed() {
+    // Official: `<input type bind:group={g} value="a">` (VALUELESS type) → COMPILE
+    // ERROR. A valueless `type` is invalid for `bind:group`. RED before the fix
+    // (only `bind:checked` was gated, so `bind:group` emitted a divergent module).
+    assert_fail_closed(
+        "<script>let g = $state(\"\");</script>\n<input type bind:group={g} value=\"a\" />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "group"),
+    );
+}
+
+#[test]
+fn bind_group_with_dynamic_type_fails_closed() {
+    // Official: `<input type={t} bind:group={g} value="a">` (DYNAMIC type) → COMPILE
+    // ERROR. A dynamic `type={t}` is invalid for `bind:group` (only `bind:value`
+    // tolerates a dynamic type). RED before the fix.
+    assert_fail_closed(
+        "<script>let g = $state(\"\"); let t = $state(\"radio\");</script>\n<input type={t} bind:group={g} value=\"a\" />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "group"),
+    );
+}
+
+#[test]
+fn bind_indeterminate_with_dynamic_type_fails_closed() {
+    // Official: `<input type={t} bind:indeterminate={i}>` (DYNAMIC type) → COMPILE
+    // ERROR. A dynamic `type={t}` is invalid for `bind:indeterminate`. RED before
+    // the fix (`bind:indeterminate` was not gated at all).
+    assert_fail_closed(
+        "<script>let i = $state(false); let t = $state(\"checkbox\");</script>\n<input type={t} bind:indeterminate={i} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "indeterminate"),
+    );
+}
+
+#[test]
+fn bind_indeterminate_with_valueless_type_fails_closed() {
+    // Official: `<input type bind:indeterminate={i}>` (VALUELESS type) → COMPILE
+    // ERROR. A valueless `type` is invalid for `bind:indeterminate`. RED before the fix.
+    assert_fail_closed(
+        "<script>let i = $state(false);</script>\n<input type bind:indeterminate={i} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "indeterminate"),
+    );
+}
+
+// ── POSITIVE controls: the input-type gate must NOT over-refuse the valid forms ─
+
+#[test]
+fn bind_value_with_dynamic_type_still_emits() {
+    // POSITIVE control: `<input type={t} bind:value={v}>` (DYNAMIC type) → OK
+    // (official emits `$.bind_value`). A dynamic type is ALLOWED for `bind:value`
+    // specifically; the gate must not over-refuse it. Verified against svelte@5.56.3.
+    let js = emit(
+        "<script>let v = $state(\"\"); let t = $state(\"text\");</script>\n<input type={t} bind:value={v} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "a dynamic type bind:value must still emit (dynamic type is OK for value):\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_with_no_type_still_emits() {
+    // POSITIVE control: `<input bind:value={v}>` (NO type attr) → OK. An absent type
+    // is always allowed. The gate must not over-refuse the §1.2 form.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={v} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "a no-type bind:value must still emit:\n{js}"
+    );
+}
+
+#[test]
+fn bind_group_with_static_radio_type_still_emits() {
+    // POSITIVE control: `<input type="radio" bind:group={g} value="a">` (STATIC
+    // type) → OK (official emits `$.bind_group`). The gate must not over-refuse the
+    // valid static-type form. Verified against svelte@5.56.3.
+    let js = emit(
+        "<script>let g = $state(\"\");</script>\n<input type=\"radio\" bind:group={g} value=\"a\" />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_group(binding_group, [], input, () => $.get(g), ($$value) => $.set(g, $$value))"),
+        "a static type=radio bind:group must still emit:\n{js}"
+    );
+}
+
+// ── FIX 2: the host-gate static-attr comparison uses ENTITY-DECODED text ────────
+//
+// official decodes HTML entity references in static attribute text before the
+// `Text.data` comparison (`decode_character_references`), so `type="check&#98;ox"`
+// (`&#98;` = `b`) decodes to `"checkbox"` and `bind:checked` is ACCEPTED. Verter's
+// host-gate static-text view must decode the attr value before comparing it to
+// `"checkbox"` (reusing the existing `decode_attr_entities` decoder), instead of a
+// raw byte compare that fails closed.
+
+#[test]
+fn bind_checked_with_entity_encoded_checkbox_type_still_emits() {
+    // POSITIVE: `<input type="check&#98;ox" bind:checked={c}>` → the static `type`
+    // decodes to `"checkbox"`, so official ACCEPTS it and emits `$.bind_checked`.
+    // RED before the fix (the raw compare `"check&#98;ox" == "checkbox"` fails
+    // closed). Verified against svelte@5.56.3.
+    let js = emit(
+        "<script>let c = $state(false);</script>\n<input type=\"check&#98;ox\" bind:checked={c} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_checked(input, () => $.get(c), ($$value) => $.set(c, $$value))"),
+        "an entity-encoded type=checkbox bind:checked must still emit (decoded compare):\n{js}"
     );
 }
 
@@ -2079,13 +3185,923 @@ fn bind_value_derived_member_fails_closed() {
 }
 
 #[test]
-fn bind_value_plain_local_member_fails_closed() {
-    // F-α: a member rooted at a PLAIN local (`let o = {...}`, never a rune) is not
-    // a reactive surface; the value-bind boundary is `$state`-rooted only, so it
-    // fails closed.
-    assert_fail_closed(
+fn bind_value_plain_local_member_emits_plain_member_lvalue() {
+    // A member rooted at a PLAIN local (`let o = {...}`, never a rune) IS a supported
+    // DOM-bind target: official emits a plain read/write closure pair over the member
+    // (`$.bind_value(input, () => o.x, ($$value) => o.x = $$value)`), NOT a signal
+    // accessor — the plain local survives script lowering verbatim. RED against the
+    // pre-widening classifier, which restricted member-rooted binds to `$state` roots
+    // and failed this closed.
+    let js = emit(
         "<script>let o = { x: '' }; let c = $state(0);</script>\n<input bind:value={o.x} />\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => o.x, ($$value) => o.x = $$value)"),
+        "a plain-local member bind:value must emit the plain member lvalue closures:\n{js}"
+    );
+    // NEGATIVE: the plain local must NOT be routed through a signal accessor.
+    assert!(
+        !js.contains("$.get(o)") && !js.contains("$.set(o,"),
+        "a plain-local member must not emit a $.get/$.set signal accessor:\n{js}"
+    );
+    // The plain local's declaration survives verbatim (not lowered to a `$.state`).
+    assert!(
+        js.contains("let o = { x: '' };") && !js.contains("$.state({"),
+        "the plain-local declaration must survive verbatim, not become a signal:\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_plain_local_ident_emits_plain_ident_lvalue() {
+    // A PLAIN-local identifier bind target (`let v = "x"`, never a rune) is supported:
+    // official emits `$.bind_value(input, () => v, ($$value) => v = $$value)` — plain
+    // read/write closures, NOT `$.get`/`$.set`. RED against the signal-only classifier.
+    // (A trailing `$state` keeps the component in RUNES mode so the bind classifier is
+    // reached — a runeless component fails at the legacy-mode gate first.)
+    let js = emit(
+        "<script>let v = \"x\"; let c = $state(0);</script>\n<input bind:value={v} />\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => v, ($$value) => v = $$value)"),
+        "a plain-local ident bind:value must emit the plain ident lvalue closures:\n{js}"
+    );
+    assert!(
+        !js.contains("$.set(v,"),
+        "a plain-local ident must not emit a $.set signal write:\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_uninitialized_plain_local_ident_emits_plain_ident_lvalue() {
+    // (5c) An UNINITIALIZED plain-local bind target (`let v;`, never a rune) is a
+    // supported DOM-bind target — official keeps the bare local verbatim and emits the
+    // plain read/write closures `$.bind_value(input, () => v, ($$value) => v = $$value)`,
+    // identical to the initialized plain-local shape. Verified against svelte@5.56.3:
+    //   let v;
+    //   $.bind_value(input, () => v, ($$value) => v = $$value);
+    // RED against the pre-fix tree, which admitted a no-init `let` ONLY for `bind:this`
+    // and refused an ordinary DOM-bind no-init local at `instance-script-item` (construct
+    // `unused bare let`). (A trailing `$state` keeps the component in RUNES mode.)
+    let js = emit(
+        "<script>let v; let c = $state(0);</script>\n<input bind:value={v} />\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => v, ($$value) => v = $$value)"),
+        "an uninitialized plain-local ident bind:value must emit the plain ident lvalue closures:\n{js}"
+    );
+    // The bare local survives as `let v;` (NO init, NOT lowered to `$.state`).
+    assert!(
+        js.contains("let v;") && !js.contains("let v = "),
+        "the uninitialized plain-local declaration must survive verbatim as `let v;`:\n{js}"
+    );
+    assert!(
+        !js.contains("$.set(v,"),
+        "an uninitialized plain-local ident must not emit a $.set signal write:\n{js}"
+    );
+}
+
+#[test]
+fn unused_uninitialized_bare_local_still_fails_closed() {
+    // NEGATIVE control for the uninit-plain-local DOM-bind widening: an UNUSED bare
+    // `let unused;` that is NOT a bind-target lvalue root stays fail-closed at the
+    // instance-script-item gate (construct `unused bare let`). The no-init admission is
+    // gated on the bind-lvalue-root set, so a bare local that nothing binds is still
+    // refused (it is not the `bind:this` clone-root nor a DOM-bind target). RED would be
+    // a wildcard "admit any no-init let".
+    assert_fail_closed(
+        "<script>let unused; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "unused bare let"),
+    );
+}
+
+#[test]
+fn bind_value_object_state_member_fails_closed_at_the_object_state_decl_gate() {
+    // SCOPE BOUNDARY: a member rooted at an OBJECT `$state` (`let o = $state({...})` —
+    // the deep-reactive `BareProxy` / `StateProxy` form) is NOT a DOM-bind-target gap.
+    // It fails closed UPSTREAM of the bind classifier at the object/array `$state`
+    // declaration gate (`state_decl_shape` accepts ONLY a primitive-literal `$state`;
+    // an object/array init is the deep-reactive `$.proxy(...)` declaration surface owned
+    // by the runes-completion vertical, not the bindings-breadth vertical). The bind
+    // target-lvalue widening covers PLAIN-local roots (which need no `$state` decl
+    // support); the object-`$state` member becomes bind-reachable only when the
+    // object/array `$state` declaration form is opened by its owning vertical, at which
+    // point the member rewrite (`() => o.x` for a `BareProxy`, `() => $.get(o).x` for a
+    // reassigned `StateProxy`) is already correct in the planner. Discriminating: it
+    // fails at the `$state()` non-primitive-init gate, NOT the bind gate.
+    assert_fail_closed(
+        "<script>let o = $state({ x: '' });</script>\n<input bind:value={o.x} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state() non-primitive init"),
+    );
+    // The REASSIGNED object `$state` (a `StateProxy`) fails at the same upstream gate.
+    assert_fail_closed(
+        "<script>let o = $state({ x: '' });</script>\n<input bind:value={o.x} />\n<button onclick={() => o = { x: 'y' }}>r</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state() non-primitive init"),
+    );
+}
+
+#[test]
+fn bind_select_value_with_array_state_fails_closed_at_the_array_state_decl_gate() {
+    // SCOPE BOUNDARY: the canonical official `<select multiple>` shape binds an ARRAY
+    // `$state([])` target, emitting `let v = $.state($.proxy([]))` +
+    // `$.bind_select_value(...)` (verified against svelte@5.56.3). The
+    // `$.bind_select_value` 3-arg helper wiring + the static-`multiple` host gate ARE
+    // delivered (the PRIMITIVE `$state` form emits identically — see
+    // `bind_select_value_with_static_multiple_still_emits`). But the array `$state([])`
+    // DECLARATION is a non-primitive `$.proxy([])` init: it fails closed UPSTREAM of the
+    // bind classifier at the `$state()` non-primitive-init gate (the deep-reactive
+    // declaration surface owned by the runes-completion vertical, not the
+    // bindings-breadth vertical). Discriminating: it fails at the `$state()`
+    // non-primitive-init gate, NOT the bind gate — so the array-state multiple-select is
+    // gated by the pre-existing non-primitive-`$state` boundary, NOT delivered here.
+    assert_fail_closed(
+        "<script>let v = $state([]);</script>\n<select multiple bind:value={v}><option>a</option></select>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state() non-primitive init"),
+    );
+}
+
+#[test]
+fn bind_value_inline_function_pair_emits_helper_with_rewritten_closures() {
+    // A DOM-host FUNCTION binding `bind:value={get, set}` — a 2-element sequence of
+    // get/set expressions. Official passes the supplied get/set DIRECTLY to the helper
+    // (NOT re-wrapped in generated lvalue thunks), rewriting any signal read/write
+    // INSIDE them: `$.bind_value(input, () => $.get(v), (x) => $.set(v, x, true))`.
+    // RED against the classifier that refused every sequence get/set pair.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={() => v, (x) => v = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(v), (x) => $.set(v, x, true))"),
+        "an inline function-pair bind:value must pass the rewritten get/set directly:\n{js}"
+    );
+    // NEGATIVE: the supplied functions must NOT be re-wrapped as `() => (() => ...)`
+    // generated lvalue thunks (the directly-passed form has no extra wrapper).
+    assert!(
+        !js.contains("() => () =>") && !js.contains("($$value) => () =>"),
+        "a function-pair must not double-wrap the supplied get/set in lvalue thunks:\n{js}"
+    );
+}
+
+#[test]
+fn bind_group_function_pair_refuses_while_non_group_function_pairs_emit() {
+    // (5c) F1: `bind:group` is the SOLE identifier/member-only bind. A function-pair
+    // (SequenceExpression) target on `bind:group` is the official `bind_group_invalid_expression`
+    // reject — `bind:group` can only bind to an Identifier or MemberExpression (verified
+    // svelte@5.56.3: `<input type="radio" bind:group={() => g, (x) => g = x}>` →
+    // `bind_group_invalid_expression`). RED before the fix: `bind:group` fail-OPENED, accepting
+    // the function-pair as a clean FunctionPair like every other DOM bind. The exact official
+    // code is asserted, not just "an error".
+    let err = emit_result(
+        "<script>let g = $state(\"\");</script>\n<input type=\"radio\" bind:group={() => g, (x) => g = x} value=\"a\" />\n",
+    )
+    .expect_err("a function-pair bind:group must refuse (identifier/member-only)");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject for a bind:group function-pair, got {err:?}");
+    };
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::BindGroupInvalidExpression,
+        "a function-pair bind:group must reject via the BindGroupInvalidExpression rule"
+    );
+    assert_eq!(
+        rejection.official_code, "bind_group_invalid_expression",
+        "the rejection mirrors the exact official `bind_group_invalid_expression` code"
+    );
+
+    // POSITIVE CONTROLS: the SAME function-pair form on a NON-group bind (`bind:value` /
+    // `bind:checked`) is official-VALID and must STILL EMIT — the identifier/member-only policy
+    // is `bind:group`-only, not a broad function-pair refusal. A regression that broadened the
+    // policy to every bind would RED here.
+    let value_js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={() => v, (x) => v = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        value_js.contains("$.bind_value("),
+        "a bind:value function-pair must still emit $.bind_value:\n{value_js}"
+    );
+    let checked_js = emit(
+        "<script>let c = $state(false);</script>\n<input type=\"checkbox\" bind:checked={() => c, (x) => c = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        checked_js.contains("$.bind_checked("),
+        "a bind:checked function-pair must still emit $.bind_checked:\n{checked_js}"
+    );
+}
+
+#[test]
+fn bind_value_named_function_pair_lowers_decls_and_passes_idents() {
+    // (5c) A function-pair bind referencing NAMED top-level `function` declarations
+    // (`function get(){...} function set(next){...} <input bind:value={get,set}>`) IS a
+    // supported 5c surface — the named functions are inside the supported 5c function-binding
+    // `bind:x={get,set}` on DOM hosts. The function declarations are ADMITTED (their names
+    // are exactly the function-pair-referenced set) and LOWERED with body signal reads /
+    // writes rewritten; the bind passes the function IDENTS directly. Verified against
+    // svelte@5.56.3:
+    //   function get() { return $.get(value); }
+    //   function set(next) { $.set(value, next, true); }
+    //   $.bind_value(input, get, set);
+    // RED against the pre-fix tree, which refused ALL top-level `function` declarations at
+    // the instance-script-item gate (only INLINE sequence pairs worked).
+    let js = emit(
+        "<script>let value = $state(0); function get(){ return value; } function set(next){ value = next; }</script>\n<input bind:value={get, set} />\n",
+        "App.svelte",
+    );
+    // The function declarations are lowered with body reads/writes rewritten.
+    assert!(
+        js.contains("function get()") && js.contains("return $.get(value)"),
+        "the named getter must be lowered with its signal read rewritten:\n{js}"
+    );
+    assert!(
+        js.contains("function set(next)") && js.contains("$.set(value, next, true)"),
+        "the named setter must be lowered with its signal write rewritten:\n{js}"
+    );
+    // The bind passes the function IDENTS directly (no lvalue-thunk wrap, no re-decl).
+    assert!(
+        js.contains("$.bind_value(input, get, set)"),
+        "a named function-pair must pass the function idents directly to the helper:\n{js}"
+    );
+    // NEGATIVE: the function bodies must NOT leak an un-rewritten bare `value` read where
+    // the rewrite belongs (the getter returns `$.get(value)`, never `return value`).
+    assert!(
+        !js.contains("return value;") && !js.contains("value = next;"),
+        "the function bodies must be lowered, not emitted verbatim:\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_named_function_pair_full_module_matches_official_structure() {
+    // (5c) Full-module structural golden for the named-function-pair surface. Asserts the
+    // load-bearing facts in source order: the state decl, BOTH lowered function
+    // declarations (bodies rewritten), the `remove_input_defaults` prelude, and the
+    // `$.bind_value(input, get, set)` ident-passing call. Verified against svelte@5.56.3:
+    //   let value = $.state(0);
+    //   function get() { return $.get(value); }
+    //   function set(next) { $.set(value, next, true); }
+    //   $.remove_input_defaults(input);
+    //   $.bind_value(input, get, set);
+    // (Cosmetic JS carrier formatting — e.g. `(){` vs `() {` brace spacing — is waived;
+    // the helper choice / args / signal rewrites / source order are structural.)
+    let js = emit(
+        "<script>let value = $state(0); function get(){ return value; } function set(next){ value = next; }</script>\n<input bind:value={get, set} />\n",
+        "App.svelte",
+    );
+    // Imports + template factory.
+    assert!(
+        js.contains("import * as $ from 'svelte/internal/client';"),
+        "missing client namespace import:\n{js}"
+    );
+    assert!(
+        js.contains("var root = $.from_html(`<input/>`);"),
+        "the input skeleton must be the bare clone root:\n{js}"
+    );
+    // The state decl precedes the functions, which precede the DOM walk (source order).
+    let state_pos = js.find("let value = $.state(0);").expect("state decl");
+    let get_pos = js.find("function get()").expect("getter decl");
+    let set_pos = js.find("function set(next)").expect("setter decl");
+    let bind_pos = js.find("$.bind_value(input, get, set)").expect("bind call");
+    assert!(
+        state_pos < get_pos && get_pos < set_pos && set_pos < bind_pos,
+        "items must emit in source order (state, get, set, bind):\n{js}"
+    );
+    // The bodies are lowered (signal read in get, signal write in set).
+    assert!(
+        js.contains("return $.get(value);"),
+        "the getter body must rewrite the signal read:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(value, next, true);"),
+        "the setter body must rewrite the signal write (with the proxy flag):\n{js}"
+    );
+    // The prelude clears input defaults; the bind passes the idents directly.
+    assert!(
+        js.contains("$.remove_input_defaults(input);"),
+        "the input-defaults prelude must emit:\n{js}"
+    );
+    // NEGATIVE: no lvalue-thunk wrap around the function idents, no re-declared functions.
+    assert!(
+        !js.contains("() => get") && !js.contains("($$value) => set"),
+        "the function idents must pass directly (no lvalue-thunk wrap):\n{js}"
+    );
+}
+
+#[test]
+fn named_function_not_referenced_by_a_bind_pair_still_fails_closed() {
+    // NEGATIVE control for the named-function-pair admission: a top-level `function`
+    // whose name is NOT referenced by an accepted function-pair bind STAYS fail-closed at
+    // the instance-script-item gate (construct `function`). The admission is gated on the
+    // function-pair-referenced name set, so a plain helper that nothing binds is still
+    // refused — this proves there is NO wildcard "emit any function" path. RED would be a
+    // broadened function admission.
+    assert_fail_closed(
+        "<script>let c = $state(0); function helper(){ return 1; }</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "function"),
+    );
+}
+
+#[test]
+fn bind_checked_inline_function_pair_passes_get_set_directly() {
+    // The function-pair form generalizes across the DOM-host bind family: a
+    // `bind:checked={get, set}` on a checkbox passes the get/set directly to
+    // `$.bind_checked(input, get, set)` (here the rewritten inline arrows). RED against
+    // the sequence-pair refusal.
+    let js = emit(
+        "<script>let c = $state(false);</script>\n<input type=\"checkbox\" bind:checked={() => c, (x) => c = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_checked(input, () => $.get(c), (x) => $.set(c, x, true))"),
+        "a function-pair bind:checked must pass the rewritten get/set directly:\n{js}"
+    );
+}
+
+#[test]
+fn bind_clientwidth_inline_function_pair_passes_setter_only() {
+    // A SETTER-ONLY DOM-host helper (`$.bind_element_size`) with a function-pair: the
+    // dimension name stays a string-literal arg and only the SET function is passed
+    // directly (no getter), matching official
+    // `$.bind_element_size(div, 'clientWidth', set)`. Here `set` is the rewritten arrow.
+    let js = emit(
+        "<script>let w = $state(0);</script>\n<div bind:clientWidth={() => w, (x) => w = x}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_element_size(div, 'clientWidth', (x) => $.set(w, x, true))"),
+        "a function-pair bind:clientWidth must pass only the rewritten setter:\n{js}"
+    );
+    // NEGATIVE: a setter-only helper must not also emit a getter closure.
+    assert!(
+        !js.contains("() => $.get(w)"),
+        "a setter-only function-pair must not emit a getter:\n{js}"
+    );
+}
+
+#[test]
+fn bind_open_inline_function_pair_passes_property_set_then_get() {
+    // The generic property form with a function-pair: official emits
+    // `$.bind_property('open', 'toggle', details, set, get)` — set BEFORE get, both
+    // passed directly (the rewritten arrows). RED against the sequence-pair refusal.
+    let js = emit(
+        "<script>let o = $state(false);</script>\n<details bind:open={() => o, (x) => o = x}></details>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "$.bind_property('open', 'toggle', details, (x) => $.set(o, x, true), () => $.get(o))"
+        ),
+        "a function-pair bind:open must pass the property set-then-get directly:\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_ts_as_on_getter_fails_closed() {
+    // A function-pair element carrying a TS `as` operator (`{get as any, set}`) is a
+    // plain-`.svelte` PARSE ERROR in official svelte@5.56.3 (`Expected token }`) — the
+    // template expression is parsed as plain JS, so a TS operator anywhere in either
+    // element fails. Verter parses the element with TSX leniency and would silently
+    // STRIP the `as any`, accepting a form official rejects; the function-pair TS gate
+    // refuses it closed instead. RED before the gate (the TS was stripped + accepted).
+    assert_fail_closed(
+        "<script>let value = $state(0); function set(next){ value = next; }</script>\n<input bind:value={get as any, set} />\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_ts_as_on_setter_fails_closed() {
+    // SYMMETRY: the TS operator on the SECOND element (`{get, set as any}`) is equally a
+    // plain-`.svelte` PARSE ERROR (`Expected token }`). The gate checks BOTH elements,
+    // not only the first. RED before the gate.
+    assert_fail_closed(
+        "<script>let value = $state(0); function get(){ return value; }</script>\n<input bind:value={get, set as any} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_non_null_assertion_fails_closed() {
+    // A function-pair element carrying a TS non-null assertion (`{get!, set}`) is a
+    // plain-`.svelte` PARSE ERROR (`Expected token }`). The non-null operator carries no
+    // type operand, so the gate must catch it via the TS-expression node directly. RED
+    // before the gate.
+    assert_fail_closed(
+        "<script>let value = $state(0); function set(next){ value = next; }</script>\n<input bind:value={get!, set} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_typed_setter_param_fails_closed() {
+    // A function-pair whose setter arrow has a TYPED parameter (`(x: number) => …`) is a
+    // plain-`.svelte` PARSE ERROR (`Unexpected token`) — a param type annotation is TS
+    // syntax. The gate flags the typed param structurally (its `type_annotation`), not by
+    // a text scan. RED before the gate (the annotation was stripped + accepted).
+    assert_fail_closed(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, (x: number) => value = x} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_typed_getter_param_fails_closed() {
+    // SYMMETRY: a typed parameter on the GETTER-side arrow (`(x: number) => value`) is
+    // equally a plain-`.svelte` PARSE ERROR (`Unexpected token`). The gate scans both
+    // elements' arrow params. RED before the gate.
+    assert_fail_closed(
+        "<script>let value = $state(0);</script>\n<input bind:value={(x: number) => value, (y) => value = y} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_nested_ts_in_arrow_body_fails_closed() {
+    // DEEP: a TS operator NESTED inside an arrow body (`(x) => value = (x as any)`) is
+    // STILL a plain-`.svelte` PARSE ERROR (`Unexpected token`) — official parses the
+    // whole template expression as plain JS, so a TS construct ANYWHERE in the element
+    // fails, not only on the lvalue/param spine. The gate visits the full element
+    // subtree, not just the top level. RED before the gate (the nested TS was stripped).
+    assert_fail_closed(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, (x) => value = (x as any)} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_generic_arrow_param_fails_closed() {
+    // A function-pair whose SETTER arrow carries a GENERIC type-parameter list with a
+    // TRAILING comma (`<T,>(x) => …`) is a plain-`.svelte` PARSE ERROR in official
+    // svelte@5.56.3 (`Unexpected token`) — a type-parameter declaration is TS syntax.
+    // A CONSTRAINT-LESS `<T,>` carries NO `TSType` inside it (the param has no
+    // `constraint`/`default`), so the type-`TSType` hook alone misses it; the gate must
+    // flag the `TSTypeParameterDeclaration` node directly. RED before the
+    // type-param-declaration override (today the empty type-param list is silently
+    // stripped at TSX-lenient parse + the pair is ACCEPTED as a module).
+    assert_fail_closed(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, <T,>(x) => value = x} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_generic_arrow_param_on_getter_fails_closed() {
+    // SYMMETRY: a generic type-parameter list on the GETTER-side arrow
+    // (`<T,>() => value`) is equally a plain-`.svelte` PARSE ERROR (`Unexpected
+    // token`). The gate scans BOTH elements' type-parameter declarations. RED before
+    // the override.
+    assert_fail_closed(
+        "<script>let value = $state(0);</script>\n<input bind:value={<T,>() => value, (x) => value = x} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_multi_generic_arrow_param_fails_closed() {
+    // A MULTI-parameter generic list (`<T, U>(x) => …`) is a plain-`.svelte` PARSE
+    // ERROR (`Unexpected token`) just like the single trailing-comma form. The
+    // type-parameter-declaration node is flagged regardless of arity / constraints.
+    // RED before the override.
+    assert_fail_closed(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, <T, U>(x) => value = x} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_optional_setter_param_fails_closed() {
+    // A function-pair whose SETTER arrow has an OPTIONAL parameter (`(x?) => …`) is a
+    // plain-`.svelte` PARSE ERROR in official svelte@5.56.3 (`Unexpected token`) — the
+    // `?` optional marker is TS-only param syntax. OXC parses it CLEANLY under TSX
+    // leniency (`optional = true`, NO recovery diagnostic), so the element reaches the
+    // function-pair TS scan and would otherwise be silently accepted with the `?`
+    // stripped. The scan flags the param's `optional` field structurally. RED before
+    // the `visit_formal_parameter` override (today the optional marker is stripped +
+    // the pair ACCEPTED).
+    assert_fail_closed(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, (x?) => value = x} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_optional_getter_param_fails_closed() {
+    // SYMMETRY: an OPTIONAL parameter on the GETTER-side arrow (`(x?) => value`) is
+    // equally a plain-`.svelte` PARSE ERROR (`Unexpected token`). The scan checks both
+    // elements' arrow params. RED before the override.
+    assert_fail_closed(
+        "<script>let value = $state(0);</script>\n<input bind:value={(x?) => value, (x) => value = x} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_readonly_param_fails_closed() {
+    // A function-pair whose setter arrow has a `readonly` param-property MODIFIER
+    // (`(readonly x) => …`) is a plain-`.svelte` PARSE ERROR in official svelte@5.56.3
+    // (`Unexpected token`) — a param modifier is TS parameter-property syntax. OXC does
+    // NOT parse it cleanly: it recovers the node WITH a `'readonly' modifier cannot
+    // appear on a parameter` diagnostic, so the template expression fails closed EARLY
+    // via the parse-error channel (`svelte-runtime-expr-parse`) before the function-pair
+    // gate. The strict official-delta scan's wildcard-free `FormalParameter` destructure
+    // also flags the recovered `readonly` field directly as defense in depth (so the scan
+    // stays a complete TS detector even if a future parser tolerates the modifier
+    // silently). This end-to-end test pins the official contract: the whole param-modifier
+    // family is REFUSED, never silently emitted with the modifier stripped.
+    match emit_result(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, (readonly x) => value = x} />\n",
+    ) {
+        Err(ClientCompileError::Lowering(errs)) => {
+            assert!(
+                errs.diagnostics
+                    .iter()
+                    .any(|d| d.code == "svelte-runtime-expr-parse"),
+                "a `readonly` param modifier must fail closed via the expr-parse channel:\n{errs:?}"
+            );
+        }
+        Ok(js) => panic!("expected fail-closed for a `readonly` param modifier, got a module:\n{js}"),
+        Err(other) => panic!("expected an expr-parse lowering error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn bind_value_function_pair_with_default_param_stays_accepted() {
+    // POSITIVE CONTROL: a DEFAULT param (`(x = 1) => …`) is plain JS — official ACCEPTS
+    // it (verified svelte@5.56.3: `$.bind_value(input, () => $.get(value), (x = 1) =>
+    // $.set(value, x, true))`). The new `visit_formal_parameter` override must NOT
+    // over-reject it (a default is the `initializer` field, not a TS field). The pair
+    // stays accepted and emits the directly-passed rewritten get/set.
+    let js = emit(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, (x = 1) => value = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(value), (x = 1) => $.set(value, x, true))"),
+        "a default-param function-pair must stay accepted (plain JS), not fail closed:\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_rest_param_stays_accepted() {
+    // POSITIVE CONTROL: a REST param (`(...x) => …`) is plain JS — official ACCEPTS it
+    // (verified svelte@5.56.3: `$.bind_value(input, () => $.get(value), (...x) =>
+    // $.set(value, x[0], true))`). The override must NOT over-reject it (rest is a
+    // plain `pattern`, not a TS field).
+    let js = emit(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, (...x) => value = x[0]} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(value), (...x) => $.set(value, x[0], true))"),
+        "a rest-param function-pair must stay accepted (plain JS), not fail closed:\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_destructured_param_stays_accepted() {
+    // POSITIVE CONTROL: a DESTRUCTURED param (`({a}) => …`) is plain JS — official
+    // ACCEPTS it (verified svelte@5.56.3: `$.bind_value(input, () => $.get(value),
+    // ({ a }) => $.set(value, a, true))`). The override must NOT over-reject it
+    // (destructuring is a plain `pattern`, not a TS field). Verter passes the setter
+    // through with its own carrier whitespace (`({a})` vs official's `({ a })`) — an
+    // intra-expression cosmetic difference that conformance waives; the structural
+    // contract is the directly-passed `$.set` setter in the `$.bind_value` call.
+    let js = emit(
+        "<script>let value = $state(0);</script>\n<input bind:value={() => value, ({a}) => value = a} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(value), ({a}) => $.set(value, a, true))"),
+        "a destructured-param function-pair must stay accepted (plain JS), not fail closed:\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_clean_inline_function_pair_stays_accepted_control() {
+    // POSITIVE CONTROL pinned alongside the function-pair TS-rejection family: a CLEAN
+    // inline function-pair (no TS construct in either element) MUST stay accepted and
+    // emit the directly-passed rewritten get/set — the TS gate (including the new
+    // type-parameter-declaration flag) must NOT over-refuse a plain pair. Verified
+    // against svelte@5.56.3: `$.bind_value(input, () => $.get(v), ($$value) => $.set(v,
+    // $$value))` for a bare `value = x` setter.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={() => v, (x) => v = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(v), (x) => $.set(v, x, true))"),
+        "a clean inline function-pair bind:value must stay accepted (directly-passed get/set):\n{js}"
+    );
+    // NEGATIVE: the clean pair must NOT route through the fail-closed refusal (no empty
+    // module / no missing helper call).
+    assert!(
+        js.contains("$.bind_value(input"),
+        "the clean function-pair must emit the bind_value helper, not fail closed:\n{js}"
+    );
+}
+
+// ====================================================================================
+// The plain-Svelte-JS function-pair bind lane (mjs + strict official-delta scan,
+// no-strip rewrite). The function-pair element acceptance routes through the
+// default-CLOSED `parse_plain_svelte_function_pair` helper: each element is parsed as
+// plain Svelte JS (`SourceType::mjs()`), the exact two-element sequence shape is
+// validated, and a strict official-delta scan refuses the OXC-mjs-over-Acorn residual
+// (TS-only class/member fields + decorators + implements/type-params + accessor) that
+// official svelte@5.56.3 REJECTS but OXC's plain-JS parse tolerates. Every outcome below
+// is oracle-verified against pinned svelte@5.56.3.
+
+/// Assert a function-pair bind source FAILS CLOSED (no module emitted), via the typed
+/// `Binding` unsupported-surface — the form reached the bind classifier (it parses
+/// cleanly under the upstream tsx expr gate) and the plain-Svelte-JS lane refused it
+/// (an `mjs` parse error OR a strict-delta violation). The pre-fix tree silently
+/// TS-stripped these and emitted a module, so the `Ok` arm is the RED-before state.
+fn assert_function_pair_binding_refused(source: &str) {
+    match emit_result(source) {
+        Err(ClientCompileError::Unsupported(surface)) => {
+            assert!(
+                matches!(&surface, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+                "expected a `Binding {{ target: \"value\" }}` refusal, got: {surface:?}"
+            );
+        }
+        Ok(js) => panic!("expected fail-closed (official rejects this), got a module:\n{js}"),
+        Err(other) => panic!("expected a `Binding` unsupported surface, got: {other:?}"),
+    }
+}
+
+/// Assert a function-pair bind source FAILS CLOSED via the upstream expr-parse channel —
+/// the element is a plain-`.svelte` PARSE ERROR even under OXC's tsx leniency (e.g.
+/// `abstract` in an expression-position class), so the template expression fails at the
+/// `svelte-runtime-expr-parse` gate BEFORE the bind classifier. Official svelte@5.56.3
+/// likewise REJECTS it (`Expected token }` / `Unexpected token`).
+fn assert_function_pair_expr_parse_refused(source: &str) {
+    match emit_result(source) {
+        Err(ClientCompileError::Lowering(errs)) => {
+            assert!(
+                errs.diagnostics
+                    .iter()
+                    .any(|d| d.code == "svelte-runtime-expr-parse"),
+                "expected a `svelte-runtime-expr-parse` diagnostic, got: {errs:?}"
+            );
+        }
+        Ok(js) => panic!("expected fail-closed (official rejects this), got a module:\n{js}"),
+        Err(other) => panic!("expected an expr-parse lowering error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn bind_value_function_pair_with_class_accessibility_field_getter_fails_closed() {
+    // A function-pair GETTER carrying a class with a TS accessibility modifier
+    // (`{class C { public x = 1 }, set}`) is a plain-`.svelte` PARSE ERROR in official
+    // svelte@5.56.3 (`Unexpected token`) — `public`/`private`/`protected` are TS-only
+    // class-member syntax. OXC's plain-JS (`mjs`) parse TOLERATES it (populating
+    // `PropertyDefinition.accessibility`) WITHOUT a `TSType` node, so the pre-fix
+    // enumerated scan (which only watched `TSType`/`TSNonNull`/type-param/formal-param
+    // hooks) never fired — the class was accepted and the modifier silently stripped.
+    // The strict official-delta scan flags `accessibility` structurally. RED against the
+    // pre-fix tree (a module was emitted); now refused.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { public x = 1 }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_class_accessibility_field_setter_fails_closed() {
+    // SYMMETRY: the TS class-member modifier on the SETTER element
+    // (`{() => v, class C { private x = 1 }}`) is equally a plain-`.svelte` PARSE ERROR
+    // (`Unexpected token`). The scan visits BOTH elements, so a TS construct in the
+    // setter position fails closed too. RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={() => v, class C { private x = 1 }} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_class_readonly_field_fails_closed() {
+    // A `readonly` class field (`{class C { readonly x = 1 }, set}`) is TS-only —
+    // official REJECTS it (`Unexpected token`). OXC's `mjs` parse populates
+    // `PropertyDefinition.readonly`; the strict-delta scan flags it. RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { readonly x = 1 }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_class_optional_field_fails_closed() {
+    // An OPTIONAL class field (`{class C { x? }, set}`) is TS-only — official REJECTS it
+    // (`Unexpected token`). OXC's `mjs` parse populates `PropertyDefinition.optional`
+    // (the `?` field marker, distinct from the JS optional-chaining `?.` operator on a
+    // member expression); the strict-delta scan flags it. RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { x? }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_class_definite_field_fails_closed() {
+    // A DEFINITE-assignment class field (`{class C { x! }, set}`) is TS-only — official
+    // REJECTS it (`Unexpected token`). OXC's `mjs` parse populates
+    // `PropertyDefinition.definite` (the member `!` marker, NOT an expression-position
+    // non-null assertion); the strict-delta scan flags it. RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { x! }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_class_declare_field_fails_closed() {
+    // A `declare` class field (`{class C { declare x }, set}`) is TS-only — official
+    // REJECTS it (`Unexpected token`). OXC's `mjs` parse populates
+    // `PropertyDefinition.declare`; the strict-delta scan flags it. RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { declare x }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_field_decorator_fails_closed() {
+    // A class-FIELD decorator (`{class C { @dec x = 1 }, set}`) is not plain ECMAScript
+    // the official Acorn parser accepts — official REJECTS it (`Unexpected character
+    // '@'`). OXC's `mjs` parse TOLERATES the decorator (populating
+    // `PropertyDefinition.decorators`); the strict-delta scan flags a non-empty
+    // decorator list. RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { @dec x = 1 }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_class_decorator_fails_closed() {
+    // A CLASS decorator (`{@dec class C {}, set}`) is not plain ECMAScript official
+    // accepts — official REJECTS it. OXC's `mjs` parse TOLERATES it (populating
+    // `Class.decorators`); the strict-delta scan flags it. RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={@dec class C {}, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_class_implements_fails_closed() {
+    // A class `implements` clause (`{class C implements I {}, set}`) is TS-only —
+    // official REJECTS it (`Unexpected token`). OXC's `mjs` parse ERRORS on `implements`
+    // (the parse-error gate refuses); the recovered AST also populates
+    // `Class.implements`, which the strict-delta scan flags as defense in depth. RED
+    // before the fix (tsx leniency stripped the clause + accepted).
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C implements I {}, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_class_override_member_fails_closed() {
+    // An `override` member (`{class C { override m() {} }, set}`) is TS-only — official
+    // REJECTS it (`Unexpected token`). OXC's `mjs` parse populates
+    // `MethodDefinition.override`; the strict-delta scan flags it. RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { override m() {} }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_accessor_member_fails_closed() {
+    // An auto-accessor (`{class C { accessor x = 1 }, set}`) is not plain ECMAScript
+    // official accepts (it is part of the TC39 decorators proposal) — official
+    // REJECTS it (`Unexpected token`). OXC's `mjs` parse produces an `AccessorProperty`
+    // node; the strict-delta scan flags the node's very existence (the `accessor`
+    // keyword is itself non-plain-JS). RED against the pre-fix tree.
+    assert_function_pair_binding_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { accessor x = 1 }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_abstract_class_fails_closed() {
+    // An `abstract` class in expression position (`{abstract class C {}, set}`) is
+    // TS-only AND not even a valid class EXPRESSION — official REJECTS it (`Expected
+    // token }`). OXC errors on it under tsx too, so it fails at the upstream
+    // `svelte-runtime-expr-parse` gate (before the bind classifier). RED-before is moot
+    // for the delta-scan here (this characterizes the official reject via the
+    // parse-error channel); the load-bearing fact is that it is REFUSED, never emitted.
+    assert_function_pair_expr_parse_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={abstract class C {}, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_abstract_member_fails_closed() {
+    // An `abstract` member (`{class C { abstract m() {} }, set}`) is TS-only — official
+    // REJECTS it (`Unexpected token`). OXC errors on `abstract` member under tsx too, so
+    // it fails at the upstream expr-parse gate. REFUSED, never emitted.
+    assert_function_pair_expr_parse_refused(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { abstract m() {} }, (x) => v = x} />\n",
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_plain_class_getter_stays_accepted() {
+    // POSITIVE CONTROL: a plain `class C {}` with NO TS modifiers is plain JS — official
+    // ACCEPTS it (verified svelte@5.56.3: `$.bind_value(input, class C {}, (x) =>
+    // $.set(v, x, true))`). The strict-delta scan must NOT over-reject a clean class
+    // (the carrier-stop is for TS-only fields, not the class construct itself). The pair
+    // stays accepted; the class getter passes through the plain-JS rewrite lane
+    // unchanged (no signal reads inside it).
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C {}, (x) => v = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, class C {}, (x) => $.set(v, x, true))"),
+        "a plain-class function-pair getter must stay accepted (plain JS):\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_plain_class_members_stays_accepted() {
+    // POSITIVE CONTROL: a class with PLAIN (non-TS) fields + methods + static + private
+    // + a static block is plain JS — official ACCEPTS it. The strict-delta scan must
+    // flag NONE of these (a plain field `value`, a method, `static`, `#private`, a
+    // `static {}` block carry no TS-only field). The pair stays accepted.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={class C { x = 1; m() {} static s = 2; #p = 3; static { 1 } }, (x) => v = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, class C") && js.contains("(x) => $.set(v, x, true))"),
+        "a plain-member class function-pair must stay accepted (plain JS):\n{js}"
+    );
+    // NEGATIVE: the accepted class must NOT be routed through the refusal (no empty
+    // module / missing helper).
+    assert!(
+        js.contains("$.bind_value(input"),
+        "the plain-member class pair must emit the bind_value helper:\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_optional_chaining_getter_stays_accepted() {
+    // POSITIVE CONTROL: optional chaining (`a?.b`) is plain JS — official ACCEPTS it
+    // (verified svelte@5.56.3: `$.bind_value(input, a?.b, (x) => $.set(v, x, true))`).
+    // The strict-delta scan must NOT confuse the JS optional-chaining `?.` operator
+    // (a `MemberExpression.optional` field) with the TS optional-member `?` marker
+    // (a `PropertyDefinition.optional` field) — only the latter is flagged.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={a?.b, (x) => v = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, a?.b, (x) => $.set(v, x, true))"),
+        "an optional-chaining function-pair getter must stay accepted (plain JS):\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_function_pair_with_object_and_array_literal_stays_accepted() {
+    // POSITIVE CONTROL: object/array literals are plain JS — official ACCEPTS them. The
+    // pair stays accepted (the strict-delta scan flags neither). Verter preserves the
+    // author's intra-expression whitespace (`{a:1}` vs official's `{ a: 1 }`) — a
+    // cosmetic difference conformance waives; the structural fact is the accepted pair.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={[1, 2], (x) => v = x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, [1, 2], (x) => $.set(v, x, true))"),
+        "an array-literal function-pair getter must stay accepted (plain JS):\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_function_pair_tag_type_arg_is_not_ts_stripped() {
+    // TRAP2 DISCRIMINATOR: a valid plain-JS RELATIONAL expression that LOOKS like a
+    // tagged-template-with-type-arguments (``tag<string>`x` ``) must be rewritten from
+    // the plain-JS (`mjs`) AST WITHOUT TS-stripping. Under TSX, OXC reinterprets
+    // ``tag<string>`x` `` as a tagged template whose `<string>` is TS type arguments;
+    // the TS strip then removes them, corrupting the expression to ``tag`x` `` — a
+    // BEHAVIORAL change (a relational compare becomes a tagged-template call). Official
+    // svelte@5.56.3 parses it as plain JS and emits the RELATIONAL form
+    // (`$.bind_value(input, tag < string > `x`, …)`), keeping the `<string>` operands.
+    // The plain-JS rewrite lane must reproduce that (Verter keeps the author's
+    // no-whitespace bytes `tag<string>`x``), and MUST NOT emit the stripped ``tag`x` ``.
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={tag<string>`x`, (x) => v = x} />\n",
+        "App.svelte",
+    );
+    // POSITIVE: the relational `<string>` operands survive (not stripped as type args).
+    assert!(
+        js.contains("tag<string>`x`"),
+        "the relational `tag<string>`x`` must survive the plain-JS rewrite (no TS-strip):\n{js}"
+    );
+    // NEGATIVE: the type-arg-stripped tagged-template form must NOT be emitted (the
+    // pre-fix tsx+strip lane produced exactly this corruption).
+    assert!(
+        !js.contains("tag`x`"),
+        "the plain-JS rewrite lane must NOT TS-strip `tag<string>`x`` into `tag`x``:\n{js}"
+    );
+    // The pair is accepted and routed through the bind_value helper.
+    assert!(
+        js.contains("$.bind_value(input, tag<string>`x`, (x) => $.set(v, x, true))"),
+        "the discriminator pair must emit bind_value with the relational getter:\n{js}"
     );
 }
 
@@ -2098,32 +4114,40 @@ fn bind_value_import_member_fails_closed() {
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::ScriptImport { .. }),
     );
 }
-// ── form / value-bearing elements demoted by the strict element allowlist ──────
+// ── form / value-bearing elements: allowlisted bind hosts whose special content /
+//    attr models still fail closed ──────────────────────────────────────────────
 //
-// `<select>` / `<option>` / `<datalist>` / `<textarea>` are NOT in the finite
-// client-core element allowlist (`a` / `button` / `div` / `h1` / `input` / `p`), so
-// a component using ANY of them fails closed at the ELEMENT gate
-// (`svelte-runtime-unsupported-element`) on the FIRST out-of-allowlist element —
-// regardless of its attrs or interior. (The pre-restructure tree accepted these
-// elements and gated only specific attrs; the strict allowlist demotes them whole.)
+// `<select>` / `<option>` / `<textarea>` ARE in the finite client-core element
+// allowlist (`a` / `button` / `div` / `h1` / `input` / `p` / `video` / `textarea` /
+// `select` / `option` / `audio` / `details`) — they were added as 5c `bind:value`
+// hosts. So a component using them passes the ELEMENT gate; the refusal MOVES to
+// their special content / attr models (a static `value` / `selected` is the
+// form-control setter family 5c owns via `bind:value`, NOT a static-attr
+// serializer), which fail closed at the ATTR gate. `<datalist>` is NOT allowlisted,
+// so it still fails closed at the ELEMENT gate
+// (`svelte-runtime-unsupported-element`) on the FIRST out-of-allowlist element.
 
 #[test]
-fn select_option_element_fails_closed_at_the_element_allowlist() {
-    // A `<select><option value="a">` component fails at the element gate on the
-    // first out-of-allowlist element (`<select>`), not at the `value` attr.
+fn select_option_static_value_attr_fails_closed_at_the_form_control_gate() {
+    // `<select>`/`<option>` are now in the element allowlist (5c bind hosts), so the
+    // refusal MOVES to the static `value` attr on `<option>`: a static `value` is the
+    // form-control setter family (5c emits `bind:value`, NOT the static-`value`
+    // serializer), so it fails closed via the `DynamicAttribute`/form-control channel.
+    // RED if the static `value` attr were silently serialized.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option value=\"a\">A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "value"),
     );
 }
 
 #[test]
-fn select_value_element_fails_closed_at_the_element_allowlist() {
-    // `<select value="x">` likewise fails at the element gate (the host element, not
-    // the `value`).
+fn select_static_value_attr_fails_closed_at_the_form_control_gate() {
+    // `<select value="x">` — the static `value` on the now-allowed `<select>` host is
+    // the form-control setter family (5c owns `bind:value`, not the static-`value`
+    // attr), so it fails closed at the attr gate, NOT the element gate.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select value=\"x\"><option>A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "value"),
     );
 }
 
@@ -2138,24 +4162,26 @@ fn datalist_element_fails_closed_at_the_element_allowlist() {
 }
 
 #[test]
-fn textarea_value_element_now_fails_closed_at_the_element_allowlist() {
-    // DEMOTION proof: a static `value` on `<textarea>` USED to serialize verbatim and
-    // emit a Main; `<textarea>` is now out of the allowlist, so the component fails
-    // closed at the element gate and emits NO Main.
+fn textarea_static_value_attr_fails_closed_at_the_form_control_gate() {
+    // `<textarea>` is now an allowed 5c bind host, so a static `value` attr (the
+    // form-control setter family — 5c emits `bind:value`, not the static-`value`
+    // serializer) fails closed at the attr gate. The empty content passes the
+    // special-content gate; the static `value` is the refusal.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<textarea value=\"hi\"></textarea>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "textarea"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "value"),
     );
 }
 
 #[test]
-fn option_selected_element_now_fails_closed_at_the_element_allowlist() {
-    // DEMOTION proof: a static `selected` on `<option>` USED to serialize
-    // `selected=""`; `<select>` / `<option>` are now out of the allowlist, so the
-    // component fails closed at the element gate on `<select>`.
+fn option_static_selected_attr_fails_closed_at_the_form_control_gate() {
+    // A static `selected` on the now-allowed `<option>` is the form-control setter
+    // family (`selected` rides the form-control deferral channel alongside
+    // `value`/`checked`), so it fails closed at the attr gate. RED if `selected=""`
+    // were silently serialized into the cloned template.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option selected>A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "selected"),
     );
 }
 
@@ -2210,6 +4236,165 @@ fn component_fails_closed() {
             UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
         )
     });
+}
+
+// ── Component-host + special-element binding surfaces (D-21): these hosts are not yet
+//    supported (owned by 5f), NOT 5c. 5c emits DOM-element binds ONLY; these surfaces STAY
+//    refused (the component / `<svelte:*>` HOST fails closed at `client_surface.rs`)
+//    until 5f opens the hosts. Each negative test is DISCRIMINATING — it would be RED
+//    if the unsupported host surface were wrongly accepted. ──
+
+#[test]
+fn component_bind_this_fails_closed_until_component_hosts_are_supported() {
+    // `<Child bind:this={inst}/>` — the COMPONENT host is refused (the component bind
+    // needs 5f's component-invocation host + instance-import hoisting). Official emits
+    // `$.bind_this(Child(...), set, get)` with a `$.set(inst, $$value, true)` proxy
+    // setter — a 5f shape. RED if the component host were accepted.
+    assert_fail_closed(
+        "<script>let inst = $state();</script>\n<Child bind:this={inst} />\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+            )
+        },
+    );
+}
+
+#[test]
+fn component_bind_prop_fails_closed_until_component_hosts_are_supported() {
+    // `<Child bind:value={val}/>` — the COMPONENT host is refused. Official emits a
+    // getter/setter pair on the component props object (`get value()/set value($$v)`
+    // with `$.set(val, $$value, true)`), NOT a `$.bind_*` helper — a 5f shape.
+    assert_fail_closed(
+        "<script>let val = $state('');</script>\n<Child bind:value={val} />\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+            )
+        },
+    );
+}
+
+#[test]
+fn component_function_binding_fails_closed_until_component_hosts_are_supported() {
+    // `<Child bind:x={get, set}/>` — a component FUNCTION binding. The component host
+    // is refused (5f). RED if accepted.
+    assert_fail_closed(
+        "<script>let v = $state(0);</script>\n<Child bind:x={() => v, (nv) => v = nv} />\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+            )
+        },
+    );
+}
+
+#[test]
+fn svelte_window_size_bind_fails_closed_until_special_element_hosts_are_supported() {
+    // `<svelte:window bind:innerWidth={w}/>` — the `<svelte:window>` special-element
+    // HOST is refused (every non-`<svelte:options>` `<svelte:*>` is a renderable 5f
+    // surface). Official emits `$.bind_window_size('innerWidth', ($$value) => $.set(w,
+    // $$value, true))` — a 5f shape with the window-host should_proxy flag.
+    assert_fail_closed(
+        "<script>let w = $state(0);</script>\n<svelte:window bind:innerWidth={w} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:window"),
+    );
+}
+
+#[test]
+fn svelte_window_scroll_bind_fails_closed_until_special_element_hosts_are_supported() {
+    // `<svelte:window bind:scrollX={sx}/>` — the window host is refused. Official emits
+    // `$.bind_window_scroll('x', get, set)` — a 5f shape.
+    assert_fail_closed(
+        "<script>let sx = $state(0);</script>\n<svelte:window bind:scrollX={sx} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:window"),
+    );
+}
+
+#[test]
+fn svelte_body_bind_fails_closed_until_special_element_hosts_are_supported() {
+    // `<svelte:body bind:clientWidth={w}/>` — the `<svelte:body>` host is refused (5f).
+    // Official emits `$.bind_element_size($.document.body, …)` — a 5f shape.
+    assert_fail_closed(
+        "<script>let w = $state(0);</script>\n<svelte:body bind:clientWidth={w} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:body"),
+    );
+}
+
+#[test]
+fn svelte_body_scrollx_bind_is_invalid_and_fails_closed() {
+    // `<svelte:body bind:scrollX={sx}/>` is an OFFICIAL COMPILE ERROR — `<svelte:body>`
+    // has NO `scrollX`/`scrollY` (those belong to `<svelte:window>`). It must NEVER
+    // emit; Verter refuses it at the `<svelte:body>` host gate (the host is not yet
+    // supported, owned by 5f, where the official-invalid host/name pair is a
+    // NEGATIVE-coverage case).
+    assert_fail_closed(
+        "<script>let sx = $state(0);</script>\n<svelte:body bind:scrollX={sx} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:body"),
+    );
+}
+
+#[test]
+fn svelte_document_bind_fails_closed_until_special_element_hosts_are_supported() {
+    // `<svelte:document bind:activeElement={el}/>` — the `<svelte:document>` host is
+    // refused (5f). RED if accepted.
+    assert_fail_closed(
+        "<script>let el = $state();</script>\n<svelte:document bind:activeElement={el} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:document"),
+    );
+}
+
+#[test]
+fn svelte_document_this_bind_fails_closed_until_special_element_hosts_are_supported() {
+    // `<svelte:document bind:this={d}/>` — the `<svelte:document>` host `bind:this` is
+    // refused (5f). Official emits `$.bind_this($.document, …)` — a 5f shape. RED if
+    // accepted.
+    assert_fail_closed(
+        "<script>let d = $state();</script>\n<svelte:document bind:this={d} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:document"),
+    );
+}
+
+#[test]
+fn svelte_window_this_bind_fails_closed_until_special_element_hosts_are_supported() {
+    // `<svelte:window bind:this={w}/>` — the `<svelte:window>` host `bind:this` is a
+    // DISTINCT special-element surface (not yet supported, owned by 5f). Official emits
+    // `$.bind_this($.window, ($$value)
+    // => $.set(w, $$value, true), () => $.get(w))` — a 5f shape with the window-host
+    // should_proxy flag. RED if the window host `bind:this` were wrongly accepted.
+    assert_fail_closed(
+        "<script>let w = $state();</script>\n<svelte:window bind:this={w} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:window"),
+    );
+}
+
+#[test]
+fn svelte_window_online_bind_fails_closed_until_special_element_hosts_are_supported() {
+    // `<svelte:window bind:online={on}/>` — the `<svelte:window>` host is refused (5f).
+    // Official emits `$.bind_online(($$value) => $.set(on, $$value, true))` — a 5f
+    // shape (the D-21 zero-coverage-gap invariant requires 5c to retain this explicit
+    // refusal until 5f opens the `<svelte:window>` host). RED if the online bind were
+    // wrongly accepted.
+    assert_fail_closed(
+        "<script>let on = $state(false);</script>\n<svelte:window bind:online={on} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:window"),
+    );
+}
+
+#[test]
+fn svelte_body_this_bind_fails_closed_until_special_element_hosts_are_supported() {
+    // `<svelte:body bind:this={b}/>` — the `<svelte:body>` host `bind:this` is refused
+    // (5f). Official emits `$.bind_this($.document.body, ($$value) => $.set(b, $$value,
+    // true), () => $.get(b))` — a 5f shape (the D-21 zero-coverage-gap invariant
+    // requires 5c to retain this explicit refusal until 5f opens the `<svelte:body>`
+    // host). RED if the body `bind:this` were wrongly accepted.
+    assert_fail_closed(
+        "<script>let b = $state();</script>\n<svelte:body bind:this={b} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:body"),
+    );
 }
 
 #[test]
@@ -2870,6 +5055,91 @@ fn mixed_class_call_module_matches_the_committed_jsdom_smoke_fixture() {
     );
 }
 
+// ── DOM-hosted bind behavioral fixtures ────────────────────────────────────────
+//
+// Each fixture below mounts the EMITTED §1.2 module (its `.client.mjs`, kept in
+// lockstep by these tests) against the REAL pinned `svelte@5.56.3` runtime in the
+// happy-dom behavioral spec (`svelte-client-bind-smoke.spec.ts`). The emitted
+// module was verified to match the pinned-official compiler STRUCTURALLY (helper
+// sequence + imports + templates) at authoring; this lockstep test keeps it from
+// drifting from `compile_client`. The reflecting `<p>{x}</p>` observable lets the
+// behavioral spec assert the DOM→signal write reaches the bound state.
+
+#[test]
+fn bind_textarea_value_module_matches_the_committed_jsdom_smoke_fixture() {
+    // `<textarea bind:value>` → `$.remove_textarea_child(textarea)` prelude +
+    // `$.bind_value(textarea, get, set)` (the textarea host of the value bind).
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet v = $state(\"\");\n</script>\n<textarea bind:value={v}></textarea>\n<p>{v}</p>\n",
+        "bind_textarea_value.client.mjs",
+    );
+}
+
+#[test]
+fn bind_select_value_module_matches_the_committed_jsdom_smoke_fixture() {
+    // `<select bind:value>` → `$.bind_select_value(select, get, set)` (no
+    // `remove_input_defaults` prelude — a select is not an input).
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet v = $state(\"a\");\n</script>\n<select bind:value={v}><option>a</option><option>b</option></select>\n<p>{v}</p>\n",
+        "bind_select_value.client.mjs",
+    );
+}
+
+#[test]
+fn bind_checked_module_matches_the_committed_jsdom_smoke_fixture() {
+    // `<input type="checkbox" bind:checked>` → `$.remove_input_defaults(input)` +
+    // `$.bind_checked(input, get, set)`.
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet c = $state(false);\n</script>\n<input type=\"checkbox\" bind:checked={c} />\n<p>{c}</p>\n",
+        "bind_checked.client.mjs",
+    );
+}
+
+#[test]
+fn bind_contenteditable_module_matches_the_committed_jsdom_smoke_fixture() {
+    // `<div contenteditable bind:innerHTML>` →
+    // `$.bind_content_editable('innerHTML', div, get, set)` (property-named first arg).
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet h = $state(\"\");\n</script>\n<div contenteditable bind:innerHTML={h}></div>\n<p>{h}</p>\n",
+        "bind_contenteditable.client.mjs",
+    );
+}
+
+#[test]
+fn bind_property_open_module_matches_the_committed_jsdom_smoke_fixture() {
+    // `<details bind:open>` → `$.bind_property('open', 'toggle', details, set, get)` —
+    // the generic DOM-property bind (read-write ⇒ getter trailing).
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet o = $state(false);\n</script>\n<details bind:open={o}></details>\n<p>{o}</p>\n",
+        "bind_property_open.client.mjs",
+    );
+}
+
+#[test]
+fn bind_group_radio_module_matches_the_committed_jsdom_smoke_fixture() {
+    // Radio `bind:group` → component-fn-scoped `const binding_group = []` + per-input
+    // `input.value = input.__value = 'X'` + `$.bind_group(binding_group, [], input,
+    // get, set)` per member.
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet g = $state(\"\");\n</script>\n<input type=\"radio\" bind:group={g} value=\"a\" />\n<input type=\"radio\" bind:group={g} value=\"b\" />\n<p>{g}</p>\n",
+        "bind_group_radio.client.mjs",
+    );
+}
+
+#[test]
+fn bind_function_pair_value_module_matches_the_committed_jsdom_smoke_fixture() {
+    // A DOM-host FUNCTION-PAIR `bind:value={() => value, (next) => value = next}` →
+    // `$.bind_value(input, () => $.get(value), (next) => $.set(value, next, true))` —
+    // the supplied get/set passed DIRECTLY (signal-rewritten, no synthesized thunk
+    // wrapper). The reflecting `<p>{value}</p>` reads the SIGNAL, so the behavioral
+    // smoke can assert the full DOM→signal→DOM round-trip (typing reaches the setter,
+    // which updates the signal, which re-renders the reflection).
+    assert_jsdom_fixture_in_sync(
+        "<script>\n\tlet value = $state(\"\");\n</script>\n<input bind:value={() => value, (next) => value = next} />\n<p>{value}</p>\n",
+        "bind_function_pair_value.client.mjs",
+    );
+}
+
 // ── Additional surface gates (R1, R4, R5, R7, R8) ──────────────────────────────
 
 #[test]
@@ -2935,16 +5205,184 @@ fn props_string_literal_key_reads_via_bracket_access() {
     );
 }
 #[test]
-fn bind_value_to_call_expression_fails_closed() {
-    // R8: `bind:value={foo()}` is not a valid lvalue — official raises
-    // `bind_invalid_expression`; Verter fails closed (never emits `foo() = $$value`).
-    // RED against the prior path (which validated only tag/target, not the
-    // bound expression, and emitted invalid JS). The component is runes-mode (a
-    // `$state` declarator) so the bind validation is reached (not pre-empted by the
-    // legacy-mode refusal).
-    assert_fail_closed(
+fn bind_value_to_call_expression_rejects_with_exact_bind_invalid_expression() {
+    // F2: `bind:value={foo()}` is not a valid lvalue / 2-element pair — official svelte@5.56.3
+    // rejects it with the EXACT code `bind_invalid_expression`. This is bind-target SHAPE
+    // validation (the same class as `bind_group_invalid_expression` / `bind_invalid_parens`),
+    // so Verter rejects it on the OFFICIAL-reject rail with the exact code — NOT the
+    // `UnsupportedSvelteRuntimeSurface::Binding` channel it used before. The component is
+    // runes-mode (a `$state` declarator) so the bind gate is reached.
+    let err = emit_result(
         "<script>let n = $state(0); function foo() { return 1; }</script>\n<input bind:value={foo()} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    )
+    .expect_err("a call-expression bind target must reject");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject(BindInvalidExpression), got {err:?}");
+    };
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::BindInvalidExpression,
+        "a call-expression bind target must reject via the BindInvalidExpression rule"
+    );
+    assert_eq!(
+        rejection.official_code, "bind_invalid_expression",
+        "the rejection mirrors the official `bind_invalid_expression` code"
+    );
+}
+
+#[test]
+fn parenthesized_identifier_bind_value_binds_typed_signal_root() {
+    // F6: `bind:value={(v)}` — author parens around a SINGLE identifier (NOT a sequence).
+    // Official svelte@5.56.3 ACCEPTS it and binds on the identifier ROOT `v`, IDENTICALLY
+    // to the unparenthesized `{v}` (oracle-verified). Verter must derive the identifier root
+    // from the typed `BindTargetFact.root_ident` (`v`), NOT `source.trim()` (`"(v)"`, which
+    // is not a resolvable binding name and previously made the bind REFUSE). `v` is a
+    // `$state` signal (the bind reassigns it), so the setter is `$.set(v, $$value)`.
+    let js = emit(
+        "<script>let v = $state('');</script>\n<input bind:value={(v)} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.set(v, $$value)"),
+        "the setter must resolve the typed root `v` (not the parenthesized source):\n{js}"
+    );
+    assert!(
+        !js.contains("(v) = $$value") && !js.contains("$.set((v)"),
+        "the parenthesized source must NOT leak as the lvalue / setter argument:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must be valid JS:\n{js}"
+    );
+}
+
+#[test]
+fn parenthesized_identifier_bind_this_binds_typed_root() {
+    // F6: `bind:this={(el)}` — author parens around the bind:this identifier target.
+    // Official ACCEPTS it and binds on `el`, IDENTICALLY to `{el}`. Verter must read the
+    // root from the typed fact (`el`), not `source.trim()` (`"(el)"`, which would fail the
+    // declared-instance-local check and refuse). `el` is a `$state` signal target.
+    let js = emit(
+        "<script>let el = $state();</script>\n<div bind:this={(el)}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_this(div,") && js.contains("$.set(el, $$value)"),
+        "bind:this={{(el)}} must be accepted and bind on the typed root `el`:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must be valid JS:\n{js}"
+    );
+}
+
+#[test]
+fn parenthesized_sequence_bind_value_still_rejected() {
+    // F6 NEGATIVE CONTROL: routing the identifier root through the typed fact must NOT
+    // accept a parenthesized SEQUENCE (`bind:value={(get, set)}`) — official rejects author
+    // parens around a bind sequence with `bind_invalid_parens` (unaffected by F1/F6). A
+    // regression that treated `(get, set)` as an identifier would RED here.
+    let err =
+        emit_result("<script>let v = $state('');</script>\n<input bind:value={(get, set)} />\n")
+            .expect_err("a parenthesized bind sequence must still reject");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject(BindInvalidParens), got {err:?}");
+    };
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::BindInvalidParens,
+        "a parenthesized bind sequence must still reject as bind_invalid_parens"
+    );
+}
+
+#[test]
+fn bind_group_dynamic_value_emits_tracked_template_effect_update() {
+    // F4: a DYNAMIC `value={label}` on a reactive `bind:group` radio. Official svelte@5.56.3
+    // emits (oracle-verified): a `var input_value;` change-tracker, a guarded
+    // `$.template_effect` writing `input.value = (input.__value = $.get(label)) ?? ''` (single
+    // value → OUTER `?? ''`) BEFORE the `$.bind_group`, and the group getter reads the
+    // dynamic-value dependency (`() => { $.get(label); return $.get(selected); }`) in official
+    // order. RED before F4: a dynamic group value fell through and failed closed as a generic
+    // dynamic form-control attr.
+    let src = "<script>\n\tlet selected = $state(\"a\");\n\tlet label = $state(\"a\");\n</script>\n<input type=\"radio\" bind:group={selected} value={label} />\n<button onclick={() => label = \"b\"}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    // (1) the value change-tracker var (named `<dom_var>_value`).
+    assert!(
+        js.contains("var input_value;"),
+        "must declare the input_value change-tracker:\n{js}"
+    );
+    // (2) the guarded change-detection update (single value → outer `?? ''`).
+    assert!(
+        js.contains("if (input_value !== (input_value = $.get(label)))")
+            && js.contains("input.value = (input.__value = $.get(label)) ?? ''"),
+        "must emit the guarded input.value/__value update:\n{js}"
+    );
+    // (3) the group getter reads the value dependency first, then returns the bound target.
+    assert!(
+        js.contains("$.get(label);") && js.contains("return $.get(selected);"),
+        "the group getter must read the value dependency before the target:\n{js}"
+    );
+    // (4) ORDER: the value `$.template_effect` precedes the `$.bind_group` call.
+    let eff = js
+        .find("$.template_effect")
+        .expect("a template_effect is emitted");
+    let bind = js.find("$.bind_group").expect("a bind_group is emitted");
+    assert!(
+        eff < bind,
+        "the value $.template_effect must be emitted BEFORE $.bind_group:\n{js}"
+    );
+    // (5) valid JS.
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must be valid JS:\n{js}"
+    );
+}
+
+#[test]
+fn bind_group_mixed_value_emits_template_literal_update() {
+    // F4: a MIXED `value="pre-{label}"` group value — official emits the template-literal
+    // value `input.value = input.__value = `pre-${$.get(label) ?? ''}`` (NO outer `?? ''` —
+    // the template literal is already a string; the `?? ''` is per-interpolation), guarded by
+    // the `input_value` tracker, before `$.bind_group`.
+    let src = "<script>\n\tlet selected = $state(\"a\");\n\tlet label = $state(\"a\");\n</script>\n<input type=\"radio\" bind:group={selected} value=\"pre-{label}\" />\n<button onclick={() => label = \"b\"}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("var input_value;"),
+        "must declare the input_value change-tracker:\n{js}"
+    );
+    assert!(
+        js.contains("input.value = input.__value = `pre-${$.get(label) ?? ''}`"),
+        "the mixed value writes the template literal with NO outer `?? ''`:\n{js}"
+    );
+    assert!(
+        js.contains("if (input_value !== (input_value = `pre-${$.get(label) ?? ''}`))"),
+        "the guard compares the template-literal value:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the emitted module must be valid JS:\n{js}"
+    );
+}
+
+#[test]
+fn bind_group_static_value_stays_direct_write_without_tracker() {
+    // F4 NEGATIVE CONTROL (static regression): a STATIC `value="a"` group value stays the
+    // one-shot direct write `input.value = input.__value = 'a'` — NO `input_value` tracker and
+    // NO `$.template_effect` for the value (the dynamic-value machinery must not fire for a
+    // static literal).
+    let src = "<script>let g = $state(\"\");</script>\n<input type=\"radio\" bind:group={g} value=\"a\" />\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("input.value = input.__value = 'a'"),
+        "the static group value stays a one-shot direct write:\n{js}"
+    );
+    assert!(
+        !js.contains("input_value"),
+        "a static group value must NOT declare the dynamic-value tracker:\n{js}"
+    );
+    assert!(
+        !js.contains("$.template_effect"),
+        "a static group value must NOT emit a value $.template_effect:\n{js}"
     );
 }
 
@@ -2979,6 +5417,461 @@ fn lang_ts_component_with_bind_targets_fails_closed() {
         assert_fail_closed(&src, |s| {
             matches!(s, UnsupportedSvelteRuntimeSurface::TypeScript { .. })
         });
+    }
+}
+
+#[test]
+fn ts_wrapped_dom_bind_target_in_plain_script_fails_closed() {
+    // E (lvalue-widening boundary): a TS-WRAPPED DOM-bind target (`bind:value={v!}` /
+    // `{v as string}`) on an ordinary DOM host stays CLOSED — the canonical-lvalue-
+    // from-TS strip is a deferral (owned by the future `lang="ts"`-script block, NOT
+    // 5c). Oracle determination (svelte@5.56.3): official PARSE-REJECTS this exact
+    // form in a PLAIN `<script>` (`Expected token }`); it is only valid under
+    // `lang="ts"`, which Verter refuses ENTIRELY as `TypeScript` upstream. Verter's
+    // plain-script parser is TSX-LENIENT, so it accepts `v!` syntactically and REACHES
+    // the bind classifier — where the TS-wrapped refusal catches it. This pins that
+    // refusal as a LIVE, exercised guard (NOT dead code), and is the discriminator
+    // that a naive widening (formatting the setter from the raw `v!` source →
+    // `$.set(v!, $$value)`) would break.
+    //
+    // SCOPE: the bind classifier fails a TS-wrapped target closed via the structural
+    // "TS-anywhere-in-lvalue" fact (`BindTargetFact.lvalue_contains_ts`), which catches BOTH
+    // a ROOT TS wrapper (`v!` / `v as T` / `(v!)`, this test) AND a NON-ROOT TS target (a
+    // member-spine `o!.x`, a computed-index `a[x as T]` — characterized by
+    // `nested_ts_anywhere_in_bind_target_lvalue_fails_closed`). The EXACT diagnostic-code
+    // parity (`expected_token`/`js_parse_error` vs the structural fail-closed) stays D-26
+    // (the shared `.mjs` template-expression parse authority), so this is the
+    // `Binding`-channel refusal, not a bind-only TS code gate.
+    for target in ["v!", "v as string", "(v!)"] {
+        let src = format!(
+            "<script>let v = $state(\"\");</script>\n<input bind:value={{{target}}} />\n<p>{{v}}</p>\n"
+        );
+        let err = emit_result(&src).expect_err(
+            "a TS-wrapped DOM-bind target must fail closed (canonical-lvalue deferral)",
+        );
+        assert!(
+            matches!(
+                err,
+                ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::Binding {
+                    target: ref t,
+                    ..
+                }) if t == "value"
+            ),
+            "a TS-wrapped `bind:value={{{target}}}` must fail closed as the `value` binding surface, got {err:?}"
+        );
+    }
+    // NEGATIVE: the clean (unwrapped) form on the SAME host is the supported 5c shape —
+    // the refusal is SPECIFIC to the TS wrapper, not a blanket `bind:value` refusal.
+    let clean = "<script>let v = $state(\"\");</script>\n<input bind:value={v} />\n<p>{v}</p>\n";
+    let js = emit(clean, "App.svelte");
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "the clean (non-TS-wrapped) bind:value on the same host must emit the supported shape:\n{js}"
+    );
+    assert!(
+        !js.contains("v!"),
+        "the emitted module must never contain the raw TS-wrapped lvalue `v!`:\n{js}"
+    );
+}
+
+#[test]
+fn nested_ts_anywhere_in_bind_target_lvalue_fails_closed() {
+    // F1: a TS-ONLY operator ANYWHERE in an accepted bind-target lvalue — a member-spine
+    // non-null (`o!.x`), a computed-index cast (`a[x as T]`), or a computed-index non-null
+    // (`a[x!]`) — FAILS CLOSED. Official svelte@5.56.3 PARSE-REJECTS each in a plain
+    // `<script>` (`expected_token` / `js_parse_error`, oracle-verified), so Verter must NOT
+    // accept-and-strip them to valid JS (the prior fail-OPEN). The structural
+    // "TS-anywhere-in-lvalue" fact (`BindTargetFact.lvalue_contains_ts`) walks the member
+    // object spine + computed-index expressions, so a NON-ROOT TS node is caught exactly
+    // like a root wrapper. The EXACT diagnostic-code parity
+    // (`expected_token`/`js_parse_error` vs Verter's structural fail-closed) stays D-26 (the
+    // shared template-expression parse authority owns uniform plain-script TS rejection), so
+    // the refusal rides the `UnsupportedSvelteRuntimeSurface::Binding` channel — NOT a
+    // bind-only TS code gate.
+    for target in ["o!.x", "a[x as T]", "a[x!]"] {
+        let src = format!(
+            "<script>let o = $state(0); let a = $state(0); let x = $state(0);</script>\n<input bind:value={{{target}}} />\n"
+        );
+        let err = emit_result(&src).expect_err(
+            "nested TS in a bind-target lvalue must fail closed (the TS-anywhere-in-lvalue fact)",
+        );
+        assert!(
+            matches!(
+                err,
+                ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::Binding {
+                    target: ref t,
+                    ..
+                }) if t == "value"
+            ),
+            "a nested-TS `bind:value={{{target}}}` must fail closed as the `value` binding surface, got {err:?}"
+        );
+    }
+    // NEGATIVE: the CLEAN member / computed forms (no TS anywhere in the spine) stay
+    // ACCEPTED and emit the bind — the fact is SPECIFIC to TS nodes, not a blanket
+    // member/computed refusal.
+    for target in ["o.x", "a[x]", "obj.a.b", "a[i]"] {
+        let src = format!(
+            "<script>let o = $state(0); let a = $state(0); let x = $state(0); let i = $state(0); let obj = $state(0);</script>\n<input bind:value={{{target}}} />\n"
+        );
+        let js = emit(&src, "App.svelte");
+        assert!(
+            js.contains("$.bind_value(input,"),
+            "a CLEAN bind:value={{{target}}} (no nested TS) must still emit the bind:\n{js}"
+        );
+        assert!(
+            parses_as_js(&js),
+            "the clean form must emit valid JS:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn bind_target_index_with_type_arg_call_fails_closed() {
+    // A computed-index bind target whose index is a CALL carrying TS type arguments —
+    // `<input bind:value={arr[g<a,b>(c)]}>` (an OXC `CallExpression` with `type_arguments`) —
+    // FAILS CLOSED via the structural `lvalue_contains_ts` fact. Under TSX the index parses as
+    // a call with `<a,b>` type arguments; the TS-strip lane would DELETE them, emitting the
+    // divergent index `arr[g(c)]` (a function call). Official svelte@5.56.3 instead parses the
+    // same source as plain JS — the relational/comma `arr[(g < a, b > c)]` (a boolean) — so
+    // accept-and-strip would be a BEHAVIORAL divergence. Failing closed (a never-wrong
+    // under-accept via the SAME `value` Binding channel as a bare instantiation —
+    // `bare_instantiation_bind_target_stays_fail_closed`) is correct until the shared plain-MJS
+    // template-expression authority emits the relational form. The EXACT diagnostic-code parity
+    // stays D-26. `arr` is a declared writable root; a `$state` drives runes mode.
+    let src = "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[g<a,b>(c)]} />\n";
+    let result = emit_result(src);
+    assert!(
+        matches!(
+            &result,
+            Err(ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::Binding {
+                target,
+                ..
+            })) if target == "value"
+        ),
+        "a call-with-type-args index bind target must fail closed as the `value` Binding surface, got {result:?}"
+    );
+    // NEGATIVE: the accept-and-emit-divergent fail-open is GONE — there is no `Ok` emit
+    // carrying the type-arg-stripped divergent index `arr[g(c)]`.
+    assert!(
+        !matches!(&result, Ok(js) if js.contains("arr[g(c)]")),
+        "the accept-and-strip fail-open (emitting the divergent index `arr[g(c)]`) must be gone: {result:?}"
+    );
+}
+
+#[test]
+fn bind_target_type_argument_forms_fail_closed_plain_forms_accepted() {
+    // The COMPLETE TSX-only type-argument expression class in a SINGLE bind-target lvalue
+    // index — a CALL, a NEW, or a TAGGED-TEMPLATE carrying `type_arguments` — FAILS CLOSED via
+    // the structural `lvalue_contains_ts` fact (the SAME `value` Binding channel as a bare
+    // instantiation). The TSX-strip lane would otherwise DELETE the type arguments and emit a
+    // divergent index (`arr[g<a,b>(c)]` -> `arr[g(c)]`), whereas official svelte@5.56.3 parses
+    // the same source as plain JS (the relational/comma `arr[(g < a, b > c)]`). The fix is
+    // PRECISE: only a type-argument-bearing node fails closed; a plain call / member / index
+    // lvalue stays accepted and is emitted verbatim. The EXACT diagnostic-code parity stays
+    // D-26 (the shared plain-MJS template-expression parse authority).
+
+    // FAIL-CLOSED: each form, paired with the would-be type-arg-STRIPPED index it must NOT emit.
+    for (src, stripped) in [
+        // CALL with type arguments (the index is a `CallExpression`).
+        (
+            "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[g<a,b>(c)]} />\n",
+            "arr[g(c)]",
+        ),
+        // NEW with type arguments (the index member's object is a `NewExpression`).
+        (
+            "<script>let s = $state(0); let data = [];</script>\n<input bind:value={data[new C<T>().k]} />\n",
+            "data[new C().k]",
+        ),
+        // TAGGED-TEMPLATE with type arguments, as a SINGLE lvalue index (NOT a function-pair).
+        (
+            "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[tag<T>`x`]} />\n",
+            "arr[tag`x`]",
+        ),
+    ] {
+        let result = emit_result(src);
+        assert!(
+            matches!(
+                &result,
+                Err(ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::Binding {
+                    target,
+                    ..
+                })) if target == "value"
+            ),
+            "{src} must fail closed as the `value` Binding surface, got {result:?}"
+        );
+        assert!(
+            !matches!(&result, Ok(js) if js.contains(stripped)),
+            "{src} must NOT accept-and-emit the type-arg-stripped index `{stripped}`: {result:?}"
+        );
+    }
+
+    // STAYS FAIL-CLOSED: the bare-instantiation arm (`arr[g<T>]` / `f<T>`, an OXC
+    // `TSInstantiationExpression` with no trailing call) — a regression guard alongside its
+    // dedicated coverage in `bare_instantiation_bind_target_stays_fail_closed`.
+    for src in [
+        "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[g<T>]} />\n",
+        "<script>let s = $state(0); let f = () => 0;</script>\n<input bind:value={f<T>} />\n",
+    ] {
+        let result = emit_result(src);
+        assert!(
+            matches!(
+                &result,
+                Err(ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::Binding {
+                    target,
+                    ..
+                })) if target == "value"
+            ),
+            "{src} (bare instantiation) must stay fail closed as the `value` Binding surface, got {result:?}"
+        );
+    }
+
+    // STAYS ACCEPTED + EMITS THE EXACT INDEX BYTES (precision: only type-argument-bearing nodes
+    // fail closed, never plain calls / members / indices). Plain (non-`$state`) roots emit their
+    // lvalue verbatim.
+    for (src, expected) in [
+        // `arr` is the literal-only bind root; `i` is a free (undeclared) index identifier so it
+        // emits verbatim (a plain non-root local would itself be an unrelated unsupported item).
+        (
+            "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[i]} />\n",
+            "arr[i]",
+        ),
+        (
+            "<script>let s = $state(0); let obj = {};</script>\n<input bind:value={obj.x} />\n",
+            "obj.x",
+        ),
+        (
+            "<script>let s = $state(0); let obj = {};</script>\n<input bind:value={obj.a.b} />\n",
+            "obj.a.b",
+        ),
+        // CRITICAL: a plain CALL index WITHOUT type arguments stays accepted — proving only the
+        // type-argument class fails closed, not all calls.
+        (
+            "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[f(c)]} />\n",
+            "arr[f(c)]",
+        ),
+    ] {
+        let js = emit(src, "App.svelte");
+        assert!(
+            js.contains("$.bind_value(input,"),
+            "a plain (type-arg-free) bind target must stay accepted + emit the bind for {src}:\n{js}"
+        );
+        assert!(
+            js.contains(expected),
+            "the accepted bind target must emit the exact index bytes `{expected}` for {src}:\n{js}"
+        );
+        assert!(
+            parses_as_js(&js),
+            "the accepted plain bind target must emit valid JS for {src}:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn bind_target_ts_in_index_subexpression_fails_closed() {
+    // A single-lvalue bind target whose computed index embeds a TS-only construct ANYWHERE in
+    // a SUB-expression — a typed arrow param, a typed function-expression param, or a typed
+    // local declaration inside an IIFE body — FAILS CLOSED via the structural
+    // `lvalue_contains_ts` fact. The index sub-expression is otherwise valid JS, so the TSX
+    // parser accepts it and the TS-strip lane would DELETE the type annotation and emit a
+    // DIVERGENT setter (e.g. `arr[((x: number) => x)(0)]` -> `arr[((x) => x)(0)]`), whereas
+    // official svelte@5.56.3 parses the source as plain JS and PARSE-REJECTS the TS. The scan
+    // is a WHOLESALE plain-Svelte-JS-faithfulness check (any TS / non-ECMAScript node fails
+    // closed), so the class is closed by construction — not an enumerated per-form arm. The
+    // EXACT diagnostic-code parity stays D-26. `arr` is a declared writable root.
+    for (src, stripped) in [
+        // Typed arrow param inside the index callee.
+        (
+            "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[((x: number) => x)(0)]} />\n",
+            "arr[((x) => x)(0)]",
+        ),
+        // Typed function-expression param inside the index callee.
+        (
+            "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[(function(y: number){ return y; })(0)]} />\n",
+            "arr[(function(y){ return y; })(0)]",
+        ),
+        // Typed local declaration inside an IIFE body in the index.
+        (
+            "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[(() => { const k: number = 0; return k; })()]} />\n",
+            "arr[(() => { const k = 0; return k; })()]",
+        ),
+    ] {
+        let result = emit_result(src);
+        assert!(
+            matches!(
+                &result,
+                Err(ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::Binding {
+                    target,
+                    ..
+                })) if target == "value"
+            ),
+            "{src} must fail closed as the `value` Binding surface, got {result:?}"
+        );
+        assert!(
+            !matches!(&result, Ok(js) if js.contains(stripped)),
+            "{src} must NOT accept-and-emit the TS-stripped index `{stripped}`: {result:?}"
+        );
+    }
+
+    // PRECISION: a plain (untyped) IIFE index has NO TS node, so it STAYS ACCEPTED and is
+    // emitted verbatim — the wholesale scan never over-refuses valid JS.
+    let untyped = "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[(() => 0)()]} />\n";
+    let js = emit(untyped, "App.svelte");
+    assert!(
+        js.contains("$.bind_value(input,"),
+        "an untyped IIFE index bind target must stay accepted + emit the bind:\n{js}"
+    );
+    assert!(
+        js.contains("arr[(() => 0)()]"),
+        "the untyped IIFE index must emit its exact bytes `arr[(() => 0)()]`:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "the accepted untyped IIFE index bind must emit valid JS:\n{js}"
+    );
+}
+
+#[test]
+fn bare_instantiation_bind_target_stays_fail_closed() {
+    // A BARE instantiation bind target — `arr[g<T>]` (instantiation INDEX) / `f<T>`
+    // (instantiation ROOT), each an OXC `TSInstantiationExpression` with NO trailing call —
+    // FAILS CLOSED via the structural `lvalue_contains_ts` fact. Official svelte@5.56.3 ALSO
+    // rejects both in a plain `<script>` (`js_parse_error` — they do not parse as plain Svelte
+    // JS), so the fail-close AGREES with official. This is the SAFETY value of the
+    // instantiation arm: dropping it would classify `arr[g<T>]` as a clean Member lvalue and
+    // emit a TS-stripped setter for an input official rejects — an accept-and-strip fail-open
+    // (the exact class F1 closed). The EXACT diagnostic-code parity (`js_parse_error` vs the
+    // structural `Binding` refusal) stays D-26. `arr` is a declared writable root, so the
+    // refusal is the TS instantiation — NOT an unresolved/non-writable root.
+    for src in [
+        "<script>let s = $state(0); let arr = [];</script>\n<input bind:value={arr[g<T>]} />\n",
+        "<script>let s = $state(0); let f = () => 0;</script>\n<input bind:value={f<T>} />\n",
+    ] {
+        let err = emit_result(src)
+            .expect_err("a bare-instantiation bind target must fail closed (lvalue_contains_ts)");
+        assert!(
+            matches!(
+                err,
+                ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::Binding {
+                    ref target,
+                    ..
+                }) if target == "value"
+            ),
+            "{src} must fail closed as the `value` Binding surface (official also js_parse_errors it), got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn group_single_value_provably_defined_omits_outer_coalesce() {
+    // A `bind:group` SINGLE value whose expression is PROVABLY DEFINED omits the outer
+    // `?? ''` coercion — official svelte@5.56.3 gates the coercion on `evaluated.is_defined`,
+    // NOT on single-vs-mixed. Oracle-verified (svelte@5.56.3) over the SUPPORTED 5c value
+    // sources: a demoted `$state(5)`, a literal `5`, and a literal `false` all emit
+    // `input.value = input.__value = V;` (NO outer `?? ''`). (A bare `let n = 5` is an
+    // unsupported instance-script item in 5c, so a demoted `$state` is the identifier vehicle.)
+    // RED before the fix: every `AttrValue::Single` group value emitted the inert
+    // `(input.__value = V) ?? ''` regardless of definedness.
+    let cases = [
+        // A never-reassigned `$state(5)` demotes to a plain local whose initializer the
+        // evaluator proves defined (the existing `mixed_chunk_nullish_wrap` demoted-$state path).
+        (
+            "let n = $state(5);",
+            "n",
+            "input.value = input.__value = n;",
+        ),
+        // A literal number / boolean is trivially provably defined — no declaration needed.
+        ("", "5", "input.value = input.__value = 5;"),
+        ("", "false", "input.value = input.__value = false;"),
+    ];
+    for (decl, value, expected) in cases {
+        let src = format!(
+            "<script>let sel = $state(\"\"); {decl}</script>\n<input type=\"radio\" bind:group={{sel}} value={{{value}}} />\n"
+        );
+        let js = emit(&src, "App.svelte");
+        assert!(
+            js.contains(expected),
+            "a provably-defined single group value must emit `{expected}` (no outer `?? ''`):\n{js}"
+        );
+        assert!(
+            !js.contains(&format!("(input.__value = {value}) ?? ''")),
+            "a provably-defined single group value must NOT carry the inert outer `?? ''`:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn group_single_value_not_provably_defined_keeps_outer_coalesce() {
+    // NEGATIVE CONTROL: a `bind:group` SINGLE value that is NOT provably defined KEEPS the
+    // outer `?? ''` (official keeps it for a null / undefined / reactive value). Oracle-verified
+    // (svelte@5.56.3) over SUPPORTED 5c value sources: a literal `null` emits
+    // `input.value = (input.__value = null) ?? '';`, and a demoted `$state(null)` emits
+    // `input.value = (input.__value = n) ?? '';`. This guards against over-suppression — GREEN
+    // before AND after the fix (a control that the definedness gate is not blanket-applied).
+    // (The reactive `$.get(...)` single case keeps `?? ''` too — pinned by the
+    // `bind_group_radio_dynamic` golden.)
+    let cases = [
+        ("", "null", "(input.__value = null) ?? ''"),
+        ("let n = $state(null);", "n", "(input.__value = n) ?? ''"),
+    ];
+    for (decl, value, expected) in cases {
+        let src = format!(
+            "<script>let sel = $state(\"\"); {decl}</script>\n<input type=\"radio\" bind:group={{sel}} value={{{value}}} />\n"
+        );
+        let js = emit(&src, "App.svelte");
+        assert!(
+            js.contains(expected),
+            "a not-provably-defined single group value (`{value}`) must keep the outer `?? ''`:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn name_host_attr_invalid_intrinsic_binds_fail_closed_via_unsupported_channel() {
+    // The four name/host/host-attr-invalid intrinsic binds whose TARGET is also shape-invalid
+    // must fail closed via the UNSUPPORTED channel (`Binding`) — NOT a confidently-WRONG
+    // `OfficialReject` shape code. Official svelte@5.56.3 reports a name/host/host-attr error
+    // for each (`bind_invalid_name` / `bind_invalid_target` / `attribute_contenteditable_missing`
+    // / `attribute_invalid_multiple`); Verter defers those exact codes (D-29) and routes the
+    // refusal through the existing unsupported channel. RED before the fix: the official-reject
+    // gate's shape scan fired `OfficialReject(BindInvalidExpression / BindInvalidParens)`
+    // BEFORE the name/host/host-attr was established, so `emit_result` returned the wrong
+    // `OfficialReject` rather than the unsupported-channel `Binding` refusal.
+    let cases = [
+        // invalid NAME (`foo` is not a DOM bind on `<div>`).
+        (
+            "<script>let v = $state(0);</script>\n<div bind:foo={f()}></div>\n",
+            "foo",
+        ),
+        // unsupported HOST (`bind:value` is not valid on `<div>`).
+        (
+            "<script>let v = $state(0);</script>\n<div bind:value={(get, set)}></div>\n",
+            "value",
+        ),
+        // missing host ATTR (innerHTML requires a static `contenteditable`).
+        (
+            "<script>let v = $state(0);</script>\n<div bind:innerHTML={f()}></div>\n",
+            "innerHTML",
+        ),
+        // invalid host ATTR (a dynamic `multiple` on a `<select bind:value>`).
+        (
+            "<script>let m = $state(true);</script>\n<select multiple={m} bind:value={f()}></select>\n",
+            "value",
+        ),
+    ];
+    for (src, expected) in cases {
+        let err = emit_result(src)
+            .expect_err("a name/host/host-attr-invalid intrinsic bind must fail closed");
+        assert!(
+            matches!(
+                err,
+                ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::Binding {
+                    ref target,
+                    ..
+                }) if target == expected
+            ),
+            "{src} must fail closed via the unsupported Binding({expected}) channel \
+             (not a wrong OfficialReject shape code), got {err:?}"
+        );
     }
 }
 // ── Additional surface gates (R4 reactive-text memoizer, R5 needs_context) ─────
@@ -3214,13 +6107,14 @@ fn standard_identifier_safe_element_tags_still_emit() {
 }
 
 #[test]
-fn textarea_element_fails_closed_at_the_element_allowlist() {
-    // `<textarea>` is NOT in the finite client-core element allowlist (`a` / `button`
-    // / `div` / `h1` / `input` / `p`), so it fails closed at the ELEMENT gate
-    // (`svelte-runtime-unsupported-element`) — BEFORE any content / value-handling
-    // classification. (Demoted by the strict-allowlist restructure: a static
-    // `<textarea>` interior used to emit; it is now §1.2-out-of-core.) RED against the
-    // pre-restructure tree (which accepted `<textarea>` and emitted a clone frame).
+fn textarea_interpolation_content_fails_closed_at_the_special_content_model_gate() {
+    // `<textarea>` IS an allowed 5c `bind:value` host, so it PASSES the element
+    // allowlist gate; the refusal is the SPECIAL CONTENT-MODEL gate, NOT the element
+    // allowlist. A `<textarea>` with INTERPOLATION content (`<textarea>{c}</textarea>`)
+    // is the official `textarea.value` / `$.template_effect` reactive-content surface
+    // 5c does NOT emit — so it fails closed on the textarea content model as
+    // `Element { tag: "textarea" }`, exactly like the `<option>{c}</option>` case
+    // below. RED if Verter silently emitted the divergent reactive-content module.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<textarea>{c}</textarea><button onclick={() => c++}>x</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "textarea"),
@@ -3228,30 +6122,85 @@ fn textarea_element_fails_closed_at_the_element_allowlist() {
 }
 
 #[test]
-fn select_and_option_elements_fail_closed_at_the_element_allowlist() {
-    // `<select>` / `<option>` are NOT in the element allowlist — a component using them
-    // fails closed at the element gate (`svelte-runtime-unsupported-element`) on
-    // the FIRST out-of-allowlist element (`<select>`), regardless of its interior. RED
-    // against the pre-restructure tree (which accepted them).
+fn option_with_interpolation_content_fails_closed_at_the_special_content_gate() {
+    // `<select>`/`<option>` are now ALLOWED 5c bind hosts, but an `<option>` with an
+    // INTERPOLATION child (`<option>{c}</option>`) is the official `option.__value` /
+    // `option_value` reactive-tracking content surface 5c does NOT emit — so it fails
+    // closed at the special-content gate as `Element { tag: "option" }` (the option's
+    // content model, NOT a static-option select host). RED if Verter silently emitted
+    // the divergent `option.__value` tracking module.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option>{c}</option></select><button onclick={() => c++}>x</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "option"),
     );
-    // A nested reactive interior is irrelevant — the element gate fires first.
+    // A nested element child inside `<option>` is likewise not the static-option
+    // interior 5c supports — it fails closed on the option content model.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<select><option><b>{c}</b></option></select><button onclick={() => c++}>x</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "select"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "option"),
     );
 }
 
 #[test]
-fn static_textarea_content_now_fails_closed_at_the_element_allowlist() {
-    // NEGATIVE / demotion proof: even a STATIC-only `<textarea>hi</textarea>` (which
-    // the pre-restructure tree serialized verbatim and EMITTED) now fails closed at the
-    // element gate — `<textarea>` is out of the finite allowlist, so it has no
-    // emission path. The component must NOT emit a Main.
+fn static_textarea_content_fails_closed_at_the_special_content_model_gate() {
+    // `<textarea>` IS an allowed 5c `bind:value` host (it passes the element
+    // allowlist), so the refusal is the SPECIAL CONTENT-MODEL gate, NOT the element
+    // allowlist. Even STATIC-only `<textarea>hi</textarea>` content is the official
+    // raw-text `textarea` content model 5c does NOT own (5c emits `<textarea>` ONLY as
+    // the empty `bind:value` host shape — `$.remove_textarea_child` then `$.bind_value`
+    // — so any interior content, static or interpolated, is out of the supported
+    // content model). It fails closed as `Element { tag: "textarea" }` at the
+    // special-content gate; the component must NOT emit a Main. RED if Verter silently
+    // serialized the static content into the cloned template.
     assert_fail_closed(
         "<script>let c = $state(0);</script>\n<textarea>hi</textarea><button onclick={() => c++}>x</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "textarea"),
+    );
+}
+
+#[test]
+fn textarea_bind_value_with_static_text_fallback_child_emits() {
+    // (5c) A `<textarea bind:value={v}>fallback</textarea>` — a `bind:value` host with a
+    // STATIC-TEXT fallback child — IS a supported 5c surface: the existing
+    // `$.remove_textarea_child` prelude clears the baked static child at runtime, so the
+    // bind is unaffected. Verified against svelte@5.56.3 (the static text is baked into
+    // the cloned skeleton, then stripped):
+    //   var root = $.from_html(`<textarea>fallback</textarea>`);
+    //   $.remove_textarea_child(textarea);
+    //   $.bind_value(textarea, () => $.get(v), ($$value) => $.set(v, $$value));
+    // RED against the pre-fix special-content gate, which blanket-refused ANY textarea
+    // child (failing this closed as `Element { tag: "textarea" }`).
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<textarea bind:value={v}>fallback</textarea>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.remove_textarea_child(textarea)"),
+        "a textarea bind:value with a static fallback must still clear the child:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_value(textarea, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "the bind must be unaffected by the static fallback child:\n{js}"
+    );
+    // The static fallback is baked into the cloned skeleton (the prelude strips it at
+    // runtime) — official keeps it in the `from_html` template.
+    assert!(
+        js.contains("<textarea>fallback</textarea>"),
+        "the static fallback child must be baked into the cloned skeleton:\n{js}"
+    );
+}
+
+#[test]
+fn textarea_bind_value_with_dynamic_content_child_still_fails_closed() {
+    // NEGATIVE control for the F6a static-fallback narrowing (and the D-22 deferral): a
+    // `<textarea bind:value={v}>{c}</textarea>` with a DYNAMIC interpolation child STAYS
+    // fail-closed. Official emits `$.set_value(textarea, c)` BEFORE the bind — a textarea
+    // CONTENT channel distinct from the static-fallback child (which 5c clears via
+    // `remove_textarea_child`). The static-text relaxation must NOT leak into the dynamic
+    // content surface, which is owned by a later content-model layer (ledger D-22). RED
+    // would be a broadened "allow any textarea child" admission.
+    assert_fail_closed(
+        "<script>let v = $state(\"\"); let c = $state(\"hi\");</script>\n<textarea bind:value={v}>{c}</textarea>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Element { tag, .. } if tag == "textarea"),
     );
 }

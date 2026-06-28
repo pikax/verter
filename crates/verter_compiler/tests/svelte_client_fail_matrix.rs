@@ -230,11 +230,9 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-binding",
     },
     // ── binds ────────────────────────────────────────────────────────────
-    FailRow {
-        name: "bind_checked",
-        source: "<script>let on = $state(false);</script>\n<input type=\"checkbox\" bind:checked={on} />\n",
-        code: "svelte-runtime-unsupported-binding",
-    },
+    // (`bind:checked` on `<input type="checkbox">` is now SUPPORTED by 5c — it emits
+    // `$.remove_input_defaults` + `$.bind_checked`; its positive coverage is the
+    // `checked_bind_now_emits_*` client test + the `matrix/bind_checked` golden.)
     FailRow {
         name: "bind_value_prop",
         source: "<script>let { label } = $props();</script>\n<input bind:value={label} />\n",
@@ -257,26 +255,17 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-advanced-rune",
     },
     FailRow {
-        name: "bind_value_plain_local_member",
-        source: "<script>let o = { x: '' }; let c = $state(0);</script>\n<input bind:value={o.x} />\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-binding",
-    },
-    FailRow {
         // An instance import is demoted — refused before the member-bind gate.
         name: "bind_value_import_member",
         source: "<script>import { store } from './s.js'; let c = $state(0);</script>\n<input bind:value={store.x} />\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-script-import",
     },
-    FailRow {
-        name: "bind_value_call",
-        source: "<script>let c = $state(0); function f() { return c; }</script>\n<input bind:value={f()} />\n",
-        code: "svelte-runtime-unsupported-binding",
-    },
-    FailRow {
-        name: "bind_value_sequence_pair",
-        source: "<script>let c = $state(0);</script>\n<input bind:value={() => c, (v) => c = v} />\n",
-        code: "svelte-runtime-unsupported-binding",
-    },
+    // NOTE: a bare CALL `bind:value={f()}` (NOT a valid lvalue and NOT a two-element
+    // `{get, set}` pair) now fails closed through the OFFICIAL-reject gate with the EXACT
+    // code `bind_invalid_expression` (a bind-target SHAPE reject, the same class as
+    // bind_group / bind_parens), so it is NOT an unsupported-feature row — its parity lives
+    // in `svelte_client_official_reject_matrix.rs` + the `bind_invalid_expression` reject
+    // corpus row.
     FailRow {
         // A member `bind:this={refs[0]}` (a plain-local array, so the member-bind gate
         // fires, not the state-shape gate) is the deferral-ledger member-bind form.
@@ -290,6 +279,119 @@ const FAIL_MATRIX: &[FailRow] = &[
         name: "bind_this_component",
         source: "<script>let c = $state(0);</script>\n<Child bind:this={c} />\n",
         code: "svelte-runtime-unsupported-component",
+    },
+    // ── runtime-unsupported DEDICATED-helper binds (fail closed at the runtime router) ──
+    // Each of these has a real IDE contract row whose OFFICIAL svelte@5.56.3 helper is a
+    // DEDICATED helper (a generic `$.bind_property` form would emit RUNTIME-BROKEN output
+    // — the wrong helper). The native client runtime does not emit these yet, so the
+    // contract records the REAL official helper + `RuntimeSupport::Unsupported` and the
+    // runtime router fails them closed. Verified against the pinned compiler: `bind:files`
+    // → `$.bind_files`, `bind:playbackRate` → `$.bind_playback_rate`, `bind:volume` →
+    // `$.bind_volume`, `bind:muted` → `$.bind_muted`, the resize-observer family →
+    // `$.bind_resize_observer`.
+    FailRow {
+        name: "bind_files_wrong_helper",
+        source: "<script>let f = $state();</script>\n<input type=\"file\" bind:files={f} />\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_playback_rate_wrong_helper",
+        source: "<script>let r = $state(1);</script>\n<audio bind:playbackRate={r}></audio>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_volume_wrong_helper",
+        source: "<script>let v = $state(1);</script>\n<audio bind:volume={v}></audio>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_muted_wrong_helper",
+        source: "<script>let m = $state(false);</script>\n<video bind:muted={m}></video>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_content_rect_wrong_helper",
+        source: "<script>let cr = $state();</script>\n<div bind:contentRect={cr}></div>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_content_box_size_wrong_helper",
+        source: "<script>let cb = $state();</script>\n<div bind:contentBoxSize={cb}></div>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_border_box_size_wrong_helper",
+        source: "<script>let bb = $state();</script>\n<div bind:borderBoxSize={bb}></div>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_device_pixel_content_box_size_wrong_helper",
+        source: "<script>let dp = $state();</script>\n<div bind:devicePixelContentBoxSize={dp}></div>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    // ── runtime-unsupported GENERIC-property binds (fail closed at the runtime router) ──
+    // Each of these has a real IDE contract row whose OFFICIAL helper IS the generic
+    // `$.bind_property` form (the right helper), yet the native client runtime does not
+    // emit it yet — so the contract records the real `Property` official helper +
+    // `RuntimeSupport::Unsupported` and the runtime router fails it closed (refusal rides
+    // support, NOT the emittable helper identity). Each host is the name's
+    // empirically-pinned `binding_properties.valid_elements` member (svelte@5.56.3
+    // `phases/bindings.js`) that is ALSO in the client element allowlist — so the row
+    // is reachable (it fails at the BIND gate, not the element gate). `naturalWidth` /
+    // `naturalHeight` are `<img>`-only and `<img>` is NOT allowlisted, so they are
+    // router-level only (covered by the `bind_contract` router test, NOT a fail-matrix
+    // row that would fail at the element gate instead of the bind gate).
+    FailRow {
+        name: "bind_indeterminate_unsupported",
+        source: "<script>let i = $state(false);</script>\n<input bind:indeterminate={i} />\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_buffered_unsupported",
+        source: "<script>let b = $state();</script>\n<audio bind:buffered={b}></audio>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_seekable_unsupported",
+        source: "<script>let s = $state();</script>\n<audio bind:seekable={s}></audio>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_seeking_unsupported",
+        source: "<script>let s = $state(false);</script>\n<audio bind:seeking={s}></audio>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_ended_unsupported",
+        source: "<script>let e = $state(false);</script>\n<audio bind:ended={e}></audio>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_ready_state_unsupported",
+        source: "<script>let r = $state(0);</script>\n<audio bind:readyState={r}></audio>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_video_width_unsupported",
+        source: "<script>let w = $state(0);</script>\n<video bind:videoWidth={w}></video>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    FailRow {
+        name: "bind_video_height_unsupported",
+        source: "<script>let h = $state(0);</script>\n<video bind:videoHeight={h}></video>\n",
+        code: "svelte-runtime-unsupported-binding",
+    },
+    // ── focused: an EXPLICIT runtime-unsupported registry row ⇒ fails closed ──
+    // `bind:focused` (→ official `$.bind_focused`) is an EXPLICIT bind-contract row
+    // recording its REAL official helper + `RuntimeSupport::Unsupported`, so
+    // `resolve_runtime_bind` returns `None` (refused on support status, NOT on
+    // absence) and the bind fails closed. Confirms the explicit-unsupported-row path
+    // routes to refusal — an official bind must be an explicit row (absent-row
+    // fail-closed and helper-identity erasure are both unacceptable).
+    FailRow {
+        name: "bind_focused_unsupported_fails_closed",
+        source: "<script>let fo = $state(false);</script>\n<input bind:focused={fo} />\n",
+        code: "svelte-runtime-unsupported-binding",
     },
     // ── events ──────────────────────────────────────────────────────────
     FailRow {
@@ -475,17 +577,21 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0);</script>\n<class></class>\n",
         code: "svelte-runtime-unsupported-element-name",
     },
-    // ── out-of-allowlist intrinsic elements (the strict element allowlist) ───
-    // The client core emits ONLY `a` / `button` / `div` / `h1` / `input` / `p`; every
-    // other intrinsic tag fails closed at the element gate (`svelte-runtime-unsupported-
-    // element`) — BEFORE any attr / content classification, so the interior / attrs are
-    // irrelevant to the refusal. (The exhaustive HTML-tag-universe cover is the
-    // dedicated ELEMENT MATRIX in `svelte_element_attr_boundary.rs`; these rows pin a
-    // representative spread of the demoted special-content / value-bearing tags.)
+    // ── out-of-allowlist intrinsic elements + special-content / form-control gates ─
+    // The client core emits the §1.2 set plus the 5c bindings-breadth hosts
+    // (`textarea`/`select`/`option`/`audio`/`details`); every other intrinsic tag
+    // fails closed at the element gate (`svelte-runtime-unsupported-element`). The 5c
+    // bind hosts are accepted as ELEMENTS but their non-bind special-content /
+    // form-control attr forms fail closed at the content / attr gate. (The exhaustive
+    // HTML-tag-universe cover is the dedicated ELEMENT MATRIX in
+    // `svelte_element_attr_boundary.rs`.)
     FailRow {
-        name: "select_option_value_element",
+        // `<select>`/`<option>` are now allowed bind hosts, so a STATIC `value` attr on
+        // `<option>` (the form-control setter family — 5c owns `bind:value`, not the
+        // static-`value` serializer) fails closed at the form-control attr gate.
+        name: "select_option_static_value_attr",
         source: "<script>let c = $state(0);</script>\n<select><option value=\"a\">A</option></select>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-element",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
     },
     FailRow {
         name: "datalist_element",
@@ -728,12 +834,6 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0); function f(x) { return x; }</script>\n<button onclick={() => f(c)}>{c}</button>\n",
         code: "svelte-runtime-unsupported-non-delegated-event",
     },
-    // ── CONVERGENCE: demoted bind shapes ────────────────────────────────────
-    FailRow {
-        name: "bind_value_plain_local",
-        source: "<script>let plain = 'x'; let c = $state(0);</script>\n<input bind:value={plain} />\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-binding",
-    },
     // ── CONVERGENCE: script imports / module scripts ────────────────────────
     FailRow {
         name: "instance_import",
@@ -949,9 +1049,15 @@ fn assert_variant(label: &str, source: &str, expected: Expected) {
         (Ok(js), Expected::FailClosed) => {
             panic!("{label}: expected fail-closed, got an emitted Main:\n{js}");
         }
+        // A fail-closed variant refuses with NO `Main` — through EITHER the
+        // unsupported-feature channel (`Unsupported`) OR the official-reject channel
+        // (`OfficialReject`, e.g. a `bind:value={a, b, c}` 3+-element sequence →
+        // `bind_invalid_expression`). Both are valid fail-closed boundaries; only an emitted
+        // `Main` (handled above) or a non-refusal error (e.g. `Lowering`) is a failure.
         (Err(ClientCompileError::Unsupported(_)), Expected::FailClosed) => {}
+        (Err(ClientCompileError::OfficialReject(_)), Expected::FailClosed) => {}
         (Err(e), Expected::FailClosed) => {
-            panic!("{label}: expected an unsupported-surface refusal, got {e:?}");
+            panic!("{label}: expected a fail-closed refusal (Unsupported or OfficialReject), got {e:?}");
         }
         (Err(e), Expected::Supported) => {
             panic!("{label}: expected a supported Main, got refusal {e:?}");
@@ -1145,10 +1251,14 @@ fn generated_bind_target_shapes_land_on_boundary() {
     // EXHAUSTIVELY across (a) the directive (`value` on `<input>` vs `checked` vs a
     // non-input host vs `this`), and (b) the target expression's ROOT-binding KIND
     // (a bare ident vs a member, rooted at a `$state` / prop / bindable / derived /
-    // plain-local / import binding) plus the non-resolvable / non-lvalue forms (a
-    // computed member, a call, a sequence pair). `bind:value` on an `<input>` to a
-    // signal/plain IDENTIFIER or a `$state`-ROOTED member is supported; element
-    // `bind:this` to an identifier is supported; EVERYTHING else fails closed.
+    // plain-local / import binding) plus the function-pair + non-resolvable / non-lvalue
+    // forms (a computed member, a call). A `bind:value` on an `<input>` to a SIGNAL or
+    // PLAIN-local IDENTIFIER, to a PLAIN-local-ROOTED member, or a two-element
+    // FUNCTION-PAIR `{get, set}`, plus element `bind:this` to an identifier, is
+    // SUPPORTED; a `$props()` / `$bindable` / `$derived` / import root (a divergent
+    // official accessor protocol), a non-lvalue call, and an object/array `$state` root
+    // (whose declaration fails closed upstream at the `$state()` non-primitive gate)
+    // all fail closed.
     let variants: &[(&str, &str, &str, Expected)] = &[
         // ── supported: bind:value(input)->signal-ident, bind:this->non-prop-ident ─
         (
@@ -1163,20 +1273,51 @@ fn generated_bind_target_shapes_land_on_boundary() {
             "<div bind:this={el}></div>",
             Expected::Supported,
         ),
-        // ── demoted: a $state MEMBER target (was supported; now a binding) ────────
+        // ── supported: a PLAIN-local IDENT / MEMBER target (the target-lvalue widening) ─
         (
-            "value_state_member",
+            "value_plain_local_ident",
+            "let v = 'x'; let c = $state(0);",
+            "<input bind:value={v} />",
+            Expected::Supported,
+        ),
+        (
+            "value_plain_local_member",
+            "let o = { x: '' }; let c = $state(0);",
+            "<input bind:value={o.x} />",
+            Expected::Supported,
+        ),
+        // ── supported: a two-element FUNCTION-PAIR `{get, set}` (inline arrows) ────
+        (
+            "value_function_pair",
+            "let c = $state('');",
+            "<input bind:value={() => c, (v) => c = v} />",
+            Expected::Supported,
+        ),
+        // A THREE-element sequence is NOT a valid `{get, set}` pair — official rejects
+        // a non-two-element sequence, so it fails closed (the exactly-two boundary).
+        (
+            "value_three_element_sequence",
+            "let c = $state('');",
+            "<input bind:value={() => c, (v) => c = v, c} />",
+            Expected::FailClosed,
+        ),
+        // ── object/array `$state` MEMBER: fails closed UPSTREAM at the object-$state
+        //    declaration gate (the `$state()` non-primitive-init surface is owned by the
+        //    runes-completion vertical), so the member never reaches the bind gate ─────
+        (
+            "value_object_state_member",
             "let o = $state({ x: '' });",
             "<input bind:value={o.x} />",
             Expected::FailClosed,
         ),
         (
-            "value_state_computed_member",
+            "value_object_state_computed_member",
             "let arr = $state(['']); let i = $state(0);",
             "<input bind:value={arr[i]} />",
             Expected::FailClosed,
         ),
-        // ── out-of-boundary: a non-`$state` MEMBER root ──────────────────────────
+        // ── out-of-boundary: a $props() / $bindable / $derived / import MEMBER root
+        //    (a divergent official accessor protocol — NOT a plain assignment) ─────────
         (
             "value_prop_ident",
             "let { label } = $props();",
@@ -1208,18 +1349,17 @@ fn generated_bind_target_shapes_land_on_boundary() {
             Expected::FailClosed,
         ),
         (
-            "value_plain_local_member",
-            "let o = { x: '' }; let c = $state(0);",
-            "<input bind:value={o.x} />",
-            Expected::FailClosed,
-        ),
-        (
             "value_import_member",
             "import { store } from './s.js'; let c = $state(0);",
             "<input bind:value={store.x} />",
             Expected::FailClosed,
         ),
-        // ── out-of-boundary: non-lvalue / non-resolvable / wrong directive ───────
+        // ── out-of-boundary: non-lvalue / non-resolvable / wrong directive. A bare
+        //    call `bind:value={f()}` and a call-rooted member `bind:value={f().x}` are
+        //    NOT valid lvalues and NOT the two-element `{get, set}` pair — official
+        //    PARSE-REJECTS them ("Can only bind to an Identifier or MemberExpression or
+        //    a `{get, set}` pair"), so they stay fail-closed (distinct from the
+        //    two-element function-pair, which IS accepted). ──────────────────────────
         (
             "value_call",
             "let c = $state(0); function f() { return c; }",
@@ -1233,22 +1373,19 @@ fn generated_bind_target_shapes_land_on_boundary() {
             Expected::FailClosed,
         ),
         (
-            "value_sequence_pair",
-            "let c = $state('');",
-            "<input bind:value={() => c, (v) => c = v} />",
-            Expected::FailClosed,
-        ),
-        (
-            "value_non_input",
+            // 5c: `bind:value` on a `<textarea>` is now SUPPORTED (`$.bind_value`
+            // after `$.remove_textarea_child`) — the value bind is NOT input-only.
+            "value_textarea",
             "let v = $state('');",
             "<textarea bind:value={v}></textarea>",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         (
+            // 5c: `bind:checked` on an `<input type="checkbox">` is now SUPPORTED.
             "checked",
             "let on = $state(false);",
             "<input type=\"checkbox\" bind:checked={on} />",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         (
             "this_member",
@@ -1612,16 +1749,69 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // The value/property-position emitter is SOURCE-PRESERVING: it keeps the author's
     // redundant parens verbatim (a cosmetic difference the structural corpus compare waives),
     // so there is NO value-paren refusal surface and NO `value_paren_*` fail-closed row.
+    //
+    // The runtime-unsupported DEDICATED-helper binds add 8 rows (`bind_files_wrong_helper`,
+    // `bind_playback_rate_wrong_helper`, `bind_volume_wrong_helper`,
+    // `bind_muted_wrong_helper`, and the four resize-observer rows
+    // `bind_content_rect_wrong_helper` / `bind_content_box_size_wrong_helper` /
+    // `bind_border_box_size_wrong_helper` /
+    // `bind_device_pixel_content_box_size_wrong_helper`): each has a real IDE contract row
+    // whose official helper is a DEDICATED helper (a generic `$.bind_property` would be the
+    // wrong helper), and the native runtime does not emit it yet, so the contract records
+    // the real official helper + `RuntimeSupport::Unsupported` and the runtime router fails
+    // it closed. The `bind_focused_unsupported_fails_closed` row (+1) locks the
+    // explicit-unsupported-row path (a real row + `Unsupported` ⇒ fail closed). +9 rows.
+    //
+    // The runtime-unsupported GENERIC-property binds add 8 MORE rows
+    // (`bind_indeterminate_unsupported` on `<input>`;
+    // `bind_buffered_unsupported` / `bind_seekable_unsupported` /
+    // `bind_seeking_unsupported` / `bind_ended_unsupported` /
+    // `bind_ready_state_unsupported` on `<audio>`;
+    // `bind_video_width_unsupported` / `bind_video_height_unsupported` on
+    // `<video>`): each official helper IS the generic `$.bind_property` form, but the
+    // native runtime does not emit it yet, so the contract records the real `Property`
+    // official helper + `RuntimeSupport::Unsupported` and the runtime router fails it
+    // closed (refusal rides support, not the emittable helper). Each host is the name's
+    // pinned `binding_properties.valid_elements` member that is ALSO in the element
+    // allowlist, so the row is reachable at the BIND gate (not the element gate).
+    // `naturalWidth` / `naturalHeight` are `<img>`-only and `<img>` is NOT allowlisted, so
+    // they stay router-level only (the `bind_contract`
+    // `unsupported_correct_helper_rows_fail_closed_at_the_runtime_router` test covers
+    // them) — NO fail-matrix row, which would fail at the element gate instead of the bind
+    // gate. +8 rows.
     assert_eq!(
         FAIL_MATRIX.len(),
-        117,
-        "the fail matrix must enumerate all 117 documented unsupported-feature \
-         fail-closed sub-shapes (the element-spread + `{{@html}}` surface removed the \
+        129,
+        "the fail matrix must enumerate all 129 documented unsupported-feature \
+         fail-closed sub-shapes. The DOM bind target-lvalue widening moved three rows \
+         from fail-closed to accepted-positive (with topology goldens): \
+         `bind_value_plain_local` (a `bind:value={{v}}` to a PLAIN local — official \
+         emits `$.bind_value(input, () => v, ($$value) => v = $$value)`), \
+         `bind_value_plain_local_member` (a `bind:value={{o.x}}` rooted at a plain local \
+         — official emits the plain member lvalue closures), and `bind_value_sequence_pair` \
+         (a `bind:value={{get, set}}` two-element function-pair — official passes the \
+         supplied get/set DIRECTLY). The `bind_value_call` row is GONE — a bare \
+         `bind:value={{f()}}` is not a valid lvalue and not a `{{get, set}}` pair, so it \
+         now fails closed through the OFFICIAL-reject gate (`bind_invalid_expression`, the \
+         exact code), NOT this unsupported-feature matrix; object/array `$state`-rooted \
+         members stay closed upstream at the `$state()` non-primitive-init gate. −4 rows. \
+         The remaining \
+         rows: the element-spread + `{{@html}}` surface removed the \
          `spread` / `html_tag` refusal rows now SUPPORTED, replacing them with the \
          `props_rest_spread` row PLUS the three spread-incompatible-directive rows \
          `spread_with_event` / `spread_with_bind` / `spread_with_use` that lock the \
          fail-closed identity of a spread co-located with an event/bind/use; the value \
          emitter is source-preserving, so the five `value_paren_*` rows are GONE — author \
-         parens are kept verbatim, never refused)"
+         parens are kept verbatim, never refused; the `bind_checked` row is GONE — 5c \
+         now emits `$.remove_input_defaults` + `$.bind_checked` for `bind:checked`; the \
+         8 runtime-unsupported DEDICATED-helper bind rows (files / playbackRate / volume / \
+         muted + the four resize-observer binds) fail closed at the runtime router rather \
+         than emit the wrong generic `$.bind_property` helper, and the \
+         `bind_focused_unsupported_fails_closed` row locks the explicit-unsupported-row \
+         refusal — +9 rows; PLUS the 8 runtime-unsupported GENERIC-property bind rows \
+         (indeterminate on input; buffered / seekable / seeking / ended / readyState on \
+         audio; videoWidth / videoHeight on video) that fail closed because the native \
+         runtime does not emit them yet — naturalWidth / naturalHeight stay router-only \
+         since `<img>` is not allowlisted — +8 rows)"
     );
 }

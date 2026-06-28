@@ -1,0 +1,63 @@
+{
+  "slug": "matrix/bind_property_open.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_property_open",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "bind_property",
+    "set",
+    "get",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_property",
+    "from_html",
+    "get",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "bind_property": 1,
+    "set": 1,
+    "get": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<details></details>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<details></details>`); export default function bind_property_open($$anchor) {let o = $.state(false); var details = root(); $.bind_property('open', 'toggle', details, ($$value) => $.set(o, $$value), () => $.get(o)); $.append($$anchor, details);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

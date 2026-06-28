@@ -424,46 +424,68 @@ pub fn script_uses_effect(alloc: &Allocator, instance_source: &str) -> bool {
     })
 }
 
-/// Lower the TYPED supported instance-script items into their emitted client-body
-/// statements, in source order.
+/// The lowering of ONE supported instance-script item that needs NO expression
+/// rewriter — the simple declaration variants. Returns the emitted client-body
+/// statement, [`SimpleItemLowering::None`] for a variant that emits nothing (a
+/// no-default `$props()` destructure), or [`SimpleItemLowering::NeedsRewriter`] for the
+/// [`FunctionDecl`](super::instance_items::SupportedInstanceScriptItem::FunctionDecl)
+/// variant (whose body lowers through the FALLIBLE expression rewriter, owned by the
+/// caller that holds the rewriter — [`SupportedClientIr::build_script_items`](super::client_plan::SupportedClientIr)).
 ///
-/// This is the SOLE instance-script lowering — it consumes ONLY the strict finite
-/// [`SupportedInstanceScriptItem`](super::client_shapes::SupportedInstanceScriptItem)
-/// allowlist (minted by `classify_supported_instance_items`); there is NO "emit any
-/// non-rune statement" path. Each item is a thin per-variant transform:
-/// - [`StatePrimitive`](super::client_shapes::SupportedInstanceScriptItem::StatePrimitive)
+/// The simple variants are a thin per-variant transform:
+/// - [`StatePrimitive`](super::instance_items::SupportedInstanceScriptItem::StatePrimitive)
 ///   → `let name = $.state(<init>);` (signal) / `let name = <init>;` (never-reassigned
 ///   `PlainLet`) — the wrapper choice reads the binding's resolved `StateLowering`;
-/// - [`PropsDestructure`](super::client_shapes::SupportedInstanceScriptItem::PropsDestructure)
+/// - [`PropsDestructure`](super::instance_items::SupportedInstanceScriptItem::PropsDestructure)
 ///   → NOTHING (a no-default props destructure reads off `$$props`, emitting no decl);
-/// - [`BindThisLocal`](super::client_shapes::SupportedInstanceScriptItem::BindThisLocal)
-///   → `let name;` (the `bind:this` clone-root local).
+/// - [`BindThisLocal`](super::instance_items::SupportedInstanceScriptItem::BindThisLocal)
+///   → `let name;` (the `bind:this` clone-root local);
+/// - [`BindLocalLet`](super::instance_items::SupportedInstanceScriptItem::BindLocalLet)
+///   → `let name = <init>;` / `let name;` (a plain-local DOM bind-target root, verbatim
+///   literal init, or the uninitialized no-init form).
 ///
-/// A primitive-literal init carries no signal read and no TS syntax, so it is
-/// emitted verbatim (the over-arity / non-primitive / destructured / `$state.raw`
-/// forms were refused upstream). Infallible — the allowlist already proved every
-/// item lowers.
+/// A primitive-literal init carries no signal read and no TS syntax, so it is emitted
+/// verbatim (the over-arity / non-primitive / destructured / `$state.raw` forms were
+/// refused upstream).
 #[must_use]
-pub(super) fn lower_supported_instance_items(
-    items: &[super::client_shapes::SupportedInstanceScriptItem],
+pub(super) fn lower_simple_instance_item(
+    item: &super::instance_items::SupportedInstanceScriptItem,
     bindings: &BindingTable,
-) -> Vec<String> {
-    use super::client_shapes::SupportedInstanceScriptItem as Item;
-    let mut body = Vec::new();
-    for item in items {
-        match item {
-            Item::StatePrimitive { name, init } => {
-                body.push(lower_state_primitive_item(name, init.as_deref(), bindings));
-            }
-            // A no-default `$props()` destructure emits no component-body declaration
-            // (the props are read directly off `$$props`).
-            Item::PropsDestructure => {}
-            Item::BindThisLocal { name } => {
-                body.push(format!("let {name};"));
-            }
-        }
+) -> SimpleItemLowering {
+    use super::instance_items::SupportedInstanceScriptItem as Item;
+    match item {
+        Item::StatePrimitive { name, init } => SimpleItemLowering::Statement(
+            lower_state_primitive_item(name, init.as_deref(), bindings),
+        ),
+        // A no-default `$props()` destructure emits no component-body declaration
+        // (the props are read directly off `$$props`).
+        Item::PropsDestructure => SimpleItemLowering::None,
+        Item::BindThisLocal { name } => SimpleItemLowering::Statement(format!("let {name};")),
+        // A plain-local DOM bind-target root: the declaration stays a verbatim plain
+        // `let name = <literal init>;` (official keeps the plain local), or a bare
+        // `let name;` for the uninitialized form. The init was restricted to a
+        // literal-only value at classification, so it carries no signal read to
+        // rewrite — emitted byte-for-byte.
+        Item::BindLocalLet { name, init } => SimpleItemLowering::Statement(match init {
+            Some(init) => format!("let {name} = {init};"),
+            None => format!("let {name};"),
+        }),
+        // A named function-pair function: its body lowers through the FALLIBLE rewriter,
+        // which lives on the projection — the caller handles it.
+        Item::FunctionDecl { .. } => SimpleItemLowering::NeedsRewriter,
     }
-    body
+}
+
+/// The outcome of lowering one simple (rewriter-free) instance-script item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SimpleItemLowering {
+    /// The emitted client-body statement.
+    Statement(String),
+    /// The item emits no component-body declaration (a no-default props destructure).
+    None,
+    /// The item is a `FunctionDecl` whose body lowers through the FALLIBLE expression
+    /// rewriter — the caller (which holds the rewriter) handles it.
+    NeedsRewriter,
 }
 
 /// Lower a supported `$state(<primitive literal>)` item to its emitted declaration.

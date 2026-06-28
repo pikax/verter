@@ -1,0 +1,76 @@
+{
+  "slug": "matrix/bind_group_radio.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_group_radio",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "remove_input_defaults",
+    "bind_group",
+    "get",
+    "set",
+    "bind_group",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_group",
+    "first_child",
+    "from_html",
+    "get",
+    "remove_input_defaults",
+    "set",
+    "sibling",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "first_child": 1,
+    "remove_input_defaults": 2,
+    "sibling": 1,
+    "bind_group": 2,
+    "get": 2,
+    "set": 2,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input type=\"radio\"/> <input type=\"radio\"/>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input type=\"radio\"/> <input type=\"radio\"/>`, 1); export default function bind_group_radio($$anchor) {const binding_group = []; let g = $.state(\"\"); var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); input.value = input.__value = 'a'; var input_1 = $.sibling(input, 2); $.remove_input_defaults(input_1); input_1.value = input_1.__value = 'b'; $.bind_group(binding_group, [], input, () => $.get(g), ($$value) => $.set(g, $$value)); $.bind_group(binding_group, [], input_1, () => $.get(g), ($$value) => $.set(g, $$value)); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

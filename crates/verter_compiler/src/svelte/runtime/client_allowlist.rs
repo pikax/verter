@@ -40,6 +40,19 @@ pub(super) enum SupportedHtmlElement {
     /// requires `importNode` (the official `from_html(…, TEMPLATE_USE_IMPORT_NODE)`
     /// flag), so the template flag is set by the skeleton planner, not here.
     Video,
+    /// `<textarea>` — the `bind:value` host (via `$.bind_value` after
+    /// `$.remove_textarea_child`).
+    Textarea,
+    /// `<select>` — the `bind:value` host (`$.bind_select_value`), single +
+    /// `multiple`.
+    Select,
+    /// `<option>` — a `<select>` child carrying the option value.
+    Option,
+    /// `<audio>` — a media host for the media-binding family (`bind:currentTime`
+    /// / `bind:paused` / `bind:duration` / …).
+    Audio,
+    /// `<details>` — the `bind:open` host (`$.bind_property('open','toggle',…)`).
+    Details,
 }
 
 impl SupportedHtmlElement {
@@ -58,6 +71,11 @@ impl SupportedHtmlElement {
             "input" => Some(Self::Input),
             "p" => Some(Self::P),
             "video" => Some(Self::Video),
+            "textarea" => Some(Self::Textarea),
+            "select" => Some(Self::Select),
+            "option" => Some(Self::Option),
+            "audio" => Some(Self::Audio),
+            "details" => Some(Self::Details),
             _ => None,
         }
     }
@@ -77,6 +95,11 @@ impl SupportedHtmlElement {
             Self::Input => "input",
             Self::P => "p",
             Self::Video => "video",
+            Self::Textarea => "textarea",
+            Self::Select => "select",
+            Self::Option => "option",
+            Self::Audio => "audio",
+            Self::Details => "details",
         }
     }
 }
@@ -117,6 +140,16 @@ pub(super) enum SupportedStaticAttr {
     InputType,
     /// `disabled` on `<input>`.
     InputDisabled,
+    /// `multiple` on `<select>` — the multi-select boolean (serialized
+    /// `multiple=""` into the cloned template, the official `<select multiple>`
+    /// form).
+    SelectMultiple,
+    /// `contenteditable` (global) — the editable-host marker attribute that the
+    /// `bind:innerHTML` / `bind:textContent` / `bind:innerText` family rides on
+    /// (serialized `contenteditable=""` into the template). It is NOT a DOM
+    /// property write — it bakes into the static skeleton like the official
+    /// `<div contenteditable>` form.
+    ContentEditable,
 }
 
 impl SupportedStaticAttr {
@@ -140,6 +173,13 @@ impl SupportedStaticAttr {
             "id" => return Some(Self::Id),
             "title" => return Some(Self::Title),
             "role" => return Some(Self::Role),
+            // `contenteditable` is the editable-host marker (any element) the
+            // `bind:innerHTML` / `bind:textContent` / `bind:innerText` family rides
+            // on. It bakes into the static skeleton (`contenteditable=""`) — it is
+            // NOT a DOM-property write. Accepted valueless (`<div contenteditable>`)
+            // or with the official `"true"` / `"false"` / `""` string value; a
+            // userland enum value still serializes verbatim.
+            "contenteditable" => return Some(Self::ContentEditable),
             // `class` is allowed ONLY with a non-empty static value — an
             // exactly-empty `class=""` (or a valueless `class`) is NOT a serializable
             // static attr (the official compiler elides an empty class).
@@ -166,6 +206,7 @@ impl SupportedStaticAttr {
             (SupportedHtmlElement::Button, "disabled") => Some(Self::ButtonDisabled),
             (SupportedHtmlElement::Input, "type") => Some(Self::InputType),
             (SupportedHtmlElement::Input, "disabled") => Some(Self::InputDisabled),
+            (SupportedHtmlElement::Select, "multiple") => Some(Self::SelectMultiple),
             _ => None,
         }
     }
@@ -355,28 +396,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn try_from_accepts_exactly_the_seven_core_tags() {
-        // The SOLE element-acceptance authority accepts EXACTLY the core set (§1.2 six
-        // plus the `video` media host for the `muted` property write).
-        let accepted: Vec<&str> = ["a", "button", "div", "h1", "input", "p", "video"]
+    fn try_from_accepts_exactly_the_twelve_core_tags() {
+        // The SOLE element-acceptance authority accepts EXACTLY the core set (§1.2
+        // six, the `video` media host for the `muted` property write, plus the
+        // bindings-breadth hosts the 5c DOM-bind family adds:
+        // `textarea`/`select`/`option`/`audio`/`details`).
+        let expected = [
+            "a", "button", "div", "h1", "input", "p", "video", "textarea", "select", "option",
+            "audio", "details",
+        ];
+        let accepted: Vec<&str> = expected
             .into_iter()
             .filter(|t| SupportedHtmlElement::try_from(t).is_some())
             .collect();
-        assert_eq!(
-            accepted,
-            ["a", "button", "div", "h1", "input", "p", "video"]
-        );
-        // A representative spread of out-of-allowlist tags is rejected — including
-        // the demoted breadth (`span` / `textarea` / `select` / `option` / `img` /
-        // `slot`) and a reserved-word tag.
+        assert_eq!(accepted, expected);
+        // A representative spread of out-of-allowlist tags is STILL rejected —
+        // including the still-demoted breadth (`span` / `optgroup` / `img` / `slot` /
+        // `datalist`) and a reserved-word tag. (`textarea`/`select`/`option` MOVED to
+        // the accepted set above — the bindings-breadth allowlist additions.)
         for tag in [
             "span",
-            "textarea",
-            "select",
-            "option",
             "optgroup",
             "img",
             "slot",
+            "datalist",
             "var",
             "class",
             "section",
@@ -404,6 +447,11 @@ mod tests {
             SupportedHtmlElement::Input,
             SupportedHtmlElement::P,
             SupportedHtmlElement::Video,
+            SupportedHtmlElement::Textarea,
+            SupportedHtmlElement::Select,
+            SupportedHtmlElement::Option,
+            SupportedHtmlElement::Audio,
+            SupportedHtmlElement::Details,
         ] {
             let stem = el.var_stem();
             assert!(!stem.is_empty());
@@ -476,6 +524,23 @@ mod tests {
             SupportedStaticAttr::classify("disabled", Input, None),
             Some(SupportedStaticAttr::InputDisabled)
         );
+        // The bindings-breadth static attrs (5c): `<select multiple>` (the
+        // multi-select boolean) + `contenteditable` (the editable-host marker, any
+        // element) bake into the cloned skeleton.
+        assert_eq!(
+            SupportedStaticAttr::classify("multiple", Select, None),
+            Some(SupportedStaticAttr::SelectMultiple)
+        );
+        assert_eq!(
+            SupportedStaticAttr::classify("contenteditable", Div, None),
+            Some(SupportedStaticAttr::ContentEditable)
+        );
+        assert_eq!(
+            SupportedStaticAttr::classify("contenteditable", Div, Some("true")),
+            Some(SupportedStaticAttr::ContentEditable)
+        );
+        // `multiple` is `<select>`-only — it does NOT cross to another element.
+        assert_eq!(SupportedStaticAttr::classify("multiple", Div, None), None);
         // Per-tag attrs do NOT cross to the wrong element (`href` only on `<a>`).
         assert_eq!(SupportedStaticAttr::classify("href", Div, Some("/x")), None);
         assert_eq!(

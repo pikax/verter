@@ -29,8 +29,9 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{Program, Statement};
 use rustc_hash::FxHashSet;
 
-use super::expr::{collect_pattern_names, reparse_module, ShadowStack};
+use super::expr::{collect_pattern_names, reparse_module, BindTargetFact, ShadowStack};
 use super::official_rule::{CoreOfficialValidationRule, OfficialRejection};
+use crate::svelte::bind_contract::{bind_target_policy, resolve_runtime_bind, BindTargetPolicy};
 use crate::svelte::parser::tokenizer_scan::find_matching_brace_in;
 use crate::svelte::parser::{
     CloseTagViolationKind, ParsedSvelte, ScriptBodyGrammar, SvelteAttribute, SvelteAttributeKind,
@@ -83,6 +84,23 @@ pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<Offic
     // `$foo` / `let $x` defect (and over the attribute-name / placement scans).
     if let Some(rule) = scan_directive_invalid_value(source, &parsed.template) {
         return Some(OfficialRejection::of(rule));
+    }
+
+    // (a.2) The single document/attribute-order bind-validation pass — ONE traversal that, for
+    // each `bind:` directive, computes the `BindTargetFact` ONCE and runs the bind-target SHAPE
+    // scans (group policy → parens → invalid-expression) ONLY for binds official carries to
+    // expression validation: an INTRINSIC host with a valid bind NAME / HOST / host-ATTRIBUTE
+    // (via the shared `bind_contract` routing + the `host_attr_gate` authority), OR any
+    // non-intrinsic (component / special) host (official has no DOM name/host/host-attr check
+    // there and validates straight to expression shape). A name/host/host-attr-INVALID intrinsic
+    // bind is a name/host/host-attr official reject BEFORE expression validation, so it is
+    // SKIPPED here and fails closed downstream via the existing unsupported channel (the exact
+    // name/host/host-attribute codes are deferred to D-29) — never a confidently-WRONG shape
+    // code. Ordered AFTER the parse-phase `directive_invalid_value` (a static text/mixed
+    // directive value is a parse error official reports first) and BEFORE the scope walk's
+    // `$`-reference checks. Structural over the typed fact (NOT a source-text scan).
+    if let Some(rejection) = scan_bind_shape_violations(source, &parsed.template) {
+        return Some(rejection);
     }
 
     // The accepted top-level local names (declared in either script) — the referents a
@@ -213,14 +231,184 @@ fn directive_value_is_invalid_text(source: &str, value: &Option<SvelteAttributeV
 /// ExpressionTag-only shape. Uses the SHARED JS-aware brace scanner so a `}` inside a
 /// string / template literal within the interpolation does not close it early.
 fn mixed_value_is_single_expression(source: &str, span: verter_span::Span) -> bool {
+    mixed_single_expression_inner(source, span).is_some()
+}
+
+/// The INNER expression slice of a quoted mixed value body that is EXACTLY one `{…}`
+/// interpolation spanning the whole body (no bytes before `{` or after the matching `}`)
+/// — the official `value.length === 1` ExpressionTag shape; `None` for any surrounding
+/// text / extra chunk. Uses the SHARED JS-aware brace scanner ([`find_matching_brace_in`])
+/// so a `}` inside a string / template literal / comment within the interpolation does
+/// not close it early.
+fn mixed_single_expression_inner(source: &str, span: verter_span::Span) -> Option<&str> {
     let text = &source[span.start as usize..span.end as usize];
     let bytes = text.as_bytes();
     if bytes.first() != Some(&b'{') {
-        return false; // text (or whitespace) before the interpolation
+        return None; // text (or whitespace) before the interpolation
     }
     let close = find_matching_brace_in(bytes, 1);
     // The matching `}` must be the LAST byte of the body (no trailing text).
-    close == bytes.len().saturating_sub(1) && bytes.get(close) == Some(&b'}')
+    if close != bytes.len().saturating_sub(1) || bytes.get(close) != Some(&b'}') {
+        return None;
+    }
+    Some(&text[1..close])
+}
+
+/// The inner expression SOURCE of a directive value that is a SINGLE expression — a bare
+/// `{expr}` ([`SvelteAttributeValue::Expression`], whose span already excludes the braces)
+/// OR a QUOTED single-expression `"{expr}"` ([`SvelteAttributeValue::Mixed`] whose body is
+/// exactly one `{…}` ExpressionTag). Returns `None` for a valueless directive, a
+/// static-text value, or a multi-chunk mixed value (none of which is a sequence target).
+/// The quoted-`Mixed` inner is located through the SHARED JS-aware brace scanner, so a
+/// quoted `"{get, set}"` is scanned IDENTICALLY to a bare `{get, set}` — the official
+/// compiler stores both as the same lone inner expression.
+fn single_expression_source<'s>(
+    source: &'s str,
+    value: &Option<SvelteAttributeValue>,
+) -> Option<&'s str> {
+    match value.as_ref()? {
+        SvelteAttributeValue::Expression(span) => {
+            Some(&source[span.start as usize..span.end as usize])
+        }
+        SvelteAttributeValue::Mixed(span) => mixed_single_expression_inner(source, *span),
+        SvelteAttributeValue::Text(_) => None,
+    }
+}
+
+/// The SINGLE document/attribute-order bind-validation pass: for each `bind:` directive, in
+/// document/attribute order, compute the [`BindTargetFact`] ONCE and run the bind-target SHAPE
+/// scans — group policy → parens → invalid-expression — returning the FIRST shape rejection,
+/// or `None`. Replaces the three former per-category whole-tree scans (which re-parsed the
+/// target 3× and, by running group-FIRST across the whole tree, could MISORDER multiple bind
+/// errors); the single document-order pass matches official's per-`BindDirective` walk.
+///
+/// The shape scans run ONLY for binds official carries to expression validation:
+/// - an INTRINSIC host whose bind NAME / HOST / host-ATTRIBUTE is valid
+///   ([`intrinsic_bind_reaches_shape_validation`] — the shared `bind_contract` routing + the
+///   `host_attr_gate` authority). A name/host/host-attr-INVALID intrinsic bind is a
+///   name/host/host-attr official reject BEFORE expression validation, so it is SKIPPED here
+///   and fails closed downstream via the existing unsupported channel (the exact
+///   name/host/host-attribute codes are deferred to D-29) — never a wrong shape code;
+/// - ANY non-intrinsic (component / special) host — official has no DOM name/host/host-attr
+///   check there and validates straight to expression shape, so the shape scans always run
+///   (this PRESERVES the official-matching shape codes for component / special-element binds,
+///   which 5f owns; it never OPENS such a host — a shape reject is fail-closed).
+///
+/// Within a valid bind, the order is group policy (the data-driven `IdentifierOrMemberOnly`
+/// [`BindTargetPolicy`] — only `bind:group` — rejects ANY sequence target) → author-paren
+/// sequence (`bind_invalid_parens`) → structurally-invalid expression
+/// (`bind_invalid_expression`), so the more-specific codes win. A TS-wrapped lvalue is EXCLUDED
+/// from the invalid-expression arm (the parse-error / D-26 class — `lvalue_contains_ts`). Bare
+/// `{expr}` and quoted `"{expr}"` values are unwrapped identically via the shared
+/// [`single_expression_source`]; every decision is STRUCTURAL over the typed fact (NEVER a
+/// source-text scan). Recurses the same node families the directive-value scan walks.
+fn scan_bind_shape_violations(source: &str, nodes: &[SvelteNode]) -> Option<OfficialRejection> {
+    for node in nodes {
+        match node {
+            SvelteNode::Element(el) => {
+                let host_is_intrinsic = matches!(el.kind, SvelteElementKind::Intrinsic);
+                for attr in &el.attributes {
+                    let SvelteAttributeKind::Directive(dir) = &attr.kind else {
+                        continue;
+                    };
+                    if dir.kind != SvelteDirectiveKind::Bind {
+                        continue;
+                    }
+                    // A bare `{expr}` OR a quoted single-expression `"{expr}"`; a static-text /
+                    // multi-chunk mixed value is not a bind target (a non-`style:` static-text
+                    // value is the parse-phase `directive_invalid_value`, handled earlier).
+                    let Some(target_src) = single_expression_source(source, &dir.value) else {
+                        continue;
+                    };
+                    // The bind-target fact, computed ONCE per directive (kills the former
+                    // per-category triple reparse) — one parse through the single
+                    // `BindTargetFact` constructor, structural over the parsed target.
+                    let alloc = oxc_allocator::Allocator::default();
+                    let fact = BindTargetFact::from_source(&alloc, target_src);
+                    // GATE (intrinsic only): skip the shape scans for a name/host/host-attr-
+                    // invalid intrinsic bind — official reports a name/host/host-attr code for
+                    // it FIRST, so it fails closed downstream (the unsupported channel; exact
+                    // codes deferred to D-29). A non-intrinsic (component / special) host has no
+                    // such DOM pre-emption and always reaches the scans.
+                    if host_is_intrinsic
+                        && !intrinsic_bind_reaches_shape_validation(
+                            &dir.local,
+                            &el.name,
+                            source,
+                            &el.attributes,
+                        )
+                    {
+                        continue;
+                    }
+                    // Within-bind order: group policy → parens → invalid-expression.
+                    // (1) `bind:group` (the data-driven identifier/member-only policy) rejects
+                    // ANY `SequenceExpression` target with the policy's exact official code,
+                    // BEFORE the two-element shape check — so the group code beats parens.
+                    if let BindTargetPolicy::IdentifierOrMemberOnly { official_code } =
+                        bind_target_policy(&dir.local, &el.name)
+                    {
+                        if fact.is_sequence {
+                            return Some(OfficialRejection::with_code(
+                                CoreOfficialValidationRule::BindGroupInvalidExpression,
+                                official_code,
+                            ));
+                        }
+                    }
+                    // (2) Author parens around a getter/setter sequence (`bind:value={(g,s)}`).
+                    if fact.is_parenthesized_sequence {
+                        return Some(OfficialRejection::of(
+                            CoreOfficialValidationRule::BindInvalidParens,
+                        ));
+                    }
+                    // (3) A structurally-invalid (non-lvalue / non-pair, non-TS) target.
+                    if fact.is_invalid_bind_expression {
+                        return Some(OfficialRejection::of(
+                            CoreOfficialValidationRule::BindInvalidExpression,
+                        ));
+                    }
+                }
+                if let Some(rejection) = scan_bind_shape_violations(source, &el.children) {
+                    return Some(rejection);
+                }
+            }
+            SvelteNode::Block(block) => {
+                if let Some(rejection) = scan_bind_shape_violations(source, &block.children) {
+                    return Some(rejection);
+                }
+                for clause in &block.clauses {
+                    if let Some(rejection) = scan_bind_shape_violations(source, &clause.children) {
+                        return Some(rejection);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a `bind:` on an INTRINSIC host passes the official NAME / HOST / host-ATTRIBUTE
+/// checks (so official carries it to expression-shape validation). `bind:this` is valid on any
+/// intrinsic element (host-routed, no DOM-value routing — the SAME `this` discriminant the
+/// runtime bind classifier uses for the `This` shape); every other bind must resolve a runtime
+/// routing ([`resolve_runtime_bind`] — name + host) AND pass the host-attribute gate
+/// ([`super::host_attr_gate::host_attr_gate_passes_parsed`], the SHARED host-attribute
+/// authority over the parsed attributes). Typed facts only — never a string heuristic.
+fn intrinsic_bind_reaches_shape_validation(
+    name: &str,
+    tag: &str,
+    source: &str,
+    attrs: &[SvelteAttribute],
+) -> bool {
+    if name == "this" {
+        return true;
+    }
+    match resolve_runtime_bind(name, tag) {
+        Some(routing) => {
+            super::host_attr_gate::host_attr_gate_passes_parsed(name, tag, &routing, source, attrs)
+        }
+        None => false,
+    }
 }
 
 /// Scan template nodes for a PLAIN attribute on an INTRINSIC element (or a
@@ -1010,412 +1198,5 @@ pub(super) fn paragraph_direct_autoclose_child(p: &SvelteElement) -> Option<Stri
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::svelte::parser::parse_svelte;
-
-    /// Run the gate over a component source, returning the violated RULE class (the
-    /// exact official code is asserted separately where it matters).
-    fn gate(source: &str) -> Option<CoreOfficialValidationRule> {
-        let parsed = parse_svelte(source);
-        official_reject_gate(source, &parsed).map(|r| r.rule)
-    }
-
-    // ── DollarPrefixInvalid (declaration position) ───────────────────────────────
-
-    #[test]
-    fn dollar_prefixed_props_destructure_local_is_dollar_prefix_invalid() {
-        // `let { a: $foo } = $props()` — the DESTRUCTURE-position `$foo` binding is the
-        // official `dollar_prefix_invalid` (a declaration, caught at the binder).
-        assert_eq!(
-            gate("<script>let { a: $foo } = $props();</script>\n<p>{$foo}</p>\n"),
-            Some(CoreOfficialValidationRule::DollarPrefixInvalid)
-        );
-    }
-
-    #[test]
-    fn dollar_prefixed_identifier_declarator_is_dollar_prefix_invalid() {
-        // `let $$anchor = 1` — an IDENTIFIER-position `$$`-prefixed binding.
-        assert_eq!(
-            gate("<script>let c = $state(0); let $$anchor = 1;</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::DollarPrefixInvalid)
-        );
-    }
-
-    #[test]
-    fn plain_named_declarations_are_not_dollar_prefix_invalid() {
-        // NEGATIVE: a plain (non-`$`) declaration is never a dollar-prefix violation —
-        // the §1.2 fixture's `let name`/`let count` must pass the gate cleanly.
-        assert_eq!(
-            gate("<script>let name = $state('world'); let count = $state(0);</script>\n<h1>Hello {name}!</h1>\n<input bind:value={name} />\n<button onclick={() => count += 1}>clicks: {count}</button>\n"),
-            None
-        );
-    }
-
-    // ── ScriptBodyParse (same-scope redeclaration) ───────────────────────────────
-
-    #[test]
-    fn duplicate_state_declaration_is_script_body_parse() {
-        // `let a = $state(0); let a = $state(1);` — a same-lexical-scope `let` redeclaration
-        // Acorn (and the OXC body-probe) rejects in the PARSE phase: `js_parse_error`, owned by
-        // the body-parse slot (NOT a later analyze-phase `declaration_duplicate`).
-        assert_eq!(
-            gate("<script>let a = $state(0); let a = $state(1);</script>\n<button onclick={() => a++}>{a}</button>\n"),
-            Some(CoreOfficialValidationRule::ScriptBodyParse)
-        );
-    }
-
-    #[test]
-    fn distinct_names_are_not_a_body_parse_error() {
-        // NEGATIVE: distinct declarator names never collide — the body parses cleanly.
-        assert_eq!(
-            gate("<script>let a = $state(0); let b = $state(1);</script>\n<button onclick={() => a++}>{a}{b}</button>\n"),
-            None
-        );
-    }
-
-    // ── GlobalReferenceInvalid + the rune exclusion ──────────────────────────────
-
-    #[test]
-    fn runes_are_not_global_reference_violations() {
-        // The CRITICAL negative: `$state` / `$derived` / `$props` / `$effect` etc. are
-        // RUNE references, NOT undeclared store subscriptions — the gate must NOT flag
-        // them as global-reference violations (the official `is_rune(name)` exclusion).
-        // A component that ONLY uses runes passes cleanly.
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn undeclared_dollar_foo_reference_is_global_reference_invalid() {
-        // `{$foo}` — an undeclared lowercase-initial `$foo` store subscription in runes
-        // mode is `global_reference_invalid`.
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button onclick={() => c++}>x{$foo}{c}</button>\n"),
-            Some(CoreOfficialValidationRule::GlobalReferenceInvalid)
-        );
-    }
-
-    #[test]
-    fn double_dollar_reference_is_global_reference_invalid() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button onclick={() => c++}>x{$$bar}{c}</button>\n"),
-            Some(CoreOfficialValidationRule::GlobalReferenceInvalid)
-        );
-    }
-
-    #[test]
-    fn dollar_slots_reference_is_not_a_global_violation() {
-        // NEGATIVE: `$$slots` is ACCEPTED by official (a valid magic object) — the gate
-        // must NOT flag it as a global-reference reject (it is a deferrable unsupported
-        // FEATURE handled downstream, not an official reject).
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button onclick={() => c++}>x{$$slots}{c}</button>\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn uppercase_dollar_reference_is_not_a_global_violation() {
-        // NEGATIVE: `$Foo` (uppercase-initial store name) is accepted by official (the
-        // `/[a-z]/` lowercase-initial rule), so it is not a global-reference violation.
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button onclick={() => c++}>x{$Foo}{c}</button>\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn dollar_props_magic_read_is_global_reference_invalid() {
-        // `$$props` in the script — the official `legacy_props_invalid` class (mapped to
-        // the GlobalReferenceInvalid rule).
-        assert_eq!(
-            gate("<script>let c = $state(0); let p = $$props;</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::GlobalReferenceInvalid)
-        );
-    }
-
-    #[test]
-    fn shadowed_dollar_name_is_not_a_global_violation() {
-        // NEGATIVE: a `$`-name bound by a local (an arrow param) is shadowed — not a
-        // global reference. (`$foo` declared as a param shadows the global.)
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button onclick={($foo) => c++}>{c}</button>\n"),
-            None
-        );
-    }
-
-    // ── bind:this targets ────────────────────────────────────────────────────────
-
-    #[test]
-    fn dollar_prefixed_bind_this_target_is_global_reference_invalid() {
-        // `bind:this={$foo}` (no declaration) — the `$foo` REFERENCE is the official
-        // `global_reference_invalid` class.
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<div bind:this={$foo}></div>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::GlobalReferenceInvalid)
-        );
-    }
-
-    #[test]
-    fn undeclared_plain_bind_this_target_is_accepted() {
-        // NEGATIVE: `bind:this={missing}` (an undeclared PLAIN identifier) is ACCEPTED by
-        // official (the binding is implicitly created) — the gate must NOT reject it.
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<div bind:this={missing}></div>\n<button onclick={() => c++}>{c}</button>\n"),
-            None
-        );
-    }
-
-    // ── HTML placement ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn nested_button_is_node_invalid_placement() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button><button>x</button></button>\n"),
-            Some(CoreOfficialValidationRule::NodeInvalidPlacement)
-        );
-    }
-
-    #[test]
-    fn nested_anchor_is_node_invalid_placement() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<a href=\"/\"><a href=\"/x\">x</a></a>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::NodeInvalidPlacement)
-        );
-    }
-
-    #[test]
-    fn heading_in_heading_is_node_invalid_placement() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<h1><h1>x</h1></h1>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::NodeInvalidPlacement)
-        );
-    }
-
-    #[test]
-    fn paragraph_with_block_descendant_and_explicit_close_is_element_autoclosed() {
-        // `<p><div>…</div></p>` and `<p><p>…</p></p>` — a `<p>` auto-closed by a block
-        // child WITH a surviving EXPLICIT `</p>`: official
-        // `element_invalid_closing_tag_autoclosed`.
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<p><div>x</div></p>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::ElementInvalidClosingTagAutoclosed)
-        );
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<p><p>x</p></p>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::ElementInvalidClosingTagAutoclosed)
-        );
-    }
-
-    #[test]
-    fn paragraph_with_block_descendant_but_no_explicit_close_is_not_a_reject() {
-        // FALSE-POSITIVE FIX: `<p><div>x</div>` with NO explicit `</p>` is official-
-        // ACCEPTED (the browser auto-closes the `<p>`, a warning). It must NOT be an
-        // official reject — neither `element_invalid_closing_tag_autoclosed` NOR
-        // `element_unclosed` (the parser sees the `<p>` as unclosed, but official
-        // auto-closes it). The gate returns None; the implicit case fails closed as an
-        // unsupported FEATURE downstream.
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<p><div>x</div>\n<button onclick={() => c++}>{c}</button>\n"),
-            None
-        );
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<p><h1>x</h1>\n<button onclick={() => c++}>{c}</button>\n"),
-            None
-        );
-    }
-
-    // ── close-tag well-formedness rules ──────────────────────────────────────────
-
-    #[test]
-    fn unclosed_button_is_element_unclosed() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}"),
-            Some(CoreOfficialValidationRule::ElementUnclosed)
-        );
-    }
-
-    #[test]
-    fn stray_close_is_element_invalid_closing_tag() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n</div>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::ElementInvalidClosingTag)
-        );
-    }
-
-    #[test]
-    fn mismatched_close_is_element_invalid_closing_tag() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<button onclick={() => c++}><div>{c}</span></button>\n"),
-            Some(CoreOfficialValidationRule::ElementInvalidClosingTag)
-        );
-    }
-
-    #[test]
-    fn void_element_explicit_close_is_void_invalid_content() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<input></input>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::VoidElementInvalidContent)
-        );
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<input>x</input>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::VoidElementInvalidContent)
-        );
-    }
-
-    #[test]
-    fn well_formed_section_1_2_records_no_close_tag_reject() {
-        // NEGATIVE: the §1.2 headline shape (well-formed, all closed, void `<input>`
-        // self-closed) is NOT a close-tag violation.
-        assert_eq!(
-            gate("<script>let name = $state('world'); let count = $state(0);</script>\n<h1>Hello {name}!</h1>\n<input bind:value={name} />\n<button onclick={() => count += 1}>clicks: {count}</button>\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn button_inside_anchor_is_accepted() {
-        // NEGATIVE: `<a><button>` is VALID (official accepts it) — the gate must NOT
-        // reject every nested element, only the disallowed-descendant families.
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<a href=\"/\"><button onclick={() => c++}>{c}</button></a>\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn sibling_supported_elements_are_accepted() {
-        // NEGATIVE: the §1.2-class sibling element layout (`<h1>` + `<input>` +
-        // `<button>` at the root) is a valid placement — no violation.
-        assert_eq!(
-            gate("<script>let name = $state('world'); let count = $state(0);</script>\n<h1>Hello {name}!</h1>\n<input bind:value={name} />\n<button onclick={() => count += 1}>clicks: {count}</button>\n"),
-            None
-        );
-    }
-
-    // ── script-domain rules ──────────────────────────────────────────────────────
-
-    #[test]
-    fn duplicate_instance_script_is_script_duplicate() {
-        assert_eq!(
-            gate("<script>let c = $state(0);</script>\n<script>let d = $state(0);</script>\n<button onclick={() => c++}>{c}{d}</button>\n"),
-            Some(CoreOfficialValidationRule::ScriptDuplicate)
-        );
-    }
-
-    #[test]
-    fn invalid_script_context_is_script_invalid_context() {
-        assert_eq!(
-            gate("<script context=\"bad\">let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::ScriptInvalidContext)
-        );
-    }
-
-    #[test]
-    fn reserved_script_attribute_is_script_reserved_attribute() {
-        // `<script server>` — a RESERVED script attribute: official `script_reserved_attribute`.
-        assert_eq!(
-            gate("<script server>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::ScriptReservedAttribute)
-        );
-    }
-
-    #[test]
-    fn duplicate_script_attribute_is_attribute_duplicate() {
-        // `<script lang="js" lang="js">` — a DUPLICATE script attribute: official
-        // `attribute_duplicate` (the element-attribute loop runs for the top-level script).
-        assert_eq!(
-            gate("<script lang=\"js\" lang=\"js\">let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            Some(CoreOfficialValidationRule::AttributeDuplicate)
-        );
-    }
-
-    #[test]
-    fn capitalized_context_attribute_name_is_not_a_reject() {
-        // FALSE-POSITIVE FIX: `<script Context="bad">` — `Context` (capital C) is an
-        // UNKNOWN attribute (official emits a `script_unknown_attribute` WARNING and
-        // ACCEPTS), NOT `script_invalid_context`. The attribute NAME match is
-        // case-sensitive, so the gate must NOT over-reject it.
-        assert_eq!(
-            gate("<script Context=\"bad\">let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn valued_module_attribute_is_script_invalid_context() {
-        // A valued `module="x"` is the official `script_invalid_attribute_value` (mapped
-        // to the ScriptInvalidContext rule), and it wins over the duplicate-script
-        // refusal (official validates per-script attributes first).
-        assert_eq!(
-            gate("<script module=\"x\">const K = 1;</script>\n<button>x</button>\n"),
-            Some(CoreOfficialValidationRule::ScriptInvalidContext)
-        );
-    }
-
-    #[test]
-    fn valid_module_context_is_accepted() {
-        // NEGATIVE: a valid `context="module"` / `<script module>` is not a violation.
-        assert_eq!(
-            gate("<script context=\"module\">const K = 1;</script>\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            None
-        );
-        assert_eq!(
-            gate("<script module>const K = 1;</script>\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
-            None
-        );
-    }
-
-    // ── from_unsupported_surface mapping ─────────────────────────────────────────
-
-    #[test]
-    fn from_unsupported_surface_maps_only_the_official_reject_surfaces() {
-        use crate::svelte::runtime::UnsupportedSvelteRuntimeSurface;
-        let span = verter_span::Span::new(0, 0);
-        // OptionsAxis (a NON-duplicate unsupported options axis) maps; an unsupported FEATURE
-        // does not. (A template `attribute_duplicate` and a duplicate `<svelte:options>` are
-        // now EXACT-CODE parser facts carried by the official-reject gate, NOT mapped from an
-        // unsupported surface, so there is no `DuplicateAttribute` surface to map.)
-        assert_eq!(
-            CoreOfficialValidationRule::from_unsupported_surface(
-                &UnsupportedSvelteRuntimeSurface::OptionsAxis { span }
-            ),
-            Some(CoreOfficialValidationRule::OptionsInvalid)
-        );
-        // A pure unsupported FEATURE (a `{#if}` block) is NOT an official reject.
-        assert_eq!(
-            CoreOfficialValidationRule::from_unsupported_surface(
-                &UnsupportedSvelteRuntimeSurface::Block {
-                    construct: "if",
-                    span,
-                }
-            ),
-            None
-        );
-        // An AdvancedRune surface is NOT auto-mapped (ambiguous: official-reject arity
-        // vs deferrable `$state.raw`).
-        assert_eq!(
-            CoreOfficialValidationRule::from_unsupported_surface(
-                &UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                    rune: "$state.raw",
-                    span,
-                }
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn rule_names_round_trip() {
-        for &rule in CoreOfficialValidationRule::ALL {
-            assert_eq!(
-                CoreOfficialValidationRule::from_name(rule.name()),
-                Some(rule)
-            );
-        }
-        assert_eq!(CoreOfficialValidationRule::from_name("NotARule"), None);
-    }
-}
+#[path = "official_reject_tests.rs"]
+mod official_reject_tests;

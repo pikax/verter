@@ -609,7 +609,9 @@ fn read_runtime_file(name: &str) -> String {
 fn guard_client_script_lowering_does_not_call_the_removed_broad_path() {
     // The broad "emit any non-rune statement" path (`lower_instance_declarations`) was
     // REMOVED. No production source may reference it — the lowering consumes ONLY the
-    // typed `SupportedInstanceScriptItem` allowlist via `lower_supported_instance_items`.
+    // typed `SupportedInstanceScriptItem` allowlist via `lower_simple_instance_item` (the
+    // per-item transform; a function-pair function body lowers through the shared fallible
+    // rewriter, NOT a broad statement path).
     for file in [
         "client_plan.rs",
         "client_surface.rs",
@@ -626,8 +628,8 @@ fn guard_client_script_lowering_does_not_call_the_removed_broad_path() {
     // The build_script_items consumer must lower from the typed allowlist.
     let plan = read_runtime_file("client_plan.rs");
     assert!(
-        plan.contains("lower_supported_instance_items"),
-        "client_plan.rs must lower the instance script via `lower_supported_instance_items`"
+        plan.contains("lower_simple_instance_item"),
+        "client_plan.rs must lower the instance script via `lower_simple_instance_item`"
     );
 }
 
@@ -697,13 +699,15 @@ fn guard_supported_instance_script_item_enum_is_the_classified_surface_field() {
         surface.contains("script_items: Vec<SupportedInstanceScriptItem>"),
         "ClassifiedClientSurface must carry a typed `script_items` allowlist field"
     );
-    let shapes = read_runtime_file("client_shapes.rs");
+    // The allowlist enum + its classifier live in the dedicated `instance_items.rs`
+    // module (extracted from `client_shapes.rs` as a cohesive concern).
+    let items = read_runtime_file("instance_items.rs");
     assert!(
-        shapes.contains("enum SupportedInstanceScriptItem"),
-        "client_shapes.rs must define the `SupportedInstanceScriptItem` allowlist enum"
+        items.contains("enum SupportedInstanceScriptItem"),
+        "instance_items.rs must define the `SupportedInstanceScriptItem` allowlist enum"
     );
     assert!(
-        shapes.contains("fn classify_supported_instance_items"),
-        "client_shapes.rs must define the `classify_supported_instance_items` classifier"
+        items.contains("fn classify_supported_instance_items"),
+        "instance_items.rs must define the `classify_supported_instance_items` classifier"
     );
 }

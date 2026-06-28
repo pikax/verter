@@ -41,27 +41,75 @@ impl Memoizer {
     }
 }
 
-/// Emit the grouped reactive-text `$.template_effect`, choosing the official shape:
+/// One reactive UPDATE folded into the combined `$.template_effect`, distinguished by its
+/// JS form:
 ///
-/// - NO writes → nothing.
-/// - No memoized deps, one write → the inline `$.template_effect(() => <write>)`.
-/// - No memoized deps, many writes → the block `$.template_effect(() => { … })`.
+/// - [`Expr`](Self::Expr) — an EXPRESSION write (`$.set_text(…)`, `$.set_attribute(…)`,
+///   `el.p = v`): valid as a concise arrow body and `;`-terminated in the block form.
+/// - [`Stmt`](Self::Stmt) — a STATEMENT write (the `bind:group` guarded
+///   `if (<tracker> !== (<tracker> = V)) { … }` value update): it is already a complete
+///   statement, so it FORCES the block-bodied arrow form (a concise `() => if (…)` is
+///   invalid JS) and is emitted verbatim (NO trailing `;`).
+pub(super) enum EffectBody {
+    /// An expression write.
+    Expr(String),
+    /// A statement write (forces the block form).
+    Stmt(String),
+}
+
+impl EffectBody {
+    /// The raw body text (the expression or the statement).
+    fn text(&self) -> &str {
+        match self {
+            EffectBody::Expr(s) | EffectBody::Stmt(s) => s,
+        }
+    }
+
+    /// Whether this body is a STATEMENT (forces the block-bodied arrow form).
+    fn is_stmt(&self) -> bool {
+        matches!(self, EffectBody::Stmt(_))
+    }
+}
+
+/// Append the effect bodies into a block-bodied arrow region: an [`EffectBody::Expr`] is
+/// `;`-terminated; an [`EffectBody::Stmt`] (a complete `if {…}` statement) is emitted verbatim.
+fn push_effect_bodies(out: &mut String, bodies: &[EffectBody]) {
+    for body in bodies {
+        match body {
+            EffectBody::Expr(s) => out.push_str(&format!("\t\t{s};\n")),
+            EffectBody::Stmt(s) => out.push_str(&format!("\t\t{s}\n")),
+        }
+    }
+}
+
+/// Emit the grouped reactive `$.template_effect`, choosing the official shape:
+///
+/// - NO bodies → nothing.
+/// - No memoized deps, one EXPRESSION body → the inline `$.template_effect(() => <write>)`.
+/// - No memoized deps, many bodies OR any STATEMENT body → the block
+///   `$.template_effect(() => { … })`.
 /// - Any memoized deps → the deps-array form `$.template_effect(($0, …) => <body>,
 ///   [() => dep0, …])` (the parameter list is `$0 … $N-1`; the body is the single
-///   write or a block of writes; the deps array is the second argument).
-pub(super) fn emit_text_effect(out: &mut String, text_writes: &[String], deps: &[String]) {
-    if text_writes.is_empty() {
+///   expression write or a block of writes; the deps array is the second argument).
+///
+/// A STATEMENT body (the `bind:group` guarded value update) forces the block form even for a
+/// single body — a concise `() => if (…)` is not valid JS.
+pub(super) fn emit_text_effect(out: &mut String, bodies: &[EffectBody], deps: &[String]) {
+    if bodies.is_empty() {
         return;
     }
+    // A statement body cannot be a concise arrow body, so it forces the block form.
+    let concise = bodies.len() == 1 && !bodies.iter().any(EffectBody::is_stmt);
     if deps.is_empty() {
-        // The non-memoized shapes (unchanged from the §1.2 / bare-read path).
-        if text_writes.len() == 1 {
-            out.push_str(&format!("\t$.template_effect(() => {});\n", text_writes[0]));
+        // The non-memoized shapes (the §1.2 / bare-read path, plus the forced-block case).
+        if concise {
+            out.push_str(&format!(
+                "\t$.template_effect(() => {});\n",
+                bodies[0].text()
+            ));
         } else {
             out.push_str("\t$.template_effect(() => {\n");
-            for body in text_writes {
-                out.push_str(&format!("\t\t{body};\n"));
-            }
+            push_effect_bodies(out, bodies);
             out.push_str("\t});\n");
         }
         return;
@@ -85,16 +133,14 @@ pub(super) fn emit_text_effect(out: &mut String, text_writes: &[String], deps: &
         })
         .collect::<Vec<_>>()
         .join(", ");
-    if text_writes.len() == 1 {
+    if concise {
         out.push_str(&format!(
             "\t$.template_effect(({params}) => {}, [{deps_array}]);\n",
-            text_writes[0]
+            bodies[0].text()
         ));
     } else {
         out.push_str(&format!("\t$.template_effect(({params}) => {{\n"));
-        for body in text_writes {
-            out.push_str(&format!("\t\t{body};\n"));
-        }
+        push_effect_bodies(out, bodies);
         out.push_str(&format!("\t}}, [{deps_array}]);\n"));
     }
 }

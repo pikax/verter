@@ -487,8 +487,21 @@ fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) 
     // / `$.set_style` (the base value becomes the call's `value` arg). Scan once.
     let has_class_directive = attrs.iter().any(|a| matches!(a, AttrIr::Class { .. }));
     let has_style_directive = attrs.iter().any(|a| matches!(a, AttrIr::Style { .. }));
+    // The official `bind:group` form emits a static `value="X"` as a runtime
+    // `input.value = input.__value = 'X'` write (the group-value `__value` source),
+    // NOT a baked static `value` attr — so a `value` on a `bind:group` input is pulled
+    // OUT of the cloned skeleton (the pinned svelte@5.56.3 group template is a bare
+    // `<input type="radio"/>`).
+    let has_group_bind = attrs
+        .iter()
+        .any(|a| matches!(a, AttrIr::Bind { target, .. } if target == "group"));
     for attr in attrs {
         if let AttrIr::Static { name, value } = attr {
+            // A static `value` on a `bind:group` input is pulled out of the skeleton
+            // (it becomes the runtime `__value` write).
+            if name == "value" && has_group_bind {
+                continue;
+            }
             // A "cannot be set statically" attribute (`autofocus` / `muted` /
             // `defaultValue` / `defaultChecked`) is NEVER in the skeleton — it is
             // applied at runtime via a property write / `$.autofocus` (the

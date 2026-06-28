@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 /*
   Generates
-  crates/verter_compiler/src/svelte/ide/bind_contract_data.rs
+  crates/verter_compiler/src/svelte/bind_contract_data.rs
   from the CLOSED Svelte-5-documented binding-name vocabulary authored below.
 
-  This registry IS the source of truth for the wide `bind:` family (F4): for
+  This registry IS the SHARED source of truth for the wide `bind:` family: for
   every documented element binding name it pins the bound value's TS TYPE and
-  its DIRECTION (read / write / read-write), plus the element/tag constraint
-  that selects it. The Svelte IDE projector consults the generated table to
-  emit a type-checked assignment-compatibility check in the projected `.svelte.tsx`
-  (the one generic checker in the prelude is an implementation HELPER — the
-  authority is this table).
+  its DIRECTION (read / write / read-write) plus the element/tag constraint that
+  selects it (the IDE columns), AND the RUNTIME emission metadata — which
+  `$.bind_*` helper / `bind_property` form the client backend calls, the call
+  ARITY, the `bind_property` EVENT name, the prelude CLEANUP, and the
+  should_proxy policy (the runtime columns). The Svelte IDE projector consults
+  the value type + direction to emit a type-checked assignment-compatibility
+  check in the projected `.svelte.tsx`; the runtime client emitter consults the
+  runtime metadata to emit the DATA-DRIVEN `$.bind_*` call. One authored
+  registry is the authority for both consumers.
 
   Directions (from the bound LOCAL's perspective):
     - "rw"  read-write: Svelte both reads the local to set the DOM and writes
@@ -46,33 +50,177 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 //   tags        the applicable lowercase tag set, or "*" for any element, or a
 //               "contenteditable" pseudo-constraint (any element with the
 //               attribute — the projector does not enforce it, documentary).
-//   special     "this" | "group" | null — routes to a dedicated checker.
+//   special     "this" | "group" | null — routes to a dedicated checker (IDE).
+//   policy      OPTIONAL accepted-target-shape policy. Absent (the default) ⇒
+//               BindTargetPolicy::LvalueOrFunctionPair (a function-pair {get, set}
+//               target is accepted). "identifier_or_member_only" ⇒ a
+//               SequenceExpression target is an official reject
+//               (bind_group_invalid_expression) — only `bind:group`.
+//
+// RUNTIME columns (consumed by the native client backend, matching pinned
+// svelte@5.56.3 emit shapes):
+//   official_helper  the OFFICIAL `svelte@5.56.3` helper IDENTITY — the
+//               machine-readable fact of which `$.bind_*` / `bind_property` form the
+//               official compiler emits, preserved even for rows the native runtime does
+//               NOT emit yet. One of: "value" | "select_value" | "checked" | "group" |
+//               "current_time" | "paused" | "played" | "element_size" |
+//               "content_editable" | "property" | "this" | "files" | "focused" |
+//               "volume" | "muted" | "playback_rate" | "buffered" | "seekable" |
+//               "seeking" | "ended" | "ready_state" | "resize_observer". Every value is
+//               oracle-verified against the pinned compiler.
+//   support     "supported" | "unsupported" — whether the native client runtime currently
+//               EMITS the bind. An "unsupported" row keeps its REAL official_helper (never
+//               an erased sentinel); the IDE projector still type-checks it, but
+//               `resolve_runtime_bind` fails it closed. The official-DOM binds outside the
+//               native runtime's current emission set (files/focused/playbackRate/volume/
+//               muted, the media-readiness buffered/seekable/seeking/ended/readyState, the
+//               resize-observer family, indeterminate, and the media-dimension
+//               naturalWidth/naturalHeight/videoWidth/videoHeight) are "unsupported". The
+//               implementation that supports one of these rows flips its support +
+//               helper routing and adds goldens.
+//   arity       "get_set" | "set_only" | "property" — the getter/setter shape.
+//   event       the `$.bind_property` event name (only for official_helper "property"),
+//               else "".
+//   prelude     "none" | "remove_input_defaults" | "remove_textarea_child" —
+//               the per-host default-clearing statement emitted before the bind.
+//   should_proxy  whether the setter takes the 3rd `true` proxy-flag arg. FALSE
+//               for every ordinary DOM bind (the `$.set(…, true)` flag is a 5f
+//               component/window-host policy, never an ordinary DOM setter).
 const REGISTRY = [
   // bind:this — host-instance assignment-compat (read-direction). value_type is
   // documentary; the projector substitutes the host-instance type and routes to
-  // the `this` checker.
-  { name: "this", direction: "r", value_type: "{HOST}", tags: "*", special: "this" },
+  // the `this` checker. Runtime routing is host-specific (element host = 5c,
+  // component host = 5f); the helper is the dedicated `$.bind_this`.
+  {
+    name: "this",
+    direction: "r",
+    value_type: "{HOST}",
+    tags: "*",
+    special: "this",
+    official_helper: "this",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
+  },
 
   // bind:group — checkbox-vs-radio shared selection. Routed to the `group`
   // checker which inspects the sibling `type` attribute; value_type documentary.
-  { name: "group", direction: "rw", value_type: "unknown", tags: "input", special: "group" },
+  // Runtime: `$.bind_group(binding_group, [], el, get, set)`.
+  {
+    name: "group",
+    direction: "rw",
+    value_type: "unknown",
+    tags: "input",
+    special: "group",
+    // `bind:group` is the SOLE identifier/member-only bind: official throws
+    // `bind_group_invalid_expression` for ANY function-pair (SequenceExpression)
+    // target (verified svelte@5.56.3 BindDirective.js — the throw precedes the
+    // two-element length check). Every other bind defaults to LvalueOrFunctionPair.
+    policy: "identifier_or_member_only",
+    official_helper: "group",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "remove_input_defaults",
+    should_proxy: false,
+  },
 
-  // bind:files — the FileList written to/read from a file input.
-  { name: "files", direction: "rw", value_type: "FileList | null", tags: "input", special: null },
+  // bind:files — the FileList written to/read from a file input. Official emits the
+  // DEDICATED `$.bind_files(input, get, set)` (get/set). The native client runtime does
+  // not emit it yet (`support: "unsupported"` ⇒ fails closed); the official helper
+  // identity is preserved. The IDE row stays real.
+  {
+    name: "files",
+    direction: "rw",
+    value_type: "FileList | null",
+    tags: "input",
+    special: null,
+    official_helper: "files",
+    support: "unsupported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
+  },
 
-  // bind:indeterminate — the checkbox indeterminate boolean (read-write).
-  { name: "indeterminate", direction: "rw", value_type: "boolean", tags: "input", special: null },
+  // bind:focused — whether the element currently holds focus (read-direction;
+  // DOM → local, set on focus/blur). Official emits the DEDICATED
+  // `$.bind_focused(el, set)` (universal.js) — verified svelte@5.56.3 emits
+  // `$.bind_focused(input, ($$value) => $.set(x, $$value))`. `focused: {}` in the
+  // official `binding_properties` registry carries no `valid_elements`, so it
+  // applies to ANY element (`*`); the svelte attribute type is `readonly` (a
+  // read-direction binding). The native client runtime does not emit it yet
+  // (`support: "unsupported"` ⇒ fail closed) — an EXPLICIT shared-contract row
+  // (absent-row fail-closed and helper-identity erasure are both unacceptable for an
+  // official bind), with the real `$.bind_focused` identity preserved. The IDE row
+  // stays real; the implementation that supports it flips support + adds goldens
+  // (debt-ledger D-25).
+  {
+    name: "focused",
+    direction: "r",
+    value_type: "boolean",
+    tags: "*",
+    special: null,
+    official_helper: "focused",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
+  },
 
-  // <details bind:open> — the open boolean.
-  { name: "open", direction: "rw", value_type: "boolean", tags: "details", special: null },
+  // bind:indeterminate — the checkbox indeterminate boolean (read-write). Its official
+  // helper IS the generic `$.bind_property('indeterminate','change',el,set,get)`. The
+  // native client runtime does not emit it yet (`support: "unsupported"` ⇒ fail closed);
+  // refusal rides the support status, NOT the helper identity (the official helper is the
+  // generic property form, which the runtime CAN emit — only support gates it). The IDE
+  // row stays real (the projector type-checks the bind via value_type/direction); the
+  // implementation that supports it flips support + adds goldens.
+  {
+    name: "indeterminate",
+    direction: "rw",
+    value_type: "boolean",
+    tags: "input",
+    special: null,
+    official_helper: "property",
+    support: "unsupported",
+    arity: "property",
+    event: "change",
+    prelude: "none",
+    should_proxy: false,
+  },
+
+  // <details bind:open> — the open boolean. `$.bind_property('open','toggle',el,set,get)`.
+  {
+    name: "open",
+    direction: "rw",
+    value_type: "boolean",
+    tags: "details",
+    special: null,
+    official_helper: "property",
+    support: "supported",
+    arity: "property",
+    event: "toggle",
+    prelude: "none",
+    should_proxy: false,
+  },
 
   // contenteditable bindings — the element text content as a string.
+  // `$.bind_content_editable('innerHTML'|'innerText'|'textContent', el, get, set)`.
   {
     name: "innerHTML",
     direction: "rw",
     value_type: "string",
     tags: "contenteditable",
     special: null,
+    official_helper: "content_editable",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "innerText",
@@ -80,6 +228,12 @@ const REGISTRY = [
     value_type: "string",
     tags: "contenteditable",
     special: null,
+    official_helper: "content_editable",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "textContent",
@@ -87,15 +241,32 @@ const REGISTRY = [
     value_type: "string",
     tags: "contenteditable",
     special: null,
+    official_helper: "content_editable",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
 
-  // Writable media bindings (HTMLMediaElement; read-write).
+  // Writable media bindings (HTMLMediaElement; read-write). currentTime/paused are
+  // supported, with dedicated helpers. playbackRate/volume/muted have dedicated OFFICIAL
+  // helpers (`$.bind_playback_rate` / `$.bind_volume` / `$.bind_muted`, all get/set) that
+  // the native client runtime does not emit yet (`support: "unsupported"` ⇒ fail closed);
+  // their REAL official helper identity is preserved (a generic `$.bind_property` form
+  // would be the wrong helper). The implementation that supports them flips support.
   {
     name: "currentTime",
     direction: "rw",
     value_type: 'HTMLMediaElement["currentTime"]',
     tags: "audio,video",
     special: null,
+    official_helper: "current_time",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "playbackRate",
@@ -103,6 +274,12 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["playbackRate"]',
     tags: "audio,video",
     special: null,
+    official_helper: "playback_rate",
+    support: "unsupported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "volume",
@@ -110,6 +287,12 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["volume"]',
     tags: "audio,video",
     special: null,
+    official_helper: "volume",
+    support: "unsupported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "muted",
@@ -117,6 +300,12 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["muted"]',
     tags: "audio,video",
     special: null,
+    official_helper: "muted",
+    support: "unsupported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "paused",
@@ -124,15 +313,34 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["paused"]',
     tags: "audio,video",
     special: null,
+    official_helper: "paused",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
 
   // Readonly media bindings (DOM → local only; a userland write is rejected).
+  // `duration` and `played` are supported (the generic `$.bind_property` read-only form /
+  // the dedicated `$.bind_played` setter-only helper). The rest
+  // (`buffered`/`seekable`/`seeking`/`ended`/`readyState`) have dedicated official helpers
+  // (`$.bind_buffered`/`$.bind_seekable`/`$.bind_seeking`/`$.bind_ended`/
+  // `$.bind_ready_state`) that the native client runtime does not emit yet
+  // (`support: "unsupported"` ⇒ fail closed); their real identity is preserved. The IDE
+  // columns stay real; the implementation that supports each flips support + adds goldens.
   {
     name: "duration",
     direction: "r",
     value_type: 'HTMLMediaElement["duration"]',
     tags: "audio,video",
     special: null,
+    official_helper: "property",
+    support: "supported",
+    arity: "property",
+    event: "durationchange",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "buffered",
@@ -140,6 +348,12 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["buffered"]',
     tags: "audio,video",
     special: null,
+    official_helper: "buffered",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "seekable",
@@ -147,6 +361,12 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["seekable"]',
     tags: "audio,video",
     special: null,
+    official_helper: "seekable",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "played",
@@ -154,6 +374,12 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["played"]',
     tags: "audio,video",
     special: null,
+    official_helper: "played",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "seeking",
@@ -161,6 +387,12 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["seeking"]',
     tags: "audio,video",
     special: null,
+    official_helper: "seeking",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "ended",
@@ -168,6 +400,12 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["ended"]',
     tags: "audio,video",
     special: null,
+    official_helper: "ended",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "readyState",
@@ -175,28 +413,163 @@ const REGISTRY = [
     value_type: 'HTMLMediaElement["readyState"]',
     tags: "audio,video",
     special: null,
+    official_helper: "ready_state",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
 
   // Readonly dimension bindings (DOM → local only; number).
-  { name: "clientWidth", direction: "r", value_type: "number", tags: "*", special: null },
-  { name: "clientHeight", direction: "r", value_type: "number", tags: "*", special: null },
-  { name: "offsetWidth", direction: "r", value_type: "number", tags: "*", special: null },
-  { name: "offsetHeight", direction: "r", value_type: "number", tags: "*", special: null },
+  // `$.bind_element_size(el, 'name', set)`.
+  {
+    name: "clientWidth",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    special: null,
+    official_helper: "element_size",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
+  },
+  {
+    name: "clientHeight",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    special: null,
+    official_helper: "element_size",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
+  },
+  {
+    name: "offsetWidth",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    special: null,
+    official_helper: "element_size",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
+  },
+  {
+    name: "offsetHeight",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    special: null,
+    official_helper: "element_size",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
+  },
 
-  // Readonly media-dimension bindings on <img>/<video>.
-  { name: "naturalWidth", direction: "r", value_type: "number", tags: "img", special: null },
-  { name: "naturalHeight", direction: "r", value_type: "number", tags: "img", special: null },
-  { name: "videoWidth", direction: "r", value_type: "number", tags: "video", special: null },
-  { name: "videoHeight", direction: "r", value_type: "number", tags: "video", special: null },
+  // Readonly media-dimension bindings on <img>/<video>. Their official helper IS the
+  // generic read-only `$.bind_property` form (naturalWidth/naturalHeight on the `load`
+  // event, videoWidth/videoHeight on the `resize` event), but the native client runtime
+  // does not emit them yet (`support: "unsupported"` ⇒ fail closed); refusal rides
+  // support, NOT the (emittable property) helper. `naturalWidth`/`naturalHeight` are
+  // `<img>`-only and `<img>` is NOT in the client element allowlist, so they are
+  // unreachable as a bind host (router-level only); `videoWidth`/`videoHeight` are
+  // reachable on `<video>` and fail closed at the runtime router. The IDE columns stay
+  // real; the implementation that supports each flips support + adds goldens.
+  {
+    name: "naturalWidth",
+    direction: "r",
+    value_type: "number",
+    tags: "img",
+    special: null,
+    official_helper: "property",
+    support: "unsupported",
+    arity: "property",
+    event: "load",
+    prelude: "none",
+    should_proxy: false,
+  },
+  {
+    name: "naturalHeight",
+    direction: "r",
+    value_type: "number",
+    tags: "img",
+    special: null,
+    official_helper: "property",
+    support: "unsupported",
+    arity: "property",
+    event: "load",
+    prelude: "none",
+    should_proxy: false,
+  },
+  {
+    name: "videoWidth",
+    direction: "r",
+    value_type: "number",
+    tags: "video",
+    special: null,
+    official_helper: "property",
+    support: "unsupported",
+    arity: "property",
+    event: "resize",
+    prelude: "none",
+    should_proxy: false,
+  },
+  {
+    name: "videoHeight",
+    direction: "r",
+    value_type: "number",
+    tags: "video",
+    special: null,
+    official_helper: "property",
+    support: "unsupported",
+    arity: "property",
+    event: "resize",
+    prelude: "none",
+    should_proxy: false,
+  },
 
-  // Readonly resize-observer bindings (DOM → local only; any element).
-  { name: "contentRect", direction: "r", value_type: "DOMRectReadOnly", tags: "*", special: null },
+  // Readonly resize-observer bindings (DOM → local only; any element). Official emits the
+  // DEDICATED `$.bind_resize_observer(el, '<name>', set)` family — NOT the generic property
+  // form — which the native client runtime does not emit yet
+  // (`support: "unsupported"` ⇒ `resolve_runtime_bind` returns `None`, the bind fails
+  // closed); the real `$.bind_resize_observer` identity is preserved (a generic property
+  // form would be the wrong helper). The IDE columns stay real (the projector type-checks
+  // the bind); the implementation that supports these flips support + adds goldens.
+  {
+    name: "contentRect",
+    direction: "r",
+    value_type: "DOMRectReadOnly",
+    tags: "*",
+    special: null,
+    official_helper: "resize_observer",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
+  },
   {
     name: "contentBoxSize",
     direction: "r",
     value_type: "readonly ResizeObserverSize[]",
     tags: "*",
     special: null,
+    official_helper: "resize_observer",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "borderBoxSize",
@@ -204,6 +577,12 @@ const REGISTRY = [
     value_type: "readonly ResizeObserverSize[]",
     tags: "*",
     special: null,
+    official_helper: "resize_observer",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
   {
     name: "devicePixelContentBoxSize",
@@ -211,6 +590,12 @@ const REGISTRY = [
     value_type: "readonly ResizeObserverSize[]",
     tags: "*",
     special: null,
+    official_helper: "resize_observer",
+    support: "unsupported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: false,
   },
 ];
 
@@ -242,6 +627,94 @@ function specialVariant(special) {
   }
 }
 
+/// Push the `target_policy` field for one row onto `lines`, in the rustfmt-canonical
+/// form. The default (absent `policy`) is `LvalueOrFunctionPair` (single line); only
+/// `bind:group` carries `IdentifierOrMemberOnly { official_code }`, whose struct-variant
+/// initializer exceeds the 100-col width and so wraps to the multi-line form rustfmt
+/// would itself produce (keeping the generated file fmt-clean + byte-stable).
+function pushPolicyField(lines, policy) {
+  switch (policy) {
+    case undefined:
+    case "lvalue_or_function_pair":
+      lines.push("        target_policy: BindTargetPolicy::LvalueOrFunctionPair,");
+      return;
+    case "identifier_or_member_only":
+      lines.push("        target_policy: BindTargetPolicy::IdentifierOrMemberOnly {");
+      lines.push('            official_code: "bind_group_invalid_expression",');
+      lines.push("        },");
+      return;
+    default:
+      throw new Error(`unknown policy: ${policy}`);
+  }
+}
+
+function officialHelperVariant(helper) {
+  // The CONTRACT-ROW official helper vocabulary. The builtin form-control helpers
+  // (value / select_value / checked) are NOT contract rows — they are emitted directly
+  // as a RuntimeHelper in `resolve_runtime_bind`'s builtin arm — so they are absent here.
+  const map = {
+    group: "Group",
+    current_time: "CurrentTime",
+    paused: "Paused",
+    played: "Played",
+    element_size: "ElementSize",
+    content_editable: "ContentEditable",
+    property: "Property",
+    this: "This",
+    files: "Files",
+    focused: "Focused",
+    volume: "Volume",
+    muted: "Muted",
+    playback_rate: "PlaybackRate",
+    buffered: "Buffered",
+    seekable: "Seekable",
+    seeking: "Seeking",
+    ended: "Ended",
+    ready_state: "ReadyState",
+    resize_observer: "ResizeObserver",
+  };
+  const v = map[helper];
+  if (!v) throw new Error(`unknown official_helper: ${helper}`);
+  return `OfficialRuntimeHelper::${v}`;
+}
+
+function supportVariant(support) {
+  switch (support) {
+    case "supported":
+      return "RuntimeSupport::Supported";
+    case "unsupported":
+      return "RuntimeSupport::Unsupported";
+    default:
+      throw new Error(`unknown support: ${support}`);
+  }
+}
+
+function arityVariant(arity) {
+  switch (arity) {
+    case "get_set":
+      return "HelperArity::GetSet";
+    case "set_only":
+      return "HelperArity::SetOnly";
+    case "property":
+      return "HelperArity::Property";
+    default:
+      throw new Error(`unknown arity: ${arity}`);
+  }
+}
+
+function preludeVariant(prelude) {
+  switch (prelude) {
+    case "none":
+      return "BindPrelude::None";
+    case "remove_input_defaults":
+      return "BindPrelude::RemoveInputDefaults";
+    case "remove_textarea_child":
+      return "BindPrelude::RemoveTextareaChild";
+    default:
+      throw new Error(`unknown prelude: ${prelude}`);
+  }
+}
+
 function generate(root) {
   const lines = [];
   lines.push("// This file is auto-generated by scripts/generate-svelte-bind-contract.mjs");
@@ -249,10 +722,20 @@ function generate(root) {
   lines.push("// edit the registry in the generator and regenerate, or the freshness");
   lines.push("// gate (svelte_bind_contract_freshness.rs) fails.");
   lines.push("");
-  lines.push("use super::bind_contract::{BindContract, BindDirection, BindSpecial};");
+  // The `use` import is emitted in the rustfmt-canonical WRAPPED form (the flat
+  // single-line form exceeds the 100-col width, so `cargo fmt --check` would demand
+  // the wrap — keeping the generated file fmt-clean AND byte-stable under the
+  // freshness gate).
+  lines.push("use super::bind_contract::{");
+  lines.push(
+    "    BindContract, BindDirection, BindPrelude, BindSpecial, BindTargetPolicy, HelperArity,",
+  );
+  lines.push("    OfficialRuntimeHelper, RuntimeSupport,");
+  lines.push("};");
   lines.push("");
-  lines.push("/// The complete CLOSED bind-contract table — the SOURCE OF TRUTH for the");
-  lines.push("/// wide `bind:` family. Ordered as authored in the generator registry.");
+  lines.push("/// The complete CLOSED bind-contract table — the SHARED SOURCE OF TRUTH for");
+  lines.push("/// the wide `bind:` family (IDE + runtime). Ordered as authored in the");
+  lines.push("/// generator registry.");
   lines.push("pub(crate) const SVELTE_BIND_CONTRACTS: &[BindContract] = &[");
   for (const row of REGISTRY) {
     lines.push("    BindContract {");
@@ -261,6 +744,13 @@ function generate(root) {
     lines.push(`        value_type: ${rsStr(row.value_type)},`);
     lines.push(`        tags: ${rsStr(row.tags)},`);
     lines.push(`        special: ${specialVariant(row.special)},`);
+    pushPolicyField(lines, row.policy);
+    lines.push(`        official_helper: ${officialHelperVariant(row.official_helper)},`);
+    lines.push(`        support: ${supportVariant(row.support)},`);
+    lines.push(`        arity: ${arityVariant(row.arity)},`);
+    lines.push(`        prop_event: ${rsStr(row.event)},`);
+    lines.push(`        prelude: ${preludeVariant(row.prelude)},`);
+    lines.push(`        should_proxy: ${row.should_proxy ? "true" : "false"},`);
     lines.push("    },");
   }
   lines.push("];");
@@ -270,7 +760,7 @@ function generate(root) {
   // can byte-compare a regen without mutating the committed tree.
   const outPath =
     process.env.VERTER_BIND_CONTRACT_OUT ||
-    path.join(root, "crates", "verter_compiler", "src", "svelte", "ide", "bind_contract_data.rs");
+    path.join(root, "crates", "verter_compiler", "src", "svelte", "bind_contract_data.rs");
   fs.writeFileSync(outPath, lines.join("\n"));
   return outPath;
 }

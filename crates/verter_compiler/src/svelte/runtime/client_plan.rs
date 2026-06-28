@@ -20,8 +20,7 @@ use oxc_allocator::Allocator;
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::SupportedHtmlElement;
 use super::client_codegen_helpers::{
-    escape_template_text, is_signal_kind, js_single_quoted, object_key, op_target_node,
-    style_object,
+    escape_template_text, js_single_quoted, object_key, op_target_node, style_object,
 };
 use super::client_shapes::{
     ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape, ClientInterpolationShape,
@@ -32,8 +31,8 @@ use super::expr::{BindingRuntimeKind, ScopeId};
 use super::expr_emit;
 use super::expr_rewrite::{self, PropReads, ProxyInitMap};
 use super::ir::{
-    AttrIr, AttrOpKind, BindOp, EventOp, EventTarget, ExprId, IrNode, MixedAttrPart, NodeId,
-    NonStaticPropertyKind, NonStaticPropertyValue, RuntimeOp, StyleDirectiveValue, SvelteRuntimeIr,
+    AttrIr, AttrOpKind, ExprId, IrNode, MixedAttrPart, NodeId, NonStaticPropertyKind,
+    NonStaticPropertyValue, RuntimeOp, StyleDirectiveValue, SvelteRuntimeIr,
 };
 use verter_span::Span;
 
@@ -89,7 +88,17 @@ pub(super) struct SupportedClientIr<'a> {
     pub(super) event_shapes: Vec<(NodeId, ClientEventHandlerShape)>,
     /// The accepted bind shape per target node (the classifier's typed FACT) — the
     /// op projection carries it onto each [`ClientRuntimeOp::Bind`].
-    pub(super) bind_shapes: Vec<(NodeId, ClientBindShape)>,
+    pub(super) bind_shapes: Vec<(NodeId, String, ClientBindShape)>,
+    /// The `bind:group` value literal per group-input node — the emitter writes
+    /// `input.value = input.__value = '<value>'` per input and declares the
+    /// component-fn-scoped `const binding_group = []` when this is non-empty.
+    pub(super) group_values: Vec<(NodeId, String)>,
+    /// The `bind:group` DYNAMIC/mixed `value={…}` per group-input node — the structured
+    /// value + reactivity the emitter renders as the change-tracked `$.template_effect`
+    /// update (reactive) or one-shot inline write (non-reactive), plus the group getter's
+    /// dynamic-value dependency read. Built from `classified.group_dynamic_value_nodes` by
+    /// reading each node's `value` attr through the shared `attr_value_for`.
+    pub(super) group_dynamic_values: Vec<(NodeId, super::client_plan_types::GroupDynamicValue)>,
     /// The accepted interpolation shape per interpolation node (the classifier's
     /// typed FACT) — proves each `ReactiveText` node is a bare signal /
     /// no-default-prop read, so the plan reads a typed classification instead of
@@ -102,7 +111,7 @@ pub(super) struct SupportedClientIr<'a> {
     /// The TYPED supported instance-script items (the strict finite allowlist) —
     /// the SOLE input `build_script_items` lowers. The broad statement-rewrite path
     /// is gone; this is the only instance-script source.
-    pub(super) script_items: Vec<super::client_shapes::SupportedInstanceScriptItem>,
+    pub(super) script_items: Vec<super::instance_items::SupportedInstanceScriptItem>,
     /// The accepted `{@html}` node ids (the classifier's typed FACT) — proves each
     /// raw-markup node is supported in its position, so the plan projects a
     /// [`ClientRuntimeOp::Html`] / [`ClientNode::RawHtml`] instead of refusing.
@@ -143,19 +152,26 @@ impl<'a> SupportedClientIr<'a> {
             ir.analysis.scripts.module_source,
             ir.analysis.scripts.instance_source,
         );
-        let projection = SupportedClientIr {
+        let mut projection = SupportedClientIr {
             ir,
             prop_reads,
             proxy_inits,
             declared_roots,
             event_shapes: classified.event_shapes.clone(),
             bind_shapes: classified.bind_shapes.clone(),
+            group_values: classified.group_values.clone(),
+            group_dynamic_values: Vec::new(),
             interp_shapes: classified.interp_shapes.clone(),
             element_facts: classified.element_facts.clone(),
             script_items: classified.script_items.clone(),
             html_nodes: classified.html_nodes.clone(),
             spread_elements: classified.spread_elements.clone(),
         };
+        // The `bind:group` DYNAMIC/mixed values — built here (not in the classifier) because
+        // it needs the rewriter + reactivity analysis the projection owns. Each node's `value`
+        // attr is read through the shared `attr_value_for`; a non-emittable value fails closed.
+        projection.group_dynamic_values =
+            projection.collect_group_dynamic_values(&classified.group_dynamic_value_nodes)?;
 
         // Divergence guard: the op projection re-derives a plain dynamic attribute's
         // emission shape through the shared `classify_dynamic_attr_shape` (the SAME
@@ -196,8 +212,9 @@ impl<'a> SupportedClientIr<'a> {
 
         // (1) The component-body statements from the TYPED instance-script item
         // allowlist (a `<script module>` / instance import is fail-closed upstream, so
-        // there are no module-scope imports / hoists).
-        let body_statements = projection.build_script_items();
+        // there are no module-scope imports / hoists). A function-pair function body
+        // lowers through the fallible rewriter, so this is fallible.
+        let body_statements = projection.build_script_items()?;
 
         // (2) The narrow node arena (mirrors the supported IR node space). The
         // reactivity decision for each interpolation is made here: a non-reactive
@@ -230,21 +247,50 @@ impl<'a> SupportedClientIr<'a> {
     }
 
     /// Lower the TYPED supported instance-script items into the narrow
-    /// [`ClientScriptItem`] component-body statements.
+    /// [`ClientScriptItem`] component-body statements, IN SOURCE ORDER.
     ///
-    /// The instance script is the strict finite [`SupportedInstanceScriptItem`](super::client_shapes::SupportedInstanceScriptItem)
-    /// allowlist (minted by the default-deny classifier); `lower_supported_instance_items`
-    /// is a thin per-variant transform over that enum — there is NO broad
-    /// statement-rewrite path. A `<script module>` and an instance `import` / `export`
-    /// were already refused at the classifier (the script-hoisting deferral), so this
-    /// stage emits NO module-script imports / hoists; it produces ONLY the
-    /// component-FUNCTION-BODY statements. Infallible — every item was already proven
-    /// lowerable by the allowlist classifier.
-    fn build_script_items(&self) -> Vec<ClientScriptItem> {
-        expr_emit::lower_supported_instance_items(&self.script_items, &self.ir.analysis.bindings)
-            .into_iter()
-            .map(|code| ClientScriptItem::BodyStatement { code })
-            .collect()
+    /// The instance script is the strict finite [`SupportedInstanceScriptItem`](super::instance_items::SupportedInstanceScriptItem)
+    /// allowlist (minted by the default-deny classifier); the lowering is a thin
+    /// per-variant transform over that enum — there is NO broad statement-rewrite path. A
+    /// `<script module>` and an instance `import` / `export` were already refused at the
+    /// classifier (the script-hoisting deferral), so this stage emits NO module-script
+    /// imports / hoists; it produces ONLY the component-FUNCTION-BODY statements.
+    ///
+    /// Every variant except `FunctionDecl` is a rewriter-FREE transform
+    /// ([`lower_simple_instance_item`](expr_emit::lower_simple_instance_item)). A
+    /// `FunctionDecl` (a named function referenced by a DOM function-pair bind) lowers its
+    /// BODY through the FALLIBLE expression rewriter ([`rewrite_source`](Self::rewrite_source))
+    /// rooted at the instance-script scope — so a signal read/write inside the body
+    /// becomes `$.get`/`$.set` (`function get() { return $.get(value); }`), NEVER verbatim.
+    /// FALLIBLE: a function body using an unsupported form refuses.
+    fn build_script_items(&self) -> Result<Vec<ClientScriptItem>, UnsupportedSvelteRuntimeSurface> {
+        use super::instance_items::SupportedInstanceScriptItem as Item;
+        use expr_emit::SimpleItemLowering;
+        let root_scope = self.ir.root_scope().scope;
+        let mut items = Vec::new();
+        for item in &self.script_items {
+            match expr_emit::lower_simple_instance_item(item, &self.ir.analysis.bindings) {
+                SimpleItemLowering::Statement(code) => {
+                    items.push(ClientScriptItem::BodyStatement { code });
+                }
+                SimpleItemLowering::None => {}
+                SimpleItemLowering::NeedsRewriter => {
+                    let Item::FunctionDecl { source, .. } = item else {
+                        // `NeedsRewriter` is produced ONLY for `FunctionDecl`; any other
+                        // item reaching here is a classifier/lowering divergence.
+                        unreachable!("only FunctionDecl needs the rewriter")
+                    };
+                    // The function declaration lowers through the shared rewriter (its
+                    // body's signal reads/writes rewrite; the `function name(...) {}`
+                    // structure is preserved). The rewriter wraps the source as an
+                    // expression internally, so a declaration's source round-trips as a
+                    // function expression with the body edits applied.
+                    let code = self.rewrite_source(source, root_scope)?;
+                    items.push(ClientScriptItem::BodyStatement { code });
+                }
+            }
+        }
+        Ok(items)
     }
 
     /// Build the narrow node arena (one `ClientNode` per supported IR node, indexed
@@ -366,18 +412,18 @@ impl<'a> SupportedClientIr<'a> {
                 value: value.as_ref().map(|v| v.value.clone()),
             }),
             AttrIr::Bind { target, .. } => {
-                let bind_target = match target.as_str() {
-                    "value" => ClientBindTarget::Value,
-                    "this" => ClientBindTarget::This,
-                    other => {
-                        return Err(UnsupportedSvelteRuntimeSurface::Binding {
-                            target: other.to_string(),
-                            span: Span::new(0, 0),
-                        });
-                    }
+                // The COARSE structural-mirror kind: `bind:this` (render-side, emitted
+                // inline) vs any DOM value/property bind (post-walk, routed by its
+                // op's `RuntimeBindRouting`). The PRECISE helper routing + getter/setter
+                // rewrite live on the corresponding `ClientRuntimeOp::Bind` shape; this
+                // narrow attr records the family only. Acceptance is owned by the
+                // classifier (the op carries the recorded shape); an unsupported bind
+                // never reaches here (it failed closed at classification).
+                let bind_target = if target == "this" {
+                    ClientBindTarget::This
+                } else {
+                    ClientBindTarget::DomValue
                 };
-                // The getter/setter rewrite lives on the corresponding op; the
-                // element attr records the supported kind only.
                 let _ = tag;
                 Ok(ClientAttr::Bind {
                     target: bind_target,
@@ -511,10 +557,18 @@ impl<'a> SupportedClientIr<'a> {
                 // A dynamic attribute / class / style write .
                 RuntimeOp::ReactiveAttr { target, attr } => match attr.kind {
                     AttrOpKind::Plain => {
+                        // A `bind:group` input's DYNAMIC/mixed `value` is NOT a generic
+                        // reactive attr — it is the group-value source, emitted as the
+                        // change-tracked `$.template_effect` update + the bind getter
+                        // dependency read (see `group_dynamic_values` / the `Bind` op). Skip
+                        // the generic reactive-attr projection for it (which would mis-route
+                        // `value` through the form-control refusal).
+                        let is_group_value = attr.name == "value"
+                            && self.group_dynamic_values.iter().any(|(n, _)| *n == *target);
                         // The first op for this `(target, name)` builds the WHOLE
                         // attribute value (the full `Dynamic` / `Mixed` concatenation);
                         // a Mixed attribute's later per-part ops are folded into it.
-                        if plain_attr_done.insert((*target, attr.name.clone())) {
+                        if !is_group_value && plain_attr_done.insert((*target, attr.name.clone())) {
                             let op = self.project_reactive_attr_op(*target, &attr.name)?;
                             ops.push(op);
                         }
@@ -586,145 +640,6 @@ impl<'a> SupportedClientIr<'a> {
         Ok(ops)
     }
 
-    /// Project a `bind:` op into the narrow [`ClientRuntimeOp::Bind`], carrying the
-    /// classifier's accepted [`ClientBindShape`] fact.
-    fn project_bind_op(
-        &self,
-        target: NodeId,
-        bind: &BindOp,
-        _scope: ScopeId,
-    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
-        let bind_target = match bind.target.as_str() {
-            "value" => ClientBindTarget::Value,
-            "this" => ClientBindTarget::This,
-            other => {
-                return Err(UnsupportedSvelteRuntimeSurface::Binding {
-                    target: other.to_string(),
-                    span: Span::new(0, 0),
-                });
-            }
-        };
-        // The accepted bind SHAPE the classifier recorded for this target node. A
-        // bind op with NO recorded shape is a classifier/plan divergence — fail
-        // closed defensively (never emit an unclassified bind).
-        let shape = self
-            .bind_shapes
-            .iter()
-            .find(|(n, _)| *n == target)
-            .map(|(_, s)| s.clone())
-            .ok_or_else(|| UnsupportedSvelteRuntimeSurface::Binding {
-                target: bind.target.clone(),
-                span: Span::new(0, 0),
-            })?;
-        let (getter, setter) = self.bind_getter_setter(bind.expr, &bind.target)?;
-        Ok(ClientRuntimeOp::Bind {
-            target: ClientNodeId(target.0),
-            bind_target,
-            shape,
-            getter,
-            setter,
-        })
-    }
-
-    /// Project an event op into the narrow [`ClientRuntimeOp::Event`], carrying the
-    /// classifier's accepted [`ClientEventHandlerShape`] fact.
-    fn project_event_op(
-        &self,
-        target: EventTarget,
-        event: &EventOp,
-        _scope: ScopeId,
-    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
-        let EventTarget::Node(node_id) = target else {
-            return Err(UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
-                event_type: event.event_type.clone(),
-                span: Span::new(0, 0),
-            });
-        };
-        // The accepted handler SHAPE the classifier recorded for this target node. An
-        // event op with NO recorded shape is a classifier/plan divergence — fail
-        // closed defensively (never emit an unclassified, possibly-non-function
-        // handler).
-        let shape = self
-            .event_shapes
-            .iter()
-            .find(|(n, _)| *n == node_id)
-            .map(|(_, s)| s.clone())
-            .ok_or_else(|| UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
-                event_type: event.event_type.clone(),
-                span: Span::new(0, 0),
-            })?;
-        let analyzed = self.ir.analysis.expressions.get(event.handler);
-        let handler = self.rewrite(event.handler, analyzed.scope)?;
-        Ok(ClientRuntimeOp::Event {
-            target: ClientNodeId(node_id.0),
-            event_type: event.event_type.clone(),
-            shape,
-            handler,
-        })
-    }
-
-    /// The getter + setter bodies for a `bind:` target. The getter is the bound
-    /// expression rewritten as a value read. The setter is shaped by the target's
-    /// STRUCTURAL lvalue kind (never a raw-text assignment):
-    ///
-    /// - a bare-IDENTIFIER signal target sets the signal directly
-    ///   (`$.set(name, $$value)`);
-    /// - a bare-IDENTIFIER non-signal target (a plain local) assigns it directly
-    ///   (`name = $$value`);
-    /// - a MEMBER target (`obj.x`, `a[i]`) writes through the SAME fallible
-    ///   lvalue-aware rewrite as the getter, so a signal-wrapped-proxy member write
-    ///   is `$.get(obj).x = $$value` (NOT a raw `obj.x = $$value` — the raw form
-    ///   would read the unproxied object and miss the reactive write).
-    ///
-    /// The lvalue kind is decided STRUCTURALLY from the parsed OXC node (never a
-    /// `source.contains('.')` text scan); a non-lvalue target was already refused by
-    /// the classifier.
-    fn bind_getter_setter(
-        &self,
-        expr: ExprId,
-        _target: &str,
-    ) -> Result<(String, String), UnsupportedSvelteRuntimeSurface> {
-        let analyzed = self.ir.analysis.expressions.get(expr);
-        let getter = self.rewrite(expr, analyzed.scope)?;
-        let text = analyzed.source.trim();
-        let mut alloc = Allocator::default();
-        let setter = match super::expr::classify_bind_target(&alloc, analyzed.source) {
-            // A bare identifier: a signal sets directly; a plain local assigns
-            // directly. The signal vs plain decision reads the resolved binding kind.
-            Some(super::expr::BindTargetKind::Identifier) => {
-                let is_signal = self
-                    .ir
-                    .analysis
-                    .bindings
-                    .resolve_kind(&self.ir.analysis.scopes, analyzed.scope, text)
-                    .is_some_and(is_signal_kind);
-                if is_signal {
-                    format!("$.set({text}, $$value)")
-                } else {
-                    format!("{text} = $$value")
-                }
-            }
-            // A member target: the LHS is the bound member expression rewritten as a
-            // value read (identical to the getter — `$.get(obj).x`), assigned to.
-            // Routing through the rewriter is the fix for the signal-wrapped-proxy
-            // member write.
-            Some(super::expr::BindTargetKind::Member) => {
-                let lvalue = self.rewrite(expr, analyzed.scope)?;
-                format!("{lvalue} = $$value")
-            }
-            // A non-lvalue target was refused by the classifier (`bind:value={f()}`);
-            // defensive — fail closed rather than emit `f() = $$value`.
-            None => {
-                return Err(UnsupportedSvelteRuntimeSurface::Binding {
-                    target: text.to_string(),
-                    span: Span::new(0, 0),
-                });
-            }
-        };
-        alloc.reset();
-        Ok((getter, setter))
-    }
-
     /// Whether a template expression references a reactive SIGNAL (the official
     /// `metadata.expression.has_state`). A dynamic attribute / class / style value
     /// with state joins the combined `$.template_effect`; a stateless value is a
@@ -753,7 +668,7 @@ impl<'a> SupportedClientIr<'a> {
     /// uses. A dynamic attribute / property value that `has_call` is MEMOIZED into the
     /// `$.template_effect(($N) => …, [() => expr])` deps-array form (the official
     /// `build_template_chunk` memoize rule), so the call runs once per dep change.
-    fn expr_has_call(&self, expr_id: ExprId) -> bool {
+    pub(super) fn expr_has_call(&self, expr_id: ExprId) -> bool {
         let analyzed = self.ir.analysis.expressions.get(expr_id);
         super::reactive_analysis::expr_has_call(
             analyzed.source,
@@ -762,6 +677,46 @@ impl<'a> SupportedClientIr<'a> {
             &self.ir.analysis.scopes,
             &self.declared_roots,
         )
+    }
+
+    /// Build the `bind:group` DYNAMIC/mixed value ([`GroupDynamicValue`]) for each recorded
+    /// group-input node — the structured value (via the shared [`attr_value_for`](Self::attr_value_for))
+    /// plus its reactivity (`has_state || has_call`, the official `RegularElement.js` rule). A
+    /// node whose `value` attr is not an emittable dynamic/mixed value fails closed (the
+    /// classifier only records a node that carried one, so the `?` is defensive).
+    ///
+    /// [`GroupDynamicValue`]: super::client_plan_types::GroupDynamicValue
+    fn collect_group_dynamic_values(
+        &self,
+        nodes: &[NodeId],
+    ) -> Result<
+        Vec<(NodeId, super::client_plan_types::GroupDynamicValue)>,
+        UnsupportedSvelteRuntimeSurface,
+    > {
+        let mut out = Vec::with_capacity(nodes.len());
+        for &node in nodes {
+            let IrNode::Element(el) = self.ir.node(node) else {
+                continue;
+            };
+            let (value, has_state) = self.attr_value_for(el, "value")?;
+            let reactive = has_state || value.has_call();
+            // The outer `?? ''` group-value coercion is gated on DEFINEDNESS (official
+            // `evaluated.is_defined`), NOT single-vs-mixed: a provably-defined SINGLE value
+            // omits it. Reuse the SAME `mixed_chunk_nullish_wrap` definedness analysis the
+            // mixed-attribute parts run (no new analysis path) — meaningful only for a single
+            // value (a mixed value is already a string and never carries the outer coercion).
+            let single_value_defined =
+                matches!(value, AttrValue::Single { .. }) && self.group_value_single_is_defined(el);
+            out.push((
+                node,
+                super::client_plan_types::GroupDynamicValue {
+                    value,
+                    reactive,
+                    single_value_defined,
+                },
+            ));
+        }
+        Ok(out)
     }
 
     /// Build the STRUCTURED dynamic-attribute value for the attribute named `name` on
@@ -1366,6 +1321,55 @@ impl<'a> SupportedClientIr<'a> {
         expr_rewrite::rewrite_expression_full(
             analyzed.source,
             analyzed.scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+            &self.prop_reads,
+            &self.proxy_inits,
+        )
+        .map(|r| r.text)
+    }
+
+    /// Rewrite a RAW expression SOURCE STRING (not a pre-analyzed `ExprId`) to its
+    /// emitted client form in `scope`, through the same FALLIBLE source-preserving
+    /// rewriter as [`rewrite`](Self::rewrite). Used for a function-pair bind's two
+    /// `{get, set}` element sources, which are sliced from the bind expression's source
+    /// and rewritten INDEPENDENTLY (each as a value expression, so a signal read/write
+    /// inside an inline arrow lowers while a bare function identifier passes through).
+    pub(super) fn rewrite_source(
+        &self,
+        source: &str,
+        scope: ScopeId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        expr_rewrite::rewrite_expression_full(
+            source,
+            scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+            &self.prop_reads,
+            &self.proxy_inits,
+        )
+        .map(|r| r.text)
+    }
+
+    /// Rewrite a FUNCTION-PAIR bind element SOURCE STRING through the PLAIN-JS rewrite
+    /// lane ([`rewrite_expression_plain_js`](expr_rewrite::rewrite_expression_plain_js)):
+    /// the element is parsed as `SourceType::mjs()` and NOT TS-stripped, mirroring
+    /// official svelte@5.56.3's plain-JS parse of a binding expression. Used ONLY for the
+    /// two `{get, set}` elements of a DOM function-pair bind (already accepted +
+    /// extracted by `parse_plain_svelte_function_pair`); each element is rewritten
+    /// INDEPENDENTLY as a value expression (signal reads/writes inside an inline arrow
+    /// lower; a bare function identifier passes through). This is distinct from
+    /// [`rewrite_source`](Self::rewrite_source) (the TSX + strip lane used for
+    /// instance-script `function` declarations) — the dialect change is SCOPED to
+    /// function-pair elements, not the broader expression-rewrite surface.
+    pub(super) fn rewrite_source_plain_js(
+        &self,
+        source: &str,
+        scope: ScopeId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        expr_rewrite::rewrite_expression_plain_js(
+            source,
+            scope,
             &self.ir.analysis.bindings,
             &self.ir.analysis.scopes,
             &self.prop_reads,

@@ -128,6 +128,41 @@ pub enum CoreOfficialValidationRule {
     /// invalid prop name on a component is ACCEPTED (not this rule); a colon name
     /// (`foo:bar`), `data-x`, `aria-label`, and `_foo` are all valid.
     AttributeInvalidName,
+    /// A `bind:group` whose target is a function-pair (`SequenceExpression`) of ANY arity
+    /// — official `bind_group_invalid_expression`. `bind:group` accepts ONLY an
+    /// `Identifier` or `MemberExpression` target (the getter/setter pair form is
+    /// meaningless for the shared checkbox/radio selection group); official's
+    /// `BindDirective` analysis throws this BEFORE the two-element shape check, so any
+    /// sequence target (`{get, set}` OR `{a, b, c}`) is rejected. Detected from the
+    /// data-driven `BindTargetPolicy` column (only `bind:group` is identifier/member-only),
+    /// never a `name == "group"` hard-code.
+    BindGroupInvalidExpression,
+    /// A `bind:` directive whose AUTHORED value wraps a sequence (function-pair) in
+    /// PARENTHESES (`bind:value={(get, set)}`, `bind:this={(get, set)}`, quoted
+    /// `"{(get, set)}"`) — official `bind_invalid_parens`. Svelte's `BindDirective` analysis
+    /// scans backward from a `SequenceExpression` target to the opening `{` and throws if it
+    /// crosses a `(` (author parens around a bind sequence are invalid). A parenthesized
+    /// NON-sequence (`{(v)}`) is NOT this reject (official accepts it), and a `bind:group`
+    /// sequence is `bind_group_invalid_expression` FIRST (group policy precedes the paren
+    /// scan). Detected STRUCTURALLY from the typed bind-target fact's
+    /// [`is_parenthesized_sequence`](crate::svelte::runtime::expr::BindTargetFact), never a
+    /// source-text scan.
+    BindInvalidParens,
+    /// A `bind:` directive whose target is NEITHER a valid lvalue (`Identifier` /
+    /// `MemberExpression`) NOR a valid two-element getter/setter function-pair — a
+    /// `CallExpression`, a literal, a 3+-element `SequenceExpression`, a binary / optional
+    /// chain / other non-assignable shape (`bind:value={f()}`, `bind:value={a, b, c}`,
+    /// `bind:value={1}`) — official `bind_invalid_expression`. Svelte's `BindDirective`
+    /// analysis accepts only an Identifier / Member lvalue or a `{get, set}` pair; everything
+    /// else throws this. This is bind-target SHAPE validation (the same class as
+    /// [`BindGroupInvalidExpression`](Self::BindGroupInvalidExpression) and
+    /// [`BindInvalidParens`](Self::BindInvalidParens)), NOT TS-grammar parity — a TS-wrapped
+    /// lvalue (`name!` / `o!.x`) is the parse-error / D-26 class and is EXCLUDED. Detected
+    /// STRUCTURALLY from the typed bind-target fact's
+    /// [`is_invalid_bind_expression`](crate::svelte::runtime::expr::BindTargetFact), never a
+    /// source-text scan; scanned AFTER the group-policy and paren scans so the more-specific
+    /// codes win.
+    BindInvalidExpression,
 }
 
 impl CoreOfficialValidationRule {
@@ -155,6 +190,9 @@ impl CoreOfficialValidationRule {
         CoreOfficialValidationRule::ParserStrictness,
         CoreOfficialValidationRule::DirectiveInvalidValue,
         CoreOfficialValidationRule::AttributeInvalidName,
+        CoreOfficialValidationRule::BindGroupInvalidExpression,
+        CoreOfficialValidationRule::BindInvalidParens,
+        CoreOfficialValidationRule::BindInvalidExpression,
     ];
 
     /// The PascalCase rule name as it appears in a reject corpus row's `rule` field.
@@ -181,6 +219,9 @@ impl CoreOfficialValidationRule {
             Self::ParserStrictness => "ParserStrictness",
             Self::DirectiveInvalidValue => "DirectiveInvalidValue",
             Self::AttributeInvalidName => "AttributeInvalidName",
+            Self::BindGroupInvalidExpression => "BindGroupInvalidExpression",
+            Self::BindInvalidParens => "BindInvalidParens",
+            Self::BindInvalidExpression => "BindInvalidExpression",
         }
     }
 
@@ -227,6 +268,9 @@ impl CoreOfficialValidationRule {
             Self::ParserStrictness => "tag_invalid_name",
             Self::DirectiveInvalidValue => "directive_invalid_value",
             Self::AttributeInvalidName => "attribute_invalid_name",
+            Self::BindGroupInvalidExpression => "bind_group_invalid_expression",
+            Self::BindInvalidParens => "bind_invalid_parens",
+            Self::BindInvalidExpression => "bind_invalid_expression",
         }
     }
 
@@ -261,6 +305,11 @@ impl CoreOfficialValidationRule {
             Self::ParserStrictness => "svelte-official-reject-parser-strictness",
             Self::DirectiveInvalidValue => "svelte-official-reject-directive-invalid-value",
             Self::AttributeInvalidName => "svelte-official-reject-attribute-invalid-name",
+            Self::BindGroupInvalidExpression => {
+                "svelte-official-reject-bind-group-invalid-expression"
+            }
+            Self::BindInvalidParens => "svelte-official-reject-bind-invalid-parens",
+            Self::BindInvalidExpression => "svelte-official-reject-bind-invalid-expression",
         }
     }
 
@@ -309,6 +358,20 @@ impl CoreOfficialValidationRule {
                 "an attribute with an invalid name on an intrinsic element (a name starting \
                  with a digit / `-` / `.`, or containing one of `^ $ @ % & # ? ! | ( ) [ ] \
                  { } * + ~ ;`)"
+            }
+            Self::BindGroupInvalidExpression => {
+                "a `bind:group` with a function-pair (sequence) target (`bind:group` can only \
+                 bind to an Identifier or MemberExpression)"
+            }
+            Self::BindInvalidParens => {
+                "a `bind:` directive whose value wraps a getter/setter sequence in \
+                 parentheses (`bind:value={(get, set)}`) — author parens around a bind \
+                 sequence are invalid"
+            }
+            Self::BindInvalidExpression => {
+                "a `bind:` directive whose target is neither a valid lvalue \
+                 (Identifier / MemberExpression) nor a two-element `{get, set}` pair \
+                 (a call, a literal, a 3+-element sequence, or other non-assignable shape)"
             }
         };
         format!(

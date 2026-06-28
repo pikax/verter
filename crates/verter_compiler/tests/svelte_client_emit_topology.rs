@@ -85,6 +85,58 @@ const SUPPORTED_MATRIX: &[&str] = &[
     // bind:value on an <input> to a reactive $state identifier.
     "matrix/bind_value_signal_ident",
     "matrix/bind_value_plain_ident",
+    // ── 5c DOM bind TARGET-LVALUE breadth (the target-lvalue widening) ──
+    // bind:value to a PLAIN local ident (`let draft = "x"`) — official emits the plain
+    // read/write closures `$.bind_value(input, () => draft, ($$value) => draft =
+    // $$value)`, and the plain local survives script lowering VERBATIM (not `$.state`).
+    "matrix/bind_value_plain_local",
+    // bind:value to a PLAIN-local MEMBER (`let form = { name: "" }`) — the plain member
+    // lvalue closures (`() => form.name` / `form.name = $$value`).
+    "matrix/bind_value_plain_local_member",
+    // bind:value to a two-element FUNCTION-PAIR `{get, set}` — the user-supplied get/set
+    // (signal-rewritten inline arrows) passed DIRECTLY: `$.bind_value(input, () =>
+    // $.get(value), (next) => $.set(value, next, true))`.
+    "matrix/bind_value_function_pair",
+    // element bind:this to a two-element FUNCTION-PAIR `{get, set}` — the user-supplied
+    // get/set passed DIRECTLY (setter slot first, getter slot second, no synthesized
+    // thunk): `$.bind_this(div, (v) => $.set(el, v, true), () => $.get(el))`.
+    "matrix/bind_this_function_pair",
+    // ── 5c DOM-hosted bind family (the bindings-breadth additions) ──
+    // textarea bind:value — `$.remove_textarea_child` + `$.bind_value` (oracle
+    // CASE textarea_value).
+    "matrix/bind_textarea_value",
+    // select bind:value (single) — `$.bind_select_value` (oracle CASE select_value).
+    "matrix/bind_select_value",
+    // bind:checked — `$.remove_input_defaults` + `$.bind_checked` (oracle CASE checked).
+    "matrix/bind_checked",
+    // media: dedicated `$.bind_current_time` (single, audio host) + the non-uniform
+    // multi-row video case (`currentTime`/`paused` dedicated, `duration` read-only via
+    // `$.bind_property('duration','durationchange',…)`, `played` setter-only via
+    // `$.bind_played`) — oracle CASEs media_currenttime + media_multi.
+    "matrix/bind_media_currenttime",
+    "matrix/bind_media_multi",
+    // dimensions: `$.bind_element_size(el, 'name', set)` setter-only, multi (oracle
+    // CASE dimension_multi).
+    "matrix/bind_dimension_multi",
+    // contenteditable: `$.bind_content_editable('name', el, get, set)` (oracle CASEs
+    // contenteditable_innerhtml / _textcontent / _innertext).
+    "matrix/bind_contenteditable_innerhtml",
+    "matrix/bind_contenteditable_textcontent",
+    "matrix/bind_contenteditable_innertext",
+    // generic DOM property: `$.bind_property('open','toggle',el,set,get)` read-write
+    // (oracle CASE property_open).
+    "matrix/bind_property_open",
+    // radio bind:group — the component-fn-scoped `const binding_group = []`, per-input
+    // `$.remove_input_defaults` + `input.value = input.__value = '<value>'`, and the
+    // per-input `$.bind_group(binding_group, [], input, get, set)` (oracle CASE group).
+    "matrix/bind_group_radio",
+    // radio bind:group with a DYNAMIC `value={expr}` — the `var input_value;` change-tracker,
+    // the guarded `$.template_effect` writing `input.value = (input.__value = expr) ?? ''`
+    // before `$.bind_group`, and the group getter's dynamic-value dependency read (F4).
+    "matrix/bind_group_radio_dynamic",
+    // radio bind:group with a MIXED `value="pre-{expr}"` — the template-literal value
+    // (`input.value = input.__value = `pre-${expr ?? ''}``) under the same tracked update (F4).
+    "matrix/bind_group_radio_mixed",
     // a delegated onclick arrow with a $state-write body.
     "matrix/event_arrow",
     // reactive text (single / multi / mixed) — bare signal reads, simple-ASCII chunks.
@@ -5322,8 +5374,13 @@ fn supported_matrix_enumerates_every_documented_sub_shape() {
     // row is dropped.
     assert_eq!(
         SUPPORTED_MATRIX.len(),
-        16,
-        "the supported matrix must enumerate all 16 documented supported sub-shapes"
+        33,
+        "the supported matrix must enumerate all 33 documented supported sub-shapes \
+         (16 §1.2/rune/attr + the 11 5c DOM-hosted bind-family rows incl. radio group + \
+         the 3 DOM bind TARGET-LVALUE rows: plain-local ident, plain-local member, and \
+         the two-element function-pair `{{get, set}}` + the element `bind:this={{get, set}}` \
+         function-pair row + the 2 F4 dynamic/mixed `bind:group` value rows: \
+         `bind_group_radio_dynamic` and `bind_group_radio_mixed`)"
     );
     // No duplicate slugs across the matrix.
     let mut seen = std::collections::BTreeSet::new();
@@ -5407,6 +5464,72 @@ fn emitted_client_topology_matches_official_goldens() {
         // cosmetically (`[() => (String(x))]` vs official `[() => String(x)]`) — invisible HERE
         // exactly as it is in the codegen corpus, with no shape predicate at the wrap site.
         assert_modules_structurally_equal(slug, &code, &golden_client_module(&golden));
+    }
+}
+
+/// The 5c DOM-hosted bind slugs — the bindings-breadth additions whose emitted
+/// constructs the D-17 verification below proves are FULLY structurally signed.
+const BIND_5C_SLUGS: &[&str] = &[
+    "matrix/bind_textarea_value",
+    "matrix/bind_select_value",
+    "matrix/bind_checked",
+    "matrix/bind_media_currenttime",
+    "matrix/bind_media_multi",
+    "matrix/bind_dimension_multi",
+    "matrix/bind_contenteditable_innerhtml",
+    "matrix/bind_contenteditable_textcontent",
+    "matrix/bind_contenteditable_innertext",
+    "matrix/bind_property_open",
+    "matrix/bind_group_radio",
+    // F4 dynamic/mixed group value — the NEW constructs (the `var input_value;` no-init
+    // declaration, the guarded `if (input_value !== (input_value = …)) { … }` IfStatement
+    // inside the `$.template_effect` arrow body) sign through `decl_var_sig` (`Var(...)`) and
+    // `stmt_sig`'s `If(...)` arm respectively — NOT a lossy `Decl(`/`Stmt(` fallback.
+    "matrix/bind_group_radio_dynamic",
+    "matrix/bind_group_radio_mixed",
+];
+
+#[test]
+fn bind_5c_emit_hits_no_lossy_comparator_axis_d17() {
+    // D-17 OBLIGATION VERIFICATION (with evidence from the ACTUAL 5c emit).
+    //
+    // D-17 requires: if any 5c-NEW emitted construct hits a DROPPED/LOSSY comparator
+    // axis — an `Other(` (expr) / `Stmt(` (statement) / `Decl(` (declaration)
+    // discriminant-only fallback — for a node that PARSES under `SourceType::mjs()`,
+    // that axis must be encoded + discriminator-tested in the same change. The
+    // fallbacks are correct ONLY for TS-only / JSX / V8-intrinsic forms that do NOT
+    // parse under `SourceType::mjs()`.
+    //
+    // The DOM-hosted bind emit introduces exactly these NEW constructs beyond the base bind:value/bind:this emit:
+    //   - chained member assignment `input.value = input.__value = 'X'`
+    //     (`ExpressionStatement` → `AssignmentExpression` whose RHS is itself an
+    //     `AssignmentExpression`, LHS a `StaticMemberExpression`);
+    //   - `const binding_group = [];` (a `const` `VariableDeclaration` with an
+    //     `ArrayExpression` init);
+    //   - the `$.bind_select_value` / `$.bind_checked` / `$.bind_property` /
+    //     `$.bind_content_editable` / `$.bind_element_size` / `$.bind_group` /
+    //     `$.bind_played` / `$.remove_textarea_child` calls (`CallExpression`s with
+    //     identifier / string-literal / arrow args).
+    //
+    // EVERY one of these signs through an EXISTING structural arm of `program_sig`
+    // (`ExpressionStatement` → `expr_sig` → `AssignmentExpression`; `assignment_target_sig`
+    // → `StaticMemberExpression`; `decl_var_sig` → `ArrayExpression`; `CallExpression` →
+    // `expr_sig` over each arg). This test PROVES that empirically: it emits each 5c
+    // bind slug, computes the AST-structural `module_sig` (the comparator's oracle
+    // signature over `SourceType::mjs()`), and asserts NO lossy-fallback token appears.
+    // It is the DISCRIMINATOR a future regression (a 5c construct collapsing to a
+    // discriminant-only signature) would trip.
+    for &slug in BIND_5C_SLUGS {
+        let code = emit(slug);
+        let sig = conformance_sig(&code, "emitted").module_sig;
+        for token in ["Other(", "Stmt(", "Decl("] {
+            assert!(
+                !sig.contains(token),
+                "5c bind emit for {slug} hit the LOSSY comparator axis `{token}` — a \
+                 dropped structural axis (D-17): encode it + add a discriminator. \
+                 module_sig:\n{sig}\n--- emitted ---\n{code}"
+            );
+        }
     }
 }
 

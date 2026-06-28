@@ -105,27 +105,42 @@ pub(super) fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) 
     }
 }
 
-/// Whether an `<input>` element needs `$.remove_input_defaults` — the official
-/// `RegularElement.js` rule: an `<input>` with a `value` / `checked` / `group`
-/// binding (or `files`) and NO static `defaultValue` / `defaultChecked`
-/// attribute. (The non-spread `bind:value` branch is handled; the rule keys on
-/// the typed `AttrIr`, never a source scan.)
-pub(super) fn input_needs_remove_defaults(el: &super::ir::ElementIr) -> bool {
-    if el.tag != "input" {
-        return false;
-    }
-    let has_value_bind = el.attrs.iter().any(|a| {
-        matches!(a, AttrIr::Bind { target, .. }
-            if matches!(target.as_str(), "value" | "checked" | "group" | "files"))
-    });
-    if !has_value_bind {
-        return false;
-    }
-    // A static `defaultValue` / `defaultChecked` attribute suppresses the helper
-    // (the default is set explicitly).
+/// The per-host bind PRELUDE cleanup an element emits before its `$.bind_*` call —
+/// the official `RegularElement.js` default-clearing statement, decided DATA-DRIVEN
+/// from the bind's runtime routing (the shared bind contract), never a hand-rolled
+/// per-name list.
+///
+/// An `<input>` carrying a `value`/`checked`/`group` bind emits
+/// `$.remove_input_defaults` (the routing's [`BindPrelude::RemoveInputDefaults`]); a
+/// `<textarea bind:value>` emits `$.remove_textarea_child` (the routing's
+/// [`BindPrelude::RemoveTextareaChild`]). A static `defaultValue` / `defaultChecked`
+/// attribute on an `<input>` suppresses the helper (the default is set explicitly).
+/// Returns `None` when the element has no bind whose routing carries a prelude.
+///
+/// The decision keys on the typed `AttrIr` bind directives + the shared routing,
+/// never a source scan.
+pub(super) fn bind_host_prelude(
+    el: &super::ir::ElementIr,
+) -> Option<crate::svelte::bind_contract::BindPrelude> {
+    use crate::svelte::bind_contract::{resolve_runtime_bind, BindPrelude};
+    // A static `defaultValue` / `defaultChecked` attribute on the element suppresses
+    // the input-defaults helper (the default is set explicitly in the skeleton).
     let has_static_default = el.attrs.iter().any(|a| {
         matches!(a, AttrIr::Static { name, .. }
             if matches!(name.as_str(), "defaultValue" | "defaultChecked"))
     });
-    !has_static_default
+    for attr in &el.attrs {
+        let AttrIr::Bind { target, .. } = attr else {
+            continue;
+        };
+        let Some(routing) = resolve_runtime_bind(target, &el.tag) else {
+            continue;
+        };
+        match routing.prelude {
+            BindPrelude::None => continue,
+            BindPrelude::RemoveInputDefaults if has_static_default => continue,
+            prelude => return Some(prelude),
+        }
+    }
+    None
 }

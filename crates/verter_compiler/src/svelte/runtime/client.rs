@@ -25,14 +25,13 @@
 //! [`UnsupportedSvelteRuntimeSurface`] carrying its owning vertical — never a
 //! silent empty module, never a panic.
 
-use super::client_effect::{emit_text_effect, Memoizer};
+use super::client_effect::{emit_text_effect, EffectBody, Memoizer};
 use super::client_plan::{
-    AttrValue, AttrValuePart, ClientBindTarget, ClientDynAttrEmit, ClientModulePlan, ClientNode,
-    ClientRuntimeOp,
+    AttrValue, ClientDynAttrEmit, ClientModulePlan, ClientNode, ClientRuntimeOp,
 };
+use super::client_shapes::{BindGetSetForm, ClientBindShape, GroupBindKey};
 use super::client_walk::{
-    any_item_needs_name, first_descent, input_needs_remove_defaults, item_needs_name,
-    sibling_descent, WalkBase,
+    any_item_needs_name, first_descent, item_needs_name, sibling_descent, WalkBase,
 };
 use super::entity_decode::decode_text_entities;
 use super::helpers::{ImportPlan, RuntimeImport};
@@ -44,6 +43,19 @@ use super::whitespace::{
 };
 
 pub use super::unsupported::UnsupportedSvelteRuntimeSurface;
+
+/// The component-FUNCTION-scoped `bind:group` accumulator name (`const binding_group
+/// = []`). It is declared at the TOP of the component function body (NOT module
+/// scope — module scope would share binding-group selection state across every
+/// component instance, a correctness bug) and passed as the first argument to every
+/// `$.bind_group(binding_group, [], el, get, set)` call. Matches the pinned
+/// `svelte@5.56.3` emit (oracle CASE `group`).
+///
+/// `pub(super)` (the minimum widening): the `bind:group` emit body
+/// ([`ClientEmitter::format_dom_bind`]) lives in the sibling `client_bind` module,
+/// and the component-prelude `const binding_group = []` declaration is emitted here
+/// — both reference this single canonical accumulator name.
+pub(super) const GROUP_BINDING_NAME: &str = "binding_group";
 
 /// The emitted client module: the JS source plus the structural facts a caller
 /// (a topology gate / the carrier) reads back without re-parsing.
@@ -101,6 +113,24 @@ pub(super) struct ClientEmitter<'a> {
     /// must NOT borrow the style accumulator). Populated by the walk's inline-init
     /// emission, read by the reactive class/style op.
     acc_name: rustc_hash::FxHashMap<(NodeId, AccKind), String>,
+    /// The collision-safe `bind:group` accumulator name PER DISTINCT GROUP, keyed by the
+    /// structural bind target + scope ([`GroupBindKey`]). Populated ONCE in [`Self::new`]
+    /// (one [`Self::alloc_name`] per distinct key, in source order — `binding_group`,
+    /// `binding_group_1`, …, bumped past a user `binding_group`); empty with no `bind:group`.
+    /// Every `$.bind_group(<name>, …)` call reads its accumulator back through its op's key,
+    /// so two INDEPENDENT groups reference DISTINCT accumulators (never a single
+    /// component-wide name) while two inputs sharing a target share one.
+    pub(super) group_binding_names: rustc_hash::FxHashMap<GroupBindKey, String>,
+    /// The DISTINCT `bind:group` accumulator names in SOURCE ORDER (the order each group's
+    /// key was first seen). The component body declares one `const <name> = [];` per entry,
+    /// in this order — matching official svelte's insertion-order accumulator decl loop.
+    pub(super) group_binding_decls: Vec<String>,
+    /// Inline `bind:this` ops pre-indexed by target node (built ONCE in [`Self::new`]) so
+    /// [`Self::emit_inline_bind_this`] is an O(1) drain, not an O(ops) per-node re-scan.
+    /// Each entry carries the bind's [`BindGetSetForm`] (identifier-thunk vs function-pair)
+    /// alongside its rewritten getter/setter bodies.
+    pub(super) inline_this_binds:
+        rustc_hash::FxHashMap<NodeId, Vec<(BindGetSetForm, String, String)>>,
 }
 
 /// Which coalesced reactive op an accumulator belongs to. A node has at most one
@@ -147,13 +177,23 @@ impl<'a> ClientEmitter<'a> {
         for reserved in ["$", "$$anchor", "$$props", "$$value"] {
             used.insert(reserved.to_string());
         }
-        Self {
+        let mut emitter = Self {
             plan,
             used,
             node_var: rustc_hash::FxHashMap::default(),
             interp_var: rustc_hash::FxHashMap::default(),
             acc_name: rustc_hash::FxHashMap::default(),
-        }
+            group_binding_names: rustc_hash::FxHashMap::default(),
+            group_binding_decls: Vec::new(),
+            inline_this_binds: super::client_bind::build_inline_this_index(plan),
+        };
+        // Allocate ONE collision-safe `bind:group` accumulator per DISTINCT group (keyed by
+        // the structural bind target + scope), in source order, through the seeded DOM-var
+        // allocator — so a user `binding_group` pushes the accumulators to `binding_group_1`,
+        // … (matching official `scope.generate`), and two independent groups get distinct
+        // names. (Lives in `client_bind` with the rest of the bind emission machinery.)
+        emitter.plan_group_accumulators();
+        emitter
     }
 
     /// The runtime IR, reached through the plan's retained semantic projection —
@@ -171,8 +211,10 @@ impl<'a> ClientEmitter<'a> {
     }
 
     /// The narrow plan (the SOLE emission input) — read by the sibling spread/`{@html}`
-    /// emission helpers for the op set.
-    pub(super) fn plan(&self) -> &ClientModulePlan<'a> {
+    /// emission helpers for the op set. Returns the `'a`-lifetime reference (copied out of
+    /// the plan field, like [`Self::ir`]) so reading the op set does NOT borrow `self` — the
+    /// per-group accumulator pass walks `plan.ops` while still mutating `self`'s name maps.
+    pub(super) fn plan(&self) -> &'a ClientModulePlan<'a> {
         self.plan
     }
 
@@ -186,8 +228,9 @@ impl<'a> ClientEmitter<'a> {
 
     /// Allocate a deterministic variable name from a preferred stem, appending a
     /// `_N` suffix on collision (mirroring the official allocator's stem +
-    /// counter).
-    fn alloc_name(&mut self, stem: &str) -> String {
+    /// counter). `pub(super)` so the sibling bind-emission module can allocate the
+    /// per-group `bind:group` accumulator names through the same seeded allocator.
+    pub(super) fn alloc_name(&mut self, stem: &str) -> String {
         if self.used.insert(stem.to_string()) {
             return stem.to_string();
         }
@@ -280,6 +323,20 @@ impl<'a> ClientEmitter<'a> {
             // — the runes-mode flag the official `5.56.3` compiler emits (a legacy
             // component would be `$.push($$props)`, but legacy fails closed at 5i).
             out.push_str("\t$.push($$props, true);\n");
+        }
+
+        // The component-FUNCTION-scoped `bind:group` accumulators, declared at the TOP of
+        // the body (before the state decls) — ONE `const <name> = [];` per DISTINCT group, in
+        // source order (the pinned svelte@5.56.3 shape — oracle CASE `group`: two independent
+        // groups emit `const binding_group = []` AND `const binding_group_1 = []`).
+        // Component-function scope (NOT module scope) is load-bearing: module scope would
+        // share binding-group selection state across every component instance, a correctness
+        // bug. The accumulator set is populated from the PRESENCE of group binds (one per
+        // distinct target+scope), NOT `group_values`: a `bind:group` with no static `value`
+        // attr has empty `group_values` yet still emits the `$.bind_group(<name>, …)` call,
+        // so each accepted group bind's key is what mints (and references) its accumulator.
+        for group_name in &self.group_binding_decls {
+            out.push_str(&format!("\tconst {group_name} = [];\n"));
         }
 
         // The component-function BODY statements (already lowered by the plan).
@@ -410,15 +467,15 @@ impl<'a> ClientEmitter<'a> {
             let IrNode::Element(el) = self.ir().node(only) else {
                 return;
             };
-            // The clone-root element's own input cleanup, INIT-domain attribute ops,
-            // and `bind:this` are emitted right after the clone frame named it. The
-            // official per-element order (`RegularElement.js`) is: `remove_input_defaults`
-            // → the init-domain writes (`$.autofocus` / `$.set_class` / `$.set_attribute`
-            // / the reactive accumulator decls) → `$.bind_this` LAST (a render-side
-            // binding emitted after the element's own inits).
-            if input_needs_remove_defaults(el) {
-                out.push_str(&format!("\t$.remove_input_defaults({region_var});\n"));
-            }
+            // The clone-root element's own bind PRELUDE cleanup, INIT-domain attribute
+            // ops, and `bind:this` are emitted right after the clone frame named it.
+            // The official per-element order (`RegularElement.js`) is: the bind prelude
+            // (`remove_input_defaults` for an input value/checked/group bind,
+            // `remove_textarea_child` for a `<textarea bind:value>`) → the init-domain
+            // writes (`$.autofocus` / `$.set_class` / `$.set_attribute` / the reactive
+            // accumulator decls) → `$.bind_this` LAST (a render-side binding emitted
+            // after the element's own inits).
+            self.emit_bind_prelude(out, only, region_var);
             self.emit_node_inline_inits(out, only);
             self.emit_inline_bind_this(out, only);
             let child_items = clean_nodes(self.ir(), &el.children, child_ctx);
@@ -523,15 +580,14 @@ impl<'a> ClientEmitter<'a> {
                     // decision); its children are the IR geometry the cleaner
                     // partitions. A non-element narrow node has no children to walk.
                     if let ClientNode::Element { tag, .. } = self.client_node(*node) {
-                        // An `<input>` bearing a value/checked/group bind and no
-                        // static default needs `$.remove_input_defaults(input)`,
-                        // emitted right after the input is named and BEFORE its
-                        // `$.bind_value` (matching the official emission order). The
-                        // bind/default facts are read from the IR element.
+                        // An element bearing a bind whose routing carries a prelude
+                        // (`<input>` value/checked/group → `$.remove_input_defaults`;
+                        // `<textarea bind:value>` → `$.remove_textarea_child`) emits it
+                        // right after the element is named and BEFORE its `$.bind_*`
+                        // (matching the official emission order). The bind/default facts
+                        // are read DATA-DRIVEN from the IR element + the shared routing.
                         if let IrNode::Element(el) = self.ir().node(*node) {
-                            if input_needs_remove_defaults(el) {
-                                out.push_str(&format!("\t$.remove_input_defaults({var});\n"));
-                            }
+                            self.emit_bind_prelude(out, *node, &var);
                             // The element's INIT-domain attribute ops (non-reactive
                             // attr/property writes, `$.autofocus`, non-reactive
                             // class/style, and the reactive class/style `let <acc>;`
@@ -644,7 +700,7 @@ impl<'a> ClientEmitter<'a> {
         // walk (`self.acc_name[node]`), so the `prev` arg + `<acc> =` assignment match
         // the inline-declared `let <acc>;`.
         let mut memoizer = Memoizer::default();
-        let mut update_bodies: Vec<String> = Vec::new();
+        let mut update_bodies: Vec<EffectBody> = Vec::new();
         let mut seen_text_vars = rustc_hash::FxHashSet::default();
         for op in &self.plan.ops {
             match op {
@@ -659,18 +715,38 @@ impl<'a> ClientEmitter<'a> {
                         continue;
                     }
                     let body = self.emit_set_text(node, &mut memoizer);
-                    update_bodies.push(body);
+                    update_bodies.push(EffectBody::Expr(body));
+                }
+                // A `bind:group` input with a REACTIVE dynamic/mixed `value={…}` folds its
+                // guarded change-detection write into THIS combined effect, in source order
+                // (the input precedes a sibling reactive text), BEFORE the post-walk
+                // `$.bind_group`. It is a STATEMENT body (the `if (…) { … }` guard), so it
+                // forces the block form. The value routes through the SHARED memoizer (a
+                // `has_call` value → a `$N` deps slot, reused in the guard + write).
+                ClientRuntimeOp::Bind {
+                    shape:
+                        ClientBindShape::DomBind {
+                            group_key: Some(_), ..
+                        },
+                    target,
+                    ..
+                } => {
+                    if let Some(body) =
+                        self.emit_group_dynamic_value_effect(NodeId(target.0), &mut memoizer)
+                    {
+                        update_bodies.push(EffectBody::Stmt(body));
+                    }
                 }
                 ClientRuntimeOp::ReactiveAttr {
                     emit,
                     reactive: true,
                     target,
                 } => {
-                    update_bodies.push(self.emit_reactive_attr(
+                    update_bodies.push(EffectBody::Expr(self.emit_reactive_attr(
                         NodeId(target.0),
                         emit,
                         &mut Some(&mut memoizer),
-                    ));
+                    )));
                 }
                 ClientRuntimeOp::SetClass {
                     target,
@@ -683,7 +759,7 @@ impl<'a> ClientEmitter<'a> {
                 } => {
                     let node = NodeId(target.0);
                     let acc = self.acc_name.get(&(node, AccKind::Class)).cloned();
-                    update_bodies.push(self.emit_set_class(
+                    update_bodies.push(EffectBody::Expr(self.emit_set_class(
                         node,
                         value,
                         css_hash.as_deref(),
@@ -691,7 +767,7 @@ impl<'a> ClientEmitter<'a> {
                         *directives_has_call,
                         acc.as_deref(),
                         &mut Some(&mut memoizer),
-                    ));
+                    )));
                 }
                 ClientRuntimeOp::SetStyle {
                     target,
@@ -703,14 +779,14 @@ impl<'a> ClientEmitter<'a> {
                 } => {
                     let node = NodeId(target.0);
                     let acc = self.acc_name.get(&(node, AccKind::Style)).cloned();
-                    update_bodies.push(self.emit_set_style(
+                    update_bodies.push(EffectBody::Expr(self.emit_set_style(
                         node,
                         value,
                         directives.as_deref(),
                         *directives_has_call,
                         acc.as_deref(),
                         &mut Some(&mut memoizer),
-                    ));
+                    )));
                 }
                 _ => {}
             }
@@ -727,18 +803,19 @@ impl<'a> ClientEmitter<'a> {
         for op in &self.plan.ops {
             match op {
                 ClientRuntimeOp::Bind {
-                    bind_target: ClientBindTarget::This,
+                    shape: ClientBindShape::This { .. },
                     ..
                 } => {
-                    // Emitted inline in the walk; skip here.
+                    // `bind:this` is a render-side binding emitted INLINE in the walk
+                    // (see `emit_inline_bind_this`); skip here.
                 }
                 ClientRuntimeOp::Bind {
                     target,
-                    bind_target,
+                    shape,
                     getter,
                     setter,
                     ..
-                } => self.emit_bind(out, NodeId(target.0), *bind_target, getter, setter),
+                } => self.emit_bind(out, NodeId(target.0), shape, getter, setter),
                 ClientRuntimeOp::Event {
                     target,
                     event_type,
@@ -788,62 +865,6 @@ impl<'a> ClientEmitter<'a> {
                 // Autofocus is init-only — its value is a pre-flattened string (never
                 // memoized).
                 format!("$.autofocus({var}, {value})")
-            }
-        }
-    }
-
-    /// Build the emitted value expression for a structured [`AttrValue`], routing each
-    /// expression part through `memoizer` (when `Some`) so a `has_call` value lands in
-    /// the official deps-array form. A `Single` value emits its bare (possibly `$N`)
-    /// expression; a `Mixed` value builds the `` `lit${expr ?? ''}lit` `` template with
-    /// each expr resolved; a `Const` emits verbatim.
-    fn build_attr_value(&self, value: &AttrValue, memoizer: &mut Option<&mut Memoizer>) -> String {
-        match value {
-            AttrValue::Const(text) => text.clone(),
-            AttrValue::Single {
-                rewritten,
-                has_call,
-            } => match memoizer {
-                Some(m) => m.add(rewritten.clone(), *has_call),
-                None => rewritten.clone(),
-            },
-            AttrValue::Mixed(parts) => {
-                let mut tmpl = String::from("`");
-                for part in parts {
-                    match part {
-                        AttrValuePart::Literal(text) => {
-                            tmpl.push_str(&super::client_codegen_helpers::escape_template_text(
-                                text,
-                            ));
-                        }
-                        AttrValuePart::Expr {
-                            rewritten,
-                            has_call,
-                            coalesce,
-                        } => {
-                            let v = match memoizer {
-                                Some(m) => m.add(rewritten.clone(), *has_call),
-                                None => rewritten.clone(),
-                            };
-                            // The `?? ''` coercion the plan computed (official
-                            // `build_template_chunk`): a provably-defined part is RAW, an
-                            // undecided part gets `?? ''` (parenthesized for a `&&`/`||`
-                            // operand). A memoized part is the `$N` identifier slot `v`.
-                            use super::reactive_fold::NullishCoalesce;
-                            match coalesce {
-                                NullishCoalesce::None => tmpl.push_str(&format!("${{{v}}}")),
-                                NullishCoalesce::Bare => {
-                                    tmpl.push_str(&format!("${{{v} ?? ''}}"));
-                                }
-                                NullishCoalesce::Parenthesized => {
-                                    tmpl.push_str(&format!("${{({v}) ?? ''}}"));
-                                }
-                            }
-                        }
-                    }
-                }
-                tmpl.push('`');
-                tmpl
             }
         }
     }
@@ -1153,38 +1174,6 @@ impl<'a> ClientEmitter<'a> {
         None
     }
 
-    /// Emit any `bind:this` op targeting `node` INLINE during the walk, right after
-    /// the node's own init-domain writes (and after `$.remove_input_defaults`). The
-    /// official compiler emits `$.bind_this(node, …)` as a RENDER-side binding
-    /// interleaved into element setup — AFTER the element's init-domain attribute
-    /// writes (`$.autofocus` / `$.set_class` / `$.set_attribute` / accumulator decls),
-    /// BEFORE the next sibling walk and BEFORE the grouped `$.template_effect` for
-    /// sibling reactive text — whereas `$.bind_value` / delegated events are emitted
-    /// post-walk (after the text effect). Emitting `bind:this` here, and SKIPPING the
-    /// `This` arm in [`Self::emit_ops`], matches that order byte-for-byte.
-    fn emit_inline_bind_this(&mut self, out: &mut String, node: NodeId) {
-        // The plan ops are cloned out so the `&self` borrow does not conflict with
-        // the `&mut self` `emit_bind` call (the op set is small — one pass).
-        let binds: Vec<(String, String)> = self
-            .plan
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                ClientRuntimeOp::Bind {
-                    target,
-                    bind_target: ClientBindTarget::This,
-                    getter,
-                    setter,
-                    ..
-                } if NodeId(target.0) == node => Some((getter.clone(), setter.clone())),
-                _ => None,
-            })
-            .collect();
-        for (getter, setter) in binds {
-            self.emit_bind(out, node, ClientBindTarget::This, &getter, &setter);
-        }
-    }
-
     /// Emit a node's INIT-domain attribute ops INLINE during the walk, right after
     /// the node has been named (and after `$.remove_input_defaults`), BEFORE its
     /// `bind:this`, in source order. This is the official per-element `init` placement
@@ -1314,36 +1303,6 @@ impl<'a> ClientEmitter<'a> {
                     out.push_str(&format!("\tlet {name};\n"));
                     self.acc_name.insert((node, kind), name);
                 }
-            }
-        }
-    }
-
-    /// Emit a `bind:value` / `bind:this` op from its already-rewritten getter +
-    /// setter bodies (the narrow plan op).
-    fn emit_bind(
-        &mut self,
-        out: &mut String,
-        target: NodeId,
-        bind_target: ClientBindTarget,
-        getter: &str,
-        setter: &str,
-    ) {
-        let var = self
-            .node_var
-            .get(&target)
-            .cloned()
-            .unwrap_or_else(|| "node".to_string());
-        match bind_target {
-            ClientBindTarget::Value => {
-                // `$.bind_value(input, () => GET, ($$value) => SET)`.
-                out.push_str(&format!(
-                    "\t$.bind_value({var}, () => {getter}, ($$value) => {setter});\n"
-                ));
-            }
-            ClientBindTarget::This => {
-                out.push_str(&format!(
-                    "\t$.bind_this({var}, ($$value) => {setter}, () => {getter});\n"
-                ));
             }
         }
     }

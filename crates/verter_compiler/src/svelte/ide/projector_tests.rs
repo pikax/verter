@@ -262,6 +262,36 @@ fn bind_this_on_an_element_access_lvalue_uses_the_read_bearing_invariant() {
 }
 
 #[test]
+fn bind_this_function_pair_on_an_intrinsic_projects_the_host_typed_fn_checker() {
+    // Finding C (R4): an INTRINSIC element `bind:this={get, set}` is the host-instance
+    // getter/setter pair official accepts — the IDE projects it through the F5
+    // `__verter_bind_fn<Host>(get, set)` checker (NOT the single-lvalue invariant, which
+    // would mangle the `get, set` sequence). `get` returns the host, `set` consumes it.
+    //
+    // RED before the fix: `bind:this` was dispatched UNCONDITIONALLY to the host-instance
+    // invariant path (the dispatch comment asserted "never a function binding"), so the
+    // `get, set` pair was sliced as one lvalue → no `__verter_bind_fn`.
+    let code = project("<input bind:this={getEl, setEl} />");
+    assert!(
+        !render_body(&code).contains("bind:this"),
+        "no bind:this residue: {code}"
+    );
+    assert!(
+        code.contains("__verter_bind_fn<__VerterHostEl<\"input\">>(getEl, setEl)"),
+        "element bind:this function-pair must project the host-typed F5 checker: {code}"
+    );
+    // NEGATIVE: the RENDER BODY must NOT route through the single-lvalue host-instance
+    // invariant (which would treat `getEl, setEl` as one assignment target). The prelude
+    // DECLARES the `__verter_bind_*` helpers, so scope this to the body, not the whole file.
+    let body = render_body(&code);
+    assert!(
+        !body.contains("__verter_bind_this_assignable")
+            && !body.contains("__verter_bind_rw<__VerterHostEl<\"input\">>(getEl, setEl)"),
+        "the function-pair form must NOT use the single-lvalue invariant: {body}"
+    );
+}
+
+#[test]
 fn bind_group_on_a_radio_input_projects_the_radio_checker() {
     // F4: `bind:group` (default radio) → the radio array-shape checker, NO
     // residue, NO `__verter_void`.
@@ -319,14 +349,19 @@ fn bind_group_on_a_non_input_tag_falls_through_to_an_attribute() {
 
 #[test]
 fn bind_this_with_a_comma_value_does_not_leak_the_host_placeholder() {
-    // A stray `bind:this={a, b}` is dispatched to the `this` handler FIRST (it is
-    // never a function binding), so the `{HOST}` placeholder never leaks through
-    // the generic F5 path as a literal type argument.
+    // Finding C (R4): an intrinsic-element `bind:this={a, b}` IS a getter/setter function
+    // binding (official accepts the element host-instance pair), so it routes to the F5
+    // checker — but specialized with the RESOLVED host type via `bind_this_host_type`, NOT
+    // the generic `project_function_binding` whose contract lookup would emit the contract's
+    // `{HOST}` placeholder as a literal type argument. The invariant: the `{HOST}`
+    // placeholder must NEVER leak into the projected TSX.
     let code = project("<input bind:this={a, b} />");
     assert!(!code.contains("{HOST}"), "no HOST placeholder leak: {code}");
+    // It routes through the F5 checker with the RESOLVED host type (the fix substitutes the
+    // real `__VerterHostEl<"input">` for the contract `{HOST}` placeholder).
     assert!(
-        !render_body(&code).contains("__verter_bind_fn"),
-        "bind:this must not route through the F5 checker: {code}"
+        render_body(&code).contains("__verter_bind_fn<__VerterHostEl<\"input\">>(a, b)"),
+        "element bind:this function-pair routes through the host-typed F5 checker: {code}"
     );
 }
 

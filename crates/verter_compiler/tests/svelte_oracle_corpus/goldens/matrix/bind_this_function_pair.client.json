@@ -1,0 +1,63 @@
+{
+  "slug": "matrix/bind_this_function_pair.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_this_function_pair",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "bind_this",
+    "set",
+    "get",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_this",
+    "from_html",
+    "get",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "bind_this": 1,
+    "set": 1,
+    "get": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function bind_this_function_pair($$anchor) {let el = $.state(null); var div = root(); $.bind_this(div, (v) => $.set(el, v, true), () => $.get(el)); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

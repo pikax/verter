@@ -97,10 +97,13 @@ pub(super) enum ClientAttr {
         /// The literal value (`None` for a valueless boolean attribute).
         value: Option<String>,
     },
-    /// `bind:value` on an `<input>` (or element `bind:this`) — the getter/setter
-    /// rewrite is on the corresponding [`ClientRuntimeOp::Bind`].
+    /// A `bind:` directive on the element (a DOM value/property bind or element
+    /// `bind:this`) — the helper-routing + getter/setter rewrite is on the
+    /// corresponding [`ClientRuntimeOp::Bind`] (carried by its accepted
+    /// [`ClientBindShape`]). This narrow attr records the coarse target KIND only (the
+    /// node tree stays a faithful structural mirror).
     Bind {
-        /// The bind target (`value` / `this`).
+        /// The coarse bind target kind (`this` vs a DOM value/property bind).
         target: ClientBindTarget,
     },
     /// A modern delegated DOM event — the handler rewrite is on the corresponding
@@ -117,12 +120,20 @@ pub(super) enum ClientAttr {
     Dynamic,
 }
 
-/// The supported bind target kind.
+/// The COARSE supported bind target kind — the structural-mirror discriminant on
+/// [`ClientAttr::Bind`]. The PRECISE helper routing (which `$.bind_*` / `bind_property`
+/// form, arity, event, prelude) lives on the op's accepted [`ClientBindShape`]
+/// ([`ClientBindShape::DomBind`] carries the typed `RuntimeBindRouting`); this enum
+/// only distinguishes the two emission FAMILIES (the render-side `bind:this` vs a
+/// DOM value/property bind), which differ in WHEN they are emitted (inline-in-walk vs
+/// post-walk).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClientBindTarget {
-    /// `bind:value`.
-    Value,
-    /// `bind:this`.
+    /// A DOM value/property bind (`value`/`checked`/`group`/media/dimension/
+    /// contenteditable/property) — emitted post-walk, routed by its
+    /// [`ClientBindShape::DomBind`] `RuntimeBindRouting`.
+    DomValue,
+    /// `bind:this` — a render-side binding emitted INLINE during the walk.
     This,
 }
 
@@ -174,15 +185,16 @@ pub(super) enum ClientRuntimeOp {
         /// Whether the expression `has_call` (drives the memoizer deps-array form).
         has_call: bool,
     },
-    /// A `bind:value` / `bind:this` op.
+    /// A `bind:*` op (a DOM value/property bind or element `bind:this`).
     Bind {
         /// The target node id.
         target: ClientNodeId,
-        /// The bind target kind.
-        bind_target: ClientBindTarget,
         /// The accepted bind SHAPE fact (from the default-deny classifier) — the
-        /// typed sub-shape the op was admitted as, carried so the op is a typed
-        /// classification, not just a rewritten string pair.
+        /// typed sub-shape the op was admitted as. For a DOM value/property bind it
+        /// carries the precise `RuntimeBindRouting` (helper / arity / event); the
+        /// emitter consumes it DATA-DRIVEN, so the op is a typed classification, not
+        /// just a rewritten string pair. (The render-side `bind:this` vs post-walk
+        /// timing split is read off this shape.)
         shape: ClientBindShape,
         /// The rewritten getter body.
         getter: String,
@@ -389,6 +401,46 @@ impl AttrValue {
                 .iter()
                 .any(|p| matches!(p, AttrValuePart::Expr { has_call: true, .. })),
         }
+    }
+}
+
+/// A DYNAMIC/mixed `value={…}` on a `bind:group` `<input>` — the structured value plus its
+/// reactivity. The official `bind:group` value topology (svelte@5.56.3):
+///
+/// - REACTIVE ⇒ a `var <var>_value;` change-tracker (declared inline in the bind prelude) +
+///   a guarded `if (<var>_value !== (<var>_value = V)) { <var>.value = (<var>.__value = V)
+///   ?? ''; }` update folded into the combined `$.template_effect` BEFORE `$.bind_group`;
+/// - NON-reactive ⇒ a one-shot inline `<var>.value = (<var>.__value = V) ?? ''` write (same
+///   position as the static-literal write), no tracker, no effect;
+///
+/// and in BOTH cases the input's `$.bind_group` getter gains a dependency read of the value
+/// (`() => { V; return <target>; }`). A SINGLE-expression value gets the OUTER `?? ''` string
+/// coercion; a MIXED template literal (or a folded `Const`) does not (it is already a string).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct GroupDynamicValue {
+    /// The structured value — rendered to the getter dep-read + the non-reactive inline write
+    /// WITHOUT the memoizer (full inline), and to the guarded effect write WITH the shared
+    /// memoizer (so a `has_call` value becomes a `$N` deps-array slot).
+    pub(super) value: AttrValue,
+    /// Whether the value is REACTIVE (joins the combined effect, guarded by the tracker) vs
+    /// NON-reactive (a one-shot inline direct write). Official `has_state || has_call`.
+    pub(super) reactive: bool,
+    /// For a SINGLE-expression value ([`AttrValue::Single`]), whether it is PROVABLY DEFINED —
+    /// the official `evaluated.is_defined` gate (reused from the `mixed_chunk_nullish_wrap`
+    /// definedness analysis). Official gates the outer `?? ''` group-value coercion on
+    /// DEFINEDNESS, not single-vs-mixed: a provably-defined single value emits
+    /// `var.value = var.__value = V` (NO outer `?? ''`), while an undecided / nullish / reactive
+    /// single keeps `var.value = (var.__value = V) ?? ''`. Always `false` for a mixed value
+    /// (already a string — it never carries the outer coercion regardless).
+    pub(super) single_value_defined: bool,
+}
+
+impl GroupDynamicValue {
+    /// Whether the value is a SINGLE expression (the official `Dynamic` / `value.length === 1`
+    /// shape) — the form that gets the OUTER `?? ''` string coercion. A MIXED template literal
+    /// (or a folded `Const`) is already a string, so it gets NO outer coercion.
+    pub(super) fn is_single_expression(&self) -> bool {
+        matches!(self.value, AttrValue::Single { .. })
     }
 }
 

@@ -1,0 +1,42 @@
+{
+  "slug": "matrix/bind_group_radio_mixed.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_group_radio_mixed",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "stringify",
+    "attr",
+    "stringify"
+  ],
+  "helperSet": [
+    "attr",
+    "stringify"
+  ],
+  "helperCounts": {
+    "attr": 2,
+    "stringify": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

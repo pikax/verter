@@ -1,0 +1,63 @@
+{
+  "slug": "matrix/bind_media_currenttime.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_media_currenttime",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "bind_current_time",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_current_time",
+    "from_html",
+    "get",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "bind_current_time": 1,
+    "get": 1,
+    "set": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<audio></audio>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<audio></audio>`); export default function bind_media_currenttime($$anchor) {let t = $.state(0); var audio = root(); $.bind_current_time(audio, () => $.get(t), ($$value) => $.set(t, $$value)); $.append($$anchor, audio);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

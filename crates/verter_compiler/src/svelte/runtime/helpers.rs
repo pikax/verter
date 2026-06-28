@@ -62,10 +62,32 @@ pub enum SvelteHelper {
     Delegate,
     /// `$.event` — attach a non-delegated event listener.
     Event,
-    /// `$.bind_value` — two-way `bind:value`.
+    /// `$.bind_value` — two-way `bind:value` (`<input>`/`<textarea>`).
     BindValue,
+    /// `$.bind_select_value` — two-way `bind:value` on a `<select>` (single +
+    /// `multiple`).
+    BindSelectValue,
+    /// `$.bind_checked` — two-way `bind:checked` (`<input type="checkbox">`).
+    BindChecked,
+    /// `$.bind_group` — radio/checkbox `bind:group`.
+    BindGroup,
+    /// `$.bind_current_time` — media `bind:currentTime`.
+    BindCurrentTime,
+    /// `$.bind_paused` — media `bind:paused`.
+    BindPaused,
+    /// `$.bind_played` — media `bind:played` (setter-only).
+    BindPlayed,
+    /// `$.bind_element_size` — dimension binds (`clientWidth`/…, setter-only).
+    BindElementSize,
+    /// `$.bind_content_editable` — `bind:innerHTML`/`textContent`/`innerText`.
+    BindContentEditable,
+    /// `$.bind_property` — the generic DOM-property bind (`open`/`duration`/…).
+    BindProperty,
     /// `$.bind_this` — `bind:this` element/component reference.
     BindThis,
+    /// `$.remove_textarea_child` — strip a `<textarea>`'s child content before a
+    /// `bind:value` (the official per-host default-clearing).
+    RemoveTextareaChild,
     /// `$.html` — `{@html}` raw-markup insertion.
     Html,
     /// `$.attribute_effect` — a reactive spread-attribute effect.
@@ -137,7 +159,17 @@ impl SvelteHelper {
             Self::Delegate => "delegate",
             Self::Event => "event",
             Self::BindValue => "bind_value",
+            Self::BindSelectValue => "bind_select_value",
+            Self::BindChecked => "bind_checked",
+            Self::BindGroup => "bind_group",
+            Self::BindCurrentTime => "bind_current_time",
+            Self::BindPaused => "bind_paused",
+            Self::BindPlayed => "bind_played",
+            Self::BindElementSize => "bind_element_size",
+            Self::BindContentEditable => "bind_content_editable",
+            Self::BindProperty => "bind_property",
             Self::BindThis => "bind_this",
+            Self::RemoveTextareaChild => "remove_textarea_child",
             Self::Html => "html",
             Self::AttributeEffect => "attribute_effect",
             Self::Append => "append",

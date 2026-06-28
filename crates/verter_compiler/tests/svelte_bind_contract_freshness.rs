@@ -1,9 +1,10 @@
 //! Byte-pin freshness guard for the GENERATED Svelte bind-contract table.
 //!
-//! `crates/verter_compiler/src/svelte/ide/bind_contract_data.rs` is generated
+//! `crates/verter_compiler/src/svelte/bind_contract_data.rs` is generated
 //! from the CLOSED binding-vocabulary registry in
-//! `scripts/generate-svelte-bind-contract.mjs` (the SOURCE OF TRUTH for the wide
-//! `bind:` family, F4). This test regenerates the table into a temp file and
+//! `scripts/generate-svelte-bind-contract.mjs` (the SHARED SOURCE OF TRUTH for
+//! the wide `bind:` family, consumed by IDE + runtime). This test regenerates
+//! the table into a temp file and
 //! byte-compares it against the committed file — a registry edit without a regen
 //! (or a hand-edit of the generated data) fails the gate, mirroring the
 //! `typeinfo_proto_ts_freshness` discipline.
@@ -23,7 +24,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn committed_data_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/svelte/ide/bind_contract_data.rs")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/svelte/bind_contract_data.rs")
 }
 
 /// Whether `node` is runnable (`node --version` succeeds).

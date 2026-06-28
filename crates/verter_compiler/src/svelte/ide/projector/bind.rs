@@ -46,8 +46,11 @@ impl TemplateProjector<'_, '_> {
     /// Project a `bind:` directive (F4/F5).
     ///
     /// The dispatch (in order):
-    /// 1. `bind:this` (any host) → the host-instance invariant check (dispatched
-    ///    FIRST — never a function binding; its checker owns the whole value).
+    /// 1. `bind:this` → an INTRINSIC-element getter/setter FUNCTION binding
+    ///    (`bind:this={get, set}`) is the F5 host-typed `__verter_bind_fn` check;
+    ///    any other `bind:this` (a single lvalue target, or a component host) is the
+    ///    host-instance invariant check. (Dispatched FIRST so its checker owns the
+    ///    whole value.)
     /// 2. `bind:group` on an `<input>` → the checkbox/radio array-shape check
     ///    (special only where its contract applies; any other tag falls through).
     /// 3. A FUNCTION binding `bind:x={get, set}` (top-level comma) → the F5
@@ -69,14 +72,20 @@ impl TemplateProjector<'_, '_> {
     ) {
         let is_component = matches!(el.kind, SvelteElementKind::Component);
 
-        // The SPECIAL bindings (`bind:this`, `bind:group`) are dispatched FIRST —
-        // they are never function bindings, and their dedicated checkers own the
-        // whole value (so a stray `bind:this={a, b}` never leaks the `{HOST}`
-        // placeholder through the generic F5 path). `bind:group` is special only
-        // where its contract applies (an `<input>`); on any other tag it is an
-        // unknown binding and falls through to the attribute/error path.
+        // The SPECIAL bindings (`bind:this`, `bind:group`) are dispatched FIRST,
+        // their dedicated checkers owning the whole value. `bind:this` HAS a function
+        // form on an intrinsic element (`bind:this={get, set}` — the host-instance
+        // getter/setter pair official accepts), which routes to the F5 host-typed
+        // `__verter_bind_fn` check; every other `bind:this` (a single lvalue target, or a
+        // component host — 5f) is the host-instance invariant check. `bind:group` is
+        // special only where its contract applies (an `<input>`); on any other tag it is
+        // an unknown binding and falls through to the attribute/error path.
         if dir.local == "this" {
-            self.project_bind_this(el, attr, dir, is_component);
+            if !is_component && self.is_function_binding(dir) {
+                self.project_bind_this_function(el, attr, dir);
+            } else {
+                self.project_bind_this(el, attr, dir, is_component);
+            }
             return;
         }
         if dir.local == "group"
@@ -191,6 +200,39 @@ impl TemplateProjector<'_, '_> {
                 &format!(" = __verter_bind_rw<{host_ty}>({local})), {{}})}}"),
             );
         }
+    }
+
+    /// Project an INTRINSIC-element `bind:this={get, set}` function binding (F5) — the
+    /// host-instance getter/setter pair.
+    ///
+    /// The two value expressions stay mapped and are checked against the element's DOM
+    /// instance type `Host` via `__verter_bind_fn<Host>(get, set)`: `get` returns `Host`
+    /// (the bound element), `set` consumes `Host`. This is the SAME F5 checker the wide
+    /// function-binding path uses, specialized with the `bind:this` host type (the contract
+    /// table's `{HOST}` placeholder is NOT a real type, so `bind:this` cannot route through
+    /// the generic `project_function_binding` — it needs the resolved host type here).
+    /// Element-only: a component `bind:this` is dispatched to `project_bind_this` (5f).
+    fn project_bind_this_function(
+        &mut self,
+        el: &SvelteElement,
+        attr: &SvelteAttribute,
+        dir: &crate::svelte::parser::SvelteDirective,
+    ) {
+        let Some(SvelteAttributeValue::Expression(expr)) = dir.value else {
+            remove_span(self.ct, attr.span);
+            return;
+        };
+        let host_ty = self.bind_this_host_type(el, false);
+        // F11: a store-sub in the `get, set` pair (`bind:this={() => $store, …}`) is
+        // rewritten in place; the pair stays a mapped chunk so the `$`-span overwrite
+        // composes with the boundary `{...(CHECKER(` … `), {})}` wrap.
+        self.rewrite_store_subs_in(expr);
+        self.ct.overwrite(
+            attr.span.start,
+            expr.start,
+            &format!("{{...(__verter_bind_fn<{host_ty}>("),
+        );
+        self.ct.overwrite(expr.end, attr.span.end, "), {})}");
     }
 
     /// The host-instance type for a `bind:this` target.

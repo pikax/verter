@@ -28,11 +28,14 @@
 
 mod attr_lowering;
 mod bind_target;
+mod bind_target_names;
 pub mod client;
 mod client_allowlist;
+mod client_bind;
 mod client_codegen_helpers;
 mod client_effect;
 mod client_plan;
+mod client_plan_bind;
 mod client_plan_spread_html;
 mod client_plan_types;
 mod client_shapes;
@@ -47,7 +50,9 @@ pub mod expr;
 pub mod expr_emit;
 pub mod expr_rewrite;
 pub mod helpers;
+mod host_attr_gate;
 pub mod html;
+mod instance_items;
 pub mod ir;
 mod naming;
 mod official_reject;
@@ -59,6 +64,7 @@ mod reactive_analysis;
 mod reactive_fold;
 mod reactive_fold_tristate;
 mod rune_scan;
+mod state_prep;
 mod state_scan;
 pub mod topology;
 mod unsupported;
@@ -82,10 +88,9 @@ use verter_span::Span;
 
 use attr_lowering::{lower_attributes, AttrHost};
 use expr::{
-    classify_state_lowering, collect_expr_references, parse_declarators, parse_pattern_names,
-    parse_render_call, reparse_module, AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable,
-    BindingUseSet, DeclaratorKeyword, ExprArena, ExprRefKind, RenderCalleeShape, ScopeGraph,
-    ScopeId, ScriptAnalysis, ScriptUseCollector, StateClassification, StateRuneKind,
+    collect_expr_references, parse_declarators, parse_pattern_names, parse_render_call,
+    reparse_module, AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable, DeclaratorKeyword,
+    ExprArena, RenderCalleeShape, ScopeGraph, ScopeId, ScriptAnalysis,
 };
 use html::StaticTemplatePlan;
 use ir::{
@@ -94,7 +99,7 @@ use ir::{
     SpecialElementIr, SpecialKind, SvelteMode, SvelteRuntimeIr, TagIr, TemplateDeclarator,
     TemplateScope, TemplateScopeId,
 };
-use state_scan::{collect_state_declarations, script_uses_runes};
+use state_scan::script_uses_runes;
 
 /// Re-export the public IR + analysis + planning surface so consumers reach it
 /// through one module path. (`emit_client_module` is module-private — the client
@@ -431,7 +436,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // are observed on the module-script side only — a template write to a name
     // shadowed by an instance binding resolves to the instance binding, never the
     // module one.
-    let module_state_tracking = prepare_state_bindings(
+    let module_state_tracking = state_prep::prepare_state_bindings(
         module_source,
         alloc,
         module_scope_id,
@@ -441,7 +446,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // Declare each instance-script `$state` binding in the root scope with its
     // SCRIPT-side observed uses; the template-side writes are attributed AFTER the
     // template scope graph is built (so a shadowing template binding is honoured).
-    let state_tracking = prepare_state_bindings(
+    let state_tracking = state_prep::prepare_state_bindings(
         instance_source,
         alloc,
         root_scope_id,
@@ -462,6 +467,20 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         &mut bindings,
     );
     state_scan::prepare_rune_bindings(
+        instance_source,
+        alloc,
+        root_scope_id,
+        &mut scopes,
+        &mut bindings,
+    );
+    // Declare the remaining top-level PLAIN-local instance-script bindings
+    // (`let v = …` that is NOT a `$state` / `$derived` / `$props()` rune) as
+    // `PlainLocal`. Runs AFTER the `$state` / rune passes so a name already declared
+    // as a reactive binding is never re-registered as a plain local. A plain local is
+    // a NON-reactive binding (a template read of it is a static fold, NOT `$.get`); it
+    // becomes relevant as a DOM bind-target lvalue root, whose plain setter
+    // (`name = $$value` / `o.x = $$value`) needs the binding to resolve to `PlainLocal`.
+    state_prep::prepare_plain_local_bindings(
         instance_source,
         alloc,
         root_scope_id,
@@ -502,8 +521,8 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // attributed to a binding only when it scope-resolves to that EXACT binding, so
     // a template write to a name shadowed by an instance binding never reaches the
     // shadowed module binding.
-    finalize_state_classifications(&mut ctx, &module_state_tracking);
-    finalize_state_classifications(&mut ctx, &state_tracking);
+    state_prep::finalize_state_classifications(&mut ctx, &module_state_tracking);
+    state_prep::finalize_state_classifications(&mut ctx, &state_tracking);
 
     // Populate the reactive runtime ops for every reactive surface the lowering
     // detected, attaching each op to its owning template scope.
@@ -536,220 +555,6 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         nodes: ctx.nodes,
         ops: ctx.ops,
     })
-}
-
-/// One tracked instance-script `$state` binding awaiting final classification:
-/// its declaration facts, its SCRIPT-side observed uses, and the [`BindingId`] of
-/// its root-scope binding row.
-struct TrackedState {
-    /// The declared rune flavour.
-    declared: StateRuneKind,
-    /// Whether the initializer is PROXIABLE (`should_proxy(init)`). Init-shape
-    /// only — it never changes after declaration.
-    proxiable: bool,
-    /// The uses observed on the SCRIPT side (refined by template writes later).
-    script_uses: BindingUseSet,
-    /// The root-scope binding row to finalize.
-    binding: BindingId,
-}
-
-/// Declare the instance-script `$state` bindings in the root scope with a
-/// PROVISIONAL (script-side) classification, returning the tracking data the
-/// post-template finalizer needs.
-///
-/// The classification is only provisional here because a `$state` binding's
-/// lowering is WRITE-gated and a write may live in a TEMPLATE expression
-/// (`onclick={() => count++}`) whose scope graph does not exist until the
-/// template is lowered. The final classification happens in
-/// [`finalize_state_classifications`] once the scope graph is complete and a
-/// shadowing template binding can be resolved.
-fn prepare_state_bindings(
-    instance_source: Option<&str>,
-    alloc: &Allocator,
-    root_scope: ScopeId,
-    scopes: &mut ScopeGraph,
-    bindings: &mut BindingTable,
-) -> Vec<TrackedState> {
-    let Some(text) = instance_source else {
-        return Vec::new();
-    };
-    let Some(program) = reparse_module(alloc, text) else {
-        return Vec::new();
-    };
-    let decls = collect_state_declarations(&program);
-    if decls.is_empty() {
-        return Vec::new();
-    }
-
-    // Collect script-side uses (reassign / deep-mutate) for each declared state
-    // name, scope-aware (a nested local of the same name shadows).
-    let names: Vec<String> = decls.iter().map(|(n, _, _)| n.clone()).collect();
-    let mut collector = ScriptUseCollector::tracking(&names);
-    use oxc_ast_visit::Visit;
-    collector.visit_program(&program);
-
-    let mut tracked = Vec::with_capacity(decls.len());
-    for (name, declared, proxiable) in decls {
-        let script_uses = collector.use_set(&name);
-        let lowering = classify_state_lowering(declared, proxiable, script_uses);
-        let binding = bindings.push(BindingInfo {
-            name: name.clone(),
-            scope: root_scope,
-            kind: state_kind_for_lowering(lowering),
-            state: Some(StateClassification {
-                declared,
-                proxiable,
-                uses: script_uses,
-                lowering,
-            }),
-        });
-        scopes.declare(root_scope, &name, binding);
-        tracked.push(TrackedState {
-            declared,
-            proxiable,
-            script_uses,
-            binding,
-        });
-    }
-    tracked
-}
-
-/// Attribute scope-resolved TEMPLATE writes to the tracked `$state` bindings and
-/// finalize each binding's classification.
-///
-/// Walks every analyzed template expression. For each WRITE reference (a
-/// reassignment or a deep mutation), it resolves the referenced name through the
-/// scope graph at the expression's own scope: only when it resolves to the EXACT
-/// tracked `$state` binding (not a shadowing each / `{@const}` / nested local of
-/// the same name) is the write merged into that binding's use-set. The final
-/// `StateClassification` + binding kind are then recomputed from the combined
-/// script + template uses.
-fn finalize_state_classifications(ctx: &mut LoweringCtx, tracked: &[TrackedState]) {
-    if tracked.is_empty() {
-        return;
-    }
-    // Index the tracked bindings by their root BindingId for O(1) resolution.
-    let tracked_ids: rustc_hash::FxHashMap<BindingId, usize> = tracked
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (t.binding, i))
-        .collect();
-
-    // Start each binding's combined uses from its script-side observation.
-    let mut combined: Vec<BindingUseSet> = tracked.iter().map(|t| t.script_uses).collect();
-
-    for expr in ctx.expressions.all() {
-        for r in &expr.references {
-            let write = match r.kind {
-                ExprRefKind::Reassign => Some(false),
-                ExprRefKind::DeepMutate => Some(true),
-                ExprRefKind::Read => None,
-            };
-            let Some(deep) = write else { continue };
-            // Resolve the written name in the expression's own scope: only a write
-            // that resolves to the EXACT tracked $state binding counts (a shadowing
-            // local of the same name resolves elsewhere).
-            let Some(resolved) = ctx.scopes.resolve(&ctx.bindings, expr.scope, &r.name) else {
-                continue;
-            };
-            if let Some(&idx) = tracked_ids.get(&resolved) {
-                if deep {
-                    combined[idx].deep_mutated = true;
-                } else {
-                    combined[idx].reassigned = true;
-                }
-            }
-        }
-    }
-
-    // A TWO-WAY `bind:` writes back to its bound target, so the bound `$state` is
-    // observed as WRITTEN even though its expression is a syntactic READ — a
-    // `bind:value={name}` makes `name` a reassigned signal (a bare-identifier
-    // target is a reassignment; a member target `bind:value={o.x}` is a deep
-    // mutation). This mirrors the official compiler treating a bind target as
-    // mutated. The write attribution is scope-resolved, so a shadowing local is
-    // never mis-attributed.
-    attribute_bind_target_writes(ctx, &tracked_ids, &mut combined);
-
-    for (t, uses) in tracked.iter().zip(combined) {
-        let lowering = classify_state_lowering(t.declared, t.proxiable, uses);
-        let info = ctx.bindings.get_mut(t.binding);
-        info.kind = state_kind_for_lowering(lowering);
-        info.state = Some(StateClassification {
-            declared: t.declared,
-            proxiable: t.proxiable,
-            uses,
-            lowering,
-        });
-    }
-}
-
-/// Attribute the WRITE-BACK of every two-way `bind:` directive to its bound
-/// `$state` binding. Walks the IR nodes for an `AttrIr::Bind { target, expr }`
-/// whose target is a two-way writable bind (anything except `this`, which is a
-/// one-way element-ref write of the binding, also a reassignment), resolves the
-/// bind expression's referenced binding scope-awarely, and marks it reassigned (a
-/// bare-identifier target) or deep-mutated (a member target).
-fn attribute_bind_target_writes(
-    ctx: &LoweringCtx,
-    tracked_ids: &rustc_hash::FxHashMap<BindingId, usize>,
-    combined: &mut [BindingUseSet],
-) {
-    for node in &ctx.nodes {
-        let attrs = match node {
-            IrNode::Element(el) => &el.attrs,
-            IrNode::Component(c) => &c.attrs,
-            IrNode::Special(s) => &s.attrs,
-            _ => continue,
-        };
-        for attr in attrs {
-            let AttrIr::Bind {
-                expr: Some(expr_id),
-                ..
-            } = attr
-            else {
-                continue;
-            };
-            let analyzed = ctx.expressions.get(*expr_id);
-            // The bind expression's STRUCTURAL lvalue shape decides the write: a
-            // bare-identifier target is a reassignment; a member target is a deep
-            // mutation. Classify it from the parsed OXC node (NOT a `source` text
-            // scan), so a member access that is not the target root cannot
-            // mis-classify. A non-lvalue target (a literal / call) carries no
-            // attributable write.
-            let target_alloc = Allocator::default();
-            let is_member = match expr::classify_bind_target(&target_alloc, analyzed.source) {
-                Some(expr::BindTargetKind::Member) => true,
-                Some(expr::BindTargetKind::Identifier) => false,
-                // A non-lvalue bind target attributes no write.
-                None => continue,
-            };
-            for r in &analyzed.references {
-                let Some(resolved) = ctx.scopes.resolve(&ctx.bindings, analyzed.scope, &r.name)
-                else {
-                    continue;
-                };
-                if let Some(&idx) = tracked_ids.get(&resolved) {
-                    if is_member {
-                        combined[idx].deep_mutated = true;
-                    } else {
-                        combined[idx].reassigned = true;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Map a resolved `$state` lowering to its binding runtime kind.
-fn state_kind_for_lowering(lowering: StateLowering) -> BindingRuntimeKind {
-    match lowering {
-        StateLowering::PlainLet => BindingRuntimeKind::PlainLocal,
-        StateLowering::StateSignal => BindingRuntimeKind::StateSignal { raw: false },
-        StateLowering::RawStateSignal => BindingRuntimeKind::StateSignal { raw: true },
-        StateLowering::BareProxy => BindingRuntimeKind::BareProxy,
-        StateLowering::StateProxy => BindingRuntimeKind::StateProxy,
-    }
 }
 
 /// Lower one template node into the IR, returning its node id (or `None` for a

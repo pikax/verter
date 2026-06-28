@@ -19,13 +19,13 @@ use crate::code_transform::{CodeTransform, SourceMapOptions};
 use super::await_scan::{
     pattern_default_await_keyword_offsets, rewrite_await_exprs_on, scan_await_positions,
 };
-use super::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
 use super::emit::{is_css_custom_property, DiagnosticSeverity, UnsupportedKind};
 use super::prelude::{render_prelude, SvelteJsxNamespace};
 use super::store_scan::{
     collect_declared_dollar_names, collect_pattern_dollar_names, scan_store_subscriptions,
     text_uses_runes,
 };
+use crate::svelte::bind_contract::{lookup_bind_contract, BindContract, BindDirection};
 use crate::svelte::parser::{
     forced_runes_option, ParsedSvelte, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
     SvelteBlock, SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement,
