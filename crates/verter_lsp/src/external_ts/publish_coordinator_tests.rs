@@ -501,8 +501,8 @@ async fn owner_move_with_failing_prune_leaves_no_stale_or_duplicate_ready_file()
         )
         .await;
     assert!(
-        matches!(result, Err(ReconcileErr::DurableStore { .. })),
-        "a failing owner-move prune must surface fail-closed as Err(DurableStore) (the \
+        matches!(result, Err(ReconcileErr::MembershipCommit { .. })),
+        "a failing owner-move prune must surface fail-closed as Err(MembershipCommit) (the \
          publish was rolled back), got {result:?}"
     );
 
@@ -521,7 +521,7 @@ async fn owner_move_with_failing_prune_leaves_no_stale_or_duplicate_ready_file()
 /// A durable-store retract FAILURE on owner loss must not be swallowed into a silent
 /// success. A corrupt on-disk manifest makes the strict `read_manifest` the retract
 /// commit performs fail, so the owner-loss reconcile's durable retract fails — and
-/// the reconciler must surface that as `Err(DurableStore)`, never report a
+/// the reconciler must surface that as `Err(MembershipCommit)`, never report a
 /// fail-closed "not advertised" success while the carrier may still be advertised.
 /// The ledger tombstone is NOT committed when the durable store cannot be retracted.
 #[tokio::test]
@@ -569,7 +569,7 @@ async fn durable_retract_failure_propagates_not_silent_success() {
         .expect("corrupt the manifest on disk");
 
     // 3. Owner-loss reconcile (NoProject) → the reconciler's durable retract fails
-    //    on the corrupt manifest → MUST propagate as `Err(DurableStore)`.
+    //    on the corrupt manifest → MUST propagate as `Err(MembershipCommit)`.
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
         build_workspace_snapshot_simple(Vec::new(), SnapshotGeneration(2)),
     )));
@@ -584,9 +584,9 @@ async fn durable_retract_failure_propagates_not_silent_success() {
         )
         .await;
     assert!(
-        matches!(result, Err(ReconcileErr::DurableStore { .. })),
+        matches!(result, Err(ReconcileErr::MembershipCommit { .. })),
         "a durable retract failure on an owner-loss reconcile MUST surface as \
-         Err(DurableStore), never a silent success that reports not-advertised while \
+         Err(MembershipCommit), never a silent success that reports not-advertised while \
          the carrier may still be advertised; got {result:?}"
     );
 }

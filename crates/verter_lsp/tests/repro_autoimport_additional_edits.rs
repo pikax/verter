@@ -201,6 +201,8 @@ fn auto_import_at_synthetic_offset_is_reanchored_into_script_setup() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     )
     .expect("the auto-import edit must translate, not be dropped");
 
@@ -437,6 +439,8 @@ fn non_zerowidth_unmapped_edit_is_rejected() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     );
     assert_eq!(
         result,
@@ -466,6 +470,8 @@ fn zerowidth_edit_in_trailing_synthetic_region_is_rejected() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     );
     assert_eq!(
         result,
@@ -497,6 +503,8 @@ fn out_of_range_unmapped_edit_is_rejected() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     );
     assert_eq!(
         result,
@@ -538,6 +546,8 @@ fn no_mapped_run_trailing_synthetic_edit_is_rejected() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     );
     assert_eq!(
         result,
@@ -572,6 +582,8 @@ fn no_mapped_run_preamble_edit_is_reanchored() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     )
     .expect("a preamble auto-import must re-anchor even with no mapped runs, not be dropped");
 
@@ -614,8 +626,15 @@ fn multiple_edits_fail_structurally_when_unmapped_edit_cannot_anchor() {
     // No anchor available → the unmapped preamble import cannot be placed → reject the whole
     // resolve (NOT `UnmappableEdit`: the edit IS a valid preamble insertion; it simply has nowhere
     // to land).
-    let result =
-        translate_completion_import_edits(&provider_edits, None, &tsx_li, &mapper, &vue_li);
+    let result = translate_completion_import_edits(
+        &provider_edits,
+        None,
+        &tsx_li,
+        &mapper,
+        &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
+    );
     assert_eq!(
         result,
         Err(AutoImportEditMappingError::NoInsertionAnchor),
@@ -655,6 +674,8 @@ fn multiple_edits_map_completely_when_anchor_available() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     )
     .expect("both edits map");
 

@@ -25,9 +25,13 @@ fn vue_sync_state_uses_owner_key_from_tsconfig() {
     // `carrier_sync_state_for_source` is now private to the carrier-sync gateway;
     // exercise the same owner-resolution + path derivation through its public
     // close-target accessor (the gateway wraps the private resolver).
-    let state =
-        crate::external_ts::carrier_close_target(&resolver, "/workspace/pkg-a/src/App.vue", false)
-            .expect("matched Vue source should materialize provider state");
+    let state = crate::external_ts::carrier_close_target(
+        &resolver,
+        "/workspace/pkg-a/src/App.vue",
+        false,
+        None,
+    )
+    .expect("matched Vue source should materialize provider state");
 
     assert_eq!(
         state.owner_binding,
@@ -288,6 +292,44 @@ fn unresolved_to_owner_aware_different_ide_path_is_stale() {
     let stale = stale_paths_for_transition(&unresolved, &owner_aware);
     assert_eq!(stale.len(), 1, "different IDE path should be stale");
     assert_eq!(stale[0].1, "/workspace/src/App.vue.tsx");
+}
+
+#[test]
+fn decl_kind_participates_in_state_path_helpers() {
+    // The declaration companion (`.d.<ext>.ts`) is a first-class provider path
+    // kind alongside Ide (`.vue.tsx`) and Api (`.vue.ts`): it must appear in
+    // `active_paths`, round-trip through `path_for_kind`, and carry its own
+    // background-loaded flag so close/lifecycle handling reaches it.
+    let mut state = ProviderSyncState {
+        owner_binding: ProviderOwnerBinding::Owned("/workspace".to_string()),
+        ide_path: Some("/workspace/src/B.vue.tsx".to_string()),
+        api_path: Some("/workspace/src/B.vue.ts".to_string()),
+        decl_path: Some("/workspace/src/B.d.vue.ts".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        state.path_for_kind(ProviderPathKind::Decl),
+        Some("/workspace/src/B.d.vue.ts")
+    );
+    assert!(!state.background_loaded_for_kind(ProviderPathKind::Decl));
+    state.set_background_loaded(ProviderPathKind::Decl, true);
+    assert!(state.background_loaded_for_kind(ProviderPathKind::Decl));
+
+    // active_paths enumerates Ide + Api + Decl deterministically.
+    let active = state.active_paths();
+    assert!(
+        active.contains(&(
+            ProviderPathKind::Decl,
+            "/workspace/src/B.d.vue.ts".to_string()
+        )),
+        "active_paths includes the Decl companion, got: {active:?}"
+    );
+    assert_eq!(
+        active.len(),
+        3,
+        "Ide + Api + Decl are all active, got: {active:?}"
+    );
 }
 
 #[test]

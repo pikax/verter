@@ -19,8 +19,9 @@ use verter_semantic::analysis::types::Hash16;
 /// merged into `CarrierIde` if it shows no material cold-perf gain).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CarrierRole {
-    /// `{name}.vue.tsx` / `{name}.svelte.tsx` — the bare-import-probed interactive
-    /// IDE surface (script + template TSX).
+    /// `{name}.vue.tsx` / `{name}.svelte.tsx` — the interactive IDE surface
+    /// (script + template TSX, self-diagnostics); the bare-import-probed surface
+    /// is the declaration carrier `{name}.d.vue.ts` / `{name}.d.svelte.ts`.
     CarrierIde,
     /// `{name}.vue.verter.ts` / `{name}.svelte.verter.ts` — the redirect-reached
     /// macro-derived public-API surface a cross-file rename resolves against.

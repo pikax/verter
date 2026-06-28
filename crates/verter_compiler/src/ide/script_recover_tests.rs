@@ -565,9 +565,15 @@ fn recovery_plan_holes_never_become_facts() {
 
 #[test]
 fn recovery_plan_recovers_real_import_with_bindings() {
-    let plan = scan("import { ref } from 'vue'\nconst c = ref(0)\nc.");
+    let src = "import { ref } from 'vue'\nconst c = ref(0)\nc.";
+    let plan = scan(src);
     assert_eq!(plan.imports.len(), 1, "the import is recovered");
-    assert_eq!(plan.imports[0].source, "vue");
+    // The statement span slices back to the `from 'vue'` import.
+    let span = plan.imports[0].span;
+    assert!(
+        src[span.start as usize..span.end as usize].contains("from 'vue'"),
+        "the recovered statement span must cover the `from 'vue'` import"
+    );
     assert!(
         plan.imports[0].binding_names.contains(&"ref"),
         "the local `ref` binding is recovered: {:?}",
@@ -578,13 +584,24 @@ fn recovery_plan_recovers_real_import_with_bindings() {
 }
 
 #[test]
-fn recovery_plan_recovers_vue_import_source_span() {
-    // `.vue` imports need the source span so the failure path can rewrite to the
-    // component IDE carrier (`.vue.tsx`).
-    let plan = scan("import Foo from './Foo.vue'\nFoo.");
+fn recovery_plan_recovers_vue_import_for_hoist() {
+    // A `.vue` import inside broken `<script setup>` is recovered so the failure
+    // path can HOIST the whole statement (via its statement span) and register the
+    // binding. The emitted specifier stays the BARE `./Foo.vue`, which resolves
+    // natively to the `.d.vue.ts` declaration carrier — there is no specifier
+    // rewrite, so the recovery plan no longer captures the specifier text/span.
+    let src = "import Foo from './Foo.vue'\nFoo.";
+    let plan = scan(src);
     assert_eq!(plan.imports.len(), 1);
-    assert_eq!(plan.imports[0].source, "./Foo.vue");
     assert!(plan.imports[0].binding_names.contains(&"Foo"));
+    // The statement span covers the full `import … './Foo.vue'` statement and
+    // slices back to the BARE specifier (NEGATIVE: no `.tsx` rewrite anywhere).
+    let span = plan.imports[0].span;
+    let stmt = &src[span.start as usize..span.end as usize];
+    assert!(
+        stmt.contains("./Foo.vue") && !stmt.contains(".vue.tsx"),
+        "the recovered import statement must carry the BARE `./Foo.vue` specifier: {stmt:?}"
+    );
 }
 
 #[test]
@@ -712,7 +729,10 @@ fn recovery_plan_excludes_block_local_import() {
     assert!(
         plan.imports.is_empty(),
         "block-local import leaked: {:?}",
-        plan.imports.iter().map(|i| i.source).collect::<Vec<_>>()
+        plan.imports
+            .iter()
+            .map(|i| &i.binding_names)
+            .collect::<Vec<_>>()
     );
 }
 

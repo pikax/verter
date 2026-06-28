@@ -14,7 +14,7 @@
 //!
 //! - Two coordinator-level sealed mutators front the durable store —
 //!   `retract_carrier` / `publish_owned_resolved`: the durable half of an
-//!   authoritative membership transition; only the `DurableCarrierStore` impl
+//!   authoritative membership transition; only the `CarrierMembershipCommitter` impl
 //!   block (the trait seam the reconciler drives) may call them.
 //! - Two backend primitives do the actual manifest mutation —
 //!   `retract_source_everywhere` / `retract_source_everywhere_except`: only the
@@ -42,8 +42,8 @@
 //!
 //! DISCRIMINATING: [`allowlist_self_test_discriminates`] feeds synthetic sources
 //! and proves the scanner FIRES on a planted `retract_carrier(...)` call in a
-//! non-allowlisted `external_ts` file, ACCEPTS the real `DurableCarrierStore` impl
-//! call, and stays CLEAN on the prefix-sharing live names.
+//! non-allowlisted `external_ts` file, ACCEPTS the real `CarrierMembershipCommitter`
+//! impl call, and stays CLEAN on the prefix-sharing live names.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -103,6 +103,12 @@ const CONTENT_VERB_ALLOWLIST: &[&str] = &[
     "crates/verter_lsp/src/server/sync_orchestration.rs",
     "crates/verter_lsp/src/server/provider_state.rs",
     "crates/verter_lsp/src/background_drain.rs",
+    // The proactive declaration-overlay closure pass — a drain carrier-sync site
+    // extracted from `background_drain.rs` (above) for the file-size guard. It
+    // opens each carrier dependency's `.d.<ext>.ts` declaration companion via the
+    // same bounded content verbs the drain uses for the IDE/API companions; it is
+    // not a store-membership mutator and routes no off-gateway commit.
+    "crates/verter_lsp/src/background_drain_decl_closure.rs",
     "crates/verter_lsp/src/sync_coordinator.rs",
     "crates/verter_lsp/src/workspace_scanner.rs",
     "crates/verter_lsp/src/type_provider/project_sync.rs",
@@ -120,15 +126,15 @@ const DELETED_NAMES: &[&str] = &[
 ];
 
 /// Whether a call to `symbol` is permitted in `file_rel`, given whether the call
-/// site is inside the `DurableCarrierStore` impl block.
-fn call_is_allowed(symbol: &str, file_rel: &str, in_durable_impl: bool) -> bool {
+/// site is inside the `CarrierMembershipCommitter` impl block.
+fn call_is_allowed(symbol: &str, file_rel: &str, in_committer_impl: bool) -> bool {
     match symbol {
-        // Coordinator-level mutators: ONLY the `DurableCarrierStore` impl block in
-        // publish_coordinator.rs (the trait seam the reconciler drives). The
+        // Coordinator-level mutators: ONLY the `CarrierMembershipCommitter` impl block
+        // in publish_coordinator.rs (the trait seam the reconciler drives). The
         // reconciler file is allowlisted defensively (it drives the trait, not
         // these inherent methods, today).
         "retract_carrier" | "publish_owned_resolved" => {
-            (file_rel == PUBLISH_COORDINATOR && in_durable_impl)
+            (file_rel == PUBLISH_COORDINATOR && in_committer_impl)
                 || file_rel == MEMBERSHIP_RECONCILER
         }
         // Backend primitives: the coordinator's sealed wrappers (publish_coordinator.rs)
@@ -151,10 +157,10 @@ fn call_is_allowed(symbol: &str, file_rel: &str, in_durable_impl: bool) -> bool 
 
 /// AST visitor: records every forbidden CALL site and every re-introduced DELETED
 /// `fn` definition, tracking whether the cursor is inside the allowlisted
-/// `DurableCarrierStore` impl block.
+/// `CarrierMembershipCommitter` impl block.
 struct CallScanner {
     file_rel: String,
-    in_durable_impl: bool,
+    in_committer_impl: bool,
     violations: Vec<String>,
 }
 
@@ -165,10 +171,10 @@ impl CallScanner {
             || DELETED_NAMES.contains(&name)
             || GATEWAY_RESOLVERS.contains(&name)
             || CARRIER_CONTENT_VERBS.contains(&name);
-        if policed && !call_is_allowed(name, &self.file_rel, self.in_durable_impl) {
+        if policed && !call_is_allowed(name, &self.file_rel, self.in_committer_impl) {
             self.violations.push(format!(
                 "{}: reference to sealed carrier symbol `{name}` outside the allowlist. \
-                 Store mutators route through the `DurableCarrierStore` impl in \
+                 Store mutators route through the `CarrierMembershipCommitter` impl in \
                  {PUBLISH_COORDINATOR} (+ backend/reconciler); `carrier_sync_state_for_source` \
                  is PRIVATE to the carrier-sync gateway ({CARRIER_SYNC_GATEWAY}); the carrier \
                  content verbs run only from the bounded carrier-sync surface; the deleted names \
@@ -191,14 +197,14 @@ impl CallScanner {
     }
 }
 
-/// True iff `im` is the `impl DurableCarrierStore for CarrierPublishCoordinator`
+/// True iff `im` is the `impl CarrierMembershipCommitter for CarrierPublishCoordinator`
 /// block — the one trait seam the reconciler drives.
-fn is_durable_carrier_store_impl(im: &syn::ItemImpl) -> bool {
+fn is_carrier_membership_committer_impl(im: &syn::ItemImpl) -> bool {
     let trait_ok = im
         .trait_
         .as_ref()
         .and_then(|(_, path, _)| path.segments.last())
-        .map(|seg| seg.ident == "DurableCarrierStore")
+        .map(|seg| seg.ident == "CarrierMembershipCommitter")
         .unwrap_or(false);
     let self_ok = match &*im.self_ty {
         syn::Type::Path(p) => p
@@ -214,11 +220,11 @@ fn is_durable_carrier_store_impl(im: &syn::ItemImpl) -> bool {
 
 impl<'ast> Visit<'ast> for CallScanner {
     fn visit_item_impl(&mut self, im: &'ast syn::ItemImpl) {
-        let prev = self.in_durable_impl;
+        let prev = self.in_committer_impl;
         // An impl block is the unit of context; nesting is handled by save/restore.
-        self.in_durable_impl = is_durable_carrier_store_impl(im);
+        self.in_committer_impl = is_carrier_membership_committer_impl(im);
         syn::visit::visit_item_impl(self, im);
-        self.in_durable_impl = prev;
+        self.in_committer_impl = prev;
     }
 
     fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
@@ -268,7 +274,7 @@ fn scan_source(file_rel: &str, src: &str) -> Vec<String> {
     };
     let mut scanner = CallScanner {
         file_rel: file_rel.to_string(),
-        in_durable_impl: false,
+        in_committer_impl: false,
         violations: Vec::new(),
     };
     scanner.visit_file(&file);
@@ -352,22 +358,22 @@ fn allowlist_self_test_discriminates() {
         "a retract_carrier call outside the allowlist must trip the guard; got {planted:?}"
     );
 
-    // 2. The REAL allowlisted call (the DurableCarrierStore impl block in
+    // 2. The REAL allowlisted call (the CarrierMembershipCommitter impl block in
     //    publish_coordinator.rs) is CLEAN.
     let real = scan_source(
         PUBLISH_COORDINATOR,
-        "impl DurableCarrierStore for CarrierPublishCoordinator {\n\
-         fn retract(&self, s: &str) -> R { self.retract_carrier(s) }\n\
-         fn publish_owned(&self, b: &B, s: &str, c: &[C]) -> R { self.publish_owned_resolved(b, s, c) }\n\
+        "impl CarrierMembershipCommitter for CarrierPublishCoordinator {\n\
+         fn retract<'a>(&'a self, s: &'a str) -> F { Box::pin(async move { self.retract_carrier(s) }) }\n\
+         fn commit_owned<'a>(&'a self, b: &'a B, s: &'a str, c: &'a [C]) -> F { Box::pin(async move { self.publish_owned_resolved(b, s, c) }) }\n\
          }",
     );
     assert!(
         real.is_empty(),
-        "the DurableCarrierStore impl block's own calls must be allowed; got {real:?}"
+        "the CarrierMembershipCommitter impl block's own calls must be allowed; got {real:?}"
     );
 
     // 2b. The SAME coordinator mutator called from publish_coordinator.rs but
-    //     OUTSIDE the DurableCarrierStore impl block FIRES (block, not file,
+    //     OUTSIDE the CarrierMembershipCommitter impl block FIRES (block, not file,
     //     granularity).
     let outside_block = scan_source(
         PUBLISH_COORDINATOR,
@@ -375,7 +381,7 @@ fn allowlist_self_test_discriminates() {
     );
     assert!(
         outside_block.iter().any(|v| v.contains("retract_carrier")),
-        "retract_carrier called outside the DurableCarrierStore impl block must fire even in \
+        "retract_carrier called outside the CarrierMembershipCommitter impl block must fire even in \
          publish_coordinator.rs; got {outside_block:?}"
     );
 

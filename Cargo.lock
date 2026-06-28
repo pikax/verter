@@ -3952,6 +3952,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_tsgo_api",
  "verter_type_runtime",
  "verter_workspace",
 ]
@@ -4209,6 +4210,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_tsgo_api"
+version = "0.0.1-beta.1"
+dependencies = [
+ "arc-swap",
+ "base64",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "verter_type_expr"
 version = "0.0.1-beta.1"
 dependencies = [
@@ -4241,6 +4254,7 @@ dependencies = [
  "tracing",
  "verter_language",
  "verter_span",
+ "verter_tsgo_api",
 ]
 
 [[package]]

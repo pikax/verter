@@ -39,7 +39,9 @@ NM_BASE="$PWD" TSGO_PATH="<abs path to tsgo[.exe]>" node tools/tsgo-api-gate/har
 
 Exit 0 = GO. The runner gates on `harness.mjs` (all discriminating checks, GATE 1–4),
 `control.mjs` part (A) (the negative control), **and** `companion-identity.mjs` (GATE 5 — the
-production companion-identity proof). `incremental.mjs` tightens the incrementality proof.
+production carrier-identity proof: the bare-import target is the `.d.<ext>.ts` declaration carrier,
+proven to resolve and WIN over the `.vue.tsx`/`.svelte.tsx` self-diagnostics carrier).
+`incremental.mjs` tightens the incrementality proof.
 `control.mjs` part (B) is informational (introspects a build-dependent private field).
 
 ## What it proves (mechanism — matches §2.3 of the design doc)
@@ -61,17 +63,27 @@ production companion-identity proof). `incremental.mjs` tightens the incremental
 - Incremental edit via `updateSnapshot({ openProject, fileChanges: { changed:[carrier] } })`
   flips diagnostics on the **same stable project handle** with the unchanged dependency retained.
 
-## Companion identity (PROVEN by GATE 5) and carrier discovery (informs Block 5)
+## Carrier identity (PROVEN by GATE 5) and carrier discovery (informs Block 5)
 
-**Companion identity.** The shipped `--api` has **no module-resolution-map endpoint**, so the path
+**Carrier identity.** The shipped `--api` has **no module-resolution-map endpoint**, so the path
 Verter serves the carrier at IS the engine identity and tsgo only reaches it by **appending
-`.tsx`/`.ts` to the full bare-import basename** (`import "./Comp.vue"` probes `Comp.vue.tsx`). GATE
-5 (`companion-identity.mjs`) decided the production identity empirically:
+`.ts`/`.tsx` to the full bare-import basename** (`import "./Comp.vue"` probes `Comp.d.vue.ts` →
+`Comp.vue.ts` → `Comp.vue.tsx`). GATE 5 (`companion-identity.mjs`) decided the production identity
+empirically:
 
-- The component **IDE carrier** is `{name}.vue.tsx` / `{name}.svelte.tsx` — bare-import-probe-compatible
-  and **collision-free** (Svelte rune modules are `*.svelte.ts` / `*.svelte.js`, never `.tsx`). GATE
-  5 proves a `Widget.svelte.tsx` carrier and a real `state.svelte.ts` rune module coexist with
-  correct types both ways.
+- The **bare-import resolution target** is the **DECLARATION carrier** `{name}.d.vue.ts` /
+  `{name}.d.svelte.ts` — the **extension-MIDDLE** `.d.<ext>.ts` form (the `.d.` sits between the stem
+  and the carrier extension), the path tsgo's basename-append probe reaches **FIRST** (probe order
+  `.d.<ext>.ts` → `.<ext>.ts` → `.<ext>.tsx`, so the declaration **wins** over the IDE carrier). GATE
+  5 proves `CompB.d.vue.ts` satisfies `import "./CompB.vue"` (types flow) and that, with BOTH the
+  `.d.vue.ts` declaration carrier AND the `.vue.tsx` IDE carrier present, the bare import resolves to
+  the **declaration carrier** (`.d.vue.ts` wins over `.vue.tsx`).
+- The component **IDE carrier** `{name}.vue.tsx` / `{name}.svelte.tsx` is the **self-diagnostics
+  surface** (the file is type-checked AS it, source-mapped back), **NOT** the bare-import target. It
+  is bare-import-probe-compatible in the absence of the declaration carrier and **collision-free**
+  (Svelte rune modules are `*.svelte.ts` / `*.svelte.js`, never `.tsx`): GATE 5 proves a
+  `Widget.svelte.tsx` IDE carrier and a real `state.svelte.ts` rune module coexist with correct types
+  both ways.
 - A **`.verter.` _component_ identity is REJECTED**: serving `Comp.vue.verter.tsx` does NOT satisfy
   `import "./Comp.vue"` (tsgo never probes a `.verter.` segment) → TS2307.
 - The reserved `.verter.` infix is correct ONLY for the **redirect-reached `.ts` API carrier**
@@ -80,14 +92,16 @@ Verter serves the carrier at IS the engine identity and tsgo only reaches it by 
   colliding with a real `*.svelte.ts` rune module (GATE 5 records tsgo probing `.svelte.ts` before
   `.svelte.tsx`).
 
-**Carrier discovery.** The carrier extension here is `.tsx`, matched by an **explicit** `src/**/*.tsx`
-glob in the fixture `tsconfig.json`. An extension-specific glob does **not** auto-expand to other
-extensions (see the `include` docs), so a real Verter component carrier (`Foo.vue.tsx` /
-`Foo.svelte.tsx`) is discoverable for the same reason — its final `.tsx` extension matches a
-`.ts`/`.tsx` glob (or the default include). A bare `.vue` would NOT be matched by `src/**/*.ts`. The
-bare `./X.vue` module-specifier redirection through the overlay is exercised by **GATE 4** (a bare
-`"./Exported.vue"` import resolving to the overlay-served `Exported.vue.tsx` companion) and the
-identity is settled by **GATE 5**. The residual for Block 5 is tsconfig-virtualization root-set
+**Carrier discovery.** The fixture's `include` is `src/**/*.ts` + `src/**/*.tsx`. An extension-specific
+glob does **not** auto-expand to other extensions (see the `include` docs), so a real Verter
+declaration carrier (`Foo.d.vue.ts` / `Foo.d.svelte.ts`) is discoverable because its final `.ts`
+extension matches a `.ts` glob (or the default include), and the IDE carrier (`Foo.vue.tsx` /
+`Foo.svelte.tsx`) is discoverable because its final `.tsx` extension matches a `.tsx` glob. A bare
+`.vue` would NOT be matched by `src/**/*.ts`. The bare `./X.vue` module-specifier redirection through
+the overlay is exercised by **GATE 4** (a bare `"./Exported.vue"` import resolving to an
+overlay-served companion — the bare-redirection MECHANISM witness) and the production identity is
+settled by **GATE 5** (the bare-import target is the `.d.<ext>.ts` declaration carrier the same probe
+reaches first). The residual for Block 5 is tsconfig-virtualization root-set
 injection under a `.vue`-specific `include`/`files` config (see the design doc §2.3).
 
 ## Hermeticity

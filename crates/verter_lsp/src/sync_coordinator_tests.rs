@@ -137,7 +137,12 @@ async fn sync_coordinator_closes_stale_owner_ids_when_owner_changes() {
     );
 
     let provider_surfaces = crate::provider_surface_store::ProviderSurfaceStore::new();
-    close_stale_paths(&sync, &provider_surfaces, &transition.stale_paths).await;
+    close_stale_paths(
+        &sync,
+        &provider_surfaces,
+        &non_decl_close_targets(&transition.stale_paths),
+    )
+    .await;
     commit_sync_transition(&states, "/workspace/src/App.vue", transition.next);
 
     let calls = mock.file_sync_calls();
@@ -210,7 +215,7 @@ async fn close_stale_paths_forgets_closed_api_surface_in_store() {
     );
 
     // Drive the coordinator close path with the API path stale.
-    let stale_paths = vec![(ProviderPathKind::Api, api_path.to_string())];
+    let stale_paths = vec![(NonDeclProviderPathKind::Api, api_path.to_string())];
     close_stale_paths(&sync, &provider_surfaces, &stale_paths).await;
 
     // The provider close still happened (behavior preserved)...
@@ -397,8 +402,10 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some(ide_path.clone()),
             api_path: Some(format!("{canonical_id}.ts")),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -740,8 +747,10 @@ defineProps<{ msg: string }>()
         ),
         ide_path: Some(ide_path.clone()),
         api_path: Some(api_path.clone()),
+        decl_path: None,
         ide_background_loaded: true,
         api_background_loaded: true,
+        decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
     };

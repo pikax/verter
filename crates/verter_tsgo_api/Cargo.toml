@@ -1,0 +1,41 @@
+[package]
+name = "verter_tsgo_api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Rust-native client for the tsgo (typescript-go) `--api` MessagePack protocol: hand-written wire codec, single-writer process actor, sync host-callback FS adapter, and interactive/batch scheduling lanes."
+publish = false
+
+[dependencies]
+# Async runtime for the process actor + scheduling lanes. `net` adds the
+# named-pipe (Windows) / Unix-domain-socket transport the `--api` ATTACH path
+# connects to (the server-minted pipe). Feature set otherwise matches the
+# workspace's other tokio consumers (verter_type_runtime / verter_napi).
+tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "rt-multi-thread", "macros", "net"] }
+# Immutable overlay snapshot published lock-free to the sync FS-callback path.
+arc-swap = "1.9"
+# Non-async synchronization for the pending-request table + lane bookkeeping.
+parking_lot = "0.12.5"
+# JSON payloads ride inside the MessagePack `bin` frame fields (the tsgo `--api`
+# high-level ops encode params/results as `JSON.stringify(...)` UTF-8 bytes).
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Binary `--api` op results (getSourceFile / typeToTypeNode) ride a base64
+# `{ data }` field on the vscode-jsonrpc ATTACH wire; the JSON parity oracle also
+# base64-encodes carrier content for the Node harness.
+base64 = "0.22.1"
+
+# NOTE: the STANDALONE `--api` transport uses the spawned engine's stdin/stdout
+# pipes on EVERY platform (no platform-specific pipe crate). The shipped JS sync
+# client uses a Windows named pipe only because Node's libuv handles cannot do
+# synchronous fd I/O; the async tokio standalone transport reads/writes the stdio
+# pipes directly (`tsgo --api` over stdio is verified working on Windows). The
+# separate ATTACH path DOES connect to a server-minted named pipe / UDS — the pipe
+# the `tsgo --lsp` server mints for `custom/initializeAPISession` — served through
+# tokio's `net` feature, NOT a sync-fd workaround.
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time", "sync"] }

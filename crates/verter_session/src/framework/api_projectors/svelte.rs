@@ -76,10 +76,18 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             return None;
         }
 
-        // The testing-API surface is Vue-only — Svelte returns None
-        // for `Testing`, distinct from the `Public` mode's `Some`.
-        if mode == PublicApiMode::Testing {
-            return None;
+        // Mode handling is EXPLICIT (no silent fall-through for a future
+        // `PublicApiMode` variant):
+        // - `Public` and `Declaration` BOTH render the same shim. The Svelte
+        //   shim is already a STRICTLY VALID `.d.ts` — pure declarations only
+        //   (type-only imports, `type`/`interface`, `declare const … export
+        //   default …`), no runtime/value statements — so the declaration
+        //   carrier surface reuses it directly.
+        // - `Testing` is the Vue-only debug surface — Svelte returns `None`,
+        //   distinct from the rendered `Some`.
+        match mode {
+            PublicApiMode::Public | PublicApiMode::Declaration => {}
+            PublicApiMode::Testing => return None,
         }
 
         // Read the ALREADY-CACHED shallow state for the resolved canonical — NO

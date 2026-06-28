@@ -1279,7 +1279,11 @@ impl VerterLanguageServer {
             self.sync_imported_carrier_api_lightweight(carrier_id).await;
         }
 
-        // Sync barrel files (TSGO's rewrite_vue_imports_for_tsgo handles .vue → .vue.ts)
+        // Sync barrel files. Carrier import specifiers already carry their
+        // resolvable suffix before reaching the provider — the compiler rewrites
+        // in-project carrier imports to the `.vue.tsx` IDE carrier, and the
+        // resolver rewrites non-carrier importer specifiers to the `.verter.ts`
+        // API carrier — so the provider sends content unmodified.
         for barrel_id in &barrel_ids {
             // Skip if already synced
             if let Some(state) = self.provider_sync_state_for_source(barrel_id) {
@@ -1840,6 +1844,7 @@ impl VerterLanguageServer {
             },
             vfs_workspace: Arc::clone(&self.vfs_workspace),
             carrier_publish_coordinator: self.carrier_publish_coordinator.clone(),
+            decl_overlay_owner: Arc::clone(&self.decl_overlay_owner),
         };
 
         let ctx = context.to_owned();

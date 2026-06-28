@@ -156,9 +156,11 @@ const IDE_CARRIERS: readonly { extension: string; ideSuffix: string }[] = Object
  * The IDE-carrier companion path for a bare carrier file (`Comp.vue` →
  * `Comp.vue.tsx`, `Comp.svelte` → `Comp.svelte.tsx`), or `null` when `fileName`
  * is not a recognised component carrier. This is the in-project module-resolution
- * redirect target — the SOURCE carrier identity both engines resolve a bare
- * `./Comp.vue` import to — distinct from the `.verter.ts` API carrier (the
- * cross-package/project-ref redirect target).
+ * redirect target THIS in-process tsserver plugin maps a bare `./Comp.vue` import
+ * to (the IDE carrier). It is distinct from the `.verter.ts` API carrier (the
+ * cross-package/project-ref redirect target), and from the tsgo native engine's
+ * bare-import target — the `.d.<ext>.ts` declaration carrier (`Comp.d.vue.ts`),
+ * which tsgo reaches via its basename-append probe (the plugin has no such hook).
  */
 export function toIdeCarrierFileName(fileName: string): string | null {
   const normalized = normalizePath(fileName);

@@ -13,8 +13,9 @@ use verter_session::external_ts::{
 use verter_session::file_artifact_store::ProjectIdentity;
 
 use super::{
-    AuthorityState, BootstrapKind, DurableCarrierStore, MembershipReconciler, OwnershipAuthority,
-    OwnershipDecision, ReconcileErr, ReconcileOutcome, ReconcileReason, ResolverOwnershipAuthority,
+    AuthorityState, BootstrapKind, CarrierMembershipCommitter, CommitFuture, MembershipReconciler,
+    OwnershipAuthority, OwnershipDecision, ReconcileErr, ReconcileOutcome, ReconcileReason,
+    ResolverOwnershipAuthority,
 };
 use crate::external_ts::membership_ledger::{
     AbsentReason, CanonicalSource, LedgerCompanion, MembershipLedger, MembershipRecord, ProjectUri,
@@ -24,17 +25,18 @@ use crate::external_ts::CarrierCompanion;
 use crate::type_provider::mock::{FailingTypeProvider, MockCall, MockTypeProvider};
 use crate::type_provider::traits::TypeProvider;
 
-/// A recording durable-store mock — records each `publish_owned` / `retract` and can
-/// be armed to fail, so the reconciler tests assert the durable store is mutated as
-/// part of an authoritative transition without standing up a real on-disk backend.
+/// A recording membership-committer mock — records each `commit_owned` / `retract`
+/// and can be armed to fail, so the reconciler tests assert the membership is
+/// committed as part of an authoritative transition without standing up a real
+/// engine backend.
 #[derive(Default)]
-struct RecordingDurableStore {
-    published: parking_lot::Mutex<Vec<String>>,
+struct RecordingMembershipCommitter {
+    committed: parking_lot::Mutex<Vec<String>>,
     retracted: parking_lot::Mutex<Vec<String>>,
     fail: AtomicBool,
 }
 
-impl RecordingDurableStore {
+impl RecordingMembershipCommitter {
     fn arc() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -44,31 +46,35 @@ impl RecordingDurableStore {
     }
 }
 
-impl DurableCarrierStore for RecordingDurableStore {
-    fn publish_owned(
-        &self,
-        _binding: &ProjectBinding,
-        source_canonical: &str,
-        _companions: &[CarrierCompanion],
-    ) -> Result<(), CarrierPublishError> {
-        if self.fail.load(Ordering::SeqCst) {
-            return Err(CarrierPublishError::Publish("armed durable failure".into()));
-        }
-        self.published.lock().push(source_canonical.to_string());
-        Ok(())
+impl CarrierMembershipCommitter for RecordingMembershipCommitter {
+    fn commit_owned<'a>(
+        &'a self,
+        _binding: &'a ProjectBinding,
+        source_canonical: &'a str,
+        _companions: &'a [CarrierCompanion],
+    ) -> CommitFuture<'a> {
+        Box::pin(async move {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(CarrierPublishError::Publish("armed commit failure".into()));
+            }
+            self.committed.lock().push(source_canonical.to_string());
+            Ok(())
+        })
     }
 
-    fn retract(&self, source_canonical: &str) -> Result<(), CarrierPublishError> {
-        if self.fail.load(Ordering::SeqCst) {
-            return Err(CarrierPublishError::Retract("armed durable failure".into()));
-        }
-        self.retracted.lock().push(source_canonical.to_string());
-        Ok(())
+    fn retract<'a>(&'a self, source_canonical: &'a str) -> CommitFuture<'a> {
+        Box::pin(async move {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(CarrierPublishError::Retract("armed commit failure".into()));
+            }
+            self.retracted.lock().push(source_canonical.to_string());
+            Ok(())
+        })
     }
 }
 
 /// A resolved `ProjectBinding` for `project` (test-only seam). The env dims are
-/// inert (the mock durable store ignores them); only `tsconfig_uri == project`
+/// inert (the mock committer ignores them); only `tsconfig_uri == project`
 /// matters, since the reconciler derives the ledger's project from it.
 fn test_binding(project: &str) -> ProjectBinding {
     let env_dims = EnvDims {
@@ -140,28 +146,31 @@ fn reconciler_with(
     provider: Arc<dyn TypeProvider>,
 ) -> (MembershipReconciler, Arc<MembershipLedger>) {
     let ledger = Arc::new(MembershipLedger::with_initial_session());
-    let reconciler =
-        MembershipReconciler::new(Arc::clone(&ledger), provider, RecordingDurableStore::arc());
+    let reconciler = MembershipReconciler::new(
+        Arc::clone(&ledger),
+        provider,
+        RecordingMembershipCommitter::arc(),
+    );
     (reconciler, ledger)
 }
 
-/// Like [`reconciler_with`] but also returns the durable-store handle for tests that
-/// assert the on-disk store was mutated (or arm a durable failure).
-fn reconciler_with_durable(
+/// Like [`reconciler_with`] but also returns the membership-committer handle for
+/// tests that assert the membership was committed (or arm a commit failure).
+fn reconciler_with_committer(
     provider: Arc<dyn TypeProvider>,
 ) -> (
     MembershipReconciler,
     Arc<MembershipLedger>,
-    Arc<RecordingDurableStore>,
+    Arc<RecordingMembershipCommitter>,
 ) {
     let ledger = Arc::new(MembershipLedger::with_initial_session());
-    let durable = RecordingDurableStore::arc();
+    let committer = RecordingMembershipCommitter::arc();
     let reconciler = MembershipReconciler::new(
         Arc::clone(&ledger),
         provider,
-        Arc::clone(&durable) as Arc<dyn DurableCarrierStore>,
+        Arc::clone(&committer) as Arc<dyn CarrierMembershipCommitter>,
     );
-    (reconciler, ledger, durable)
+    (reconciler, ledger, committer)
 }
 
 /// Advertise `source` under `project` with `companions` through the real reconciler.
@@ -589,8 +598,11 @@ async fn provider_transition_failure_does_not_commit_the_tombstone() {
     assert!(ledger.is_advertised(&source));
 
     let provider: Arc<dyn TypeProvider> = Arc::new(FailingTypeProvider::new("provider down"));
-    let reconciler =
-        MembershipReconciler::new(Arc::clone(&ledger), provider, RecordingDurableStore::arc());
+    let reconciler = MembershipReconciler::new(
+        Arc::clone(&ledger),
+        provider,
+        RecordingMembershipCommitter::arc(),
+    );
 
     let result = reconciler
         .remove_source_membership(&source, AbsentReason::Deleted)
@@ -607,15 +619,16 @@ async fn provider_transition_failure_does_not_commit_the_tombstone() {
 }
 
 #[tokio::test]
-async fn durable_store_failure_returns_err_and_does_not_advertise() {
-    // DISCRIMINATION: the reconciler folds in the durable on-disk store mutation
-    // (the plugin's cross-process content + advertised-set surface). If that store
-    // mutation fails, the transition must fail closed — Err(DurableStore), no ledger
+async fn membership_commit_failure_returns_err_and_does_not_advertise() {
+    // DISCRIMINATION: the reconciler folds in the membership commit (the engine's
+    // advertised-membership surface — the tsserver plugin's cross-process content +
+    // advertised set, or a future in-memory engine's overlay). If that commit fails,
+    // the transition must fail closed — Err(MembershipCommit), no ledger
     // advertisement, no false success. An impl that committed the ledger regardless
-    // of the store would advertise a carrier the plugin cannot serve.
+    // of the membership commit would advertise a carrier the engine cannot serve.
     let mock = Arc::new(MockTypeProvider::new());
-    let (reconciler, ledger, durable) = reconciler_with_durable(mock.clone());
-    durable.arm_failure();
+    let (reconciler, ledger, committer) = reconciler_with_committer(mock.clone());
+    committer.arm_failure();
     let source = CanonicalSource::from("/proj/src/Comp.vue");
     let authority = StubAuthority::new(owned(
         "/proj/tsconfig.json",
@@ -627,26 +640,26 @@ async fn durable_store_failure_returns_err_and_does_not_advertise() {
         .await;
 
     assert!(
-        matches!(result, Err(ReconcileErr::DurableStore { .. })),
-        "a failed durable store publish must return Err(DurableStore), got {result:?}"
+        matches!(result, Err(ReconcileErr::MembershipCommit { .. })),
+        "a failed membership commit must return Err(MembershipCommit), got {result:?}"
     );
     assert!(
         !ledger.is_advertised(&source),
-        "a failed durable store publish must NOT advertise in the ledger"
+        "a failed membership commit must NOT advertise in the ledger"
     );
     assert!(
         ledger.record_snapshot(&source).is_none(),
-        "a failed durable store publish must not write a ledger record"
+        "a failed membership commit must not write a ledger record"
     );
 }
 
 #[tokio::test]
-async fn owned_publishes_to_the_durable_store_before_advertising() {
-    // DISCRIMINATION: an owned advertisement must also publish the carrier into the
-    // durable on-disk store (so the plugin can serve it), not only the ledger. An
-    // impl that skipped the store would leave `published` empty.
+async fn owned_commits_membership_before_advertising() {
+    // DISCRIMINATION: an owned advertisement must also commit the carrier's
+    // membership (so the engine can serve it), not only the ledger. An impl that
+    // skipped the commit would leave `committed` empty.
     let mock = Arc::new(MockTypeProvider::new());
-    let (reconciler, ledger, durable) = reconciler_with_durable(mock.clone());
+    let (reconciler, ledger, committer) = reconciler_with_committer(mock.clone());
     let source = CanonicalSource::from("/proj/src/Comp.vue");
     let authority = StubAuthority::new(owned(
         "/proj/tsconfig.json",
@@ -659,10 +672,113 @@ async fn owned_publishes_to_the_durable_store_before_advertising() {
         .expect("owned reconcile should succeed");
 
     assert_eq!(
-        durable.published.lock().as_slice(),
+        committer.committed.lock().as_slice(),
         ["/proj/src/Comp.vue".to_string()],
-        "an owned advertisement must publish the source into the durable store"
+        "an owned advertisement must commit the source's membership"
     );
+    assert!(ledger.is_advertised(&source));
+}
+
+/// A membership committer whose commit/retract futures cross a real `.await`
+/// suspension point (`yield_now`) and, AFTER resuming, observe the shared ledger's
+/// advertised state at the moment the commit runs. The reconciler drives the
+/// transition in order — membership commit, THEN ledger commit — so a committer
+/// future that is actually AWAITED to completion before the ledger commit must
+/// observe the source as NOT-yet-advertised. This proves the seam is genuinely
+/// async (the future is polled to completion across the await), not fire-and-forget.
+struct AwaitOrderingCommitter {
+    ledger: Arc<MembershipLedger>,
+    /// The ledger's `is_advertised` value observed (post-yield) at commit time, for
+    /// the source the commit named. `true` would mean the ledger committed BEFORE the
+    /// membership commit future completed (a non-awaited / fire-and-forget seam).
+    advertised_at_commit_time: parking_lot::Mutex<Vec<bool>>,
+    /// Set once the commit future has fully run (post-yield) — absent if the future
+    /// was dropped without being polled to completion.
+    commit_completed: AtomicBool,
+}
+
+impl AwaitOrderingCommitter {
+    fn arc(ledger: Arc<MembershipLedger>) -> Arc<Self> {
+        Arc::new(Self {
+            ledger,
+            advertised_at_commit_time: parking_lot::Mutex::new(Vec::new()),
+            commit_completed: AtomicBool::new(false),
+        })
+    }
+}
+
+impl CarrierMembershipCommitter for AwaitOrderingCommitter {
+    fn commit_owned<'a>(
+        &'a self,
+        _binding: &'a ProjectBinding,
+        source_canonical: &'a str,
+        _companions: &'a [CarrierCompanion],
+    ) -> CommitFuture<'a> {
+        Box::pin(async move {
+            // A genuine suspension point: only a reconciler that AWAITS this future to
+            // completion observes the post-yield effects below before it commits the
+            // ledger.
+            tokio::task::yield_now().await;
+            let observed = self
+                .ledger
+                .is_advertised(&CanonicalSource::from(source_canonical));
+            self.advertised_at_commit_time.lock().push(observed);
+            self.commit_completed.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    fn retract<'a>(&'a self, _source_canonical: &'a str) -> CommitFuture<'a> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn membership_commit_future_is_awaited_before_ledger_commit() {
+    // DISCRIMINATION: the commit seam is ASYNC. A reconciler that drives the
+    // committer future to completion across its `.await` (the correct behavior)
+    // observes the ledger as NOT-yet-advertised at commit time and records the
+    // commit as completed. A sync-in-async-clothing / fire-and-forget seam that did
+    // NOT await the future would either (a) leave `commit_completed` false (the
+    // future was dropped unpolled) or (b) let the ledger commit race ahead of the
+    // post-yield observation (`advertised_at_commit_time == true`). Both bugs go RED.
+    let ledger = Arc::new(MembershipLedger::with_initial_session());
+    let committer = AwaitOrderingCommitter::arc(Arc::clone(&ledger));
+    let mock: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
+    let reconciler = MembershipReconciler::new(
+        Arc::clone(&ledger),
+        mock,
+        Arc::clone(&committer) as Arc<dyn CarrierMembershipCommitter>,
+    );
+    let source = CanonicalSource::from("/proj/src/Comp.vue");
+    let authority = StubAuthority::new(owned(
+        "/proj/tsconfig.json",
+        vec![ide("/proj/src/Comp.vue.tsx")],
+    ));
+
+    let outcome = reconciler
+        .reconcile_source_membership(&source, &authority, ReconcileReason::SourceSynced)
+        .await
+        .expect("owned reconcile should succeed");
+    assert!(matches!(outcome, ReconcileOutcome::Advertised { .. }));
+
+    assert!(
+        committer.commit_completed.load(Ordering::SeqCst),
+        "the commit future must be AWAITED to completion (its post-yield body ran), \
+         not dropped unpolled"
+    );
+    assert_eq!(
+        committer.advertised_at_commit_time.lock().as_slice(),
+        [false],
+        "the membership commit future must complete BEFORE the ledger commit — at \
+         commit time the source must NOT yet be advertised (a fire-and-forget seam \
+         would let the ledger commit race ahead and observe `true`)"
+    );
+    // And after the awaited transition the ledger IS advertised (the commit and the
+    // ledger commit both happened, in order).
     assert!(ledger.is_advertised(&source));
 }
 
@@ -999,17 +1115,17 @@ async fn transition_matrix_random_sequences_preserve_model() {
 }
 
 #[tokio::test]
-async fn transition_matrix_durable_and_provider_failures_are_fail_closed() {
+async fn transition_matrix_membership_commit_and_provider_failures_are_fail_closed() {
     // DISCRIMINATION: an impl that commits the ledger regardless of a failing
-    // durable publish (owner change) or a failing provider close (remove) would
+    // membership commit (owner change) or a failing provider close (remove) would
     // tear the advertisement; both branches assert Err + the prior advertisement
     // survives untouched.
 
-    // Durable-store failure on an owner change A→B: nothing moves.
+    // Membership-commit failure on an owner change A→B: nothing moves.
     for seed in 0..40u64 {
         let mut state = lcg_seed(seed);
         let mock = Arc::new(MockTypeProvider::new());
-        let (reconciler, ledger, durable) = reconciler_with_durable(mock.clone());
+        let (reconciler, ledger, committer) = reconciler_with_committer(mock.clone());
         let source =
             CanonicalSource::new(format!("/proj/src/Comp{}.vue", lcg_next(&mut state) % 5));
         let project_a = "/proj/a/tsconfig.json";
@@ -1019,7 +1135,7 @@ async fn transition_matrix_durable_and_provider_failures_are_fail_closed() {
         advertise(&reconciler, &source, project_a, vec![ide(&companion)]).await;
         assert!(ledger.is_advertised(&source));
 
-        durable.arm_failure();
+        committer.arm_failure();
         let result = reconciler
             .reconcile_source_membership(
                 &source,
@@ -1029,8 +1145,8 @@ async fn transition_matrix_durable_and_provider_failures_are_fail_closed() {
             .await;
 
         assert!(
-            matches!(result, Err(ReconcileErr::DurableStore { .. })),
-            "seed {seed}: a failed durable publish must fail closed, got {result:?}"
+            matches!(result, Err(ReconcileErr::MembershipCommit { .. })),
+            "seed {seed}: a failed membership commit must fail closed, got {result:?}"
         );
         assert_eq!(
             ledger.advertised_under(&ProjectUri::from(project_a)),
@@ -1069,8 +1185,11 @@ async fn transition_matrix_durable_and_provider_failures_are_fail_closed() {
         assert!(ledger.is_advertised(&source));
 
         let provider: Arc<dyn TypeProvider> = Arc::new(FailingTypeProvider::new("provider down"));
-        let reconciler =
-            MembershipReconciler::new(Arc::clone(&ledger), provider, RecordingDurableStore::arc());
+        let reconciler = MembershipReconciler::new(
+            Arc::clone(&ledger),
+            provider,
+            RecordingMembershipCommitter::arc(),
+        );
         let reason = match lcg_next(&mut state) % 3 {
             0 => AbsentReason::Deleted,
             1 => AbsentReason::CompileFailed,

@@ -1843,11 +1843,40 @@ impl VerterHost {
         self.get_public_api_with_mode(canonical_id, PublicApiMode::Public, None)
     }
 
+    /// The consumer-facing declaration companion path (`.d.<ext>.ts`) for a
+    /// framework-carrier `canonical_id` — `Foo.vue` -> `Foo.d.vue.ts`,
+    /// `Foo.svelte` -> `Foo.d.svelte.ts`.
+    ///
+    /// Resolved through the SAME framework-adapter lookup
+    /// [`Self::get_public_api_with_mode`] uses: the runtime-loaded source
+    /// language (`UpsertRequest.file_language`) over the alias-resolved canonical
+    /// selects the adapter id, and the registered adapter's descriptor supplies
+    /// the descriptor-owned `.d.<ext>.ts` naming
+    /// ([`crate::framework::descriptor::FrameworkAdapterDescriptor::declaration_carrier_identity`]).
+    /// `None` when the source is not loaded, its language has no framework
+    /// adapter, the adapter projects no declaration carrier, or the canonical
+    /// does not carry the adapter's carrier extension — the same fail-closed
+    /// boundary the public-API surface uses.
+    pub fn declaration_carrier_path(&self, canonical_id: &str) -> Option<String> {
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
+            snap.downcast_data::<crate::host_executor::HostSourceData>()
+                .map(|hd| hd.file_language.clone())
+        })?;
+        let adapter_id = file_language.adapter_id()?;
+        let registration = self.framework_registry().get(adapter_id)?;
+        registration
+            .descriptor
+            .declaration_carrier_identity(&canonical)
+    }
+
     /// Generate public API output for a Vue SFC using the requested surface mode.
     ///
     /// `PublicApiMode::Public` matches the default application-facing instance shape.
     /// `PublicApiMode::Testing` exposes internal `<script setup>` bindings in a
-    /// Vue Test Utils-like debug surface.
+    /// Vue Test Utils-like debug surface. `PublicApiMode::Declaration` renders the
+    /// declaration-only (`.d.<ext>.ts`) public surface — a valid `.d.ts` with no
+    /// runtime/value code — that a bare framework-carrier import resolves to.
     ///
     /// When `profile` is provided, script/content overrides for that compile
     /// profile are reflected in the generated API surface.
@@ -1985,6 +2014,7 @@ impl VerterHost {
         let tsc_mode = match mode {
             PublicApiMode::Public => verter_compiler::tsc::TscMode::Public,
             PublicApiMode::Testing => verter_compiler::tsc::TscMode::Testing,
+            PublicApiMode::Declaration => verter_compiler::tsc::TscMode::Declaration,
         };
 
         // Try cached extract path: avoids re-parsing SFC + OXC on cache hit.

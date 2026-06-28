@@ -800,13 +800,41 @@ pub(super) async fn handle_did_close(
             }
         }
     }
-    // Capture canonical_id before did_close clears document state.
+    // Capture canonical_id before did_close clears document state — every step
+    // below that needs the closed file's identity (the overlay release, the host
+    // evict, the scheduler close) reads it from here, not from `documents`.
     let canonical_id = server.documents.get_canonical_id(uri);
 
-    // Clear the VFS overlay FIRST so the workspace falls back to disk.
-    // This must happen before scheduler.close_file() because close_file
-    // enqueues a background Source reload that reads via WorkspaceSourceLoader.
+    // Clear document state FIRST, before releasing the proactive
+    // declaration-overlay graph below: `documents.did_close` removes this root
+    // from `documents.open_uris()`, the live open-root set the background
+    // closure pass reads. Doing it first means a closure pass racing this close
+    // observes the root as CLOSED — so when it reconciles the overlay refcount it
+    // DROPS this root's re-recorded edges instead of keeping them. If the release
+    // ran first, a pass landing in the gap would re-record the just-released
+    // edges while the root was still in the open set, and the final reconcile
+    // would KEEP them with no future close event — a permanent overlay leak.
+    //
+    // (Also keeps the required ordering vs `scheduler.close_file()` below: the
+    // VFS overlay must clear before `close_file` enqueues a background Source
+    // reload that reads via WorkspaceSourceLoader.)
     server.documents.did_close(uri);
+
+    // Release this root from the proactive declaration-overlay graph: any
+    // `.d.<ext>.ts` overlay its closure opened that NO other open root still
+    // reaches is closed now. An overlay still reachable from another open root
+    // is retained (closing it would strand that root's bare carrier imports).
+    // A no-op for tsserver (the refcount is only populated on the tgo closure
+    // pass) and when the closed file was never a carrier root. Runs AFTER
+    // `did_close` so the closure pass already sees the root as closed (above).
+    if server.project_sync.is_some() {
+        if let Some(ref canonical_id) = canonical_id {
+            server
+                .release_declaration_overlays_for_closed_root(canonical_id)
+                .await;
+        }
+    }
+
     server.cached_verter_diags.remove(uri.as_str());
 
     // Evict the host's FileEntry so ensure_loaded / get_source don't

@@ -229,7 +229,13 @@ pub fn resolve(
         workspace_root,
         strict,
         &|| verter_type_runtime::find_node(),
-        &|| verter_type_runtime::tsgo::find_tsgo_binary().ok(),
+        &|| {
+            // rc-only canonical discovery: env override → workspace `node_modules`
+            // rc `tsc` → npm/npx cache. Passing the workspace root lets a project
+            // that pins `typescript@>=7` resolve its own engine.
+            verter_type_runtime::tsgo::find_tsgo_binary_canonical(Some(Path::new(workspace_root)))
+                .ok()
+        },
         &|tsdk, ws| {
             verter_type_runtime::find_tsserver(Some(tsdk), Some(ws))
                 .map(|p| p.to_string_lossy().to_string())

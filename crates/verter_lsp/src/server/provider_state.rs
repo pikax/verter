@@ -207,7 +207,13 @@ impl VerterLanguageServer {
         is_jsx: bool,
     ) -> Option<ProviderSyncState> {
         let snapshot = self.published_resolver()?;
-        crate::external_ts::carrier_close_target(&snapshot.resolver, canonical_id, is_jsx)
+        let decl_path = self.documents.host().declaration_carrier_path(canonical_id);
+        crate::external_ts::carrier_close_target(
+            &snapshot.resolver,
+            canonical_id,
+            is_jsx,
+            decl_path,
+        )
     }
 
     pub(super) fn prepare_non_carrier_provider_sync_transition(
@@ -384,6 +390,28 @@ impl VerterLanguageServer {
             return;
         };
         for (kind, path) in paths {
+            // A `Decl` close is ROUTED through THE declaration-overlay lifecycle
+            // owner — the SOLE authority that issues a provider `close_dts` for a
+            // declaration overlay — so there is no second, UNGUARDED Decl-close path.
+            // The owner serializes the close behind the overlay's path lock and
+            // re-checks the overlay's reachability + close generation before the
+            // destructive close: a still-referenced overlay (or one whose generation
+            // advanced via a racing open) is skipped (closing it would strand an open
+            // root on TS2307); a `Decl` path that is NOT a proactive overlay (no slot,
+            // generation 0) closes through the same path. The owner needs no resolver
+            // snapshot here — its per-path serialization (not a compensate-after-close
+            // re-open) is what keeps a concurrent open consistent.
+            if *kind == ProviderPathKind::Decl {
+                let target = self.decl_overlay_owner.close_target_for(path);
+                self.decl_overlay_owner
+                    .guarded_close(
+                        sync,
+                        &self.provider_sync_states,
+                        std::slice::from_ref(&target),
+                    )
+                    .await;
+                continue;
+            }
             // A closing API path is no longer the active synced virtual surface —
             // retire its active generation under a fresh close EPOCH (historical
             // snapshots stay valid for any in-flight rename that already captured
@@ -400,6 +428,8 @@ impl VerterLanguageServer {
                 ProviderPathKind::Ide => sync.close_tsx(path).await,
                 ProviderPathKind::Api => sync.close_dts(path).await,
                 ProviderPathKind::Shadow => sync.close_file(path).await,
+                // Delegated above (the guarded close is the SOLE Decl-close path).
+                ProviderPathKind::Decl => unreachable!("Decl is delegated to the guarded close"),
             };
             match result {
                 // Only a CONFIRMED API close finalizes, and only via THIS close's
@@ -423,6 +453,35 @@ impl VerterLanguageServer {
     pub(super) async fn close_provider_state(&self, state: &ProviderSyncState) {
         let paths = state.active_paths();
         self.close_provider_paths(&paths).await;
+    }
+
+    /// Release a now-closed carrier ROOT from the proactive declaration-overlay
+    /// graph: drop it from every overlay's reachability set and CLOSE every
+    /// `.d.<ext>.ts` overlay no longer reachable from any open root.
+    ///
+    /// An overlay still reached by a DIFFERENT open root is retained (closing it
+    /// would strand that root's bare carrier imports on TS2307). The closed
+    /// overlays are also stripped from their owner carrier's committed provider
+    /// state so the Decl kind does not linger as a falsely-live path.
+    pub(super) async fn release_declaration_overlays_for_closed_root(&self, root_canonical: &str) {
+        let now_unreferenced = self.decl_overlay_owner.release_root(root_canonical);
+        if now_unreferenced.is_empty() {
+            return;
+        }
+        // Route the Decl close through THE declaration-overlay lifecycle owner — the
+        // SOLE path that issues a provider `close_dts` for a declaration overlay (the
+        // closure pass's reconcile uses the same owner). It serializes the close
+        // behind the overlay's path lock and re-checks reachability + the close
+        // generation before the destructive close, so this did_close-side close can
+        // never clobber a concurrent reopen by another still-open root (TS2307
+        // stranding). It also strips the `Decl` kind from each owner carrier's
+        // committed state for the overlays it actually closes.
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        self.decl_overlay_owner
+            .guarded_close(sync, &self.provider_sync_states, &now_unreferenced)
+            .await;
     }
 
     /// Check if a URI is a virtual file and return its TSGO routing context.

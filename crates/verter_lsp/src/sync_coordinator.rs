@@ -22,9 +22,9 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
-    commit_sync_transition, genuinely_stale_after_sync, open_unresolved_carrier_commit,
-    open_unresolved_carrier_state, remove_sync_state, revert_unsynced_kinds, ProviderPathKind,
-    ProviderSyncState,
+    commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
+    open_unresolved_carrier_commit, open_unresolved_carrier_state, remove_sync_state,
+    revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
 use crate::server::compute_verter_diagnostics_for_with_views;
 use crate::type_provider::merge;
@@ -364,7 +364,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 close_stale_paths(
                     &deps.project_sync,
                     deps.documents.provider_surfaces(),
-                    &genuinely_stale,
+                    &non_decl_close_targets(&genuinely_stale),
                 )
                 .await;
             }
@@ -458,7 +458,7 @@ async fn preserve_open_unresolved_carrier(
         close_stale_paths(
             &deps.project_sync,
             deps.documents.provider_surfaces(),
-            std::slice::from_ref(&dropped),
+            &non_decl_close_targets(std::slice::from_ref(&dropped)),
         )
         .await;
     }
@@ -466,7 +466,7 @@ async fn preserve_open_unresolved_carrier(
         close_stale_paths(
             &deps.project_sync,
             deps.documents.provider_surfaces(),
-            std::slice::from_ref(&stale),
+            &non_decl_close_targets(std::slice::from_ref(&stale)),
         )
         .await;
     }
@@ -479,7 +479,10 @@ async fn clear_provider_sync_state(
     canonical_id: &str,
 ) {
     if let Some(state) = remove_sync_state(states, canonical_id) {
-        close_stale_paths(sync, provider_surfaces, &state.active_paths()).await;
+        // The declaration overlay (`Decl`), if any, is released by `DeclOverlayOwner`
+        // via the `did_close` lifecycle, never closed here — the generic close
+        // touches only non-decl artifacts.
+        close_stale_paths(sync, provider_surfaces, &state.active_non_decl_paths()).await;
     }
 }
 
@@ -497,7 +500,7 @@ async fn clear_provider_sync_state(
 async fn close_stale_paths(
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
-    stale_paths: &[(ProviderPathKind, String)],
+    stale_paths: &[(NonDeclProviderPathKind, String)],
 ) {
     for (kind, path) in stale_paths {
         // Retire the closing API surface under a fresh close EPOCH (see the sibling
@@ -506,15 +509,17 @@ async fn close_stale_paths(
         // a failed close cannot let it degrade to NotVirtual and corrupt a real
         // file. Capture the epoch-stamped token so the finalize is scoped to THIS
         // close.
-        let close_token = if *kind == ProviderPathKind::Api {
+        let close_token = if *kind == NonDeclProviderPathKind::Api {
             Some(provider_surfaces.forget(path))
         } else {
             None
         };
+        // A declaration overlay (`Decl`) is unrepresentable here — its lifecycle is
+        // owned by `DeclOverlayOwner`, never this generic close.
         let result = match kind {
-            ProviderPathKind::Ide => sync.close_tsx(path).await,
-            ProviderPathKind::Api => sync.close_dts(path).await,
-            ProviderPathKind::Shadow => sync.close_file(path).await,
+            NonDeclProviderPathKind::Ide => sync.close_tsx(path).await,
+            NonDeclProviderPathKind::Api => sync.close_dts(path).await,
+            NonDeclProviderPathKind::Shadow => sync.close_file(path).await,
         };
         match result {
             // Only a CONFIRMED API close finalizes, and only via THIS close's token —

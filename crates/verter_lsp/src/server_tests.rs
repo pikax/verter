@@ -464,6 +464,255 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
     }
 }
 
+/// A FAITHFUL type provider for the declaration-overlay close-supersession race:
+/// it applies the open/close EFFECT (mutating `open_paths`) at await-COMPLETION
+/// inside the returned future — exactly as the real `ExtensionTypeProvider` does
+/// (it inserts/removes the path inside the `async move` body), NOT at call-ENTRY
+/// like `MockTypeProvider` (which records the call before its `.await` returns and
+/// therefore MASKS the stale-close race). `open_paths` is the provider's ground
+/// truth: a `.d.<ext>.ts` overlay is resolvable iff it is in this set, so a test
+/// can assert the provider and the refcount agree (no TS2307 stranding).
+///
+/// A one-shot close gate (`block_close_path` / `arrived` / `release`) pauses the
+/// `close_file` future of ONE exact path AFTER it has been entered but BEFORE the
+/// open-set removal effect applies — modelling a slow provider close, so the test
+/// can run a concurrent reopen pass inside the destructive-close window
+/// deterministically (no timing race).
+#[derive(Default)]
+struct GatedDeclOverlayProvider {
+    open_paths: std::sync::Mutex<HashSet<String>>,
+    calls: std::sync::Mutex<Vec<MockCall>>,
+    /// `Some((path, arrived, release))`: a `close_file` against `path` SIGNALS
+    /// `arrived` (the close future has been entered, before the open-set removal),
+    /// then AWAITS `release` before applying the removal effect and returning. The
+    /// gate is taken (one-shot) so subsequent closes of the same path do not block.
+    #[allow(clippy::type_complexity)]
+    close_gate: std::sync::Mutex<
+        Option<(
+            String,
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+    >,
+    /// `Some((path, opened))`: an `open_file`/`update_file` against `path` SIGNALS
+    /// `opened` AFTER its open-set insertion effect has applied (the overlay is now
+    /// resolvable). One-shot. Lets a test learn the EXACT moment a specific overlay
+    /// open EFFECT lands — used to release a gated close strictly after a concurrent
+    /// reopen has re-established the overlay, so the stale-close strand is
+    /// deterministic in a tree WITHOUT the owner's per-path serialization.
+    #[allow(clippy::type_complexity)]
+    open_signal: std::sync::Mutex<Option<(String, std::sync::Arc<tokio::sync::Notify>)>>,
+}
+
+impl GatedDeclOverlayProvider {
+    fn open_paths_snapshot(&self) -> HashSet<String> {
+        self.open_paths.lock().unwrap().clone()
+    }
+
+    fn calls(&self) -> Vec<MockCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// Take (one-shot) the open signal armed for `path`, if any.
+    fn take_open_signal(&self, path: &str) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        let mut guard = self.open_signal.lock().unwrap();
+        match guard.as_ref() {
+            Some((armed, _)) if armed == path => guard.take().map(|(_, opened)| opened),
+            _ => None,
+        }
+    }
+
+    /// Arm the one-shot close gate for `path`. Returns `(arrived, release)`: the
+    /// test awaits `arrived` to learn the close future has been entered (the
+    /// closing task is now paused INSIDE the destructive close, before the open-set
+    /// removal applies), runs whatever concurrent reopen it needs, then signals
+    /// `release` (`notify_one`, which stores a permit so there is no
+    /// signal-before-await race) to let the close apply its removal and return.
+    fn block_close_path(
+        &self,
+        path: &str,
+    ) -> (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.close_gate.lock().unwrap() =
+            Some((path.to_string(), arrived.clone(), release.clone()));
+        (arrived, release)
+    }
+
+    /// Arm a one-shot OPEN signal for `path`. Returns `opened`: a future open (or
+    /// in-place update) of `path` fires it AFTER applying its open-set insertion, so
+    /// the test learns the open EFFECT has landed (the overlay is now resolvable).
+    fn signal_open_path(&self, path: &str) -> std::sync::Arc<tokio::sync::Notify> {
+        let opened = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.open_signal.lock().unwrap() = Some((path.to_string(), opened.clone()));
+        opened
+    }
+}
+
+impl TypeProvider for GatedDeclOverlayProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
+    fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        let content = content.to_string();
+        // Take the one-shot open signal (if armed for this exact path) WITHOUT
+        // holding the open_paths lock across the await.
+        let opened_signal = self.take_open_signal(&path);
+        Box::pin(async move {
+            // EFFECT at await-completion: the path becomes resolvable only once the
+            // open future actually runs to its end (faithful to the real provider).
+            self.open_paths.lock().unwrap().insert(path.clone());
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::OpenFile { path, content });
+            // Signal AFTER the open-set insertion: the overlay is now resolvable.
+            if let Some(opened) = opened_signal {
+                opened.notify_one();
+            }
+            Ok(())
+        })
+    }
+
+    fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        let content = content.to_string();
+        let opened_signal = self.take_open_signal(&path);
+        Box::pin(async move {
+            // An update keeps the path open (sync_dts of an already-live overlay).
+            self.open_paths.lock().unwrap().insert(path.clone());
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::UpdateFile { path, content });
+            if let Some(opened) = opened_signal {
+                opened.notify_one();
+            }
+            Ok(())
+        })
+    }
+
+    fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        // Capture the one-shot gate (if armed for this exact path) WITHOUT holding
+        // the open_paths lock across the await.
+        let gate = {
+            let mut guard = self.close_gate.lock().unwrap();
+            match guard.as_ref() {
+                Some((armed, _, _)) if armed == &path => {
+                    guard.take().map(|(_, arrived, release)| (arrived, release))
+                }
+                _ => None,
+            }
+        };
+        Box::pin(async move {
+            if let Some((arrived, release)) = gate {
+                // Signal the test that the destructive close has been ENTERED (the
+                // open-set removal has NOT applied yet), then await the release.
+                arrived.notify_one();
+                release.notified().await;
+            }
+            // EFFECT at await-completion: only now is the path no longer resolvable.
+            self.open_paths.lock().unwrap().remove(&path);
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::CloseFile { path });
+            Ok(())
+        })
+    }
+
+    fn get_completions(
+        &self,
+        _path: &str,
+        _offset: u32,
+        _trigger_character: Option<&str>,
+    ) -> ProviderFuture<'_, CompletionResult> {
+        Box::pin(async {
+            Ok(CompletionResult {
+                items: Vec::new(),
+                is_incomplete: false,
+            })
+        })
+    }
+
+    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_type_definition(
+        &self,
+        _path: &str,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_rename_locations(
+        &self,
+        _path: &str,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_signature_help(
+        &self,
+        _path: &str,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn get_code_actions(
+        &self,
+        _path: &str,
+        _start_offset: u32,
+        _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
+    ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_document_highlights(
+        &self,
+        _path: &str,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_inlay_hints(
+        &self,
+        _path: &str,
+        _start_offset: u32,
+        _end_offset: u32,
+    ) -> ProviderFuture<'_, Vec<InlayHint>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
 #[derive(Default)]
 struct LostContentCompletionProvider {
     open_paths: std::sync::Mutex<HashSet<String>>,
@@ -6284,8 +6533,10 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -6377,8 +6628,10 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -6484,8 +6737,10 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -6592,8 +6847,10 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -6915,8 +7172,10 @@ const msg = 'hello'
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: None,
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -7007,8 +7266,10 @@ const msg = 'hello'
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
             api_path: None,
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -7118,8 +7379,10 @@ const msg = 'hello'
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
             api_path: None,
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -7203,8 +7466,10 @@ const msg = 'hello'
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
             api_path: None,
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -7299,8 +7564,10 @@ const msg = 'hello'
             ),
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -7526,8 +7793,10 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         ),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
         api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+        decl_path: None,
         ide_background_loaded: true,
         api_background_loaded: true,
+        decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
     };
@@ -7636,8 +7905,10 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
             ),
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -7758,8 +8029,10 @@ async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kin
             ),
             ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -8056,8 +8329,10 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
             ),
             ide_path: Some(format!("{canonical_id}.tsx")),
             api_path: None,
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -8099,8 +8374,10 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
             ),
             ide_path: Some(format!("{canonical_id}.tsx")),
             api_path: Some(format!("{canonical_id}.verter.ts")),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -8186,8 +8463,10 @@ defineProps<{ msg: string }>()
         ),
         ide_path: Some(ide_path.clone()),
         api_path: Some(api_path.clone()),
+        decl_path: None,
         ide_background_loaded: true,
         api_background_loaded: true,
+        decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
     };
@@ -8309,8 +8588,10 @@ defineProps<{ msg: string }>()
         ),
         ide_path: Some(ide_path.clone()),
         api_path: Some(prior_api_path.clone()),
+        decl_path: None,
         ide_background_loaded: true,
         api_background_loaded: true,
+        decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
     };
@@ -8630,8 +8911,10 @@ defineProps<{ msg: string }>()
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some(child_tsx.clone()),
             api_path: Some(child_api.clone()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -8708,7 +8991,9 @@ defineProps<{ msg: string }>()
         ),
         ide_path: None,
         api_path: Some(api_path.to_string()),
+        decl_path: None,
         api_background_loaded: true,
+        decl_background_loaded: false,
         ide_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
@@ -8975,8 +9260,10 @@ const msg = 'hello'
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -9389,8 +9676,10 @@ const msg = 'hello'
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
             api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: false,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -11908,8 +12197,10 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
             owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
             ide_path: Some(ide_path.to_string()),
             api_path: Some(api_path.to_string()),
+            decl_path: None,
             ide_background_loaded: false,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -12821,6 +13112,7 @@ import Child from '@/components/Child.vue'
         &provider_sync_states,
         false,
         None,
+        &DeclOverlayOwner::default(),
     )
     .await;
 
@@ -12854,6 +13146,1642 @@ import Child from '@/components/Child.vue'
 
     // Cleanup
     let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[test]
+fn declaration_overlay_refcount_release_closes_only_unreferenced_overlays() {
+    // `DeclOverlayOwner` is glob-imported from `background_drain_decl_closure` via
+    // `use super::*`. This pins the slot-surgery contract of `release_root`:
+    // WHICH overlays drain to empty (and are returned for close) when a root closes.
+
+    // Two open roots reach a SHARED declaration overlay; root A also reaches a
+    // PRIVATE overlay only it uses. Seed each slot directly (mirroring what a real
+    // open records) at a non-zero generation.
+    let owner = DeclOverlayOwner::default();
+    owner.test_seed_slot("/ws/Shared.d.vue.ts", &["/ws/A.vue", "/ws/B.vue"], 1);
+    owner.test_seed_slot("/ws/OnlyA.d.vue.ts", &["/ws/A.vue"], 1);
+
+    // The release returns `(decl_path, generation_at_decision)`; the subject under
+    // test is WHICH overlays drain — project the returned targets to their paths.
+    let close_paths = |targets: Vec<DeclCloseTarget>| -> Vec<String> {
+        targets.into_iter().map(|(path, _gen)| path).collect()
+    };
+
+    // Closing root A: its PRIVATE overlay is now unreferenced (must close); the
+    // SHARED overlay is still reached by B (must be retained, NOT returned).
+    let to_close = close_paths(owner.release_root("/ws/A.vue"));
+    assert_eq!(
+        to_close,
+        vec!["/ws/OnlyA.d.vue.ts".to_string()],
+        "only A's private overlay is unreferenced after A closes, got: {to_close:?}"
+    );
+    // The shared overlay slot survives, now referenced only by B.
+    let shared_roots: Vec<String> = owner
+        .test_slot_roots("/ws/Shared.d.vue.ts")
+        .expect("shared overlay still tracked")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        shared_roots,
+        vec!["/ws/B.vue".to_string()],
+        "shared overlay now reached only by B"
+    );
+    // The drained private overlay is kept as a generation TOMBSTONE (empty roots) —
+    // the slot is GC'd only when the guarded close confirms the provider close, so a
+    // re-open racing the pending close is never lost. Its roots are empty.
+    assert_eq!(
+        owner.test_slot_roots("/ws/OnlyA.d.vue.ts"),
+        Some(HashSet::new()),
+        "the drained overlay is kept as an empty tombstone until the close confirms"
+    );
+
+    // Closing root B drains the shared overlay → it is now unreferenced.
+    let to_close = close_paths(owner.release_root("/ws/B.vue"));
+    assert_eq!(
+        to_close,
+        vec!["/ws/Shared.d.vue.ts".to_string()],
+        "the shared overlay closes once its last reaching root (B) closes, got: {to_close:?}"
+    );
+    // Every slot has drained to an empty tombstone (no live root reaches anything).
+    assert!(
+        owner
+            .test_slots_snapshot()
+            .iter()
+            .all(|(_, roots)| roots.is_empty()),
+        "every overlay slot has drained to empty once all roots close, slots={:?}",
+        owner.test_slots_snapshot()
+    );
+
+    // Releasing a root that never reached anything closes nothing (no panic). The
+    // empty tombstones are not re-returned (their roots were already empty before
+    // this release, so this release removed nothing from them).
+    let to_close = close_paths(owner.release_root("/ws/Never.vue"));
+    assert!(
+        to_close.is_empty(),
+        "releasing an unknown root closes nothing, got: {to_close:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declaration_closure_proactively_opens_transitive_decl_overlays() {
+    // The proactive declaration-closure pass (tgo) must open the `.d.<ext>.ts`
+    // declaration overlay for EVERY carrier in the transitive closure reachable
+    // from an open root, so a bare `import B from "./B.vue"` resolves with no
+    // TS2307. Cover the TRANSITIVE case: A imports B imports C — opening A opens
+    // B.d.vue.ts AND C.d.vue.ts. Also pin that a cycle (C imports A) terminates.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_transitive");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // A -> B -> C -> A (cycle back to A exercises the visited-set termination).
+    std::fs::write(
+        workspace.join("src/C.vue"),
+        "<script setup lang=\"ts\">\nimport A from './A.vue'\ndefineProps<{ c: string }>()\n</script>\n<template><A/></template>",
+    )
+    .expect("write C.vue");
+    std::fs::write(
+        workspace.join("src/B.vue"),
+        "<script setup lang=\"ts\">\nimport C from './C.vue'\ndefineProps<{ b: string }>()\n</script>\n<template><C/></template>",
+    )
+    .expect("write B.vue");
+    std::fs::write(
+        workspace.join("src/A.vue"),
+        "<script setup lang=\"ts\">\nimport B from './B.vue'\ndefineProps<{ a: string }>()\n</script>\n<template><B/></template>",
+    )
+    .expect("write A.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let a_id = format!("{workspace_id}/src/A.vue");
+
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&a_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/A.vue")).unwrap(),
+    });
+
+    // Build + populate the project registry so imports resolve.
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    // Run the drain as the tgo engine so the closure pass fires.
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true, // is_tsgo — the closure pass is tgo-scoped
+        None,
+        &decl_overlay_owner,
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    let opened_decl = |needle: &str| {
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::OpenFile { path, .. } if path.contains(needle)))
+    };
+
+    // TRANSITIVE: both the direct dependency B AND the deep dependency C have
+    // their declaration overlays opened by the closure walk from A.
+    assert!(
+        opened_decl("B.d.vue.ts"),
+        "closure opens the direct dependency's declaration overlay (B.d.vue.ts), calls={calls:?}"
+    );
+    assert!(
+        opened_decl("C.d.vue.ts"),
+        "closure opens the TRANSITIVE dependency's declaration overlay (C.d.vue.ts), calls={calls:?}"
+    );
+
+    // Reachability recorded: both overlays are tracked as reached from root A.
+    // The recorded root is A's canonical (matched by suffix — the host normalizes
+    // the drive-letter case, so an exact-string compare against `a_id` would be a
+    // path-normalization false negative, not a logic failure). `a_id` is used to
+    // anchor the expectation; the recorded reaching-root set must be non-empty and
+    // name A.
+    let _ = &a_id;
+    let reaches_a = |key_needle: &str| {
+        decl_overlay_owner
+            .test_slots_snapshot()
+            .iter()
+            .any(|(key, roots)| {
+                key.contains(key_needle)
+                    && !roots.is_empty()
+                    && roots.iter().all(|root| root.ends_with("/A.vue"))
+            })
+    };
+    assert!(
+        reaches_a("B.d.vue.ts") && reaches_a("C.d.vue.ts"),
+        "both B and C declaration overlays are recorded as reached from root A, slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    // The cycle (C -> A) did not infinite-loop: we reached this assertion. A's own
+    // declaration overlay IS opened (the per-root emission — every open carrier root
+    // emits its own `.d.<ext>.ts`), but A is NOT re-walked as a DEPENDENCY through
+    // the cycle (the visited set seeds with A so the C -> A edge is a no-op).
+    assert!(
+        opened_decl("A.d.vue.ts"),
+        "the open root A emits its OWN declaration overlay (A.d.vue.ts), calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lone_leaf_carrier_opens_its_own_declaration_overlay() {
+    // P1 #1 (root-emission): a SINGLE open leaf carrier — one that NOTHING imports
+    // and that imports nothing — must still get its OWN `.d.<ext>.ts` declaration
+    // overlay opened. tsgo resolves a bare `import Leaf from "./Leaf.vue"` (from any
+    // future importer, or a same-file self-reference) to the virtual declaration via
+    // its native probe, so the declaration must be live whenever the carrier is open
+    // — independent of any OTHER open file reaching it through the closure.
+    //
+    // RED-before: the closure pass only opened DEPENDENCIES' declarations (it seeded
+    // `visited` with the root and skipped it), and the main per-document sync only
+    // opened the IDE `.vue.tsx` + API `.vue.verter.ts`. So a lone leaf got neither —
+    // its `Leaf.d.vue.ts` was never opened.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_lone_leaf");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // A lone leaf — imports nothing, imported by nothing.
+    std::fs::write(
+        workspace.join("src/Leaf.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ leaf: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write Leaf.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let leaf_id = format!("{workspace_id}/src/Leaf.vue");
+
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&leaf_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/Leaf.vue")).unwrap(),
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true, // is_tsgo — the closure pass is tgo-scoped
+        None,
+        &decl_overlay_owner,
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    let opened_decl = |needle: &str| {
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::OpenFile { path, .. } if path.contains(needle)))
+    };
+
+    assert!(
+        opened_decl("Leaf.d.vue.ts"),
+        "a lone leaf carrier opens its OWN declaration overlay (Leaf.d.vue.ts), calls={calls:?}"
+    );
+
+    // The lone leaf's own declaration overlay is recorded as reached from itself
+    // (a self-edge), so the `did_close` lifecycle retires it when the leaf closes.
+    let _ = &leaf_id;
+    let self_reached = decl_overlay_owner
+        .test_slots_snapshot()
+        .iter()
+        .any(|(key, roots)| {
+            key.contains("Leaf.d.vue.ts")
+                && !roots.is_empty()
+                && roots.iter().all(|root| root.ends_with("/Leaf.vue"))
+        });
+    assert!(
+        self_reached,
+        "the lone leaf's declaration overlay records a self-edge (reached from Leaf.vue), slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
+    // P1 #2 (did_close-vs-pass race) at the PRODUCTION CALL SITE — NOT just the
+    // pure primitive. The closure pass snapshots the open carrier roots at its
+    // START, then `.await`s the overlay opens, then reconciles the refcount against
+    // a re-read of the open set. If a root closes DURING the pass (after the
+    // snapshot, while its overlay is being opened), its `did_close` releases its
+    // edges, the per-root reconcile RE-records them, and the final reconcile must
+    // drop it — otherwise the re-added edges + overlay leak permanently (no future
+    // close event exists for a root that is no longer open).
+    //
+    // This drives the real async pass (`open_declaration_closure_for_open_files` via
+    // `resync_aliased_imports_for_open_files`) and interleaves the close
+    // DETERMINISTICALLY: the mock fires a one-shot callback the moment A's own
+    // declaration overlay (`A.d.vue.ts`) is opened, and that callback closes A in
+    // the `DocumentRegistry`. So by the time the pass reaches its final reconcile,
+    // A is no longer open.
+    //
+    // The invariant: the final reconcile must NOT use the START-of-pass snapshot
+    // (which still contains A), or A's re-recorded self-edge is KEPT and the overlay
+    // is never closed — a permanent leak. Instead the call site
+    // RE-READS the open set after the async work, so the now-closed A is dropped
+    // and its solely-A overlay is returned for close.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_close_mid_pass");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // A lone carrier — its own declaration is the only overlay the pass opens, so
+    // the interleave point (the open of `A.d.vue.ts`) is unambiguous and the
+    // refcount holds exactly one slot (A's self-edge).
+    std::fs::write(
+        workspace.join("src/A.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ a: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write A.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let a_id = format!("{workspace_id}/src/A.vue");
+
+    let vfs_workspace_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace_access));
+    // `documents` is shared into the mock's open-file callback so the callback can
+    // close A mid-pass through the SAME registry the pass re-reads.
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri = crate::uri::path_to_file_uri(&a_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/A.vue")).unwrap(),
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    // The exact declaration-overlay path the pass opens for A (computed the same
+    // way production does), so the interleave callback is armed for that precise
+    // open. The pass SEEDS the root itself, so this is the FIRST overlay open.
+    let a_decl_path = host
+        .declaration_carrier_path(&a_id)
+        .expect("A.vue projects a declaration carrier path");
+    assert!(
+        a_decl_path.contains("A.d.vue.ts"),
+        "sanity: A's declaration overlay path is A.d.vue.ts, got {a_decl_path}"
+    );
+
+    // Deterministic mid-pass close: when `A.d.vue.ts` is opened (after the pass has
+    // already snapshotted A as a live root), close A in the registry. The pass then
+    // re-records A's self-edge in its per-root reconcile; only a final reconcile
+    // against a FRESH (now-A-absent) open set removes it again.
+    {
+        let documents_for_cb = Arc::clone(&documents);
+        let uri_for_cb = uri.clone();
+        provider.set_on_open_file(
+            &a_decl_path,
+            Box::new(move || {
+                documents_for_cb.did_close(&uri_for_cb);
+            }),
+        );
+    }
+
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true, // is_tsgo — the closure pass is tgo-scoped
+        None,
+        &decl_overlay_owner,
+    )
+    .await;
+
+    // The interleave actually happened: A's overlay open fired (so the callback ran
+    // and A was closed mid-pass), and A is no longer open afterwards.
+    let calls = provider.file_sync_calls();
+    let opened_a_decl = calls
+        .iter()
+        .any(|call| matches!(call, MockCall::OpenFile { path, .. } if path == &a_decl_path));
+    assert!(
+        opened_a_decl,
+        "the pass opened A's declaration overlay (arming the mid-pass close), calls={calls:?}"
+    );
+    assert!(
+        !documents.open_uris().iter().any(|u| u == uri.as_str()),
+        "A was closed mid-pass via the open-file callback"
+    );
+
+    // INVARIANT (the fix): after the pass, NO refcount edge exists for the
+    // now-closed root A. RED-before this would still hold `A.d.vue.ts -> {A}`.
+    let a_edge_remains = decl_overlay_owner
+        .test_slots_snapshot()
+        .iter()
+        .any(|(_, roots)| roots.iter().any(|root| root.ends_with("/A.vue")));
+    assert!(
+        !a_edge_remains,
+        "a root closed mid-pass leaves NO reaching-root edge — the stale start-of-pass \
+         snapshot must NOT keep A; slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    // INVARIANT (the fix): the overlay attributable SOLELY to the closed root A is
+    // CLOSED by the final reconcile. RED-before this CloseFile never happened.
+    let closed_a_decl = calls
+        .iter()
+        .any(|call| matches!(call, MockCall::CloseFile { path } if path == &a_decl_path));
+    assert!(
+        closed_a_decl,
+        "A's solely-reached declaration overlay is CLOSED once A closes mid-pass, calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+/// D1 (overlay LEAK — `handle_did_close` ordering) at the REAL handler. The
+/// `did_close` handler captures the canonical id, then runs TWO halves whose
+/// relative order is the bug under test: `[RELEASE]`
+/// (`release_declaration_overlays_for_closed_root` — drops the closing root's
+/// reachability edges and closes any solely-its overlay) and `[DIDCLOSE]`
+/// (`documents.did_close` — removes the root from the open set the closure pass
+/// reads). If `[RELEASE]` runs BEFORE `[DIDCLOSE]`, a closure pass whose
+/// per-root + final reconcile lands in the `[RELEASE]..[DIDCLOSE]` window
+/// RE-RECORDS the just-released edge while the root is STILL in `open_uris()`,
+/// so the final reconcile KEEPS it — a permanent overlay leak (no future close
+/// event exists for a root that is no longer open). The fix orders `[DIDCLOSE]`
+/// before `[RELEASE]`: the pass then observes the root as closed and drops the
+/// re-recorded edge.
+///
+/// This drives the REAL `handle_did_close` (not just `documents.did_close`)
+/// racing the REAL `open_declaration_closure_for_open_files` on the server's ONE
+/// shared `decl_overlay_refcount`. The interleave is DETERMINISTIC, not a timing
+/// race: the mock pauses the closing task INSIDE `[RELEASE]`'s overlay close
+/// (`block_close_file`), and the closure pass's re-record is run precisely in
+/// that paused window via `tokio::join!`-driven gate coordination. All three
+/// futures share `&server` (no spawn / no `'static` server handle needed); the
+/// join polls the closure-pass future while the handler is suspended on the
+/// close gate.
+///
+/// RED-before (pre-reorder, `[RELEASE]` then `[DIDCLOSE]`): the re-record lands
+/// while A is still open → `A.d.vue.ts -> {A}` is KEPT → the leak assertion
+/// FAILS. GREEN-after (`[DIDCLOSE]` then `[RELEASE]`): A leaves the open set
+/// before the pass re-reads it → the edge is dropped → no leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_handler() {
+    let temp_base = std::env::temp_dir().join("verter_test_did_close_release_order_leak");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // A lone carrier — its own declaration is the only overlay the pass opens, so
+    // the refcount holds exactly one slot (A's self-edge) and the close gate fires
+    // on exactly that one overlay.
+    std::fs::write(
+        workspace.join("src/A.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ a: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write A.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let a_id = format!("{workspace_id}/src/A.vue");
+
+    let vfs_workspace_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace_access));
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry)
+        .into_inner()
+        .expect("the test VFS workspace publishes a snapshot");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                // The proactive declaration-overlay graph is a tgo-only concern.
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    server.install_vfs_workspace(vfs_workspace);
+
+    let uri = crate::uri::path_to_file_uri(&a_id).expect("file uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/A.vue")).unwrap(),
+    });
+
+    // Re-bind `a_id` to the EXACT canonical id the registry assigns this URI — the
+    // same string the closure pass records into the refcount — so every later
+    // comparison is exact (the host normalises drive-letter case on Windows, so a
+    // `canonicalize`-derived id can differ in case from the registry's).
+    let a_id = server
+        .test_documents()
+        .get_canonical_id(&uri)
+        .expect("A.vue has a canonical id after did_open");
+
+    let a_decl_path = host
+        .declaration_carrier_path(&a_id)
+        .expect("A.vue projects a declaration carrier path");
+    assert!(
+        a_decl_path.contains("A.d.vue.ts"),
+        "sanity: A's declaration overlay path is A.d.vue.ts, got {a_decl_path}"
+    );
+
+    // PRIME the refcount: one real closure pass with A open records A's self-edge
+    // (`A.d.vue.ts -> {A}`) so the racing `[RELEASE]` actually has an overlay to
+    // close — that close is the deterministic interleave point.
+    server.test_run_declaration_closure_pass().await;
+    let primed = server
+        .test_decl_overlay_owner()
+        .test_slot_roots(&a_decl_path)
+        .is_some_and(|roots| roots.iter().any(|r| r == &a_id));
+    assert!(
+        primed,
+        "priming pass records A's self-edge A.d.vue.ts -> {{A}}, slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+
+    // Arm the deterministic interleave: `[RELEASE]`'s close of A.d.vue.ts pauses
+    // INSIDE the provider (signals `arrived`, awaits `release`).
+    let (arrived, release) = provider.block_close_file(&a_decl_path);
+    let pass_done = Arc::new(tokio::sync::Notify::new());
+
+    // H — the REAL did_close handler. Pre-fix it runs [RELEASE] then [DIDCLOSE];
+    // post-fix [DIDCLOSE] then [RELEASE]. Borrows `&server`.
+    let handler = super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+        },
+    );
+
+    // P — the REAL closure pass, run PRECISELY in the [RELEASE]'s-close window:
+    // it waits until the handler is paused in the overlay close, then re-records
+    // against whatever open set exists at that instant. Borrows `&server`.
+    let pass_done_for_p = Arc::clone(&pass_done);
+    let pass = async {
+        arrived.notified().await;
+        server.test_run_declaration_closure_pass().await;
+        pass_done_for_p.notify_one();
+    };
+
+    // R — release the handler's paused close only AFTER the pass re-record has
+    // landed, so the re-record is guaranteed to fall inside the window. Touches
+    // only the notifies (no server borrow).
+    let releaser = async {
+        pass_done.notified().await;
+        release.notify_one();
+    };
+
+    tokio::join!(handler, pass, releaser);
+
+    // The handler ran to completion: A is closed in the registry.
+    assert!(
+        !server
+            .test_documents()
+            .open_uris()
+            .iter()
+            .any(|u| u == uri.as_str()),
+        "the real did_close handler closed A"
+    );
+
+    // INVARIANT (the fix): after the real handler + the interleaved closure pass,
+    // NO refcount edge for the now-closed root A remains — its solely-A overlay is
+    // not leaked. RED-before (pre-reorder) this FAILS: the re-record landed while
+    // A was still in open_uris(), so A.d.vue.ts -> {A} was KEPT.
+    let leaked = server
+        .test_decl_overlay_owner()
+        .test_slots_snapshot()
+        .iter()
+        .any(|(_, roots)| roots.iter().any(|root| root == &a_id));
+    assert!(
+        !leaked,
+        "a root closed by the REAL did_close handler must leave NO reaching-root edge — \
+         [RELEASE] before [DIDCLOSE] re-records + KEEPS the edge (leak); \
+         slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+
+    drain.abort();
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+/// DECLARATION-OVERLAY CLOSE-VS-REOPEN serialization: a provider `close_dts` of a
+/// shared overlay, decided when one root drains it, must NOT strand a DIFFERENT
+/// still-open root that reaches the same overlay. The owner serializes the close
+/// and a concurrent reopen of the same overlay path behind that path's lock, so the
+/// reopen waits for the close to finish and then re-establishes the overlay — the
+/// provider and the reachability graph end in agreement, never with the overlay
+/// closed while a live root reaches it (TS2307 stranding).
+///
+/// EXACT interleave (engineered so the stale close's open-set REMOVAL is sequenced
+/// strictly AFTER S's reopen of the same overlay):
+///   * R is the SOLE root reaching `Shared.d.vue.ts` at release time.
+///   * R closes via the REAL `handle_did_close`: `release_…_for_closed_root` drops
+///     R, computes `now_unreferenced = [Shared.d.vue.ts, R.d.vue.ts]`, and the
+///     owner's guarded close acquires `Shared.d.vue.ts`'s path lock and issues the
+///     provider close — which PAUSES inside the close, HOLDING the lock (the
+///     open-set removal has NOT applied yet).
+///   * Concurrently the closure pass for the still-open S re-opens `Shared.d.vue.ts`
+///     (S's bare `import Shared from "./Shared.vue"` needs the overlay).
+///   * R's paused close is released ONLY after S's reopen of `Shared.d.vue.ts` has
+///     landed (signalled by the provider open EFFECT) — or, when S is lock-blocked
+///     and cannot reopen until R frees the lock, after a bounded fallback. R then
+///     APPLIES its open-set removal and frees the lock.
+///
+/// ASSERT (no stranding): the provider STILL has `Shared.d.vue.ts` open AND the
+/// owner records `{Shared.d.vue.ts -> S}` — the graph and the provider AGREE.
+///
+/// The provider is the FAITHFUL [`GatedDeclOverlayProvider`] (open/close EFFECT at
+/// await-COMPLETION, mirroring the real `ExtensionTypeProvider`), NOT
+/// `MockTypeProvider` (records at call-ENTRY, masking the ordering).
+///
+/// FORCED DISCRIMINATOR (no timeout): R's gated close is released by the FIRST of
+/// exactly TWO mutually-exclusive owner observations — a `select!` with no sleep
+/// arm. On a tree WITHOUT the owner's per-path serialization, S's reopen is not
+/// lock-gated, so it lands WHILE R's close is paused and fires `shared_reopened`
+/// FIRST (reason `ReopenedBeforeCloseReleased`); R's removal then lands AFTER S
+/// re-opened `Shared.d.vue.ts`, leaving it closed in the provider though the graph
+/// says `{Shared -> S}` → both the `reason` assertion AND the stranding assertion
+/// FAIL. On the serialized owner S's `open_overlay` for Shared finds R's path lock
+/// HELD and fires `shared_open_contended` FIRST (reason `BlockedOnPathLock`); S then
+/// re-establishes the overlay only after the close completes and drops the lock, so
+/// the provider keeps `Shared.d.vue.ts` and the asserted reason is
+/// `BlockedOnPathLock` → both assertions PASS. The release rides the forced lock
+/// ordering, never a clock — there is no timing race and no fallback that could go
+/// green despite the bug. The contention probe is `#[cfg(test)]`-gated on the owner,
+/// so production carries no probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
+    let temp_base = std::env::temp_dir().join("verter_test_decl_close_supersession");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // Shared is a leaf carrier imported by BOTH R and S — the shared declaration
+    // overlay `Shared.d.vue.ts` is reached from each of them. R and S also seed
+    // their own self-overlays, but the race is on the SHARED one.
+    std::fs::write(
+        workspace.join("src/Shared.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ s: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write Shared.vue");
+    let r_src = "<script setup lang=\"ts\">\nimport Shared from './Shared.vue'\ndefineProps<{ r: string }>()\n</script>\n<template><Shared/></template>";
+    std::fs::write(workspace.join("src/R.vue"), r_src).expect("write R.vue");
+    let s_src = "<script setup lang=\"ts\">\nimport Shared from './Shared.vue'\ndefineProps<{ q: string }>()\n</script>\n<template><Shared/></template>";
+    std::fs::write(workspace.join("src/S.vue"), s_src).expect("write S.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+
+    let vfs_workspace_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace_access));
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry)
+        .into_inner()
+        .expect("the test VFS workspace publishes a snapshot");
+
+    let provider = Arc::new(GatedDeclOverlayProvider::default());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                // The proactive declaration-overlay graph is a tgo-only concern.
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    server.install_vfs_workspace(vfs_workspace);
+
+    // Open R first (S is opened later, AFTER R's priming pass, so that at R's
+    // release time R is the SOLE referencer of Shared.d.vue.ts).
+    let r_uri = crate::uri::path_to_file_uri(&format!("{workspace_id}/src/R.vue")).expect("r uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: r_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r_src.to_string(),
+    });
+    let r_id = server
+        .test_documents()
+        .get_canonical_id(&r_uri)
+        .expect("R.vue has a canonical id");
+    let shared_id = format!("{workspace_id}/src/Shared.vue");
+    let shared_decl_path = host
+        .declaration_carrier_path(&shared_id)
+        .expect("Shared.vue projects a declaration carrier path");
+    assert!(
+        shared_decl_path.contains("Shared.d.vue.ts"),
+        "sanity: Shared's declaration overlay path is Shared.d.vue.ts, got {shared_decl_path}"
+    );
+
+    // PRIME with only R open: the closure pass records `{Shared.d.vue.ts -> R}`
+    // (R imports Shared) and opens the overlay in the provider.
+    server.test_run_declaration_closure_pass().await;
+    let primed_shared_by_r = server
+        .test_decl_overlay_owner()
+        .test_slot_roots(&shared_decl_path)
+        .is_some_and(|roots| roots.iter().any(|r| r == &r_id));
+    assert!(
+        primed_shared_by_r,
+        "priming pass (R open) records Shared.d.vue.ts -> {{R}}, slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+    assert!(
+        provider.open_paths_snapshot().contains(&shared_decl_path),
+        "priming pass opened Shared.d.vue.ts in the provider, open_paths={:?}",
+        provider.open_paths_snapshot()
+    );
+
+    // Now open S (imports Shared too) — but DO NOT run a pass for S yet. At R's
+    // release time the refcount still says `{Shared -> R}` only, so R's release
+    // computes Shared as now-unreferenced (the precondition for the stale close).
+    let s_uri = crate::uri::path_to_file_uri(&format!("{workspace_id}/src/S.vue")).expect("s uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: s_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: s_src.to_string(),
+    });
+    let s_id = server
+        .test_documents()
+        .get_canonical_id(&s_uri)
+        .expect("S.vue has a canonical id");
+
+    // Arm the deterministic interleave. R's release close of Shared.d.vue.ts pauses
+    // INSIDE the provider close (signals `arrived`, awaits `release`) BEFORE the
+    // open-set removal applies — and, in the lifecycle owner, R's guarded close
+    // holds Shared's per-path serialization lock across that paused provider close.
+    //
+    // Two mutually-exclusive owner observations drive a deterministic release with NO
+    // timeout — the discrimination rides a FORCED ordering, never a clock:
+    //   * `shared_open_contended` fires the instant S's `open_overlay` for
+    //     Shared.d.vue.ts finds the path's serialization lock already HELD (by R's
+    //     in-flight close) and is about to await it. This is the POST-FIX signal: it
+    //     proves S's open genuinely BLOCKED behind R's close instead of racing it.
+    //   * `shared_reopened` fires the instant S's RE-OPEN of Shared.d.vue.ts lands its
+    //     provider open EFFECT (the overlay is resolvable again). This is the PRE-FIX
+    //     signal: WITHOUT serialization S's open is not lock-gated, so it re-opens
+    //     Shared while R's close is still paused and signals here FIRST.
+    let (arrived, release) = provider.block_close_path(&shared_decl_path);
+    let shared_reopened = provider.signal_open_path(&shared_decl_path);
+    let shared_open_contended = server
+        .test_decl_overlay_owner()
+        .signal_open_lock_contended_for_test(&shared_decl_path);
+
+    // H — the REAL did_close handler for R: [DIDCLOSE](R) then [RELEASE](R). The
+    // release drops R from Shared's set → Shared now-unreferenced → the owner's
+    // guarded close acquires Shared's path lock and issues the gated provider close
+    // of Shared.d.vue.ts (which pauses, holding the lock). Borrows `&server`.
+    let handler = super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: r_uri.clone() },
+        },
+    );
+
+    /// Which of the two FORCED owner observations released R's gated close — the
+    /// FORCED discriminator of the per-path serialization. There is no third
+    /// (timeout) outcome: exactly one of these fires in each world.
+    #[derive(Debug)]
+    enum ReleaseReason {
+        /// POST-FIX: S's `open_overlay` hit R's HELD path lock (it blocked on the
+        /// serialization instead of racing R's close).
+        BlockedOnPathLock,
+        /// PRE-FIX: S re-opened Shared BEFORE R's close was released (no
+        /// serialization — S's open raced R's in-flight close).
+        ReopenedBeforeCloseReleased,
+    }
+
+    // P — once R's close is gated (a SINGLE `arrived` awaiter, so the one-shot notify
+    // is never split between two futures), drive S's reopen and R's release
+    // CONCURRENTLY. The releaser waits on the FIRST of the two owner observations and
+    // frees R only then — a `select!` over exactly two outcomes, NO sleep:
+    //   * post-fix (serialized owner): S's `open_overlay` for Shared finds R's path
+    //     lock held → `shared_open_contended` fires → reason = BlockedOnPathLock →
+    //     release R → R's close completes + drops the lock → S acquires it,
+    //     revalidates S is open, records S, and re-opens Shared → no strand.
+    //   * pre-fix (no serialization): S's open is not lock-gated, so it re-opens
+    //     Shared while R's close is still paused → `shared_reopened` fires FIRST →
+    //     reason = ReopenedBeforeCloseReleased → release R → R's stale close applies
+    //     its open-set REMOVAL strictly AFTER S re-opened Shared → Shared stranded.
+    // Both the `reason` assertion and the strand assertion below then discriminate
+    // deterministically, with no timing dependence.
+    let pass_and_release = async {
+        arrived.notified().await;
+        let pass = server.test_run_declaration_closure_pass();
+        let releaser = async {
+            let reason = tokio::select! {
+                _ = shared_open_contended.notified() => ReleaseReason::BlockedOnPathLock,
+                _ = shared_reopened.notified() => ReleaseReason::ReopenedBeforeCloseReleased,
+            };
+            release.notify_one();
+            reason
+        };
+        let (synced, reason) = tokio::join!(pass, releaser);
+        (synced, reason)
+    };
+
+    let (_, (_synced, reason)) = tokio::join!(handler, pass_and_release);
+
+    // The handler ran to completion: R is closed in the registry.
+    assert!(
+        !server
+            .test_documents()
+            .open_uris()
+            .iter()
+            .any(|u| u == r_uri.as_str()),
+        "the real did_close handler closed R"
+    );
+
+    // FORCED DISCRIMINATOR (no timeout): post-fix, S's open must have BLOCKED behind
+    // R's held path lock — so the release reason is `BlockedOnPathLock`. Pre-fix (no
+    // serialization) S re-opens Shared while R's close is paused, so `shared_reopened`
+    // fires first and the reason is `ReopenedBeforeCloseReleased` → this FAILS
+    // deterministically (the discrimination rides the forced lock ordering, never a
+    // clock).
+    assert!(
+        matches!(reason, ReleaseReason::BlockedOnPathLock),
+        "the serialized owner must make S's reopen BLOCK on R's held path lock (release \
+         reason = BlockedOnPathLock); a non-serialized tree lets S re-open Shared before \
+         R is released (reason = ReopenedBeforeCloseReleased). Got {reason:?}, calls={:?}",
+        provider.calls()
+    );
+
+    // INVARIANT 1 (the fix): the owner records S still reaches Shared.d.vue.ts.
+    let shared_reached_by_s = server
+        .test_decl_overlay_owner()
+        .test_slot_roots(&shared_decl_path)
+        .is_some_and(|roots| roots.iter().any(|r| r == &s_id));
+    assert!(
+        shared_reached_by_s,
+        "after the race the owner records S as reaching Shared.d.vue.ts, slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+
+    // INVARIANT 2 (the fix — the STRANDING assertion): the provider STILL has
+    // Shared.d.vue.ts open, so S's bare `import Shared from "./Shared.vue"`
+    // resolves (no TS2307). RED-before: R's stale close removed it from the
+    // provider open-set AFTER S re-opened it → open_paths is missing Shared (it
+    // typically contains only S's self-overlay S.d.vue.ts) → this FAILS, exactly
+    // the stranding the refcount cannot see.
+    let open_paths = provider.open_paths_snapshot();
+    assert!(
+        open_paths.contains(&shared_decl_path),
+        "the provider must STILL have Shared.d.vue.ts open after the race (the \
+         refcount says S reaches it) — a stale close that strands S on TS2307 is \
+         the bug; provider open_paths={open_paths:?}, calls={:?}",
+        provider.calls()
+    );
+
+    drain.abort();
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+/// D3 (atomic / linearizable remove-if-empty) + D2 (over-close root cause). The
+/// refcount's remove-if-empty MUST decide emptiness and remove the slot under a
+/// SINGLE held shard lock, so a concurrent insert of ANOTHER still-open root's
+/// edge into the SAME shared overlay slot is never clobbered (the D3 lost
+/// update). D2 is the consequence: if root S's edge is lost when root R is
+/// released, S's shared overlay is wrongly closed and S's bare carrier import
+/// strands on TS2307 — so the D2 ROOT CAUSE is exactly "S's edge survives R's
+/// release", asserted here at the refcount level.
+///
+/// DISCRIMINATING via a stress loop: two tasks race per iteration — one
+/// RELEASES R from a shared slot (`DeclOverlayOwner::release_root`), the other
+/// RE-RECORDS S into the SAME slot (`DeclOverlayOwner::reconcile_root_reachability`)
+/// starting from a slot reached by R ALONE (`{R}`), exactly the setup where R
+/// closes while S is FIRST recording its edge into the same overlay.
+///
+/// With the atomic remove-if-empty, S's edge ALWAYS survives: either the
+/// reconcile lands first (`{R,S}` → release removes R → `{S}`, non-empty, kept),
+/// or the release lands first (`{R}` → atomically removed) and the reconcile
+/// re-creates `{S}`. The release's emptiness-check-and-remove is ONE held-lock
+/// critical section, so it can never delete a slot that the reconcile
+/// concurrently populated. The non-atomic pre-fix pattern (snapshot keys →
+/// get_mut/check-empty with the guard DROPPED → SEPARATE unconditional `remove`)
+/// loses S when: release's get_mut sees `{R}`, removes R → empty → decides
+/// drained, then — in the gap before its `remove` — the reconcile inserts S
+/// (`{S}`), and release's unconditional `remove` then deletes the now-`{S}` slot.
+///
+/// DISCRIMINATING via a high-contention stress loop on REAL OS threads aligned by
+/// a `Barrier` (so both enter their critical section together), repeated many
+/// times. RED-before: the pre-fix non-atomic `remove` loses S in ≥1 race (the
+/// test fails reporting the loss count). GREEN-after: zero losses across every
+/// iteration. This is a STRESS discriminator (not a single deterministic
+/// interleave — the production functions expose no yield point between the
+/// emptiness decision and the remove to pin a deterministic interleave), so it is
+/// run with enough contention/iterations to make the pre-fix loss reliably
+/// observable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn decl_refcount_remove_if_empty_never_clobbers_concurrent_record() {
+    use std::sync::Barrier;
+
+    let shared_overlay = "/ws/Shared.d.vue.ts".to_string();
+    let r_root = "/ws/R.vue".to_string();
+    let s_root = "/ws/S.vue".to_string();
+
+    let iterations = 300_000usize;
+    let s_edge_lost = Arc::new(AtomicUsize::new(0));
+
+    // Real OS threads + a 3-phase barrier per iteration: (1) align both critical
+    // sections, (2) both done → measure, (3) measurement done → reset for next
+    // iteration. The reset + measure both run on the release thread, bracketed by
+    // barriers, so the record thread cannot run during reset/measure and the reset
+    // cannot run during measure — the only concurrency is release || record.
+    std::thread::scope(|scope| {
+        let owner: Arc<DeclOverlayOwner> = Arc::new(DeclOverlayOwner::default());
+        let barrier = Arc::new(Barrier::new(2));
+        let lost = Arc::clone(&s_edge_lost);
+
+        let owner_a = Arc::clone(&owner);
+        let barrier_a = Arc::clone(&barrier);
+        let shared_a = shared_overlay.clone();
+        let r_a = r_root.clone();
+        let s_a = s_root.clone();
+        let release_thread = scope.spawn(move || {
+            for _ in 0..iterations {
+                // Reset the slot to {R} ALONE (the D2 setup).
+                owner_a.test_replace_slot(&shared_a, &[r_a.as_str()], 1);
+                // Phase (1): aligned start of the concurrent section.
+                barrier_a.wait();
+                // R closes: drop R from every overlay it reaches.
+                owner_a.release_root(&r_a);
+                // Phase (2): both critical sections complete — now MEASURE that S
+                // still reaches the overlay (R's release must not have clobbered
+                // S's concurrent first-time record).
+                barrier_a.wait();
+                let s_present = owner_a
+                    .test_slot_roots(&shared_a)
+                    .map(|set| set.contains(&s_a))
+                    .unwrap_or(false);
+                if !s_present {
+                    lost.fetch_add(1, Ordering::Relaxed);
+                }
+                // Phase (3): measured — safe to reset the slot next iteration.
+                barrier_a.wait();
+            }
+        });
+
+        let owner_b = Arc::clone(&owner);
+        let barrier_b = Arc::clone(&barrier);
+        let shared_b = shared_overlay.clone();
+        let s_b = s_root.clone();
+        let record_thread = scope.spawn(move || {
+            for _ in 0..iterations {
+                // Phase (1): aligned start.
+                barrier_b.wait();
+                // S records (FIRST time) that it reaches the shared overlay,
+                // concurrently with R's release.
+                owner_b.reconcile_root_reachability(&s_b, std::slice::from_ref(&shared_b));
+                // Phase (2): both complete — the release thread measures.
+                barrier_b.wait();
+                // Phase (3): next iteration.
+                barrier_b.wait();
+            }
+        });
+
+        release_thread.join().expect("release thread");
+        record_thread.join().expect("record thread");
+    });
+
+    let lost = s_edge_lost.load(Ordering::Relaxed);
+    assert_eq!(
+        lost, 0,
+        "the atomic remove-if-empty must NEVER clobber a concurrent re-record of a \
+         still-open root's edge (D3 lost update → D2 over-close → TS2307); S's edge \
+         to the shared overlay vanished in {lost}/{iterations} races"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closure_reconciles_dropped_import_releases_overlay() {
+    // P1 #3 (reconcile): the refcount is NOT append-only. When a root STOPS
+    // importing a carrier, the next closure pass must REMOVE that root from the
+    // dropped dependency's reachability set — and CLOSE the overlay if its set
+    // drains empty. The invariant: a root's recorded reachability edges EQUAL its
+    // CURRENT declaration closure each pass (add new, drop dropped), never an
+    // ever-growing union.
+    //
+    // RED-before: the closure only ever INSERTED; removal happened ONLY on
+    // did_close. So `B.d.vue.ts` stayed attributed to A (and stayed open) after A
+    // stopped importing B.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_reconcile");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    std::fs::write(
+        workspace.join("src/B.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ b: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write B.vue");
+    // A initially imports B.
+    let a_with_import = "<script setup lang=\"ts\">\nimport B from './B.vue'\ndefineProps<{ a: string }>()\n</script>\n<template><B/></template>";
+    std::fs::write(workspace.join("src/A.vue"), a_with_import).expect("write A.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let a_id = format!("{workspace_id}/src/A.vue");
+
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&a_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: a_with_import.to_string(),
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    // Pass 1: A imports B → B.d opened + recorded as reached from A.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+        None,
+        &decl_overlay_owner,
+    )
+    .await;
+
+    let b_reached_by_a = || {
+        decl_overlay_owner
+            .test_slots_snapshot()
+            .iter()
+            .any(|(key, roots)| {
+                key.contains("B.d.vue.ts") && roots.iter().any(|root| root.ends_with("/A.vue"))
+            })
+    };
+    assert!(
+        b_reached_by_a(),
+        "pass 1: B.d.vue.ts is recorded as reached from A, slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    // Edit A to DROP the `import B` (now imports nothing).
+    let a_no_import = "<script setup lang=\"ts\">\ndefineProps<{ a: string }>()\n</script>\n<template><div/></template>";
+    let _ = documents.did_change(&uri, 2, a_no_import);
+    provider.clear_calls();
+
+    // Pass 2: A no longer imports B → reconcile must drop A from B.d's set and,
+    // since A was the only reaching root, CLOSE B.d.vue.ts.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+        None,
+        &decl_overlay_owner,
+    )
+    .await;
+
+    assert!(
+        !b_reached_by_a(),
+        "pass 2: A is dropped from B.d.vue.ts's reachability after A stops importing B, slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    let calls = provider.file_sync_calls();
+    let closed_b_decl = calls
+        .iter()
+        .any(|call| matches!(call, MockCall::CloseFile { path } if path.contains("B.d.vue.ts")));
+    assert!(
+        closed_b_decl,
+        "pass 2: B.d.vue.ts is CLOSED once its last reaching root (A) drops the import, calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[test]
+fn declaration_refcount_record_for_released_root_is_reconciled_away() {
+    // P1 #2 (race-safe record): if a root closes between the closure snapshot and
+    // the per-overlay record, `DeclOverlayOwner::release_root` has ALREADY run for
+    // that root — a naive late `insert(root)` would re-add the now-closed
+    // root, stranding the overlay with no future close event (a permanent leak).
+    //
+    // The fix's invariant, exercised here directly on the pure map logic: after a
+    // root is released, reconciling the live open-root set down to a set that does
+    // NOT contain the released root removes it again, leaving the overlay
+    // unreferenced (slot drained → returned for close). I.e. a closed root leaves
+    // NOTHING behind even if its record raced the release.
+    let owner = DeclOverlayOwner::default();
+
+    // Root A had recorded reachability to an overlay, then closed (released).
+    owner.test_seed_slot("/ws/Dep.d.vue.ts", &["/ws/A.vue"], 1);
+    let released = owner.release_root("/ws/A.vue");
+    // The release returns `(decl_path, generation_at_decision)`; assert on the path.
+    assert_eq!(
+        released.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        vec!["/ws/Dep.d.vue.ts".to_string()],
+        "releasing A drains the overlay it solely reached"
+    );
+    // The drained slot is kept as an empty tombstone (GC'd on a confirmed close),
+    // so the reaching-root set is empty even though the slot key persists.
+    assert_eq!(
+        owner.test_slot_roots("/ws/Dep.d.vue.ts"),
+        Some(HashSet::new()),
+        "the drained slot is an empty tombstone until the close confirms"
+    );
+
+    // RACE: the in-flight closure pass — which snapshotted A as a root BEFORE the
+    // close — now performs its late record, re-adding A.
+    owner.reconcile_root_reachability("/ws/A.vue", &["/ws/Dep.d.vue.ts".to_string()]);
+    // Without the race fix this would leave `Dep.d.vue.ts -> {A}` permanently. The
+    // reconcile against the LIVE open-root set (A is no longer open ⇒ empty live
+    // set) drops A again and returns the overlay for close.
+    let now_unreferenced = owner.reconcile_open_roots(&HashSet::new());
+    assert!(
+        now_unreferenced
+            .iter()
+            .any(|(p, _)| p == "/ws/Dep.d.vue.ts"),
+        "a closed root that raced the record leaves NOTHING behind — the overlay is \
+         returned for close, got: {now_unreferenced:?}"
+    );
+    assert!(
+        owner
+            .test_slots_snapshot()
+            .iter()
+            .all(|(_, roots)| roots.is_empty()),
+        "no stale reaching-root edge remains for the closed root A, slots={:?}",
+        owner.test_slots_snapshot()
+    );
+}
+
+/// CLOSE-SIDE RECOVERABILITY: a close-side orphan — a drained overlay whose
+/// provider `close_dts` did NOT complete (the close failed, or the close future
+/// was interrupted before its await landed) — leaves the provider overlay STILL
+/// OPEN with the slot reduced to an empty tombstone and NO live root reaching it.
+/// A later sweep MUST re-examine that tombstone and re-issue the close, so the
+/// orphaned provider overlay is eventually closed. The owner GCs a slot ONLY on a
+/// CONFIRMED close, so a SURVIVING tombstone is exactly the "close not confirmed"
+/// signal a later `reconcile_open_roots` must act on.
+///
+/// DISCRIMINATING: `reconcile_open_roots` (the post-pass sweep) must RE-RETURN a
+/// surviving tombstone whose provider close never confirmed. RED-before: the sweep
+/// only returned a slot it drained from non-empty to empty, so an already-empty
+/// tombstone was permanently dropped — the orphan had no future closer (the
+/// provider overlay leaked open forever). GREEN-after: the sweep re-returns the
+/// unconfirmed tombstone, and the re-issued close finally closes the provider
+/// overlay and GCs the slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn unconfirmed_close_tombstone_is_recovered_by_a_later_reconcile() {
+    let decl_path = "/ws/Dep.d.vue.ts";
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+    // The carrier owner state that carries the live Decl overlay (so guarded_close
+    // has a committed provider state to strip + a path to close).
+    states.insert(
+        "/ws/Dep.vue".to_string(),
+        crate::provider_sync::ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/ws/tsconfig.json".into(),
+            ),
+            decl_path: Some(decl_path.to_string()),
+            decl_background_loaded: true,
+            ..Default::default()
+        },
+    );
+    let owner = DeclOverlayOwner::default();
+
+    // The overlay is reached by a single root A at generation 1.
+    owner.test_seed_slot(decl_path, &["/ws/A.vue"], 1);
+
+    // A closes → the overlay drains to an empty tombstone; the close is decided at
+    // generation 1.
+    let decision = owner.release_root("/ws/A.vue");
+    assert_eq!(
+        decision,
+        vec![(decl_path.to_string(), 1)],
+        "releasing A drains the overlay and decides the close at generation 1"
+    );
+
+    // The provider close FAILS this time (a crashed/slow provider, or an interrupted
+    // close). guarded_close keeps the tombstone (fail closed) and does NOT GC it.
+    provider.set_fail_file_ops(true);
+    owner.guarded_close(&sync, &states, &decision).await;
+    provider.set_fail_file_ops(false);
+
+    let close_attempts_after_fail = provider
+        .file_sync_calls()
+        .iter()
+        .filter(|c| matches!(c, MockCall::CloseFile { path } if path == decl_path))
+        .count();
+    assert_eq!(
+        close_attempts_after_fail,
+        1,
+        "the first close was attempted (and failed), calls={:?}",
+        provider.file_sync_calls()
+    );
+    // The tombstone SURVIVES (the failed close did not GC it) — this is the
+    // "close not confirmed" signal the sweep must recover from.
+    assert_eq!(
+        owner.test_slot_roots(decl_path),
+        Some(HashSet::new()),
+        "a failed close keeps the empty tombstone (fail closed, no GC)"
+    );
+
+    // A later sweep against the live open-root set (A is closed ⇒ empty) MUST
+    // re-return the unconfirmed tombstone so its orphaned provider overlay is closed.
+    // RED-before: the sweep skipped already-empty tombstones, so this is empty and
+    // the orphan leaks forever.
+    let resweep = owner.reconcile_open_roots(&HashSet::new());
+    assert!(
+        resweep.iter().any(|(p, _)| p == decl_path),
+        "a later reconcile must RE-RETURN the unconfirmed-close tombstone (provider \
+         overlay still open, no live root reaches it) so it gets a future closer; \
+         got: {resweep:?}"
+    );
+
+    // The re-issued close now succeeds → the provider overlay is closed and the slot
+    // is GC'd (the orphan is recovered).
+    owner.guarded_close(&sync, &states, &resweep).await;
+    let close_attempts_total = provider
+        .file_sync_calls()
+        .iter()
+        .filter(|c| matches!(c, MockCall::CloseFile { path } if path == decl_path))
+        .count();
+    assert_eq!(
+        close_attempts_total,
+        2,
+        "the recovered close was re-issued (second attempt), calls={:?}",
+        provider.file_sync_calls()
+    );
+    assert_eq!(
+        owner.test_slot_roots(decl_path),
+        None,
+        "the confirmed re-close GCs the recovered tombstone"
+    );
+
+    // NEGATIVE CONTROL: with the orphan recovered (slot GC'd), a further sweep must
+    // NOT manufacture a phantom close target — the recovery is bounded to genuine
+    // unconfirmed tombstones, not an unconditional re-close of every path.
+    let after_recovery = owner.reconcile_open_roots(&HashSet::new());
+    assert!(
+        after_recovery.is_empty(),
+        "once the orphan is recovered (slot gone) the sweep returns nothing, got: {after_recovery:?}"
+    );
+}
+
+/// CLOSE-SIDE RECOVERY IS IN-FLIGHT-AWARE: a sweep must NOT re-issue a close for a
+/// tombstone whose close is CURRENTLY in-flight. The guarded close marks the slot
+/// `close_pending` and holds the overlay's path lock across its provider await; a
+/// redundant close issued by a racing `reconcile_open_roots` would only block on
+/// that held lock (and, under a paused/gated close, DEADLOCK the very task that
+/// would release it). So the recovery is gated on "close NOT in-flight": only a
+/// tombstone whose close already finished UNCONFIRMED is re-returned.
+///
+/// DISCRIMINATING: with the provider close GATED (paused inside `close_dts`, the
+/// path lock held and `close_pending` set), `reconcile_open_roots` against an empty
+/// live set must return NOTHING for the in-flight overlay. RED-before (a sweep that
+/// re-returns every empty tombstone regardless of the in-flight mark): it re-returns
+/// the in-flight tombstone; releasing the gate then lets the in-flight close GC the
+/// slot and the sweep's redundant target double-closes / contends. GREEN-after: the
+/// in-flight tombstone is skipped, and once the gated close completes it GCs the
+/// slot, leaving nothing for a later sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconcile_does_not_reissue_close_for_an_in_flight_tombstone() {
+    let decl_path = "/ws/Dep.d.vue.ts";
+
+    let provider = Arc::new(GatedDeclOverlayProvider::default());
+    // Make the overlay resolvable so there is an open path for the close to act on.
+    provider
+        .open_paths
+        .lock()
+        .unwrap()
+        .insert(decl_path.to_string());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+    states.insert(
+        "/ws/Dep.vue".to_string(),
+        crate::provider_sync::ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/ws/tsconfig.json".into(),
+            ),
+            decl_path: Some(decl_path.to_string()),
+            decl_background_loaded: true,
+            ..Default::default()
+        },
+    );
+    let owner = Arc::new(DeclOverlayOwner::default());
+
+    // The overlay drains to an empty tombstone; the close is decided at generation 1.
+    owner.test_seed_slot(decl_path, &["/ws/A.vue"], 1);
+    let decision = owner.release_root("/ws/A.vue");
+    assert_eq!(decision, vec![(decl_path.to_string(), 1)]);
+
+    // Gate the provider close so it pauses INSIDE `close_dts` — at which point the
+    // guarded close holds the path lock AND has marked the slot `close_pending`.
+    let (arrived, release) = provider.block_close_path(decl_path);
+
+    let owner_for_close = Arc::clone(&owner);
+    let states_ref = &states;
+    let close = async {
+        owner_for_close
+            .guarded_close(&sync, states_ref, &decision)
+            .await;
+    };
+
+    let probe = async {
+        // Wait until the close is paused inside the provider (path lock held,
+        // close_pending set), then sweep with an empty live set.
+        arrived.notified().await;
+        let swept = owner.reconcile_open_roots(&HashSet::new());
+        // INVARIANT: the in-flight tombstone is NOT re-returned.
+        assert!(
+            swept.iter().all(|(p, _)| p != decl_path),
+            "a sweep must NOT re-issue a close for a tombstone whose close is in-flight \
+             (close_pending) — re-issuing contends on the held path lock; got: {swept:?}"
+        );
+        // Release the gated close so it completes and GCs the slot.
+        release.notify_one();
+    };
+
+    tokio::join!(close, probe);
+
+    // The in-flight close completed and GC'd the slot; a redundant close was never
+    // issued (exactly one provider close for the overlay).
+    let closes = provider
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, MockCall::CloseFile { path } if path == decl_path))
+        .count();
+    assert_eq!(
+        closes,
+        1,
+        "exactly one provider close was issued for the in-flight overlay (no redundant \
+         re-close), calls={:?}",
+        provider.calls()
+    );
+    assert_eq!(
+        owner.test_slot_roots(decl_path),
+        None,
+        "the completed in-flight close GC'd the slot"
+    );
+}
+
+#[test]
+fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
+    // P2 #4: `carrier_dependency_ids` resolves each script import through the
+    // engine's workspace resolver (analysis-time `resolved_canonical_id`, with the
+    // `resolve_import_specifier_standalone` → `host.resolve_import_via_workspace`
+    // fallback rail) and returns ONLY the carrier→carrier edges — a non-carrier
+    // (`.ts`) dependency is dropped (handled by the other passes), per the
+    // documented contract. (The fallback rail itself is a timing safety net for the
+    // registry-bootstrap window where analysis ran before the project registry was
+    // configured; its discriminating coverage is the aliased-import resync flow.
+    // The analysis-time id and the workspace resolver are architecturally coupled —
+    // both bottom out in the same resolver — so they cannot be split in a single-
+    // state unit test. This test pins the contract the closure depends on: resolve
+    // + carrier-filter.)
+    //
+    // Discriminates against (a) dropping resolution entirely (empty result), and
+    // (b) failing to carrier-filter (a `.ts` dep leaking into the declaration
+    // closure, which would open a `.d.ts` for a non-carrier).
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(HostConfig::default(), ws);
+    host.upsert(UpsertRequest {
+        canonical_id: None,
+        input_id: "/src/A.vue".to_string(),
+        source: Arc::from(
+            "<script setup lang=\"ts\">\nimport B from './B.vue'\nimport { util } from './util'\n</script>\n<template><B>{{ util }}</B></template>",
+        ),
+        file_language: FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .expect("upsert A.vue");
+    host.set_exact_resolutions(
+        "/src/A.vue",
+        vec![
+            verter_workspace::ExactResolution {
+                specifier: "./B.vue".to_string(),
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("/src/B.vue".to_string()),
+                possible_canonical_ids: vec!["/src/B.vue".to_string()],
+            },
+            verter_workspace::ExactResolution {
+                specifier: "./util".to_string(),
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("/src/util.ts".to_string()),
+                possible_canonical_ids: vec!["/src/util.ts".to_string()],
+            },
+        ],
+    );
+
+    let deps = carrier_dependency_ids(&host, "/src/A.vue");
+
+    // POSITIVE: the carrier dependency `./B.vue` is resolved and returned.
+    assert!(
+        deps.iter().any(|d| d == "/src/B.vue"),
+        "carrier_dependency_ids resolves and returns the carrier dependency ./B.vue, got: {deps:?}"
+    );
+    // NEGATIVE (discriminating): the non-carrier `./util` (a `.ts`) is FILTERED —
+    // the closure follows only carrier→carrier edges, so a `.ts` dep must never be
+    // opened as a declaration overlay.
+    assert!(
+        !deps.iter().any(|d| d == "/src/util.ts"),
+        "carrier_dependency_ids must FILTER the non-carrier ./util.ts dependency, got: {deps:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -12955,7 +14883,9 @@ import Child from '@/components/Child.vue'
         ),
         ide_path: None,
         api_path: Some(child_api_path.clone()),
+        decl_path: None,
         api_background_loaded: false,
+        decl_background_loaded: false,
         ide_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
@@ -12969,6 +14899,7 @@ import Child from '@/components/Child.vue'
         &provider_sync_states,
         false,
         None,
+        &DeclOverlayOwner::default(),
     )
     .await;
 
@@ -13087,6 +15018,7 @@ import Child from '@/components/Child.vue'
         &provider_sync_states,
         true,
         None,
+        &DeclOverlayOwner::default(),
     )
     .await;
 
@@ -13199,6 +15131,7 @@ import { Overlay } from './components'
         &provider_sync_states,
         true,
         None,
+        &DeclOverlayOwner::default(),
     )
     .await;
 
@@ -13214,8 +15147,10 @@ import { Overlay } from './components'
     );
 
     // Positive: Barrel file should be synced to provider (via sync_file → update_file)
-    // Note: rewrite_vue_imports_for_tsgo happens inside the real TSGO provider, not the mock.
-    // The mock records raw content; in production TSGO rewrites .vue → .vue.ts.
+    // Note: carrier import specifiers are already resolvable before reaching the
+    // provider — the compiler emits `.vue.tsx` for in-project carrier imports and
+    // the resolver emits `.verter.ts` for non-carrier importer specifiers — so the
+    // provider sends content unmodified (the mock records that raw content).
     assert!(
         calls.iter().any(|call| matches!(
             call,
@@ -13352,8 +15287,10 @@ defineProps<{ msg: string }>()
         ),
         ide_path: Some(child_tsx.clone()),
         api_path: Some(child_api_path.clone()),
+        decl_path: None,
         ide_background_loaded: true,
         api_background_loaded: true,
+        decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
     };
@@ -13367,6 +15304,7 @@ defineProps<{ msg: string }>()
         &provider_sync_states,
         false,
         None,
+        &DeclOverlayOwner::default(),
     )
     .await;
 
@@ -13534,8 +15472,10 @@ defineProps<{ show: boolean }>()
             ),
             ide_path: Some(overlay_tsx.clone()),
             api_path: Some(overlay_api.clone()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -13549,6 +15489,7 @@ defineProps<{ show: boolean }>()
         &provider_sync_states,
         true,
         None,
+        &DeclOverlayOwner::default(),
     )
     .await;
 
@@ -13648,8 +15589,10 @@ defineProps<{ msg: string }>()
             ),
             ide_path: Some(app_tsx.to_string()),
             api_path: Some(app_api.to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -13752,8 +15695,10 @@ defineProps<{ msg: string }>()
             ),
             ide_path: Some(app_tsx.to_string()),
             api_path: Some(app_api.to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
         },
@@ -14702,9 +16647,11 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
             owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some(tsx_path.to_string()),
             api_path: None,
+            decl_path: None,
             shadow_path: None,
             ide_background_loaded: true,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_background_loaded: false,
         },
     );
@@ -14819,4 +16766,510 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
         "a non-actionable local handle must NOT be stamped with a resolve envelope, got data={:?}",
         local.data
     );
+}
+
+/// F1 (type split — `active_non_decl_paths` EXCLUDES the declaration overlay). The
+/// generic stale-path closers consume the close-target set this method returns; a
+/// declaration overlay (`Decl`) must never appear in it, because a `Decl` overlay's
+/// lifecycle is owned exclusively by `DeclOverlayOwner` and must never be closed by
+/// a generic stale-path close (closing it while an open carrier root still reaches
+/// it strands that root on TS2307).
+///
+/// Discriminates directly: a state carrying ALL FOUR provider paths yields exactly
+/// the three non-decl kinds from `active_non_decl_paths()` (Decl absent) while
+/// `active_paths()` still yields all four — so the generic closers, which take the
+/// `NonDeclProviderPathKind` slice, are structurally unable to receive the decl
+/// path. RED-before (the method does not exist on the pre-fix tree — a compile
+/// error); GREEN-after.
+#[test]
+fn active_non_decl_paths_excludes_the_declaration_overlay() {
+    use crate::provider_sync::{NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState};
+
+    let state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/ws/tsconfig.json".into(),
+        ),
+        ide_path: Some("/ws/App.vue.tsx".to_string()),
+        api_path: Some("/ws/App.vue.verter.ts".to_string()),
+        decl_path: Some("/ws/App.d.vue.ts".to_string()),
+        shadow_path: Some("/ws/App.shadow".to_string()),
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: true,
+        shadow_background_loaded: true,
+    };
+
+    // The full active set still includes the declaration overlay.
+    let all: Vec<ProviderPathKind> = state.active_paths().into_iter().map(|(k, _)| k).collect();
+    assert!(
+        all.contains(&ProviderPathKind::Decl),
+        "active_paths() still includes the Decl overlay, got {all:?}"
+    );
+
+    // The generic-closer input EXCLUDES the declaration overlay entirely.
+    let non_decl = state.active_non_decl_paths();
+    let kinds: Vec<NonDeclProviderPathKind> = non_decl.iter().map(|(k, _)| *k).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            NonDeclProviderPathKind::Ide,
+            NonDeclProviderPathKind::Api,
+            NonDeclProviderPathKind::Shadow,
+        ],
+        "active_non_decl_paths() returns exactly Ide/Api/Shadow (no Decl), got {kinds:?}"
+    );
+    assert!(
+        !non_decl.iter().any(|(_, path)| path == "/ws/App.d.vue.ts"),
+        "the declaration overlay path must NEVER appear in the generic-closer input, got {non_decl:?}"
+    );
+}
+
+/// F1 (the generic stale closer never issues a `close_dts` for a declaration
+/// overlay). Drive the production `close_stale_provider_paths` with a state that
+/// carries a live declaration overlay and assert the provider received NO close for
+/// the decl path — only the non-decl artifacts close.
+///
+/// `close_stale_provider_paths` takes the `NonDeclProviderPathKind` slice, so it is
+/// fed exactly what a removal path feeds it: `state.active_non_decl_paths()`. The
+/// declaration overlay is structurally excluded, so the faithful provider records a
+/// `CloseFile` for the API surface but never for `App.d.vue.ts`. RED-before (the
+/// pre-fix closer took `active_paths()` — which includes `Decl` — and matched
+/// `Api | Decl => close_dts`, closing the overlay; here it cannot). GREEN-after.
+#[tokio::test(flavor = "multi_thread")]
+async fn generic_stale_closer_never_closes_declaration_overlay() {
+    use crate::provider_sync::ProviderSyncState;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_surfaces = crate::provider_surface_store::ProviderSurfaceStore::new();
+
+    let state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/ws/tsconfig.json".into(),
+        ),
+        ide_path: Some("/ws/App.vue.tsx".to_string()),
+        api_path: Some("/ws/App.vue.verter.ts".to_string()),
+        decl_path: Some("/ws/App.d.vue.ts".to_string()),
+        shadow_path: None,
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: true,
+        shadow_background_loaded: false,
+    };
+
+    // Exactly the call shape the removal paths use: the generic closer over the
+    // NON-DECL active set.
+    super::close_stale_provider_paths(
+        &sync,
+        &provider_surfaces,
+        &state.active_non_decl_paths(),
+        "decl_close_guard_test",
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // The declaration overlay was NEVER closed by the generic closer.
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == "/ws/App.d.vue.ts")),
+        "the generic stale closer must NEVER issue a close for the declaration overlay \
+         (App.d.vue.ts) — its lifecycle is owned by DeclOverlayOwner; calls={calls:?}"
+    );
+    // The non-decl artifacts WERE closed (positive control — the closer ran and is
+    // not a no-op): the API `.verter.ts` and IDE `.tsx` both closed.
+    assert!(
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == "/ws/App.vue.verter.ts")),
+        "the generic stale closer DOES close the non-decl API surface (positive control), calls={calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == "/ws/App.vue.tsx")),
+        "the generic stale closer DOES close the non-decl IDE surface (positive control), calls={calls:?}"
+    );
+}
+
+/// F3 (ABA supersession — generation FOLDED with the reaching-root set). A guarded
+/// close decided when a slot drained at generation `G` must be SKIPPED once any open
+/// has bumped the slot's generation past `G`, EVEN IF the reaching-root set looks
+/// empty again at the close-time gate. The folded `DeclOverlaySlot { generation,
+/// roots }` makes `(generation, roots)` one critical section, so the gate can never
+/// observe a half-applied pair and a transient drain-then-refill (or a drain whose
+/// generation advanced) is recognised as a superseded close.
+///
+/// Two cases, both deterministic on the owner:
+///   1. A reference REAPPEARED (set non-empty): skip.
+///   2. The set is EMPTY again but the generation ADVANCED past the decision
+///      baseline: skip — the ABA hole the bare set cannot catch.
+///
+/// In both, the provider receives NO `close_dts` (a destructive close would strand
+/// the reappearing/just-opened root on TS2307). The faithful provider records every
+/// close, so the assertion is exact. RED-before (the owner — folded slot,
+/// `guarded_close`, the generation gate — does not exist on the pre-fix tree; the
+/// pre-fix sibling generation map is read/written outside the slot's critical
+/// section, the false-invariant ABA hole this folds shut). GREEN-after.
+#[tokio::test(flavor = "multi_thread")]
+async fn guarded_close_is_superseded_when_generation_advanced_even_if_set_looks_empty() {
+    let decl_path = "/ws/Shared.d.vue.ts";
+
+    // CASE 1: a reaching root reappeared after the close was decided.
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+        let owner = DeclOverlayOwner::default();
+
+        // The slot drained at generation 5 → close decided with baseline gen 5.
+        owner.test_seed_slot(decl_path, &["/ws/R.vue"], 5);
+        let decision = owner.release_root("/ws/R.vue");
+        assert_eq!(
+            decision,
+            vec![(decl_path.to_string(), 5)],
+            "the close decision captures the slot's generation (5) at the drain"
+        );
+
+        // A racing open re-referenced the overlay (set now {S}) and bumped the
+        // generation (6). (test_replace_slot mirrors what open_overlay records.)
+        owner.test_replace_slot(decl_path, &["/ws/S.vue"], 6);
+
+        owner.guarded_close(&sync, &states, &decision).await;
+
+        let closed = provider
+            .file_sync_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == decl_path));
+        assert!(
+            !closed,
+            "a close decided at gen 5 must be SKIPPED once a reference reappeared (set \
+             {{S}}, gen 6) — closing would strand S on TS2307; calls={:?}",
+            provider.file_sync_calls()
+        );
+        // The slot survives (the live reference is intact).
+        assert_eq!(
+            owner.test_slot_roots(decl_path),
+            Some(["/ws/S.vue".to_string()].into_iter().collect()),
+            "the superseded close leaves the re-referenced slot intact"
+        );
+    }
+
+    // CASE 2 (the ABA the bare set cannot catch): the set is EMPTY again at the gate,
+    // but the generation advanced past the decision baseline.
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+        let owner = DeclOverlayOwner::default();
+
+        owner.test_seed_slot(decl_path, &["/ws/R.vue"], 5);
+        let decision = owner.release_root("/ws/R.vue");
+        assert_eq!(decision, vec![(decl_path.to_string(), 5)]);
+
+        // ABA: a root opened (bump → 6) and closed again (set drains to empty), so the
+        // set LOOKS like the decision saw it ({}), but the generation has advanced.
+        owner.test_replace_slot(decl_path, &[], 6);
+        assert_eq!(
+            owner.test_slot_generation(decl_path),
+            6,
+            "the slot generation advanced to 6 despite the empty set"
+        );
+
+        owner.guarded_close(&sync, &states, &decision).await;
+
+        let closed = provider
+            .file_sync_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == decl_path));
+        assert!(
+            !closed,
+            "a close decided at gen 5 must be SKIPPED once the generation advanced to 6, \
+             EVEN with an empty set (the ABA case the bare reaching-root set cannot \
+             catch); calls={:?}",
+            provider.file_sync_calls()
+        );
+    }
+
+    // POSITIVE CONTROL: an un-superseded close (set empty, generation UNCHANGED from
+    // the decision) DOES issue the provider close — the gate is not a blanket skip.
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+        let owner = DeclOverlayOwner::default();
+
+        owner.test_seed_slot(decl_path, &["/ws/R.vue"], 5);
+        let decision = owner.release_root("/ws/R.vue");
+        // No racing open: the tombstone stays empty at gen 5 (unchanged).
+        owner.guarded_close(&sync, &states, &decision).await;
+
+        let closed = provider
+            .file_sync_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == decl_path));
+        assert!(
+            closed,
+            "an un-superseded close (empty set, generation unchanged) DOES close the \
+             overlay (positive control); calls={:?}",
+            provider.file_sync_calls()
+        );
+        // The confirmed close GC'd the slot.
+        assert_eq!(
+            owner.test_slot_roots(decl_path),
+            None,
+            "a confirmed close GCs the empty tombstone slot"
+        );
+    }
+}
+
+/// SUPERSESSION GATE (the replacement invariant for the deleted post-await repair):
+/// a close decided when an overlay drained at generation `G` must be SKIPPED once a
+/// reaching root REOPENS the overlay in the decision→close window (re-referencing it
+/// and advancing the generation past `G`). The owner has NO compensate-after-close
+/// re-open; instead the guarded close's supersession gate refuses the now-stale
+/// close, so a live root's overlay is never clobbered (which would strand that root
+/// on TS2307) and a drained overlay is never resurrected for a root that is no
+/// longer there.
+///
+/// This drives the EXACT decision→reopen→gate window through the REAL owner methods
+/// against the FAITHFUL gated provider — distinct from the unit-level
+/// `guarded_close_is_superseded_*` test (which sets slot state via `test_replace_slot`):
+/// here the reopen runs through the REAL closure pass / `open_overlay`, so a
+/// regression in the open path's record-and-bump is also caught, and the assertion
+/// is on the PROVIDER end-state (the overlay stays open), not merely "no close call".
+///   * R primes `Shared.d.vue.ts` (`{Shared -> R}` at generation `G`, Shared open).
+///   * R's close is DECIDED: `release_root(R)` drains Shared to an empty tombstone
+///     and captures the close baseline generation `G`.
+///   * S (a still-open root that also imports Shared) RE-OPENS `Shared.d.vue.ts`
+///     through the REAL closure pass — re-recording `{Shared -> S}` and advancing the
+///     generation to `G+1`, with Shared re-synced in the provider.
+///   * R's STALE close (baseline `G`) is issued LAST: the gate sees a non-empty set
+///     AND `G+1 != G`, so it is SUPERSEDED and SKIPPED.
+///
+/// ASSERT: R's superseded close issues NO provider `close_dts` for Shared, Shared
+/// STAYS OPEN in the provider, and the owner records `{Shared -> S}` (the live root
+/// keeps it). DISCRIMINATING: locally weakening the supersession gate (so the close
+/// is never recognised as superseded) makes R's stale close fire — closing Shared in
+/// the provider and dropping S's edge — so the "stays open" assertion FAILS. With
+/// the gate intact it PASSES. The sibling
+/// `guarded_decl_close_does_not_strand_concurrently_reopened_overlay` discriminates
+/// the orthogonal defense (the per-path SERIALIZATION) under true close-vs-reopen
+/// concurrency; this one discriminates the GENERATION/REACHABILITY gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
+    let temp_base = std::env::temp_dir().join("verter_test_decl_close_no_resurrect");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // Shared is a leaf carrier imported by BOTH R and S.
+    std::fs::write(
+        workspace.join("src/Shared.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ s: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write Shared.vue");
+    let r_src = "<script setup lang=\"ts\">\nimport Shared from './Shared.vue'\ndefineProps<{ r: string }>()\n</script>\n<template><Shared/></template>";
+    std::fs::write(workspace.join("src/R.vue"), r_src).expect("write R.vue");
+    let s_src = "<script setup lang=\"ts\">\nimport Shared from './Shared.vue'\ndefineProps<{ q: string }>()\n</script>\n<template><Shared/></template>";
+    std::fs::write(workspace.join("src/S.vue"), s_src).expect("write S.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+
+    let vfs_workspace_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace_access));
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry)
+        .into_inner()
+        .expect("the test VFS workspace publishes a snapshot");
+
+    let provider = Arc::new(GatedDeclOverlayProvider::default());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    server.install_vfs_workspace(vfs_workspace);
+
+    // Open R, then prime so Shared is recorded `{Shared -> R}` and open in provider.
+    let r_uri = crate::uri::path_to_file_uri(&format!("{workspace_id}/src/R.vue")).expect("r uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: r_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r_src.to_string(),
+    });
+    let r_id = server
+        .test_documents()
+        .get_canonical_id(&r_uri)
+        .expect("R.vue has a canonical id");
+    let shared_id = format!("{workspace_id}/src/Shared.vue");
+    let shared_decl_path = host
+        .declaration_carrier_path(&shared_id)
+        .expect("Shared.vue projects a declaration carrier path");
+    assert!(
+        shared_decl_path.contains("Shared.d.vue.ts"),
+        "sanity: Shared's declaration overlay path is Shared.d.vue.ts, got {shared_decl_path}"
+    );
+
+    // PRIME with only R open: records `{Shared.d.vue.ts -> R}` at some generation G
+    // and opens Shared in the provider.
+    server.test_run_declaration_closure_pass().await;
+    assert!(
+        provider.open_paths_snapshot().contains(&shared_decl_path),
+        "priming pass opened Shared.d.vue.ts in the provider, open_paths={:?}",
+        provider.open_paths_snapshot()
+    );
+    let r_reaches_shared = server
+        .test_decl_overlay_owner()
+        .test_slot_roots(&shared_decl_path)
+        .is_some_and(|roots| roots.iter().any(|r| r == &r_id));
+    assert!(
+        r_reaches_shared,
+        "priming pass records Shared.d.vue.ts -> {{R}}, slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+
+    // Open S (imports Shared too) — a still-open root. Its edge is recorded by the
+    // REAL reopen pass below, not yet.
+    let s_uri = crate::uri::path_to_file_uri(&format!("{workspace_id}/src/S.vue")).expect("s uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: s_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: s_src.to_string(),
+    });
+    let s_id = server
+        .test_documents()
+        .get_canonical_id(&s_uri)
+        .expect("S.vue has a canonical id");
+
+    let owner = server.test_decl_overlay_owner();
+
+    // STEP 1 — R's close DECISION: drain R from Shared. With S not yet recorded the
+    // slot drains to an empty tombstone, and the returned target carries the close
+    // baseline generation G (captured under the slot lock at the drain).
+    let decision = owner.release_root(&r_id);
+    let shared_decision: Vec<&DeclCloseTarget> = decision
+        .iter()
+        .filter(|(p, _)| p == &shared_decl_path)
+        .collect();
+    assert_eq!(
+        shared_decision.len(),
+        1,
+        "releasing R decides a close for Shared.d.vue.ts, decision={decision:?}"
+    );
+    let baseline_gen = shared_decision[0].1;
+
+    // STEP 2 — S RE-OPENS Shared through the REAL closure pass BEFORE R's stale close
+    // is issued: `open_overlay` re-records `{Shared -> S}`, advances the generation
+    // past the baseline, and re-syncs Shared in the provider (the decision→close
+    // window the gate must defend).
+    server.test_run_declaration_closure_pass().await;
+    assert!(
+        owner
+            .test_slot_roots(&shared_decl_path)
+            .is_some_and(|roots| roots.iter().any(|r| r == &s_id)),
+        "S's reopen pass re-records Shared.d.vue.ts -> {{S}}, slots={:?}",
+        owner.test_slots_snapshot()
+    );
+    assert!(
+        owner.test_slot_generation(&shared_decl_path) > baseline_gen,
+        "S's reopen advances the generation past the close baseline ({baseline_gen}), \
+         got {}",
+        owner.test_slot_generation(&shared_decl_path)
+    );
+
+    // STEP 3 — R's STALE close is issued LAST with the baseline-G decision. The
+    // guarded close's gate sees a non-empty set ({S}) AND the advanced generation, so
+    // it is SUPERSEDED and must NOT touch the provider.
+    let Some(sync) = server.project_sync.as_ref() else {
+        panic!("the tgo server has a project sync");
+    };
+    owner
+        .guarded_close(sync, &server.provider_sync_states, &decision)
+        .await;
+
+    // INVARIANT 1 (gate skip): R's superseded close issued NO provider close for
+    // Shared. RED if the gate is weakened (the stale close fires and closes Shared).
+    let shared_closed = provider
+        .calls()
+        .iter()
+        .any(|c| matches!(c, MockCall::CloseFile { path } if path == &shared_decl_path));
+    assert!(
+        !shared_closed,
+        "R's stale close (baseline gen {baseline_gen}) must be SUPERSEDED by S's reopen \
+         and issue NO provider close for Shared.d.vue.ts; calls={:?}",
+        provider.calls()
+    );
+
+    // INVARIANT 2 (no clobber): Shared.d.vue.ts STAYS OPEN in the provider, so S's
+    // bare `import Shared from "./Shared.vue"` still resolves (no TS2307), and the
+    // owner still records the live root S reaching it.
+    assert!(
+        provider.open_paths_snapshot().contains(&shared_decl_path),
+        "Shared.d.vue.ts must STAY OPEN after R's superseded close (S reaches it); \
+         open_paths={:?}, calls={:?}",
+        provider.open_paths_snapshot(),
+        provider.calls()
+    );
+    assert!(
+        owner
+            .test_slot_roots(&shared_decl_path)
+            .is_some_and(|roots| roots.iter().any(|r| r == &s_id)),
+        "the superseded close leaves S's edge to Shared.d.vue.ts intact, slots={:?}",
+        owner.test_slots_snapshot()
+    );
+
+    drain.abort();
+    let _ = std::fs::remove_dir_all(&temp_base);
 }

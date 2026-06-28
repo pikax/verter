@@ -710,6 +710,88 @@ fn svelte_get_public_api_renders_the_events_and_slots_shim_members() {
 }
 
 #[test]
+fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
+    // `PublicApiMode::Declaration` for a `.svelte` carrier produces a strictly
+    // valid `.d.ts`: pure declarations only (type-only imports, `type`/
+    // `interface`, `declare const … export default …`). It carries the public
+    // surface — props (incl. optional/defaulted), `$bindable` keys via the
+    // props type, snippet slots, and public instance exports.
+    let host = host();
+    upsert_ts(
+        &host,
+        "/node_modules/svelte/index.d.ts",
+        "export type Snippet<T extends unknown[] = []> = (...args: T) => unknown;\n",
+    );
+    upsert_svelte(
+        &host,
+        "/Card.svelte",
+        "<script lang=\"ts\">\n  import type { Snippet } from 'svelte';\n  let { title, count = 0, header }: { title: string; count?: number; header?: Snippet } = $props();\n  export function focus() {}\n</script>\n<button onclick={focus}>{title}: {count}</button>\n{@render header?.()}\n",
+    );
+    let decl = host
+        .get_public_api_with_mode("/Card.svelte", PublicApiMode::Declaration, None)
+        .expect("svelte declaration output")
+        .code
+        .to_string();
+
+    // POSITIVE: the declaration surface is present and complete.
+    assert!(
+        decl.contains("export default __VerterComponent"),
+        "declaration default-exports the component value:\n{decl}"
+    );
+    assert!(
+        decl.contains("declare const __VerterComponent:"),
+        "declaration declares the component value:\n{decl}"
+    );
+    assert!(
+        decl.contains("import type { Snippet } from 'svelte'"),
+        "type-only import survives in the declaration:\n{decl}"
+    );
+    assert!(
+        decl.contains("title: string") && decl.contains("count?: number"),
+        "props (incl. optional) survive in the declaration:\n{decl}"
+    );
+    assert!(
+        decl.contains("focus:"),
+        "the public instance export `focus` survives:\n{decl}"
+    );
+
+    // The Svelte shim is already declaration-safe, so the `Declaration` arm
+    // reuses the `Public` render verbatim. DISCRIMINATING: a `Declaration` arm
+    // that stubbed to `None` (or diverged) would break this byte-identity.
+    let public = host
+        .get_public_api_with_mode("/Card.svelte", PublicApiMode::Public, None)
+        .expect("svelte public output")
+        .code
+        .to_string();
+    assert_eq!(
+        decl, public,
+        "the Svelte declaration arm reuses the already-declaration-safe public shim"
+    );
+
+    // NEGATIVE: NO runtime / value code. A `.d.ts` cannot contain a value
+    // initializer, a value import, a function body, or `defineComponent`.
+    assert!(
+        !decl.contains("defineComponent"),
+        "svelte declaration is framework-neutral — no defineComponent:\n{decl}"
+    );
+    for line in decl.lines() {
+        let t = line.trim_start();
+        // A value `const`/`let`/`var` binding (without `declare`) is illegal in
+        // a `.d.ts`. Every `const` the projector emits is a `declare const`.
+        assert!(
+            !(t.starts_with("const ") || t.starts_with("let ") || t.starts_with("var ")),
+            "no runtime value binding allowed in a declaration; offending line: `{line}`\n{decl}"
+        );
+        // A non-type `import { … }` (value import) is illegal in this
+        // declaration; only `import type …` is allowed.
+        assert!(
+            !(t.starts_with("import ") && !t.starts_with("import type ")),
+            "only type-only imports allowed in a declaration; offending line: `{line}`\n{decl}"
+        );
+    }
+}
+
+#[test]
 fn svelte_get_public_api_testing_mode_returns_none() {
     // DISCRIMINATING: the testing surface is Vue-only — Svelte returns None for
     // Testing, distinct from Public mode's Some.

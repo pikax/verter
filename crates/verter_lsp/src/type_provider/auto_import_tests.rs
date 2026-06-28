@@ -12,8 +12,8 @@
 use tower_lsp_server::ls_types::{Position, Range};
 
 use super::auto_import::{
-    rewrite_inserted_carrier_specifier, translate_completion_import_edits,
-    AutoImportEditMappingError, ProviderImportEdit, ScriptImportInsertionAnchor,
+    translate_completion_import_edits, AutoImportEditMappingError, ProviderImportEdit,
+    ScriptImportInsertionAnchor,
 };
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
@@ -97,7 +97,15 @@ fn translate_completion_import_edits_preamble_insertion_strict_mapping_to_origin
     }];
 
     // No usable anchor: the preamble insertion cannot be placed, so the whole resolve fails closed.
-    let result = translate_completion_import_edits(&edits, None, &tsx_li, &mapper, &carrier_li);
+    let result = translate_completion_import_edits(
+        &edits,
+        None,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        "/ws/src/Comp.vue",
+        &(|_: &str| false),
+    );
 
     // KEY assertion: regardless of Ok/Err, NO returned edit is the `(0,0)..(0,0)` file top with
     // import-shaped text. (Pre-fix this is exactly what the `Some((0,0))` arm produced.)
@@ -157,8 +165,15 @@ fn translate_completion_import_edits_preamble_insertion_strict_mapping_to_origin
         offset: anchor_offset,
     };
 
-    let result =
-        translate_completion_import_edits(&edits, Some(&anchor), &tsx_li, &mapper, &carrier_li);
+    let result = translate_completion_import_edits(
+        &edits,
+        Some(&anchor),
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        "/ws/src/Comp.vue",
+        &(|_: &str| false),
+    );
 
     let edits = result.expect("a usable anchor must let the resolve succeed");
     assert_eq!(
@@ -238,7 +253,15 @@ fn translate_completion_import_edits_add_to_existing_mapped_edit_is_accepted_ver
     }];
 
     // No anchor supplied: a genuine mapped edit must still succeed verbatim (it never needs an anchor).
-    let result = translate_completion_import_edits(&edits, None, &tsx_li, &mapper, &carrier_li);
+    let result = translate_completion_import_edits(
+        &edits,
+        None,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        "/ws/src/Comp.vue",
+        &(|_: &str| false),
+    );
     let out = result.expect("a genuine mapped AddToExisting edit must be accepted, not rejected");
     assert_eq!(out.len(), 1, "exactly the one verbatim edit: {out:?}");
     assert_eq!(
@@ -335,7 +358,15 @@ fn translate_completion_import_edits_svelte_add_to_existing_past_boundary_is_acc
 
     // BOUNDARY PRESENT (post-producer-fix Svelte map): a genuine mapped edit succeeds verbatim (it
     // never needs an anchor) — NOT diverted, NOT dropped.
-    let result = translate_completion_import_edits(&edits, None, &tsx_li, &mapper, &carrier_li);
+    let result = translate_completion_import_edits(
+        &edits,
+        None,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        "/ws/src/Comp.vue",
+        &(|_: &str| false),
+    );
     let out =
         result.expect("a genuine mapped Svelte AddToExisting edit must be accepted, not rejected");
     assert_eq!(out.len(), 1, "exactly the one verbatim edit: {out:?}");
@@ -368,8 +399,15 @@ fn translate_completion_import_edits_svelte_add_to_existing_past_boundary_is_acc
         no_boundary_mapper.helper_preamble_end().is_none(),
         "the boundary-less map (pre-producer-fix Svelte) publishes no boundary"
     );
-    let red_result =
-        translate_completion_import_edits(&edits, None, &tsx_li, &no_boundary_mapper, &carrier_li);
+    let red_result = translate_completion_import_edits(
+        &edits,
+        None,
+        &tsx_li,
+        &no_boundary_mapper,
+        &carrier_li,
+        "/ws/src/Comp.vue",
+        &(|_: &str| false),
+    );
     assert_eq!(
         red_result,
         Err(AutoImportEditMappingError::UnmappableEdit { start: at, end: at }),
@@ -411,8 +449,15 @@ fn translate_completion_import_edits_svelte_preamble_insertion_reanchors_with_an
         new_text: "import { tick } from 'svelte';\n".to_string(),
     }];
 
-    let result =
-        translate_completion_import_edits(&edits, Some(&anchor), &tsx_li, &mapper, &carrier_li);
+    let result = translate_completion_import_edits(
+        &edits,
+        Some(&anchor),
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        "/ws/src/Comp.vue",
+        &(|_: &str| false),
+    );
     let out = result.expect("a usable anchor must let the Svelte preamble resolve succeed");
     assert_eq!(out.len(), 1, "exactly one re-anchored import edit: {out:?}");
     assert_eq!(
@@ -500,7 +545,15 @@ fn translate_completion_import_edits_absent_boundary_zero_width_no_anchor_is_unm
 
     // No anchor: the diverted edit cannot be re-anchored, and with no boundary it is a non-preamble
     // miss ⇒ the whole resolve fails closed with UnmappableEdit (all-or-nothing).
-    let result = translate_completion_import_edits(&edits, None, &tsx_li, &mapper, &carrier_li);
+    let result = translate_completion_import_edits(
+        &edits,
+        None,
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        "/ws/src/Comp.vue",
+        &(|_: &str| false),
+    );
     assert_eq!(
         result,
         Err(AutoImportEditMappingError::UnmappableEdit { start: at, end: at }),
@@ -509,70 +562,6 @@ fn translate_completion_import_edits_absent_boundary_zero_width_no_anchor_is_unm
     );
 }
 
-// ── inserted-import carrier-specifier rewrite (Rust-owned on the LSP surface) ──
-
-#[test]
-fn specifier_rewrite_strips_vue_ide_companion_to_bare_carrier() {
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("import Comp from \"./Comp.vue.tsx\";\n"),
-        "import Comp from \"./Comp.vue\";\n",
-        "a `.vue.tsx` IDE-companion specifier must be rewritten to the bare `.vue`"
-    );
-    // Single-quote style is handled too.
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("import Comp from './Comp.vue.tsx';\n"),
-        "import Comp from './Comp.vue';\n"
-    );
-}
-
-#[test]
-fn specifier_rewrite_strips_svelte_companion_and_api_carrier() {
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("import Widget from \"./Widget.svelte.tsx\";\n"),
-        "import Widget from \"./Widget.svelte\";\n",
-        "a `.svelte.tsx` companion specifier must be rewritten to the bare `.svelte`"
-    );
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("import Comp from \"./Comp.vue.verter.ts\";\n"),
-        "import Comp from \"./Comp.vue\";\n",
-        "a `.verter.ts` API-carrier specifier must be rewritten to the bare `.vue`"
-    );
-}
-
-#[test]
-fn specifier_rewrite_leaves_non_carrier_specifiers_untouched() {
-    // A plain sibling import is never a carrier companion → unchanged.
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("import { formatCount } from \"./utils\";\n"),
-        "import { formatCount } from \"./utils\";\n",
-        "a plain `./utils` import must be left UNCHANGED (not a carrier companion)"
-    );
-    // A Svelte RUNE module (`.svelte.ts`) is NOT a `.svelte.tsx`/`.verter.ts`
-    // companion — it must be left intact so a real rune import is never mangled.
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("import { store } from \"./store.svelte.ts\";\n"),
-        "import { store } from \"./store.svelte.ts\";\n",
-        "a Svelte rune module `./store.svelte.ts` must NOT be rewritten (fail closed)"
-    );
-    // A bare `.ts` whose stem is not a carrier (`./Comp.ts`) is unchanged.
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("import x from \"./plain.tsx\";\n"),
-        "import x from \"./plain.tsx\";\n",
-        "a `.tsx` whose stem is not a carrier must be left UNCHANGED"
-    );
-}
-
-#[test]
-fn specifier_rewrite_handles_side_effect_import_and_non_import_text() {
-    // A bare side-effect import of a companion is rewritten.
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("import \"./Comp.vue.tsx\";\n"),
-        "import \"./Comp.vue\";\n"
-    );
-    // Free-form / non-import text carries no specifier literal → unchanged.
-    assert_eq!(
-        rewrite_inserted_carrier_specifier("const x = 1;\n"),
-        "const x = 1;\n",
-        "text with no import specifier must be returned unchanged"
-    );
-}
+// The inserted-import carrier-specifier rewrite (companion + bare-carrier +
+// fail-closed `Drop`) is now the SHARED `crate::type_provider::specifier_rewrite`
+// module; its discriminating tests live in `specifier_rewrite_tests.rs`.

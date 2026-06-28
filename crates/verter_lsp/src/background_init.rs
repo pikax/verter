@@ -59,6 +59,9 @@ pub(super) struct BackgroundInitArgs {
     /// path). `Some` only for the tsserver engine; `None` for tgo and when no
     /// type provider is connected.
     pub(super) carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    /// The proactive declaration-overlay lifecycle owner (shared with the server's
+    /// `did_close` lifecycle).
+    pub(super) decl_overlay_owner: Arc<super::DeclOverlayOwner>,
 }
 
 struct PublishedWorkspaceBuild {
@@ -145,6 +148,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         mru_canonical_ids,
         vfs_workspace,
         carrier_publish_coordinator,
+        decl_overlay_owner,
     } = args;
 
     let host = documents.host_arc();
@@ -299,6 +303,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         &provider_sync_states,
         is_tsgo,
         carrier_publish_coordinator.as_ref(),
+        &decl_overlay_owner,
     )
     .await;
 

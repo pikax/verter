@@ -177,8 +177,9 @@ impl CarrierSyncDecision {
 /// * no owner ⇒ retract/defer the membership (tsserver) and return
 ///   [`CarrierSyncDecision::Unowned`].
 pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> CarrierSyncDecision {
+    let decl_path = req.host.declaration_carrier_path(req.canonical_id);
     let Some(next_state) =
-        carrier_sync_state_for_source(req.resolver, req.canonical_id, req.is_jsx)
+        carrier_sync_state_for_source(req.resolver, req.canonical_id, req.is_jsx, decl_path)
     else {
         // No owner resolved. tsserver: retract (authoritative) or defer (cold) the
         // STORE/ledger membership through the single reconciler, so a previously
@@ -399,6 +400,7 @@ fn carrier_sync_state_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,
     is_jsx: bool,
+    decl_path: Option<String>,
 ) -> Option<ProviderSyncState> {
     let owner = resolver.owner_for_file(source_id)?;
     let owner_key = owner
@@ -409,9 +411,14 @@ fn carrier_sync_state_for_source(
         owner_binding: ProviderOwnerBinding::Owned(owner_key),
         ide_path: resolver.provider_ide_id_for_source(source_id, is_jsx),
         api_path: resolver.provider_id_for_source(source_id),
+        // The consumer-facing declaration companion (`.d.<ext>.ts`) — supplied by
+        // the host's framework-descriptor lookup. `None` for a carrier whose
+        // adapter projects no declaration carrier.
+        decl_path,
         shadow_path: None,
         ide_background_loaded: false,
         api_background_loaded: false,
+        decl_background_loaded: false,
         shadow_background_loaded: false,
     })
 }
@@ -426,8 +433,9 @@ pub(crate) fn carrier_close_target(
     resolver: &NativeProjectResolver,
     canonical_id: &str,
     is_jsx: bool,
+    decl_path: Option<String>,
 ) -> Option<ProviderSyncState> {
-    carrier_sync_state_for_source(resolver, canonical_id, is_jsx)
+    carrier_sync_state_for_source(resolver, canonical_id, is_jsx, decl_path)
 }
 
 #[cfg(test)]

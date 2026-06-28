@@ -33,11 +33,11 @@
 //! ## Fail-closed
 //!
 //! `Ok(ReconcileOutcome)` is returned ONLY if the computed desired state was
-//! actually reached: the durable on-disk store mutation succeeded, the provider
-//! transition succeeded, AND the ledger commit's post-commit verification passed. A
-//! failure at any step returns `Err` carrying the desired state, so a request caller
-//! can propagate with `?` and a background caller can mark the source unhealthy +
-//! back off + surface external-TS degradation — never a silent false "not published".
+//! actually reached: the membership commit succeeded, the provider transition
+//! succeeded, AND the ledger commit's post-commit verification passed. A failure at
+//! any step returns `Err` carrying the desired state, so a request caller can
+//! propagate with `?` and a background caller can mark the source unhealthy + back
+//! off + surface external-TS degradation — never a silent false "not published".
 //!
 //! This reconciler is the SINGLE authoritative entry for every source-membership
 //! transition: the low-level publish / retract store mutators are sealed so a server
@@ -46,6 +46,8 @@
 //! / [`remove_source_membership`](MembershipReconciler::remove_source_membership).
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use verter_session::external_ts::{ProjectBinding, ProjectResolution};
@@ -57,37 +59,63 @@ use super::membership_ledger::{
 use super::publish_coordinator::{CarrierCompanion, CarrierPublishError};
 use crate::type_provider::traits::TypeProvider;
 
-/// The durable on-disk carrier-publish store the reconciler mutates as part of an
-/// authoritative membership transition.
+/// The error a membership commit / retract surfaces. Engine-agnostic at the seam:
+/// the on-disk (tsserver) committer surfaces its store-mutation failures here, a
+/// future in-memory-overlay committer surfaces its re-snapshot failures here, and
+/// the reconciler maps EITHER to the same fail-closed [`ReconcileErr::MembershipCommit`]
+/// without committing the ledger.
+pub type CommitErr = CarrierPublishError;
+
+/// A boxed, `Send` future — the return type for every [`CarrierMembershipCommitter`]
+/// operation. Mirrors the provider's boxed-future convention so the seam stays
+/// `dyn`-dispatched (the reconciler holds an `Arc<dyn CarrierMembershipCommitter>`)
+/// while being genuinely asynchronous: a committer whose membership commit is async
+/// (an in-memory overlay's `update_snapshot`) returns its real future, and the
+/// reconciler `.await`s it before committing the ledger.
+pub type CommitFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CommitErr>> + Send + 'a>>;
+
+/// The engine-agnostic membership-commit seam the reconciler drives as the durable
+/// half of an authoritative source-membership transition.
 ///
-/// The `@verter/typescript-plugin` runs inside the user's tsserver — a SEPARATE
-/// process with no shared memory — and reads the carrier content + the advertised
-/// `ready_files` from the on-disk content-addressed store. So an authoritative
-/// reconciliation must mutate that store (blobs + manifest) too, not only the
-/// in-process ledger: the reconciler is the SINGLE writer of BOTH, keeping the
-/// plugin's view and the ledger consistent. These ops are synchronous (the on-disk
-/// store is a synchronous fsync'd swap); the async provider-buffer transition stays
-/// in the reconciler.
+/// "Committed to the engine" — NOT "written to disk". A carrier's membership is the
+/// set of companions the external TypeScript engine ADVERTISES for a source under a
+/// project. Different engines make that membership effective differently: the
+/// tsserver engine writes the companions into an on-disk content-addressed store
+/// (blobs + manifest) the out-of-process `@verter/typescript-plugin` reads
+/// (`getExternalFiles`); an in-memory-overlay engine instead installs the companions
+/// as an overlay and re-snapshots the project. BOTH satisfy this one seam, so the
+/// reconciler is the SINGLE membership choke-point regardless of engine.
+///
+/// The commit is ASYNC (a boxed future): an in-memory-overlay engine's re-snapshot
+/// is inherently asynchronous, and a synchronous seam would force it to block or hide
+/// the failure on a background task. An engine whose commit is synchronous (the
+/// on-disk store is a synchronous fsync'd swap) simply does its work inline inside the
+/// returned future. The reconciler's transition methods are already `async`, so
+/// awaiting the committer is natural and the failure stays on the fail-closed path.
 ///
 /// Production wires this to the [`CarrierPublishCoordinator`](super::publish_coordinator::CarrierPublishCoordinator)
-/// (which owns the [`TsserverEngineBackend`](super::tsserver_backend::TsserverEngineBackend));
-/// the reconciler's unit tests supply a recording mock. The seam takes the ALREADY
-/// resolved [`ProjectBinding`] so the durable publish NEVER re-resolves ownership
-/// (the single resolution happens once through the [`OwnershipAuthority`]).
-pub trait DurableCarrierStore: Send + Sync {
-    /// Publish the resolved owned carrier's companions into the on-disk store
-    /// (blobs + manifest), pruning the source from every OTHER project so an owner
-    /// change leaves nothing under the old project. No ownership re-resolution.
-    fn publish_owned(
-        &self,
-        binding: &ProjectBinding,
-        source_canonical: &str,
-        companions: &[CarrierCompanion],
-    ) -> Result<(), CarrierPublishError>;
+/// (the on-disk implementation, which owns the
+/// [`TsserverEngineBackend`](super::tsserver_backend::TsserverEngineBackend)); the
+/// reconciler's unit tests supply a recording mock. The seam takes the ALREADY
+/// resolved [`ProjectBinding`] so the commit does not re-resolve ownership (the lone
+/// resolution happens once through the [`OwnershipAuthority`]).
+pub trait CarrierMembershipCommitter: Send + Sync {
+    /// Commit the resolved owned carrier's companions as the engine's advertised
+    /// membership for this source under this project, pruning the source from every
+    /// OTHER project so an owner change leaves nothing under the old project. No
+    /// ownership re-resolution. A failed commit returns `Err` (the reconciler does
+    /// NOT commit the ledger).
+    fn commit_owned<'a>(
+        &'a self,
+        binding: &'a ProjectBinding,
+        source_canonical: &'a str,
+        companions: &'a [CarrierCompanion],
+    ) -> CommitFuture<'a>;
 
-    /// Retract the source from the on-disk store across EVERY project — the
-    /// owner-loss / delete transition that stops the plugin advertising it.
-    fn retract(&self, source_canonical: &str) -> Result<(), CarrierPublishError>;
+    /// Retract the source's advertised membership across EVERY project — the
+    /// owner-loss / delete transition that stops the engine advertising it. A failed
+    /// retract returns `Err` (the reconciler does NOT commit the tombstone).
+    fn retract<'a>(&'a self, source_canonical: &'a str) -> CommitFuture<'a>;
 }
 
 /// Why a reconciliation was triggered — the caller's contextual reason.
@@ -184,7 +212,7 @@ pub enum DesiredMembership {
 pub enum OwnershipDecision {
     /// A configured project owns the source; advertise these companions under it.
     /// Carries the RESOLVED [`ProjectBinding`] (not just the project URI) so the
-    /// reconciler's durable publish mints the engine witness + project env dims
+    /// reconciler's membership commit mints the engine witness + project env dims
     /// WITHOUT re-resolving ownership (the single resolution already happened).
     Owned {
         /// The resolved owning-project binding.
@@ -368,14 +396,15 @@ pub enum ReconcileOutcome {
 /// A failed reconciliation — the desired state was NOT reached.
 #[derive(Debug, Clone)]
 pub enum ReconcileErr {
-    /// The durable on-disk store mutation (blobs + manifest) failed, so the
-    /// plugin's advertised view could not be reached. The ledger was NOT committed
-    /// (fail-closed: the source is never reported advertised while the store did
-    /// not reach the desired state).
-    DurableStore {
+    /// The membership commit (the engine-agnostic durable half — an on-disk
+    /// blobs+manifest write for tsserver, an overlay re-snapshot for an in-memory
+    /// engine) failed, so the engine's advertised view could not be reached. The
+    /// ledger was NOT committed (fail-closed: the source is never reported advertised
+    /// while the commit did not reach the desired state).
+    MembershipCommit {
         /// The desired state that could not be reached.
         desired: DesiredMembership,
-        /// Detail from the failing store mutation.
+        /// Detail from the failing membership commit.
         detail: String,
     },
     /// The provider-buffer transition (a resilient-actor command) failed, so the
@@ -399,8 +428,8 @@ pub enum ReconcileErr {
 impl std::fmt::Display for ReconcileErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReconcileErr::DurableStore { detail, .. } => {
-                write!(f, "durable carrier-store mutation failed: {detail}")
+            ReconcileErr::MembershipCommit { detail, .. } => {
+                write!(f, "carrier membership commit failed: {detail}")
             }
             ReconcileErr::ProviderTransition { detail, .. } => {
                 write!(f, "provider-buffer transition failed: {detail}")
@@ -423,23 +452,23 @@ impl std::error::Error for ReconcileErr {}
 pub struct MembershipReconciler {
     ledger: Arc<MembershipLedger>,
     provider: Arc<dyn TypeProvider>,
-    durable: Arc<dyn DurableCarrierStore>,
+    committer: Arc<dyn CarrierMembershipCommitter>,
 }
 
 impl MembershipReconciler {
     /// Build the reconciler over the shared ledger, the active provider (the
-    /// resilient single-writer actor), and the durable on-disk store seam (the
-    /// plugin's content + advertised-set surface).
+    /// resilient single-writer actor), and the engine-agnostic membership-commit
+    /// seam (the engine's advertised-membership surface).
     #[must_use]
     pub fn new(
         ledger: Arc<MembershipLedger>,
         provider: Arc<dyn TypeProvider>,
-        durable: Arc<dyn DurableCarrierStore>,
+        committer: Arc<dyn CarrierMembershipCommitter>,
     ) -> Self {
         Self {
             ledger,
             provider,
-            durable,
+            committer,
         }
     }
 
@@ -503,12 +532,13 @@ impl MembershipReconciler {
         self.apply_absent(source, reason).await
     }
 
-    /// Stage an owned advertisement: publish the companions into the durable
-    /// on-disk store (blobs + manifest, pruning the old project), register the new
-    /// companions on the provider buffer, close any stale companions the prior
-    /// record no longer covers, then atomically swap the single ledger entry to the
-    /// new advertisement. Fail-closed: any step failing returns `Err` and the
-    /// ledger is NOT committed.
+    /// Stage an owned advertisement: commit the companions as the engine's advertised
+    /// membership (the on-disk committer writes blobs + manifest and prunes the old
+    /// project; an in-memory committer re-snapshots its overlay), register the new
+    /// companions on the provider buffer, close any stale companions the prior record
+    /// no longer covers, then atomically swap the single ledger entry to the new
+    /// advertisement. Fail-closed: any step failing returns `Err` and the ledger is
+    /// NOT committed.
     async fn apply_owned(
         &self,
         source: &CanonicalSource,
@@ -550,15 +580,18 @@ impl MembershipReconciler {
             _ => Vec::new(),
         };
 
-        // 1. Durable on-disk store publish FIRST — the plugin (a separate process)
-        // serves carrier content + the advertised set from the store, so the bytes
-        // must be on disk before the provider opens the companion buffer. The store
-        // publish is source-indexed-pruning (the source is removed from every OTHER
-        // project), so an owner change leaves nothing under the old project. A store
+        // 1. The membership commit runs before the provider opens the companion
+        // buffer — the engine serves the carrier's advertised membership from the
+        // committed state (the tsserver plugin reads the on-disk store cross-process;
+        // an in-memory engine re-snapshots its overlay), so the membership must be
+        // committed ahead of the companion-buffer open.
+        // The commit is source-indexed-pruning (the source is removed from every OTHER
+        // project), so an owner change leaves nothing under the old project. A commit
         // failure fails closed (ledger NOT committed).
-        self.durable
-            .publish_owned(&binding, source.as_str(), &companions)
-            .map_err(|err| ReconcileErr::DurableStore {
+        self.committer
+            .commit_owned(&binding, source.as_str(), &companions)
+            .await
+            .map_err(|err| ReconcileErr::MembershipCommit {
                 desired: desired.clone(),
                 detail: err.to_string(),
             })?;
@@ -639,15 +672,16 @@ impl MembershipReconciler {
         let gen = self.ledger.current_session();
         let desired = DesiredMembership::Absent { reason, gen };
 
-        // 1. Retract from the durable on-disk store FIRST so the plugin stops
-        // advertising the carrier. UNCONDITIONAL (not gated on a prior ledger
-        // advertisement): a publish path may have left a stale ready file on disk
-        // the ledger never recorded, and owner loss must clear it. Fail-closed: a
-        // store-retract failure returns `Err` and the tombstone is NOT committed
-        // (the source may still be advertised — never report a false absence).
-        self.durable
+        // 1. Retract the membership FIRST so the engine stops advertising the carrier.
+        // UNCONDITIONAL (not gated on a prior ledger advertisement): a commit path may
+        // have left stale advertised membership the ledger never recorded, and owner
+        // loss must clear it. Fail-closed: a retract failure returns `Err` and the
+        // tombstone is NOT committed (the source may still be advertised — never
+        // report a false absence).
+        self.committer
             .retract(source.as_str())
-            .map_err(|err| ReconcileErr::DurableStore {
+            .await
+            .map_err(|err| ReconcileErr::MembershipCommit {
                 desired: desired.clone(),
                 detail: err.to_string(),
             })?;

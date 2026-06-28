@@ -257,10 +257,13 @@ pub(super) fn instance_declaration_ambient(
 
 /// Emit the component's PUBLIC-FACADE re-export onto the IDE carrier.
 ///
-/// The IDE carrier (`{name}.vue.tsx`) is the in-project bare-import target
-/// (`import Comp from "./Comp.vue"` resolves here — the bare-import-probe
-/// identity, §2.2/§2.9). A consumer importing it must therefore see the
-/// component's PUBLIC type as a clean `export default`. The public default is
+/// The IDE carrier (`{name}.vue.tsx`) is the self-diagnostics surface, NOT the
+/// in-project bare-import target — a consumer's `import Comp from "./Comp.vue"`
+/// resolves to the `.d.<ext>.ts` declaration carrier (`Comp.d.vue.ts`, the
+/// path tsgo's basename-append probe reaches first), §2.2/§2.9. The IDE carrier
+/// still re-exports the component's PUBLIC type as a clean `export default` so
+/// the self-imported carrier surface and any internal/self-import caller see the
+/// real public type. The public default is
 /// SYNTHESISED on the API carrier (`{name}.verter.ts`, the redirect-reached
 /// public-API surface produced by the higher-layer API projector), so the IDE
 /// carrier RE-EXPORTS it:

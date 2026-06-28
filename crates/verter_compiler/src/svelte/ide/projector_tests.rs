@@ -37,12 +37,12 @@ fn prelude_opens_the_projection_and_no_script_tag_survives() {
 
 #[test]
 fn ide_carrier_exports_public_facade_default_with_typed_props() {
-    // The IDE carrier (`Comp.svelte.tsx`) is the in-project bare-import target
-    // (`import Comp from "./Comp.svelte"` → `Comp.svelte.tsx`), so it must
-    // export the component's PUBLIC type as a clean `export default` — a
+    // The IDE carrier (`Comp.svelte.tsx`) is the self-diagnostics surface; it
+    // composes the component's PUBLIC type as a clean `export default` — a
     // constructable component whose instance carries `$props`/`$events`/
-    // `$slots`. `$props` is derived SYNTACTICALLY from the instance script's
-    // `$props()` annotation.
+    // `$slots`. (The bare-import target is the `Comp.d.svelte.ts` declaration
+    // carrier, not this IDE carrier.) `$props` is derived SYNTACTICALLY from the
+    // instance script's `$props()` annotation.
     let code = project(
         "<script lang=\"ts\">let { msg }: { msg: string } = $props();</script>\n<div>{msg}</div>",
     );

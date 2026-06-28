@@ -154,6 +154,7 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
 /// `background_init`. This function runs **after** the registry is committed and
 /// re-runs the same import-collection pipeline, so the provider gets the missing
 /// `.vue.ts` files before the E2E diagnostic check.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn resync_aliased_imports_for_open_files(
     documents: &DocumentRegistry,
     project_sync: Option<&ProjectSync>,
@@ -161,6 +162,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     is_tsgo: bool,
     carrier_publish_coordinator: Option<&crate::external_ts::CarrierPublishCoordinator>,
+    decl_overlay_owner: &DeclOverlayOwner,
 ) -> bool {
     let Some(sync) = project_sync else {
         return false;
@@ -521,6 +523,31 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         }
     }
 
+    // Pass 3 (TSGO only): proactively open the transitive DECLARATION closure.
+    //
+    // tsgo resolves a bare framework-carrier import (`import B from "./B.vue"`)
+    // to the virtual `B.d.<ext>.ts` declaration via its native basename-append
+    // probe — but tsgo has NO module-resolution hook, so every declaration an
+    // importing carrier (transitively) needs must already be OPEN as an overlay
+    // when that carrier is type-checked, or the import fails with TS2307. This
+    // pass walks the transitive closure of carrier dependencies reachable from
+    // the OPEN carrier roots and opens each one's `.d.<ext>.ts`, recording the
+    // reachability so the `did_close` lifecycle can release them.
+    //
+    // tsserver serves carrier companions through the publish store (not direct
+    // overlay opens), so the proactive overlay graph is a tgo-only concern —
+    // scoped exactly like the carrier-open passes above.
+    if is_tsgo {
+        synced_any |= decl_overlay_owner
+            .open_declaration_closure_for_open_files(
+                sync,
+                documents,
+                provider_sync_states,
+                &snapshot,
+            )
+            .await;
+    }
+
     synced_any
 }
 
@@ -774,7 +801,7 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
         close_stale_provider_paths(
             sync,
             provider_surfaces,
-            std::slice::from_ref(stale),
+            &non_decl_close_targets(std::slice::from_ref(stale)),
             "open_unresolved_ext_flip",
         )
         .await;
@@ -800,7 +827,7 @@ async fn close_dropped_owner_api_path(
         close_stale_provider_paths(
             sync,
             provider_surfaces,
-            std::slice::from_ref(dropped),
+            &non_decl_close_targets(std::slice::from_ref(dropped)),
             context,
         )
         .await;
@@ -1057,7 +1084,7 @@ async fn apply_owner_resolved_carrier_sync(
                 close_stale_provider_paths(
                     sync,
                     documents.provider_surfaces(),
-                    &genuinely_stale,
+                    &non_decl_close_targets(&genuinely_stale),
                     context,
                 )
                 .await;
@@ -1201,7 +1228,7 @@ pub(super) async fn sync_api_to_provider_background_task(
         close_stale_provider_paths(
             &sync,
             &provider_surfaces,
-            &genuinely_stale,
+            &non_decl_close_targets(&genuinely_stale),
             "sync_api(background)",
         )
         .await;
@@ -1263,7 +1290,7 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
     close_stale_provider_paths(
         sync,
         documents.provider_surfaces(),
-        &transition.stale_paths,
+        &non_decl_close_targets(&transition.stale_paths),
         "pending_snapshot",
     )
     .await;
@@ -1303,7 +1330,7 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
 pub(super) async fn close_stale_provider_paths(
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
-    stale_paths: &[(ProviderPathKind, String)],
+    stale_paths: &[(NonDeclProviderPathKind, String)],
     context: &str,
 ) {
     for (kind, path) in stale_paths {
@@ -1313,15 +1340,17 @@ pub(super) async fn close_stale_provider_paths(
         // until the provider close is CONFIRMED, so a failed close cannot let it
         // degrade to NotVirtual and corrupt a same-named real file). Capture the
         // epoch-stamped token so the finalize is scoped to THIS close.
-        let close_token = if *kind == ProviderPathKind::Api {
+        let close_token = if *kind == NonDeclProviderPathKind::Api {
             Some(provider_surfaces.forget(path))
         } else {
             None
         };
+        // A declaration overlay (`Decl`) is unrepresentable here — its lifecycle is
+        // owned by `DeclOverlayOwner`, never this generic close.
         let result = match kind {
-            ProviderPathKind::Ide => sync.close_tsx(path).await,
-            ProviderPathKind::Api => sync.close_dts(path).await,
-            ProviderPathKind::Shadow => sync.close_file(path).await,
+            NonDeclProviderPathKind::Ide => sync.close_tsx(path).await,
+            NonDeclProviderPathKind::Api => sync.close_dts(path).await,
+            NonDeclProviderPathKind::Shadow => sync.close_file(path).await,
         };
         match result {
             // Only a CONFIRMED API close finalizes, and only via THIS close's token —
@@ -1350,6 +1379,16 @@ async fn remove_provider_sync_state_and_close_paths(
 ) {
     if let Some(state) = crate::provider_sync::remove_sync_state(provider_sync_states, canonical_id)
     {
-        close_stale_provider_paths(sync, provider_surfaces, &state.active_paths(), context).await;
+        // The declaration overlay (`Decl`), if any, is NOT closed here: its
+        // lifecycle is owned by `DeclOverlayOwner` and released only when no open
+        // carrier root still reaches it (via the `did_close` release). A background
+        // state removal closes only the non-decl artifacts.
+        close_stale_provider_paths(
+            sync,
+            provider_surfaces,
+            &state.active_non_decl_paths(),
+            context,
+        )
+        .await;
     }
 }

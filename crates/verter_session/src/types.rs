@@ -1836,6 +1836,9 @@ pub enum PublicApiMode {
     Public,
     /// A Vue Test Utils-like debug surface that exposes `<script setup>` bindings.
     Testing,
+    /// The declaration-only public surface (`.d.<ext>.ts`): a valid `.d.ts` —
+    /// no runtime/value code — that a bare framework-carrier import resolves to.
+    Declaration,
 }
 
 #[derive(Debug, Clone)]

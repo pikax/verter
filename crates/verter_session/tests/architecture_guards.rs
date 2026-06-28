@@ -4085,6 +4085,12 @@ mod foundations_guards {
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/reporter.rs",
             "crates/verter_tsc/src/tsconfig.rs",
+            // rc tsgo-engine binary discovery (`discover_tsgo`) — real-OS
+            // pnpm-store + classic-sibling walk to locate the installed
+            // `typescript@>=7` platform binary the `--api` transport spawns;
+            // a subprocess binary is real-FS by nature, never workspace
+            // source (sibling of the `verter_type_runtime` IPC entries).
+            "crates/verter_tsgo_api/src/transport/spawn.rs",
             // Audit substrate's `current_process_rss` reads
             // `/proc/self/statm` (Linux) for memory-delta
             // accounting; matches the historic
@@ -7838,6 +7844,10 @@ mod foundations_guards {
         (
             "crates/verter_tsc/src/tsconfig.rs",
             "verter-tsc binary CLI — reads tsconfig files outside the host's WorkspaceAccess (separate from the LSP/session tsconfig path). Doc comment also references `std::fs::canonicalize` behaviour for documentation.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/transport/spawn.rs",
+            "rc tsgo-engine binary discovery (`discover_tsgo`) — walks the pnpm virtual store + classic `@typescript/` sibling layout on the REAL OS filesystem to locate the installed `typescript@>=7` platform binary (`tsc`/`tsc.exe`) the `--api` transport spawns. Real-FS by nature (a subprocess binary cannot be read through the in-memory VFS); same category as `verter_type_runtime/src/tsgo/ipc.rs` + `verter_tsc/src/reporter.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
         ),
         (
             "crates/verter_type_runtime/src/discovery.rs",
@@ -15963,7 +15973,7 @@ mod single_resolution_engine_guards {
         // Same doomed-engine symbols, relocated — NOT a new engine path (upstream `prepared.rs`
         // already carried these sites and passed its own guard).
         ("crates/verter_compiler/src/script/prepared.rs", 10),
-        ("crates/verter_compiler/src/tsc/script.rs", 37),
+        ("crates/verter_compiler/src/tsc/script.rs", 35),
         ("crates/verter_parser/src/utils/oxc/script/mod.rs", 1),
         (
             "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",

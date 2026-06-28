@@ -38,12 +38,12 @@ const LANGUAGE_AUTHORITY_SEGMENT: &str = "crates/verter_language/src";
 /// workspace-relative. Shrink-only.
 const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // Vue compiler / parser paths (frozen-Vue surface; component-name
-    // suffix strips and import rewriting).
+    // suffix strips). The `ide/script/{setup,options_api}.rs` rows are GONE:
+    // dropping the in-project `.vue`-import specifier rewrite removed their last
+    // carrier-extension literal (this shrink-only list contracts as each surface
+    // sheds its carrier literal).
     "crates/verter_compiler/src/compile/helpers.rs",
     "crates/verter_compiler/src/ide/mod.rs",
-    "crates/verter_compiler/src/ide/script/options_api.rs",
-    "crates/verter_compiler/src/ide/script/setup.rs",
-    "crates/verter_parser/src/utils/oxc/vue/script/mod.rs",
     // Import-resolution extension tables (resolution data, not
     // classification — `extension_priority` / project-coverage /
     // eval-extension lists stay carrier-aware by design).

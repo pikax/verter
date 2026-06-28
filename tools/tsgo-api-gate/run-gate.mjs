@@ -1,5 +1,5 @@
 // One-command driver for the tsgo --api capability gate.
-// Discovers the user-installed tsgo binary (@typescript/native-preview) from the
+// Discovers the user-installed rc `typescript` tsgo binary from the
 // repo node_modules, sets TSGO_PATH + NM_BASE, and runs all four gate scripts
 // (harness, control, incremental, companion-identity).
 // Exit 0 only if every script passes (GO). Used as the version-bump capability gate.
@@ -20,32 +20,28 @@ const require = createRequire(import.meta.url);
 // tsgo[.exe]. We discover it portably here rather than hardcoding a platform path.
 //
 // Engine SELECTION rule (mirrored here; full text in README/§2.8 of the design doc):
-//   - The INSTALLED `typescript` package whose MAJOR is >= 7 WINS ALWAYS (regardless of
-//     the exact version/dist-tag), with platform binaries `@typescript/typescript-<plat>-<arch>`.
-//   - The `@typescript/native-preview` dev-preview channel (binaries
-//     `@typescript/native-preview-<plat>-<arch>`) is the same engine/API and is accepted
-//     as a FALLBACK SOURCE when no installed `typescript@>=7` is present. Both ship the
-//     IDENTICAL `--api` surface (`./unstable/sync` -> dist/api/sync/api.js).
+//   - The INSTALLED `typescript` package whose MAJOR is >= 7 is the SOLE engine source
+//     (regardless of the exact version/dist-tag), with platform binaries
+//     `@typescript/typescript-<plat>-<arch>` shipping the `--api` surface
+//     (`./unstable/sync` -> dist/api/sync/api.js).
 //   - This gate only DISCOVERS an installed/repo binary. The production NO-TYPESCRIPT
 //     fallback (not exercised here) DOWNLOADS the npm `typescript` package at the `rc`
 //     dist-tag (the current TS7 channel — `npm view typescript@rc` = 7.0.1-rc today; npm
 //     `latest` is still the 6.x line), retargeting `latest` once TS7 ships stable, and
 //     fails closed when offline. It is download-only — never a bundled/forked binary.
+// The published `typescript@7.x` (e.g. 7.0.1-rc) ships the typescript-go binary as
+// `tsc` (renamed from `tsgo`) in `@typescript/typescript-<plat>-<arch>`.
 const TS7_SOURCES = [
   {
     pkg: "typescript",
+    bin: "tsc",
     binRe: /@typescript\+typescript-(?!.*native)/,
     sibRe: /^typescript-(?!.*native)/,
-  },
-  {
-    pkg: "@typescript/native-preview",
-    binRe: /@typescript\+native-preview-/,
-    sibRe: /native-preview-/,
   },
 ];
 
 function discoverTsgo() {
-  const exeName = os.platform() === "win32" ? "tsgo.exe" : "tsgo";
+  const exe = (stem) => (os.platform() === "win32" ? `${stem}.exe` : stem);
   const pnpmDir = path.join(REPO_ROOT, "node_modules", ".pnpm");
   for (const src of TS7_SOURCES) {
     // Resolve the source package's version (must be >=7 to be a tsgo distribution).
@@ -70,8 +66,8 @@ function discoverTsgo() {
           const scopeDir = path.join(inner, scope);
           try {
             for (const p of fs.readdirSync(scopeDir)) {
-              candidates.push(path.join(scopeDir, p, "lib", exeName));
-              candidates.push(path.join(scopeDir, p, "bin", exeName));
+              candidates.push(path.join(scopeDir, p, "lib", exe(src.bin)));
+              candidates.push(path.join(scopeDir, p, "bin", exe(src.bin)));
             }
           } catch {
             /* not a dir */
@@ -84,8 +80,8 @@ function discoverTsgo() {
       const scopeRoot = path.join(REPO_ROOT, "node_modules", "@typescript");
       for (const sibling of fs.readdirSync(scopeRoot)) {
         if (!src.sibRe.test(sibling)) continue;
-        candidates.push(path.join(scopeRoot, sibling, "lib", exeName));
-        candidates.push(path.join(scopeRoot, sibling, "bin", exeName));
+        candidates.push(path.join(scopeRoot, sibling, "lib", exe(src.bin)));
+        candidates.push(path.join(scopeRoot, sibling, "bin", exe(src.bin)));
       }
     } catch {
       /* ignore */
@@ -95,9 +91,8 @@ function discoverTsgo() {
     if (hit) return { exe: hit, version, source: src.pkg };
   }
   throw new Error(
-    `Could not locate a tsgo binary (${exeName}). Looked for the user-installed \`typescript@>=7\` ` +
-      `(binaries @typescript/typescript-<plat>-<arch>) then @typescript/native-preview. ` +
-      `Install one, or set TSGO_PATH explicitly.`,
+    `Could not locate a tsgo engine binary. Looked for the user-installed \`typescript@>=7\` ` +
+      `(binary \`tsc\` in @typescript/typescript-<plat>-<arch>). Install it, or set TSGO_PATH explicitly.`,
   );
 }
 

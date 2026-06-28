@@ -1,5 +1,5 @@
 // tsgo --api capability gate harness (the "Block 0" gate).
-// Drives the USER-INSTALLED tsgo (@typescript/native-preview) sync --api client.
+// Drives the USER-INSTALLED rc `typescript` tsgo sync --api client.
 // Proves whether an OFF-DISK (overlay/FS-callback-only, never written to disk)
 // generated TSX "carrier" can be a real member of a configured TS project.
 //
@@ -19,22 +19,19 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 // The TS fixture project lives in ./fixture (committed, hermetic, no node_modules).
 const FIXTURE = path.join(ROOT, "fixture");
 
-// Resolve the sync API from the user-installed TS>=7 distribution, searching the
-// repo node_modules (passed via NM_BASE). The TS7_SOURCE env names the package
-// (`typescript` at v7, or `@typescript/native-preview`); both expose the sync
+// Resolve the sync API from the user-installed rc `typescript` (TS>=7)
+// distribution, searching the repo node_modules (passed via NM_BASE). The
+// TS7_SOURCE env names the package (`typescript` at v7); it exposes the sync
 // client at the PUBLIC export subpath `<pkg>/unstable/sync`. We import through
 // that public `exports` entry (not a hand-built dist/ path) so the gate exercises
 // exactly the surface a real consumer uses. Portable: no junctions.
 const require = createRequire(import.meta.url);
 const searchPaths = (process.env.NM_BASE || "").split(path.delimiter).filter(Boolean);
 const opts = { paths: searchPaths.length ? searchPaths : undefined };
-const sourcePkgs = [process.env.TS7_SOURCE, "typescript", "@typescript/native-preview"].filter(
-  Boolean,
-);
+const sourcePkgs = [process.env.TS7_SOURCE, "typescript"].filter(Boolean);
 // Resolve the PUBLIC `<pkg>/unstable/sync` export (parameterized over the source
-// package: works for `typescript/unstable/sync` AND
-// `@typescript/native-preview/unstable/sync`). `require.resolve` honours the
-// package's `exports` map, so this is the public entry, not an internal file path.
+// package: `typescript/unstable/sync`). `require.resolve` honours the package's
+// `exports` map, so this is the public entry, not an internal file path.
 let syncApiSpecifier, syncApiPath;
 for (const p of sourcePkgs) {
   try {

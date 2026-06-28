@@ -117,6 +117,35 @@ pub struct VirtualFileNaming {
     pub testing_api_suffix: Option<&'static str>,
     /// Additional sidecar virtual-file suffixes the adapter emits.
     pub sidecar_suffixes: &'static [&'static str],
+    /// How the DECLARATION carrier surface (`.d.<ext>.ts`) is named relative to
+    /// the carrier source — the dedicated BARE-IMPORT-PROBED declaration file a
+    /// bare framework-carrier import (`import B from "./B.vue"`) resolves to.
+    ///
+    /// This is a DISTINCT column from [`Self::import_surface`]: the import
+    /// surface is the redirect-reached `.verter.` API file, while the
+    /// declaration carrier is the extension-MIDDLE `.d.<ext>.ts` file tsgo's
+    /// basename-append probe reaches FIRST. A component carrier sets
+    /// [`DeclarationSurface::ExtensionMiddleTs`]; a non-projecting adapter sets
+    /// [`DeclarationSurface::None`].
+    pub declaration_surface: DeclarationSurface,
+}
+
+/// How an adapter's DECLARATION carrier surface (`.d.<ext>.ts`) is named.
+///
+/// A component carrier emits a real `.d.<ext>.ts` declaration file the bare
+/// framework-carrier import resolves to (tsgo's basename-append probe order is
+/// `.d.vue.ts` -> `.vue.ts` -> `.vue.tsx`). The declaration carrier is the
+/// EXTENSION-MIDDLE form — `Foo.vue` -> `Foo.d.vue.ts` — NOT the extension-last
+/// `Foo.vue.d.ts`, and it NEVER carries the redirect-reached `.verter.` infix
+/// (that lives on the [`VirtualFileNaming::import_surface`] API file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationSurface {
+    /// No declaration carrier surface (a non-component adapter / rune module).
+    None,
+    /// The extension-MIDDLE `.d.<ext>.ts` declaration file: insert `.d.` between
+    /// the carrier source's stem and its carrier extension, then append `.ts`
+    /// (`Foo.vue` -> `Foo.d.vue.ts`, `Foo.svelte` -> `Foo.d.svelte.ts`).
+    ExtensionMiddleTs,
 }
 
 impl VirtualFileNaming {
@@ -186,6 +215,58 @@ impl VirtualFileNaming {
             .map(|suffix| format!("{source}{suffix}"))
             .collect()
     }
+
+    /// The descriptor-valid DECLARATION carrier identity for a carrier `source`:
+    /// the EXTENSION-MIDDLE `.d.<ext>.ts` path a bare framework-carrier import
+    /// resolves to. `Foo.vue` -> `Foo.d.vue.ts`, `Foo.svelte` -> `Foo.d.svelte.ts`.
+    ///
+    /// The transform inserts `.d.` between the carrier source's stem and its
+    /// carrier extension, then appends `.ts`: the carrier extension is PRESERVED
+    /// in extension-MIDDLE form (`.d.vue.ts`, never the extension-last
+    /// `.vue.d.ts` tsgo would not bare-resolve), and NO `.verter.` infix is
+    /// inserted (that reserved infix lives only on the redirect-reached
+    /// [`api_surface_suffix`](Self::api_surface_suffix)). `None` when this naming
+    /// policy projects no declaration carrier ([`DeclarationSurface::None`]) or
+    /// the `source` has no carrier extension to wrap.
+    ///
+    /// This is the descriptor AUTHORITY for the declaration carrier's identity:
+    /// a consumer composing a `.d.<ext>.ts` path MUST route through this — never
+    /// `format!`-ing a suffix onto a source itself, which is how the carrier
+    /// extension lands extension-last or the `.verter.` infix leaks onto the
+    /// bare-probed declaration surface.
+    #[must_use]
+    pub fn declaration_carrier_identity(
+        &self,
+        source: &str,
+        carrier_extension: Option<&str>,
+    ) -> Option<String> {
+        match self.declaration_surface {
+            DeclarationSurface::None => None,
+            DeclarationSurface::ExtensionMiddleTs => {
+                // The carrier extension the owning adapter declares (derived from
+                // its `carrier_language`, e.g. `.vue` / `.svelte`) — NEVER a
+                // hand-matched literal here (`single_language_classifier`). The
+                // transform applies ONLY to a `source` carrying THIS extension:
+                // a `.ts` / `.js` / foreign-extension / extension-less source is
+                // not a carrier path and yields `None` (never a fabricated
+                // `Foo.d.ts.ts`).
+                let carrier_ext = carrier_extension?;
+                let stem = source.strip_suffix(carrier_ext)?;
+                // The extension must sit on a non-empty BASENAME stem: the char
+                // immediately before the extension must be a real basename
+                // character, not a path separator (a bare `/.vue` is not a
+                // carrier path) and the stem must not itself be empty.
+                let last = stem.chars().next_back()?;
+                if last == '/' || last == '\\' {
+                    return None;
+                }
+                // Insert `.d.` between the stem and the carrier extension, then
+                // append `.ts`: `{stem}{.d}{carrier_ext}{.ts}` =
+                // `Foo` + `.d` + `.vue` + `.ts` → `Foo.d.vue.ts`.
+                Some(format!("{stem}.d{carrier_ext}.ts"))
+            }
+        }
+    }
 }
 
 /// How a virtual surface (IDE or import-resolution) is named relative to a
@@ -211,6 +292,33 @@ pub enum VirtualPathPolicy {
         /// The suffix used when the carrier script does not use JSX.
         non_jsx: &'static str,
     },
+}
+
+impl FrameworkAdapterDescriptor {
+    /// The carrier extension this adapter owns, in leading-dot form
+    /// (`.{carrier_language}`, e.g. `.vue` / `.svelte`), or `None` for a
+    /// carrier-less adapter. DERIVED from [`Self::carrier_language`] — never a
+    /// hand-matched extension literal (`single_language_classifier`).
+    #[must_use]
+    pub fn carrier_extension(&self) -> Option<String> {
+        self.carrier_language
+            .as_ref()
+            .map(|lang| format!(".{}", lang.as_str()))
+    }
+
+    /// The descriptor-valid DECLARATION carrier identity for a carrier `source`
+    /// (`Foo.vue` -> `Foo.d.vue.ts`), or `None` when this adapter projects no
+    /// declaration carrier OR `source` does not carry THIS adapter's carrier
+    /// extension. This is the descriptor AUTHORITY for the `.d.<ext>.ts`
+    /// identity: it supplies the registry-derived carrier extension to
+    /// [`VirtualFileNaming::declaration_carrier_identity`], so a non-carrier
+    /// source (`Foo.ts` / `Foo.js` / a foreign extension) never produces a
+    /// fabricated `Foo.d.ts.ts`.
+    #[must_use]
+    pub fn declaration_carrier_identity(&self, source: &str) -> Option<String> {
+        let naming = self.virtual_file_naming.as_ref()?;
+        naming.declaration_carrier_identity(source, self.carrier_extension().as_deref())
+    }
 }
 
 /// The Vue adapter descriptor row.
@@ -244,6 +352,10 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
             // is not a rune-module extension, so it is already collision-free.
             testing_api_suffix: Some(".__verter_test.ts"),
             sidecar_suffixes: &[],
+            // The bare `import B from "./B.vue"` declaration carrier is the
+            // extension-middle `B.d.vue.ts` — the path tsgo's basename-append
+            // probe reaches first (`.d.vue.ts` -> `.vue.ts` -> `.vue.tsx`).
+            declaration_surface: DeclarationSurface::ExtensionMiddleTs,
         }),
         // The Vue adapter resolves the SFC's default-export component surface
         // only; a named-export framework surface is not yet a distinct
@@ -297,6 +409,10 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
             // Vue-only).
             testing_api_suffix: None,
             sidecar_suffixes: &[],
+            // The bare `import C from "./C.svelte"` declaration carrier is the
+            // extension-middle `C.d.svelte.ts` — the path tsgo's basename-append
+            // probe reaches first (`.d.svelte.ts` -> `.svelte.ts` -> `.svelte.tsx`).
+            declaration_surface: DeclarationSurface::ExtensionMiddleTs,
         }),
         // The Svelte carrier resolves the default-export component surface only
         // (a `.svelte` file is one component); a named-export framework surface
@@ -322,6 +438,9 @@ pub fn svelte_rune_module_naming() -> VirtualFileNaming {
         import_surface: VirtualPathPolicy::SelfFile,
         testing_api_suffix: None,
         sidecar_suffixes: &[],
+        // A rune module is a script, not a component carrier — it projects no
+        // declaration carrier (it serves its own `SelfFile` path).
+        declaration_surface: DeclarationSurface::None,
     }
 }
 
@@ -434,6 +553,120 @@ mod tests {
     }
 
     #[test]
+    fn declaration_carrier_identity_inserts_d_infix_in_extension_middle_form() {
+        // The declaration carrier identity is the EXTENSION-MIDDLE `.d.<ext>.ts`
+        // form: take `.../Foo.<ext>`, insert `.d.` between the stem and the
+        // carrier extension, then append `.ts`. This is the path tsgo's bare
+        // framework-carrier import basename-append probe reaches FIRST
+        // (`.d.vue.ts` -> `.vue.ts` -> `.vue.tsx`). Exercised through the
+        // descriptor-level entry, which derives the carrier extension from the
+        // adapter's `carrier_language` (no hand-matched literal).
+        assert_eq!(
+            vue_descriptor().declaration_carrier_identity("/ws/src/Foo.vue"),
+            Some("/ws/src/Foo.d.vue.ts".to_string()),
+            "Vue declaration carrier is the extension-middle `.d.vue.ts`"
+        );
+        assert_eq!(
+            svelte_descriptor().declaration_carrier_identity("/ws/src/Foo.svelte"),
+            Some("/ws/src/Foo.d.svelte.ts".to_string()),
+            "Svelte declaration carrier is the extension-middle `.d.svelte.ts`"
+        );
+    }
+
+    #[test]
+    fn declaration_carrier_identity_is_extension_middle_never_extension_last() {
+        // NEGATIVE: the declaration carrier PRESERVES the carrier extension in
+        // extension-MIDDLE form. It is NEVER the extension-LAST `.vue.d.ts`
+        // (which tsgo would not resolve the bare `.vue` import to), and it
+        // NEVER carries the redirect-reached `.verter.` infix.
+        let identity = vue_descriptor()
+            .declaration_carrier_identity("/ws/src/Foo.vue")
+            .expect("vue produces a declaration carrier");
+        assert!(
+            identity.ends_with(".d.vue.ts"),
+            "extension-middle form: `{identity}` must end with `.d.vue.ts`"
+        );
+        assert!(
+            !identity.contains(".vue.d.ts"),
+            "must NOT be extension-last `.vue.d.ts`: `{identity}`"
+        );
+        assert!(
+            !identity.contains(".verter."),
+            "the declaration carrier is bare-probed, never `.verter.`: `{identity}`"
+        );
+    }
+
+    #[test]
+    fn declaration_carrier_identity_none_for_extension_less_source() {
+        // A source with no extension has no carrier extension to wrap, so the
+        // declaration-carrier transform returns None (it is not a carrier path).
+        assert_eq!(
+            vue_descriptor().declaration_carrier_identity("/ws/src/Foo"),
+            None
+        );
+    }
+
+    #[test]
+    fn declaration_carrier_identity_rejects_non_carrier_extensions() {
+        // The declaration carrier identity is a CARRIER-EXTENSION transform: it
+        // returns `Some(..)` ONLY when the source's extension matches THIS
+        // adapter's (registry-derived) carrier extension. A `.ts` / `.js` /
+        // foreign-extension source is NOT a carrier path, so the transform
+        // returns `None` — it must NOT fabricate a `Foo.d.ts.ts` by blindly
+        // inserting `.d.` at the final basename dot.
+        let vue = vue_descriptor();
+
+        // A `.ts` source under the Vue descriptor is NOT a carrier: it must NOT
+        // become `/ws/src/Foo.d.ts.ts`.
+        assert_eq!(
+            vue.declaration_carrier_identity("/ws/src/Foo.ts"),
+            None,
+            "a `.ts` source is not a Vue carrier — no `.d.ts.ts`"
+        );
+        // NEGATIVE: explicitly assert the bad output is never produced.
+        assert_ne!(
+            vue.declaration_carrier_identity("/ws/src/Foo.ts"),
+            Some("/ws/src/Foo.d.ts.ts".to_string()),
+            "the `.ts` source must NEVER yield the fabricated `Foo.d.ts.ts`"
+        );
+        assert_eq!(
+            vue.declaration_carrier_identity("/ws/src/Foo.js"),
+            None,
+            "a `.js` source is not a Vue carrier"
+        );
+        // A foreign carrier extension (`.svelte` under the Vue descriptor) is
+        // also not THIS descriptor's carrier.
+        assert_eq!(
+            vue.declaration_carrier_identity("/ws/src/Foo.svelte"),
+            None,
+            "a `.svelte` source is not a Vue carrier under the Vue descriptor"
+        );
+
+        // The Svelte descriptor is the mirror image: it accepts `.svelte`, not
+        // `.vue`.
+        assert_eq!(
+            svelte_descriptor().declaration_carrier_identity("/ws/src/Foo.vue"),
+            None,
+            "a `.vue` source is not a Svelte carrier under the Svelte descriptor"
+        );
+    }
+
+    #[test]
+    fn declaration_carrier_identity_accepts_only_the_matching_carrier_extension() {
+        // POSITIVE control (non-vacuity): the matching carrier extension still
+        // produces the extension-middle `.d.<ext>.ts` identity for each
+        // descriptor.
+        assert_eq!(
+            vue_descriptor().declaration_carrier_identity("/ws/src/Foo.vue"),
+            Some("/ws/src/Foo.d.vue.ts".to_string()),
+        );
+        assert_eq!(
+            svelte_descriptor().declaration_carrier_identity("/ws/src/Foo.svelte"),
+            Some("/ws/src/Foo.d.svelte.ts".to_string()),
+        );
+    }
+
+    #[test]
     fn testing_api_suffix_requires_a_distinct_import_surface_file() {
         // A testing-API suffix requires a distinct suffix-appended import
         // surface (a `SelfFile`/`None` import surface has no API file to vary).
@@ -442,6 +675,7 @@ mod tests {
             import_surface: VirtualPathPolicy::None,
             testing_api_suffix: Some(".__verter_test.ts"),
             sidecar_suffixes: &[],
+            declaration_surface: DeclarationSurface::None,
         };
         assert!(!invalid.is_structurally_valid());
 
@@ -452,6 +686,7 @@ mod tests {
             import_surface: VirtualPathPolicy::SelfFile,
             testing_api_suffix: Some(".__verter_test.ts"),
             sidecar_suffixes: &[],
+            declaration_surface: DeclarationSurface::None,
         };
         assert!(!invalid_self.is_structurally_valid());
 
@@ -460,6 +695,7 @@ mod tests {
             import_surface: VirtualPathPolicy::Suffix(".ts"),
             testing_api_suffix: Some(".__verter_test.ts"),
             sidecar_suffixes: &[],
+            declaration_surface: DeclarationSurface::None,
         };
         assert!(valid.is_structurally_valid());
     }

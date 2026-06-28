@@ -161,6 +161,29 @@ mod inner {
         /// deterministically open the snapshot→swap window. Other paths are
         /// unaffected.
         register_block: Option<(String, std::sync::Arc<tokio::sync::Notify>)>,
+        /// Test seam: when set to `Some((path, arrived, release))`, a `close_file`
+        /// against `path` RECORDS its call, SIGNALS `arrived` (so the test observes
+        /// the close has been reached), and then AWAITS `release` before returning.
+        /// Pauses the closing task INSIDE the provider close so a concurrency test
+        /// can deterministically run other work (e.g. a closure-pass re-record)
+        /// while a `did_close` is mid-flight in its overlay-release half. Other
+        /// paths close without blocking.
+        #[allow(clippy::type_complexity)]
+        close_block: Option<(
+            String,
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+        /// Test seam: when set to `Some((path, callback))`, the FIRST `open_file`
+        /// whose path equals `path` RECORDS its call, takes the callback (one-shot)
+        /// and RUNS it synchronously — after releasing the state lock and before
+        /// returning the future. Lets a test deterministically interleave a side
+        /// effect (e.g. closing a document in the `DocumentRegistry`) at the exact
+        /// moment a specific overlay open fires, so a mid-pass close can be exercised
+        /// against the real async pass without a non-deterministic thread race. Other
+        /// paths, and all subsequent opens of the same path, are unaffected.
+        #[allow(clippy::type_complexity)]
+        on_open_file: Option<(String, Box<dyn FnOnce() + Send>)>,
     }
 
     /// A mock `TypeProvider` for testing.
@@ -317,6 +340,15 @@ mod inner {
             self.state.lock().unwrap().provider_id = Some(provider_id);
         }
 
+        /// Install a one-shot side effect that fires the FIRST time `open_file` is
+        /// called for `path`. The callback runs synchronously, after the state lock
+        /// is released and before the open's future is returned. Used to
+        /// deterministically interleave a mid-pass event (e.g. a `did_close`) at the
+        /// exact moment a specific overlay open fires. See [`MockState::on_open_file`].
+        pub fn set_on_open_file(&self, path: &str, callback: Box<dyn FnOnce() + Send>) {
+            self.state.lock().unwrap().on_open_file = Some((path.to_string(), callback));
+        }
+
         /// Get all recorded calls.
         pub fn calls(&self) -> Vec<MockCall> {
             self.state.lock().unwrap().calls.clone()
@@ -382,6 +414,28 @@ mod inner {
             let gate = std::sync::Arc::new(tokio::sync::Notify::new());
             self.state.lock().unwrap().register_block = Some((path.to_string(), gate.clone()));
             gate
+        }
+
+        /// Test seam: make `close_file` against `path` RECORD its call, SIGNAL the
+        /// returned `arrived` gate, and then BLOCK until the returned `release` gate
+        /// is signalled. Returns `(arrived, release)`: the test awaits `arrived` to
+        /// learn the close has been reached (the closing task is now paused INSIDE
+        /// the provider close, e.g. mid-`did_close` overlay release), does whatever
+        /// concurrent work it needs to interleave, then signals `release`
+        /// (`notify_one`, which stores a permit so there is no signal-before-await
+        /// race) to let the close return. Other paths close without blocking.
+        pub fn block_close_file(
+            &self,
+            path: &str,
+        ) -> (
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        ) {
+            let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().close_block =
+                Some((path.to_string(), arrived.clone(), release.clone()));
+            (arrived, release)
         }
     }
 
@@ -559,12 +613,30 @@ mod inner {
         }
 
         fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::OpenFile {
-                path: path.to_string(),
-                content: content.to_string(),
-            });
-            let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            // Record the call + take the one-shot interleave callback (if armed for
+            // this exact path) WHILE holding the lock, then RELEASE the lock before
+            // running the callback — running it under the std mutex would deadlock if
+            // it re-entered the mock. The callback runs synchronously here so its
+            // effect (e.g. a `did_close`) is observable before the open's future is
+            // even returned, which is the realistic mid-pass ordering.
+            let (fail, on_open) = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::OpenFile {
+                    path: path.to_string(),
+                    content: content.to_string(),
+                });
+                let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+                let on_open = match &state.on_open_file {
+                    Some((armed_path, _)) if armed_path == path => {
+                        state.on_open_file.take().map(|(_, cb)| cb)
+                    }
+                    _ => None,
+                };
+                (fail, on_open)
+            };
+            if let Some(callback) = on_open {
+                callback();
+            }
             Box::pin(async move { fail_or_ok(fail, "open_file") })
         }
 
@@ -589,15 +661,38 @@ mod inner {
         }
 
         fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::CloseFile {
-                path: path.to_string(),
-            });
-            // `close_file` is intentionally NOT gated by `fail_sync_paths`:
-            // failure-injection tests want to observe whether a stale path was
-            // (wrongly) closed even while a sibling kind's sync fails.
-            let fail = state.fail_file_ops;
-            Box::pin(async move { fail_or_ok(fail, "close_file") })
+            // Record the call + capture the one-shot block gate (if armed for this
+            // exact path) WHILE holding the sync lock, then RELEASE the lock before
+            // awaiting — awaiting under the std mutex would deadlock every other
+            // mock op. The gate is taken (one-shot) so subsequent closes of the
+            // same path do not block.
+            let (fail, block) = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::CloseFile {
+                    path: path.to_string(),
+                });
+                // `close_file` is intentionally NOT gated by `fail_sync_paths`:
+                // failure-injection tests want to observe whether a stale path was
+                // (wrongly) closed even while a sibling kind's sync fails.
+                let fail = state.fail_file_ops;
+                let block = match &state.close_block {
+                    Some((armed_path, _, _)) if armed_path == path => state
+                        .close_block
+                        .take()
+                        .map(|(_, arrived, release)| (arrived, release)),
+                    _ => None,
+                };
+                (fail, block)
+            };
+            Box::pin(async move {
+                if let Some((arrived, release)) = block {
+                    // Signal the test that the close has been reached (the closing
+                    // task is paused HERE), then await the test's release.
+                    arrived.notify_one();
+                    release.notified().await;
+                }
+                fail_or_ok(fail, "close_file")
+            })
         }
 
         fn notify_carrier_changed(&self, companion_path: &str) -> ProviderFuture<'_, ()> {

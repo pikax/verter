@@ -152,7 +152,7 @@ Enforcing guard: `trace_surface_guard` (`crates/verter_type_runtime/tests/trace_
 
 ### Background File Sync
 
-During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.vue.ts` (public API) are synced; cross-file imports resolve through `.vue.ts` (via `rewrite_vue_imports_for_tsgo`). Ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
+During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.verter.ts` (public API) are synced. Cross-file imports resolve WITHOUT any provider-side text rewrite: the compiler emits in-project carrier imports already suffixed to the `.vue.tsx` IDE carrier (sourcemap-safe `CodeTransform`), and the workspace resolver rewrites a plain-file `./Comp.vue` specifier to the `.verter.ts` public-API carrier before the bytes reach the provider — so tsgo's native module resolution reaches the didOpened carrier directly. Ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
 
 ### Barrel-Import Eager Sync (TSGO)
 

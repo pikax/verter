@@ -94,14 +94,10 @@ pub enum RecoveredVarKind {
 #[derive(Debug)]
 pub struct RecoveredImport<'a> {
     /// Span of the full `import … '<source>'` statement (SFC-absolute), including
-    /// a trailing `;` when one immediately follows. Suitable for `move_with_suffix`.
+    /// a trailing `;` when one immediately follows. Suitable for `move_with_suffix`
+    /// — the failure path hoists the WHOLE statement verbatim (the bare specifier
+    /// resolves natively, so there is no specifier rewrite).
     pub span: Span,
-    /// Module specifier text WITHOUT the surrounding quotes (e.g. `vue`, `./Foo.vue`).
-    pub source: &'a str,
-    /// Span of the source string literal INCLUDING quotes (SFC-absolute), used to
-    /// rewrite an in-project `.vue` import to the component IDE carrier
-    /// (`.vue.tsx`).
-    pub source_span: Span,
     /// Local binding names introduced by this import (default / namespace / named
     /// locals). Empty for side-effect imports (`import './x'`).
     pub binding_names: Vec<&'a str>,
@@ -1010,7 +1006,6 @@ impl<'a> ScriptTokenScanner<'a> {
                         self.pos = save;
                         return None;
                     }
-                    let source = &self.source[src_start + 1..src_end - 1];
                     let mut end = src_end;
                     if self.bytes.get(end).copied() == Some(b';') {
                         end += 1;
@@ -1020,11 +1015,6 @@ impl<'a> ScriptTokenScanner<'a> {
                         span: Span::new(
                             self.content_start + import_kw_start as u32,
                             self.content_start + end as u32,
-                        ),
-                        source,
-                        source_span: Span::new(
-                            self.content_start + src_start as u32,
-                            self.content_start + src_end as u32,
                         ),
                         binding_names,
                         is_type_only,

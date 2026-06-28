@@ -3363,3 +3363,964 @@ fn digit_prefix_component_name_is_prefixed() {
         code
     );
 }
+
+// ── Declaration mode (`.d.<ext>.ts`) — declaration-SAFE output ───────────────
+//
+// `TscMode::Declaration` renders the SAME public surface `TscMode::Public`
+// computes, but as a strictly valid `.d.ts`: pure declarations only, NO runtime
+// / value code. These tests are DISCRIMINATING — the runtime-token assertions
+// fail against the `Public` output (which emits `defineComponent` / `const
+// __comp` / `typeof __comp`) and pass only for the declaration path.
+
+fn gen_tsc_declaration(sfc: &str) -> String {
+    generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            filename: Some("/test/TestComp.vue".to_string()),
+            mode: TscMode::Declaration,
+            ..Default::default()
+        },
+    )
+    .code
+}
+
+#[test]
+fn declaration_mode_emits_no_runtime_value_code() {
+    let sfc = r#"<script setup lang="ts">
+defineProps<{ msg: string; count?: number }>()
+defineEmits<{ change: [value: string] }>()
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // NEGATIVE: a `.d.ts` MUST NOT contain any runtime / value code. The
+    // `Public` mode emits all of these; the declaration path emits none.
+    assert!(
+        !d.contains("defineComponent("),
+        "declaration must not call defineComponent, got:\n{d}"
+    );
+    assert!(
+        !d.contains("= defineComponent"),
+        "declaration must not assign defineComponent, got:\n{d}"
+    );
+    assert!(
+        !d.contains("const __comp"),
+        "declaration must not create the runtime __comp const, got:\n{d}"
+    );
+    assert!(
+        !d.contains("typeof __comp"),
+        "declaration must not reference typeof a runtime value, got:\n{d}"
+    );
+    assert!(
+        !d.contains("import { defineComponent }"),
+        "declaration must not value-import defineComponent, got:\n{d}"
+    );
+
+    // POSITIVE: it IS a declaration with an exported default value.
+    assert!(
+        d.contains("declare const TestComp"),
+        "declaration declares the component value, got:\n{d}"
+    );
+    assert!(
+        d.contains("export default TestComp"),
+        "declaration exports the component as default, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_preserves_the_public_props_surface() {
+    let sfc = r#"<script setup lang="ts">
+defineProps<{ msg: string; count?: number }>()
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // The declaration must carry the SAME public `$props` surface the Public
+    // mode computes (rendered as an explicit declaration). The prop names and
+    // optionality must survive into the `new()`/`$props` shape.
+    assert!(
+        d.contains("$props"),
+        "declaration carries $props, got:\n{d}"
+    );
+    assert!(d.contains("msg"), "required prop `msg` survives, got:\n{d}");
+    assert!(
+        d.contains("count?"),
+        "optional prop `count?` survives, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_preserves_type_only_imports_but_drops_value_import() {
+    let sfc = r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // Type-only imports are declaration-legal and MUST survive.
+    assert!(
+        d.contains("import type { Props } from './types'"),
+        "type-only import survives in the declaration, got:\n{d}"
+    );
+    // The vue runtime value import must NOT appear.
+    assert!(
+        !d.contains("import { defineComponent }"),
+        "declaration must not emit the defineComponent value import, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_has_no_macro_stubs_or_setup_body_even_with_expose() {
+    // `defineExpose` is exactly the case the Public mode emits the setup body +
+    // macro stubs (to resolve `typeof` over exposed bindings). The declaration
+    // path must render the expose surface as an explicit type WITHOUT any
+    // executable body.
+    let sfc = r#"<script setup lang="ts">
+const internal = 1
+defineExpose({ internal })
+</script>
+<template><div>hi</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    assert!(
+        !d.contains("declare function defineProps"),
+        "declaration must not emit macro stubs, got:\n{d}"
+    );
+    assert!(
+        !d.contains("const internal = 1"),
+        "declaration must not emit the script-setup executable body, got:\n{d}"
+    );
+    assert!(
+        !d.contains("defineExpose("),
+        "declaration must not call defineExpose, got:\n{d}"
+    );
+    assert!(
+        d.contains("declare const TestComp"),
+        "declaration still declares the component, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_empty_sfc_is_declaration_safe() {
+    // An SFC with no `<script setup>` and no `<script>` falls to the empty
+    // stub. The `Public`/default path emits a RUNTIME stub (`const __comp =
+    // defineComponent({})`, `typeof __comp`); the declaration path must NOT.
+    let d = gen_tsc_declaration("<template><div>hello</div></template>");
+    assert!(
+        !d.contains("defineComponent("),
+        "empty-SFC declaration must not call defineComponent, got:\n{d}"
+    );
+    assert!(
+        !d.contains("const __comp"),
+        "empty-SFC declaration must not create the runtime __comp const, got:\n{d}"
+    );
+    assert!(
+        !d.contains("typeof __comp"),
+        "empty-SFC declaration must not reference typeof a runtime value, got:\n{d}"
+    );
+    assert!(
+        d.contains("declare const TestComp") && d.contains("export default TestComp"),
+        "empty-SFC declaration still declares + default-exports the component, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_options_api_sfc_is_declaration_safe() {
+    // An Options-API `<script>` (no `<script setup>`) falls to the
+    // options-API stub, which in the runtime path wraps the default export in
+    // `defineComponent(...)`. The declaration path must NOT emit that runtime
+    // wrapper or value import.
+    let sfc = r#"<script>
+export default { name: 'Foo', props: { msg: String } }
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+    assert!(
+        !d.contains("defineComponent("),
+        "options-API declaration must not wrap in defineComponent, got:\n{d}"
+    );
+    assert!(
+        !d.contains("import { defineComponent }"),
+        "options-API declaration must not value-import defineComponent, got:\n{d}"
+    );
+    assert!(
+        d.contains("declare const TestComp") && d.contains("export default TestComp"),
+        "options-API declaration still declares + default-exports the component, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_options_api_projects_the_full_props_and_emits_surface() {
+    // An Options-API `defineComponent({ props, emits })` (no `<script setup>`)
+    // must project its FULL public surface into the declaration — NOT the empty
+    // `DefineComponent<{}, {}, any>` stub. The runtime-object props/emits are
+    // extracted through the same prop/emit normalization the `<script setup>`
+    // macros use and rendered declaration-SAFELY (no runtime `defineComponent`
+    // call, no `__comp`, no `typeof __comp`).
+    let sfc = r#"<script>
+import { defineComponent } from 'vue'
+export default defineComponent({
+  name: 'Foo',
+  props: { msg: String },
+  emits: ['change'],
+})
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // POSITIVE: the prop `msg` and the emit `change` reach the instance surface.
+    assert!(
+        d.contains("new(") && d.contains("$props"),
+        "options-API declaration carries the `new(...)` instance surface with $props, got:\n{d}"
+    );
+    assert!(
+        d.contains("msg"),
+        "options-API prop `msg` survives into the declaration surface, got:\n{d}"
+    );
+    assert!(
+        d.contains("'change'"),
+        "options-API emit `change` survives into the declaration emit surface, got:\n{d}"
+    );
+
+    // NEGATIVE (discriminating): the empty stub's bare `DefineComponent<{}, {},
+    // any>` must NOT be what a props-bearing component renders.
+    assert!(
+        !d.contains("DefineComponent<{}, {}, any>"),
+        "a props/emits-bearing options-API component must NOT collapse to the empty \
+         DefineComponent<{{}}, {{}}, any> stub, got:\n{d}"
+    );
+
+    // NEGATIVE: still fully declaration-legal — no runtime value code.
+    assert!(
+        !d.contains("defineComponent("),
+        "options-API full-surface declaration must not call defineComponent, got:\n{d}"
+    );
+    assert!(
+        !d.contains("const __comp") && !d.contains("typeof __comp"),
+        "options-API full-surface declaration must not create/reference a runtime __comp, got:\n{d}"
+    );
+    assert!(
+        d.contains("declare const TestComp") && d.contains("export default TestComp"),
+        "options-API full-surface declaration declares + default-exports the component, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_options_api_scriptless_stays_empty_surface() {
+    // CONTROL: a genuinely-empty surface (no `<script setup>`, no props/emits)
+    // must still render the minimal empty stub — the full-surface projection must
+    // not fabricate members where none exist.
+    let sfc = r#"<script>
+export default { name: 'Bare' }
+</script>
+<template><div>hi</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    assert!(
+        !d.contains("defineComponent("),
+        "scriptless options-API declaration must not call defineComponent, got:\n{d}"
+    );
+    assert!(
+        d.contains("declare const TestComp") && d.contains("export default TestComp"),
+        "scriptless options-API declaration still declares + default-exports, got:\n{d}"
+    );
+    // No props were declared, so no prop name should be invented into the surface.
+    assert!(
+        !d.contains("msg"),
+        "scriptless options-API declaration must not invent props, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_options_api_preserves_imported_type_only_prop_import() {
+    // P2 #5: an Options-API prop typed via an IMPORTED type (`type: Object as
+    // PropType<Foo>` where `Foo` is `import type`-ed) must keep `Foo`'s import in
+    // the emitted declaration — otherwise the `.d.ts` references `Foo` with no
+    // import (an incomplete / illegal declaration). Same class as the setup path's
+    // type-import threading; the Options-API path must reuse the SAME machinery
+    // (`collect_type_imports` + the `TypeUsageTracker` finalize), not pass empty
+    // type-import context.
+    //
+    // RED-before: `generate_options_api_declaration` passed an EMPTY `type_imports`
+    // / `parsed_items`, so the tracker had nothing to emit — `Foo` was referenced
+    // in the surface with no `import type { Foo }` line.
+    let sfc = r#"<script>
+import { defineComponent } from 'vue'
+import type { PropType } from 'vue'
+import type { Foo } from './types'
+export default defineComponent({
+  name: 'Foo',
+  props: { item: { type: Object as PropType<Foo>, required: true } },
+})
+</script>
+<template><div>{{ item }}</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // POSITIVE: the prop surface references the imported type `Foo`...
+    assert!(
+        d.contains("Foo"),
+        "options-API prop type references the imported type `Foo`, got:\n{d}"
+    );
+    // ...and the declaration brings `Foo` into scope via a type-only import.
+    assert!(
+        d.contains("import type { Foo } from './types'"),
+        "options-API declaration emits the type-only import that resolves `Foo`, got:\n{d}"
+    );
+
+    // NEGATIVE (discriminating): `Foo` must NOT be referenced WITHOUT its import —
+    // the declaration is not declaration-legal if `Foo` is undefined. (Asserted by
+    // the positive import check above; this is the explicit no-orphan-type guard.)
+    let references_foo_type = d.contains("PropType<Foo>") || d.contains(": Foo");
+    let has_foo_import = d.contains("import type { Foo } from './types'");
+    assert!(
+        !references_foo_type || has_foo_import,
+        "options-API declaration must not reference `Foo` without importing it, got:\n{d}"
+    );
+
+    // Still fully declaration-legal: no runtime value code, no PropType cast left
+    // in a value position.
+    assert!(
+        !d.contains("defineComponent(") && !d.contains("const __comp"),
+        "imported-type options-API declaration stays declaration-legal, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_options_api_promotes_value_import_used_in_prop_type() {
+    // P2 #5 (value-import promotion): a VALUE import (`import { Foo }`, no `type`
+    // modifier) used in an Options-API prop's TYPE position (`PropType<Foo>`) must
+    // be PROMOTED to a declaration-legal `import type { Foo }` — exactly as the
+    // setup path does. The declaration carries no runtime body, so a bare value
+    // import of a type-only symbol risks an unused-value-import.
+    let sfc = r#"<script>
+import { defineComponent } from 'vue'
+import { PropType } from 'vue'
+import { Foo } from './types'
+export default defineComponent({
+  props: { item: { type: Object as PropType<Foo>, required: true } },
+})
+</script>
+<template><div>{{ item }}</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // POSITIVE: the value import used in a type position is promoted to `import
+    // type`.
+    assert!(
+        d.contains("import type { Foo } from './types'"),
+        "options-API declaration promotes the type-position value import to `import type`, got:\n{d}"
+    );
+    // NEGATIVE: it must NOT emit the bare value import form.
+    assert!(
+        !d.contains("import { Foo } from './types'"),
+        "options-API declaration must NOT emit the bare value import form, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_options_api_omits_unused_imported_type() {
+    // CONTROL (discriminating): an imported type that is NOT used in any prop/emit
+    // type position must stay ABSENT — proving the Options-API import emission is
+    // usage-driven (the `TypeUsageTracker` marks only referenced types), not "emit
+    // every import in the script".
+    let sfc = r#"<script>
+import { defineComponent } from 'vue'
+import type { PropType } from 'vue'
+import type { Unused } from './unused'
+import type { Foo } from './types'
+export default defineComponent({
+  props: { item: { type: Object as PropType<Foo>, required: true } },
+})
+</script>
+<template><div>{{ item }}</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // The used type is imported...
+    assert!(
+        d.contains("import type { Foo } from './types'"),
+        "the referenced imported type is emitted, got:\n{d}"
+    );
+    // ...the unused one is not.
+    assert!(
+        !d.contains("Unused") && !d.contains("from './unused'"),
+        "an unused imported type must NOT appear in the options-API declaration, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_promotes_value_import_used_in_type_position() {
+    // A VALUE import (`import { Props }`, no `type` modifier) used in a TYPE
+    // position (`defineProps<Props>()`) must reach the declaration's imports —
+    // otherwise `Props` is undefined in the rendered props surface. The Public
+    // path gets `Props` from the emitted setup body; the declaration path omits
+    // the body, so it must bring `Props` into scope itself, as a declaration-
+    // legal `import type` (a bare value import of a type-only symbol risks an
+    // unused-value-import in a declaration).
+    let sfc = r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // POSITIVE: `Props` is brought into scope via a declaration-legal type
+    // import.
+    assert!(
+        d.contains("import type { Props } from './types'"),
+        "declaration promotes the type-position value import to `import type`, got:\n{d}"
+    );
+    // NEGATIVE: it must NOT emit the bare value import (`import { Props }`
+    // without `type`) — that is not declaration-clean.
+    assert!(
+        !d.contains("import { Props } from './types'"),
+        "declaration must NOT emit the bare value import form, got:\n{d}"
+    );
+    // The props surface references `Props`.
+    assert!(
+        d.contains("Props"),
+        "the props surface references Props, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_omits_genuinely_value_only_import() {
+    // CONTROL: a value import used ONLY as a runtime value (never in a type
+    // position) must stay ABSENT from the declaration output — the declaration
+    // carries no runtime code, so a runtime-only import has nothing to bind.
+    // This proves the promotion above is type-position-driven, not "emit every
+    // import".
+    let sfc = r#"<script setup lang="ts">
+import { runtimeHelper } from './helper'
+import { Props } from './types'
+runtimeHelper()
+defineProps<Props>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // The type-position import is promoted...
+    assert!(
+        d.contains("import type { Props } from './types'"),
+        "the type-position import is promoted, got:\n{d}"
+    );
+    // ...but the runtime-only helper import is absent (not used in any type
+    // position).
+    assert!(
+        !d.contains("runtimeHelper"),
+        "a runtime-only import must NOT appear in the declaration, got:\n{d}"
+    );
+    assert!(
+        !d.contains("from './helper'"),
+        "the runtime-only import's module must NOT appear, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_never_references_omitted_setup_binding() {
+    // The Public path emits the `<script setup>` body so `typeof internal`
+    // resolves against the runtime `const internal`. The declaration path OMITS
+    // the setup body, so `typeof internal` would be an UNBOUND value reference —
+    // an erroring declaration. The declaration expose surface must therefore be
+    // declaration-safe: it must NOT emit `typeof <setup-binding>`.
+    let sfc = r#"<script setup lang="ts">
+const internal = 1
+defineExpose({ internal })
+</script>
+<template><div>hi</div></template>"#;
+
+    let decl = gen_tsc_declaration(sfc);
+    let public = generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            mode: TscMode::Public,
+            ..Default::default()
+        },
+    )
+    .code;
+
+    // (a) NEGATIVE: the declaration must NOT reference the omitted setup binding
+    // via `typeof internal` (the binding is not in scope in the declaration).
+    assert!(
+        !decl.contains("typeof internal"),
+        "declaration must NOT emit `typeof <setup-binding>` (unbound), got:\n{decl}"
+    );
+
+    // (b) POSITIVE: `internal` still surfaces in the expose tail with a legal
+    // (declaration-resolvable) type — the member is not silently dropped.
+    assert!(
+        decl.contains("internal"),
+        "declaration still surfaces the exposed `internal` member, got:\n{decl}"
+    );
+
+    // (c) DISCRIMINATING control: the Public mode DOES emit the runtime
+    // `typeof internal` form (proving the negative above is non-vacuous and the
+    // two modes genuinely differ on the expose tail).
+    assert!(
+        public.contains("typeof internal"),
+        "Public mode emits the runtime `typeof internal` form (control), got:\n{public}"
+    );
+}
+
+#[test]
+fn declaration_mode_expose_complex_entries_are_declaration_safe() {
+    // A more complex expose surface — an exposed ref and an exposed function —
+    // exercises the whole class: NO expose entry may emit a value-position
+    // reference (`typeof <ident>`) that only the omitted setup body defines.
+    let sfc = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const counter = ref(0)
+function reset() { counter.value = 0 }
+defineExpose({ counter, reset })
+</script>
+<template><div>hi</div></template>"#;
+
+    let decl = gen_tsc_declaration(sfc);
+
+    // NEGATIVE: neither exposed binding may be referenced via `typeof <ident>`
+    // (both are omitted-setup-body bindings).
+    assert!(
+        !decl.contains("typeof counter"),
+        "declaration must NOT emit `typeof counter`, got:\n{decl}"
+    );
+    assert!(
+        !decl.contains("typeof reset"),
+        "declaration must NOT emit `typeof reset`, got:\n{decl}"
+    );
+    // NEGATIVE: no setup-body runtime survives.
+    assert!(
+        !decl.contains("counter.value = 0"),
+        "declaration must NOT emit the setup function body, got:\n{decl}"
+    );
+    // POSITIVE: both members still surface in the declaration's expose tail.
+    assert!(
+        decl.contains("counter") && decl.contains("reset"),
+        "declaration surfaces both exposed members, got:\n{decl}"
+    );
+}
+
+#[test]
+fn declaration_mode_carries_the_instance_component_surface() {
+    // #5 contract: the declaration `C` is a usable component VALUE — it carries
+    // the instance surface (the `new(...)` construct signature exposing
+    // `$props`) and default-exports `C`, which is what a consumer importing the
+    // component and using it as `<C/>` / `createApp(C)` needs. The non-
+    // declaration-legal `__OmitNew<typeof __comp> &` prefix is intentionally
+    // absent (it is value-bearing).
+    let sfc = r#"<script setup lang="ts">
+defineProps<{ msg: string; count?: number }>()
+defineEmits<{ change: [value: string] }>()
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // The component value is declared and default-exported (so `import C from
+    // "..."` and `const x: typeof C` bind).
+    assert!(
+        d.contains("declare const TestComp"),
+        "declares the component value, got:\n{d}"
+    );
+    assert!(
+        d.contains("export default TestComp"),
+        "default-exports the component value, got:\n{d}"
+    );
+    // The instance surface is reachable through the construct signature carrying
+    // `$props` (usable as a component) — the load-bearing instance contract.
+    assert!(
+        d.contains("new(") && d.contains("$props"),
+        "carries the `new(...)` instance surface with $props, got:\n{d}"
+    );
+    assert!(
+        d.contains("msg") && d.contains("count?"),
+        "the public props surface (msg, count?) is present, got:\n{d}"
+    );
+    // NEGATIVE: the value-bearing `__OmitNew<typeof __comp>` prefix is NOT
+    // declaration-legal and must be absent.
+    assert!(
+        !d.contains("__OmitNew") && !d.contains("typeof __comp"),
+        "the value-bearing __OmitNew<typeof __comp> prefix is absent, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_differs_from_public_mode_on_runtime_tokens() {
+    // DISCRIMINATING: the same SFC under `Public` DOES contain the runtime
+    // tokens, proving the assertions above are not vacuously true.
+    let sfc = r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    let public = generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            mode: TscMode::Public,
+            ..Default::default()
+        },
+    )
+    .code;
+    let decl = gen_tsc_declaration(sfc);
+
+    assert!(
+        public.contains("const __comp = defineComponent"),
+        "Public mode emits the runtime __comp (control), got:\n{public}"
+    );
+    assert!(
+        !decl.contains("const __comp = defineComponent"),
+        "Declaration mode drops the runtime __comp, got:\n{decl}"
+    );
+    assert_ne!(
+        public, decl,
+        "Declaration output must differ from Public output"
+    );
+}
+
+#[test]
+fn declaration_mode_promotes_namespace_value_import_used_in_type_position() {
+    // A NAMESPACE value import (`import * as NS`) used in a type position
+    // (`defineProps<NS.Props>()`) references `NS.Props`; the declaration omits
+    // the setup body that brought `NS` into scope, so it must bring `NS` into
+    // scope itself with the declaration-legal namespace type-only form
+    // `import type * as NS from './ns'` — otherwise `NS` is undefined in the
+    // rendered props surface. The bare named form (`import type { NS }`) is
+    // malformed for a namespace import.
+    let sfc = r#"<script setup lang="ts">
+import * as NS from './ns'
+defineProps<NS.Props>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // POSITIVE: `NS` resolves via the declaration-legal namespace type-only
+    // import, so `NS.Props` is bound.
+    assert!(
+        d.contains("import type * as NS from './ns'"),
+        "declaration promotes the type-position namespace import to `import type * as NS`, got:\n{d}"
+    );
+    // NEGATIVE: it must NOT mis-promote to the malformed bare named form.
+    assert!(
+        !d.contains("import type { NS }"),
+        "a namespace import must NOT be mis-promoted to a bare named import type, got:\n{d}"
+    );
+    // The props surface references `NS`.
+    assert!(
+        d.contains("NS.Props") || d.contains("NS"),
+        "the props surface references the namespace member NS.Props, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_promotes_default_value_import_used_in_type_position() {
+    // A DEFAULT value import (`import Props from './types'`) used in a type
+    // position (`defineProps<Props>()`) references `Props`; the declaration
+    // omits the setup body, so it must bring `Props` into scope itself with the
+    // declaration-legal default type-only form `import type Props from
+    // './types'` — otherwise `Props` is undefined. The bare named form
+    // (`import type { Props }`) is the WRONG shape for a default import.
+    let sfc = r#"<script setup lang="ts">
+import Props from './types'
+defineProps<Props>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // POSITIVE: `Props` resolves via the declaration-legal default type-only
+    // import.
+    assert!(
+        d.contains("import type Props from './types'"),
+        "declaration promotes the type-position default import to `import type Props`, got:\n{d}"
+    );
+    // NEGATIVE: it must NOT mis-promote a default import to the named form.
+    assert!(
+        !d.contains("import type { Props } from './types'"),
+        "a default import must NOT be mis-promoted to a named import type, got:\n{d}"
+    );
+    // The props surface references `Props`.
+    assert!(
+        d.contains("Props"),
+        "the props surface references Props, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_promotes_aliased_named_value_import_with_imported_name() {
+    // An ALIASED named value import (`import { Props as P }`) used in a type
+    // position (`defineProps<P>()`) references the LOCAL name `P`, but the
+    // module exports `Props`, not `P`. The promotion must emit `import type {
+    // Props as P }` (the imported name `Props` aliased to the local `P`) —
+    // emitting `import type { P }` would not resolve, because `./types` has no
+    // export named `P`.
+    let sfc = r#"<script setup lang="ts">
+import { Props as P } from './types'
+defineProps<P>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // POSITIVE: the imported name `Props` is preserved, aliased to the local
+    // `P` — the only form that actually resolves.
+    assert!(
+        d.contains("import type { Props as P } from './types'"),
+        "declaration emits the aliased form `import type {{ Props as P }}`, got:\n{d}"
+    );
+    // NEGATIVE: the wrong, unresolvable bare-local form must NOT be emitted.
+    assert!(
+        !d.contains("import type { P } from './types'"),
+        "declaration must NOT emit the unresolvable bare-local form `import type {{ P }}`, got:\n{d}"
+    );
+    // The props surface references the LOCAL name `P`.
+    assert!(
+        d.contains("P"),
+        "the props surface references the local name P, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_promotes_non_aliased_named_value_import_control() {
+    // CONTROL for the aliased case: a NON-aliased named value import
+    // (`import { Props }`, local == imported) must emit the plain
+    // `import type { Props }` form — no spurious `Props as Props` self-alias.
+    let sfc = r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    assert!(
+        d.contains("import type { Props } from './types'"),
+        "non-aliased import emits the plain `import type {{ Props }}` form, got:\n{d}"
+    );
+    // No degenerate self-alias.
+    assert!(
+        !d.contains("Props as Props"),
+        "a non-aliased import must NOT emit a self-alias, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_type_only_aliased_import_preserves_imported_name() {
+    // PRE-EXISTING type-only path audit (same class: reconstructed type-only
+    // imports must preserve the imported name). An EXPLICIT type-only aliased
+    // import (`import type { Props as P }`) used in a type position must
+    // round-trip as `import type { Props as P }`, NOT the unresolvable bare
+    // `import type { P }`. This guards the `type_import_stmts` reconstruction,
+    // not the value-promotion path.
+    let sfc = r#"<script setup lang="ts">
+import type { Props as P } from './types'
+defineProps<P>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    assert!(
+        d.contains("import type { Props as P } from './types'"),
+        "type-only aliased import round-trips with the imported name preserved, got:\n{d}"
+    );
+    assert!(
+        !d.contains("import type { P } from './types'"),
+        "the type-only path must NOT drop the imported name to the bare-local form, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_promotes_mixed_form_default_and_aliased_named_import() {
+    // MIXED-FORM import: `import Default, { Named as N } from '...'` with BOTH
+    // parts used in type positions. Each part must promote in its own correct
+    // declaration-legal form: the default as `import type Default`, the aliased
+    // named as `import type { Named as N }`.
+    let sfc = r#"<script setup lang="ts">
+import Default, { Named as N } from './mixed'
+defineProps<Default & N>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // The default part promotes to the default type-only form.
+    assert!(
+        d.contains("import type Default from './mixed'"),
+        "the default part of a mixed import promotes to `import type Default`, got:\n{d}"
+    );
+    // The aliased named part preserves the imported name.
+    assert!(
+        d.contains("import type { Named as N } from './mixed'"),
+        "the aliased named part preserves the imported name, got:\n{d}"
+    );
+    // NEGATIVE: no malformed combined/bare-local forms.
+    assert!(
+        !d.contains("import type { N } from './mixed'"),
+        "the named part must NOT drop the imported name, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_promotes_string_literal_named_value_import_preserving_quotes() {
+    // A STRING-LITERAL named value import (`import { "vue-props" as P }`) used in
+    // a type position (`defineProps<P>()`). TypeScript allows an arbitrary-string
+    // module export name in a named import; the local MUST be an `as <ident>`
+    // alias (a bare `import { "vue-props" }` is a TS error). The promotion must
+    // render the imported name as a QUOTED string literal — `import type {
+    // "vue-props" as P }` — because `vue-props` is NOT a valid identifier. The
+    // bare form `import type { vue-props as P }` is invalid syntax and would fail
+    // to type-check.
+    let sfc = r#"<script setup lang="ts">
+import { "vue-props" as P } from './types'
+defineProps<P>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // POSITIVE: the string-literal imported name keeps its quotes, aliased to the
+    // local `P` — the only declaration-legal form that resolves.
+    assert!(
+        d.contains(r#"import type { "vue-props" as P } from './types'"#),
+        "declaration emits the quoted string-literal form `import type {{ \"vue-props\" as P }}`, got:\n{d}"
+    );
+    // NEGATIVE: the invalid bare-identifier form must NOT be emitted.
+    assert!(
+        !d.contains("import type { vue-props as P } from './types'"),
+        "declaration must NOT emit the invalid bare `import type {{ vue-props as P }}`, got:\n{d}"
+    );
+    // The props surface references the LOCAL name `P`.
+    assert!(
+        d.contains("P"),
+        "the props surface references the local name P, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_type_only_string_literal_aliased_import_preserves_quotes() {
+    // PRE-EXISTING type-only path audit for the string-literal class: an EXPLICIT
+    // type-only string-literal aliased import (`import type { "vue-props" as P }`)
+    // used in a type position must round-trip with the quotes preserved, NOT the
+    // invalid bare `import type { vue-props as P }`. Both paths render through the
+    // same `render_stmt`, but this asserts the explicit type-only route.
+    let sfc = r#"<script setup lang="ts">
+import type { "vue-props" as P } from './types'
+defineProps<P>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    assert!(
+        d.contains(r#"import type { "vue-props" as P } from './types'"#),
+        "type-only string-literal aliased import round-trips with quotes preserved, got:\n{d}"
+    );
+    assert!(
+        !d.contains("import type { vue-props as P } from './types'"),
+        "the type-only path must NOT drop the quotes to the invalid bare form, got:\n{d}"
+    );
+}
+
+#[test]
+fn declaration_mode_string_literal_export_name_with_newline_escapes_the_line_terminator() {
+    // A STRING-LITERAL named value import whose export name CONTAINS a line
+    // terminator — the SFC source uses the VALID `\n` escape inside the literal
+    // (`import { "line\nprops" as P }`), which OXC cooks into a real LF in the
+    // captured export name. Used in a type position (`defineProps<P>()`), it
+    // promotes to a declaration-legal `import type`. The reconstruction re-wraps
+    // the COOKED name (with a real LF) into a double-quoted TS string literal: a
+    // raw newline inside `"…"` is itself invalid, so the line terminator MUST be
+    // re-emitted as the two-character escape `\n`, keeping the whole `import
+    // type` statement on a single physical line.
+    //
+    // `\n` in this raw string is the two characters backslash-n (a valid source
+    // escape), NOT a Rust line break.
+    let sfc = r#"<script setup lang="ts">
+import { "line\nprops" as P } from './types'
+defineProps<P>()
+</script>
+<template><div>hello</div></template>"#;
+    let d = gen_tsc_declaration(sfc);
+
+    // The reconstructed import re-escapes the cooked LF as the two-character
+    // sequence backslash-n (`"line\nprops"`), NOT a raw newline.
+    let escaped_import = "import type { \"line\\nprops\" as P } from './types'";
+    assert!(
+        d.contains(escaped_import),
+        "declaration must escape the embedded line terminator as `\\n` in the \
+         string-literal export name, got:\n{d}"
+    );
+    // NEGATIVE: the raw-newline form (a line break INSIDE the quotes, splitting
+    // the `import type` statement across two physical lines) must NOT appear —
+    // that is an invalid TS string literal.
+    assert!(
+        !d.contains("import type { \"line\nprops\" as P } from './types'"),
+        "declaration must NOT emit a raw line terminator inside the string \
+         literal (it would split the import across lines), got:\n{d}"
+    );
+    // The reconstructed `import type` statement is on a SINGLE physical line:
+    // locate the emitted `import type { "line` prefix and assert no raw newline
+    // precedes its `from './types'` clause.
+    let stmt_start = d
+        .find("import type { \"line")
+        .expect("the reconstructed string-literal import statement is present");
+    let after_start = &d[stmt_start..];
+    let stmt_end = after_start
+        .find("from './types'")
+        .expect("the reconstructed import statement reaches its `from` clause");
+    assert!(
+        !after_start[..stmt_end].contains('\n'),
+        "the reconstructed `import type` statement must stay on one physical \
+         line (no raw newline between `import type` and `from`), got:\n{d}"
+    );
+    // The props surface references the LOCAL name `P`.
+    assert!(
+        d.contains("P"),
+        "the props surface references the local name P, got:\n{d}"
+    );
+}
+
+#[test]
+fn quote_module_export_name_is_a_complete_ts_string_literal_encoder() {
+    use super::script::quote_module_export_name;
+
+    // A plain printable name (including the hyphen) is wrapped UNCHANGED — no
+    // over-escaping of printable ASCII.
+    assert_eq!(quote_module_export_name("vue-props"), "\"vue-props\"");
+    assert_eq!(quote_module_export_name(""), "\"\"");
+
+    // An embedded double quote is escaped.
+    assert_eq!(quote_module_export_name("a\"b"), "\"a\\\"b\"");
+
+    // An embedded backslash is escaped (and escaped FIRST, so it does not
+    // double-process the escapes introduced for other characters).
+    assert_eq!(quote_module_export_name("a\\b"), "\"a\\\\b\"");
+    // `\` immediately followed by `"` stays two independent escapes, not a
+    // collapsed `\"`.
+    assert_eq!(quote_module_export_name("\\\""), "\"\\\\\\\"\"");
+
+    // Line terminators illegal raw in a string literal become escapes.
+    assert_eq!(quote_module_export_name("a\nb"), "\"a\\nb\"");
+    assert_eq!(quote_module_export_name("a\rb"), "\"a\\rb\"");
+    // U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR are illegal raw in a TS
+    // string literal and must be `\u`-escaped.
+    assert_eq!(quote_module_export_name("a\u{2028}b"), "\"a\\u2028b\"");
+    assert_eq!(quote_module_export_name("a\u{2029}b"), "\"a\\u2029b\"");
+
+    // ASCII control characters: TAB has a short escape; a control char without a
+    // short escape (e.g. U+0001) uses the zero-padded 4-hex `\uXXXX` fallback.
+    assert_eq!(quote_module_export_name("a\tb"), "\"a\\tb\"");
+    assert_eq!(quote_module_export_name("a\u{0001}b"), "\"a\\u0001b\"");
+
+    // NEGATIVE: the encoder NEVER emits a raw control char or line terminator —
+    // the output is always a single-line, valid double-quoted literal.
+    for input in ["x\ny", "x\ry", "x\tz", "x\u{2028}y", "x\u{0000}y"] {
+        let encoded = quote_module_export_name(input);
+        assert!(
+            encoded.starts_with('"') && encoded.ends_with('"'),
+            "encoded value is a double-quoted literal, got: {encoded:?}"
+        );
+        let inner = &encoded[1..encoded.len() - 1];
+        assert!(
+            !inner.chars().any(|c| c == '\n'
+                || c == '\r'
+                || c == '\u{2028}'
+                || c == '\u{2029}'
+                || (c.is_control())),
+            "the encoded literal must not contain a raw control char or line \
+             terminator, got: {encoded:?}"
+        );
+    }
+}

@@ -2662,6 +2662,70 @@ fn merge_code_actions_add_import_prelude_insertion_reanchors_to_script_setup() {
     );
 }
 
+/// SHARED-REWRITE PROOF: a CURRENT-file `addMissingImport` quickfix whose preamble insertion names
+/// the carrier COMPANION specifier (`from "./Comp.vue.tsx"`) is rewritten to the bare `.vue` THROUGH
+/// THE SHARED specifier-rewrite layer before re-anchoring — the re-anchored edit carries
+/// `from "./Comp.vue"` and NO `.vue.tsx` companion specifier ever leaks into the user's source.
+/// Discriminating: if the merge dropped the shared rewrite, the re-anchored `new_text` would still
+/// carry `./Comp.vue.tsx`.
+#[test]
+fn merge_code_actions_preamble_companion_specifier_is_rewritten_to_bare_vue() {
+    let (carrier_source, carrier_li, tsx_li, mapper) = make_preamble_mapper_and_indexes();
+
+    let actions = vec![TypeCodeAction {
+        title: "Add import from \"./Comp.vue\"".to_string(),
+        kind: Some("quickfix".to_string()),
+        edits: vec![protocol::TypeCodeEdit {
+            // The engine names the carrier COMPANION it actually resolved the bare import through.
+            path: "/test.vue.tsx".to_string(),
+            start: 0,
+            end: 0,
+            new_text: "import Comp from \"./Comp.vue.tsx\";\n".to_string(),
+        }],
+    }];
+
+    let no_external: Option<ExternalIdeResolver> = None;
+    let preamble_reanchor =
+        crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+            "/test.vue.tsx",
+            &carrier_source,
+            &[],
+        );
+    let result = merge_code_actions(
+        actions,
+        "/test.vue.tsx",
+        &tsx_li,
+        &mapper,
+        &carrier_li,
+        no_external,
+        &carrier_exists,
+        PositionEncodingKind::UTF16,
+        &no_source,
+        preamble_reanchor.as_ref(),
+    );
+
+    assert_eq!(
+        result.len(),
+        1,
+        "the companion add-import action must survive: {result:?}"
+    );
+    let CodeActionOrCommand::CodeAction(action) = &result[0] else {
+        panic!("expected a CodeAction");
+    };
+    let changes = action.edit.as_ref().unwrap().changes.as_ref().unwrap();
+    let (_uri, edits) = changes.iter().next().expect("one change set");
+    assert_eq!(edits.len(), 1, "one re-anchored import edit");
+    assert_eq!(
+        edits[0].new_text, "import Comp from \"./Comp.vue\";\n",
+        "the inserted companion specifier must be rewritten to the bare `.vue` via the shared layer"
+    );
+    assert!(
+        !edits[0].new_text.contains(".vue.tsx"),
+        "no `.vue.tsx` companion specifier may leak into the user's source; got {:?}",
+        edits[0].new_text
+    );
+}
+
 /// A carrier-IDE mapper whose synthetic helper-import preamble offset (TSX offset 0, the add-import
 /// insertion point) DOES strict-map to the carrier — to position `(0,0)`, the file top ABOVE
 /// `<script setup>`. This is the real provider geometry the strict-None fixture

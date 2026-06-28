@@ -16,8 +16,13 @@
 //      `import "./Comp.vue"` under default resolution — tsgo never probes a
 //      `.verter.` infix -> TS2307. (The doc's prior `.verter.` component identity
 //      is empirically refuted.)
-//   B. `.vue.tsx` (the production component identity) DOES satisfy the bare `.vue`
-//      import and the companion's exported types flow into the plain `.ts`.
+//   B. `.d.vue.ts` (the production DECLARATION carrier identity, extension-MIDDLE)
+//      is the bare-import resolution target — it satisfies the bare `.vue` import
+//      and its exported types flow into the plain `.ts` (B2: with BOTH the
+//      `.d.vue.ts` declaration carrier AND the `.vue.tsx` IDE carrier present, the
+//      bare import resolves to the DECLARATION carrier — `.d.vue.ts` WINS the probe
+//      order `.d.vue.ts` -> `.vue.ts` -> `.vue.tsx`; the `.vue.tsx` IDE carrier is
+//      the self-diagnostics surface, NOT the bare-import target).
 //   C. The Svelte hard case (realistic layout): `import W from "./Widget.svelte"`
 //      resolves to the `Widget.svelte.tsx` component carrier WHILE a REAL Svelte
 //      rune module (`*.svelte.ts`) is present in the SAME directory and stays
@@ -47,9 +52,7 @@ const FIXTURE = path.join(ROOT, "fixture");
 const norm = (p) => p.replace(/\\/g, "/");
 const require = createRequire(import.meta.url);
 const opts = { paths: (process.env.NM_BASE || "").split(path.delimiter).filter(Boolean) };
-const sourcePkgs = [process.env.TS7_SOURCE, "typescript", "@typescript/native-preview"].filter(
-  Boolean,
-);
+const sourcePkgs = [process.env.TS7_SOURCE, "typescript"].filter(Boolean);
 // Import via the PUBLIC `<pkg>/unstable/sync` export (honouring the package
 // `exports` map) — the same public surface a real consumer uses.
 let syncApiPath;
@@ -132,7 +135,7 @@ function typeAtStr(project, file, offset) {
 }
 
 console.log(
-  "=== GATE 5: production companion-identity proof (.verter. vs .vue.tsx / .svelte.tsx) ===",
+  "=== GATE 5: production carrier-identity proof (bare-import target = .d.<ext>.ts DECLARATION carrier; .vue.tsx/.svelte.tsx = self-diagnostics; .verter. = redirect-reached API only) ===",
 );
 console.log("fixture root:", norm(FIXTURE));
 
@@ -175,27 +178,36 @@ console.log("fixture root:", norm(FIXTURE));
 }
 
 // ============================================================================
-// B. `.vue.tsx` (PRODUCTION component identity) satisfies the bare `.vue` import
-//    and types flow.
+// B. `.d.vue.ts` (PRODUCTION DECLARATION carrier identity, extension-MIDDLE) is
+//    the bare-import resolution target: it satisfies the bare `.vue` import and
+//    its exported types flow into the plain `.ts`. (B2 below STRENGTHENS this to
+//    the production precedence: with BOTH the `.d.vue.ts` declaration carrier AND
+//    the `.vue.tsx` IDE carrier present, the bare import resolves to the
+//    declaration carrier — `.d.vue.ts` WINS the probe order over `.vue.tsx`.)
+//
+//    The declaration content is a minimal HAND-WRITTEN declaration: this gate
+//    proves tsgo RESOLUTION of the declaration-carrier identity, not Verter's
+//    projector output.
 // ============================================================================
 {
   const consumer = path.join(DIR, "ConsumerB.ts");
-  const companion = path.join(DIR, "CompB.vue.tsx"); // production component identity
+  const declCarrier = path.join(DIR, "CompB.d.vue.ts"); // production DECLARATION carrier (extension-MIDDLE)
   const CONSUMER_SRC = `import { widget } from "./CompB.vue";\nconst lbl = widget.label;\nexport const b: string = lbl;\n`;
-  const COMPANION_SRC = `export const widget = { label: "hi" as string };\n`;
+  // Minimal hand-written declaration: `widget.label` is `string`.
+  const DECL_SRC = `declare const widget: { label: string };\nexport { widget };\n`;
   const api = new API({
     tsserverPath: process.env.TSGO_PATH,
     cwd: FIXTURE,
-    fs: makeOverlay({ [consumer]: CONSUMER_SRC, [companion]: COMPANION_SRC }),
+    fs: makeOverlay({ [consumer]: CONSUMER_SRC, [declCarrier]: DECL_SRC }),
   });
   try {
     const snap = api.updateSnapshot({
       openProject: TSCONFIG,
-      fileChanges: { changed: [consumer, companion] },
+      fileChanges: { changed: [consumer, declCarrier] },
     });
     const project = snap.getProject(TSCONFIG);
     const diags = project.program.getSemanticDiagnostics(consumer);
-    console.log("[B] ConsumerB diags (serving .vue.tsx):", JSON.stringify(diagSummary(diags)));
+    console.log("[B] ConsumerB diags (serving .d.vue.ts):", JSON.stringify(diagSummary(diags)));
     // Type at `lbl` binding (whose initializer is widget.label : string).
     const lblTy = typeAtStr(
       project,
@@ -203,13 +215,84 @@ console.log("fixture root:", norm(FIXTURE));
       offsetOf(CONSUMER_SRC, "const lbl = widget.label;", "const ".length),
     );
     record(
-      "vue_tsx_resolves_and_types_flow",
+      "vue_declaration_carrier_resolves_and_types_flow",
       !hasCode(diags, 2307) && diags.length === 0 && lblTy === "string",
       diags.length === 0
-        ? "CompB.vue.tsx satisfies `import ./CompB.vue` with ZERO diags; widget.label type = " +
+        ? "CompB.d.vue.ts satisfies `import ./CompB.vue` with ZERO diags; widget.label type = " +
             JSON.stringify(lblTy) +
-            " flows into the plain .ts. PRODUCTION component identity is .vue.tsx."
+            " flows into the plain .ts; PRODUCTION declaration carrier identity is .d.vue.ts."
         : "unexpected: diags=" + JSON.stringify(diagSummary(diags)) + " lblTy=" + lblTy,
+    );
+    snap.dispose();
+  } finally {
+    api.close();
+  }
+}
+
+// ============================================================================
+// B2. PRODUCTION PRECEDENCE — the `.d.vue.ts` DECLARATION carrier WINS the
+//     basename-append probe over the co-present `.vue.tsx` IDE carrier. Serve
+//     BOTH at distinguishable types (declaration `widget.label: string` vs IDE
+//     `widget.label: number`); the bare `import "./CompB.vue"` must resolve to the
+//     DECLARATION carrier, so the consumer sees `string`. This is the real
+//     Approach-A invariant (probe order `.d.vue.ts` -> `.vue.ts` -> `.vue.tsx`,
+//     declaration WINS; the `.vue.tsx` IDE carrier is the self-diagnostics
+//     surface, NOT the bare-import target). Mirrors section D's probe-order style.
+// ============================================================================
+{
+  const consumer = path.join(DIR, "ConsumerB2.ts");
+  const declCarrier = path.join(DIR, "CompB2.d.vue.ts"); // DECLARATION carrier — label: string
+  const ideCarrier = path.join(DIR, "CompB2.vue.tsx"); // IDE carrier (self-diagnostics) — label: number
+  const CONSUMER_SRC = `import { widget } from "./CompB2.vue";\nconst lbl = widget.label;\nexport const which = lbl;\n`;
+  const DECL_SRC = `declare const widget: { label: string };\nexport { widget };\n`;
+  const IDE_SRC = `export const widget = { label: 0 as number };\n`;
+  const api = new API({
+    tsserverPath: process.env.TSGO_PATH,
+    cwd: FIXTURE,
+    fs: makeOverlay({ [consumer]: CONSUMER_SRC, [declCarrier]: DECL_SRC, [ideCarrier]: IDE_SRC }),
+  });
+  try {
+    const snap = api.updateSnapshot({
+      openProject: TSCONFIG,
+      fileChanges: { changed: [consumer, declCarrier, ideCarrier] },
+    });
+    const project = snap.getProject(TSCONFIG);
+    const diags = project.program.getSemanticDiagnostics(consumer);
+    console.log(
+      "[B2] ConsumerB2 diags (serving BOTH .d.vue.ts + .vue.tsx):",
+      JSON.stringify(diagSummary(diags)),
+    );
+    // `lbl` is `string` IFF the bare import resolved to the DECLARATION carrier
+    // (the IDE carrier would type it `number`).
+    const lblTy = typeAtStr(
+      project,
+      consumer,
+      offsetOf(CONSUMER_SRC, "const lbl = widget.label;", "const ".length),
+    );
+    // The losing `.vue.tsx` IDE carrier MUST be a real Program source file —
+    // otherwise "declaration WINS over the IDE carrier" is vacuous (the IDE
+    // carrier was never a candidate). Guards against a trivial pass if the
+    // CompB2.vue.tsx fixture key were ever dropped from the overlay.
+    const ideSf = project.program.getSourceFile(ideCarrier);
+    const ideInProgram = !!ideSf;
+    console.log(
+      `[B2] losing IDE carrier in Program: ${ideInProgram}${
+        ideSf ? ` (fileName=${norm(ideSf.fileName)})` : ""
+      }`,
+    );
+    record(
+      "vue_declaration_carrier_wins_over_ide_carrier",
+      !hasCode(diags, 2307) && diags.length === 0 && lblTy === "string" && ideInProgram,
+      lblTy === "string" && ideInProgram
+        ? "with BOTH CompB2.d.vue.ts (label:string) and CompB2.vue.tsx (label:number, confirmed a Program source) present, bare `import ./CompB2.vue` resolved to the DECLARATION carrier (widget.label = " +
+            JSON.stringify(lblTy) +
+            "); .d.vue.ts WINS the probe order over the co-present .vue.tsx. The .vue.tsx IDE carrier is the self-diagnostics surface, NOT the bare-import target."
+        : !ideInProgram
+          ? "SETUP INVALID: the losing CompB2.vue.tsx IDE carrier is NOT a Program source — `declaration wins` would be vacuous; the IDE carrier must be a co-present candidate for this proof."
+          : "PROBE-ORDER VIOLATION: bare `import ./CompB2.vue` did NOT pick the .d.vue.ts declaration carrier (expected widget.label=string, got " +
+            lblTy +
+            "); diags=" +
+            JSON.stringify(diagSummary(diags)),
     );
     snap.dispose();
   } finally {
@@ -407,7 +490,8 @@ let svelteProbeWinner = "?";
 // ---- Verdict ----------------------------------------------------------------
 const order = [
   "verter_infix_rejected_for_bare_import",
-  "vue_tsx_resolves_and_types_flow",
+  "vue_declaration_carrier_resolves_and_types_flow",
+  "vue_declaration_carrier_wins_over_ide_carrier",
   "svelte_component_carrier_and_rune_module_coexist",
   "svelte_bare_import_targets_tsx_component_carrier",
   "svelte_probe_order_recorded",
@@ -425,6 +509,6 @@ for (const k of order) {
   if (!r.pass) allPass = false;
 }
 console.log(
-  `\nGATE 5 (production companion identity: .verter. REJECTED for the component carrier; .vue.tsx/.svelte.tsx PROVEN + collision-free; same-stem rune edge recorded): ${allPass ? "PASS" : "FAIL"}`,
+  `\nGATE 5 (production carrier identity: bare-import target is the .d.<ext>.ts DECLARATION carrier — PROVEN to resolve + WIN the probe order over the .vue.tsx self-diagnostics carrier; .verter. REJECTED for a bare-probed carrier; Svelte rune coexistence + probe order + same-stem edge recorded): ${allPass ? "PASS" : "FAIL"}`,
 );
 process.exit(allPass ? 0 : 1);

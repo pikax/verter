@@ -952,51 +952,409 @@ const CARRIER_VIRTUAL_IMPORT_SUFFIXES: &[&str] = &[
 /// back to the bare carrier path (`Bar.vue` / `Bar.svelte`) so the `*.vue` /
 /// `*.svelte` wildcard shim matches.
 ///
-/// Handles `import('path…')`, `from 'path…'`, and `export … from 'path…'`.
+/// ONLY real module-specifier positions are classified: the quoted path after a
+/// `from` clause (static `import …`/`export … from`), the dynamic `import("…")`
+/// argument, and the side-effect `import "…"` specifier. The validation TSX
+/// lowers the user's `<script setup>` body verbatim, so an ordinary string
+/// literal, a comment, or a template literal that merely SPELLS a carrier path is
+/// NOT a specifier and is left byte-for-byte untouched (see
+/// [`rewrite_module_specifiers`]).
 fn rewrite_vue_ts_imports(code: &str, vue_ts_map: &HashMap<String, PathBuf>) -> String {
-    // Fast path: no carrier-virtual suffix terminates a quoted string anywhere.
-    // (`.tsx`/`.jsx` are common in TSX output, so the precise check is the loop;
-    // this only skips files with none of the suffixes at all.)
-    if !CARRIER_VIRTUAL_IMPORT_SUFFIXES
+    // Fast path: skip files that mention neither a carrier-virtual suffix nor a
+    // bare carrier source extension anywhere. A bare in-project carrier import
+    // (`./Comp.vue`, no virtual suffix) must still be examined — the precise
+    // carrier classification happens per-specifier in the scan. This is a cheap,
+    // deliberately conservative pre-filter against the registry's carrier
+    // extensions (`.vue`/`.svelte`), not a hardcoded `.vue` literal.
+    let carrier_source_exts = verter_workspace::carrier_source_extensions();
+    let mentions_carrier = CARRIER_VIRTUAL_IMPORT_SUFFIXES
         .iter()
         .any(|s| code.contains(s))
-    {
+        || carrier_source_exts
+            .iter()
+            .any(|ext| code.contains(&format!(".{ext}")));
+    if !mentions_carrier {
         return code.to_string();
     }
 
-    let mut result = String::with_capacity(code.len());
-    let mut rest = code;
+    rewrite_module_specifiers(code, vue_ts_map)
+}
 
-    // Walk quote-delimited specifiers. Each opening quote begins a candidate
-    // import specifier; if it ends in a carrier-virtual suffix over a carrier
-    // path, rewrite/strip it, otherwise pass it through untouched.
-    while let Some(rel_quote) = rest.find(['\'', '"']) {
-        let quote_char = rest.as_bytes()[rel_quote] as char;
-        // Emit everything up to and including the opening quote.
-        result.push_str(&rest[..=rel_quote]);
-        let body = &rest[rel_quote + 1..];
+/// What a freshly-read `import`/`export` keyword is waiting to consume next.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpecifierExpect {
+    /// Not inside an import/export construct seeking a specifier.
+    None,
+    /// Inside a static `import …`/`export …` statement; the specifier is the
+    /// quoted string immediately following the next code-level `from` keyword.
+    AfterFrom,
+    /// The next code-level quoted string is the specifier (side-effect
+    /// `import "x"`, or the first string inside a dynamic `import( … )`).
+    NextString,
+}
 
-        let Some(rel_close) = body.find(quote_char) else {
-            // Unterminated quote — emit the remainder and stop.
-            result.push_str(body);
-            rest = "";
-            break;
-        };
-        let specifier = &body[..rel_close];
+/// Lexical module-specifier rewriter: copies `code` to the output verbatim,
+/// rewriting ONLY the string literal that occupies a genuine module-specifier
+/// position. It recognizes the specifier-introducing token shapes and skips all
+/// non-specifier context (comments, ordinary string literals, template literals)
+/// so user code that merely mentions a carrier path is never corrupted.
+///
+/// This is `verter_tsc`'s own minimal syntactic position scanner over the
+/// generated validation TSX — a focused specifier-position lexer, NOT a type-text
+/// heuristic and NOT a full TS parser. It maintains just enough lexical state to
+/// (a) never treat a token inside a comment/string/template as code, and (b)
+/// arm the specifier position only for real `import`/`export` constructs.
+///
+/// Specifier shapes covered (each at a real code-level position):
+/// - `import X from "x"`, `import type { X } from "x"`, `import { type X } from "x"`
+/// - `import * as X from "x"`
+/// - `export * from "x"`, `export type * from "x"`
+/// - `export { X } from "x"`, `export type { X } from "x"`
+/// - dynamic `import("x")` and `import ( "x" )` (whitespace-tolerant)
+/// - side-effect `import "x"`
+///
+/// The `from` keyword arms a specifier ONLY inside an `import`/`export` construct
+/// (tracked via [`SpecifierExpect::AfterFrom`]); a bare `const from = "./x"` is
+/// never treated as a specifier introducer. Byte-level scanning is safe: every
+/// syntactic token is ASCII, and non-ASCII bytes appear only inside
+/// strings/comments/identifiers, which are copied through unaltered.
+fn rewrite_module_specifiers(code: &str, vue_ts_map: &HashMap<String, PathBuf>) -> String {
+    let bytes = code.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut i = 0usize;
+    let mut expect = SpecifierExpect::None;
 
-        match carrier_virtual_import_target(specifier, vue_ts_map) {
-            Some(Rewrite::Stub(stub)) => result.push_str(&stub),
-            Some(Rewrite::CarrierPath(len)) => result.push_str(&specifier[..len]),
-            None => result.push_str(specifier),
+    while i < len {
+        let b = bytes[i];
+
+        // Line comment: copy through to end of line, no state change.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            let start = i;
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            result.push_str(&code[start..i]);
+            continue;
         }
 
-        // Emit the closing quote and continue past it.
-        result.push(quote_char);
-        rest = &body[rel_close + 1..];
+        // Block comment: copy through to the closing `*/`, no state change.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            let start = i;
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len); // consume closing `*/` (or run to EOF)
+            result.push_str(&code[start..i]);
+            continue;
+        }
+
+        // Template literal: copy through verbatim (including `${ … }` spans). A
+        // carrier path inside a template is never a specifier. Interpolations are
+        // skipped wholesale via brace-depth so an inner string/template does not
+        // re-arm a specifier.
+        if b == b'`' {
+            let start = i;
+            i += 1;
+            while i < len {
+                let c = bytes[i];
+                if c == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if c == b'`' {
+                    i += 1;
+                    break;
+                }
+                if c == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                    // Skip the interpolation to its matching close brace.
+                    i += 2;
+                    let mut depth = 1usize;
+                    while i < len && depth > 0 {
+                        match bytes[i] {
+                            b'{' => depth += 1,
+                            b'}' => depth -= 1,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+            result.push_str(&code[start..i]);
+            continue;
+        }
+
+        // String literal (single or double quote).
+        if b == b'\'' || b == b'"' {
+            let quote = b;
+            let content_start = i + 1;
+            let mut j = content_start;
+            while j < len {
+                let c = bytes[j];
+                if c == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if c == quote {
+                    break;
+                }
+                j += 1;
+            }
+            // `j` indexes the closing quote (or `len` if unterminated).
+            let closed = j < len;
+            let specifier = &code[content_start..j];
+
+            // Emit the opening quote.
+            result.push(quote as char);
+
+            if expect == SpecifierExpect::AfterFrom || expect == SpecifierExpect::NextString {
+                // This string is a genuine module specifier — classify it.
+                match carrier_virtual_import_target(specifier, vue_ts_map) {
+                    Some(Rewrite::Stub(stub)) => result.push_str(&stub),
+                    Some(Rewrite::CarrierPath(keep)) => result.push_str(&specifier[..keep]),
+                    None => result.push_str(specifier),
+                }
+            } else {
+                // Ordinary (non-specifier) string literal — leave verbatim.
+                result.push_str(specifier);
+            }
+            // The specifier (or any string) closes this import/export construct's
+            // pending specifier expectation.
+            expect = SpecifierExpect::None;
+
+            if closed {
+                result.push(quote as char);
+                i = j + 1;
+            } else {
+                i = j; // unterminated — already at EOF
+            }
+            continue;
+        }
+
+        // Identifier / keyword token at code level.
+        if is_ident_start(b) {
+            let start = i;
+            i += 1;
+            while i < len && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            let word = &code[start..i];
+            result.push_str(word);
+            // Leading-context guard: `import`/`export`/`from` introduce a specifier
+            // construct ONLY at a statement/expression position, never as a member
+            // name. When the previous significant code byte is `.` the word is a
+            // property access — `loader.import("x")`, `loader?.import("x")` (the
+            // significant prior byte is still `.`), `obj.from(…)`, `obj.export` —
+            // so any string that follows is an ordinary value, not a module
+            // specifier. Copy the word verbatim and leave `expect` unchanged.
+            // (Matching INSIDE a longer identifier like `importer`/`fromage` is
+            // already prevented by the `is_ident_start`/`is_ident_continue` token
+            // boundary; this guard covers the `.`-prefixed member-access case.)
+            let member_access = prev_significant_byte(bytes, start) == Some(b'.');
+            if !member_access {
+                match word {
+                    "import" => {
+                        // Decide the specifier form from the next significant byte:
+                        // `(` → dynamic, a quote → side-effect, else a static import
+                        // whose specifier follows a `from` clause.
+                        match next_significant_byte(bytes, i) {
+                            Some(b'(') => expect = SpecifierExpect::NextString,
+                            Some(b'\'') | Some(b'"') => expect = SpecifierExpect::NextString,
+                            _ => expect = SpecifierExpect::AfterFrom,
+                        }
+                    }
+                    "export" => {
+                        // `export … from "x"` carries a specifier; a specifier-less
+                        // `export` (e.g. `export const`) simply never reaches a
+                        // `from` before the construct's string/`;` clears it.
+                        expect = SpecifierExpect::AfterFrom;
+                    }
+                    "from" if expect == SpecifierExpect::AfterFrom => {
+                        // The next code-level string is the specifier.
+                        expect = SpecifierExpect::NextString;
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        // Any other byte: a `;` ends a statement, clearing a dangling
+        // specifier-less `export`/`import` expectation so a later unrelated
+        // string is not captured. All other bytes are copied verbatim.
+        if b == b';' {
+            expect = SpecifierExpect::None;
+        }
+        result.push(b as char);
+        i += 1;
     }
 
-    result.push_str(rest);
     result
+}
+
+/// Whether `b` can start a JS/TS identifier-or-keyword token. Word boundaries
+/// keep the scanner from matching `import`/`export`/`from` inside a longer
+/// identifier (e.g. `importer`, `fromage`).
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_' || b == b'$' || b >= 0x80
+}
+
+/// Whether `b` continues a JS/TS identifier-or-keyword token.
+fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
+}
+
+/// The next byte after `from` that is not ASCII whitespace, skipping `//` and
+/// `/* */` comments. Used to disambiguate `import(` / `import "x"` / `import X`.
+fn next_significant_byte(bytes: &[u8], mut i: usize) -> Option<u8> {
+    let len = bytes.len();
+    while i < len {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+        return Some(b);
+    }
+    None
+}
+
+/// The last significant code byte strictly BEFORE index `start`, or `None` when
+/// no code-level byte precedes it. Used by the specifier scanner's leading-context
+/// guard to tell a keyword introducer (`import`/`export`/`from` at a
+/// statement/expression position) from a member name (`obj.import(…)`,
+/// `obj?.import(…)`, `obj.from(…)`), whose prior significant byte is `.`.
+///
+/// The lexical state at `start` is established by scanning FORWARD from the
+/// beginning of `bytes` with the SAME string / template / block-comment / line-
+/// comment state machine the forward specifier scan ([`rewrite_module_specifiers`])
+/// uses — not a backward line-local heuristic. This is the only correct way to
+/// classify a `//`, a `.`, or a quote that lies on a continuation line of a
+/// MULTILINE construct: a `//` inside an unterminated template literal (or a block
+/// comment) carried over from a prior physical line is template / comment text, not
+/// a code-level line comment, and the `.` beside it is not a member-access
+/// qualifier. A line-local backward scan cannot know the line began mid-template
+/// and would wrongly suppress a genuine specifier that follows the construct's
+/// close. By replaying the forward lexical state, the byte reported is the last one
+/// at true code level (skipping whitespace, comments, and string/template bodies),
+/// so the member-access guard fires only on a real `.`-qualified keyword.
+///
+/// Template interpolations (`${ … }`) are skipped wholesale (brace-balanced),
+/// exactly as the forward scanner treats them: the forward scan never tokenizes an
+/// `import`/`from`/`export` keyword INSIDE an interpolation, so `start` is always a
+/// code-level position outside any interpolation and the opaque skip keeps the two
+/// scanners consistent. Escaped backticks (`` \` ``) inside a template do not close
+/// it (and an escape pair inside a single/double string is consumed), so a string
+/// or template that spans physical lines is tracked across them.
+fn prev_significant_byte(bytes: &[u8], start: usize) -> Option<u8> {
+    let len = bytes.len();
+    let end = start.min(len);
+    let mut i = 0usize;
+    let mut last_significant: Option<u8> = None;
+    while i < end {
+        let b = bytes[i];
+
+        // Line comment: skip to end of line (the byte is comment text, never
+        // significant). A `//` is a comment opener ONLY here, at true code level.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Block comment: skip to its closing `*/`, across physical lines.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len); // consume the `*/` (or run to EOF)
+            continue;
+        }
+
+        // Template literal: skip its body across physical lines, consuming escape
+        // pairs and skipping `${ … }` interpolations wholesale by brace depth — so a
+        // `//`, a `.`, or a quote inside the template is never seen as code, and an
+        // inner string/template cannot re-enter code level.
+        if b == b'`' {
+            i += 1;
+            while i < len {
+                let c = bytes[i];
+                if c == b'\\' {
+                    i += 2; // an escaped backtick does not close the template
+                    continue;
+                }
+                if c == b'`' {
+                    i += 1;
+                    break;
+                }
+                if c == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                    i += 2;
+                    let mut depth = 1usize;
+                    while i < len && depth > 0 {
+                        match bytes[i] {
+                            b'{' => depth += 1,
+                            b'}' => depth -= 1,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // String literal (single or double quote): skip its body across the line,
+        // consuming escape pairs, so a `//` or `.` inside it is never seen as code.
+        if b == b'\'' || b == b'"' {
+            let quote = b;
+            i += 1;
+            while i < len {
+                let c = bytes[i];
+                if c == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // A code-level byte: whitespace is not significant; everything else is the
+        // running candidate for "last significant code byte before `start`".
+        if !b.is_ascii_whitespace() {
+            last_significant = Some(b);
+        }
+        i += 1;
+    }
+    last_significant
 }
 
 /// The rewrite decision for a single quoted import specifier.
@@ -1011,46 +1369,48 @@ enum Rewrite {
 /// Classify a quoted import `specifier` as a carrier-virtual import.
 ///
 /// Returns `None` if the specifier is not a carrier companion (left untouched).
-/// Otherwise resolves the stub via `vue_ts_map` (canonical path first, then a
-/// basename fallback) or, when unknown, the bare carrier-path prefix length.
+/// Otherwise resolves the stub via an EXACT canonical `vue_ts_map` lookup. The
+/// map is keyed by the canonical carrier path, and `rewrite_relative_imports`
+/// has already absolutized every real specifier to that canonical form, so a
+/// true import always exact-hits. There is no basename fallback: matching by
+/// filename alone is ambiguous when two carriers in different directories share
+/// a name, and would route a same-basename specifier to the wrong stub.
+///
+/// Two carrier shapes route here:
+/// - A suffixed virtual specifier (`…/Foo.vue.tsx` / `…/Foo.vue.verter.ts`):
+///   strip the suffix, then a known carrier → `Stub`, an unknown carrier →
+///   `CarrierPath` (drop the suffix back to the bare carrier path for the
+///   `*.vue` wildcard shim).
+/// - An already-bare in-project carrier (`…/Foo.vue` / `…/Foo.svelte`): a known
+///   carrier → the generic-bearing public-API `Stub`; an unknown carrier →
+///   `None` (left bare for the `*.vue` wildcard shim — a bare path has no suffix
+///   to drop, so `CarrierPath` would corrupt it).
 fn carrier_virtual_import_target(
     specifier: &str,
     vue_ts_map: &HashMap<String, PathBuf>,
 ) -> Option<Rewrite> {
-    // Strip the first matching virtual suffix; the remainder must be a carrier
-    // path (`…/Foo.vue` / `…/Foo.svelte`). Longest-first so `.verter.ts` wins.
-    let carrier_path = CARRIER_VIRTUAL_IMPORT_SUFFIXES
+    // The bare carrier path the specifier targets, and whether a virtual suffix
+    // was stripped to recover it. Suffixed forms strip the first matching
+    // suffix (longest-first so `.verter.ts` wins); an already-bare carrier is
+    // taken as-is. A specifier that is neither is not a carrier companion.
+    let (carrier_path, suffix_stripped) = CARRIER_VIRTUAL_IMPORT_SUFFIXES
         .iter()
         .find_map(|suffix| specifier.strip_suffix(suffix))
-        .filter(|carrier| verter_workspace::path_is_carrier(carrier))?;
+        .filter(|carrier| verter_workspace::path_is_carrier(carrier))
+        .map(|carrier| (carrier, true))
+        .or_else(|| verter_workspace::path_is_carrier(specifier).then_some((specifier, false)))?;
 
-    // Known carrier → temp-dir stub (canonical-path match, basename fallback).
-    let stub = vue_ts_map.get(carrier_path).or_else(|| {
-        carrier_basename(carrier_path).and_then(|base| {
-            vue_ts_map
-                .iter()
-                .find(|(canonical, _)| carrier_basename(canonical) == Some(base))
-                .map(|(_, stub)| stub)
-        })
-    });
-
-    Some(match stub {
-        Some(stub_path) => Rewrite::Stub(stub_path.to_string_lossy().replace('\\', "/")),
-        // Unknown carrier → keep the bare carrier path for the wildcard shim.
-        None => Rewrite::CarrierPath(carrier_path.len()),
-    })
-}
-
-/// The final `/`-delimited segment of a normalized carrier path (the carrier
-/// filename, e.g. `…/src/Foo.vue` → `Foo.vue`). Used as the basename-match key
-/// for the rare case where a carrier-virtual specifier survives as a bare basename.
-///
-/// CAVEAT: basename matching is ambiguous when two carriers in different
-/// directories share a filename (e.g. `a/Foo.vue` and `b/Foo.vue`). The primary
-/// canonical-path lookup is exact and is what the post-`rewrite_relative_imports`
-/// specifier always hits; the basename branch is a best-effort fallback only.
-fn carrier_basename(carrier_path: &str) -> Option<&str> {
-    carrier_path.rsplit('/').next().filter(|s| !s.is_empty())
+    // Known carrier → temp-dir stub, by EXACT canonical lookup only.
+    match vue_ts_map.get(carrier_path) {
+        Some(stub_path) => Some(Rewrite::Stub(
+            stub_path.to_string_lossy().replace('\\', "/"),
+        )),
+        // Unknown carrier. A suffixed specifier drops its virtual suffix back to
+        // the bare carrier path (for the `*.vue` wildcard shim); an already-bare
+        // carrier is left exactly as-is (`None`) — there is no suffix to drop.
+        None if suffix_stripped => Some(Rewrite::CarrierPath(carrier_path.len())),
+        None => None,
+    }
 }
 
 /// Sanitize a component name to be a valid JavaScript identifier.
@@ -1901,26 +2261,45 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
     /// Discriminating regression for the carrier-API suffix migration: the
     /// rewrite matches the reserved `.verter.ts` suffix (not the legacy
-    /// `.vue.ts` stub extension), and a bare-basename carrier-API specifier
-    /// still resolves to its stub via the basename fallback.
+    /// `.vue.ts` stub extension). Carrier resolution is EXACT-canonical only —
+    /// a carrier-API specifier whose stripped path does not exact-hit
+    /// `vue_ts_map` strips back to the bare carrier path (for the `*.vue`
+    /// wildcard shim), regardless of any basename coincidence (the ambiguous
+    /// basename fallback was removed).
     #[test]
-    fn rewrite_vue_ts_imports_matches_verter_suffix_and_basename() {
+    fn rewrite_vue_ts_imports_matches_verter_suffix_exact_canonical() {
         let mut map = HashMap::new();
         map.insert(
             "D:/project/src/Foo.vue".to_string(),
             PathBuf::from("C:/tmp/Foo_abc.vue.ts"),
         );
 
-        // Known carrier-API, bare basename (no directory) → basename fallback hit.
-        let known = r#"import('Foo.vue.verter.ts')['default']"#;
+        // Known carrier-API, EXACT canonical path → stub (the real-pipeline path:
+        // post-`rewrite_relative_imports` specifiers are absolute and exact-hit).
+        let known = r#"import('D:/project/src/Foo.vue.verter.ts')['default']"#;
         let known_out = rewrite_vue_ts_imports(known, &map);
         assert!(
             known_out.contains("'C:/tmp/Foo_abc.vue.ts'"),
-            "bare-basename known carrier-API should map to its stub: {known_out}"
+            "exact-canonical known carrier-API should map to its stub: {known_out}"
         );
         assert!(
             !known_out.contains("Foo.vue.verter.ts"),
             "the original carrier-API specifier should be gone: {known_out}"
+        );
+
+        // A bare-basename carrier-API specifier (`Foo.vue.verter.ts`, no directory)
+        // does NOT exact-hit the canonical map key → strips to the bare carrier
+        // path (NOT the stub: the ambiguous basename fallback is gone).
+        let bare_basename = r#"import('Foo.vue.verter.ts')['default']"#;
+        let bare_out = rewrite_vue_ts_imports(bare_basename, &map);
+        assert!(
+            bare_out.contains("'Foo.vue'"),
+            "a bare-basename carrier-API that does not exact-hit must strip to the \
+             bare carrier path, not the stub: {bare_out}"
+        );
+        assert!(
+            !bare_out.contains("C:/tmp/Foo_abc.vue.ts"),
+            "a bare-basename carrier-API must NOT route to the stub via basename: {bare_out}"
         );
 
         // Unknown carrier-API, bare basename → stripped to the carrier path.
@@ -1985,6 +2364,584 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
             plain_out, plain,
             "a non-carrier `.tsx` import must be left untouched: {plain_out}"
         );
+    }
+
+    /// A BARE in-project carrier specifier (no virtual suffix) routes to the
+    /// generic-bearing public-API stub via the exact `vue_ts_map` lookup — the
+    /// same target the `.tsx`/`.verter.ts`-suffixed surfaces resolve to. This is
+    /// the direct classifier contract: a known bare `…/Comp.vue` is `Stub`, not
+    /// `None`. (An unknown bare carrier stays `None` so the `*.vue` wildcard shim
+    /// handles it — covered by the negative test below.)
+    #[test]
+    fn carrier_virtual_import_target_routes_bare_in_project_carrier_to_stub() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/GenericComp.vue".to_string(),
+            PathBuf::from("/tmp/GenericComp_abc.vue.ts"),
+        );
+
+        // Bare in-project carrier → the public-API stub (exact canonical hit).
+        match carrier_virtual_import_target("/ws/src/GenericComp.vue", &map) {
+            Some(Rewrite::Stub(stub)) => assert_eq!(
+                stub, "/tmp/GenericComp_abc.vue.ts",
+                "bare in-project carrier must route to its public-API stub"
+            ),
+            other => panic!(
+                "bare in-project carrier must be Rewrite::Stub, got {}",
+                rewrite_label(&other)
+            ),
+        }
+
+        // Unknown bare carrier (not in the map) → None: left bare for the
+        // `*.vue` wildcard shim. NOT a `CarrierPath` strip (a bare carrier has
+        // no suffix to drop — stripping would corrupt the path).
+        assert!(
+            carrier_virtual_import_target("/ws/src/Unknown.vue", &map).is_none(),
+            "unknown bare carrier must be None (left bare for the wildcard shim), \
+             never a CarrierPath strip"
+        );
+
+        // Non-carrier bare specifiers → None (untouched), unchanged behavior.
+        assert!(
+            carrier_virtual_import_target("./types", &map).is_none(),
+            "a relative non-carrier specifier must be None"
+        );
+        assert!(
+            carrier_virtual_import_target("lodash", &map).is_none(),
+            "a bare package specifier must be None"
+        );
+        // A `.d.ts` whose stem (`./foo`) is not a carrier → None.
+        assert!(
+            carrier_virtual_import_target("./foo.d.ts", &map).is_none(),
+            "a non-carrier `.d.ts` must be None"
+        );
+
+        // The existing suffixed-form behavior still holds: a known `.vue.tsx`
+        // resolves to the stub, an unknown `.vue.tsx` strips back to the carrier.
+        match carrier_virtual_import_target("/ws/src/GenericComp.vue.tsx", &map) {
+            Some(Rewrite::Stub(stub)) => assert_eq!(
+                stub, "/tmp/GenericComp_abc.vue.ts",
+                "known `.vue.tsx` must still resolve to the stub"
+            ),
+            other => panic!(
+                "known `.vue.tsx` must be Rewrite::Stub, got {}",
+                rewrite_label(&other)
+            ),
+        }
+        match carrier_virtual_import_target("/ws/src/Unknown.vue.tsx", &map) {
+            Some(Rewrite::CarrierPath(len)) => assert_eq!(
+                &"/ws/src/Unknown.vue.tsx"[..len],
+                "/ws/src/Unknown.vue",
+                "unknown `.vue.tsx` must strip the suffix back to the carrier path"
+            ),
+            other => panic!(
+                "unknown `.vue.tsx` must be Rewrite::CarrierPath, got {}",
+                rewrite_label(&other)
+            ),
+        }
+    }
+
+    /// The CLASS contract: once the bare-carrier classifier and the fast-path
+    /// gate are fixed, `rewrite_vue_ts_imports` rewrites EVERY quoted specifier
+    /// shape that targets a bare in-project carrier — a default import, a dynamic
+    /// `import("…")`, and a re-export `export … from "…"` — to the public-API
+    /// stub. A code string whose ONLY carrier reference is bare `.vue` (no
+    /// `.tsx`/`.jsx`/`.verter.ts` anywhere) must NOT be early-returned unchanged.
+    #[test]
+    fn rewrite_vue_ts_imports_rewrites_bare_in_project_carrier_class() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/GenericComp.vue".to_string(),
+            PathBuf::from("/tmp/GenericComp_abc.vue.ts"),
+        );
+
+        // Default import of a bare in-project carrier (the regression case).
+        let default_import = r#"import GenericComp from "/ws/src/GenericComp.vue";"#;
+        let default_out = rewrite_vue_ts_imports(default_import, &map);
+        assert!(
+            default_out.contains(r#""/tmp/GenericComp_abc.vue.ts""#),
+            "bare default import must be rewritten to the stub: {default_out}"
+        );
+        assert!(
+            !default_out.contains("/ws/src/GenericComp.vue\""),
+            "the bare carrier specifier must be gone after rewrite: {default_out}"
+        );
+
+        // Dynamic import of the same bare carrier.
+        let dynamic = r#"const C = import("/ws/src/GenericComp.vue");"#;
+        let dynamic_out = rewrite_vue_ts_imports(dynamic, &map);
+        assert!(
+            dynamic_out.contains(r#""/tmp/GenericComp_abc.vue.ts""#),
+            "bare dynamic import must be rewritten to the stub: {dynamic_out}"
+        );
+
+        // Re-export `export { default } from "…"` of the same bare carrier.
+        let reexport = r#"export { default } from "/ws/src/GenericComp.vue";"#;
+        let reexport_out = rewrite_vue_ts_imports(reexport, &map);
+        assert!(
+            reexport_out.contains(r#""/tmp/GenericComp_abc.vue.ts""#),
+            "bare re-export must be rewritten to the stub: {reexport_out}"
+        );
+
+        // The fast-path gate must NOT early-return a file whose only carrier
+        // reference is bare `.vue` — the rewrite above already proves it ran, but
+        // assert the gate independently against a single bare import.
+        let bare_only = r#"import C from "/ws/src/GenericComp.vue";"#;
+        assert_ne!(
+            rewrite_vue_ts_imports(bare_only, &map),
+            bare_only,
+            "a file whose only carrier import is bare `.vue` must not be \
+             early-returned unchanged by the fast-path gate"
+        );
+    }
+
+    /// Negative class coverage for the bare-carrier path: unknown bare carriers
+    /// and non-carrier specifiers must survive `rewrite_vue_ts_imports`
+    /// unchanged (so the `*.vue` wildcard shim resolves the unknown carrier and
+    /// real modules are untouched).
+    #[test]
+    fn rewrite_vue_ts_imports_leaves_unknown_bare_carrier_and_non_carriers() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/GenericComp.vue".to_string(),
+            PathBuf::from("/tmp/GenericComp_abc.vue.ts"),
+        );
+
+        // Unknown bare carrier (not in the map) → left bare for the wildcard shim.
+        let unknown = r#"import U from "/ws/src/Unknown.vue";"#;
+        assert_eq!(
+            rewrite_vue_ts_imports(unknown, &map),
+            unknown,
+            "an unknown bare carrier must be left bare for the `*.vue` shim"
+        );
+
+        // Non-carrier specifiers (a relative module and a package) → untouched.
+        let non_carrier = r#"import { a } from "./types";
+import _ from "lodash";"#;
+        assert_eq!(
+            rewrite_vue_ts_imports(non_carrier, &map),
+            non_carrier,
+            "non-carrier specifiers must be unchanged"
+        );
+
+        // A `.d.ts` whose stem is not a carrier → untouched.
+        let dts = r#"import type { F } from "./foo.d.ts";"#;
+        assert_eq!(
+            rewrite_vue_ts_imports(dts, &map),
+            dts,
+            "a non-carrier `.d.ts` import must be unchanged"
+        );
+    }
+
+    /// Test helper: a short label for a `carrier_virtual_import_target` outcome,
+    /// used only in `panic!` messages so failures name the wrong variant.
+    fn rewrite_label(rewrite: &Option<Rewrite>) -> String {
+        match rewrite {
+            Some(Rewrite::Stub(s)) => format!("Stub({s})"),
+            Some(Rewrite::CarrierPath(len)) => format!("CarrierPath({len})"),
+            None => "None".to_string(),
+        }
+    }
+
+    /// CONTEXT-SCOPING (Part 1): `rewrite_vue_ts_imports` must rewrite ONLY the
+    /// quoted string that occupies a real module-specifier position — the path
+    /// after an import/export-from token, the dynamic `import("…")` argument, and
+    /// the side-effect `import "…"` specifier. A user string literal whose VALUE
+    /// equals a carrier path (exact-canonical OR relative), the same text inside a
+    /// `//`/`/* */` comment, and the same text inside a template literal must be
+    /// left BYTE-FOR-BYTE verbatim — the validation TSX lowers the user's
+    /// `<script setup>` body, so those positions are real user code that the
+    /// type-checker must see unaltered.
+    #[test]
+    fn rewrite_vue_ts_imports_rewrites_only_module_specifiers() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/GenericComp.vue".to_string(),
+            PathBuf::from("/tmp/GenericComp_abc.vue.ts"),
+        );
+        let stub = "/tmp/GenericComp_abc.vue.ts";
+
+        // A real default import of the bare in-project carrier, sharing the file
+        // with user string literals / a comment / a template that all spell the
+        // SAME carrier path but are NOT specifier positions.
+        let code = r#"import GenericComp from "/ws/src/GenericComp.vue";
+const route = { component: "/ws/src/GenericComp.vue" };
+const other = "/ws/src/GenericComp.vue";
+const rel = "./GenericComp.vue";
+// see /ws/src/GenericComp.vue for details
+/* block: /ws/src/GenericComp.vue */
+const tmpl = `/ws/src/GenericComp.vue`;
+const nested = `path is ${other} for /ws/src/GenericComp.vue`;
+"#;
+        let out = rewrite_vue_ts_imports(code, &map);
+
+        // The real import specifier IS rewritten to the stub.
+        assert!(
+            out.contains(&format!("import GenericComp from \"{stub}\";")),
+            "the real default-import specifier must be rewritten to the stub: {out}"
+        );
+
+        // Every NON-specifier occurrence is left verbatim. There must be exactly
+        // ONE rewrite (the import); count the surviving literal occurrences.
+        assert!(
+            out.contains(r#"const route = { component: "/ws/src/GenericComp.vue" };"#),
+            "an object-literal property string must be left verbatim: {out}"
+        );
+        assert!(
+            out.contains(r#"const other = "/ws/src/GenericComp.vue";"#),
+            "an exact-canonical user string literal must be left verbatim: {out}"
+        );
+        assert!(
+            out.contains(r#"const rel = "./GenericComp.vue";"#),
+            "a relative user string literal must be left verbatim: {out}"
+        );
+        assert!(
+            out.contains("// see /ws/src/GenericComp.vue for details"),
+            "a line comment must be left verbatim: {out}"
+        );
+        assert!(
+            out.contains("/* block: /ws/src/GenericComp.vue */"),
+            "a block comment must be left verbatim: {out}"
+        );
+        assert!(
+            out.contains("const tmpl = `/ws/src/GenericComp.vue`;"),
+            "a template literal must be left verbatim: {out}"
+        );
+        assert!(
+            out.contains("const nested = `path is ${other} for /ws/src/GenericComp.vue`;"),
+            "a template literal with an interpolation must be left verbatim: {out}"
+        );
+
+        // The stub must appear EXACTLY once — only the one real specifier was
+        // rewritten, none of the literal/comment/template occurrences leaked.
+        assert_eq!(
+            out.matches(stub).count(),
+            1,
+            "exactly one occurrence (the real import) must be rewritten to the stub: {out}"
+        );
+    }
+
+    /// CONTEXT-SCOPING (Part 1), per specifier shape: each genuine specifier shape
+    /// is rewritten, while a same-text NON-specifier string literal on the next
+    /// line is left verbatim. Covers default, `import type … from`,
+    /// `import * as … from`, `export * from`, `export { … } from`, dynamic
+    /// `import("…")` (whitespace-tolerant), and side-effect `import "…"`.
+    #[test]
+    fn rewrite_vue_ts_imports_covers_specifier_shapes() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/C.vue".to_string(),
+            PathBuf::from("/tmp/C_abc.vue.ts"),
+        );
+        let stub = "/tmp/C_abc.vue.ts";
+
+        // Each input pairs a real specifier with a same-text non-specifier literal.
+        let shapes: &[&str] = &[
+            // default import
+            "import C from \"/ws/src/C.vue\";\nconst a = \"/ws/src/C.vue\";",
+            // import type { X } from
+            "import type { P } from \"/ws/src/C.vue\";\nconst b = \"/ws/src/C.vue\";",
+            // import { type X } from
+            "import { type P } from \"/ws/src/C.vue\";\nconst b2 = \"/ws/src/C.vue\";",
+            // import * as ns from
+            "import * as NS from \"/ws/src/C.vue\";\nconst c = \"/ws/src/C.vue\";",
+            // export * from
+            "export * from \"/ws/src/C.vue\";\nconst d = \"/ws/src/C.vue\";",
+            // export type * from
+            "export type * from \"/ws/src/C.vue\";\nconst d2 = \"/ws/src/C.vue\";",
+            // export { X } from
+            "export { default } from \"/ws/src/C.vue\";\nconst e = \"/ws/src/C.vue\";",
+            // export type { X } from
+            "export type { P } from \"/ws/src/C.vue\";\nconst e2 = \"/ws/src/C.vue\";",
+            // dynamic import("x")
+            "const f = import(\"/ws/src/C.vue\");\nconst g = \"/ws/src/C.vue\";",
+            // dynamic import ( "x" ) — whitespace-tolerant
+            "const h = import ( \"/ws/src/C.vue\" );\nconst i = \"/ws/src/C.vue\";",
+            // side-effect import "x"
+            "import \"/ws/src/C.vue\";\nconst j = \"/ws/src/C.vue\";",
+        ];
+
+        for input in shapes {
+            let out = rewrite_vue_ts_imports(input, &map);
+            // The specifier was rewritten exactly once; the trailing non-specifier
+            // literal `"/ws/src/C.vue"` survives verbatim, so the original carrier
+            // path still appears exactly once (the literal) and the stub once.
+            assert_eq!(
+                out.matches(stub).count(),
+                1,
+                "specifier shape must rewrite exactly the specifier to the stub: \
+                 input={input:?} out={out:?}"
+            );
+            assert_eq!(
+                out.matches("\"/ws/src/C.vue\"").count(),
+                1,
+                "the same-text non-specifier literal must survive verbatim: \
+                 input={input:?} out={out:?}"
+            );
+        }
+    }
+
+    /// LEADING-CONTEXT GUARD: a `.import(…)` member-access call is NOT a dynamic
+    /// import — `import` is a property name preceded by `.`, so its string argument
+    /// is an ordinary value, not a module specifier, and must be copied verbatim
+    /// (never rewritten to the carrier stub), even when the bare carrier path IS in
+    /// `vue_ts_map`. The negative control in the same test confirms a GENUINE
+    /// `import(…)` (no leading `.`) still rewrites, so the guard did not over-correct.
+    #[test]
+    fn rewrite_vue_ts_imports_skips_member_access_import_call() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/GenericComp.vue".to_string(),
+            PathBuf::from("/tmp/GenericComp_abc.vue.ts"),
+        );
+        let stub = "/tmp/GenericComp_abc.vue.ts";
+
+        // Member-access `.import("x")` — `import` is a property, the prior
+        // significant byte is `.`, so the string argument is left verbatim.
+        let member = r#"const c = loader.import("/ws/src/GenericComp.vue");"#;
+        let out = rewrite_vue_ts_imports(member, &map);
+        assert!(
+            !out.contains(stub),
+            "a `.import(\"x\")` member-access call must NOT route its argument to \
+             the carrier stub: {out}"
+        );
+        assert!(
+            out.contains(r#"loader.import("/ws/src/GenericComp.vue")"#),
+            "the member-access call argument must survive verbatim: {out}"
+        );
+
+        // Optional-chaining `?.import("x")` — the prior significant byte is still
+        // `.`, so the same guard applies.
+        let optional = r#"const c = loader?.import("/ws/src/GenericComp.vue");"#;
+        let out_opt = rewrite_vue_ts_imports(optional, &map);
+        assert!(
+            !out_opt.contains(stub),
+            "a `?.import(\"x\")` optional-chaining member call must NOT route its \
+             argument to the carrier stub: {out_opt}"
+        );
+        assert!(
+            out_opt.contains(r#"loader?.import("/ws/src/GenericComp.vue")"#),
+            "the optional-chaining call argument must survive verbatim: {out_opt}"
+        );
+
+        // NEGATIVE CONTROL: a genuine dynamic `import("x")` (no leading `.`) is a
+        // real specifier position and MUST still rewrite to the stub — the guard
+        // only suppresses member-access keywords, not real introducers.
+        let genuine = r#"const c = import("/ws/src/GenericComp.vue");"#;
+        let out_real = rewrite_vue_ts_imports(genuine, &map);
+        assert!(
+            out_real.contains(&format!(r#"import("{stub}")"#)),
+            "a genuine dynamic import specifier must still rewrite to the stub: {out_real}"
+        );
+        assert!(
+            !out_real.contains(r#"import("/ws/src/GenericComp.vue")"#),
+            "the genuine dynamic import's original specifier must be gone (rewritten): {out_real}"
+        );
+    }
+
+    /// LEADING-CONTEXT GUARD, comment-tolerant lookback: the member-access guard
+    /// must see the `.` qualifier even when a `//` line comment OR a `/* */` block
+    /// comment sits between the `.` and the `import` member name. `prev_significant_byte`
+    /// skips BOTH comment forms in reverse, so `loader. // note\n import("x")` is
+    /// recognised as a property access (`import` qualified by `.`) and its string
+    /// argument is left verbatim — never routed to the carrier stub. The negative
+    /// control (a genuine `import("x")` whose only preceding token is a line comment
+    /// on its OWN line, with no `.` qualifier) still rewrites, proving the lookback
+    /// did not over-suppress real introducers.
+    #[test]
+    fn rewrite_vue_ts_imports_member_access_lookback_skips_line_comments() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/GenericComp.vue".to_string(),
+            PathBuf::from("/tmp/GenericComp_abc.vue.ts"),
+        );
+        let stub = "/tmp/GenericComp_abc.vue.ts";
+
+        // Member-access `.import("x")` with an intervening `//` LINE comment between
+        // the `.` and `import`. The prior significant byte (skipping the line comment
+        // and the newline) is `.`, so `import` is a property — the argument is verbatim.
+        let line_comment =
+            "const c = loader. // pick the carrier\n  import(\"/ws/src/GenericComp.vue\");";
+        let out_line = rewrite_vue_ts_imports(line_comment, &map);
+        assert!(
+            !out_line.contains(stub),
+            "a `.import(\"x\")` member call with an intervening // line comment must NOT \
+             route its argument to the carrier stub: {out_line}"
+        );
+        assert!(
+            out_line.contains("import(\"/ws/src/GenericComp.vue\")"),
+            "the member-access call argument must survive verbatim across a line comment: {out_line}"
+        );
+
+        // Member-access `.import("x")` with an intervening `/* */` BLOCK comment.
+        let block_comment = "const c = loader. /* pick */ import(\"/ws/src/GenericComp.vue\");";
+        let out_block = rewrite_vue_ts_imports(block_comment, &map);
+        assert!(
+            !out_block.contains(stub),
+            "a `.import(\"x\")` member call with an intervening /* */ block comment must NOT \
+             route its argument to the carrier stub: {out_block}"
+        );
+        assert!(
+            out_block.contains("import(\"/ws/src/GenericComp.vue\")"),
+            "the member-access call argument must survive verbatim across a block comment: {out_block}"
+        );
+
+        // NEGATIVE CONTROL: a genuine dynamic `import("x")` whose only preceding token
+        // is a line comment on its OWN line (no `.` qualifier anywhere before it) is a
+        // real specifier position and MUST still rewrite — the lookback skips the
+        // comment and lands on a non-`.` byte (the `;`), so the guard does not fire.
+        let genuine = "const prev = 1;\n// load it dynamically\nconst c = import(\"/ws/src/GenericComp.vue\");";
+        let out_real = rewrite_vue_ts_imports(genuine, &map);
+        assert!(
+            out_real.contains(&format!(r#"import("{stub}")"#)),
+            "a genuine dynamic import preceded only by a line comment must still rewrite \
+             to the stub: {out_real}"
+        );
+        assert!(
+            !out_real.contains(r#"import("/ws/src/GenericComp.vue")"#),
+            "the genuine dynamic import's original specifier must be gone (rewritten): {out_real}"
+        );
+    }
+
+    /// CROSS-LINE LEXICAL STATE: a multiline TEMPLATE literal whose continuation
+    /// line happens to contain `. //` must NOT poison the leading-context lookback
+    /// of a GENUINE dynamic import that follows the template. The `//` lives inside
+    /// an unterminated template literal carried over from a prior physical line, so
+    /// it is template text, NOT a code-level line comment — and the `.` on that line
+    /// is template text too, not a member-access qualifier. A line-local backward
+    /// heuristic mis-reads the continuation line as starting at code level, treats
+    /// `//` as a comment, backs to the `.`, and wrongly suppresses the rewrite. The
+    /// lookback must instead reflect the lexical state established by the forward
+    /// scan up to the keyword, so the real `import(...)` after the closing backtick
+    /// is recognised as a true specifier position and rewritten.
+    #[test]
+    fn rewrite_vue_ts_imports_lookback_respects_multiline_template_state() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/src/GenericComp.vue".to_string(),
+            PathBuf::from("/tmp/GenericComp_abc.vue.ts"),
+        );
+        let stub = "/tmp/GenericComp_abc.vue.ts";
+
+        // A multiline template whose 2nd line is `. // literal text`, then a GENUINE
+        // dynamic import. The `.` and `//` are template text (the template opened on
+        // line 1 and only closes on line 2 at the backtick), so the import is a real
+        // specifier position and MUST rewrite to the stub.
+        let multiline =
+            "const s = `first\n. // literal text`; import(\"/ws/src/GenericComp.vue\");";
+        let out = rewrite_vue_ts_imports(multiline, &map);
+        assert!(
+            out.contains(&format!(r#"import("{stub}")"#)),
+            "a genuine dynamic import following a multiline template (whose continuation \
+             line contains `. //` as template text) MUST still rewrite to the stub — the \
+             `//` is inside the template, not a code comment: {out}"
+        );
+        assert!(
+            !out.contains(r#"import("/ws/src/GenericComp.vue")"#),
+            "the genuine dynamic import's original specifier must be gone (rewritten) — the \
+             multiline-template `. //` must not suppress the rewrite: {out}"
+        );
+
+        // The template body itself is preserved verbatim (no corruption of its text).
+        assert!(
+            out.contains("`first\n. // literal text`"),
+            "the multiline template literal body must survive verbatim: {out}"
+        );
+
+        // CROSS-LINE BLOCK COMMENT sibling: a `/* … */` block comment that OPENS on a
+        // prior line and only closes after a `. //`-bearing line is comment text, so a
+        // genuine import after the block-comment close still rewrites. The line-local
+        // heuristic would mis-read the continuation line as code.
+        let multiline_block =
+            "const s = 1; /* first\n. // still comment */ import(\"/ws/src/GenericComp.vue\");";
+        let out_block = rewrite_vue_ts_imports(multiline_block, &map);
+        assert!(
+            out_block.contains(&format!(r#"import("{stub}")"#)),
+            "a genuine dynamic import after a multiline /* */ block comment (whose \
+             continuation line contains `. //`) MUST still rewrite to the stub: {out_block}"
+        );
+
+        // NEGATIVE CONTROL (member access still suppressed): a REAL `.import("x")`
+        // member access whose qualifying `.` precedes the keyword on the SAME code
+        // level must still be left verbatim — the cross-line fix must not regress the
+        // genuine member-access suppression.
+        let member = r#"const c = loader.import("/ws/src/GenericComp.vue");"#;
+        let out_member = rewrite_vue_ts_imports(member, &map);
+        assert!(
+            !out_member.contains(stub),
+            "a genuine `.import(\"x\")` member access must STILL be left verbatim after \
+             the cross-line lexical fix: {out_member}"
+        );
+        assert!(
+            out_member.contains(r#"loader.import("/ws/src/GenericComp.vue")"#),
+            "the member-access argument must survive verbatim: {out_member}"
+        );
+
+        // NEGATIVE CONTROL (escaped backtick inside template): an escaped backtick
+        // `\`` does NOT close the template, so a following `. //` and `import(...)`
+        // are STILL inside the template — the whole thing is template text, nothing
+        // is rewritten and the body is preserved.
+        let escaped = "const s = `a\\`b\n. // import(\"/ws/src/GenericComp.vue\")`; const x = 1;";
+        let out_escaped = rewrite_vue_ts_imports(escaped, &map);
+        assert!(
+            !out_escaped.contains(stub),
+            "an import that is INSIDE a template (kept open by an escaped backtick) must \
+             NOT be rewritten — the escaped backtick does not close the template: {out_escaped}"
+        );
+        assert!(
+            out_escaped.contains("import(\"/ws/src/GenericComp.vue\")"),
+            "the template body containing the escaped backtick must survive verbatim: {out_escaped}"
+        );
+    }
+
+    /// EXACT-CANONICAL ONLY (Part 2): with the ambiguous basename fallback removed,
+    /// a bare in-project carrier specifier that does NOT exact-hit `vue_ts_map` but
+    /// shares a basename with a map entry in a DIFFERENT directory must NOT be
+    /// rewritten to that entry's stub. The map holds `/ws/a/Foo.vue`; a specifier
+    /// for `/ws/b/Foo.vue` is an unknown carrier → `None` (left bare for the
+    /// `*.vue` wildcard shim), never the `/ws/a` stub.
+    #[test]
+    fn carrier_virtual_import_target_no_basename_fallback() {
+        let mut map = HashMap::new();
+        map.insert(
+            "/ws/a/Foo.vue".to_string(),
+            PathBuf::from("/tmp/Foo_a.vue.ts"),
+        );
+
+        // Bare same-basename carrier in a different dir → unknown → None.
+        assert!(
+            carrier_virtual_import_target("/ws/b/Foo.vue", &map).is_none(),
+            "a same-basename bare carrier in a different dir must NOT route to the \
+             other dir's stub (no basename fallback); it must be None"
+        );
+
+        // A suffixed same-basename carrier in a different dir → unknown →
+        // CarrierPath (strip the suffix back to the bare carrier for the shim),
+        // NOT the other dir's stub.
+        match carrier_virtual_import_target("/ws/b/Foo.vue.tsx", &map) {
+            Some(Rewrite::CarrierPath(len)) => assert_eq!(
+                &"/ws/b/Foo.vue.tsx"[..len],
+                "/ws/b/Foo.vue",
+                "a same-basename suffixed carrier in a different dir must strip to \
+                 its own bare carrier, never the other dir's stub"
+            ),
+            other => panic!(
+                "same-basename suffixed carrier must be CarrierPath, got {}",
+                rewrite_label(&other)
+            ),
+        }
+
+        // The exact-canonical entry still hits the stub (exact-hit preserved).
+        match carrier_virtual_import_target("/ws/a/Foo.vue", &map) {
+            Some(Rewrite::Stub(stub)) => assert_eq!(
+                stub, "/tmp/Foo_a.vue.ts",
+                "the exact-canonical carrier must still resolve to its stub"
+            ),
+            other => panic!(
+                "exact-canonical carrier must be Rewrite::Stub, got {}",
+                rewrite_label(&other)
+            ),
+        }
     }
 
     #[test]

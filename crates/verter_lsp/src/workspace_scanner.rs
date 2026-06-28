@@ -27,8 +27,9 @@ use verter_session::{CompileProfile, UpsertRequest, VerterHost};
 use verter_session::FileLanguage;
 
 use crate::provider_sync::{
-    commit_sync_transition, genuinely_stale_after_sync, prepare_sync_transition,
-    revert_unsynced_kinds, ProviderPathKind, ProviderSyncState,
+    commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
+    prepare_sync_transition, revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind,
+    ProviderSyncState,
 };
 use crate::type_provider::project_sync::ProjectSync;
 
@@ -666,7 +667,12 @@ async fn sync_non_carrier_file_to_provider(
                 .await;
         }
         let transition = prepare_sync_transition(sync_states, canonical_id, next);
-        close_stale_paths(sync, provider_surfaces, &transition.stale_paths).await;
+        close_stale_paths(
+            sync,
+            provider_surfaces,
+            &non_decl_close_targets(&transition.stale_paths),
+        )
+        .await;
         let mut committed = transition.next;
 
         if let Err(error) = sync
@@ -939,7 +945,12 @@ async fn sync_file_to_provider(
                     committed_state,
                     &receipt,
                 );
-                close_stale_paths(sync, provider_surfaces, &genuinely_stale).await;
+                close_stale_paths(
+                    sync,
+                    provider_surfaces,
+                    &non_decl_close_targets(&genuinely_stale),
+                )
+                .await;
             }
             // On total failure nothing is committed and nothing is closed: the
             // previous state + provider paths are retained intact.
@@ -950,7 +961,9 @@ async fn sync_file_to_provider(
             // document), so drop any stale local provider state + close its buffers.
             if let Some(state) = crate::provider_sync::remove_sync_state(sync_states, canonical_id)
             {
-                close_stale_paths(sync, provider_surfaces, &state.active_paths()).await;
+                // The declaration overlay (`Decl`), if any, is released by
+                // `DeclOverlayOwner` via the `did_close` lifecycle, never here.
+                close_stale_paths(sync, provider_surfaces, &state.active_non_decl_paths()).await;
             }
         }
         crate::external_ts::CarrierSyncDecision::Pending => {
@@ -963,7 +976,7 @@ async fn sync_file_to_provider(
 async fn close_stale_paths(
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
-    stale_paths: &[(ProviderPathKind, String)],
+    stale_paths: &[(NonDeclProviderPathKind, String)],
 ) {
     for (kind, path) in stale_paths {
         // A closing API path is no longer the active synced virtual surface —
@@ -972,15 +985,17 @@ async fn close_stale_paths(
         // until the provider close is CONFIRMED, so a failed close cannot let it
         // degrade to NotVirtual and corrupt a same-named real file). Capture the
         // epoch-stamped token so the finalize is scoped to THIS close.
-        let close_token = if *kind == ProviderPathKind::Api {
+        let close_token = if *kind == NonDeclProviderPathKind::Api {
             Some(provider_surfaces.forget(path))
         } else {
             None
         };
+        // A declaration overlay (`Decl`) is unrepresentable here — its lifecycle is
+        // owned by `DeclOverlayOwner`, never this generic close.
         let result = match kind {
-            ProviderPathKind::Ide => sync.close_tsx(path).await,
-            ProviderPathKind::Api => sync.close_dts(path).await,
-            ProviderPathKind::Shadow => sync.close_file(path).await,
+            NonDeclProviderPathKind::Ide => sync.close_tsx(path).await,
+            NonDeclProviderPathKind::Api => sync.close_dts(path).await,
+            NonDeclProviderPathKind::Shadow => sync.close_file(path).await,
         };
         match result {
             // Only a CONFIRMED API close finalizes, and only via THIS close's token —
@@ -2008,8 +2023,10 @@ defineProps<{ msg: string }>()
                 ),
                 ide_path: Some(ide_path.clone()),
                 api_path: Some(api_path.clone()),
+                decl_path: None,
                 ide_background_loaded: true,
                 api_background_loaded: true,
+                decl_background_loaded: false,
                 shadow_path: None,
                 shadow_background_loaded: false,
             },

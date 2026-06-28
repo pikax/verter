@@ -13,9 +13,7 @@ const FIXTURE = path.join(ROOT, "fixture");
 const norm = (p) => p.replace(/\\/g, "/").toLowerCase();
 const require = createRequire(import.meta.url);
 const opts = { paths: (process.env.NM_BASE || "").split(path.delimiter).filter(Boolean) };
-const sourcePkgs = [process.env.TS7_SOURCE, "typescript", "@typescript/native-preview"].filter(
-  Boolean,
-);
+const sourcePkgs = [process.env.TS7_SOURCE, "typescript"].filter(Boolean);
 // Import via the PUBLIC `<pkg>/unstable/sync` export (parameterized over the
 // source package), honouring the package `exports` map — not a hand-built dist/ path.
 let syncApiPath;

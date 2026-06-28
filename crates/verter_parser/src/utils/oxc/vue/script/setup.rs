@@ -11,8 +11,8 @@ use oxc_ast::ast::*;
 use oxc_span::GetSpan;
 
 use super::macros::{
-    detect_macro_kind, MacroArrayArg, MacroArrayElement, MacroDeclarator, MacroObjectArg,
-    MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
+    detect_macro_kind, is_define_component, MacroArrayArg, MacroArrayElement, MacroDeclarator,
+    MacroObjectArg, MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
 };
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -1109,6 +1109,122 @@ fn extract_array_arg<'a>(arr: &ArrayExpression<'a>) -> MacroArrayArg<'a> {
         span: Span::from(arr.span),
         elements,
     }
+}
+
+/// The runtime `props` / `emits` argument forms extracted from an Options-API
+/// `defineComponent({ props, emits })` options object, in the SAME shapes the
+/// `<script setup>` `defineProps` / `defineEmits` macros carry.
+///
+/// This is the typed bridge that lets an Options-API component reuse the
+/// shared prop/emit normalization (`process_props` / `process_emits` in the TSC
+/// codegen) instead of a second extraction engine: an options object's
+/// `props: { … }` is identical in structure to `defineProps({ … })`, and its
+/// `emits: [ … ]` / `emits: { … }` to `defineEmits([ … ])` / `defineEmits({ … })`.
+#[derive(Debug, Default)]
+pub struct OptionsComponentMacroArgs<'a> {
+    /// `props: { … }` object form, if present.
+    pub props_object: Option<MacroObjectArg<'a>>,
+    /// `props: [ … ]` array (string-name) form, if present.
+    pub props_array: Option<MacroArrayArg<'a>>,
+    /// `emits: { … }` object form, if present.
+    pub emits_object: Option<MacroObjectArg<'a>>,
+    /// `emits: [ … ]` array (string-name) form, if present.
+    pub emits_array: Option<MacroArrayArg<'a>>,
+}
+
+/// Extract the runtime `props` / `emits` arguments from an Options-API
+/// component's default export — `export default defineComponent({ … })` or the
+/// plain `export default { … }` form — in the same `MacroObjectArg` /
+/// `MacroArrayArg` shapes the `<script setup>` macros produce.
+///
+/// Typed-IR only: locates the options `ObjectExpression` on the program's
+/// default export (the SAME `defineComponent`-call / plain-object detection the
+/// Options-API parser uses) and reuses the existing macro-argument extractors
+/// (`extract_object_arg` / `extract_array_arg`) — no string slicing of the
+/// options object, no second prop/emit engine. Returns `None` for an arm whose
+/// `props`/`emits` is missing or is neither an object nor an array (a
+/// genuinely-empty surface), and an all-`None` result when the program has no
+/// options-object default export. Only the FIRST `props` / `emits` property is
+/// considered (a duplicate key is invalid Options-API input).
+#[must_use]
+pub fn extract_options_component_macro_args<'a>(
+    program: &'a Program<'a>,
+    ctx: &ScriptParseContext<'a>,
+) -> OptionsComponentMacroArgs<'a> {
+    let mut out = OptionsComponentMacroArgs::default();
+    let Some(options_obj) = find_default_export_options_object(program) else {
+        return out;
+    };
+
+    for prop in &options_obj.properties {
+        let ObjectPropertyKind::ObjectProperty(p) = prop else {
+            continue;
+        };
+        let Some((name, _)) = extract_property_key(&p.key, ctx) else {
+            continue;
+        };
+        match name {
+            "props" if out.props_object.is_none() && out.props_array.is_none() => match &p.value {
+                Expression::ObjectExpression(obj) => {
+                    out.props_object = Some(extract_object_arg(obj, ctx));
+                }
+                Expression::ArrayExpression(arr) => {
+                    out.props_array = Some(extract_array_arg(arr));
+                }
+                _ => {}
+            },
+            "emits" if out.emits_object.is_none() && out.emits_array.is_none() => match &p.value {
+                Expression::ObjectExpression(obj) => {
+                    out.emits_object = Some(extract_object_arg(obj, ctx));
+                }
+                Expression::ArrayExpression(arr) => {
+                    out.emits_array = Some(extract_array_arg(arr));
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    out
+}
+
+/// Locate the options `ObjectExpression` on a program's `export default`, for
+/// both `export default { … }` and `export default defineComponent({ … })`.
+/// `None` for any other default-export shape (function/class/arrow/identifier)
+/// or when there is no default export.
+fn find_default_export_options_object<'a>(
+    program: &'a Program<'a>,
+) -> Option<&'a ObjectExpression<'a>> {
+    for stmt in &program.body {
+        let Statement::ExportDefaultDeclaration(export) = stmt else {
+            continue;
+        };
+        let expr = export.declaration.as_expression()?;
+        return match expr {
+            // export default { ... }
+            Expression::ObjectExpression(obj) => Some(&**obj),
+            // export default defineComponent({ ... })
+            Expression::CallExpression(call) => {
+                let is_define_comp = matches!(
+                    &call.callee,
+                    Expression::Identifier(id) if is_define_component(id.name.as_bytes())
+                );
+                if !is_define_comp {
+                    return None;
+                }
+                call.arguments.first().and_then(|arg| {
+                    if let Some(Expression::ObjectExpression(obj)) = arg.as_expression() {
+                        Some(&**obj)
+                    } else {
+                        None
+                    }
+                })
+            }
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Resolve a `defineProps` / `defineEmits` array element to its string-literal

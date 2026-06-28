@@ -220,7 +220,8 @@ pub fn project_svelte_ide(
     projector.project_template(&parsed.template, region);
 
     // Emit the component's PUBLIC-FACADE default export onto the IDE carrier
-    // (the in-project bare-import target, §2.2/§2.9). See [`svelte_public_facade`]
+    // (the self-diagnostics surface; the bare-import target is the declaration
+    // carrier, §2.2/§2.9). See [`svelte_public_facade`]
     // for the shape; it REPLACES the bare `export {};` marker. Appended through
     // `CodeTransform::append` (output-only, unmapped) so it perturbs no mapped
     // span — keeping CodeTransform the single source of truth for carrier text.

@@ -20,6 +20,31 @@ use super::position::{
     api_surface_range_to_carrier_range, tsx_range_to_carrier_range, ApiSurfaceResolution,
     ExternalApiResolver, ExternalIdeResolver, ExternalSourceReader,
 };
+use crate::type_provider::specifier_rewrite::{
+    rewrite_inserted_carrier_specifier, SpecifierRewrite, SpecifierRewriteCtx,
+};
+
+/// The outcome of rewriting an inserted-import specifier for a code-action edit
+/// whose user-facing target is `edit_target_path`.
+///
+/// Returns the `new_text` to commit (rewritten or verbatim), or `None` when the
+/// rewrite FAILS CLOSED ([`SpecifierRewrite::Drop`]) — the caller then drops the
+/// WHOLE action so no companion specifier leaks into the user's source.
+fn rewrite_action_specifier(
+    new_text: &str,
+    edit_target_path: &str,
+    carrier_source_exists: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let ctx = SpecifierRewriteCtx {
+        edit_target_path,
+        carrier_source_exists,
+    };
+    match rewrite_inserted_carrier_specifier(new_text, &ctx) {
+        SpecifierRewrite::Unchanged => Some(new_text.to_string()),
+        SpecifierRewrite::Rewritten(t) => Some(t),
+        SpecifierRewrite::Drop => None,
+    }
+}
 
 // ── References merge ────────────────────────────────────────────────
 
@@ -539,12 +564,21 @@ pub fn merge_code_actions(
                             mapper,
                         ) {
                             // Rewrite a companion import specifier to the bare carrier
-                            // before the preamble re-anchor coalesces these into the
-                            // `<script setup>` block (Rust-owned on the LSP surface).
-                            let new_text =
-                                crate::type_provider::auto_import::rewrite_inserted_carrier_specifier(
-                                    &edit.new_text,
-                                );
+                            // through the SHARED specifier-rewrite layer BEFORE the
+                            // preamble re-anchor coalesces these into the `<script setup>`
+                            // block. The edit targets the CURRENT carrier's user-facing
+                            // source (the `.vue`/`.svelte` the `.vue.tsx` strips to), so a
+                            // bare `./Comp` resolves against that directory. FAIL CLOSED:
+                            // an unmappable carrier specifier DROPS the whole action.
+                            let edit_target =
+                                normalize_carrier_path(current_tsx_path, carrier_source_exists);
+                            // FAIL CLOSED: `?` returns `None` from the `filter_map` closure (drops
+                            // the WHOLE action) when the shared rewrite cannot map the specifier.
+                            let new_text = rewrite_action_specifier(
+                                &edit.new_text,
+                                edit_target,
+                                carrier_source_exists,
+                            )?;
                             preamble_imports.push((edit.start, edit.end, new_text));
                             continue;
                         }
@@ -583,14 +617,17 @@ pub fn merge_code_actions(
                         let carrier_path = normalize_carrier_path(edit_path, carrier_source_exists);
                         if let Some(uri) = path_to_uri(carrier_path) {
                             // A companion import specifier inside the inserted text
-                            // (`from "./Comp.vue.tsx"` / `.verter.ts`) is rewritten to
-                            // the bare `.vue`/`.svelte` specifier — owned by Rust on the
-                            // LSP surface (the plugin returns raw responses). Fail-closed:
-                            // a non-companion specifier is left unchanged.
-                            let new_text =
-                                crate::type_provider::auto_import::rewrite_inserted_carrier_specifier(
-                                    &edit.new_text,
-                                );
+                            // (`from "./Comp.vue.tsx"` / `.verter.ts` / a bare `./Comp`)
+                            // is rewritten to the bare `.vue`/`.svelte` specifier through
+                            // the SHARED specifier-rewrite layer; the edit targets the
+                            // mapped carrier source (`carrier_path`). FAIL CLOSED: `?`
+                            // returns `None` (drops the WHOLE action) on an unmappable
+                            // carrier specifier.
+                            let new_text = rewrite_action_specifier(
+                                &edit.new_text,
+                                carrier_path,
+                                carrier_source_exists,
+                            )?;
                             changes
                                 .entry(uri)
                                 .or_default()
@@ -622,14 +659,14 @@ pub fn merge_code_actions(
                 ) else {
                     continue;
                 };
-                // A real `.ts` edit can still carry a companion import specifier in
-                // an added import (`from "./Comp.vue.tsx"`) — rewrite it to bare
-                // `.vue`/`.svelte` (Rust-owned on the LSP surface). Fail-closed for a
-                // non-companion specifier (left unchanged).
+                // A real `.ts` edit can still carry a companion import specifier in an
+                // added import (`from "./Comp.vue.tsx"`, or a bare `./Comp`) — rewrite it
+                // to the bare `.vue`/`.svelte` through the SHARED specifier-rewrite layer;
+                // the edit targets THIS real `.ts` (so a bare `./Comp` resolves against
+                // its own directory). FAIL CLOSED: `?` returns `None` (drops the WHOLE
+                // action) on an unmappable carrier specifier.
                 let new_text =
-                    crate::type_provider::auto_import::rewrite_inserted_carrier_specifier(
-                        &edit.new_text,
-                    );
+                    rewrite_action_specifier(&edit.new_text, edit_path, carrier_source_exists)?;
                 changes
                     .entry(uri)
                     .or_default()

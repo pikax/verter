@@ -317,12 +317,31 @@ impl TestSessionBuilder {
                     }
                 };
                 let root_uri = crate::uri::path_to_file_uri_string(&workspace_id);
-                match crate::tsgo::ipc::TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await {
-                    Ok(p) => Arc::new(p),
+                // OWNED one-instance dual-surface provider: spawn ONE `tsgo --lsp`
+                // (the feature surface), then attach an `--api` checker to the SAME
+                // process and open the CONFIGURED project on it. Diagnostics ride
+                // the `--api` checker holding the real tsconfig (the project-bound
+                // membership), so a carrier's `@/`-aliased import + ambient globals
+                // resolve — NOT a config-less inferred project.
+                let inner =
+                    match crate::tsgo::ipc::TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await {
+                        Ok(p) => Arc::new(p),
+                        Err(e) => {
+                            return handle_absent_provider(
+                                self.kind,
+                                &format!("tsgo spawn failed: {e}"),
+                            )
+                        }
+                    };
+                let tsconfig_path = format!("{workspace_id}/tsconfig.json").replace('\\', "/");
+                match crate::tsgo::ipc::TsgoOwnedProvider::attach(inner, tsconfig_path, &tsgo_bin)
+                    .await
+                {
+                    Ok(owned) => Arc::new(owned),
                     Err(e) => {
                         return handle_absent_provider(
                             self.kind,
-                            &format!("tsgo spawn failed: {e}"),
+                            &format!("tsgo --api attach failed: {e}"),
                         )
                     }
                 }
@@ -653,6 +672,21 @@ impl RealProviderTestSession {
         doc.line_index
             .offset_to_position(offset as u32)
             .expect("valid position")
+    }
+
+    /// The committed carrier [`crate::provider_sync::ProviderSyncState`] for an open
+    /// carrier-source URI, or `None` when none has been committed.
+    ///
+    /// Surfaces the provider-neutral ownership backbone state the carrier-sync
+    /// gateway commits when a `.vue`/`.svelte` carrier becomes a configured-project
+    /// member, so a real-provider proof can tie a flowing carrier diagnostic to that
+    /// membership (an `Owned`, background-loaded state) rather than to a bare
+    /// diagnostic appearing by happenstance.
+    pub(crate) fn provider_sync_state(
+        &self,
+        uri: &Uri,
+    ) -> Option<crate::provider_sync::ProviderSyncState> {
+        self.server().test_provider_sync_state(uri)
     }
 
     /// Find the Nth (0-indexed) occurrence of `needle` and add `delta`.

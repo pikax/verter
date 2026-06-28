@@ -321,10 +321,13 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           };
         }
 
-        // A relative bare `./Comp.vue` / `./Comp.svelte` import redirects to the
-        // COMPONENT IDE carrier (`Comp.vue.tsx` / `Comp.svelte.tsx`) — the source
-        // carrier identity both engines resolve to, derived from the `ide`
-        // column. NOT the `.verter.ts` API carrier (the cross-package target).
+        // A relative bare `./Comp.vue` / `./Comp.svelte` import redirects (in this
+        // in-process tsserver plugin) to the COMPONENT IDE carrier
+        // (`Comp.vue.tsx` / `Comp.svelte.tsx`, derived from the `ide` column). NOT
+        // the `.verter.ts` API carrier (the cross-package target). The tsgo native
+        // engine instead resolves the bare import to the `.d.<ext>.ts` declaration
+        // carrier (`Comp.d.vue.ts`) via its basename-append probe — a separate
+        // surface this plugin's resolution hook does not produce.
         if (isRelativeVue(moduleName)) {
           const resolved = path.resolve(path.dirname(containingFile), moduleName);
           const ideCarrier = toIdeCarrierFileName(resolved);

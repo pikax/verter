@@ -2832,14 +2832,17 @@ that C2a introduces)** → background/diagnostics cluster (C7 → C6 → C10+C13
 - **C15 — ranged provider updates only over provider-materialized text. GATED
   (HARD-ORDER prerequisite).** Boundary is `verter_type_runtime` TSGO `ipc.rs` +
   a compiler/codegen handoff (NOT `verter_session`). Ranged provider `didChange` /
-  diff updates instead of full-document re-sends. **HARD-ORDER:** TSGO mutates
-  provider-visible text via `rewrite_vue_imports_for_tsgo`
-  (`crates/verter_type_runtime/src/tsgo/ipc.rs`, around `:1301`) before the
-  update / open / load variants — a source range after a rewritten `.vue` import
-  lands at the wrong provider offset. Direct source-range forwarding is FORBIDDEN
-  until that rewrite is emitted through `CodeTransform` before `build_string()` /
-  source-map emission (a compiler/codegen workstream) OR eliminated by
-  byte-preserving resolver behaviour. Until then, every provider range/diff is
+  diff updates instead of full-document re-sends. The former provider-side
+  import rewrite (`rewrite_vue_imports_for_tsgo`) and its offset-translation
+  compensation have been ELIMINATED: TSGO now receives byte-identical generated
+  text (carrier→carrier imports are suffixed at compile time through
+  `CodeTransform`; plain-file `./Comp.vue` specifiers are resolved to the
+  `.verter.ts` carrier by the workspace resolver before the bytes reach the
+  provider), so provider-visible offsets already match the source. With the
+  byte-shifting rewrite gone, the prior HARD-ORDER prerequisite (forbidding
+  direct source-range forwarding until the rewrite was emitted through
+  `CodeTransform`) is satisfied by byte-preserving resolver behaviour. Until
+  ranged updates are wired, every provider range/diff is
   computed ONLY over previous/current provider-materialized `ide.code`, never
   source ranges. **GOVERNANCE-FLAG:** CodeTransform single-source CRITICAL +
   proposed guard `codetransform_no_post_build_provider_text_rewrite_static_guard`

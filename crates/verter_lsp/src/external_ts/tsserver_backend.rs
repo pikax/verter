@@ -76,7 +76,7 @@ pub struct TsserverEngineBackend {
     /// ONLY ever armed by the `#[cfg(test)]` [`Self::arm_prune_except_failure`];
     /// production never sets it, so the prune behaviour is unchanged there. When
     /// armed, the next prune returns `Err` BEFORE any store mutation, exercising the
-    /// `publish_owned` compensation/rollback path so a partial owner-move never leaves
+    /// `publish_owned_resolved` compensation/rollback path so a partial owner-move never leaves
     /// the cross-process `ready_files` stale or duplicated.
     fail_next_prune_except: std::sync::atomic::AtomicBool,
 }
@@ -268,7 +268,7 @@ impl TsserverEngineBackend {
         keep_project_uri: &str,
     ) -> Result<(), EngineError> {
         // Test-only fault injection: when armed, fail the stale-owner prune BEFORE any
-        // store mutation, so the `publish_owned` compensation/rollback path runs.
+        // store mutation, so the `publish_owned_resolved` compensation/rollback path runs.
         // Production never arms it (the arming method is `#[cfg(test)]`), so this is a
         // no-op there.
         if self
@@ -300,7 +300,7 @@ impl TsserverEngineBackend {
 
     /// Test-only: arm the NEXT [`Self::retract_source_everywhere_except`] (the
     /// owner-move stale-owner prune) to fail BEFORE any store mutation, so the
-    /// `publish_owned` compensation/rollback path can be exercised without a real IO
+    /// `publish_owned_resolved` compensation/rollback path can be exercised without a real IO
     /// fault. Production never arms it.
     #[cfg(test)]
     pub(in crate::external_ts) fn arm_prune_except_failure(&self) {

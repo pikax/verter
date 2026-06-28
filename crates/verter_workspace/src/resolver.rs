@@ -837,6 +837,20 @@ pub fn carrier_api_provider_path(source_id: &str) -> String {
     format!("{source_id}{CARRIER_API_VIRTUAL_SUFFIX}")
 }
 
+/// The registry-classified framework CARRIER source extensions (`vue`, `svelte`,
+/// …), WITHOUT a leading dot — the single classification authority the
+/// inserted-import specifier rewrite probes a bare `./Comp` against (one
+/// `Comp.{ext}` candidate per extension). Owned `String`s so callers are free of
+/// the global registry's borrow. A new carrier extends the registry, not callers.
+#[must_use]
+pub fn carrier_source_extensions() -> Vec<String> {
+    verter_language::LanguageRegistry::global()
+        .carrier_extensions()
+        .iter()
+        .map(|ext| (*ext).to_string())
+        .collect()
+}
+
 /// Whether `path` is a framework CARRIER file (`.vue` / `.svelte`), by the
 /// language registry's carrier-extension set (the single classification
 /// authority — a new carrier extends the registry, not this predicate).

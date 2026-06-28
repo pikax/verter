@@ -14,4 +14,5 @@ pub mod merge;
 pub mod mock;
 pub mod project_sync;
 pub mod protocol;
+pub mod specifier_rewrite;
 pub mod traits;

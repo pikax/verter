@@ -12,9 +12,9 @@ use crate::documents::{uri_to_canonical_id, DocumentRegistry};
 use crate::features::cursor_context::ExpressionContext;
 use crate::features::diagnostics::map_diagnostics;
 use crate::provider_sync::{
-    commit_sync_transition, genuinely_stale_after_sync, open_unresolved_carrier_commit,
-    open_unresolved_carrier_state, prepare_sync_transition, revert_unsynced_kinds,
-    ProviderPathKind, ProviderSyncState,
+    commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
+    open_unresolved_carrier_commit, open_unresolved_carrier_state, prepare_sync_transition,
+    revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
 use crate::statistics::Statistics;
 use crate::type_provider::project_sync::ProjectSync;
@@ -149,14 +149,24 @@ pub(crate) use self::server_utils::{
 
 #[path = "../background_drain.rs"]
 mod background_drain;
+#[path = "../background_drain_decl_closure.rs"]
+mod background_drain_decl_closure;
 #[path = "../background_init.rs"]
 mod background_init;
 // Glob re-export so `server_tests.rs` (a child of `server`) sees
 // `drain_pending_snapshot_provider_sync`, `sync_pending_carrier_provider_file`,
 // `is_generated_verter_types_event`, etc. via its `use super::*;`.
 pub(crate) use self::background_drain::configure_provider_paths_for_source;
+// The declaration-overlay lifecycle owner is reached by the drain
+// (`background_drain`), the server struct, and the `did_close` lifecycle —
+// glob-export it at module scope so all three resolve the bare name.
 #[cfg(test)]
 use self::background_drain::*;
+pub(crate) use self::background_drain_decl_closure::DeclOverlayOwner;
+// `carrier_dependency_ids` is asserted by the dual-resolution-rail unit test;
+// `DeclCloseTarget` is named only by the lifecycle regression tests.
+#[cfg(test)]
+pub(crate) use self::background_drain_decl_closure::{carrier_dependency_ids, DeclCloseTarget};
 #[cfg(test)]
 use self::background_init::*;
 
@@ -245,6 +255,15 @@ pub struct VerterLanguageServer {
     cached_verter_diags: Arc<DashMap<String, CachedVerterDiagEntry>>,
     /// Source-keyed provider materialization state shared across background/live sync.
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
+    /// The proactive declaration-overlay lifecycle owner: the SOLE authority for
+    /// the `.d.<ext>.ts` overlay graph (reachability folded with the per-overlay
+    /// close generation) and the only code that issues a provider `close_dts` for a
+    /// declaration overlay. The drain's closure pass opens/reconciles overlays
+    /// through it; the `did_close` lifecycle releases a closed root through it. The
+    /// per-declaration-path serialization lock inside the owner makes a stale close
+    /// unable to clobber a concurrent open of the same overlay (TS2307 stranding) or
+    /// resurrect one no live root reaches. See [`DeclOverlayOwner`].
+    decl_overlay_owner: Arc<DeclOverlayOwner>,
     /// The cross-file-rename provider FENCE. A real (non-advisory) async mutex
     /// the rename transaction holds across its sync-before-query →
     /// snapshot-capture → provider-query → response-parse, so a sync it issues
@@ -362,6 +381,7 @@ impl VerterLanguageServer {
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
         let provider_sync_states = Arc::new(DashMap::new());
+        let decl_overlay_owner = Arc::new(DeclOverlayOwner::default());
         let pending_snapshot_provider_sync = Arc::new(DashSet::new());
         let vfs_workspace: Arc<
             parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
@@ -426,6 +446,7 @@ impl VerterLanguageServer {
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             cached_verter_diags,
             provider_sync_states,
+            decl_overlay_owner,
             rename_provider_fence: Arc::new(tokio::sync::Mutex::new(())),
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
@@ -509,6 +530,61 @@ impl VerterLanguageServer {
         uri: &tower_lsp_server::ls_types::Uri,
     ) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
         self.compute_full_diagnostics(uri).await
+    }
+
+    /// The committed carrier [`crate::provider_sync::ProviderSyncState`] for a
+    /// carrier-source URI (test harness access), or `None` when no provider-sync
+    /// state has been committed for it.
+    ///
+    /// Read-only: it clones the entry the carrier-sync gateway commits into the
+    /// server's shared `provider_sync_states` map (the provider-neutral ownership
+    /// backbone), so a real-provider test can assert that a `.vue`/`.svelte`
+    /// carrier whose diagnostics flow actually became an OWNED, background-loaded
+    /// project member through that backbone — not merely that a diagnostic happened
+    /// to appear.
+    pub(crate) fn test_provider_sync_state(
+        &self,
+        uri: &tower_lsp_server::ls_types::Uri,
+    ) -> Option<crate::provider_sync::ProviderSyncState> {
+        let canonical_id = self.documents.get_canonical_id(uri)?;
+        self.provider_sync_state_for_source(&canonical_id)
+    }
+
+    /// The server's shared declaration-overlay lifecycle owner (test harness
+    /// access). The SAME `Arc` the `did_close` lifecycle releases through and the
+    /// background closure pass opens through, so a concurrency test can race the
+    /// real `handle_did_close` against the real closure pass on one shared owner and
+    /// assert no overlay edge leaks (via the owner's `test_slot_*` accessors).
+    pub(crate) fn test_decl_overlay_owner(&self) -> &Arc<DeclOverlayOwner> {
+        &self.decl_overlay_owner
+    }
+
+    /// Run ONE real proactive-declaration-overlay closure pass
+    /// ([`DeclOverlayOwner::open_declaration_closure_for_open_files`]) against the
+    /// server's OWN shared state — its `project_sync`, `documents`,
+    /// `provider_sync_states`, published resolver snapshot, and the shared
+    /// declaration-overlay owner (test harness access).
+    ///
+    /// This is the EXACT pass `background_init` runs (same owner, same shared
+    /// `Arc`s), so a test can interleave it with the real `handle_did_close` and
+    /// exercise the production `[RELEASE]`-vs-`[DIDCLOSE]` ordering on one shared
+    /// owner. Returns `false` (no-op) when no project sync or published snapshot is
+    /// available.
+    pub(crate) async fn test_run_declaration_closure_pass(&self) -> bool {
+        let Some(sync) = self.project_sync.as_ref() else {
+            return false;
+        };
+        let Some(snapshot) = self.published_resolver() else {
+            return false;
+        };
+        self.decl_overlay_owner
+            .open_declaration_closure_for_open_files(
+                sync,
+                &self.documents,
+                &self.provider_sync_states,
+                &snapshot,
+            )
+            .await
     }
 }
 

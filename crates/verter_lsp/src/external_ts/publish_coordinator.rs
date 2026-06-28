@@ -38,9 +38,9 @@ use verter_workspace::FilesystemWorkspace;
 
 use crate::external_ts::membership_ledger::AbsentReason;
 use crate::external_ts::membership_reconciler::{
-    AuthorityState, BootstrapKind, DurableCarrierStore, MembershipReconciler, OwnershipDecision,
-    PrecomputedOwnershipAuthority, ReconcileErr, ReconcileOutcome, ReconcileReason,
-    ResolverOwnershipAuthority,
+    AuthorityState, BootstrapKind, CarrierMembershipCommitter, CommitFuture, MembershipReconciler,
+    OwnershipDecision, PrecomputedOwnershipAuthority, ReconcileErr, ReconcileOutcome,
+    ReconcileReason, ResolverOwnershipAuthority,
 };
 use crate::external_ts::tsserver_backend::TsserverEngineBackend;
 use crate::external_ts::CanonicalSource;
@@ -115,8 +115,9 @@ impl CarrierPublishCoordinator {
     /// while the carrier is still advertised in `getExternalFiles`. The pointer set
     /// is durable on `Ok` (the manifest swap is fsynced).
     ///
-    /// Sealed: only the reconciler (via [`DurableCarrierStore::retract`]) reaches it,
-    /// so no server path can retract the store without the ledger tombstone.
+    /// Sealed: only the reconciler (via [`CarrierMembershipCommitter::retract`])
+    /// reaches it, so no server path can retract the store without the ledger
+    /// tombstone.
     pub(in crate::external_ts) fn retract_carrier(
         &self,
         source_canonical: &str,
@@ -128,15 +129,16 @@ impl CarrierPublishCoordinator {
 
     /// The membership reconciler over THIS coordinator's shared ledger
     /// (`backend.membership_ledger()`), the active provider (the resilient
-    /// single-writer actor), and this coordinator as the durable on-disk store seam.
-    /// Cheap to build (all `Arc` clones); every production decision point routes its
-    /// membership transition through it.
+    /// single-writer actor), and this coordinator as the on-disk membership-commit
+    /// seam (the [`CarrierMembershipCommitter`] implementation for the tsserver
+    /// engine). Cheap to build (all `Arc` clones); every production decision point
+    /// routes its membership transition through it.
     #[must_use]
     pub(crate) fn reconciler(&self) -> MembershipReconciler {
         MembershipReconciler::new(
             Arc::clone(self.backend.membership_ledger()),
             Arc::clone(&self.provider),
-            Arc::new(self.clone()) as Arc<dyn DurableCarrierStore>,
+            Arc::new(self.clone()) as Arc<dyn CarrierMembershipCommitter>,
         )
     }
 
@@ -236,8 +238,8 @@ impl CarrierPublishCoordinator {
     /// (NO re-resolution), runs the two-phase store publish, then prunes the source
     /// from every OTHER project so an owner change leaves nothing under the old
     /// project. Provider-buffer + ledger steps are the reconciler's; this is purely
-    /// the durable store. Sealed: only the reconciler (via [`DurableCarrierStore`])
-    /// reaches it.
+    /// the durable store. Sealed: only the reconciler (via the on-disk
+    /// [`CarrierMembershipCommitter`] impl) reaches it.
     pub(in crate::external_ts) fn publish_owned_resolved(
         &self,
         binding: &ProjectBinding,
@@ -297,18 +299,26 @@ impl CarrierPublishCoordinator {
     }
 }
 
-impl DurableCarrierStore for CarrierPublishCoordinator {
-    fn publish_owned(
-        &self,
-        binding: &ProjectBinding,
-        source_canonical: &str,
-        companions: &[CarrierCompanion],
-    ) -> Result<(), CarrierPublishError> {
-        self.publish_owned_resolved(binding, source_canonical, companions)
+/// The ON-DISK implementation of the engine-agnostic membership-commit seam for the
+/// tsserver engine. The commit is a synchronous fsync'd store swap (the
+/// content-addressed blobs + atomic manifest the out-of-process
+/// `@verter/typescript-plugin` reads), so the async `commit_owned` / `retract`
+/// futures do that synchronous store work INLINE — the seam is async to admit a
+/// future in-memory-overlay engine whose re-snapshot is genuinely asynchronous,
+/// without changing this on-disk store's two-phase-publish / manifest /
+/// negative-cache-evict behavior.
+impl CarrierMembershipCommitter for CarrierPublishCoordinator {
+    fn commit_owned<'a>(
+        &'a self,
+        binding: &'a ProjectBinding,
+        source_canonical: &'a str,
+        companions: &'a [CarrierCompanion],
+    ) -> CommitFuture<'a> {
+        Box::pin(async move { self.publish_owned_resolved(binding, source_canonical, companions) })
     }
 
-    fn retract(&self, source_canonical: &str) -> Result<(), CarrierPublishError> {
-        self.retract_carrier(source_canonical)
+    fn retract<'a>(&'a self, source_canonical: &'a str) -> CommitFuture<'a> {
+        Box::pin(async move { self.retract_carrier(source_canonical) })
     }
 }
 

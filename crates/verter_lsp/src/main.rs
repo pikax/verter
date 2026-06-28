@@ -4,7 +4,7 @@ use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 use verter_lsp::server::VerterLanguageServer;
-use verter_lsp::tsgo::ipc::{find_tsgo_binary_canonical, TsgoTypeProvider};
+use verter_lsp::tsgo::ipc::{find_tsgo_binary_canonical, TsgoOwnedProvider, TsgoTypeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
 use verter_lsp::tsserver::resilient as tsserver_resilient;
@@ -374,7 +374,35 @@ async fn create_type_provider(
     }
 }
 
-/// Try to spawn TSGO.
+/// Resolve the EXPLICIT configured tsconfig binding for an owned tsgo workspace.
+///
+/// Owned tsgo is PROJECT-BOUND: the `--api` checker requires a real configured
+/// project, so this resolves the workspace's explicit `tsconfig.json` and returns
+/// its forward-slashed path. A workspace WITHOUT an explicit binding (no
+/// `tsconfig.json`) returns `Err` so the owned startup FAILS CLOSED — there is no
+/// config-less / inferred-project owned fallback.
+fn require_owned_tsconfig(workspace_root: &std::path::Path) -> Result<String, String> {
+    let tsconfig = workspace_root.join("tsconfig.json");
+    // `is_file()` (not `exists()`): a DIRECTORY named `tsconfig.json` is not a
+    // valid configured-project binding and must fail closed, not satisfy the
+    // owned-startup precondition.
+    if tsconfig.is_file() {
+        Ok(tsconfig.to_string_lossy().replace('\\', "/"))
+    } else {
+        Err(format!(
+            "no tsconfig.json file at {} — owned tsgo is project-bound and requires an explicit \
+             configured project; it will not start a config-less inferred project",
+            workspace_root.display()
+        ))
+    }
+}
+
+/// Try to spawn the OWNED, project-bound dual-surface TSGO provider.
+///
+/// Owned tsgo is PROJECT-BOUND: it requires an explicit configured tsconfig
+/// binding (via [`require_owned_tsconfig`]) and a version-gated `--api` attach
+/// BEFORE serving any traffic, and FAILS CLOSED otherwise. The standard LSP
+/// handshake (`rootUri`) is retained as transport metadata only.
 async fn try_spawn_tsgo(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
@@ -386,32 +414,50 @@ async fn try_spawn_tsgo(
         .map_err(|err| err.to_string())?;
     tracing::info!("found tsgo binary: {tsgo_bin}");
 
+    // The configured project is mandatory for owned tsgo — resolve it (fail closed
+    // when absent) BEFORE spawning, so a config-less workspace never starts a
+    // `tsgo --lsp` process it would have to tear down.
+    let tsconfig_str = require_owned_tsconfig(std::path::Path::new(workspace_root))?;
+
+    // `root_uri` is the LSP transport's workspace-folder metadata only — NOT the
+    // project-binding decision (that is `tsconfig_str` above).
     let root_uri = path_to_file_uri(workspace_root);
     let crash_notify = Arc::new(Notify::new());
 
-    match TsgoTypeProvider::spawn_with_crash_signal(
+    let tp = TsgoTypeProvider::spawn_with_crash_signal(
         &tsgo_bin,
         &root_uri,
         Some(Arc::clone(&crash_notify)),
     )
     .await
-    {
-        Ok(tp) => {
-            tracing::info!("TSGO type provider started (resilient mode)");
-            let resilient = tsgo_resilient::new(
-                tp,
-                crash_notify,
-                tsgo_bin,
-                root_uri,
-                Arc::clone(client_cell),
-                3,
-            );
-            Ok(Arc::new(resilient))
-        }
-        Err(e) => Err(format!(
-            "found tsgo at {tsgo_bin}, but spawn/initialize failed: {e}"
-        )),
-    }
+    .map_err(|e| format!("found tsgo at {tsgo_bin}, but spawn/initialize failed: {e}"))?;
+
+    // OWNED one-instance dual-surface: attach a version-gated `--api` checker to
+    // THIS `tsgo --lsp` process and open the configured project on it (the carrier
+    // becomes a member of its real tsconfig — the project-bound membership). The
+    // `--api` checker is the project-bound typecheck oracle; the `--lsp` surface
+    // serves features + the user-facing diagnostics. A probe / wire-gate / attach
+    // failure fails closed rather than silently degrading the typecheck oracle.
+    let owned = TsgoOwnedProvider::attach(Arc::new(tp), tsconfig_str.clone(), &tsgo_bin)
+        .await
+        .map_err(|e| {
+            format!(
+                "found tsgo at {tsgo_bin} and spawned --lsp, but the version-gated --api \
+                 attach failed: {e}"
+            )
+        })?;
+    tracing::info!("TSGO owned dual-surface provider started (--api attached, resilient)");
+
+    let resilient = tsgo_resilient::new_owned(
+        owned,
+        crash_notify,
+        tsgo_bin,
+        root_uri,
+        tsconfig_str,
+        Arc::clone(client_cell),
+        3,
+    );
+    Ok(Arc::new(resilient))
 }
 
 /// Try to spawn tsserver.

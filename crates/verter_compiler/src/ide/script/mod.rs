@@ -211,10 +211,12 @@ pub fn generate_ide_script<'alloc>(
     out.apply_to(ct);
 
     // Emit the component's PUBLIC-FACADE re-export as a top-level statement on
-    // the IDE carrier. The IDE carrier is the in-project bare-import target
-    // (`import Comp from "./Comp.vue"` → `Comp.vue.tsx`), so a consumer must see
-    // the component's PUBLIC `export default` from it; the public default is
-    // synthesised on the API carrier (`.verter.ts`) and re-exported here.
+    // the IDE carrier. A consumer importing the component must see its PUBLIC
+    // `export default`, so the IDE carrier re-exports the public default from the
+    // API carrier (`.verter.ts`, where the public default is synthesised). A bare
+    // in-project `import Comp from "./Comp.vue"` resolves natively to the
+    // `.d.vue.ts` declaration carrier (the IDE carrier itself is the
+    // self-diagnostics surface).
     //
     // EXCEPTION — the Options-API script-only arm `(Some(script), None)` already
     // emits its OWN public `export default __sfc__` (the `defineComponent`-shape

@@ -1,0 +1,53 @@
+{
+  "engineVersion": "7.0.1-rc",
+  "note": "Canonical tsgo --api tuple frames. requestFrames are JS-channel WRITE bytes; liveFrames are raw bytes tsgo wrote back. Hex-encoded.",
+  "requestFrames": {
+    "initialize": {
+      "method": "initialize",
+      "payload": "null",
+      "hex": "9301c40a696e697469616c697a65c4046e756c6c"
+    },
+    "updateSnapshot_openProject": {
+      "method": "updateSnapshot",
+      "payload": "{\"openProject\":\"/repo/tsconfig.json\"}",
+      "hex": "9301c40e757064617465536e617073686f74c4257b226f70656e50726f6a656374223a222f7265706f2f7473636f6e6669672e6a736f6e227d"
+    },
+    "updateSnapshot_fileChanges": {
+      "method": "updateSnapshot",
+      "payload": "{\"openProject\":\"/repo/tsconfig.json\",\"fileChanges\":{\"changed\":[\"/repo/src/a.ts\"]}}",
+      "hex": "9301c40e757064617465536e617073686f74c4527b226f70656e50726f6a656374223a222f7265706f2f7473636f6e6669672e6a736f6e222c2266696c654368616e676573223a7b226368616e676564223a5b222f7265706f2f7372632f612e7473225d7d7d"
+    },
+    "getSemanticDiagnostics": {
+      "method": "getSemanticDiagnostics",
+      "payload": "{\"snapshot\":1,\"project\":\"p.x\",\"file\":\"/repo/src/a.ts\"}",
+      "hex": "9301c41667657453656d616e746963446961676e6f7374696373c4367b22736e617073686f74223a312c2270726f6a656374223a22702e78222c2266696c65223a222f7265706f2f7372632f612e7473227d"
+    },
+    "getTypeAtPosition": {
+      "method": "getTypeAtPosition",
+      "payload": "{\"snapshot\":1,\"project\":\"p.x\",\"file\":\"/repo/src/a.ts\",\"position\":42}",
+      "hex": "9301c411676574547970654174506f736974696f6ec4447b22736e617073686f74223a312c2270726f6a656374223a22702e78222c2266696c65223a222f7265706f2f7372632f612e7473222c22706f736974696f6e223a34327d"
+    },
+    "getSymbolAtPosition": {
+      "method": "getSymbolAtPosition",
+      "payload": "{\"snapshot\":1,\"project\":\"p.x\",\"file\":\"/repo/src/a.ts\",\"position\":42}",
+      "hex": "9301c41367657453796d626f6c4174506f736974696f6ec4447b22736e617073686f74223a312c2270726f6a656374223a22702e78222c2266696c65223a222f7265706f2f7372632f612e7473222c22706f736974696f6e223a34327d"
+    },
+    "typeToString": {
+      "method": "typeToString",
+      "payload": "{\"snapshot\":1,\"project\":\"p.x\",\"type\":1}",
+      "hex": "9301c40c74797065546f537472696e67c4277b22736e617073686f74223a312c2270726f6a656374223a22702e78222c2274797065223a317d"
+    },
+    "echo": {
+      "method": "echo",
+      "payload": "hello-verter",
+      "hex": "9301c4046563686fc40c68656c6c6f2d766572746572"
+    }
+  },
+  "liveFrames": {
+    "initialize_response": {
+      "request_method": "initialize",
+      "hex": "9304c40a696e697469616c697a65c4597b227573654361736553656e73697469766546696c654e616d6573223a66616c73652c2263757272656e744469726563746f7279223a22443a5c5c6465765c5c706572736f6e616c5c5c7665727465722d657874747335227d",
+      "captured_from": "real tsgo engine"
+    }
+  }
+}

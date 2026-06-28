@@ -116,12 +116,21 @@ pub(super) fn resolve_provider_auto_import_edits(
         .unwrap_or_default();
     let anchor = resolve_script_import_anchor(&doc.source, &user_import_spans);
 
+    // The edit targets the carrier SOURCE (the `.vue`/`.svelte` the carrier-IDE path
+    // strips to); a bare `./Comp` inserted-import resolves against its directory via
+    // the host source authority (the same probe the code-action / navigation merges
+    // use). The SHARED specifier-rewrite layer fails closed on an unmappable carrier.
+    let carrier_source_path = crate::documents::uri_to_canonical_id(&carrier_uri);
+    let host = server.documents.host();
+    let carrier_source_exists = |p: &str| host.get_source(p).is_some();
     let edits = translate_completion_import_edits(
         provider_edits,
         Some(&anchor),
         &tsx_li,
         &mapper,
         &doc.line_index,
+        &carrier_source_path,
+        &carrier_source_exists,
     )
     .map_err(|e| e.to_string())?;
 

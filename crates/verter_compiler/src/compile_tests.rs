@@ -14862,10 +14862,10 @@ fn template_expression_overlay_pins_absolute_output_bytes() {
     assert!(TS_OVERLAY_GOLDEN_TSX.contains("<p title={msg}>{ msg }</p>"));
 
     // The IDE carrier exports the component's PUBLIC FACADE — a clean
-    // `export default` re-exported from the API carrier (`.verter.ts`), the
-    // surface a consumer of `import Comp from "./Comp.vue"` (→ `Comp.vue.tsx`)
-    // sees. The self-import that types `___VERTER___instance` also targets the
-    // API carrier, NOT the IDE output.
+    // `export default` re-exported from the API carrier (`.verter.ts`). A bare
+    // consumer `import Comp from "./Comp.vue"` resolves natively to the
+    // `.d.vue.ts` declaration carrier; the self-import that types
+    // `___VERTER___instance` targets the API carrier, NOT the IDE output.
     assert!(
         tsx.contains("export { default } from './App.vue.verter.ts';"),
         "IDE carrier must re-export the public default from the API carrier:\n{tsx}"

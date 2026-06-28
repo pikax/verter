@@ -49,7 +49,7 @@ fn standalone_and_ambient_types_preserve_slot_argument_maps() {
 }
 
 #[test]
-fn vue_imports_rewritten_to_vue_ts() {
+fn vue_imports_emit_bare_carrier_specifier() {
     let (code, _) = gen_tsx_script(
         r#"<script setup>
 import MyComp from './MyComp.vue'
@@ -59,17 +59,29 @@ const x = 1
 </script>"#,
     );
 
-    // Positive: an in-project .vue import resolves to the COMPONENT IDE carrier
-    // (`.vue.tsx`, the bare-import-probe identity), NOT the `.verter.ts` API
-    // surface. The consumer gets the component's public default (the IDE carrier
-    // re-exports it from the API carrier).
+    // Positive: the IDE carrier emits the BARE `.vue` specifier verbatim. A bare
+    // framework-carrier import resolves NATIVELY to the `.d.vue.ts` declaration
+    // carrier (emitted + proactively opened per A1/A2) through tsgo's
+    // basename-append probe — there is NO compile-time `.tsx` specifier rewrite.
     assert!(
-        code.contains("from './MyComp.vue.tsx'"),
-        "single-quoted in-project .vue import should resolve to the IDE carrier (.vue.tsx): {code}"
+        code.contains("from './MyComp.vue'"),
+        "single-quoted in-project .vue import must be emitted BARE (`./MyComp.vue`): {code}"
     );
     assert!(
-        code.contains("from \"@/components/Another.vue.tsx\""),
-        "double-quoted in-project .vue import should resolve to the IDE carrier (.vue.tsx): {code}"
+        code.contains("from \"@/components/Another.vue\""),
+        "double-quoted in-project .vue import must be emitted BARE (`@/components/Another.vue`): \
+         {code}"
+    );
+
+    // Negative discriminator: the emitted import specifier carries NO `.vue.tsx`
+    // IDE-carrier suffix — the in-project specifier stays bare.
+    assert!(
+        !code.contains("./MyComp.vue.tsx"),
+        "the emitted in-project `.vue` import must be bare — no `./MyComp.vue.tsx`: {code}"
+    );
+    assert!(
+        !code.contains("Another.vue.tsx"),
+        "the emitted in-project `.vue` import must be bare — no `Another.vue.tsx`: {code}"
     );
 
     // Negative: a bare in-project import must NOT target the `.verter.ts` API
@@ -80,27 +92,17 @@ const x = 1
         "in-project .vue import must NOT target the .verter.ts API carrier: {code}"
     );
 
-    // Negative: non-.vue imports should NOT be rewritten
+    // Negative: non-.vue imports are untouched.
     assert!(
         code.contains("from '../utils'"),
         "non-.vue import must not be rewritten: {code}"
     );
-
-    // Negative: should NOT have a bare .vue' or .vue" (must carry the IDE
-    // carrier suffix .vue.tsx).
-    assert!(
-        !code.contains(".vue'") || code.contains(".vue.tsx'"),
-        "bare .vue' should not remain: {code}"
-    );
-    assert!(
-        !code.contains(".vue\"") || code.contains(".vue.tsx\""),
-        "bare .vue\" should not remain: {code}"
-    );
 }
 
-/// Companion `<script>` imports should also be rewritten to `.vue.ts`.
+/// Companion `<script>` imports emit the BARE `.vue` specifier (no `.vue.tsx`
+/// rewrite — bare resolves natively to the `.d.vue.ts` declaration carrier).
 #[test]
-fn companion_script_vue_imports_rewritten_to_vue_ts() {
+fn companion_script_vue_imports_emit_bare_carrier_specifier() {
     let (code, _) = gen_tsx_script(
         r#"<script>
 import Base from './Base.vue'
@@ -112,14 +114,19 @@ const x = 1
     );
 
     assert!(
-        code.contains("from './Base.vue.tsx'"),
-        "companion script in-project .vue import should resolve to the IDE carrier (.vue.tsx): {code}"
+        code.contains("from './Base.vue'"),
+        "companion script in-project .vue import must be emitted BARE (`./Base.vue`): {code}"
+    );
+    assert!(
+        !code.contains("./Base.vue.tsx"),
+        "the compile-time `.vue.tsx` rewrite must be DROPPED on the companion path: {code}"
     );
 }
 
-/// Re-exports like `export { Foo } from './Foo.vue'` should also be rewritten.
+/// Re-exports like `export { Foo } from './Foo.vue'` emit the BARE `.vue`
+/// specifier (no `.vue.tsx` rewrite).
 #[test]
-fn reexport_vue_specifier_rewritten_to_vue_ts() {
+fn reexport_vue_specifier_emits_bare_carrier_specifier() {
     let (code, _) = gen_tsx_script(
         r#"<script>
 export { default as Dropdown } from './Dropdown.vue'
@@ -130,17 +137,41 @@ const x = 1
 </script>"#,
     );
 
-    // Positive: an in-project .vue re-export resolves to the component IDE
-    // carrier (.vue.tsx).
+    // Positive: an in-project .vue re-export specifier stays BARE.
     assert!(
-        code.contains("from './Dropdown.vue.tsx'"),
-        "re-export in-project .vue specifier should resolve to the IDE carrier (.vue.tsx): {code}"
+        code.contains("from './Dropdown.vue'"),
+        "re-export in-project .vue specifier must be emitted BARE (`./Dropdown.vue`): {code}"
+    );
+    // Negative discriminator: the re-export specifier carries no `.vue.tsx` suffix.
+    assert!(
+        !code.contains("./Dropdown.vue.tsx"),
+        "the emitted in-project `.vue` re-export specifier must be bare — no `.vue.tsx`: {code}"
     );
 
-    // Negative: non-.vue re-export should NOT be rewritten
+    // Negative: non-.vue re-export is untouched.
     assert!(
         code.contains("from './utils'"),
         "non-.vue re-export must not be rewritten: {code}"
+    );
+}
+
+/// Dynamic imports (`import('./Foo.vue')`) emit the BARE `.vue` specifier — the
+/// in-project dynamic-import specifier is not suffixed.
+#[test]
+fn dynamic_vue_import_emits_bare_carrier_specifier() {
+    let (code, _) = gen_tsx_script(
+        r#"<script setup lang="ts">
+const Lazy = () => import('./Lazy.vue')
+</script>"#,
+    );
+
+    assert!(
+        code.contains("import('./Lazy.vue')"),
+        "dynamic in-project .vue import must be emitted BARE (`import('./Lazy.vue')`): {code}"
+    );
+    assert!(
+        !code.contains("./Lazy.vue.tsx"),
+        "the compile-time `.vue.tsx` rewrite must be DROPPED on dynamic imports: {code}"
     );
 }
 
@@ -191,10 +222,12 @@ const count = ref(0)
 
 #[test]
 fn ide_carrier_exports_public_facade_reexport_for_script_setup() {
-    // The Vue IDE carrier (`App.vue.tsx`) is the in-project bare-import target,
-    // so it must export the component's PUBLIC default. `<script setup>` has no
-    // own default, so the carrier RE-EXPORTS the public default from the API
-    // carrier (`App.vue.verter.ts`, where the public type is synthesised).
+    // The Vue IDE carrier (`App.vue.tsx`) is the self-diagnostics surface; it
+    // re-exports the public default synthesised on the API carrier. `<script
+    // setup>` has no own default, so the carrier RE-EXPORTS the public default
+    // from the API carrier (`App.vue.verter.ts`, where the public type is
+    // synthesised). (The bare-import target is the `.d.vue.ts` declaration
+    // carrier, not this IDE carrier.)
     let (code, _) = gen_tsx_script(
         r#"<script setup lang="ts">
 const count = ref(0)

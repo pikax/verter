@@ -39,9 +39,11 @@ fn owned_carrier_state() -> ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
         api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+        decl_path: None,
         shadow_path: None,
         ide_background_loaded: true,
         api_background_loaded: true,
+        decl_background_loaded: false,
         shadow_background_loaded: false,
     }
 }
@@ -87,7 +89,7 @@ fn carrier_close_target_returns_owner_resolved_paths() {
         ),
     ]);
 
-    let target = carrier_close_target(&resolver, "/workspace/src/App.vue", false)
+    let target = carrier_close_target(&resolver, "/workspace/src/App.vue", false, None)
         .expect("an owner-resolved carrier has provider paths to close");
     assert_eq!(
         target.owner_binding,

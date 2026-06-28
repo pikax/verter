@@ -16,6 +16,8 @@ pub mod carrier_sync;
 pub mod membership_ledger;
 pub mod membership_reconciler;
 pub mod publish_coordinator;
+pub mod tsgo_backend;
+pub mod tsgo_virtual_config;
 pub mod tsserver_backend;
 
 pub use carrier_publish_store::{
@@ -31,6 +33,7 @@ pub(crate) use carrier_sync::{
     CarrierMembershipCtx, CarrierProviderCommit, CarrierSyncDecision, CarrierSyncRequest,
 };
 pub use publish_coordinator::{CarrierCompanion, CarrierPublishCoordinator, CarrierPublishError};
+pub use tsgo_backend::TsgoEngineBackend;
 pub use tsserver_backend::TsserverEngineBackend;
 
 pub use membership_ledger::{
@@ -38,7 +41,8 @@ pub use membership_ledger::{
     MembershipRecord, ProjectUri, SessionGen,
 };
 pub use membership_reconciler::{
-    AuthorityState, BootstrapKind, BootstrapState, DesiredMembership, DurableCarrierStore,
-    MembershipReconciler, OwnershipAuthority, OwnershipDecision, PrecomputedOwnershipAuthority,
-    ReconcileErr, ReconcileOutcome, ReconcileReason, ResolverOwnershipAuthority,
+    AuthorityState, BootstrapKind, BootstrapState, CarrierMembershipCommitter, CommitErr,
+    CommitFuture, DesiredMembership, MembershipReconciler, OwnershipAuthority, OwnershipDecision,
+    PrecomputedOwnershipAuthority, ReconcileErr, ReconcileOutcome, ReconcileReason,
+    ResolverOwnershipAuthority,
 };

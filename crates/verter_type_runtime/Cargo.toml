@@ -17,6 +17,12 @@ tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "r
 tracing = "0.1.44"
 verter_span = { path = "../verter_span" }
 verter_language = { path = "../verter_language" }
+# The tsgo `--api` ATTACH transport: the dual-surface OWNED provider attaches an
+# `--api` checker (diagnostics + reflection) to its own `tsgo --lsp` process over
+# the server-minted pipe (the `custom/initializeAPISession` attach), reusing the
+# vscode-jsonrpc transport + typed checker client this crate would otherwise
+# duplicate.
+verter_tsgo_api = { path = "../verter_tsgo_api" }
 
 [dev-dependencies]
 # `test-util` provides the paused virtual clock (`#[tokio::test(start_paused = true)]`)

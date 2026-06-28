@@ -6,20 +6,30 @@ an off-disk generated TSX carrier, served only through the `--api` FS overlay, i
 member of the configured TS project and answers diagnostics/hover/definition from the
 configured Program, with incremental Program reuse across edits.
 
-**PRODUCTION COMPONENT-CARRIER IDENTITY — PROVEN (`GATE 5`, the load-bearing P0).**
+**PRODUCTION CARRIER IDENTITY — PROVEN (`GATE 5`, the load-bearing P0).**
 Because the shipped `--api` has **no module-resolution-map endpoint**, the path Verter serves
-the carrier at IS the engine file identity, and tsgo only reaches it by **appending `.tsx`/`.ts`
-to the FULL bare-import basename** (`import "./Comp.vue"` probes `Comp.vue.tsx` then `Comp.vue.ts`).
-GATE 5 decided the identity empirically against real tsgo (6/6 green):
+the carrier at IS the engine file identity, and tsgo only reaches it by **appending `.ts`/`.tsx`
+to the FULL bare-import basename** (`import "./Comp.vue"` probes `Comp.d.vue.ts` then `Comp.vue.ts`
+then `Comp.vue.tsx`). GATE 5 decided the identity empirically against real tsgo (7/7 green):
 
-- A **`.verter.` infix is REJECTED** for the bare-import **component** carrier — serving
-  `Comp.vue.verter.tsx` does NOT satisfy `import "./Comp.vue"` (tsgo never probes a `.verter.`
-  segment) → **TS2307**. (The earlier doc's `.verter.` _component_ identity is refuted.)
-- The production **component IDE carrier identity is `{name}.vue.tsx` / `{name}.svelte.tsx`** —
-  bare-import-probe-compatible, and **collision-free** because Svelte rune modules are
-  `*.svelte.ts` / `*.svelte.js` (never `.tsx`). GATE 5(C) proves a `Widget.svelte.tsx` component
-  carrier and a REAL `state.svelte.ts` rune module coexist in one directory with correct types
-  **both** ways, no clash.
+- The production **bare-import resolution target is the DECLARATION carrier
+  `{name}.d.vue.ts` / `{name}.d.svelte.ts`** — the **extension-MIDDLE** `.d.<ext>.ts` form (the
+  `.d.` sits between the stem and the carrier extension). tsgo's basename-append probe reaches it
+  **FIRST** (probe order `.d.<ext>.ts` → `.<ext>.ts` → `.<ext>.tsx`, so the declaration **wins**
+  over the IDE carrier). GATE 5(B) proves `CompB.d.vue.ts` satisfies `import "./CompB.vue"` with
+  zero diagnostics and the type flows; GATE 5(B2) proves the **precedence** — with BOTH a
+  `CompB2.d.vue.ts` (`label:string`) and a `CompB2.vue.tsx` (`label:number`) present, the bare
+  `import "./CompB2.vue"` resolves to the **declaration carrier** (`label` → `string`), so
+  `.d.vue.ts` **wins** over `.vue.tsx`.
+- The **component IDE carrier `{name}.vue.tsx` / `{name}.svelte.tsx`** is the **self-diagnostics
+  surface** (the file `B.vue` is type-checked AS, source-mapped back), **NOT** the bare-import
+  target. It is bare-import-probe-compatible in the absence of the declaration carrier and
+  **collision-free** against Svelte rune modules (`*.svelte.ts` / `*.svelte.js`, never `.tsx`):
+  GATE 5(C) proves a `Widget.svelte.tsx` IDE carrier and a REAL `state.svelte.ts` rune module
+  coexist in one directory with correct types **both** ways, no clash.
+- A **`.verter.` infix is REJECTED** for any bare-probed carrier — serving `Comp.vue.verter.tsx`
+  does NOT satisfy `import "./Comp.vue"` (tsgo never probes a `.verter.` segment) → **TS2307**.
+  (The earlier doc's `.verter.` _component_ identity is refuted.)
 - The redirect-reached **`.ts` public-API carrier** (`CarrierApi`, reached via project-reference
   redirect / cross-package `.d.ts`-equivalent — **never bare-probed**) is the ONLY place a
   reserved infix is needed/safe: it uses `{name}.vue.verter.ts` / `{name}.svelte.verter.ts` so it
@@ -87,7 +97,7 @@ normal resolution + `include` enumeration), then queried via `getDefaultProjectF
 is a better fit for Verter than the proposal shape: it maps 1:1 onto the VFS and needs no
 special per-file "open" call.
 
-## Gate results (reproduced; 17/17 harness checks green — GATE 1–4 — plus GATE 5, 6/6)
+## Gate results (reproduced; 17/17 harness checks green — GATE 1–4 — plus GATE 5, 7/7)
 
 Fixture: a real `tsconfig.json` with `baseUrl` + `paths` (`@/* → ./src/*`) + `jsx:react-jsx` +
 `jsxImportSource:verterjsx` + `types:["verter-global-types"]` + `typeRoots` + a **project
@@ -118,22 +128,32 @@ written to disk** (asserted) and is served only through the overlay.
   verified mechanism: tsgo appends `.tsx`/`.ts` to the `Exported.vue` basename and resolves the
   overlay-served companion — serving TSX at the bare `.vue` path does NOT work (a separate probe
   showed `TS2307`), so the redirection MUST target the companion extension. PASS.
-- **GATE 5 (production companion identity — `.verter.` rejected; `.vue.tsx`/`.svelte.tsx` proven;
-  rune coexistence — `companion-identity.mjs`, 6/6):**
+- **GATE 5 (production carrier identity — bare-import target = `.d.<ext>.ts` declaration carrier,
+  proven to resolve + WIN over `.vue.tsx`; `.verter.` rejected for a bare-probed carrier; rune
+  coexistence — `companion-identity.mjs`, 7/7):**
   - `verter_infix_rejected_for_bare_import` — serving `CompA.vue.verter.tsx` does NOT satisfy
     `import "./CompA.vue"` → **TS2307**. The `.verter.` _component_ identity is rejected.
-  - `vue_tsx_resolves_and_types_flow` — `CompB.vue.tsx` satisfies `import "./CompB.vue"` with zero
-    diagnostics; `widget.label` → `"string"` flows into the plain `.ts`. Production component
-    identity is `.vue.tsx`.
+  - `vue_declaration_carrier_resolves_and_types_flow` — `CompB.d.vue.ts` (a hand-written
+    declaration: `declare const widget: { label: string }`) satisfies `import "./CompB.vue"` with
+    zero diagnostics; `widget.label` → `"string"` flows into the plain `.ts`. Production
+    **declaration** carrier identity is `.d.vue.ts`.
+  - `vue_declaration_carrier_wins_over_ide_carrier` — with BOTH `CompB2.d.vue.ts` (`label:string`)
+    and `CompB2.vue.tsx` (`label:number`) served, bare `import "./CompB2.vue"` resolves to the
+    **declaration** carrier (`widget.label` → `"string"`): `.d.vue.ts` **wins** the probe order over
+    `.vue.tsx`. The `.vue.tsx` IDE carrier is the self-diagnostics surface, NOT the bare-import
+    target.
   - `svelte_component_carrier_and_rune_module_coexist` + `svelte_bare_import_targets_tsx_component_carrier`
-    — `import "./Widget.svelte"` resolves to the `Widget.svelte.tsx` component carrier
+    — `import "./Widget.svelte"` resolves to the `Widget.svelte.tsx` IDE carrier
     (`WidgetProps.label` → `"string"`) while a REAL `state.svelte.ts` rune module in the same dir
-    stays resolvable (`count.value` → `"number"`); no clash, correct types both ways.
+    stays resolvable (`count.value` → `"number"`); no clash, correct types both ways. (This section
+    serves only the `.svelte.tsx` carrier — no `.d.svelte.ts` — so it records the IDE carrier's
+    bare-probe compatibility + rune collision-freedom; the production bare-import TARGET is the
+    `.d.svelte.ts` declaration carrier the same probe reaches first, proven for Vue in B/B2.)
   - `svelte_probe_order_recorded` — tsgo probes `.svelte.ts` **before** `.svelte.tsx` (so the
     redirect-reached `.ts` API carrier must avoid a bare `.svelte.ts` identity).
   - `svelte_same_stem_ts_rune_shadows_tsx_carrier` — a same-stem `Same.svelte.ts` rune shadows the
     `Same.svelte.tsx` carrier on `import "./Same.svelte"` (TS1192); documented edge, not fixed by a
-    `.verter.` infix. PASS (all 6).
+    `.verter.` infix. PASS (all 7).
 
 ### The bare-`.vue` redirection probe (settles the mechanism)
 
@@ -161,10 +181,13 @@ A 3-strategy probe against the same tsgo established exactly how `import "./Comp
   path asserted absent on disk; tsgo appends `.tsx`/`.ts` to the basename). The bare-`.vue` case is
   PROVEN here, not deferred. (Residual for Block 5: tsconfig-virtualization root-set injection under
   a `.vue`-specific `include`/`files` config — see the design doc §2.3.)
-- The **production companion identity** is settled by GATE 5 (above): the component IDE carrier is
-  `{name}.vue.tsx` / `{name}.svelte.tsx` (bare-import-probe-compatible + collision-free); the
-  redirect-reached `.ts` API carrier uses the reserved `{name}.vue.verter.ts` /
-  `{name}.svelte.verter.ts` infix (never bare-probed). A `.verter.` _component_ identity is refuted.
+- The **production carrier identities** are settled by GATE 5 (above): the **bare-import resolution
+  target** is the **declaration carrier** `{name}.d.vue.ts` / `{name}.d.svelte.ts` (extension-MIDDLE,
+  the path the basename-append probe reaches FIRST — proven to resolve AND win over `.vue.tsx`); the
+  `{name}.vue.tsx` / `{name}.svelte.tsx` IDE carrier is the **self-diagnostics** surface (bare-probe-
+  compatible + rune-collision-free, but NOT the bare-import target); the redirect-reached `.ts` API
+  carrier uses the reserved `{name}.vue.verter.ts` / `{name}.svelte.verter.ts` infix (never
+  bare-probed). A `.verter.` _component_ identity is refuted.
 - **Engine acquisition (precise):** the installed `typescript` package whose **major is ≥ 7** wins
   always; `@typescript/native-preview` is accepted as a fallback SOURCE. The production NO-TS
   fallback (not exercised here) downloads `typescript@rc` (the TS7 channel — `rc` = `7.0.1-rc`
