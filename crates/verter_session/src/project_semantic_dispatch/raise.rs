@@ -4719,21 +4719,60 @@ pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
     shape_engine::project_node_root_sentinel(dispatch, node).unwrap_or(false)
 }
 
-/// Node-domain equivalent of `matches!(raise(node), TypeExpr::Unknown { raw } if raw
-/// == "semanticMiss")`: whether `node`'s OWN raised ROOT term is EXACTLY the
-/// `semanticMiss` sentinel. STRICTLY NARROWER than
-/// [`node_root_is_unmaterialized_sentinel_with_dispatch`] — an object-surface /
-/// surface-member / budget / cycle root reads as an unmaterialised sentinel THERE but
-/// is NOT the miss sentinel HERE. A whole-raise `None` is `false`. DISPATCH-taking
-/// primary — the published-operator mirror's `Mapped` arm reads this off the value
-/// node so it suppresses EXACTLY the carriers `type_expr_root_is_published_operator`
-/// does (the single miss spelling), without raising the node to a `TypeExpr`.
+/// Node-domain equivalent of `type_expr_root_is_published_operator(raise(node))`:
+/// whether `node`'s NORMALIZED raised root is a published surface operator
+/// (`Ref` / `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf`, or a `Mapped`
+/// whose value root is NOT `semanticMiss`). Reads the post-normalized raised root
+/// off the facts-only fold — the single source the fold normalizes through — so it
+/// answers IDENTICALLY to the `TypeExpr` predicate on the raised value, including
+/// for shapes the raw-node walk mis-classifies (e.g. an `Intersection([{}, op])`
+/// the fold collapses to its operator arm). A whole-raise `None` is `false`.
 #[must_use]
-pub(crate) fn node_root_is_semantic_miss_sentinel_with_dispatch(
+pub(crate) fn node_root_is_published_operator_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> bool {
-    shape_engine::project_node_root_semantic_miss_sentinel(dispatch, node).unwrap_or(false)
+    shape_engine::project_node_root_is_published_operator(dispatch, node).unwrap_or(false)
+}
+
+/// Node-domain equivalent of `matches!(raise(node), TypeExpr::TypeOf(_))`: whether
+/// `node`'s NORMALIZED raised root is a `TypeOf`. Reads the post-normalized raised
+/// root off the facts-only fold (no `TypeExpr` materialised), so an
+/// `Intersection([{}, TypeOf])` collapsed by the fold answers `true`. A
+/// whole-raise `None` is `false`.
+#[must_use]
+pub(crate) fn node_root_is_typeof_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_root_is_typeof(dispatch, node).unwrap_or(false)
+}
+
+/// Node-domain equivalent of `matches!(raise(node), TypeExpr::Object(_))`: whether
+/// `node`'s NORMALIZED raised root is EXACTLY an `Object` (NOT a `Union` /
+/// `Intersection` root). Reads the post-normalized raised root off the facts-only
+/// fold (no `TypeExpr` materialised), so an `Intersection([{}, Object])` collapsed
+/// by the fold answers `true`, matching the `TypeExpr` predicate on the raised
+/// value. A whole-raise `None` is `false`.
+#[must_use]
+pub(crate) fn node_root_is_object_surface_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_root_is_object_surface(dispatch, node).unwrap_or(false)
+}
+
+/// Node-domain equivalent of `matches!(raise(node), TypeExpr::IndexedAccess { .. })`:
+/// whether `node`'s NORMALIZED raised root is an `IndexedAccess`. Reads the
+/// post-normalized raised root off the facts-only fold (no `TypeExpr`
+/// materialised), so an `Intersection([{}, IndexedAccess])` collapsed by the fold
+/// answers `true`. A whole-raise `None` is `false`.
+#[must_use]
+pub(crate) fn node_root_is_indexed_access_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_root_is_indexed_access(dispatch, node).unwrap_or(false)
 }
 
 /// Node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`:

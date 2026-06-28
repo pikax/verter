@@ -138,116 +138,54 @@ fn type_expr_root_is_published_operator(expr: &verter_type_expr::TypeExpr) -> bo
 }
 
 /// Node-domain mirror of [`type_expr_root_is_published_operator`] applied to a
-/// node's RAISED root term: is `node`'s root a published operator
-/// (`Ref`/`Mapped`-with-value/`KeyOf`/`IndexedAccess`/`Conditional`/`TypeOf`)?
+/// node's RAISED root term: is `node`'s NORMALIZED raised root a published
+/// operator (`Ref` / `Mapped`-with-non-miss-value / `KeyOf` / `IndexedAccess` /
+/// `Conditional` / `TypeOf`)?
 ///
-/// Read off the producing node so the second-pass reduction context is decided
-/// without raising the first-pass surface to a `TypeExpr` and re-classifying it.
-/// Arm-for-arm with the `TypeExpr` predicate:
-///   - `Alias(inner)` ⇒ recurse — the node-domain identity hop (the `TypeExpr`
-///     predicate's `Parenthesized` peel); the raise strips it.
-///   - `DeclRef` / `InstantiationRef` / `BareRef` ⇒ true — they raise to
-///     `TypeExpr::Ref` (a surviving declared surface root).
-///   - `Mapped { value }` ⇒ true UNLESS the `value`'s raised ROOT is EXACTLY the
-///     `semanticMiss` sentinel (`node_root_is_semantic_miss_sentinel_with_dispatch`,
-///     the node form of the `TypeExpr` predicate's `value == Unknown { raw ==
-///     "semanticMiss" }` carrier check). This is the NARROW miss-root fact, NOT the
-///     broad unmaterialised-sentinel set: a `Mapped` value raising to one of the
-///     OTHER sentinel spellings (object-surface, surface-member, budget, cycle)
-///     PUBLISHES (true), exactly as the `TypeExpr` predicate does — pinned by the
-///     `Mapped { value: semanticObjectSurface }` vs `Mapped { value: semanticMiss }`
-///     parity cases.
-///   - `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf` ⇒ true.
-///   - everything else (`Object`/`Union`/`Intersection`/primitives/… and
-///     `ImportType`/`RawFallback`, which raise to non-`Ref` non-operator terms) ⇒
-///     false.
+/// Reads the POST-NORMALIZED raised root through the shared shape-engine fold
+/// (`node_root_is_published_operator_with_dispatch`) — the SAME fold that drops
+/// the Intersection sentinel / empty-object arms and peels the `Alias` identity
+/// hops — so the answer equals `type_expr_root_is_published_operator(raise(node))`
+/// BY CONSTRUCTION, including for shapes the former raw-node walk mis-classified
+/// (e.g. `Intersection([{}, IndexedAccess])`, which the raw walk saw as a bare
+/// `Intersection` ⇒ false but which raises to its operator arm ⇒ true). The
+/// `Mapped` carrier-suppression (publish UNLESS the value root is EXACTLY the
+/// `semanticMiss` sentinel) is carried in the fold's normalized root class, so the
+/// NARROW miss-root rule still holds without a raw-node value re-fold here.
 fn node_root_is_published_operator(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
 ) -> bool {
-    use crate::project_semantic_dispatch::raise::node_root_is_semantic_miss_sentinel_with_dispatch;
+    use crate::project_semantic_dispatch::raise::node_root_is_published_operator_with_dispatch;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::SemanticNodeData;
-    use rustc_hash::FxHashSet;
 
     let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Iterative visited-set walk of the `Alias` identity-hop chain (the node-domain
-    // peel the raise strips). The `visited` set follows an acyclic alias chain of
-    // ANY depth — matching the uncapped `TypeExpr` predicate's `Parenthesized` peel —
-    // and terminates on a node-graph cycle (a self- or mutually-referential `Alias`).
-    let mut visited: FxHashSet<crate::semantic_query::SemanticNodeId> = FxHashSet::default();
-    let mut node = node;
-    loop {
-        if !visited.insert(node) {
-            return false;
-        }
-        let Some(data) = dispatch.graph().node_data(node) else {
-            return false;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Alias(inner) => {
-                node = *inner;
-            }
-            SemanticNodeData::DeclRef { .. }
-            | SemanticNodeData::InstantiationRef { .. }
-            | SemanticNodeData::BareRef(_) => return true,
-            SemanticNodeData::Mapped { mapper, .. } => {
-                // The mapped VALUE expression (`{ [K in S]: <value> }`) lives on the
-                // mapper key. `type_expr_root_is_published_operator` keeps a `Mapped`
-                // as a carrier (false) ONLY when its value is EXACTLY the
-                // `Unknown { raw == "semanticMiss" }` placeholder, and publishes
-                // (true) for ANY other value — including a value that raises to one of
-                // the OTHER unmaterialised sentinels (object-surface, surface-member,
-                // budget, cycle). So this arm suppresses on the NARROW miss-root fact,
-                // NOT the broad unmaterialised-sentinel set, to mirror the `TypeExpr`
-                // predicate exactly.
-                let value = mapper.value_expr;
-                return !node_root_is_semantic_miss_sentinel_with_dispatch(&dispatch, value);
-            }
-            SemanticNodeData::KeyOf { .. }
-            | SemanticNodeData::IndexedAccess { .. }
-            | SemanticNodeData::Conditional { .. }
-            | SemanticNodeData::TypeOf(_) => return true,
-            _ => return false,
-        }
-    }
+    node_root_is_published_operator_with_dispatch(&dispatch, node)
 }
 
-/// Whether `node`'s raised ROOT term is a `TypeOf` — the node-domain equivalent of
-/// `matches!(expr, TypeExpr::TypeOf(_))`, following the `Alias` identity hop (the
-/// node-domain peel the raise strips). The registry member-surface stabiliser scopes
-/// its typeof-result-miss admission refusal to a `TypeOf`-rooted surface, exactly as
-/// `materialize_component_meta_type_expr_until_stable_full` scopes that refusal to a
-/// `TypeOf` input expr (so a miss-rooted `Pick`/`Omit`/`Ref` surface — a different,
-/// already-handled class — is not refused here).
+/// Whether `node`'s NORMALIZED raised ROOT term is a `TypeOf` — the node-domain
+/// equivalent of `matches!(raise(node), TypeExpr::TypeOf(_))`. The registry
+/// member-surface stabiliser scopes its typeof-result-miss admission refusal to a
+/// `TypeOf`-rooted surface, exactly as
+/// `materialize_component_meta_type_expr_until_stable_full` scopes that refusal to
+/// a `TypeOf` input expr (so a miss-rooted `Pick`/`Omit`/`Ref` surface — a
+/// different, already-handled class — is not refused here).
+///
+/// Reads the POST-NORMALIZED raised root through the shared shape-engine fold
+/// (`node_root_is_typeof_with_dispatch`) — the SAME fold that drops the
+/// Intersection sentinel / empty-object arms and peels the `Alias` hops — so the
+/// answer equals the `TypeExpr` predicate on the raised value BY CONSTRUCTION,
+/// including for shapes the former raw-node walk mis-classified (e.g.
+/// `Intersection([{}, TypeOf])`, raw ⇒ false but raises to `TypeOf` ⇒ true).
 fn node_root_is_typeof(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
 ) -> bool {
-    use crate::semantic_query::SemanticNodeData;
-    use rustc_hash::FxHashSet;
+    use crate::project_semantic_dispatch::raise::node_root_is_typeof_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 
-    // Iterative visited-set walk of the `Alias` identity-hop chain (the node-domain
-    // peel the raise strips). The `visited` set follows an acyclic alias chain of
-    // ANY depth and terminates on a node-graph cycle (a self- or mutually-referential
-    // `Alias`).
-    let mut visited: FxHashSet<crate::semantic_query::SemanticNodeId> = FxHashSet::default();
-    let mut node = node;
-    loop {
-        if !visited.insert(node) {
-            return false;
-        }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
-            return false;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Alias(inner) => {
-                node = *inner;
-            }
-            SemanticNodeData::TypeOf(_) => return true,
-            _ => return false,
-        }
-    }
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    node_root_is_typeof_with_dispatch(&dispatch, node)
 }
 
 /// Node-domain mirror of [`type_expr_materialize_reduction_context`]: the EXACT

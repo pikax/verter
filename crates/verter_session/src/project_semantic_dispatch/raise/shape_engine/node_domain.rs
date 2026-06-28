@@ -17,9 +17,9 @@ use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, Primitive
 
 use super::{
     FactShapeTag, FoldedFunction, FoldedTupleElement, RaisedFunction, RaisedFunctionParam,
-    RaisedObjectMember, RaisedRecursiveFrame, RaisedShapeAlgebra, RaisedShapeFacts, RaisedShapeKey,
-    RaisedShapeResult, RaisedShapeSummary, RaisedTerm, RaisedTupleElement, RaisedTypeParam,
-    ShapeInterner,
+    RaisedObjectMember, RaisedRecursiveFrame, RaisedRootKind, RaisedShapeAlgebra, RaisedShapeFacts,
+    RaisedShapeKey, RaisedShapeResult, RaisedShapeSummary, RaisedTerm, RaisedTupleElement,
+    RaisedTypeParam, ShapeInterner,
 };
 use crate::resolver_core::component_meta_query_engine::{
     semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
@@ -37,7 +37,8 @@ use crate::semantic_query::QueryError;
 // ===========================================================================
 mod summary {
     use super::{
-        FactShapeTag, RaisedShapeFacts, RaisedShapeSummary, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
+        FactShapeTag, RaisedRootKind, RaisedShapeFacts, RaisedShapeSummary, SEMANTIC_MISS,
+        SEMANTIC_OBJECT_SURFACE,
     };
 
     /// Assemble a summary from the three facts + tag. `can_shell_raise` is
@@ -59,14 +60,30 @@ mod summary {
             // ROOT is not a sentinel, even when a child is).
             root_unmaterialized_sentinel: false,
             root_semantic_miss_sentinel: false,
+            // Default `Other`; the per-arm constructors that map to a root mirror
+            // class (`reference_leaf` / `type_of` / `empty_object` / `key_of` /
+            // `indexed_access` / `conditional` / `mapped` / `object_from_members`)
+            // override it.
+            root_kind: RaisedRootKind::Other,
         }
     }
 
-    /// A materialized, expanded leaf with no special tag (Primitive, Literal,
-    /// Infer, RecursiveRef, Ref, SyntheticSlotBinding, ImportType,
-    /// TemplateLiteral, TypeParameter).
+    /// A materialized, expanded leaf with no special tag and no root-mirror class
+    /// (Primitive, Literal, Infer, RecursiveRef, SyntheticSlotBinding, ImportType,
+    /// TemplateLiteral, TypeParameter). A `Ref` carrier uses [`reference_leaf`]
+    /// instead so it carries [`RaisedRootKind::Reference`].
     pub(super) fn materialized_expanded_leaf() -> RaisedShapeSummary {
         summary(true, true, FactShapeTag::Other)
+    }
+
+    /// A `Ref`-carrier leaf (`DeclRef` / `InstantiationRef` / `BareRef` /
+    /// `DeclPlaceholder`): facts/tag identical to [`materialized_expanded_leaf`]
+    /// (materialized + expanded, `Other` tag) — only `root_kind` differs, marking
+    /// the root as a `TypeExpr::Ref` (a published-operator surface root).
+    pub(super) fn reference_leaf() -> RaisedShapeSummary {
+        let mut s = summary(true, true, FactShapeTag::Other);
+        s.root_kind = RaisedRootKind::Reference;
+        s
     }
 
     /// `Unknown { raw }`: materialized iff the raw is NOT an unmaterialized
@@ -129,7 +146,9 @@ mod summary {
 
     /// `TypeOf`: a materialized leaf but NOT an expanded surface.
     pub(super) fn type_of() -> RaisedShapeSummary {
-        summary(true, false, FactShapeTag::Other)
+        let mut s = summary(true, false, FactShapeTag::Other);
+        s.root_kind = RaisedRootKind::TypeOf;
+        s
     }
 
     /// `Union`: materialized / expanded are the AND over all members.
@@ -157,9 +176,11 @@ mod summary {
         summary(materialized, expanded, FactShapeTag::Other)
     }
 
-    /// The representable empty object `{}`.
+    /// The representable empty object `{}` — raises to `TypeExpr::Object([])`.
     pub(super) fn empty_object() -> RaisedShapeSummary {
-        summary(true, true, FactShapeTag::EmptyObject)
+        let mut s = summary(true, true, FactShapeTag::EmptyObject);
+        s.root_kind = RaisedRootKind::Object;
+        s
     }
 
     /// `Array`: recurses `materialized` into its element; an expanded surface.
@@ -177,7 +198,9 @@ mod summary {
 
     /// `KeyOf`: recurses `materialized` into its inner; NOT an expanded surface.
     pub(super) fn key_of(base: RaisedShapeFacts) -> RaisedShapeSummary {
-        summary(base.materialized, false, FactShapeTag::Other)
+        let mut s = summary(base.materialized, false, FactShapeTag::Other);
+        s.root_kind = RaisedRootKind::KeyOf;
+        s
     }
 
     /// `IndexedAccess`: materialized iff BOTH object + index are; NOT an
@@ -186,11 +209,13 @@ mod summary {
         object: RaisedShapeFacts,
         index: RaisedShapeFacts,
     ) -> RaisedShapeSummary {
-        summary(
+        let mut s = summary(
             object.materialized && index.materialized,
             false,
             FactShapeTag::Other,
-        )
+        );
+        s.root_kind = RaisedRootKind::IndexedAccess;
+        s
     }
 
     /// `Conditional`: materialized iff ALL of check / extends / true / false
@@ -205,19 +230,30 @@ mod summary {
             && extends.materialized
             && true_type.materialized
             && false_type.materialized;
-        summary(materialized, false, FactShapeTag::Other)
+        let mut s = summary(materialized, false, FactShapeTag::Other);
+        s.root_kind = RaisedRootKind::Conditional;
+        s
     }
 
     /// `Mapped`: materialized iff source + value (+ name_type, when present)
-    /// are; NOT an expanded surface.
+    /// are; NOT an expanded surface. `value_root_semantic_miss` is the mapped
+    /// VALUE's OWN raised-root `semanticMiss` fact, carried into the root class so
+    /// the published-operator classifier suppresses EXACTLY the
+    /// `value == Unknown { raw == "semanticMiss" }` carrier the `TypeExpr`
+    /// predicate suppresses (publishing for any other value).
     pub(super) fn mapped(
         source: RaisedShapeFacts,
         value: RaisedShapeFacts,
         name_type: Option<RaisedShapeFacts>,
+        value_root_semantic_miss: bool,
     ) -> RaisedShapeSummary {
         let materialized =
             source.materialized && value.materialized && name_type.is_none_or(|n| n.materialized);
-        summary(materialized, false, FactShapeTag::Other)
+        let mut s = summary(materialized, false, FactShapeTag::Other);
+        s.root_kind = RaisedRootKind::Mapped {
+            value_is_semantic_miss: value_root_semantic_miss,
+        };
+        s
     }
 
     /// `Function`: carries the function's folded `materialized` fact; an
@@ -247,7 +283,9 @@ mod summary {
         } else {
             FactShapeTag::Other
         };
-        summary(materialized, true, tag)
+        let mut s = summary(materialized, true, tag);
+        s.root_kind = RaisedRootKind::Object;
+        s
     }
 }
 
@@ -398,7 +436,7 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
                 name,
                 type_arguments,
             },
-            summary::materialized_expanded_leaf(),
+            summary::reference_leaf(),
         )
     }
     fn synthetic_slot_binding(
@@ -532,6 +570,7 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
             source.summary.facts,
             value.summary.facts,
             name_type.as_ref().map(|n| n.summary.facts),
+            value.summary.root_semantic_miss_sentinel,
         );
         self.result(
             RaisedTerm::Mapped {
@@ -788,7 +827,7 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
         _name: Arc<str>,
         _type_arguments: Vec<RaisedShapeSummary>,
     ) -> RaisedShapeSummary {
-        summary::materialized_expanded_leaf()
+        summary::reference_leaf()
     }
     fn synthetic_slot_binding(
         &mut self,
@@ -865,7 +904,12 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
         _readonly: MappedModifier,
         name_type: Option<RaisedShapeSummary>,
     ) -> RaisedShapeSummary {
-        summary::mapped(source.facts, value.facts, name_type.map(|n| n.facts))
+        summary::mapped(
+            source.facts,
+            value.facts,
+            name_type.map(|n| n.facts),
+            value.root_semantic_miss_sentinel,
+        )
     }
     fn template_literal(
         &mut self,

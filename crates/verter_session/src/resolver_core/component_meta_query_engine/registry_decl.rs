@@ -33,12 +33,12 @@ use verter_type_expr::TypeExpr;
 use super::helpers::{
     is_builtin_name, resolve_imported_registry_symbol_with_budget, ImportedRegistrySymbolResolution,
 };
+use super::route_admission::{self, AdmittedRouteProjectionNode};
 use super::surface::{
     project_admitted_route_node_to_expanded_object_shape,
     projected_compound_root_surface_via_dispatch, projected_surface_from_semantic_node,
     projected_surface_to_expanded_shape, projected_surface_to_type_expr,
 };
-use super::AdmittedRouteProjectionNode;
 use super::{
     empty_semantic_args, engine_fact_signature_for_exported_type,
     local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
@@ -1137,11 +1137,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
                         // Node-domain materializedness gate (the typed
                         // equivalent of the former
-                        // `.filter(dispatch_route_expr_is_materialized)`); admit
-                        // the node WITHOUT materialising it.
+                        // `.filter(dispatch_route_expr_is_materialized)`); the
+                        // gated mint is `route_admission::admit_materialized`,
+                        // which admits the node WITHOUT materialising it.
                         node_raised_shape_facts_with_dispatch(&dispatch, node)
-                            .filter(|facts| facts.materialized)
-                            .map(|_| AdmittedRouteProjectionNode::new(node))
+                            .and_then(|facts| route_admission::admit_materialized(&facts, node))
                     }
                     _ => None,
                 }
@@ -1393,12 +1393,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
                 // Node-domain materializedness gate (the typed equivalent of the
-                // former `.filter(dispatch_route_expr_is_materialized)`); admit
-                // the node WITHOUT materialising it — the publication wrapper
+                // former `.filter(dispatch_route_expr_is_materialized)`); the gated
+                // mint is `route_admission::admit_materialized`, which admits the
+                // node WITHOUT materialising it — the publication wrapper
                 // materialises once at the registry sink.
                 node_raised_shape_facts_with_dispatch(&dispatch, node)
-                    .filter(|facts| facts.materialized)
-                    .map(|_| AdmittedRouteProjectionNode::new(node))
+                    .and_then(|facts| route_admission::admit_materialized(&facts, node))
             }
             _ => None,
         }

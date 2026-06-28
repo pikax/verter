@@ -351,6 +351,47 @@ pub(in crate::project_semantic_dispatch) enum FactShapeTag {
     Other,
 }
 
+/// The NORMALIZED raised-ROOT term class of a folded node — the node-domain
+/// successor of the raw-node `match data.as_ref()` root mirrors
+/// (`node_root_is_published_operator` / `node_root_is_typeof` /
+/// `node_raises_to_object_surface` / `node_is_indexed_access_shell`).
+///
+/// Carried on [`RaisedShapeSummary`] and produced BOTTOM-UP by the same
+/// [`summary`](node_domain) constructor layer that already folds the facts/tag.
+/// Because the fold has ALREADY applied the structural normalizations the
+/// materializer applies (the Intersection sentinel / empty-object arm drop +
+/// single-arm collapse), reading the ROOT node's `root_kind` answers IDENTICALLY
+/// to the matching `TypeExpr` predicate applied to `raise(node)` — i.e.
+/// `node_pred(node) == type_expr_pred(raise(node))` BY CONSTRUCTION, with no
+/// second arm-collapse walk and no `TypeExpr` materialised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::project_semantic_dispatch) enum RaisedRootKind {
+    /// Raises to `TypeExpr::Object` — an `Object` / representable empty object,
+    /// and the `MergedDecl` / `VueMacroElements` carriers that fold through the
+    /// object constructors.
+    Object,
+    /// Raises to `TypeExpr::Ref` — a `DeclRef` / `InstantiationRef` / `BareRef` /
+    /// `DeclPlaceholder` carrier.
+    Reference,
+    /// Raises to `TypeExpr::KeyOf`.
+    KeyOf,
+    /// Raises to `TypeExpr::IndexedAccess`.
+    IndexedAccess,
+    /// Raises to `TypeExpr::Conditional`.
+    Conditional,
+    /// Raises to `TypeExpr::TypeOf`.
+    TypeOf,
+    /// Raises to `TypeExpr::Mapped`; carries whether the mapped VALUE's OWN raised
+    /// root is EXACTLY the `semanticMiss` sentinel — the single carrier the
+    /// published-operator predicate suppresses (it PUBLISHES for any other value).
+    Mapped { value_is_semantic_miss: bool },
+    /// Any other raised root — `Union` / `Intersection` / primitive / literal /
+    /// `Function` / `ConstructorType` / `Array` / `Tuple` / sentinel / `ImportType`
+    /// / … — none of which is an object root, a reference, an operator, or a typeof
+    /// for the root mirrors.
+    Other,
+}
+
 /// The shared bottom-up SUMMARY of a raised shape: the [`RaisedShapeFacts`] plus
 /// the [`FactShapeTag`]. The fact + tag FORMULAS live ONCE in the
 /// [`node_domain`] summary-constructor layer; BOTH the key-bearing
@@ -379,11 +420,20 @@ pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
     /// (`unknown` / `opaque_sentinel`) when the raw / `QueryError` reads as the miss
     /// spelling, so it is the node-domain equivalent of `matches!(raise(node),
     /// TypeExpr::Unknown { raw } if raw == "semanticMiss")` applied to the ROOT term.
-    /// Read through [`project_node_root_semantic_miss_sentinel`] by the
-    /// published-operator mirror's `Mapped` arm, which suppresses EXACTLY the
-    /// carriers the `TypeExpr` predicate does (the miss spelling alone, NOT the broad
-    /// sentinel set).
+    /// Read by the `mapped` [`summary`](node_domain) constructor off the mapped
+    /// VALUE's summary and folded into [`RaisedRootKind::Mapped`]'s
+    /// `value_is_semantic_miss`, which the published-operator classifier
+    /// ([`project_node_root_is_published_operator`]) consumes to suppress EXACTLY
+    /// the carrier the `TypeExpr` predicate does (the miss spelling alone, NOT the
+    /// broad sentinel set).
     pub(in crate::project_semantic_dispatch) root_semantic_miss_sentinel: bool,
+    /// The NORMALIZED raised-ROOT term class — see [`RaisedRootKind`]. Set by the
+    /// per-arm [`summary`](node_domain) constructors and carried up so the
+    /// [`project_node_root_is_published_operator`] / [`project_node_root_is_typeof`]
+    /// / [`project_node_root_is_object_surface`] / [`project_node_root_is_indexed_access`]
+    /// classifiers answer off the POST-NORMALIZED root, matching the `TypeExpr`
+    /// predicate on `raise(node)` by construction.
+    pub(in crate::project_semantic_dispatch) root_kind: RaisedRootKind,
 }
 
 /// The bottom-up node-domain projection result: the interned structural key
@@ -1127,22 +1177,89 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
     Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_unmaterialized_sentinel)
 }
 
-/// Whether `node`'s OWN raised root term is EXACTLY the
-/// [`SEMANTIC_MISS`](crate::resolver_core::component_meta_query_engine::SEMANTIC_MISS)
-/// sentinel — the node-domain equivalent of `matches!(raise(node), TypeExpr::Unknown
-/// { raw } if raw == "semanticMiss")` applied to the ROOT term. Reads the ROOT
-/// node's [`RaisedShapeSummary::root_semantic_miss_sentinel`] from the facts-only
-/// fold (no key interned, no `TypeExpr` materialised). STRICTLY NARROWER than
-/// [`project_node_root_sentinel`]: an object-surface / surface-member / budget /
-/// cycle root is an unmaterialised sentinel there but is NOT the miss sentinel here.
-/// `None` when the whole raise is `None`.
-pub(in crate::project_semantic_dispatch) fn project_node_root_semantic_miss_sentinel(
+/// The NORMALIZED raised-ROOT class of `node` — the facts-only fold's
+/// [`RaisedShapeSummary::root_kind`]. `None` when the whole raise is `None`. The
+/// per-fact classifiers below read this; a caller never matches on the enum
+/// outside this module.
+fn project_node_root_kind(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<RaisedRootKind> {
+    let mut alg = RaisedFactsAlg;
+    let mut active = FxHashSet::default();
+    Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_kind)
+}
+
+/// Node-domain equivalent of `type_expr_root_is_published_operator(raise(node))`:
+/// whether `node`'s NORMALIZED raised root is a published surface operator — a
+/// `Ref` / `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf`, OR a `Mapped`
+/// whose value root is NOT the `semanticMiss` sentinel. Reads the post-normalized
+/// [`RaisedRootKind`] off the facts-only fold (no key interned, no `TypeExpr`
+/// materialised), so it answers IDENTICALLY to the `TypeExpr` predicate on
+/// `raise(node)` even for shapes the raw-node mirror would mis-classify (e.g.
+/// `Intersection([{}, IndexedAccess])`, which the fold collapses to its operator
+/// root). `None` when the whole raise is `None`.
+pub(in crate::project_semantic_dispatch) fn project_node_root_is_published_operator(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> Option<bool> {
-    let mut alg = RaisedFactsAlg;
-    let mut active = FxHashSet::default();
-    Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_semantic_miss_sentinel)
+    Some(matches!(
+        project_node_root_kind(dispatch, node)?,
+        RaisedRootKind::Reference
+            | RaisedRootKind::KeyOf
+            | RaisedRootKind::IndexedAccess
+            | RaisedRootKind::Conditional
+            | RaisedRootKind::TypeOf
+            | RaisedRootKind::Mapped {
+                value_is_semantic_miss: false
+            }
+    ))
+}
+
+/// Node-domain equivalent of `matches!(raise(node), TypeExpr::TypeOf(_))`: whether
+/// `node`'s NORMALIZED raised root is a `TypeOf`. Reads the post-normalized
+/// [`RaisedRootKind`] (no `TypeExpr` materialised). `None` when the whole raise is
+/// `None`.
+pub(in crate::project_semantic_dispatch) fn project_node_root_is_typeof(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    Some(matches!(
+        project_node_root_kind(dispatch, node)?,
+        RaisedRootKind::TypeOf
+    ))
+}
+
+/// Node-domain equivalent of `matches!(raise(node), TypeExpr::Object(_))`: whether
+/// `node`'s NORMALIZED raised root is EXACTLY an `Object` (an `Object` / empty
+/// object / `MergedDecl` / `VueMacroElements` — a `Union` / `Intersection` root
+/// is NOT). Reads the post-normalized [`RaisedRootKind`] (no `TypeExpr`
+/// materialised), so e.g. `Intersection([{}, Object])` — which the fold collapses
+/// to its `Object` arm — answers `true`, matching the `TypeExpr` predicate on the
+/// raised value. `None` when the whole raise is `None`.
+pub(in crate::project_semantic_dispatch) fn project_node_root_is_object_surface(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    Some(matches!(
+        project_node_root_kind(dispatch, node)?,
+        RaisedRootKind::Object
+    ))
+}
+
+/// Node-domain equivalent of `matches!(raise(node), TypeExpr::IndexedAccess { .. })`:
+/// whether `node`'s NORMALIZED raised root is an `IndexedAccess`. Reads the
+/// post-normalized [`RaisedRootKind`] (no `TypeExpr` materialised), so
+/// `Intersection([{}, IndexedAccess])` — collapsed by the fold to its
+/// `IndexedAccess` arm — answers `true`. `None` when the whole raise is `None`.
+pub(in crate::project_semantic_dispatch) fn project_node_root_is_indexed_access(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    Some(matches!(
+        project_node_root_kind(dispatch, node)?,
+        RaisedRootKind::IndexedAccess
+    ))
 }
 
 /// Whether `node`'s raised shape contains a semantic miss ANYWHERE in its tree —

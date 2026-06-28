@@ -15,6 +15,10 @@ use rustc_hash::FxHashSet;
 use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
 use verter_type_expr::TypeExpr;
 
+use super::route_admission::{
+    admit_expanded_surface, admit_expanded_surface_changed, admit_mode_aware,
+    AdmittedRouteProjectionNode,
+};
 use super::{
     BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
     SEMANTIC_SURFACE_MEMBER,
@@ -60,52 +64,6 @@ fn materialize_published_node(
     let cap = MetaQuerySurfaceOutputCap::new(dispatch);
     cap.materialize_output_type_expr(node)
         .map(|raised| raised.into_type_expr(&cap))
-}
-
-/// A node-domain route-projection result: the admitted `SemanticNodeId` a
-/// route/surface adapter produced AFTER its node-domain acceptance gate
-/// (`materialized && expanded_surface`), held in node-domain so the route
-/// fixpoint stabilises on interned [`shape_engine::RaisedShapeKey`] identity
-/// and materialises EXACTLY ONCE at the terminal sink.
-///
-/// SEALED carrier: the `node` field is module-private (only this `surface`
-/// leaf reads it, to materialise / compare it at a cap-gated sink) and `new` /
-/// `node` are mint-scoped to the query-engine subtree
-/// (`pub(in crate::resolver_core::component_meta_query_engine)`), so the route
-/// adapters in `surface` / `registry_decl` mint and read it while the
-/// host-threaded wrappers (`crate::meta_resolve`) and the fixpoint driver only
-/// NAME and pass it — no forgeable `SemanticNodeId → TypeExpr` adapter crosses
-/// the query-engine boundary, and materialisation stays cap-gated regardless of
-/// who holds the carrier.
-///
-/// Same admitted-node carrier shape as the macro-output `AdmittedExpansionNode`,
-/// but DELIBERATELY widened: `AdmittedExpansionNode` is fully module-private,
-/// whereas the type here is `pub(crate)` ON PURPOSE so the cross-subtree
-/// `meta_resolve::dispatch_helpers` host-threaded wrappers can NAME and pass the
-/// carrier across the query-engine boundary. They cannot FORGE one: `new` / `node`
-/// stay subtree-mint-scoped (`pub(in …::component_meta_query_engine)`) and
-/// materialisation stays cap-gated, so widening the type's name does not widen the
-/// mint or the materialise.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct AdmittedRouteProjectionNode {
-    node: SemanticNodeId,
-}
-
-impl AdmittedRouteProjectionNode {
-    /// Mint the carrier around an admitted route-projection node. Subtree-scoped
-    /// so only the route/surface adapters (`surface` + `registry_decl`) mint it,
-    /// after their own node-domain acceptance gate.
-    #[must_use]
-    pub(in crate::resolver_core::component_meta_query_engine) fn new(node: SemanticNodeId) -> Self {
-        Self { node }
-    }
-
-    /// The admitted node. Subtree-scoped so only the sink-owned materialise /
-    /// compare helpers read it; the materialisation it feeds stays cap-gated.
-    #[must_use]
-    pub(in crate::resolver_core::component_meta_query_engine) fn node(&self) -> SemanticNodeId {
-        self.node
-    }
 }
 
 /// A freshly-lowered route-key SOURCE node held in node domain for the SINGLE
@@ -258,8 +216,7 @@ pub(crate) fn project_admitted_node_to_expanded_node(
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
     let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
-    (facts.materialized && facts.expanded_surface)
-        .then(|| AdmittedRouteProjectionNode::new(result_node))
+    admit_expanded_surface(&facts, result_node)
 }
 
 /// Node-domain "no-op/changed" convergence test for the route fixpoint's FIRST
@@ -389,12 +346,11 @@ pub(crate) fn lower_and_project_to_expanded_node(
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
     // Facts + the no-op/changed decision come from ONE node fold (reusing the
-    // dispatch above): `!contains_miss && is_expanded_surface && reduced != expr`
-    // — the `reduced != *expr` no-op check is the node-domain shape inequality.
+    // dispatch above); the gate (`materialized && expanded_surface && changed`,
+    // where `changed = !shape.eq_to_expr` is the node-domain shape inequality
+    // against `expr`) is encoded in `admit_expanded_surface_changed`.
     let shape = node_raised_shape_for_eq_with_dispatch(&dispatch, result_node, expr)?;
-    let changed = !shape.eq_to_expr;
-    (shape.facts.materialized && shape.facts.expanded_surface && changed)
-        .then(|| AdmittedRouteProjectionNode::new(result_node))
+    admit_expanded_surface_changed(&shape, result_node)
 }
 
 /// Thin publication wrapper over [`lower_and_project_to_expanded_node`]:
@@ -426,7 +382,7 @@ pub(crate) fn project_expr_surface_expr_node(
     use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
-        PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryKey,
+        PathSegment, ProjectionReductionContext, QueryResult, SemanticQueryKey,
     };
 
     let dispatch = ProjectSemanticDispatch::new(ctx);
@@ -455,21 +411,12 @@ pub(crate) fn project_expr_surface_expr_node(
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
     // Facts-only gate — reuses the dispatch above; no structural key interned.
+    // The mode-aware acceptance (`materialized` plus, for an `Expanded` terminal,
+    // `expanded_surface`; Shallow / Identity / Navigate / Skeleton admit the
+    // carrier shape) is encoded in `admit_mode_aware`, which also refuses a
+    // `semanticMiss`-bearing result (node-domain `!materialized`).
     let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
-    // Refuse `semanticMiss`-bearing results (node-domain `!materialized`).
-    if !facts.materialized {
-        return None;
-    }
-    let accept = match terminal_mode {
-        // Expanded terminal — only fully materialised surfaces qualify.
-        ProjectionMode::Expanded => facts.expanded_surface,
-        // Shallow / Identity / Navigate / Skeleton — admit the carrier shape.
-        ProjectionMode::Shallow
-        | ProjectionMode::Identity
-        | ProjectionMode::Navigate
-        | ProjectionMode::Skeleton => true,
-    };
-    accept.then(|| AdmittedRouteProjectionNode::new(result_node))
+    admit_mode_aware(&facts, terminal_mode, result_node)
 }
 
 /// Demand-bound NODE adapter for the Class-A path-precise projection (former
@@ -524,8 +471,7 @@ pub(crate) fn project_class_a_terminal_node(
     };
     // Facts-only gate — reuses the dispatch above; no structural key interned.
     let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
-    (facts.materialized && facts.expanded_surface)
-        .then(|| AdmittedRouteProjectionNode::new(result_node))
+    admit_expanded_surface(&facts, result_node)
 }
 
 /// Thin publication wrapper over [`project_class_a_terminal_node`]: resolve the

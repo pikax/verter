@@ -112,6 +112,7 @@ mod engine_accessors;
 mod helpers;
 mod node_materialize;
 mod registry_decl;
+mod route_admission;
 mod route_keys;
 mod shallow_preserve;
 mod surface;
@@ -129,13 +130,19 @@ mod surface;
 // `pub(in …::component_meta_query_engine)` so only in-subtree route/surface
 // adapters and the route fixpoint reach the node→`TypeExpr` materialisation
 // (via `super::surface::`), compiler-enforcing the sink confinement.
+// The sealed route-admission carrier is re-exported from its OWNER module
+// `route_admission` (NOT `surface`): its constructor is private to that module, so
+// no sibling can mint or alias-forge a carrier — only the gated `admit_*` helpers
+// there reach the constructor. Cross-subtree namers (the `meta_resolve`
+// host-threaded wrappers, the route fixpoint) reach the TYPE through this
+// re-export; they cannot widen the mint.
+pub(crate) use route_admission::AdmittedRouteProjectionNode;
 pub(crate) use surface::{
     lower_and_project_to_expanded_node, lower_and_project_to_expanded_published,
     project_admitted_node_to_expanded_node, project_class_a_terminal_node,
     project_class_a_terminal_published, project_expr_surface_expr_node,
     route_projection_node_eq_to_expr, route_projection_nodes_eq, semantic_query_error_raw,
     type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
-    AdmittedRouteProjectionNode,
 };
 // `type_expr_is_expanded_surface` and `type_expr_root_is_unmaterialized_sentinel`
 // survive only as `#[cfg(test)]` parity ORACLES the raised-shape suite compares

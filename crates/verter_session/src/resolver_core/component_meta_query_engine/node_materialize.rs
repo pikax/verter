@@ -483,13 +483,13 @@ pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
 ) -> bool {
     use crate::semantic_query::SemanticNodeData;
     // Visited-set work-stack over the object-surface frontier (the `Alias` identity
-    // hop plus `Union` / `Intersection` arms). The `visited` set bounds the
-    // traversal independently of graph shape: an already-visited node is skipped, so
-    // an acyclic chain of ANY depth is fully walked (matching the uncapped
-    // `TypeExpr` predicate), a node-graph cycle (the interned graph can cycle via a
-    // self-referential `Alias`) terminates, and a shared-subtree DAG is deduped
-    // (linear, not exponential). A data-less frame contributes `false` and is
-    // dropped.
+    // hop plus `Union` / `Intersection` arms). The interned arena is append-only and
+    // every edge references a strictly-smaller id, so it is ACYCLIC — a node-graph
+    // cycle is not constructible. The `visited` set therefore provides DAG-dedup (a
+    // shared-subtree DAG is walked linearly, not exponentially) and uncapped depth
+    // (an acyclic chain of ANY depth is fully walked, matching the uncapped
+    // `TypeExpr` predicate) — NOT cycle-termination. A data-less frame contributes
+    // `false` and is dropped.
     let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
     let mut stack: Vec<SemanticNodeId> = vec![node];
     while let Some(node) = stack.pop() {
@@ -513,41 +513,27 @@ pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
     false
 }
 
-/// Whether `node` raises EXACTLY to a `TypeExpr::Object` (an `Object` /
-/// `MergedDecl` / `VueMacroElements`, following the `Alias` hop) — the node-domain
-/// mirror of `matches!(raise(node), TypeExpr::Object(_))`. Unlike
-/// [`component_meta_registry_node_has_explicit_object_surface`], a `Union` /
-/// `Intersection` (which raises to a `Union` / `Intersection`, not a plain `Object`)
-/// is NOT an object root here.
+/// Whether `node` raises EXACTLY to a `TypeExpr::Object` — the node-domain mirror
+/// of `matches!(raise(node), TypeExpr::Object(_))`. An `Object` / representable
+/// empty object / `MergedDecl` / `VueMacroElements` all fold to a plain `Object`
+/// root; unlike [`component_meta_registry_node_has_explicit_object_surface`], a
+/// `Union` / `Intersection` root (which raises to a `Union` / `Intersection`, not a
+/// plain `Object`) is NOT an object root here.
+///
+/// Reads the POST-NORMALIZED raised root through the shared shape-engine fold
+/// (`node_root_is_object_surface_with_dispatch`) — the SAME fold that drops the
+/// Intersection sentinel / empty-object arms and peels the `Alias` hops — so the
+/// answer equals `matches!(raise(node), TypeExpr::Object(_))` BY CONSTRUCTION,
+/// including for shapes the former raw-node walk mis-classified (e.g.
+/// `Intersection([{}, Object])`, raw ⇒ false but collapsed by the fold to its
+/// `Object` arm ⇒ true).
 pub(crate) fn node_raises_to_object_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: SemanticNodeId,
 ) -> bool {
-    use crate::semantic_query::SemanticNodeData;
-    // The raise-to-object frontier follows only the `Alias` identity hop — a linear
-    // chain. A visited set terminates the walk on a node-graph cycle (a self- or
-    // mutually-referential `Alias`) while still following an acyclic alias chain of
-    // ANY depth to the object surface (matching the uncapped raise), a non-Alias
-    // node, or a data-less node.
-    let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
-    let mut node = node;
-    loop {
-        if !visited.insert(node) {
-            return false;
-        }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
-            return false;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Object(_)
-            | SemanticNodeData::MergedDecl { .. }
-            | SemanticNodeData::VueMacroElements(_) => return true,
-            SemanticNodeData::Alias(inner) => {
-                node = *inner;
-            }
-            _ => return false,
-        }
-    }
+    use crate::project_semantic_dispatch::raise::node_root_is_object_surface_with_dispatch;
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    node_root_is_object_surface_with_dispatch(&dispatch, node)
 }
 
 /// Node-domain mirror of `component_meta_registry_has_non_object_top_level_surface`
@@ -566,10 +552,12 @@ pub(crate) fn component_meta_registry_node_has_non_object_top_level_surface(
     // any arm does NOT raise to a plain object OR any arm recursively qualifies; the
     // two disjuncts are pure boolean reads, so checking the arm-raise disjunct in
     // place and deferring the recursive disjunct onto the stack yields the same
-    // verdict as the short-circuit `||`. The `visited` set bounds the traversal
-    // independently of graph shape: an already-visited node is skipped, so an
-    // acyclic chain of ANY depth is walked (matching the uncapped `TypeExpr`
-    // predicate), a node-graph cycle terminates, and a shared-subtree DAG is deduped.
+    // verdict as the short-circuit `||`. The interned arena is append-only and every
+    // edge references a strictly-smaller id, so it is ACYCLIC — a node-graph cycle is
+    // not constructible. The `visited` set therefore provides DAG-dedup (a
+    // shared-subtree DAG is walked linearly) and uncapped depth (an acyclic chain of
+    // ANY depth is walked, matching the uncapped `TypeExpr` predicate) — NOT
+    // cycle-termination.
     let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
     let mut stack: Vec<SemanticNodeId> = vec![node];
     while let Some(node) = stack.pop() {
@@ -602,15 +590,23 @@ pub(crate) fn component_meta_registry_node_has_non_object_top_level_surface(
     false
 }
 
-/// Whether `node`'s top-level data is a deferred `IndexedAccess` shell — the
-/// node-domain mirror of `matches!(leaf, TypeExpr::IndexedAccess { .. })`.
+/// Whether `node` raises to a deferred `IndexedAccess` shell — the node-domain
+/// mirror of `matches!(raise(node), TypeExpr::IndexedAccess { .. })`.
+///
+/// Reads the POST-NORMALIZED raised root through the shared shape-engine fold
+/// (`node_root_is_indexed_access_with_dispatch`) — the SAME fold that drops the
+/// Intersection sentinel / empty-object arms and peels the `Alias` hops — so the
+/// answer equals the `TypeExpr` predicate on the raised leaf BY CONSTRUCTION,
+/// including for shapes a raw top-level data check mis-classified (e.g.
+/// `Intersection([{}, IndexedAccess])`, raw top-level ⇒ `Intersection` ⇒ false but
+/// collapsed by the fold to its `IndexedAccess` arm ⇒ true).
 pub(crate) fn node_is_indexed_access_shell(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: SemanticNodeId,
 ) -> bool {
-    use crate::semantic_query::SemanticNodeData;
-    crate::project_semantic_dispatch::node_data_for(ctx, node)
-        .is_some_and(|data| matches!(data.as_ref(), SemanticNodeData::IndexedAccess { .. }))
+    use crate::project_semantic_dispatch::raise::node_root_is_indexed_access_with_dispatch;
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    node_root_is_indexed_access_with_dispatch(&dispatch, node)
 }
 
 /// Raise a member-surface NODE to its published `TypeExpr` through the registered

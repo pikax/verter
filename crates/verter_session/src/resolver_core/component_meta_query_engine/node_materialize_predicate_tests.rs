@@ -364,48 +364,217 @@ fn node_published_operator_mapped_suppresses_only_semantic_miss_value() {
     );
 }
 
-/// Count the `AdmittedRouteProjectionNode::new(` mint occurrences in `src`,
-/// ignoring `//`-comment lines (a doc / comment NAMING the carrier is not a mint).
-/// Shared detector for the broadened carrier-forging guard
-/// ([`registry_candidate_module_never_forges_route_admitted_carrier`]) and its
-/// self-test ([`admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path`]).
+/// §1a (R2 normalization-fix DISCRIMINATION): the node-domain raised-ROOT mirrors
+/// (`node_raises_to_object_surface`, `node_is_indexed_access_shell`, the
+/// published-operator + typeof root facts) read the POST-NORMALIZED raised root
+/// through the shared shape-engine fold, so each answers IDENTICALLY to the
+/// `TypeExpr` predicate on `raise(node)` — even for DIRECTLY-INTERNED shapes that
+/// real lowering pre-collapses (the divergence is unreachable today; this pins it
+/// closed defensively). The fold drops the Intersection empty-object / object-
+/// surface-sentinel arms BEFORE classifying the root, so an `Intersection([{}, X])`
+/// is classified by its surviving arm `X`.
+///
+/// DISCRIMINATING: each asserted value is the one a RAW-NODE walk gets WRONG —
+/// reverting any mirror to `match node_data { … }` over the bare `Intersection`
+/// root flips it. E.g. reverting `node_is_indexed_access_shell` to its former
+/// `matches!(node_data, IndexedAccess)` immediate-data check returns `false` on
+/// `Intersection([{}, IndexedAccess])` (top-level is `Intersection`), while the
+/// fold-backed mirror — and `matches!(raise(node), IndexedAccess)` — return `true`,
+/// so the `assert_eq!` against the raised value FAILS. Likewise reverting
+/// `node_raises_to_object_surface` / `node_root_is_typeof` / the published-operator
+/// walk to the raw `match node_data` flips the `Intersection([{}, Object])` /
+/// `Intersection([{}, TypeOf])` anchors.
+#[test]
+fn raised_root_mirrors_match_type_expr_predicate_on_collapsed_intersection_roots() {
+    use crate::meta_resolve::materialize::{
+        node_materialize_reduction_context, type_expr_materialize_reduction_context,
+    };
+    use crate::project_semantic_dispatch::raise::node_root_is_typeof_with_dispatch;
+    use crate::semantic_query::{
+        IndexKey, QueryError, ScopeId, SemanticNodeData, SurfaceView, ValueRootKey,
+    };
+
+    let project = open_host();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/p.ts").unwrap();
+    let host = session.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let graph = ctx.project_type_store().semantic_graph();
+
+    let empty_surface = || SurfaceView {
+        members: StdArc::from(Vec::new().into_boxed_slice()),
+        call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    // The representable empty object `{}` — an Intersection arm the fold DROPS
+    // before classifying the surviving root.
+    let empty_obj = graph.intern_node(SemanticNodeData::Object(empty_surface()));
+    let dummy = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: dummy,
+        index: IndexKey::String(StdArc::from("x")),
+    });
+    let typeof_node = graph.intern_node(SemanticNodeData::new_typeof(
+        ValueRootKey {
+            scope: ScopeId {
+                canonical_id: StdArc::from("/p.ts"),
+                local_scope: None,
+            },
+            name: StdArc::from("missingValue"),
+        },
+        StdArc::from(Vec::new().into_boxed_slice()),
+        StdArc::from(Vec::new().into_boxed_slice()),
+    ));
+    let one_prop = dispatch
+        .lower_type_expr_in_scope_with_mode(
+            "/p.ts",
+            &one_prop_object("a"),
+            ProjectionMode::Navigate,
+        )
+        .expect("object lowers");
+
+    // Divergent shapes (DIRECTLY interned so lowering does NOT pre-collapse them).
+    let int_obj = graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
+        vec![empty_obj, one_prop].into_boxed_slice(),
+    )));
+    let int_indexed = graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
+        vec![empty_obj, indexed].into_boxed_slice(),
+    )));
+    let int_typeof = graph.intern_node(SemanticNodeData::Intersection(StdArc::from(
+        vec![empty_obj, typeof_node].into_boxed_slice(),
+    )));
+    // The brief's `Union([Intersection([{}, Object])])`: a single-arm union is NOT
+    // collapsed by the materializer, so it raises to `Union([Object])` (a Union
+    // root) — a clean AGREEMENT case (both mirror + TypeExpr predicate say "not an
+    // object/operator root"), included to pin that the outer union is preserved.
+    let union_int_obj = graph.intern_node(SemanticNodeData::Union(StdArc::from(
+        vec![int_obj].into_boxed_slice(),
+    )));
+
+    // Every node: the mirror MUST equal the `TypeExpr` predicate on `raise(node)`.
+    for node in [
+        int_obj,
+        int_indexed,
+        int_typeof,
+        union_int_obj,
+        indexed,
+        typeof_node,
+        one_prop,
+        empty_obj,
+    ] {
+        let raised =
+            materialize_member_node_to_type_expr(ctx, node).expect("interned shape raises");
+        assert_eq!(
+            node_raises_to_object_surface(ctx, node),
+            matches!(raised, TypeExpr::Object(_)),
+            "node_raises_to_object_surface must mirror matches!(raise, Object) for {raised:?}",
+        );
+        assert_eq!(
+            super::node_is_indexed_access_shell(ctx, node),
+            matches!(raised, TypeExpr::IndexedAccess { .. }),
+            "node_is_indexed_access_shell must mirror matches!(raise, IndexedAccess) for {raised:?}",
+        );
+        assert_eq!(
+            node_root_is_typeof_with_dispatch(&dispatch, node),
+            matches!(raised, TypeExpr::TypeOf(_)),
+            "node_root_is_typeof must mirror matches!(raise, TypeOf) for {raised:?}",
+        );
+        assert_eq!(
+            node_materialize_reduction_context(ctx, node, ProjectionMode::Navigate),
+            type_expr_materialize_reduction_context(&raised, ProjectionMode::Navigate),
+            "node reduction context (published-operator mirror) must mirror the TypeExpr context \
+             for {raised:?}",
+        );
+    }
+
+    // DISCRIMINATING anchors — the exact values a RAW-NODE walk gets WRONG (it sees
+    // the bare `Intersection` root ⇒ false; the fold collapses the `{}` arm and
+    // classifies the surviving operator/object/typeof arm ⇒ true).
+    assert!(
+        super::node_is_indexed_access_shell(ctx, int_indexed),
+        "Intersection([{{}}, IndexedAccess]) raises to IndexedAccess (raw walk ⇒ false)",
+    );
+    assert!(
+        node_raises_to_object_surface(ctx, int_obj),
+        "Intersection([{{}}, Object]) raises to Object (raw walk ⇒ false)",
+    );
+    assert!(
+        node_root_is_typeof_with_dispatch(&dispatch, int_typeof),
+        "Intersection([{{}}, TypeOf]) raises to TypeOf (raw walk ⇒ false)",
+    );
+}
+
+/// Count the route-admitted-carrier MINT literal spellings in `src` (ignoring
+/// `//`-comment lines): the carrier constructor `AdmittedRouteProjectionNode::new`
+/// AND the gated mint API `route_admission::admit` (the only routes to a minted
+/// carrier). A doc / comment NAMING either is NOT a mint. Shared by the residual
+/// literal tripwire ([`registry_candidate_module_never_forges_route_admitted_carrier`])
+/// and its self-test
+/// ([`admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path`]).
 fn admitted_carrier_mint_count(src: &str) -> usize {
     src.lines()
         .filter(|line| !line.trim_start().starts_with("//"))
-        .map(|line| line.matches("AdmittedRouteProjectionNode::new").count())
+        .map(|line| {
+            line.matches("AdmittedRouteProjectionNode::new").count()
+                + line.matches("route_admission::admit").count()
+        })
         .sum()
 }
 
-/// Carrier-contract guard (whole-module): the node-domain registry-candidate
-/// materialisation module (`node_materialize.rs`) holds first-pass / stabilised
-/// member-surface nodes that are NOT route/surface-adapter admitted nodes (each can
-/// be a `Miss`/`Recursive`/`Tainted`/degenerate outcome), so EVERY materialisation
-/// of such a node MUST route through the no-admission-claim `RegistryPublicationNode`
-/// carrier + the `materialize_registry_publication_node` sink — NEVER forge
-/// `AdmittedRouteProjectionNode` (whose contract asserts a passed
-/// `materialized && expanded_surface` route-admission gate). The genuine route-adapter
-/// admissions live in the route/surface adapter modules (`surface.rs` /
-/// `registry_decl.rs`), each minted only AFTER a node-domain
-/// `node_raised_shape_facts_with_dispatch(...).materialized[ && expanded_surface]`
-/// acceptance gate; they are architecturally NOT in this registry-candidate module.
+/// Carrier-contract RESIDUAL literal tripwire (whole-module): the node-domain
+/// registry-candidate materialisation module (`node_materialize.rs`) holds
+/// first-pass / stabilised member-surface nodes that are NOT route/surface-adapter
+/// admitted nodes (each can be a `Miss`/`Recursive`/`Tainted`/degenerate outcome),
+/// so it must publish them ONLY through the no-admission `RegistryPublicationNode`
+/// carrier + the `materialize_registry_publication_node` sink — never as a
+/// route-admitted `AdmittedRouteProjectionNode`.
 ///
-/// DISCRIMINATING: an `owner_local_generic_alias_candidate` that minted
-/// `AdmittedRouteProjectionNode::new(node)` after only `node_raises_to_object_surface`
-/// (an object-ROOT structural check, weaker than the route-admission gate) is rejected
-/// by this WHOLE-MODULE absence assertion — broadened from a single-function-body scan
-/// so the forging class is structurally caught for EVERY site in the module, not just
-/// `materialize_member_node_to_type_expr`. The `admitted_carrier_mint_count` self-test
-/// proves the detector flags a forged mint and clears the no-admission carrier path.
+/// SCOPE (narrowed — NOT the primary defense, NOT every-site/structural): this
+/// scans for the LITERAL mint spellings in `node_materialize.rs` only. The
+/// STRUCTURAL CONFINEMENT is primary and lives in `route_admission`:
+/// `AdmittedRouteProjectionNode::new` is PRIVATE to that module, so a
+/// `node_materialize.rs` `AdmittedRouteProjectionNode::new(node)` — directly OR
+/// alias-laundered (`use … as Forge; Forge::new(node)`) — is a COMPILE error
+/// (`E0603: ...::new is private`). The only mints are the gated
+/// `route_admission::admit_*` helpers; this tripwire is a cheap literal backstop
+/// for THAT spelling, which the compiler permits (the helpers are subtree-visible)
+/// but which `node_materialize` must never use.
+///
+/// GUARD-LOCAL SC-FIRST RECORD:
+/// - scanner_invariant: `node_materialize.rs` contains zero route-admitted-carrier
+///   mint literal spellings (`AdmittedRouteProjectionNode::new` /
+///   `route_admission::admit`).
+/// - scanner_justification: residual literal backstop for the gated-helper spelling
+///   the compiler cannot reject (the helpers are subtree-visible); the private
+///   constructor is the primary, compiler-enforced seal.
+/// - mechanism_ruling: r3-scfirst-ruling (structural-confinement-first).
+/// - hardening_rounds: SUPERSEDED — the prior broadened whole-module name-scanner
+///   was REPLACED by structural confinement (a private constructor); this is the
+///   narrowed residual remnant, not a further scanner-hardening round.
+/// - escape_stop: the alias-laundering forge `use super::AdmittedRouteProjectionNode
+///   as Forge; Forge::new(node)` — which the OLD name-scanner missed (it scanned for
+///   the literal `AdmittedRouteProjectionNode::new`, not the alias) — is now STOPPED
+///   structurally by the private constructor (`E0603`), not by this scanner.
+/// - hardening_history: was a whole-module name-scanner asserting "every-site"
+///   enforcement; that claim was launderable, so enforcement moved to the private
+///   constructor and this scanner was narrowed to a literal-spelling residual.
 #[test]
 fn registry_candidate_module_never_forges_route_admitted_carrier() {
     const SRC: &str = include_str!("node_materialize.rs");
     let forged = admitted_carrier_mint_count(SRC);
     assert_eq!(
         forged, 0,
-        "the node-domain registry-candidate module (node_materialize.rs) must NOT forge the \
-         route-admitted AdmittedRouteProjectionNode carrier for a held member-surface node — \
-         route every such node through the no-admission RegistryPublicationNode carrier + the \
-         materialize_registry_publication_node sink. Found {forged} forging mint(s).",
+        "the node-domain registry-candidate module (node_materialize.rs) must NOT mint a \
+         route-admitted AdmittedRouteProjectionNode for a held member-surface node (directly or \
+         via a route_admission::admit_* helper) — publish every such node through the \
+         no-admission RegistryPublicationNode carrier + the materialize_registry_publication_node \
+         sink. Found {forged} mint spelling(s). (The carrier constructor is also privately sealed \
+         in route_admission, so a direct/alias-forged `::new` is already an E0603 compile error; \
+         this residual catches the gated-helper spelling.)",
     );
     // Anti-vacuity: the module DOES publish member-surface nodes through the
     // no-admission carrier, so the absence above is a real property (never vacuous on
@@ -417,22 +586,32 @@ fn registry_candidate_module_never_forges_route_admitted_carrier() {
     );
 }
 
-/// Self-test for the [`admitted_carrier_mint_count`] detector the broadened
-/// carrier-forging guard depends on: a forged `AdmittedRouteProjectionNode::new(...)`
-/// mint is COUNTED (so the guard FAILS on it), the no-admission
+/// Self-test for the [`admitted_carrier_mint_count`] residual detector: BOTH mint
+/// spellings — the direct constructor `AdmittedRouteProjectionNode::new(...)` (now
+/// also an `E0603` compile error in production) and the gated helper
+/// `route_admission::admit_*(...)` (the compiler-permitted residual) — are COUNTED
+/// (so the tripwire fails on either), the no-admission
 /// `materialize_member_node_to_type_expr` / `RegistryPublicationNode` path is NOT
-/// counted (the sanctioned shape passes), and a comment NAMING the carrier is NOT
-/// counted (no false positive on a doc reference).
+/// counted, and a comment NAMING a mint is NOT counted (no false positive).
 #[test]
 fn admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path() {
-    // The exact pre-fix forging shape in a registry-candidate-shaped body.
-    let forged = "        if !node_raises_to_object_surface(ctx, node) { return None; }\n\
+    // Direct-constructor forge (also an E0603 compile error in production).
+    let forged_ctor = "        if !node_raises_to_object_surface(ctx, node) { return None; }\n\
                   \x20       let admitted = AdmittedRouteProjectionNode::new(node);\n\
                   \x20       let ty = super::surface::materialize_route_projection_node(ctx, &admitted)?;\n";
     assert_eq!(
-        admitted_carrier_mint_count(forged),
+        admitted_carrier_mint_count(forged_ctor),
         1,
         "the detector MUST flag a forged AdmittedRouteProjectionNode::new mint",
+    );
+    // Gated-helper forge — the residual the compiler permits (helpers are subtree-visible).
+    let forged_helper =
+        "        let facts = node_raised_shape_facts_with_dispatch(&dispatch, node)?;\n\
+                  \x20       let admitted = route_admission::admit_materialized(&facts, node)?;\n";
+    assert_eq!(
+        admitted_carrier_mint_count(forged_helper),
+        1,
+        "the detector MUST flag a route_admission::admit_* gated-helper mint",
     );
     // The sanctioned no-admission path — routes through the RegistryPublicationNode
     // helper, no forged admitted carrier.
@@ -443,13 +622,13 @@ fn admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path() {
         0,
         "the sanctioned no-admission RegistryPublicationNode path is NOT a forge",
     );
-    // A comment NAMING the carrier is not a mint (no false positive).
-    let comment =
-        "        // NOT AdmittedRouteProjectionNode::new — see the no-admission carrier.\n";
+    // A comment NAMING a mint is not a mint (no false positive).
+    let comment = "        // NOT AdmittedRouteProjectionNode::new / route_admission::admit — \
+                   see the no-admission carrier.\n";
     assert_eq!(
         admitted_carrier_mint_count(comment),
         0,
-        "a comment naming AdmittedRouteProjectionNode::new must NOT be counted as a forge",
+        "a comment naming a mint must NOT be counted as a forge",
     );
 }
 
