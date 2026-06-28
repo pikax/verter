@@ -308,22 +308,51 @@ pub(crate) struct PublicationScore {
 }
 
 /// Facts about the shape a node raises to, derived bottom-up from the
-/// POST-NORMALIZED raised shape (NOT the raw graph kind). `pub(crate)` because
-/// it is re-exported from `raise` and read by the Kind-B callers.
+/// POST-NORMALIZED raised shape (NOT the raw graph kind). The TYPE is
+/// `pub(crate)` because it is re-exported from `raise` and read by the Kind-B
+/// callers; the FIELDS are PRIVATE (defining-module + descendants only).
+///
+/// SEALED INPUT: a value with a passing fact can be produced ONLY by the
+/// node-domain fold's [`summary`](node_domain) constructor layer (the sole
+/// construction site lives in the `node_domain` child). No sibling can fabricate
+/// a `RaisedShapeFacts { materialized: true, expanded_surface: true, .. }` to
+/// feed a [`route_admission`](crate::resolver_core::component_meta_query_engine)
+/// `admit_*` gate — the gate's fact input is itself unforgeable. Cross-module
+/// readers go exclusively through the `pub(crate)` getters below.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RaisedShapeFacts {
     /// `true` for every node the fold produces a value for — i.e.
     /// `raise(node).is_some()`. A `Some(result)` always has
     /// `can_shell_raise == true`.
-    pub(crate) can_shell_raise: bool,
+    can_shell_raise: bool,
     /// `dispatch_route_expr_is_materialized(raise(node))`: the structural AND
     /// over all value-bearing children, `Unknown { raw }` materialized iff
     /// `!raw_is_unmaterialized_sentinel(raw)`.
-    pub(crate) materialized: bool,
+    materialized: bool,
     /// `type_expr_is_expanded_surface(raise(node))`: `false` only when the
     /// raised root (recursing through `Union`/`Intersection`) is an open
     /// deferred shell (`KeyOf`/`IndexedAccess`/`Mapped`/`TypeOf`/`Conditional`).
-    pub(crate) expanded_surface: bool,
+    expanded_surface: bool,
+}
+
+impl RaisedShapeFacts {
+    /// `true` for every node the fold produces a value for (`raise(node).is_some()`).
+    #[must_use]
+    pub(crate) fn can_shell_raise(&self) -> bool {
+        self.can_shell_raise
+    }
+    /// `dispatch_route_expr_is_materialized(raise(node))` — the structural AND
+    /// over all value-bearing children.
+    #[must_use]
+    pub(crate) fn materialized(&self) -> bool {
+        self.materialized
+    }
+    /// `type_expr_is_expanded_surface(raise(node))` — `false` only for an open
+    /// deferred shell root.
+    #[must_use]
+    pub(crate) fn expanded_surface(&self) -> bool {
+        self.expanded_surface
+    }
 }
 
 /// The exact raised-term CLASS a folded node-domain value belongs to, as far as
@@ -367,8 +396,9 @@ pub(in crate::project_semantic_dispatch) enum FactShapeTag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::project_semantic_dispatch) enum RaisedRootKind {
     /// Raises to `TypeExpr::Object` — an `Object` / representable empty object,
-    /// and the `MergedDecl` / `VueMacroElements` carriers that fold through the
-    /// object constructors.
+    /// and the `MergedDecl` carrier that folds through the object constructors. A
+    /// `VueMacroElements` carrier does NOT reach here: it folds to the
+    /// `VueMacroElementsPlaceholder` sentinel, whose root classifies as `Other`.
     Object,
     /// Raises to `TypeExpr::Ref` — a `DeclRef` / `InstantiationRef` / `BareRef` /
     /// `DeclPlaceholder` carrier.
@@ -461,10 +491,34 @@ impl RaisedShapeResult {
 /// caller's input `&TypeExpr` interned in the SAME interner. `pub(crate)`
 /// (consistent with [`RaisedShapeFacts`]) so the Kind-B sink adapters in
 /// `resolver_core` read it through the `raise` re-export.
+///
+/// SEALED INPUT: like [`RaisedShapeFacts`], the FIELDS are PRIVATE — the sole
+/// construction is the key-bearing fold ([`project_node_shape_for_eq`]). A
+/// sibling cannot fabricate a `NodeShapeEq { eq_to_expr: false, .. }` to force a
+/// `route_admission` "changed" gate; cross-module readers use the getters.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NodeShapeEq {
-    pub(crate) facts: RaisedShapeFacts,
-    pub(crate) eq_to_expr: bool,
+    facts: RaisedShapeFacts,
+    eq_to_expr: bool,
+}
+
+impl NodeShapeEq {
+    /// The route-gate [`RaisedShapeFacts`] of the folded node.
+    #[must_use]
+    pub(crate) fn facts(&self) -> RaisedShapeFacts {
+        self.facts
+    }
+    /// Whether the node's raised shape equals the caller's input `&TypeExpr`.
+    #[must_use]
+    pub(crate) fn eq_to_expr(&self) -> bool {
+        self.eq_to_expr
+    }
+    /// `!eq_to_expr` — whether the node's raised shape DIFFERS from the caller's
+    /// input `&TypeExpr` (the route "changed" gate's positive form).
+    #[must_use]
+    pub(crate) fn changed(&self) -> bool {
+        !self.eq_to_expr
+    }
 }
 
 // ===========================================================================
@@ -1177,17 +1231,20 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
     Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_unmaterialized_sentinel)
 }
 
-/// The NORMALIZED raised-ROOT class of `node` — the facts-only fold's
-/// [`RaisedShapeSummary::root_kind`]. `None` when the whole raise is `None`. The
-/// per-fact classifiers below read this; a caller never matches on the enum
-/// outside this module.
+/// The NORMALIZED raised-ROOT class of `node` — [`RaisedShapeSummary::root_kind`]
+/// from the ROOT-ONLY projection ([`node_domain::project_root_summary`]), which
+/// classifies the post-normalized root WITHOUT folding member values (an O(1)
+/// shallow check for a large object surface, not the O(tree) whole-subtree walk
+/// the full fold pays to also compute the here-unused `materialized` AND). Its
+/// `root_kind` is pinned byte-identical to the full fold's by the parity test.
+/// `None` when the whole raise is `None`. The per-fact classifiers below read
+/// this; a caller never matches on the enum outside this module.
 fn project_node_root_kind(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> Option<RaisedRootKind> {
-    let mut alg = RaisedFactsAlg;
     let mut active = FxHashSet::default();
-    Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_kind)
+    Some(node_domain::project_root_summary(dispatch, node, &mut active)?.root_kind)
 }
 
 /// Node-domain equivalent of `type_expr_root_is_published_operator(raise(node))`:
@@ -1232,8 +1289,9 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_is_typeof(
 
 /// Node-domain equivalent of `matches!(raise(node), TypeExpr::Object(_))`: whether
 /// `node`'s NORMALIZED raised root is EXACTLY an `Object` (an `Object` / empty
-/// object / `MergedDecl` / `VueMacroElements` — a `Union` / `Intersection` root
-/// is NOT). Reads the post-normalized [`RaisedRootKind`] (no `TypeExpr`
+/// object / `MergedDecl` — a `Union` / `Intersection` root, or a
+/// `VueMacroElements` placeholder, is NOT). Reads the post-normalized
+/// [`RaisedRootKind`] (no `TypeExpr`
 /// materialised), so e.g. `Intersection([{}, Object])` — which the fold collapses
 /// to its `Object` arm — answers `true`, matching the `TypeExpr` predicate on the
 /// raised value. `None` when the whole raise is `None`.

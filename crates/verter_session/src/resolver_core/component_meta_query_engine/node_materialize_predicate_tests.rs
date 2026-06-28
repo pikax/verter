@@ -535,11 +535,14 @@ fn admitted_carrier_mint_count(src: &str) -> usize {
 ///
 /// SCOPE (narrowed — NOT the primary defense, NOT every-site/structural): this
 /// scans for the LITERAL mint spellings in `node_materialize.rs` only. The
-/// STRUCTURAL CONFINEMENT is primary and lives in `route_admission`:
-/// `AdmittedRouteProjectionNode::new` is PRIVATE to that module, so a
-/// `node_materialize.rs` `AdmittedRouteProjectionNode::new(node)` — directly OR
-/// alias-laundered (`use … as Forge; Forge::new(node)`) — is a COMPILE error
-/// (`E0603: ...::new is private`). The only mints are the gated
+/// STRUCTURAL CONFINEMENT is primary and lives in `route_admission`, now a
+/// COMPLETE two-layer seal: (1) `AdmittedRouteProjectionNode::new` is PRIVATE to
+/// that module, so a `node_materialize.rs` `AdmittedRouteProjectionNode::new(node)`
+/// — directly OR alias-laundered (`use … as Forge; Forge::new(node)`) — is a
+/// COMPILE error (`E0624: associated function `new` is private`); (2) the gate
+/// inputs `RaisedShapeFacts` / `NodeShapeEq` carry PRIVATE fields, so a sibling
+/// cannot fabricate a passing fact struct literal to drive a gated helper either
+/// (`E0451: field … is private`). The only mints are the gated
 /// `route_admission::admit_*` helpers; this tripwire is a cheap literal backstop
 /// for THAT spelling, which the compiler permits (the helpers are subtree-visible)
 /// but which `node_materialize` must never use.
@@ -558,7 +561,7 @@ fn admitted_carrier_mint_count(src: &str) -> usize {
 /// - escape_stop: the alias-laundering forge `use super::AdmittedRouteProjectionNode
 ///   as Forge; Forge::new(node)` — which the OLD name-scanner missed (it scanned for
 ///   the literal `AdmittedRouteProjectionNode::new`, not the alias) — is now STOPPED
-///   structurally by the private constructor (`E0603`), not by this scanner.
+///   structurally by the private constructor (`E0624`), not by this scanner.
 /// - hardening_history: was a whole-module name-scanner asserting "every-site"
 ///   enforcement; that claim was launderable, so enforcement moved to the private
 ///   constructor and this scanner was narrowed to a literal-spelling residual.
@@ -573,7 +576,7 @@ fn registry_candidate_module_never_forges_route_admitted_carrier() {
          via a route_admission::admit_* helper) — publish every such node through the \
          no-admission RegistryPublicationNode carrier + the materialize_registry_publication_node \
          sink. Found {forged} mint spelling(s). (The carrier constructor is also privately sealed \
-         in route_admission, so a direct/alias-forged `::new` is already an E0603 compile error; \
+         in route_admission, so a direct/alias-forged `::new` is already an E0624 compile error; \
          this residual catches the gated-helper spelling.)",
     );
     // Anti-vacuity: the module DOES publish member-surface nodes through the
@@ -588,14 +591,14 @@ fn registry_candidate_module_never_forges_route_admitted_carrier() {
 
 /// Self-test for the [`admitted_carrier_mint_count`] residual detector: BOTH mint
 /// spellings — the direct constructor `AdmittedRouteProjectionNode::new(...)` (now
-/// also an `E0603` compile error in production) and the gated helper
+/// also an `E0624` compile error in production) and the gated helper
 /// `route_admission::admit_*(...)` (the compiler-permitted residual) — are COUNTED
 /// (so the tripwire fails on either), the no-admission
 /// `materialize_member_node_to_type_expr` / `RegistryPublicationNode` path is NOT
 /// counted, and a comment NAMING a mint is NOT counted (no false positive).
 #[test]
 fn admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path() {
-    // Direct-constructor forge (also an E0603 compile error in production).
+    // Direct-constructor forge (also an E0624 compile error in production).
     let forged_ctor = "        if !node_raises_to_object_surface(ctx, node) { return None; }\n\
                   \x20       let admitted = AdmittedRouteProjectionNode::new(node);\n\
                   \x20       let ty = super::surface::materialize_route_projection_node(ctx, &admitted)?;\n";

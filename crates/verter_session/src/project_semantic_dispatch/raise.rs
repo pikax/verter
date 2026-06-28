@@ -4611,7 +4611,7 @@ pub(crate) fn node_can_shell_raise_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> bool {
-    shape_engine::project_node_facts(dispatch, node).is_some_and(|facts| facts.can_shell_raise)
+    shape_engine::project_node_facts(dispatch, node).is_some_and(|facts| facts.can_shell_raise())
 }
 
 /// `true` when `node` can be shell-raised to a `TypeExpr` at all
@@ -4660,7 +4660,7 @@ pub(crate) fn node_contains_semantic_miss_or_unraisable(
 ) -> bool {
     let dispatch = ProjectSemanticDispatch::new(ctx);
     match shape_engine::project_node_facts(&dispatch, node) {
-        Some(facts) => !facts.materialized,
+        Some(facts) => !facts.materialized(),
         None => true,
     }
 }
@@ -4688,7 +4688,7 @@ pub(crate) fn node_is_expanded_surface_legacy_equivalent(
 ) -> bool {
     let dispatch = ProjectSemanticDispatch::new(ctx);
     match shape_engine::project_node_facts(&dispatch, node) {
-        Some(facts) => facts.expanded_surface,
+        Some(facts) => facts.expanded_surface(),
         None => false,
     }
 }
@@ -5043,7 +5043,7 @@ mod tests {
         );
         let facts = node_raised_shape_facts_with_dispatch(&dispatch, array_of_miss).expect("facts");
         assert!(
-            !facts.materialized,
+            !facts.materialized(),
             "the Array DOES carry an unmaterialised element, so root-sentinel=false is \
              genuinely ROOT-only — not merely the absence of any sentinel"
         );

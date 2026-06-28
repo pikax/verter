@@ -119,20 +119,20 @@ fn assert_classifier_parity(host: &VerterHost, node: SemanticNodeId, label: &str
                 .expect("a raisable node yields a combined facts+eq projection");
             assert_eq!(
                 (
-                    facts_only.materialized,
-                    facts_only.expanded_surface,
-                    facts_only.can_shell_raise
+                    facts_only.materialized(),
+                    facts_only.expanded_surface(),
+                    facts_only.can_shell_raise()
                 ),
                 (
-                    full.facts.materialized,
-                    full.facts.expanded_surface,
-                    full.facts.can_shell_raise
+                    full.facts().materialized(),
+                    full.facts().expanded_surface(),
+                    full.facts().can_shell_raise()
                 ),
                 "[{label}] FACTS-ONLY algebra facts must equal KEY-bearing algebra facts \
                  (shared summary layer) (oracle = {oracle:?})"
             );
             assert!(
-                full.eq_to_expr,
+                full.eq_to_expr(),
                 "[{label}] node_raised_shape_for_eq(node, raise(node)).eq_to_expr must be true"
             );
         }

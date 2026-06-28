@@ -395,7 +395,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         &ProjectSemanticDispatch::new(ctx),
                         node,
                     )
-                    .map(|facts| !facts.materialized)
+                    .map(|facts| !facts.materialized())
                     .unwrap_or(false);
                     if has_miss {
                         property.ty.clone()
@@ -471,12 +471,19 @@ fn registry_indexed_access_expr(symbol_name: &str, path: &[String]) -> TypeExpr 
         })
 }
 
-/// Node-domain mirror of `component_meta_registry_has_explicit_object_surface`
-/// applied to a node's RAISED root: an `Object` / `MergedDecl` / `VueMacroElements`
-/// (all raise to `TypeExpr::Object`), or a `Union` / `Intersection` carrying such
-/// an arm, following the `Alias` identity hop. Read off the producing node so a
-/// candidate's object-surface fact is decided in node domain instead of inspecting
-/// the materialised `TypeExpr`.
+/// Whole-tree EXISTENTIAL arm-set predicate (registry candidate selection): does
+/// ANY node in the `Alias` / `Union` / `Intersection` frontier carry an
+/// object-surface-bearing kind — an `Object`, a `MergedDecl`, or a
+/// `VueMacroElements`? Read off the producing node so a candidate's
+/// object-surface fact is decided in node domain instead of inspecting the
+/// materialised `TypeExpr`.
+///
+/// NOT a normalized-root mirror and NOT a `predicate(raise(node))` parity
+/// guarantee — it is DELIBERATELY a structural arm-set scan, distinct from the
+/// root-shape classifiers ([`node_raises_to_object_surface`] et al.). It can
+/// diverge from the folded root: a `VueMacroElements` arm counts here (a
+/// structural object-surface candidate) even though it folds to a non-`Object`
+/// placeholder root, and an arm the intersection fold would DROP still counts.
 pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: SemanticNodeId,
@@ -515,10 +522,12 @@ pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
 
 /// Whether `node` raises EXACTLY to a `TypeExpr::Object` — the node-domain mirror
 /// of `matches!(raise(node), TypeExpr::Object(_))`. An `Object` / representable
-/// empty object / `MergedDecl` / `VueMacroElements` all fold to a plain `Object`
-/// root; unlike [`component_meta_registry_node_has_explicit_object_surface`], a
-/// `Union` / `Intersection` root (which raises to a `Union` / `Intersection`, not a
-/// plain `Object`) is NOT an object root here.
+/// empty object / `MergedDecl` all fold to a plain `Object` root; a
+/// `VueMacroElements` carrier does NOT (it folds to the
+/// `VueMacroElementsPlaceholder` sentinel, root `Other`). Unlike
+/// [`component_meta_registry_node_has_explicit_object_surface`], a `Union` /
+/// `Intersection` root (which raises to a `Union` / `Intersection`, not a plain
+/// `Object`) is NOT an object root here.
 ///
 /// Reads the POST-NORMALIZED raised root through the shared shape-engine fold
 /// (`node_root_is_object_surface_with_dispatch`) — the SAME fold that drops the
@@ -536,12 +545,17 @@ pub(crate) fn node_raises_to_object_surface(
     node_root_is_object_surface_with_dispatch(&dispatch, node)
 }
 
-/// Node-domain mirror of `component_meta_registry_has_non_object_top_level_surface`
-/// applied to a node's RAISED root: a `Ref`-carrier (`DeclRef` / `InstantiationRef`
-/// / `BareRef`, raising to `TypeExpr::Ref`) / `IndexedAccess` / `Conditional` /
-/// `Mapped`, OR a `Union` / `Intersection` where any arm recursively qualifies or
-/// any arm does NOT raise to a plain `Object`. Arm-for-arm with the `TypeExpr`
-/// predicate (`KeyOf` / `TypeOf` and primitives/objects are NOT non-object roots).
+/// Whole-tree EXISTENTIAL arm-set predicate (registry candidate selection): does
+/// ANY node in the `Alias` / `Union` / `Intersection` frontier carry a
+/// non-object top-level kind — a `Ref`-carrier (`DeclRef` / `InstantiationRef` /
+/// `BareRef`) / `IndexedAccess` / `Conditional` / `Mapped` — OR does any
+/// `Union` / `Intersection` arm not reduce to a plain object (`KeyOf` / `TypeOf`
+/// and primitives / objects do NOT qualify)?
+///
+/// NOT a normalized-root mirror and NOT a `predicate(raise(node))` parity
+/// guarantee — it is DELIBERATELY a structural arm-set scan, distinct from the
+/// root-shape classifiers. It can diverge from the folded root for a dropped-arm
+/// intersection (an arm the fold would collapse away still counts here).
 pub(crate) fn component_meta_registry_node_has_non_object_top_level_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: SemanticNodeId,

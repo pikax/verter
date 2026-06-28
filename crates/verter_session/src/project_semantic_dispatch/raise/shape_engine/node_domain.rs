@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
 use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr};
 
 use super::{
@@ -21,10 +22,11 @@ use super::{
     RaisedShapeKey, RaisedShapeResult, RaisedShapeSummary, RaisedTerm, RaisedTupleElement,
     RaisedTypeParam, ShapeInterner,
 };
+use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::component_meta_query_engine::{
     semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
 };
-use crate::semantic_query::QueryError;
+use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId};
 
 // ===========================================================================
 // Shared summary-constructor layer — the SINGLE source of the per-arm
@@ -1262,148 +1264,228 @@ fn function_expr_to_raised(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::summary;
-    use super::FactShapeTag;
-    use crate::resolver_core::component_meta_query_engine::semantic_query_error_raw;
-    use crate::semantic_query::QueryError;
+// ===========================================================================
+// Root-only projection — the NORMALIZED raised-ROOT class WITHOUT folding
+// member values. The root-shape mirrors (`project_node_root_kind` and the
+// per-fact classifiers it backs) need ONLY the post-normalized root class, not
+// the whole-tree `materialized` AND the full fold also computes; this projection
+// skips the deep walk for the perf win on large surfaces.
+// ===========================================================================
 
-    /// The TYPED node-domain summary constructor (`summary::opaque_sentinel`)
-    /// must yield the SAME FULL summary — `materialized` fact, `expanded_surface`,
-    /// AND `FactShapeTag` — the LEGACY raw-string node-domain path
-    /// (`summary::unknown` over the variant's `semantic_query_error_raw`) produced,
-    /// for the FULL `_ => opaque_sentinel`-reachable variant set the `fold_node`
-    /// `Opaque(err)` arm routes (every variant EXCEPT `RecursiveRef` and
-    /// `DeclPlaceholder`, which hit the earlier `recursive_ref` / `reference`
-    /// sub-arms and are covered by the agreement test in `raise_sentinel.rs`),
-    /// INCLUDING the `Other`-sentinel-text carrier. This is the node-domain
-    /// anti-drift guard discharging the `Opaque`-arm behaviour-preservation
-    /// obligation: a typed classification that disagreed with the raw-string
-    /// classification would fail here.
-    ///
-    /// DISCRIMINATING on BOTH the `materialized` text-bearing delegation
-    /// (`Other("semanticMiss")` — pre-delegation the typed `materialized` fact
-    /// diverged from the legacy raw fact) AND the `tag` text-bearing delegation
-    /// (`Other("semanticObjectSurface")` — the payload that tags
-    /// `ObjectSurfaceSentinel` via the raw rule; reverting the tag-predicate
-    /// delegation back to `Other(_) => false` makes `typed.tag` report `Other`
-    /// while the legacy raw rule reports `ObjectSurfaceSentinel`, so the `tag`
-    /// assertion below FAILS for it).
-    #[test]
-    fn opaque_sentinel_summary_matches_legacy_unknown_summary() {
-        // The full `_ => opaque_sentinel`-reachable set the `Opaque(err)` arm
-        // routes (RecursiveRef + DeclPlaceholder hit earlier sub-arms ⇒ excluded).
-        // Includes the recognised prefix-sentinel `UnsupportedIntrinsic` (its raw
-        // `unsupportedIntrinsic(<name>)` is unmaterialised via the
-        // `unsupportedIntrinsic(` prefix, tag `Other`) and both adversarial
-        // text-bearing carriers the delegation covers: `Other("semanticMiss")`
-        // (the `materialized` drift case) and `Other("semanticObjectSurface")`
-        // (the `tag` drift case).
-        let reachable = [
-            QueryError::Miss,
-            QueryError::UnsupportedIntrinsic {
-                name: std::sync::Arc::from("FixtureIntrinsic"),
-            },
-            QueryError::BudgetExceeded(
-                crate::resolver_core::shallow_file_state::BudgetExceededFailure {
-                    domain:
-                        crate::resolver_core::shallow_file_state::BudgetDomain::ProjectionOperation,
-                    limit: 1,
-                    actual: 2,
-                    context: "opaque-sentinel summary fixture".to_string(),
-                },
-            ),
-            QueryError::UnstableState { attempts: 3 },
-            QueryError::AliasCycle {
-                chain: std::sync::Arc::from(
-                    vec![std::sync::Arc::from("A"), std::sync::Arc::from("B")].into_boxed_slice(),
-                ),
-            },
-            QueryError::ValueDomainMismatch {
-                expected: crate::semantic_query::SemanticQueryValueTag::TypeNode,
-                actual: crate::semantic_query::SemanticQueryValueTag::Relation,
-            },
-            QueryError::RaiseAliasCycle,
-            QueryError::TypeParamCycle,
-            QueryError::RaiseMiss,
-            QueryError::UnrepresentableSurface,
-            QueryError::UnrepresentableSurfaceMember,
-            QueryError::VueMacroElementsPlaceholder,
-            QueryError::Other(std::sync::Arc::from("semanticMiss")),
-            QueryError::Other(std::sync::Arc::from("semanticObjectSurface")),
-            QueryError::Other(std::sync::Arc::from("budgetExceeded(x)")),
-            QueryError::Other(std::sync::Arc::from("genuinely free text")),
-        ];
-        for variant in reachable {
-            let typed = summary::opaque_sentinel(&variant);
-            let legacy = summary::unknown(&semantic_query_error_raw(&variant));
-            assert_eq!(
-                typed.facts.materialized, legacy.facts.materialized,
-                "materialized fact drift for {variant:?}"
-            );
-            assert_eq!(typed.tag, legacy.tag, "tag drift for {variant:?}");
-            // `opaque_sentinel` mirrors `unknown`'s always-expanded surface —
-            // asserted as PARITY (both are always `true`, so a hardcoded
-            // `assert!(typed...)` would pass too, but comparing to `legacy`
-            // matches the FULL-summary parity claim and catches a future edit
-            // that diverged either side's `expanded_surface` formula).
-            assert_eq!(
-                typed.facts.expanded_surface, legacy.facts.expanded_surface,
-                "expanded_surface drift for {variant:?}"
-            );
-        }
-
-        // Concretely pin the `tag` discriminator: `Other("semanticObjectSurface")`
-        // raises to the SEMANTIC_OBJECT_SURFACE spelling, so BOTH the typed summary
-        // and the legacy raw rule must tag it `ObjectSurfaceSentinel` (the carrier
-        // the intersection reducer drops). A reverted tag-predicate delegation
-        // would tag it `Other` and fail the loop's `tag` assertion above.
-        let object_surface_text = summary::opaque_sentinel(&QueryError::Other(
-            std::sync::Arc::from("semanticObjectSurface"),
-        ));
-        assert_eq!(
-            object_surface_text.tag,
-            FactShapeTag::ObjectSurfaceSentinel,
-            "Other(\"semanticObjectSurface\") must tag ObjectSurfaceSentinel via the text-bearing \
-             delegation (this is the tag-drift case the fixture previously omitted)"
-        );
-    }
-
-    /// Pin the concrete `(materialized, tag)` outcomes so a regression that
-    /// flipped a single variant's classification is caught directly (not only
-    /// via the parity loop). Derived first-hand from the raw recogniser:
-    /// `semanticObjectSurface` / `semanticAliasCycle` / `semanticSurfaceMember`
-    /// / `VueMacroElements` are recognised sentinels ⇒ NOT materialized;
-    /// `<raise miss>` and `semanticTypeParamCycle` are deliberately NOT in the
-    /// recogniser ⇒ materialized. Only the object-surface sentinel tags
-    /// `ObjectSurfaceSentinel`.
-    #[test]
-    fn opaque_sentinel_summary_pins_exact_materialized_and_tag() {
-        let surface = summary::opaque_sentinel(&QueryError::UnrepresentableSurface);
-        assert!(!surface.facts.materialized);
-        assert_eq!(surface.tag, FactShapeTag::ObjectSurfaceSentinel);
-
-        let surface_member = summary::opaque_sentinel(&QueryError::UnrepresentableSurfaceMember);
-        assert!(!surface_member.facts.materialized);
-        assert_eq!(surface_member.tag, FactShapeTag::Other);
-
-        let alias_cycle = summary::opaque_sentinel(&QueryError::RaiseAliasCycle);
-        assert!(!alias_cycle.facts.materialized);
-        assert_eq!(alias_cycle.tag, FactShapeTag::Other);
-
-        let vue = summary::opaque_sentinel(&QueryError::VueMacroElementsPlaceholder);
-        assert!(!vue.facts.materialized);
-        assert_eq!(vue.tag, FactShapeTag::Other);
-
-        // `<raise miss>` is NOT a recognised sentinel ⇒ materialized = true.
-        let raise_miss = summary::opaque_sentinel(&QueryError::RaiseMiss);
-        assert!(raise_miss.facts.materialized);
-        assert_eq!(raise_miss.tag, FactShapeTag::Other);
-
-        // `semanticTypeParamCycle` is NOT a recognised sentinel ⇒ materialized.
-        let tp_cycle = summary::opaque_sentinel(&QueryError::TypeParamCycle);
-        assert!(tp_cycle.facts.materialized);
-        assert_eq!(tp_cycle.tag, FactShapeTag::Other);
+/// Placeholder child facts for [`project_root_summary`]. The shared [`summary`]
+/// constructors fold child `materialized` / `expanded_surface` ONLY into the
+/// discarded `facts` field — the root-only projection reads `root_kind` / `tag`
+/// / `root_semantic_miss_sentinel` ONLY, none of which depends on a child's fact
+/// VALUES (each constructor sets `root_kind` / `tag` by WHICH constructor runs,
+/// plus `mapped`'s `value_root_semantic_miss` and `object_from_members`'s
+/// `is_empty`, both passed REAL). So feeding a constant here is exact — it avoids
+/// the deep fold whose only product would be thrown away.
+fn root_only_placeholder_facts() -> RaisedShapeFacts {
+    RaisedShapeFacts {
+        can_shell_raise: true,
+        materialized: true,
+        expanded_surface: true,
     }
 }
+
+/// `true` when surface signature `sig` raises to a `Function` shape — the
+/// root-only equivalent of the `out_as_function(fold_member(sig)).is_some()`
+/// gate `fold_surface_view` applies to a call / construct signature (tag
+/// `Function`). Folds the signature root-only with a FRESH cycle set (matching
+/// `fold_member`'s fresh-per-member `active`).
+fn signature_raises_to_function(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    sig: SemanticNodeId,
+) -> bool {
+    let mut active = FxHashSet::default();
+    project_root_summary(dispatch, sig, &mut active)
+        .is_some_and(|s| s.tag == FactShapeTag::Function)
+}
+
+/// The NORMALIZED raised-ROOT [`RaisedShapeSummary`] of `node` — the root-only
+/// counterpart of [`fold_node`](super::fold_node) under [`RaisedFactsAlg`],
+/// computed WITHOUT folding member VALUES.
+///
+/// A node's `root_kind` / `tag` / `root_semantic_miss_sentinel` depend ONLY on
+/// the node's own kind plus its ROOT-determining edges — the `Alias` peel, the
+/// `Intersection` sentinel/empty-object arm-drop + 0/1/many collapse, the
+/// `MergedDecl` reduction, the `ConstructorType` signature class, the `Object`
+/// surface's empty / single-call-signature / member-presence shape, and the
+/// `Mapped` VALUE's own root `semanticMiss` flag — NEVER on object property
+/// values, function param/return types, array/tuple element types, union
+/// members, conditional branches, indexed-access operands, keyof bases, or
+/// carrier type-arguments. This projection therefore recurses ONLY along those
+/// root edges and builds each result through the SHARED [`summary`] constructor
+/// layer (feeding [`root_only_placeholder_facts`] it discards), so its
+/// `root_kind` / `tag` / `root_semantic_miss_sentinel` are BYTE-IDENTICAL to the
+/// full fold's by construction. The whole-subtree walk the full fold pays to
+/// compute the (here-unused) `materialized` AND is skipped — the perf win for a
+/// large object surface (an `Object` with N members raises to an `Object` root
+/// after an O(1) shallow check, not an O(tree) walk).
+///
+/// `None` exactly when [`fold_node`](super::fold_node) returns `None` for
+/// `node`. Both bottom out at `node_data_for(node)?`; the append-only interned
+/// arena guarantees every present node's edges reference present nodes (the
+/// invariant the whole-tree arm-walkers rely on), so the root edges this
+/// projection follows are never `None` when `node` is present and the two agree
+/// on `Some` / `None` for every well-formed node. Pinned equal to the full
+/// fold's `root_kind` by the parity test.
+pub(super) fn project_root_summary(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+) -> Option<RaisedShapeSummary> {
+    let ctx = dispatch.ctx;
+    let data = node_data_for(ctx, node)?;
+    Some(match data.as_ref() {
+        SemanticNodeData::Primitive(_)
+        | SemanticNodeData::Literal(_)
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::TemplateLiteral { .. }
+        | SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::ImportType(_)
+        | SemanticNodeData::SyntheticBinding { .. } => summary::materialized_expanded_leaf(),
+
+        // The `Ref` carriers + the `DeclPlaceholder` carrier raise to
+        // `TypeExpr::Ref` (a published-operator surface root).
+        SemanticNodeData::DeclRef { .. }
+        | SemanticNodeData::InstantiationRef { .. }
+        | SemanticNodeData::BareRef(_)
+        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }) => summary::reference_leaf(),
+
+        SemanticNodeData::TypeOf(_) => summary::type_of(),
+        SemanticNodeData::KeyOf { .. } => summary::key_of(root_only_placeholder_facts()),
+        SemanticNodeData::IndexedAccess { .. } => {
+            summary::indexed_access(root_only_placeholder_facts(), root_only_placeholder_facts())
+        }
+        SemanticNodeData::Conditional { .. } => summary::conditional(
+            root_only_placeholder_facts(),
+            root_only_placeholder_facts(),
+            root_only_placeholder_facts(),
+            root_only_placeholder_facts(),
+        ),
+        SemanticNodeData::Function { .. } => summary::function(true),
+        SemanticNodeData::Array { .. } => summary::array(root_only_placeholder_facts()),
+        SemanticNodeData::Tuple { .. } => summary::tuple(std::iter::empty::<RaisedShapeFacts>()),
+        SemanticNodeData::Union(_) => summary::union(std::iter::empty::<RaisedShapeFacts>()),
+        SemanticNodeData::RawFallback { raw } => summary::unknown(raw),
+        SemanticNodeData::VueMacroElements(_) => {
+            summary::opaque_sentinel(&QueryError::VueMacroElementsPlaceholder)
+        }
+
+        SemanticNodeData::Alias(target) => {
+            if !active.insert(node) {
+                return Some(summary::opaque_sentinel(&QueryError::RaiseAliasCycle));
+            }
+            let result = project_root_summary(dispatch, *target, active);
+            active.remove(&node);
+            return result;
+        }
+        SemanticNodeData::MergedDecl { contributors } => {
+            let merged = crate::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(
+                dispatch.graph(),
+                contributors,
+            );
+            return project_root_summary(dispatch, merged, active);
+        }
+        SemanticNodeData::Intersection(members) => {
+            // filter_map recurse (root-only), drop the SEMANTIC_OBJECT_SURFACE
+            // sentinel + empty-object arms, then collapse: empty -> empty object,
+            // len==1 -> that arm, else Intersection — identical to `fold_node`'s
+            // Intersection arm, but each arm classified root-only.
+            let mut arms: Vec<RaisedShapeSummary> = members
+                .iter()
+                .filter_map(|member| project_root_summary(dispatch, *member, active))
+                .collect();
+            arms.retain(|arm| {
+                arm.tag != FactShapeTag::ObjectSurfaceSentinel
+                    && arm.tag != FactShapeTag::EmptyObject
+            });
+            if arms.is_empty() {
+                summary::empty_object()
+            } else if arms.len() == 1 {
+                arms.into_iter().next().unwrap()
+            } else {
+                summary::intersection(std::iter::empty::<RaisedShapeFacts>())
+            }
+        }
+        SemanticNodeData::Mapped { mapper, .. } => {
+            // Only the mapped VALUE's OWN root `semanticMiss` flag feeds the
+            // root class; the source / name_type subtrees do not. Mirror
+            // `fold_node`'s `?` on the value.
+            let value = project_root_summary(dispatch, mapper.value_expr, active)?;
+            summary::mapped(
+                root_only_placeholder_facts(),
+                root_only_placeholder_facts(),
+                None,
+                value.root_semantic_miss_sentinel,
+            )
+        }
+        SemanticNodeData::ConstructorType { signature } => {
+            // The rewrap reads the SIGNATURE child: a `Function` signature
+            // rewraps to a `ConstructorType` (root Other); any other signature
+            // shape passes through unchanged (its own root class). Mirror
+            // `fold_node`'s `?` on the signature.
+            let signature = project_root_summary(dispatch, *signature, active)?;
+            if signature.tag == FactShapeTag::Function {
+                summary::constructor(true)
+            } else {
+                signature
+            }
+        }
+        SemanticNodeData::Object(surface) => {
+            if surface.members.is_empty()
+                && surface.call_signatures.is_empty()
+                && surface.construct_signatures.is_empty()
+                && !surface.has_index_signature
+            {
+                summary::empty_object()
+            } else if surface.members.is_empty()
+                && surface.construct_signatures.is_empty()
+                && !surface.has_index_signature
+                && surface.call_signatures.len() == 1
+            {
+                // Single-call-signature surface IS that signature's value
+                // (`fold_surface_view`'s fast path), folded with a FRESH cycle set.
+                let mut member_active = FxHashSet::default();
+                project_root_summary(dispatch, surface.call_signatures[0], &mut member_active)
+                    .unwrap_or_else(|| {
+                        summary::opaque_sentinel(&QueryError::UnrepresentableSurfaceMember)
+                    })
+            } else {
+                // A representable member survives iff there is a property, a
+                // concrete-or-open index signature, or a call / construct
+                // signature that raises to a `Function` — exactly
+                // `fold_surface_view`'s member-set non-emptiness. A surviving
+                // surface raises to an `Object` root; an empty one becomes the
+                // `UnrepresentableSurface` sentinel (tag `ObjectSurfaceSentinel`,
+                // root `Other`). The signature scan runs ONLY when a property /
+                // index has not already settled it (short-circuit `||`).
+                let has_member = !surface.members.is_empty()
+                    || !surface.index_signatures.is_empty()
+                    || surface.has_index_signature
+                    || surface
+                        .call_signatures
+                        .iter()
+                        .any(|sig| signature_raises_to_function(dispatch, *sig))
+                    || surface
+                        .construct_signatures
+                        .iter()
+                        .any(|sig| signature_raises_to_function(dispatch, *sig));
+                if has_member {
+                    summary::object_from_members(std::iter::empty::<bool>(), false)
+                } else {
+                    summary::opaque_sentinel(&QueryError::UnrepresentableSurface)
+                }
+            }
+        }
+        SemanticNodeData::Opaque(err) => match err {
+            QueryError::RecursiveRef { .. } => summary::materialized_expanded_leaf(),
+            _ => summary::opaque_sentinel(err),
+        },
+    })
+}
+
+#[cfg(test)]
+#[path = "node_domain_tests.rs"]
+mod tests;

@@ -230,7 +230,7 @@ pub(crate) fn route_projection_node_eq_to_expr(
     use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     node_raised_shape_for_eq_with_dispatch(&dispatch, node.node(), expr)
-        .is_some_and(|shape| shape.eq_to_expr)
+        .is_some_and(|shape| shape.eq_to_expr())
 }
 
 /// Node-domain convergence test for later route-fixpoint iterations: do `a` and

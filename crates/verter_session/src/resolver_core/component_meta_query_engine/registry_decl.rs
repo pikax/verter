@@ -1197,7 +1197,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // materialised surface TypeExpr.
                 let materialized =
                     node_raised_shape_facts_with_dispatch(&self.semantic_dispatch(), surface_node)
-                        .is_some_and(|facts| facts.materialized);
+                        .is_some_and(|facts| facts.materialized());
                 materialized
                     .then(|| projected_surface_to_type_expr(&surface))
                     .flatten()

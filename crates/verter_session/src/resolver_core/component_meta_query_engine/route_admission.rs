@@ -1,20 +1,34 @@
 //! The sealed route-admission carrier ([`AdmittedRouteProjectionNode`]) plus the
 //! gated mint helpers that are the SOLE minters of it.
 //!
-//! STRUCTURAL CONFINEMENT (the primary defense): [`AdmittedRouteProjectionNode::new`]
-//! is PRIVATE to this module. No sibling — `surface`, `registry_decl`,
-//! `node_materialize`, the `meta_resolve` host-threaded wrappers, the route
-//! fixpoint — can construct the carrier or alias-forge one: a planted
-//! `use super::AdmittedRouteProjectionNode as Forge; Forge::new(node)` is
-//! `error[E0603]: ...::new is private`, because aliasing a path does not relax the
-//! item's visibility. The route/surface adapters mint EXCLUSIVELY through the gated
+//! TWO-LAYER STRUCTURAL SEAL (the primary defense): a carrier can be obtained
+//! ONLY through a gated `admit_*` helper, AND the gate's fact input is itself
+//! unforgeable.
+//!
+//! 1. CONSTRUCTOR confinement — [`AdmittedRouteProjectionNode::new`] is PRIVATE
+//!    to this module. No sibling — `surface`, `registry_decl`, `node_materialize`,
+//!    the `meta_resolve` host-threaded wrappers, the route fixpoint — can
+//!    construct the carrier or alias-forge one: a planted
+//!    `use super::AdmittedRouteProjectionNode as Forge; Forge::new(node)` is
+//!    `error[E0624]: associated function `new` is private`, because aliasing a
+//!    path does not relax the item's visibility.
+//! 2. FACT-INPUT seal — the gate inputs [`RaisedShapeFacts`] / [`NodeShapeEq`]
+//!    carry PRIVATE fields (constructable only by the node-domain fold's
+//!    `summary` layer). A sibling cannot fabricate a
+//!    `RaisedShapeFacts { materialized: true, expanded_surface: true, .. }` (or a
+//!    `NodeShapeEq { eq_to_expr: false, .. }`) struct literal to drive an
+//!    `admit_*` helper past its gate: the literal is `error[E0451]: field … is
+//!    private`. The facts read by the helpers can only be the legitimate output
+//!    of the shared fold.
+//!
+//! The route/surface adapters mint EXCLUSIVELY through the gated
 //! [`admit_expanded_surface`] / [`admit_expanded_surface_changed`] /
 //! [`admit_mode_aware`] / [`admit_materialized`] helpers below, each of which
 //! encodes ONE call site's node-domain acceptance gate and is the only code that
 //! can reach the private constructor. The helpers take the caller's
-//! ALREADY-COMPUTED [`RaisedShapeFacts`] / [`NodeShapeEq`] (the route/surface
-//! adapters fold them for their own decision anyway), so confining the mint here
-//! adds no extra hot-path fold.
+//! ALREADY-COMPUTED (and now sealed-unforgeable) [`RaisedShapeFacts`] /
+//! [`NodeShapeEq`] (the route/surface adapters fold them for their own decision
+//! anyway), so confining the mint here adds no extra hot-path fold.
 //!
 //! The type itself is `pub(crate)` ON PURPOSE so the cross-subtree
 //! `meta_resolve::dispatch_helpers` host-threaded wrappers and the route fixpoint
@@ -48,7 +62,10 @@ use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 /// `route_admission` (only the gated helpers reach it); `node` is subtree-mint-
 /// scoped (`pub(in …::component_meta_query_engine)`) so only the in-subtree sink /
 /// compare helpers read it, and the materialisation it feeds stays cap-gated at
-/// the surface sink regardless of who holds the carrier.
+/// the surface sink regardless of who holds the carrier. The seal is COMPLETE
+/// end-to-end: the gate input (`RaisedShapeFacts` / `NodeShapeEq`) is sealed
+/// (private fields, fold-only) too, so neither the carrier nor a passing gate
+/// fact can be forged outside the legitimate fold + gated helper.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdmittedRouteProjectionNode {
     node: SemanticNodeId,
@@ -79,7 +96,8 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surf
     facts: &RaisedShapeFacts,
     node: SemanticNodeId,
 ) -> Option<AdmittedRouteProjectionNode> {
-    (facts.materialized && facts.expanded_surface).then(|| AdmittedRouteProjectionNode::new(node))
+    (facts.materialized() && facts.expanded_surface())
+        .then(|| AdmittedRouteProjectionNode::new(node))
 }
 
 /// Gate: `materialized && expanded_surface && changed`, where
@@ -92,7 +110,7 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surf
     shape: &NodeShapeEq,
     node: SemanticNodeId,
 ) -> Option<AdmittedRouteProjectionNode> {
-    (shape.facts.materialized && shape.facts.expanded_surface && !shape.eq_to_expr)
+    (shape.facts().materialized() && shape.facts().expanded_surface() && shape.changed())
         .then(|| AdmittedRouteProjectionNode::new(node))
 }
 
@@ -109,12 +127,12 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_mode_aware(
     terminal_mode: ProjectionMode,
     node: SemanticNodeId,
 ) -> Option<AdmittedRouteProjectionNode> {
-    if !facts.materialized {
+    if !facts.materialized() {
         return None;
     }
     let accept = match terminal_mode {
         // Expanded terminal — only fully materialised surfaces qualify.
-        ProjectionMode::Expanded => facts.expanded_surface,
+        ProjectionMode::Expanded => facts.expanded_surface(),
         // Shallow / Identity / Navigate / Skeleton — admit the carrier shape.
         ProjectionMode::Shallow
         | ProjectionMode::Identity
@@ -136,6 +154,6 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_materialized(
     node: SemanticNodeId,
 ) -> Option<AdmittedRouteProjectionNode> {
     facts
-        .materialized
+        .materialized()
         .then(|| AdmittedRouteProjectionNode::new(node))
 }

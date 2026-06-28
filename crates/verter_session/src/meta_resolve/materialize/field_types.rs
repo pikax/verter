@@ -371,8 +371,8 @@ pub(crate) fn stabilize_registry_member_surface_node_with_shape_cache(
 
     // No-poison (tri-state): keep the FIRST-pass surface only when the stabilised
     // root is CONFIDENTLY a miss AND the first-pass root is CONFIDENTLY miss-free.
-    let stable_has_miss = stable_facts.map(|f| !f.materialized);
-    let first_has_miss = first_facts.map(|f| !f.materialized);
+    let stable_has_miss = stable_facts.map(|f| !f.materialized());
+    let first_has_miss = first_facts.map(|f| !f.materialized());
     if stable_has_miss == Some(true) && first_has_miss == Some(false) {
         RegistryMemberStabilizedValue::First { node: first_node }
     } else {
