@@ -25746,3 +25746,451 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
         "the REAL mod.rs must match the exact sanctioned shape"
     );
 }
+
+// =============================================================================
+// Component-meta hot paths obtain `ScopeShadowing` from the per-scope memo.
+//
+// `ComponentMetaQueryEngine::scope_shadowing_for_scope(scope) ->
+// Arc<ScopeShadowing>` builds ONE shadow set per scope and memoizes it, so the
+// Pick/Omit package-root gate (`is_builtin_pick_or_omit`) can probe it O(1) per
+// published field. A component-meta hot path that instead builds a fresh
+// `ScopeShadowing` per field — folding the scope's local type names ∪
+// script-setup type bindings ∪ resolved import-binding keys into a new set each
+// time — is O(fields × scope-names) reclone on the publication hot path.
+//
+// This guard pins that the production `crate::meta_resolve::**` hot paths obtain
+// the shadow set from that per-scope memo, with EXACTLY ONE sanctioned
+// exception: the genuinely engine-less `None`-arm fallback in
+// `project_expr_class_a_via_dispatch_threaded`, which runs only when no
+// `ComponentMetaQueryEngine` is threaded in (a transient, engine-less call) and
+// therefore has no memo to consult. The allowlist is ARM-PRECISE — an
+// unconditional / pre-match direct build in the SAME fn is still flagged.
+//
+// The detector is a `syn` path/visitor source scan (mirroring the established
+// `dispatch_to_type_expr_method_body` family). A plain identifier-count scan
+// cannot express the arm-precise allowance, so the per-arm `None`-fallback
+// context is tracked structurally.
+// =============================================================================
+mod component_meta_scope_shadowing_memo {
+    use quote::ToTokens;
+    use syn::visit::Visit;
+
+    use super::{read_workspace_file, workspace_root};
+
+    /// The four `ScopeShadowing` associated constructors a component-meta hot
+    /// path must NOT call directly — it must obtain the per-scope
+    /// `Arc<ScopeShadowing>` from
+    /// `ComponentMetaQueryEngine::scope_shadowing_for_scope` instead.
+    pub(super) const SCOPE_SHADOWING_CTORS: &[&str] = &[
+        "from_scope_payload",
+        "from_host_scope",
+        "from_prepared_decl_bundle",
+        "empty",
+    ];
+
+    /// One non-allowlisted direct `ScopeShadowing` constructor call found in a
+    /// `meta_resolve` production source file.
+    #[derive(Debug)]
+    pub(super) struct Violation {
+        pub(super) file: String,
+        pub(super) fn_name: String,
+        pub(super) method: String,
+    }
+
+    impl std::fmt::Display for Violation {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{} :: fn `{}` builds `ScopeShadowing::{}(...)` directly",
+                self.file, self.fn_name, self.method
+            )
+        }
+    }
+
+    /// Returns the matched constructor name when `path`'s final two segments are
+    /// `ScopeShadowing :: <ctor>` for one of [`SCOPE_SHADOWING_CTORS`]. Matches
+    /// BOTH the fully-qualified
+    /// `crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope`
+    /// form and a bare (use-imported) `ScopeShadowing::from_host_scope` form,
+    /// because only the trailing `ScopeShadowing` + constructor segment pair is
+    /// inspected.
+    fn scope_shadowing_ctor_of_path(path: &syn::Path) -> Option<&'static str> {
+        let n = path.segments.len();
+        if n < 2 {
+            return None;
+        }
+        if path.segments[n - 2].ident != "ScopeShadowing" {
+            return None;
+        }
+        let ctor = path.segments[n - 1].ident.to_string();
+        SCOPE_SHADOWING_CTORS
+            .iter()
+            .copied()
+            .find(|c| *c == ctor.as_str())
+    }
+
+    /// `true` when `pat` is the bare `None` pattern (`Some`/`None` arm of an
+    /// `Option` match). syn parses a lone `None` as a `Pat::Ident`; a
+    /// path-qualified `Option::None` lands as a `Pat::Path`.
+    fn pat_is_none(pat: &syn::Pat) -> bool {
+        match pat {
+            syn::Pat::Ident(pi) => pi.ident == "None" && pi.subpat.is_none(),
+            syn::Pat::Path(pp) => pp.path.segments.last().is_some_and(|s| s.ident == "None"),
+            _ => false,
+        }
+    }
+
+    fn token_stream_mentions_ident(ts: proc_macro2::TokenStream, ident: &str) -> bool {
+        ts.into_iter().any(|tt| match tt {
+            proc_macro2::TokenTree::Ident(i) => i == ident,
+            proc_macro2::TokenTree::Group(g) => token_stream_mentions_ident(g.stream(), ident),
+            _ => false,
+        })
+    }
+
+    /// `true` when the match scrutinee references an `engine` binding — the
+    /// signal that a `None` arm of this match is the engine-less fallback (vs.
+    /// some unrelated `Option` match whose `None` arm is NOT engine-less).
+    fn expr_mentions_engine(expr: &syn::Expr) -> bool {
+        token_stream_mentions_ident(expr.to_token_stream(), "engine")
+    }
+
+    /// Walks a single production source file's AST, tracking the enclosing fn
+    /// name and whether the cursor is inside the `None` arm of an `engine`
+    /// match, and records every non-allowlisted direct `ScopeShadowing`
+    /// constructor call.
+    struct Scanner {
+        rel_path: String,
+        is_dispatch_helpers: bool,
+        fn_stack: Vec<String>,
+        in_engine_none_arm: bool,
+        violations: Vec<Violation>,
+    }
+
+    impl<'ast> Visit<'ast> for Scanner {
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            self.fn_stack.push(node.sig.ident.to_string());
+            syn::visit::visit_item_fn(self, node);
+            self.fn_stack.pop();
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            self.fn_stack.push(node.sig.ident.to_string());
+            syn::visit::visit_impl_item_fn(self, node);
+            self.fn_stack.pop();
+        }
+
+        fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+            // Visit the scrutinee normally, then drive each arm body with the
+            // `None`-engine-fallback context set so a construction lexically
+            // inside the `None =>` arm of an `engine` match is recognised as the
+            // single allowlisted site. A nested match restores the prior flag.
+            self.visit_expr(&node.expr);
+            let engine_match = expr_mentions_engine(&node.expr);
+            for arm in &node.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    self.visit_expr(guard);
+                }
+                let prev = self.in_engine_none_arm;
+                if engine_match && pat_is_none(&arm.pat) {
+                    self.in_engine_none_arm = true;
+                }
+                self.visit_expr(&arm.body);
+                self.in_engine_none_arm = prev;
+            }
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(p) = node.func.as_ref() {
+                if let Some(method) = scope_shadowing_ctor_of_path(&p.path) {
+                    let fn_name = self
+                        .fn_stack
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "<file-scope>".to_string());
+                    // The SOLE allowlisted direct construction: the engine-less
+                    // `None`-arm `from_host_scope` fallback inside
+                    // `project_expr_class_a_via_dispatch_threaded`.
+                    let allowlisted = self.is_dispatch_helpers
+                        && fn_name == "project_expr_class_a_via_dispatch_threaded"
+                        && method == "from_host_scope"
+                        && self.in_engine_none_arm;
+                    if !allowlisted {
+                        self.violations.push(Violation {
+                            file: self.rel_path.clone(),
+                            fn_name,
+                            method: method.to_string(),
+                        });
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+
+    /// Run the detector over one production source file's text.
+    pub(super) fn violations_in(rel_path: &str, src: &str) -> Vec<Violation> {
+        let file = syn::parse_file(src).unwrap_or_else(|e| {
+            panic!("scope-shadowing memo guard: parse `{rel_path}` failed: {e}")
+        });
+        let mut scanner = Scanner {
+            rel_path: rel_path.to_string(),
+            is_dispatch_helpers: rel_path.ends_with("meta_resolve/dispatch_helpers.rs"),
+            fn_stack: Vec::new(),
+            in_engine_none_arm: false,
+            violations: Vec::new(),
+        };
+        scanner.visit_file(&file);
+        scanner.violations
+    }
+
+    /// The production sources in scope: the `meta_resolve` shell module plus
+    /// every `.rs` under `meta_resolve/`, EXCLUDING colocated test modules
+    /// (`*_tests.rs` / `tests.rs`).
+    pub(super) fn production_sources() -> Vec<(String, String)> {
+        let root = workspace_root();
+        let mut out: Vec<(String, String)> = Vec::new();
+        const SHELL: &str = "crates/verter_session/src/meta_resolve.rs";
+        out.push((SHELL.to_string(), read_workspace_file(SHELL)));
+        let dir = root.join("crates/verter_session/src/meta_resolve");
+        for entry in walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Production source only — colocated test modules are out of scope.
+            if rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("scope-shadowing memo guard: read `{rel}` failed: {e}"));
+            out.push((rel, src));
+        }
+        out
+    }
+}
+
+/// Component-meta hot paths obtain `ScopeShadowing` from the per-scope memo.
+///
+/// Production component-meta hot paths in `crate::meta_resolve::**` must NOT
+/// build a `ScopeShadowing` directly per field — they must obtain the per-scope
+/// `Arc<ScopeShadowing>` from
+/// `ComponentMetaQueryEngine::scope_shadowing_for_scope`, which builds one
+/// shadow set per scope and memoizes it. Building it directly per published
+/// field is an O(fields × scope-names) reclone on the publication hot path.
+///
+/// SCOPE: production source only — `crates/verter_session/src/meta_resolve.rs`
+/// and `crates/verter_session/src/meta_resolve/**/*.rs` (NOT
+/// `project_semantic_dispatch/**`, NOT `resolver_core/**`, NOT tests).
+///
+/// ALLOWLIST: EXACTLY ONE direct construction — the engine-less `None`-arm
+/// `ScopeShadowing::from_host_scope(ctx, scope)` fallback inside
+/// `project_expr_class_a_via_dispatch_threaded` (dispatch_helpers.rs). That arm
+/// runs ONLY when no `ComponentMetaQueryEngine` is threaded in, so there is no
+/// memo to consult and a direct build is correct. The allowlist is ARM-PRECISE:
+/// an unconditional / pre-match direct build in the same fn is STILL flagged
+/// (proven by the `..._unconditional_dispatch_build_fires` self-test).
+///
+/// ── SC-first guard-local record ────────────────────────────────────────────
+/// `scanner_invariant`: `component_meta_hot_path_scope_shadowing_memo_routing`.
+///
+/// `scanner_justification`: Rust visibility cannot separate the `meta_resolve`
+///   hot paths from their legitimate visibility-peers — the engine-less
+///   `project_semantic_dispatch` lowering layer, which builds a `ScopeShadowing`
+///   once per lowering op (NOT per field) and holds no engine to memoize
+///   through. `ScopeShadowing` + its `pub(crate)` constructors, the per-scope
+///   memo on `ComponentMetaQueryEngine`, and the hot paths live in three SIBLING
+///   top-level modules (`resolver_core::scope_shadowing`,
+///   `resolver_core::component_meta_query_engine`, `meta_resolve`); a
+///   `pub(in crate::resolver_core)` seal would admit the memo but BREAK the
+///   engine-less dispatch builds, and any `pub(crate)` escape hatch the dispatch
+///   peer uses, the hot paths can use too. Token / type-state cannot encode
+///   "only when `engine` is `None`" or "not per-field": the distinction is
+///   semantic / cadence-based (engine-available hot path vs engine-less
+///   lowering), not a module boundary — so the compiler cannot express it within
+///   these owner boundaries, and a source guard supplements it.
+///
+/// `mechanism_ruling`: `SCF-SCOPE-SHADOWING-MEMO-2026-06-28` — a neutral codex
+///   SC-first architecture ruling, dated 2026-06-28, decided the mechanism is
+///   SCANNER-SUPPLEMENTED, not compiler-sealed: route the hot sites through the
+///   memo and add this discriminating source guard for the residual. The
+///   structural END-STATE the ruling named is a shared request-context
+///   (`ResolverContext`) per-scope shadow memo that ALL consumers — including
+///   the engine-less `project_semantic_dispatch` builds — consult, after which
+///   the constructors can seal to `pub(in crate::resolver_core)` and this guard
+///   is no longer needed. That migration is a SEPARATE follow-up, not this
+///   guard's debt.
+///
+/// `hardening_rounds`: 0 (adoption).
+///
+/// `hardening_history`: adoption under the 2026-06-28 codex SC-first
+///   architecture ruling.
+/// ────────────────────────────────────────────────────────────────────────────
+#[test]
+fn component_meta_hot_paths_obtain_scope_shadowing_from_the_per_scope_memo() {
+    use component_meta_scope_shadowing_memo as guard;
+    let mut messages: Vec<String> = Vec::new();
+    for (rel, src) in guard::production_sources() {
+        for v in guard::violations_in(&rel, &src) {
+            // Best-effort source line hint (the workspace's `syn` dev-dep has
+            // `proc-macro2/span-locations` off, so the AST carries no line
+            // numbers): list the lines whose text bears the constructor call.
+            let hint: Vec<usize> = src
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.contains(&format!("{}(", v.method)))
+                .map(|(i, _)| i + 1)
+                .collect();
+            messages.push(format!("{v} (construction line(s): {hint:?})"));
+        }
+    }
+    assert!(
+        messages.is_empty(),
+        "component-meta hot paths in `crate::meta_resolve::**` must obtain \
+         `ScopeShadowing` from the per-scope memo \
+         (`ComponentMetaQueryEngine::scope_shadowing_for_scope`), not build it \
+         directly per field. The ONLY sanctioned direct construction is the \
+         engine-less `None`-arm `ScopeShadowing::from_host_scope(ctx, scope)` \
+         fallback inside `project_expr_class_a_via_dispatch_threaded`. \
+         Non-allowlisted direct construction(s):\n{}",
+        messages.join("\n")
+    );
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_field_types_direct_build_fires() {
+    // A direct `ScopeShadowing::from_scope_payload(...)` build in a field-types
+    // hot path (the regression form) must FIRE.
+    let planted = r#"
+        fn materialize_component_meta_type_expr_until_stable_full(
+            query_engine: &mut ComponentMetaQueryEngine,
+            scope_canonical_id: &str,
+        ) {
+            let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
+            let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                scope_payload.as_deref(),
+            );
+            let _ = shadowing;
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+        planted,
+    );
+    assert_eq!(
+        v.len(),
+        1,
+        "a direct `ScopeShadowing::from_scope_payload(...)` build in a field-types \
+         hot path MUST fire; got: {v:?}"
+    );
+    assert_eq!(v[0].method, "from_scope_payload");
+    assert_eq!(
+        v[0].fn_name,
+        "materialize_component_meta_type_expr_until_stable_full"
+    );
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_unconditional_dispatch_build_fires() {
+    // A pre-match UNCONDITIONAL `from_host_scope` build in
+    // `project_expr_class_a_via_dispatch_threaded` must FIRE even though the
+    // same fn ALSO contains the legitimate engine-less `None`-arm build — this
+    // proves the allowlist is arm-precise, not fn-wide or file-wide.
+    let planted = r#"
+        fn project_expr_class_a_via_dispatch_threaded(
+            ctx: &dyn ResolverContext,
+            mut engine: Option<&mut ComponentMetaQueryEngine>,
+            scope_canonical_id: &str,
+        ) {
+            let pre_match = crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                ctx,
+                scope_canonical_id,
+            );
+            let memoized = match engine.as_deref_mut() {
+                Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
+                None => std::sync::Arc::new(
+                    crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                        ctx,
+                        scope_canonical_id,
+                    ),
+                ),
+            };
+            let _ = (pre_match, memoized);
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/dispatch_helpers.rs",
+        planted,
+    );
+    // EXACTLY one: the pre-match build fires; the `None`-arm build is
+    // allowlisted. fn-wide allowance would yield 0; no allowance would yield 2.
+    assert_eq!(
+        v.len(),
+        1,
+        "the pre-match unconditional `from_host_scope` build MUST fire while the \
+         engine-less `None`-arm build stays allowlisted (arm-precise); got: {v:?}"
+    );
+    assert_eq!(v[0].method, "from_host_scope");
+    assert_eq!(v[0].fn_name, "project_expr_class_a_via_dispatch_threaded");
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_clean_memo_path_passes() {
+    // The field-types hot path obtains the shadow set from the memo — no direct
+    // build — and the dispatch helper uses the engine-aware match (`Some` arm →
+    // memo, `None` arm → the single allowlisted engine-less build). Both PASS.
+    let clean_field_types = r#"
+        fn materialize_component_meta_type_expr_until_stable_full(
+            query_engine: &mut ComponentMetaQueryEngine,
+            scope_canonical_id: &str,
+        ) {
+            let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
+            let shadowing = query_engine.scope_shadowing_for_scope(scope_canonical_id);
+            let _ = (scope_payload, shadowing);
+        }
+    "#;
+    assert!(
+        component_meta_scope_shadowing_memo::violations_in(
+            "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+            clean_field_types,
+        )
+        .is_empty(),
+        "the memo-routed field-types hot path must pass"
+    );
+
+    let clean_dispatch = r#"
+        fn project_expr_class_a_via_dispatch_threaded(
+            ctx: &dyn ResolverContext,
+            mut engine: Option<&mut ComponentMetaQueryEngine>,
+            scope_canonical_id: &str,
+        ) {
+            let shadowing = match engine.as_deref_mut() {
+                Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
+                None => std::sync::Arc::new(
+                    crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                        ctx,
+                        scope_canonical_id,
+                    ),
+                ),
+            };
+            let _ = shadowing;
+        }
+    "#;
+    assert!(
+        component_meta_scope_shadowing_memo::violations_in(
+            "crates/verter_session/src/meta_resolve/dispatch_helpers.rs",
+            clean_dispatch,
+        )
+        .is_empty(),
+        "the engine-aware dispatch helper (memo `Some` arm + single allowlisted \
+         `None`-arm build) must pass"
+    );
+}
