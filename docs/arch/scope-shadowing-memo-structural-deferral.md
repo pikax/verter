@@ -50,7 +50,7 @@ structurally on the `ScopeShadowing` ident plus a sanctioned constructor segment
 `#[cfg(test)]` items are out of scope (the guard is production-only).
 
 Disclosed residual (inherent to any name-based syntactic source scanner; NOT enforced). The
-80/20 bound leaves TWO residual classes to the structural end-state rather than chasing
+80/20 bound leaves THREE residual classes to the structural end-state rather than chasing
 further AST shapes:
 
 1. Identity-laundering forms that do not spell `ScopeShadowing` at the call site — a renamed
@@ -60,10 +60,17 @@ further AST shapes:
    `(ScopeShadowing::from_host_scope)(...)`), and macro-expanded construction.
 2. Runtime / control-flow multiplicity inside the sanctioned `None` arm — the scanner enforces
    ONE syntactic direct call expression in the allowlisted arm, NOT "at most once at runtime";
-   a single sanctioned call inside a loop, closure, or guarded sub-arm builds many times at
-   runtime while reading as one syntactic call.
+   a single sanctioned call inside a loop or closure builds many times at runtime while
+   reading as one syntactic call.
+3. Binding-identity / parameter-shadowing laundering — a deliberately shadowed local `engine`
+   (e.g. a `let engine = None::<&mut ComponentMetaQueryEngine>;` ahead of
+   `match engine.as_deref_mut() { None => ScopeShadowing::from_host_scope(..) }` inside the
+   sanctioned fn) reads syntactically as the engine-less fallback even though it DISCARDS a
+   present engine. A syntactic scanner cannot tell the shadowed local from the unshadowed
+   `engine` parameter without name resolution — the SAME inherent name-scanner class as the
+   aliases / macros of (1).
 
-Universal confinement of BOTH classes belongs to the structural end-state below (the
+Universal confinement of ALL THREE classes belongs to the structural end-state below (the
 shared-`ResolverContext` per-scope memo, after which the constructors seal and a direct
 hot-path build will not compile), NOT this scanner. An observed evasion is a laundering escape
 that freezes the scanner per Structural-Confinement-First, at which point the structural

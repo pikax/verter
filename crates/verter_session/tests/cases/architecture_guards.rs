@@ -24469,10 +24469,11 @@ fn visibility_is_crate_visible(vis: &syn::Visibility) -> bool {
 /// - A `pub(in crate::…)`-subtree / `pub(super)` / `pub(self)` restricted entry
 ///   is NOT crate-visible (see [`visibility_is_crate_visible`]); `pub(in crate)`
 ///   (exact crate root) IS.
-/// - A `#[cfg(test)]`-gated (or `#[cfg(any(test, …))]`, gated via the `test`
-///   arm) item, impl, or module is test-only and never widens the production
-///   producer surface (see [`attrs_test_gate`]). A bare `#[cfg(debug_assertions)]`
-///   item is PRODUCTION (compiled in debug builds) and IS counted.
+/// - An item, impl, or module whose `#[cfg(...)]` ENTAILS test — `#[cfg(test)]`
+///   or `#[cfg(all(test, …))]` — is test-only and never widens the production
+///   producer surface (see [`attrs_test_gate`]). A PRODUCTION-satisfiable gate is
+///   NOT excluded: `#[cfg(any(test, …))]`, `#[cfg(not(test))]`, and a bare
+///   `#[cfg(debug_assertions)]` all compile into a non-test build and ARE counted.
 ///
 /// GOV P0 (round 4): the previous line-scanner only saw module-level FREE fns
 /// (brace-depth 0) and MISSED a crate-visible ASSOCIATED fn — e.g.
@@ -25226,10 +25227,10 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
 /// the sole `pub(crate)` entry passes; an INJECTED second crate-visible producer
 /// — `pub(crate)` OR `pub(in crate)`, FREE or ASSOCIATED (inside an INHERENT
 /// `impl`) — reddens; reverting greens. A `pub(in crate::…)`-subtree /
-/// `pub(super)` restricted entry is NOT crate-visible; a `#[cfg(test)]`-gated
-/// (or `#[cfg(any(test, …))]`, via the `test` arm) item is excluded, while a
-/// `#[cfg(not(test))]` PRODUCTION item and a bare `#[cfg(debug_assertions)]`
-/// PRODUCTION item are COUNTED.
+/// `pub(super)` restricted entry is NOT crate-visible; an item whose
+/// `#[cfg(...)]` ENTAILS test (`#[cfg(test)]`, `#[cfg(all(test, …))]`) is
+/// excluded, while a PRODUCTION-satisfiable `#[cfg(any(test, …))]`,
+/// `#[cfg(not(test))]`, or bare `#[cfg(debug_assertions)]` item is COUNTED.
 #[test]
 fn mirror_entry_surface_classifier_discriminates() {
     // Baseline: one sanctioned free entry + a restricted-subtree helper + an
@@ -26025,6 +26026,16 @@ mod component_meta_scope_shadowing_memo {
             }
         }
 
+        // CFG-TEST CONTAINER COVERAGE (80/20). The cfg-test depth gate on the
+        // visitors above covers the REALISTIC production container set: `mod`,
+        // free `fn`, `impl`-method (`ImplItemFn`), `impl`, top-level `const`, and
+        // `static`. Exotic cfg-gated containers — a trait default-method body
+        // (`TraitItemFn`) / `TraitItemConst`, an `ImplItemConst`, or a
+        // statement-level `#[cfg(test)]` — are NOT depth-gated. That is FP-SAFE: a
+        // sanctioned build inside one would OVER-fire (a loud spurious flag on
+        // genuinely test-only exotic code), never silently miss a production
+        // build. None exist in-tree; the 80/20 ruling bounds further AST-shape
+        // coverage to the tracked structural end-state.
         fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
             // The allowlisted construction is the `None` arm of a TOP-LEVEL
             // (depth-0) match whose scrutinee is EXACTLY `engine.as_deref_mut()`
@@ -26160,13 +26171,17 @@ mod component_meta_scope_shadowing_memo {
 /// `project_expr_class_a_via_dispatch_threaded` (dispatch_helpers.rs). That arm
 /// runs ONLY when no `ComponentMetaQueryEngine` is threaded in, so there is no
 /// memo to consult and a direct build is correct. The allowance is PRECISE: the
-/// `None` arm must belong to a TOP-LEVEL match whose scrutinee ROOT RECEIVER is
-/// the `engine` binding (not merely a scrutinee that mentions the token), it
-/// covers AT MOST ONE build (a second fires), and it does not inherit into a
-/// nested match — an unconditional / pre-match / second / non-engine-rooted /
+/// `None` arm must belong to a TOP-LEVEL match whose scrutinee is EXACTLY
+/// `engine.as_deref_mut()` (enclosing parens / groups around it are fine). Any
+/// other `engine`-rooted scrutinee — `engine.filter(..)`, `engine.and_then(..)`,
+/// a bare `engine` path, or a field access like `other.engine` — can take its
+/// `None` arm with an engine PRESENT, so it is NOT sanctioned. The allowance
+/// covers AT MOST ONE build (a second fires) and does not inherit into a nested
+/// match — an unconditional / pre-match / second / non-canonical-scrutinee /
 /// nested-match build is STILL flagged (proven by the
 /// `..._unconditional_dispatch_build_fires`, `..._second_none_arm_build_fires`,
-/// `..._non_engine_scrutinee_none_arm_fires`, and
+/// `..._non_engine_scrutinee_none_arm_fires`,
+/// `..._non_canonical_engine_scrutinee_fires`, and
 /// `..._nested_engine_match_none_arm_fires` self-tests).
 ///
 /// ENFORCED SURFACE: a literal `ScopeShadowing::<ctor>` path-call — bare
@@ -26178,7 +26193,7 @@ mod component_meta_scope_shadowing_memo {
 /// items are out of scope (the guard is production-only).
 ///
 /// DISCLOSED RESIDUAL (inherent to any name-based syntactic source scanner; NOT
-/// enforced). The 80/20 bound leaves TWO residual classes to the structural
+/// enforced). The 80/20 bound leaves THREE residual classes to the structural
 /// end-state rather than chasing further AST shapes:
 ///
 /// 1. Identity-laundering forms that do not spell `ScopeShadowing` at the call
@@ -26192,10 +26207,20 @@ mod component_meta_scope_shadowing_memo {
 /// 2. Runtime / control-flow MULTIPLICITY inside the sanctioned `None` arm — the
 ///    scanner enforces ONE syntactic direct call expression in the allowlisted
 ///    arm, NOT "at most once at runtime". A single sanctioned call placed inside
-///    a loop, a closure, or a guarded sub-arm within that `None` arm builds many
-///    times at runtime while reading as one syntactic call, and is not detected.
+///    a loop or a closure within that `None` arm builds many times at runtime
+///    while reading as one syntactic call, and is not detected.
 ///
-/// Universal confinement of BOTH classes belongs to the tracked structural
+/// 3. Binding-identity / parameter-shadowing laundering — a deliberately
+///    shadowed local `engine` (e.g. a
+///    `let engine = None::<&mut ComponentMetaQueryEngine>;` ahead of
+///    `match engine.as_deref_mut() { None => ScopeShadowing::from_host_scope(..) }`
+///    inside the sanctioned fn) reads syntactically as the engine-less fallback
+///    even though it DISCARDS a present engine. A syntactic scanner cannot tell
+///    the shadowed local from the unshadowed `engine` parameter without name
+///    resolution — the SAME inherent name-scanner class as the aliases / macros
+///    of (1).
+///
+/// Universal confinement of ALL THREE classes belongs to the tracked structural
 /// end-state, NOT this scanner: the shared-`ResolverContext` per-scope memo that
 /// lets the constructors seal to `pub(in crate::resolver_core)`, recorded in
 /// `docs/arch/scope-shadowing-memo-structural-deferral.md`. An OBSERVED such
