@@ -519,12 +519,18 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     // resolves `Pick` to the userland declaration via dispatch's
     // standard `ResolveDecl` path — preserving the "user shadowing
     // wins" rule across BOTH lowering entry points. With a
-    // `ComponentMetaQueryEngine` threaded in, the shadow set comes from
-    // its per-scope memo (built once per scope, reused per field); the
-    // engine-less fallback builds it directly from the same prepared-decl
-    // bundle the dispatch path consumes. Both observe identical shadow
-    // sets per scope. `as_deref_mut` reborrows so `engine` stays usable
-    // at the later `match engine` below.
+    // `ComponentMetaQueryEngine` threaded in, the `Some` arm takes the
+    // shadow set from its per-scope memo (`from_scope_payload` of the
+    // loaded bundle payload, built once per scope and reused per field);
+    // the engine-less `None`-arm fallback builds it directly via
+    // `from_host_scope`. When the scope's prepared-decl bundle is loaded —
+    // the case an engine-present caller hits, since the SFC's own bundle is
+    // already loaded — the two observe a membership-equivalent shadow set.
+    // In the rare unloaded-bundle case the memo's lazy load yields the
+    // properly-shadowed set where the bare `from_host_scope` fallback would
+    // see an empty one: strictly more correct, not a regression.
+    // `as_deref_mut` reborrows so `engine` stays usable at the later
+    // `match engine` below.
     let shadowing = match engine.as_deref_mut() {
         Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
         None => std::sync::Arc::new(

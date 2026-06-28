@@ -42,11 +42,20 @@ not expressible within the current owner boundaries:
   per-field") is a runtime cadence/engine-availability distinction, not a module boundary,
   so module visibility, sealed tokens, and type-state cannot express it.
 
-Disclosed residual of the scanner (inherent to any name-based source scanner): an aliased
-import (`use ...ScopeShadowing as SS; SS::from_host_scope(...)`) evades the spelling match.
-This is honestly documented at the guard; an observed evasion would be a laundering escape
-that freezes the scanner per Structural-Confinement-First, at which point the structural
-replacement below becomes the required fix.
+Enforced surface: a literal `ScopeShadowing::<ctor>` path-call (bare, module-qualified, or
+fully-qualified) AND the UFCS / qself form `<ScopeShadowing>::<ctor>` — both matched
+structurally on the `ScopeShadowing` ident plus a sanctioned constructor segment; inline
+`#[cfg(test)]` items are out of scope (the guard is production-only).
+
+Disclosed residual (inherent to any name-based source scanner; NOT enforced): identity-
+laundering forms that do not spell `ScopeShadowing` at the call site — a renamed
+`use ...ScopeShadowing as SS; SS::from_host_scope(...)` import, a `type SS = ScopeShadowing;`
+alias, a function-pointer / value capture (`let f = ScopeShadowing::from_host_scope; f(...)`),
+and macro-expanded construction. These launder the type identity and are closed only by the
+structural end-state below (the shared-`ResolverContext` per-scope memo, after which the
+constructors seal and a direct hot-path build will not compile). An observed evasion is a
+laundering escape that freezes the scanner per Structural-Confinement-First, at which point
+the structural replacement below becomes the required fix.
 
 ## The structural end-state that retires the scanner
 
@@ -73,9 +82,9 @@ component-meta hot paths) and replaces the scanner-supplement with a compiler se
 ## Ruling source
 
 - `mechanism_ruling: SCF-SCOPE-SHADOWING-MEMO-2026-06-28` — neutral/unprimed codex
-  Structural-Confinement-First architecture ruling: the fix5 mechanism is
-  SCANNER-SUPPLEMENTED (route the two component-meta hot sites through the memo + a
-  discriminating `meta_resolve`-scoped source guard), and the shared-`ResolverContext`-memo
+  Structural-Confinement-First architecture ruling: the component-meta hot-path routing
+  mechanism is SCANNER-SUPPLEMENTED (route the two component-meta hot sites through the memo
+  + a discriminating `meta_resolve`-scoped source guard), and the shared-`ResolverContext`-memo
   migration is the separate structural follow-up scoped out of the regression fix.
 - CTO layer-2 cleared the guard 2026-06-28 with the binding tracking requirement that this
   structural replacement be recorded as durable tracked debt.

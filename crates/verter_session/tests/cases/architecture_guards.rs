@@ -25772,8 +25772,8 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
 // context is tracked structurally.
 // =============================================================================
 mod component_meta_scope_shadowing_memo {
-    use quote::ToTokens;
     use syn::visit::Visit;
+    use syn::{Attribute, ExprPath, ItemMod, Meta, Type};
 
     use super::{read_workspace_file, workspace_root};
 
@@ -25807,13 +25807,19 @@ mod component_meta_scope_shadowing_memo {
         }
     }
 
+    /// Returns the matched constructor when `ident` names one of
+    /// [`SCOPE_SHADOWING_CTORS`].
+    fn matched_ctor(ident: &str) -> Option<&'static str> {
+        SCOPE_SHADOWING_CTORS.iter().copied().find(|c| *c == ident)
+    }
+
     /// Returns the matched constructor name when `path`'s final two segments are
     /// `ScopeShadowing :: <ctor>` for one of [`SCOPE_SHADOWING_CTORS`]. Matches
-    /// BOTH the fully-qualified
+    /// the fully-qualified
     /// `crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope`
-    /// form and a bare (use-imported) `ScopeShadowing::from_host_scope` form,
-    /// because only the trailing `ScopeShadowing` + constructor segment pair is
-    /// inspected.
+    /// form, the module-qualified form, and a bare (use-imported)
+    /// `ScopeShadowing::from_host_scope` form, because only the trailing
+    /// `ScopeShadowing` + constructor segment pair is inspected.
     fn scope_shadowing_ctor_of_path(path: &syn::Path) -> Option<&'static str> {
         let n = path.segments.len();
         if n < 2 {
@@ -25822,11 +25828,37 @@ mod component_meta_scope_shadowing_memo {
         if path.segments[n - 2].ident != "ScopeShadowing" {
             return None;
         }
-        let ctor = path.segments[n - 1].ident.to_string();
-        SCOPE_SHADOWING_CTORS
-            .iter()
-            .copied()
-            .find(|c| *c == ctor.as_str())
+        matched_ctor(&path.segments[n - 1].ident.to_string())
+    }
+
+    /// Returns the matched constructor name for a call-position path, covering
+    /// BOTH spellings that name the real `ScopeShadowing` type:
+    ///
+    /// 1. The plain path form `[crate::…::]ScopeShadowing::<ctor>` — the
+    ///    `ScopeShadowing` ident is the path's second-to-last segment.
+    /// 2. The UFCS / qself form `<[crate::…::]ScopeShadowing>::<ctor>` — the
+    ///    `ScopeShadowing` ident is laundered into the path's `qself` type,
+    ///    leaving only the `<ctor>` segment in `ep.path`, so the plain-path
+    ///    check bails (`segments.len() < 2`). This form evades WITHOUT renaming,
+    ///    so it is matched on the qself type's final ident.
+    fn scope_shadowing_ctor_of_expr_path(ep: &ExprPath) -> Option<&'static str> {
+        if let Some(ctor) = scope_shadowing_ctor_of_path(&ep.path) {
+            return Some(ctor);
+        }
+        let qself = ep.qself.as_ref()?;
+        let ctor = matched_ctor(&ep.path.segments.last()?.ident.to_string())?;
+        match qself.ty.as_ref() {
+            Type::Path(tp)
+                if tp
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|s| s.ident == "ScopeShadowing") =>
+            {
+                Some(ctor)
+            }
+            _ => None,
+        }
     }
 
     /// `true` when `pat` is the bare `None` pattern (`Some`/`None` arm of an
@@ -25840,87 +25872,184 @@ mod component_meta_scope_shadowing_memo {
         }
     }
 
-    fn token_stream_mentions_ident(ts: proc_macro2::TokenStream, ident: &str) -> bool {
-        ts.into_iter().any(|tt| match tt {
-            proc_macro2::TokenTree::Ident(i) => i == ident,
-            proc_macro2::TokenTree::Group(g) => token_stream_mentions_ident(g.stream(), ident),
+    /// `true` when `expr`'s ROOT RECEIVER is the bare `engine` binding — the
+    /// signal that a `None` arm of THIS match is the engine-less fallback. A
+    /// method-call chain rooted at `engine` (`engine.as_deref_mut()`,
+    /// `engine.as_mut()`, `engine.as_deref()`), a parenthesised / grouped /
+    /// referenced `engine`, or a bare `engine` path all root at the binding. A
+    /// field access (`other.engine` / `self.engine`) or an arbitrary call
+    /// (`get_opt_that_mentions_engine()`) do NOT root at the binding — the token
+    /// `engine` merely appearing in the scrutinee is not enough.
+    fn expr_root_receiver_is_engine(expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::MethodCall(mc) => expr_root_receiver_is_engine(&mc.receiver),
+            syn::Expr::Paren(p) => expr_root_receiver_is_engine(&p.expr),
+            syn::Expr::Group(g) => expr_root_receiver_is_engine(&g.expr),
+            syn::Expr::Reference(r) => expr_root_receiver_is_engine(&r.expr),
+            syn::Expr::Path(p) => p.qself.is_none() && p.path.is_ident("engine"),
             _ => false,
+        }
+    }
+
+    /// `true` when any of `attrs` is a `#[cfg(test)]` (or `cfg(any(test, …))` /
+    /// `cfg(all(…, test, …))`) attribute — mirrors the cfg-test helper used by
+    /// the other `syn`-scanner guards in this file. Used to skip inline
+    /// test-only items inside a production source file so the "production-only"
+    /// scope is honest.
+    fn has_cfg_test(attrs: &[Attribute]) -> bool {
+        attrs.iter().any(|a| {
+            if !a.path().is_ident("cfg") {
+                return false;
+            }
+            let rendered = match &a.meta {
+                Meta::List(list) => list.tokens.to_string(),
+                _ => return false,
+            };
+            rendered
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|token| token == "test")
         })
     }
 
-    /// `true` when the match scrutinee references an `engine` binding — the
-    /// signal that a `None` arm of this match is the engine-less fallback (vs.
-    /// some unrelated `Option` match whose `None` arm is NOT engine-less).
-    fn expr_mentions_engine(expr: &syn::Expr) -> bool {
-        token_stream_mentions_ident(expr.to_token_stream(), "engine")
-    }
-
     /// Walks a single production source file's AST, tracking the enclosing fn
-    /// name and whether the cursor is inside the `None` arm of an `engine`
-    /// match, and records every non-allowlisted direct `ScopeShadowing`
-    /// constructor call.
+    /// name, the `#[cfg(test)]` depth (inline test items are skipped — the
+    /// guard is production-only), the match-nesting depth, and whether the
+    /// cursor is inside the `None` arm of a TOP-LEVEL `engine`-rooted match,
+    /// and records every non-allowlisted direct `ScopeShadowing` constructor
+    /// call.
     struct Scanner {
         rel_path: String,
         is_dispatch_helpers: bool,
         fn_stack: Vec<String>,
+        cfg_test_depth: u32,
+        match_depth: u32,
         in_engine_none_arm: bool,
+        sanctioned_build_consumed: bool,
         violations: Vec<Violation>,
     }
 
     impl<'ast> Visit<'ast> for Scanner {
-        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-            self.fn_stack.push(node.sig.ident.to_string());
-            syn::visit::visit_item_fn(self, node);
-            self.fn_stack.pop();
-        }
-
-        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-            self.fn_stack.push(node.sig.ident.to_string());
-            syn::visit::visit_impl_item_fn(self, node);
-            self.fn_stack.pop();
-        }
-
-        fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-            // Visit the scrutinee normally, then drive each arm body with the
-            // `None`-engine-fallback context set so a construction lexically
-            // inside the `None =>` arm of an `engine` match is recognised as the
-            // single allowlisted site. A nested match restores the prior flag.
-            self.visit_expr(&node.expr);
-            let engine_match = expr_mentions_engine(&node.expr);
-            for arm in &node.arms {
-                if let Some((_, guard)) = &arm.guard {
-                    self.visit_expr(guard);
-                }
-                let prev = self.in_engine_none_arm;
-                if engine_match && pat_is_none(&arm.pat) {
-                    self.in_engine_none_arm = true;
-                }
-                self.visit_expr(&arm.body);
-                self.in_engine_none_arm = prev;
+        fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+            // Inline `#[cfg(test)] mod ...` / `mod tests` items are NOT
+            // production — skip their constructions (the guard is
+            // production-only). Mirrors the cfg-test depth pattern used by the
+            // other `syn`-scanner guards in this file.
+            let entered_test = has_cfg_test(&node.attrs) || node.ident == "tests";
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_mod(self, node);
+            if entered_test {
+                self.cfg_test_depth -= 1;
             }
         }
 
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            let entered_test = has_cfg_test(&node.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            self.fn_stack.push(node.sig.ident.to_string());
+            // A fn body starts a fresh match context — save/restore so match
+            // state never leaks across a (possibly nested) fn item.
+            let saved = (
+                self.match_depth,
+                self.in_engine_none_arm,
+                self.sanctioned_build_consumed,
+            );
+            self.match_depth = 0;
+            self.in_engine_none_arm = false;
+            self.sanctioned_build_consumed = false;
+            syn::visit::visit_item_fn(self, node);
+            self.match_depth = saved.0;
+            self.in_engine_none_arm = saved.1;
+            self.sanctioned_build_consumed = saved.2;
+            self.fn_stack.pop();
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            let entered_test = has_cfg_test(&node.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            self.fn_stack.push(node.sig.ident.to_string());
+            let saved = (
+                self.match_depth,
+                self.in_engine_none_arm,
+                self.sanctioned_build_consumed,
+            );
+            self.match_depth = 0;
+            self.in_engine_none_arm = false;
+            self.sanctioned_build_consumed = false;
+            syn::visit::visit_impl_item_fn(self, node);
+            self.match_depth = saved.0;
+            self.in_engine_none_arm = saved.1;
+            self.sanctioned_build_consumed = saved.2;
+            self.fn_stack.pop();
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+            // The allowlisted construction is the `None` arm of a TOP-LEVEL
+            // (depth-0) match whose scrutinee ROOT RECEIVER is the `engine`
+            // binding. A nested match (depth >= 1) resets the flag so an inner
+            // `None` arm cannot inherit OR re-establish the allowance.
+            let top_level = self.match_depth == 0;
+            let scrutinee_is_engine = expr_root_receiver_is_engine(&node.expr);
+
+            // The scrutinee is evaluated OUTSIDE any arm — clear the flag for it.
+            let saved = self.in_engine_none_arm;
+            self.in_engine_none_arm = false;
+            self.visit_expr(&node.expr);
+
+            self.match_depth += 1;
+            for arm in &node.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    // A guard expression is not the `None`-arm body.
+                    self.in_engine_none_arm = false;
+                    self.visit_expr(guard);
+                }
+                self.in_engine_none_arm = top_level && scrutinee_is_engine && pat_is_none(&arm.pat);
+                self.visit_expr(&arm.body);
+            }
+            self.match_depth -= 1;
+            self.in_engine_none_arm = saved;
+        }
+
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if let syn::Expr::Path(p) = node.func.as_ref() {
-                if let Some(method) = scope_shadowing_ctor_of_path(&p.path) {
-                    let fn_name = self
-                        .fn_stack
-                        .last()
-                        .cloned()
-                        .unwrap_or_else(|| "<file-scope>".to_string());
-                    // The SOLE allowlisted direct construction: the engine-less
-                    // `None`-arm `from_host_scope` fallback inside
-                    // `project_expr_class_a_via_dispatch_threaded`.
-                    let allowlisted = self.is_dispatch_helpers
-                        && fn_name == "project_expr_class_a_via_dispatch_threaded"
-                        && method == "from_host_scope"
-                        && self.in_engine_none_arm;
-                    if !allowlisted {
-                        self.violations.push(Violation {
-                            file: self.rel_path.clone(),
-                            fn_name,
-                            method: method.to_string(),
-                        });
+            if self.cfg_test_depth == 0 {
+                if let syn::Expr::Path(p) = node.func.as_ref() {
+                    if let Some(method) = scope_shadowing_ctor_of_expr_path(p) {
+                        let fn_name = self
+                            .fn_stack
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| "<file-scope>".to_string());
+                        // The SOLE allowlisted direct construction: the FIRST
+                        // engine-less `None`-arm `from_host_scope` fallback
+                        // inside `project_expr_class_a_via_dispatch_threaded`.
+                        // The allowance covers AT MOST ONE build per sanctioned
+                        // fn — a second fires.
+                        let in_sanctioned_context = self.is_dispatch_helpers
+                            && fn_name == "project_expr_class_a_via_dispatch_threaded"
+                            && method == "from_host_scope"
+                            && self.in_engine_none_arm;
+                        let allowlisted = in_sanctioned_context && !self.sanctioned_build_consumed;
+                        if in_sanctioned_context {
+                            self.sanctioned_build_consumed = true;
+                        }
+                        if !allowlisted {
+                            self.violations.push(Violation {
+                                file: self.rel_path.clone(),
+                                fn_name,
+                                method: method.to_string(),
+                            });
+                        }
                     }
                 }
             }
@@ -25937,7 +26066,10 @@ mod component_meta_scope_shadowing_memo {
             rel_path: rel_path.to_string(),
             is_dispatch_helpers: rel_path.ends_with("meta_resolve/dispatch_helpers.rs"),
             fn_stack: Vec::new(),
+            cfg_test_depth: 0,
+            match_depth: 0,
             in_engine_none_arm: false,
+            sanctioned_build_consumed: false,
             violations: Vec::new(),
         };
         scanner.visit_file(&file);
@@ -25991,13 +26123,40 @@ mod component_meta_scope_shadowing_memo {
 /// and `crates/verter_session/src/meta_resolve/**/*.rs` (NOT
 /// `project_semantic_dispatch/**`, NOT `resolver_core/**`, NOT tests).
 ///
-/// ALLOWLIST: EXACTLY ONE direct construction — the engine-less `None`-arm
-/// `ScopeShadowing::from_host_scope(ctx, scope)` fallback inside
+/// ALLOWLIST: EXACTLY ONE direct construction — the FIRST engine-less
+/// `None`-arm `ScopeShadowing::from_host_scope(ctx, scope)` fallback inside
 /// `project_expr_class_a_via_dispatch_threaded` (dispatch_helpers.rs). That arm
 /// runs ONLY when no `ComponentMetaQueryEngine` is threaded in, so there is no
-/// memo to consult and a direct build is correct. The allowlist is ARM-PRECISE:
-/// an unconditional / pre-match direct build in the same fn is STILL flagged
-/// (proven by the `..._unconditional_dispatch_build_fires` self-test).
+/// memo to consult and a direct build is correct. The allowance is PRECISE: the
+/// `None` arm must belong to a TOP-LEVEL match whose scrutinee ROOT RECEIVER is
+/// the `engine` binding (not merely a scrutinee that mentions the token), it
+/// covers AT MOST ONE build (a second fires), and it does not inherit into a
+/// nested match — an unconditional / pre-match / second / non-engine-rooted /
+/// nested-match build is STILL flagged (proven by the
+/// `..._unconditional_dispatch_build_fires`, `..._second_none_arm_build_fires`,
+/// `..._non_engine_scrutinee_none_arm_fires`, and
+/// `..._nested_engine_match_none_arm_fires` self-tests).
+///
+/// ENFORCED SURFACE: a literal `ScopeShadowing::<ctor>` path-call — bare
+/// (`ScopeShadowing::from_host_scope`), module-qualified, or fully-qualified
+/// (`crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope`) —
+/// AND the UFCS / qself form `<ScopeShadowing>::<ctor>` (the type ident in the
+/// path's `qself`). Both are matched structurally on the `ScopeShadowing` ident
+/// plus a `SCOPE_SHADOWING_CTORS` constructor segment; inline `#[cfg(test)]`
+/// items are out of scope (the guard is production-only).
+///
+/// DISCLOSED RESIDUAL (inherent to any name-based source scanner; NOT enforced):
+/// identity-laundering forms that do not spell `ScopeShadowing` at the call
+/// site — a renamed `use ...ScopeShadowing as SS; SS::from_host_scope(...)`
+/// import, a `type SS = ScopeShadowing;` alias, a function-pointer / value
+/// capture (`let f = ScopeShadowing::from_host_scope; f(...)`), and
+/// macro-expanded construction. These launder the type identity and are closed
+/// only by the structural end-state (the shared-`ResolverContext` per-scope
+/// memo that lets the constructors seal to `pub(in crate::resolver_core)`),
+/// recorded in `docs/arch/scope-shadowing-memo-structural-deferral.md`. An
+/// OBSERVED such evasion is a laundering escape that freezes the scanner per
+/// Structural-Confinement-First and makes that structural migration the
+/// required fix.
 ///
 /// ── SC-first guard-local record ────────────────────────────────────────────
 /// `scanner_invariant`: `component_meta_hot_path_scope_shadowing_memo_routing`.
@@ -26192,5 +26351,200 @@ fn component_meta_hot_paths_self_test_clean_memo_path_passes() {
         .is_empty(),
         "the engine-aware dispatch helper (memo `Some` arm + single allowlisted \
          `None`-arm build) must pass"
+    );
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_second_none_arm_build_fires() {
+    // The engine-less `None`-arm allowance covers AT MOST ONE
+    // `from_host_scope` build. A SECOND build in the same real `None` arm is
+    // a duplicate the allowance does NOT cover: it fires. (The sanctioned
+    // shape constructs the fallback once.)
+    let planted = r#"
+        fn project_expr_class_a_via_dispatch_threaded(
+            ctx: &dyn ResolverContext,
+            mut engine: Option<&mut ComponentMetaQueryEngine>,
+            scope_canonical_id: &str,
+        ) {
+            let shadowing = match engine.as_deref_mut() {
+                Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
+                None => {
+                    let first = crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                        ctx,
+                        scope_canonical_id,
+                    );
+                    let second = crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                        ctx,
+                        scope_canonical_id,
+                    );
+                    std::sync::Arc::new(if first.is_empty() { second } else { first })
+                }
+            };
+            let _ = shadowing;
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/dispatch_helpers.rs",
+        planted,
+    );
+    // An unbounded `None`-arm allowance yields 0; a bounded (at-most-one)
+    // allowance fires the second build → exactly 1.
+    assert_eq!(
+        v.len(),
+        1,
+        "a SECOND `from_host_scope` build in the engine-less `None` arm MUST \
+         fire (the allowance covers at most one); got: {v:?}"
+    );
+    assert_eq!(v[0].method, "from_host_scope");
+    assert_eq!(v[0].fn_name, "project_expr_class_a_via_dispatch_threaded");
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_non_engine_scrutinee_none_arm_fires() {
+    // The `None` arm of a match whose scrutinee merely MENTIONS the `engine`
+    // token but whose ROOT RECEIVER is not the `engine` binding
+    // (`match other.engine` — root receiver `other`) is NOT the engine-less
+    // fallback. A build there fires even inside the allowlisted fn.
+    let planted = r#"
+        fn project_expr_class_a_via_dispatch_threaded(
+            ctx: &dyn ResolverContext,
+            other: &SomeHolder,
+            scope_canonical_id: &str,
+        ) {
+            let shadowing = match other.engine {
+                Some(_) => default_shadowing(),
+                None => std::sync::Arc::new(
+                    crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                        ctx,
+                        scope_canonical_id,
+                    ),
+                ),
+            };
+            let _ = shadowing;
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/dispatch_helpers.rs",
+        planted,
+    );
+    // A token-stream "mentions engine" scan allowlists this (0); a
+    // root-receiver match fires it (1).
+    assert_eq!(
+        v.len(),
+        1,
+        "a `from_host_scope` build in the `None` arm of a NON-engine-rooted \
+         match (`match other.engine`, root receiver `other`) MUST fire; \
+         got: {v:?}"
+    );
+    assert_eq!(v[0].method, "from_host_scope");
+    assert_eq!(v[0].fn_name, "project_expr_class_a_via_dispatch_threaded");
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_nested_engine_match_none_arm_fires() {
+    // A build in the `None` arm of a NESTED engine match inside a non-`None`
+    // outer arm — `Some(e) => match engine { None => build }` — is dead code
+    // the allowance must NOT cover: the `None`-arm flag does not inherit or
+    // re-establish across a nested match.
+    let planted = r#"
+        fn project_expr_class_a_via_dispatch_threaded(
+            ctx: &dyn ResolverContext,
+            mut engine: Option<&mut ComponentMetaQueryEngine>,
+            scope_canonical_id: &str,
+        ) {
+            let shadowing = match engine.as_deref_mut() {
+                Some(e) => match engine {
+                    Some(_) => e.scope_shadowing_for_scope(scope_canonical_id),
+                    None => std::sync::Arc::new(
+                        crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                            ctx,
+                            scope_canonical_id,
+                        ),
+                    ),
+                },
+                None => default_shadowing(),
+            };
+            let _ = shadowing;
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/dispatch_helpers.rs",
+        planted,
+    );
+    // An inheriting / re-establishing flag allowlists the nested build (0);
+    // a per-match-depth reset fires it (1).
+    assert_eq!(
+        v.len(),
+        1,
+        "a `from_host_scope` build in the `None` arm of a NESTED engine match \
+         (inside a non-`None` outer arm) MUST fire — the allowance does not \
+         inherit across a nested match; got: {v:?}"
+    );
+    assert_eq!(v[0].method, "from_host_scope");
+    assert_eq!(v[0].fn_name, "project_expr_class_a_via_dispatch_threaded");
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_ufcs_build_fires() {
+    // The UFCS / qself form `<ScopeShadowing>::from_host_scope(...)` launders
+    // the `ScopeShadowing` ident into the path's qself, leaving only the ctor
+    // segment in the call path — WITHOUT renaming. A maintainer using the real
+    // name expects coverage: it must FIRE.
+    let planted = r#"
+        fn materialize_component_meta_type_expr_until_stable_full(
+            ctx: &dyn ResolverContext,
+            scope_canonical_id: &str,
+        ) {
+            let bare = <ScopeShadowing>::from_host_scope(ctx, scope_canonical_id);
+            let qualified =
+                <crate::resolver_core::scope_shadowing::ScopeShadowing>::from_scope_payload(None);
+            let _ = (bare, qualified);
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+        planted,
+    );
+    // The path-only `segments[n-2] == ScopeShadowing` check bails on the qself
+    // form (the ctor is the lone segment) → 0; the qself-aware check fires both.
+    assert_eq!(
+        v.len(),
+        2,
+        "the UFCS `<ScopeShadowing>::<ctor>(...)` form (bare and \
+         module-qualified qself) MUST fire — the qself launders the type ident \
+         but does not rename it; got: {v:?}"
+    );
+    assert!(v.iter().any(|x| x.method == "from_host_scope"));
+    assert!(v.iter().any(|x| x.method == "from_scope_payload"));
+}
+
+#[test]
+fn component_meta_hot_paths_self_test_inline_cfg_test_build_is_ignored() {
+    // The guard is production-only: a `ScopeShadowing` build inside an inline
+    // `#[cfg(test)]` module within a production `meta_resolve` file is NOT a
+    // production construction and must be ignored.
+    let planted = r#"
+        fn production_path(query_engine: &mut ComponentMetaQueryEngine, scope: &str) {
+            let _ = query_engine.scope_shadowing_for_scope(scope);
+        }
+
+        #[cfg(test)]
+        mod tests {
+            fn builds_directly_in_a_test() {
+                let _ =
+                    crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+            }
+        }
+    "#;
+    let v = component_meta_scope_shadowing_memo::violations_in(
+        "crates/verter_session/src/meta_resolve/materialize/field_types.rs",
+        planted,
+    );
+    // A scanner that strips only `*_tests.rs` FILES flags this inline test (1);
+    // an inline-`#[cfg(test)]`-aware scanner ignores it (0).
+    assert!(
+        v.is_empty(),
+        "a `ScopeShadowing` build inside an inline `#[cfg(test)]` module must be \
+         ignored (the guard is production-only); got: {v:?}"
     );
 }

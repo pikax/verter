@@ -256,8 +256,10 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // same shadow set the route-extraction path uses. The `&mut` borrow ends
     // here (the accessor returns an owned `Arc<ScopeShadowing>`), so the shared
     // `ctx` borrow opened just below — held through dispatch lowering — is
-    // unaffected. The memo reuses the just-cached scope payload, so the shadow
-    // decision is byte-equivalent to building it inline from `scope_payload`.
+    // unaffected. The memo's `from_scope_payload` reuses the SAME just-cached
+    // scope payload captured above, so its shadow set is membership-identical to
+    // an inline `from_scope_payload(scope_payload)` build (same payload in, same
+    // set out).
     let shadowing = query_engine.scope_shadowing_for_scope(scope_canonical_id);
     let ctx = query_engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
