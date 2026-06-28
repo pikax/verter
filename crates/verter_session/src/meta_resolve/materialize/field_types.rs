@@ -251,6 +251,14 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // Step 1.5 thin dispatch wrapper. Build NodeScopeId for the file
     // scope, then lower → raise_and_reduce in the caller's mode.
     let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
+    // Capture the scope-shadowing context once for the materialize → lower
+    // pipeline from the per-scope memo, so the dispatch fast-path observes the
+    // same shadow set the route-extraction path uses. The `&mut` borrow ends
+    // here (the accessor returns an owned `Arc<ScopeShadowing>`), so the shared
+    // `ctx` borrow opened just below — held through dispatch lowering — is
+    // unaffected. The memo reuses the just-cached scope payload, so the shadow
+    // decision is byte-equivalent to building it inline from `scope_payload`.
+    let shadowing = query_engine.scope_shadowing_for_scope(scope_canonical_id);
     let ctx = query_engine.ctx();
     let dispatch = ProjectSemanticDispatch::new(ctx);
     // Mint the field-types materialiser output capability (constructor
@@ -319,13 +327,6 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     };
     let name_resolution = rustc_hash::FxHashMap::default();
     let mut substitutions: Vec<(Arc<str>, crate::semantic_query::SemanticNodeId)> = Vec::new();
-    // R15/F11 — capture the scope-shadowing context
-    // once for the materialize → lower pipeline so the dispatch
-    // fast-path observes the same shadow set the route extraction
-    // path uses.
-    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
-        scope_payload.as_deref(),
-    );
     let _us_trace = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
     if _us_trace {
         eprintln!(
@@ -342,7 +343,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         &scope,
         &name_resolution,
         scope_payload.as_deref(),
-        &shadowing,
+        shadowing.as_ref(),
         &mut substitutions,
         reduction_context,
     );

@@ -491,7 +491,7 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// dispatch.
 pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
-    engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
+    mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_type_expr::TypeExpr> {
@@ -518,13 +518,22 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     // fast-path MUST be suppressed so the bare-name walk below
     // resolves `Pick` to the userland declaration via dispatch's
     // standard `ResolveDecl` path — preserving the "user shadowing
-    // wins" rule across BOTH lowering entry points. Constructed once
-    // per call from the same prepared-decl bundle the dispatch path
-    // consumes, so the two paths observe identical shadow sets.
-    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
-        ctx,
-        scope_canonical_id,
-    );
+    // wins" rule across BOTH lowering entry points. With a
+    // `ComponentMetaQueryEngine` threaded in, the shadow set comes from
+    // its per-scope memo (built once per scope, reused per field); the
+    // engine-less fallback builds it directly from the same prepared-decl
+    // bundle the dispatch path consumes. Both observe identical shadow
+    // sets per scope. `as_deref_mut` reborrows so `engine` stays usable
+    // at the later `match engine` below.
+    let shadowing = match engine.as_deref_mut() {
+        Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
+        None => std::sync::Arc::new(
+            crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                ctx,
+                scope_canonical_id,
+            ),
+        ),
+    };
     // r15/F11 shadow gate — check the OUTER utility / chain-root
     // identifier the userland alias would shadow (e.g. `Pick` /
     // `Omit` / the chain root for indexed-access). The route's
