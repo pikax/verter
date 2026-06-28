@@ -20,13 +20,13 @@ use super::{
     FactShapeTag, FoldedFunction, FoldedTupleElement, RaisedFunction, RaisedFunctionParam,
     RaisedObjectMember, RaisedRecursiveFrame, RaisedRootKind, RaisedShapeAlgebra, RaisedShapeFacts,
     RaisedShapeKey, RaisedShapeResult, RaisedShapeSummary, RaisedTerm, RaisedTupleElement,
-    RaisedTypeParam, ShapeInterner,
+    RaisedTypeParam, RootOnlySummary, ShapeInterner,
 };
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::component_meta_query_engine::{
     semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
 };
-use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNodeId};
 
 // ===========================================================================
 // Shared summary-constructor layer — the SINGLE source of the per-arm
@@ -37,259 +37,7 @@ use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId};
 // two algebras. The functions take ONLY the child facts they fold (never a key
 // or interner), exactly mirroring the historical inline `RaisedShapeAlg` arms.
 // ===========================================================================
-mod summary {
-    use super::{
-        FactShapeTag, RaisedRootKind, RaisedShapeFacts, RaisedShapeSummary, SEMANTIC_MISS,
-        SEMANTIC_OBJECT_SURFACE,
-    };
-
-    /// Assemble a summary from the three facts + tag. `can_shell_raise` is
-    /// ALWAYS `true` for any value the fold produces (a `Some(result)`).
-    fn summary(
-        materialized: bool,
-        expanded_surface: bool,
-        tag: FactShapeTag,
-    ) -> RaisedShapeSummary {
-        RaisedShapeSummary {
-            facts: RaisedShapeFacts {
-                can_shell_raise: true,
-                materialized,
-                expanded_surface,
-            },
-            tag,
-            // Only the two sentinel-leaf constructors (`unknown` / `opaque_sentinel`)
-            // set these true; every compound / non-sentinel term is `false` (its
-            // ROOT is not a sentinel, even when a child is).
-            root_unmaterialized_sentinel: false,
-            root_semantic_miss_sentinel: false,
-            // Default `Other`; the per-arm constructors that map to a root mirror
-            // class (`reference_leaf` / `type_of` / `empty_object` / `key_of` /
-            // `indexed_access` / `conditional` / `mapped` / `object_from_members`)
-            // override it.
-            root_kind: RaisedRootKind::Other,
-        }
-    }
-
-    /// A materialized, expanded leaf with no special tag and no root-mirror class
-    /// (Primitive, Literal, Infer, RecursiveRef, SyntheticSlotBinding, ImportType,
-    /// TemplateLiteral, TypeParameter). A `Ref` carrier uses [`reference_leaf`]
-    /// instead so it carries [`RaisedRootKind::Reference`].
-    pub(super) fn materialized_expanded_leaf() -> RaisedShapeSummary {
-        summary(true, true, FactShapeTag::Other)
-    }
-
-    /// A `Ref`-carrier leaf (`DeclRef` / `InstantiationRef` / `BareRef` /
-    /// `DeclPlaceholder`): facts/tag identical to [`materialized_expanded_leaf`]
-    /// (materialized + expanded, `Other` tag) — only `root_kind` differs, marking
-    /// the root as a `TypeExpr::Ref` (a published-operator surface root).
-    pub(super) fn reference_leaf() -> RaisedShapeSummary {
-        let mut s = summary(true, true, FactShapeTag::Other);
-        s.root_kind = RaisedRootKind::Reference;
-        s
-    }
-
-    /// `Unknown { raw }`: materialized iff the raw is NOT an unmaterialized
-    /// sentinel; an expanded leaf; tagged `ObjectSurfaceSentinel` iff the raw is
-    /// exactly the object-surface sentinel (dropped from an intersection).
-    pub(super) fn unknown(raw: &str) -> RaisedShapeSummary {
-        let materialized =
-            !crate::project_semantic_dispatch::raise_sentinel::raw_is_unmaterialized_sentinel(raw);
-        let tag = if raw == SEMANTIC_OBJECT_SURFACE {
-            FactShapeTag::ObjectSurfaceSentinel
-        } else {
-            FactShapeTag::Other
-        };
-        let mut s = summary(materialized, true, tag);
-        // The ROOT term IS this `Unknown { raw }`, so it is a root sentinel iff the
-        // raw reads unmaterialised (`!materialized`), and the NARROWER miss-root iff
-        // the raw is EXACTLY the `semanticMiss` spelling.
-        s.root_unmaterialized_sentinel = !materialized;
-        s.root_semantic_miss_sentinel = raw == SEMANTIC_MISS;
-        s
-    }
-
-    /// A TYPED resolver-control sentinel (`Opaque(QueryError)` reaching the
-    /// reverse boundary, or a converted `fold_node` control arm): the
-    /// node-domain counterpart of [`unknown`], but classified DIRECTLY from the
-    /// typed [`QueryError`] via the shared sentinel authority instead of
-    /// re-spelling a raw string. `materialized` comes from the domain-neutral
-    /// `query_error_is_unmaterialized_sentinel`; the `tag` is mapped HERE — this
-    /// is where [`FactShapeTag`] lives — from the domain-neutral
-    /// `query_error_is_object_surface_sentinel` predicate, exactly mirroring the
-    /// `raw == SEMANTIC_OBJECT_SURFACE` tag rule [`unknown`] applies (the
-    /// `UnrepresentableSurface` carrier round-trips to that spelling natively, and
-    /// a text-bearing `Other("semanticObjectSurface")` payload round-trips to it
-    /// via the predicate's delegation — both tag `ObjectSurfaceSentinel`, exactly
-    /// as the raw rule would). Both predicates are held byte-for-byte in agreement
-    /// with the raw recogniser `unknown` uses (the no-drift contract), so this
-    /// path and the raw-string path classify a sentinel identically.
-    /// `expanded_surface` is always `true`, exactly as `unknown` passes.
-    pub(super) fn opaque_sentinel(err: &crate::semantic_query::QueryError) -> RaisedShapeSummary {
-        use crate::project_semantic_dispatch::raise_sentinel::{
-            query_error_is_object_surface_sentinel, query_error_is_semantic_miss_sentinel,
-            query_error_is_unmaterialized_sentinel,
-        };
-        let materialized = !query_error_is_unmaterialized_sentinel(err);
-        let tag = if query_error_is_object_surface_sentinel(err) {
-            FactShapeTag::ObjectSurfaceSentinel
-        } else {
-            FactShapeTag::Other
-        };
-        let mut s = summary(materialized, true, tag);
-        // The ROOT term IS this typed sentinel, so it is a root sentinel iff the
-        // error reads unmaterialised (`!materialized`), and the NARROWER miss-root
-        // iff the error round-trips to the `semanticMiss` spelling — classified
-        // DIRECTLY from the typed variant via the shared authority, never by
-        // re-spelling a raw string.
-        s.root_unmaterialized_sentinel = !materialized;
-        s.root_semantic_miss_sentinel = query_error_is_semantic_miss_sentinel(err);
-        s
-    }
-
-    /// `TypeOf`: a materialized leaf but NOT an expanded surface.
-    pub(super) fn type_of() -> RaisedShapeSummary {
-        let mut s = summary(true, false, FactShapeTag::Other);
-        s.root_kind = RaisedRootKind::TypeOf;
-        s
-    }
-
-    /// `Union`: materialized / expanded are the AND over all members.
-    pub(super) fn union(
-        member_facts: impl Iterator<Item = RaisedShapeFacts>,
-    ) -> RaisedShapeSummary {
-        let (mut materialized, mut expanded) = (true, true);
-        for f in member_facts {
-            materialized &= f.materialized;
-            expanded &= f.expanded_surface;
-        }
-        summary(materialized, expanded, FactShapeTag::Other)
-    }
-
-    /// `Intersection`: materialized / expanded are the AND over all surviving
-    /// arms (the fold has already dropped sentinel / empty-object arms).
-    pub(super) fn intersection(
-        arm_facts: impl Iterator<Item = RaisedShapeFacts>,
-    ) -> RaisedShapeSummary {
-        let (mut materialized, mut expanded) = (true, true);
-        for f in arm_facts {
-            materialized &= f.materialized;
-            expanded &= f.expanded_surface;
-        }
-        summary(materialized, expanded, FactShapeTag::Other)
-    }
-
-    /// The representable empty object `{}` — raises to `TypeExpr::Object([])`.
-    pub(super) fn empty_object() -> RaisedShapeSummary {
-        let mut s = summary(true, true, FactShapeTag::EmptyObject);
-        s.root_kind = RaisedRootKind::Object;
-        s
-    }
-
-    /// `Array`: recurses `materialized` into its element; an expanded surface.
-    pub(super) fn array(element: RaisedShapeFacts) -> RaisedShapeSummary {
-        summary(element.materialized, true, FactShapeTag::Other)
-    }
-
-    /// `Tuple`: materialized is the AND over all elements; an expanded surface.
-    pub(super) fn tuple(
-        element_facts: impl Iterator<Item = RaisedShapeFacts>,
-    ) -> RaisedShapeSummary {
-        let materialized = element_facts.fold(true, |acc, f| acc & f.materialized);
-        summary(materialized, true, FactShapeTag::Other)
-    }
-
-    /// `KeyOf`: recurses `materialized` into its inner; NOT an expanded surface.
-    pub(super) fn key_of(base: RaisedShapeFacts) -> RaisedShapeSummary {
-        let mut s = summary(base.materialized, false, FactShapeTag::Other);
-        s.root_kind = RaisedRootKind::KeyOf;
-        s
-    }
-
-    /// `IndexedAccess`: materialized iff BOTH object + index are; NOT an
-    /// expanded surface.
-    pub(super) fn indexed_access(
-        object: RaisedShapeFacts,
-        index: RaisedShapeFacts,
-    ) -> RaisedShapeSummary {
-        let mut s = summary(
-            object.materialized && index.materialized,
-            false,
-            FactShapeTag::Other,
-        );
-        s.root_kind = RaisedRootKind::IndexedAccess;
-        s
-    }
-
-    /// `Conditional`: materialized iff ALL of check / extends / true / false
-    /// are; NOT an expanded surface.
-    pub(super) fn conditional(
-        check: RaisedShapeFacts,
-        extends: RaisedShapeFacts,
-        true_type: RaisedShapeFacts,
-        false_type: RaisedShapeFacts,
-    ) -> RaisedShapeSummary {
-        let materialized = check.materialized
-            && extends.materialized
-            && true_type.materialized
-            && false_type.materialized;
-        let mut s = summary(materialized, false, FactShapeTag::Other);
-        s.root_kind = RaisedRootKind::Conditional;
-        s
-    }
-
-    /// `Mapped`: materialized iff source + value (+ name_type, when present)
-    /// are; NOT an expanded surface. `value_root_semantic_miss` is the mapped
-    /// VALUE's OWN raised-root `semanticMiss` fact, carried into the root class so
-    /// the published-operator classifier suppresses EXACTLY the
-    /// `value == Unknown { raw == "semanticMiss" }` carrier the `TypeExpr`
-    /// predicate suppresses (publishing for any other value).
-    pub(super) fn mapped(
-        source: RaisedShapeFacts,
-        value: RaisedShapeFacts,
-        name_type: Option<RaisedShapeFacts>,
-        value_root_semantic_miss: bool,
-    ) -> RaisedShapeSummary {
-        let materialized =
-            source.materialized && value.materialized && name_type.is_none_or(|n| n.materialized);
-        let mut s = summary(materialized, false, FactShapeTag::Other);
-        s.root_kind = RaisedRootKind::Mapped {
-            value_is_semantic_miss: value_root_semantic_miss,
-        };
-        s
-    }
-
-    /// `Function`: carries the function's folded `materialized` fact; an
-    /// expanded surface; tagged `Function` (the `out_as_function` extraction
-    /// subject + the constructor-rewrap signature child).
-    pub(super) fn function(materialized: bool) -> RaisedShapeSummary {
-        summary(materialized, true, FactShapeTag::Function)
-    }
-
-    /// `ConstructorType`: carries the signature's folded `materialized` fact; an
-    /// expanded surface; tagged `Other` (the rewrap reads the SIGNATURE child,
-    /// never the constructor itself, so it must NOT tag `Function`).
-    pub(super) fn constructor(materialized: bool) -> RaisedShapeSummary {
-        summary(materialized, true, FactShapeTag::Other)
-    }
-
-    /// `Object` from surviving members: materialized is the AND over members; an
-    /// expanded surface; tagged `EmptyObject` when zero members survive
-    /// (defensive — mirrors the interner-readback of `Object([])`), else `Other`.
-    pub(super) fn object_from_members(
-        member_materialized: impl Iterator<Item = bool>,
-        is_empty: bool,
-    ) -> RaisedShapeSummary {
-        let materialized = member_materialized.fold(true, |acc, m| acc & m);
-        let tag = if is_empty {
-            FactShapeTag::EmptyObject
-        } else {
-            FactShapeTag::Other
-        };
-        let mut s = summary(materialized, true, tag);
-        s.root_kind = RaisedRootKind::Object;
-        s
-    }
-}
+mod summary;
 
 // ===========================================================================
 // Algebra 2 — `RaisedShapeAlg` (Out = RaisedShapeResult).
@@ -1274,12 +1022,12 @@ fn function_expr_to_raised(
 
 /// Placeholder child facts for [`project_root_summary`]. The shared [`summary`]
 /// constructors fold child `materialized` / `expanded_surface` ONLY into the
-/// discarded `facts` field — the root-only projection reads `root_kind` / `tag`
-/// / `root_semantic_miss_sentinel` ONLY, none of which depends on a child's fact
-/// VALUES (each constructor sets `root_kind` / `tag` by WHICH constructor runs,
-/// plus `mapped`'s `value_root_semantic_miss` and `object_from_members`'s
-/// `is_empty`, both passed REAL). So feeding a constant here is exact — it avoids
-/// the deep fold whose only product would be thrown away.
+/// `facts` field that [`RootOnlySummary::from_summary`] STRIPS — the root-only
+/// projection keeps `root_kind` / `tag` / `root_semantic_miss_sentinel` ONLY, none
+/// of which depends on a child's fact VALUES (each constructor sets `root_kind` /
+/// `tag` by WHICH constructor runs, plus `mapped`'s `value_root_semantic_miss` and
+/// `object_from_members`'s `is_empty`, both passed REAL). So feeding a constant
+/// here is exact — it avoids the deep fold whose only product would be stripped.
 fn root_only_placeholder_facts() -> RaisedShapeFacts {
     RaisedShapeFacts {
         can_shell_raise: true,
@@ -1302,9 +1050,9 @@ fn signature_raises_to_function(
         .is_some_and(|s| s.tag == FactShapeTag::Function)
 }
 
-/// The NORMALIZED raised-ROOT [`RaisedShapeSummary`] of `node` — the root-only
-/// counterpart of [`fold_node`](super::fold_node) under [`RaisedFactsAlg`],
-/// computed WITHOUT folding member VALUES.
+/// The NARROW [`RootOnlySummary`] of `node` — the root-only counterpart of
+/// [`fold_node`](super::fold_node) under [`RaisedFactsAlg`], computed WITHOUT
+/// folding member VALUES.
 ///
 /// A node's `root_kind` / `tag` / `root_semantic_miss_sentinel` depend ONLY on
 /// the node's own kind plus its ROOT-determining edges — the `Alias` peel, the
@@ -1312,29 +1060,32 @@ fn signature_raises_to_function(
 /// `MergedDecl` reduction, the `ConstructorType` signature class, the `Object`
 /// surface's empty / single-call-signature / member-presence shape, and the
 /// `Mapped` VALUE's own root `semanticMiss` flag — NEVER on object property
-/// values, function param/return types, array/tuple element types, union
-/// members, conditional branches, indexed-access operands, keyof bases, or
-/// carrier type-arguments. This projection therefore recurses ONLY along those
-/// root edges and builds each result through the SHARED [`summary`] constructor
-/// layer (feeding [`root_only_placeholder_facts`] it discards), so its
-/// `root_kind` / `tag` / `root_semantic_miss_sentinel` are BYTE-IDENTICAL to the
-/// full fold's by construction. The whole-subtree walk the full fold pays to
-/// compute the (here-unused) `materialized` AND is skipped — the perf win for a
-/// large object surface (an `Object` with N members raises to an `Object` root
-/// after an O(1) shallow check, not an O(tree) walk).
+/// values, function param/return types, union members, or carrier type-arguments.
+/// This projection therefore builds each result through the SHARED [`summary`]
+/// constructor layer (feeding [`root_only_placeholder_facts`] that
+/// [`RootOnlySummary::from_summary`] then strips), so its returned ROOT FIELDS
+/// MATCH THE FULL FOLD's by construction. The whole-subtree walk the full fold
+/// pays to compute the (here-stripped) `materialized` AND is skipped — the perf
+/// win for a large object surface (an `Object` with N members raises to an
+/// `Object` root after an O(1) shallow check, not an O(tree) walk).
 ///
-/// `None` exactly when [`fold_node`](super::fold_node) returns `None` for
-/// `node`. Both bottom out at `node_data_for(node)?`; the append-only interned
-/// arena guarantees every present node's edges reference present nodes (the
-/// invariant the whole-tree arm-walkers rely on), so the root edges this
-/// projection follows are never `None` when `node` is present and the two agree
-/// on `Some` / `None` for every well-formed node. Pinned equal to the full
-/// fold's `root_kind` by the parity test.
+/// `None` EXACTLY when [`fold_node`](super::fold_node) returns `None` for `node`.
+/// Both bottom out at `node_data_for(node)?`, and this projection propagates the
+/// SAME required-edge `?` aborts `fold_node` does — `Array.element`, `KeyOf.base`,
+/// `IndexedAccess.object` + a `TypeNode` `index`, every `Conditional` operand,
+/// `Mapped`'s source / value / name-remap, the `ConstructorType` signature, and
+/// the `Alias` / `MergedDecl` peel — while LEAVING object member values
+/// short-circuited (the full fold wraps a missing member as a sentinel, never
+/// `None`, so a root-only deep member walk would FALSELY diverge). The two
+/// therefore agree on `Some` / `None` for every node, INCLUDING a malformed node
+/// with a dangling required child (production-unreachable today; pinned by the
+/// malformed-child parity test). Root fields pinned equal to the full fold's by
+/// the parity test.
 pub(super) fn project_root_summary(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
-) -> Option<RaisedShapeSummary> {
+) -> Option<RootOnlySummary> {
     let ctx = dispatch.ctx;
     let data = node_data_for(ctx, node)?;
     Some(match data.as_ref() {
@@ -1344,38 +1095,81 @@ pub(super) fn project_root_summary(
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::ImportType(_)
-        | SemanticNodeData::SyntheticBinding { .. } => summary::materialized_expanded_leaf(),
+        | SemanticNodeData::SyntheticBinding { .. } => {
+            RootOnlySummary::from_summary(summary::materialized_expanded_leaf())
+        }
 
         // The `Ref` carriers + the `DeclPlaceholder` carrier raise to
         // `TypeExpr::Ref` (a published-operator surface root).
         SemanticNodeData::DeclRef { .. }
         | SemanticNodeData::InstantiationRef { .. }
         | SemanticNodeData::BareRef(_)
-        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }) => summary::reference_leaf(),
+        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }) => {
+            RootOnlySummary::from_summary(summary::reference_leaf())
+        }
 
-        SemanticNodeData::TypeOf(_) => summary::type_of(),
-        SemanticNodeData::KeyOf { .. } => summary::key_of(root_only_placeholder_facts()),
-        SemanticNodeData::IndexedAccess { .. } => {
-            summary::indexed_access(root_only_placeholder_facts(), root_only_placeholder_facts())
+        SemanticNodeData::TypeOf(_) => RootOnlySummary::from_summary(summary::type_of()),
+
+        // Required-edge `?` parity with `fold_node`: the operand child must raise
+        // for the operator to, so a dangling operand aborts BOTH (the root class
+        // itself does not read the child — only its `Some`/`None` does). Object
+        // member values stay short-circuited below, so this set mirrors EXACTLY
+        // `fold_node`'s `?`-propagating required edges, with no member deep-walk.
+        SemanticNodeData::KeyOf { base } => {
+            project_root_summary(dispatch, *base, active)?;
+            RootOnlySummary::from_summary(summary::key_of(root_only_placeholder_facts()))
         }
-        SemanticNodeData::Conditional { .. } => summary::conditional(
-            root_only_placeholder_facts(),
-            root_only_placeholder_facts(),
-            root_only_placeholder_facts(),
-            root_only_placeholder_facts(),
+        SemanticNodeData::IndexedAccess { object, index } => {
+            project_root_summary(dispatch, *object, active)?;
+            if let IndexKey::TypeNode(index_node) = index {
+                project_root_summary(dispatch, *index_node, active)?;
+            }
+            RootOnlySummary::from_summary(summary::indexed_access(
+                root_only_placeholder_facts(),
+                root_only_placeholder_facts(),
+            ))
+        }
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            ..
+        } => {
+            project_root_summary(dispatch, *check, active)?;
+            project_root_summary(dispatch, *extends, active)?;
+            project_root_summary(dispatch, *true_branch_ref, active)?;
+            project_root_summary(dispatch, *false_branch_ref, active)?;
+            RootOnlySummary::from_summary(summary::conditional(
+                root_only_placeholder_facts(),
+                root_only_placeholder_facts(),
+                root_only_placeholder_facts(),
+                root_only_placeholder_facts(),
+            ))
+        }
+        SemanticNodeData::Function { .. } => RootOnlySummary::from_summary(summary::function(true)),
+        SemanticNodeData::Array { element, .. } => {
+            project_root_summary(dispatch, *element, active)?;
+            RootOnlySummary::from_summary(summary::array(root_only_placeholder_facts()))
+        }
+        SemanticNodeData::Tuple { .. } => {
+            RootOnlySummary::from_summary(summary::tuple(std::iter::empty::<RaisedShapeFacts>()))
+        }
+        SemanticNodeData::Union(_) => {
+            RootOnlySummary::from_summary(summary::union(std::iter::empty::<RaisedShapeFacts>()))
+        }
+        SemanticNodeData::RawFallback { raw } => {
+            RootOnlySummary::from_summary(summary::unknown(raw))
+        }
+        SemanticNodeData::VueMacroElements(_) => RootOnlySummary::from_summary(
+            summary::opaque_sentinel(&QueryError::VueMacroElementsPlaceholder),
         ),
-        SemanticNodeData::Function { .. } => summary::function(true),
-        SemanticNodeData::Array { .. } => summary::array(root_only_placeholder_facts()),
-        SemanticNodeData::Tuple { .. } => summary::tuple(std::iter::empty::<RaisedShapeFacts>()),
-        SemanticNodeData::Union(_) => summary::union(std::iter::empty::<RaisedShapeFacts>()),
-        SemanticNodeData::RawFallback { raw } => summary::unknown(raw),
-        SemanticNodeData::VueMacroElements(_) => {
-            summary::opaque_sentinel(&QueryError::VueMacroElementsPlaceholder)
-        }
 
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
-                return Some(summary::opaque_sentinel(&QueryError::RaiseAliasCycle));
+                return Some(RootOnlySummary::from_summary(summary::opaque_sentinel(
+                    &QueryError::RaiseAliasCycle,
+                )));
             }
             let result = project_root_summary(dispatch, *target, active);
             active.remove(&node);
@@ -1393,7 +1187,7 @@ pub(super) fn project_root_summary(
             // sentinel + empty-object arms, then collapse: empty -> empty object,
             // len==1 -> that arm, else Intersection — identical to `fold_node`'s
             // Intersection arm, but each arm classified root-only.
-            let mut arms: Vec<RaisedShapeSummary> = members
+            let mut arms: Vec<RootOnlySummary> = members
                 .iter()
                 .filter_map(|member| project_root_summary(dispatch, *member, active))
                 .collect();
@@ -1402,24 +1196,33 @@ pub(super) fn project_root_summary(
                     && arm.tag != FactShapeTag::EmptyObject
             });
             if arms.is_empty() {
-                summary::empty_object()
+                RootOnlySummary::from_summary(summary::empty_object())
             } else if arms.len() == 1 {
                 arms.into_iter().next().unwrap()
             } else {
-                summary::intersection(std::iter::empty::<RaisedShapeFacts>())
+                RootOnlySummary::from_summary(summary::intersection(std::iter::empty::<
+                    RaisedShapeFacts,
+                >()))
             }
         }
         SemanticNodeData::Mapped { mapper, .. } => {
-            // Only the mapped VALUE's OWN root `semanticMiss` flag feeds the
-            // root class; the source / name_type subtrees do not. Mirror
-            // `fold_node`'s `?` on the value.
+            // Required-edge `?` parity with `fold_node`'s Mapped arm: the source
+            // (`mapper.key_space`; a `KeyOf` node is `None` iff its base is, so
+            // recursing `key_space` root-only gives the IDENTICAL `None` the
+            // KeyOf-aware `base` fold would), the VALUE, and the optional
+            // name-remap all propagate. Only the VALUE's OWN root `semanticMiss`
+            // flag feeds the root class.
+            project_root_summary(dispatch, mapper.key_space, active)?;
             let value = project_root_summary(dispatch, mapper.value_expr, active)?;
-            summary::mapped(
+            if let Some(remap) = mapper.name_remap {
+                project_root_summary(dispatch, remap, active)?;
+            }
+            RootOnlySummary::from_summary(summary::mapped(
                 root_only_placeholder_facts(),
                 root_only_placeholder_facts(),
                 None,
                 value.root_semantic_miss_sentinel,
-            )
+            ))
         }
         SemanticNodeData::ConstructorType { signature } => {
             // The rewrap reads the SIGNATURE child: a `Function` signature
@@ -1428,7 +1231,7 @@ pub(super) fn project_root_summary(
             // `fold_node`'s `?` on the signature.
             let signature = project_root_summary(dispatch, *signature, active)?;
             if signature.tag == FactShapeTag::Function {
-                summary::constructor(true)
+                RootOnlySummary::from_summary(summary::constructor(true))
             } else {
                 signature
             }
@@ -1439,7 +1242,7 @@ pub(super) fn project_root_summary(
                 && surface.construct_signatures.is_empty()
                 && !surface.has_index_signature
             {
-                summary::empty_object()
+                RootOnlySummary::from_summary(summary::empty_object())
             } else if surface.members.is_empty()
                 && surface.construct_signatures.is_empty()
                 && !surface.has_index_signature
@@ -1447,10 +1250,15 @@ pub(super) fn project_root_summary(
             {
                 // Single-call-signature surface IS that signature's value
                 // (`fold_surface_view`'s fast path), folded with a FRESH cycle set.
+                // A miss becomes the surface-member sentinel (NOT `None`), exactly
+                // as `fold_member`'s `unwrap_or_else` does — so the Object arm
+                // never propagates `None`.
                 let mut member_active = FxHashSet::default();
                 project_root_summary(dispatch, surface.call_signatures[0], &mut member_active)
                     .unwrap_or_else(|| {
-                        summary::opaque_sentinel(&QueryError::UnrepresentableSurfaceMember)
+                        RootOnlySummary::from_summary(summary::opaque_sentinel(
+                            &QueryError::UnrepresentableSurfaceMember,
+                        ))
                     })
             } else {
                 // A representable member survives iff there is a property, a
@@ -1473,15 +1281,22 @@ pub(super) fn project_root_summary(
                         .iter()
                         .any(|sig| signature_raises_to_function(dispatch, *sig));
                 if has_member {
-                    summary::object_from_members(std::iter::empty::<bool>(), false)
+                    RootOnlySummary::from_summary(summary::object_from_members(
+                        std::iter::empty::<bool>(),
+                        false,
+                    ))
                 } else {
-                    summary::opaque_sentinel(&QueryError::UnrepresentableSurface)
+                    RootOnlySummary::from_summary(summary::opaque_sentinel(
+                        &QueryError::UnrepresentableSurface,
+                    ))
                 }
             }
         }
         SemanticNodeData::Opaque(err) => match err {
-            QueryError::RecursiveRef { .. } => summary::materialized_expanded_leaf(),
-            _ => summary::opaque_sentinel(err),
+            QueryError::RecursiveRef { .. } => {
+                RootOnlySummary::from_summary(summary::materialized_expanded_leaf())
+            }
+            _ => RootOnlySummary::from_summary(summary::opaque_sentinel(err)),
         },
     })
 }

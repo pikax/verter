@@ -4567,11 +4567,14 @@ pub(crate) use shape_engine::NodeShapeEq;
 /// so `crate::meta_resolve::scoring`'s comparison formula reads the SAME facts the
 /// node front and the `&TypeExpr` front both produce.
 pub(crate) use shape_engine::PublicationScore;
-/// Facts about the shape a node raises to, computed bottom-up by the shared
-/// [`shape_engine`] (NOT by materialising a `TypeExpr`). Re-exported from
-/// [`shape_engine`] so the existing `super::raise::RaisedShapeFacts` path stays
-/// stable.
-pub(crate) use shape_engine::RaisedShapeFacts;
+/// The NODE-BOUND raised-shape facts witness (its `RaisedShapeFacts` — the inner
+/// facts type, kept PRIVATE to the shape engine — PAIRED with the `SemanticNodeId`
+/// they were computed for). Re-exported so the Kind-B sink adapters and the
+/// `route_admission` mint helpers read the facts and the bound node from ONE sealed
+/// value — the sole cross-module admission input. Cross-module readers use the
+/// witness's `pub(crate)` passthrough getters, never the inner `RaisedShapeFacts`
+/// type directly.
+pub(crate) use shape_engine::RaisedNodeShapeFacts;
 
 /// The [`PublicationScore`] of `node` — folded through the publication algebra
 /// over the shared [`shape_engine`] traversal, WITHOUT materialising a
@@ -4693,15 +4696,17 @@ pub(crate) fn node_is_expanded_surface_legacy_equivalent(
     }
 }
 
-/// Both [`RaisedShapeFacts`] of `node` in one projection (the
-/// materialized-miss + expanded-surface gate the Kind-B route helpers apply).
-/// `None` when the whole raise is `None`. DISPATCH-taking primary. Folds through
-/// the FACTS-ONLY [`shape_engine`] algebra — no structural key interned.
+/// The node-bound [`RaisedNodeShapeFacts`] witness of `node` (its facts — the
+/// materialized-miss + expanded-surface gate the Kind-B route helpers apply —
+/// PAIRED with `node`). `None` when the whole raise is `None`. DISPATCH-taking
+/// primary. Folds through the FACTS-ONLY [`shape_engine`] algebra — no structural
+/// key interned. A mint site passes the witness straight to a `route_admission`
+/// `admit_*` helper, which binds the carrier to `witness.node()`.
 #[must_use]
 pub(crate) fn node_raised_shape_facts_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
-) -> Option<RaisedShapeFacts> {
+) -> Option<RaisedNodeShapeFacts> {
     shape_engine::project_node_facts(dispatch, node)
 }
 
@@ -4723,10 +4728,11 @@ pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
 /// whether `node`'s NORMALIZED raised root is a published surface operator
 /// (`Ref` / `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf`, or a `Mapped`
 /// whose value root is NOT `semanticMiss`). Reads the post-normalized raised root
-/// off the facts-only fold — the single source the fold normalizes through — so it
+/// off the ROOT-ONLY projection (the source it normalizes through) — so it
 /// answers IDENTICALLY to the `TypeExpr` predicate on the raised value, including
 /// for shapes the raw-node walk mis-classifies (e.g. an `Intersection([{}, op])`
-/// the fold collapses to its operator arm). A whole-raise `None` is `false`.
+/// the root-only projection collapses to its operator arm). A whole-raise `None`
+/// is `false`.
 #[must_use]
 pub(crate) fn node_root_is_published_operator_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -4737,8 +4743,8 @@ pub(crate) fn node_root_is_published_operator_with_dispatch(
 
 /// Node-domain equivalent of `matches!(raise(node), TypeExpr::TypeOf(_))`: whether
 /// `node`'s NORMALIZED raised root is a `TypeOf`. Reads the post-normalized raised
-/// root off the facts-only fold (no `TypeExpr` materialised), so an
-/// `Intersection([{}, TypeOf])` collapsed by the fold answers `true`. A
+/// root off the ROOT-ONLY projection (no `TypeExpr` materialised), so an
+/// `Intersection([{}, TypeOf])` collapsed by the projection answers `true`. A
 /// whole-raise `None` is `false`.
 #[must_use]
 pub(crate) fn node_root_is_typeof_with_dispatch(
@@ -4750,10 +4756,10 @@ pub(crate) fn node_root_is_typeof_with_dispatch(
 
 /// Node-domain equivalent of `matches!(raise(node), TypeExpr::Object(_))`: whether
 /// `node`'s NORMALIZED raised root is EXACTLY an `Object` (NOT a `Union` /
-/// `Intersection` root). Reads the post-normalized raised root off the facts-only
-/// fold (no `TypeExpr` materialised), so an `Intersection([{}, Object])` collapsed
-/// by the fold answers `true`, matching the `TypeExpr` predicate on the raised
-/// value. A whole-raise `None` is `false`.
+/// `Intersection` root). Reads the post-normalized raised root off the ROOT-ONLY
+/// projection (no `TypeExpr` materialised), so an `Intersection([{}, Object])`
+/// collapsed by the projection answers `true`, matching the `TypeExpr` predicate
+/// on the raised value. A whole-raise `None` is `false`.
 #[must_use]
 pub(crate) fn node_root_is_object_surface_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -4764,9 +4770,9 @@ pub(crate) fn node_root_is_object_surface_with_dispatch(
 
 /// Node-domain equivalent of `matches!(raise(node), TypeExpr::IndexedAccess { .. })`:
 /// whether `node`'s NORMALIZED raised root is an `IndexedAccess`. Reads the
-/// post-normalized raised root off the facts-only fold (no `TypeExpr`
-/// materialised), so an `Intersection([{}, IndexedAccess])` collapsed by the fold
-/// answers `true`. A whole-raise `None` is `false`.
+/// post-normalized raised root off the ROOT-ONLY projection (no `TypeExpr`
+/// materialised), so an `Intersection([{}, IndexedAccess])` collapsed by the
+/// projection answers `true`. A whole-raise `None` is `false`.
 #[must_use]
 pub(crate) fn node_root_is_indexed_access_with_dispatch(
     dispatch: &ProjectSemanticDispatch<'_>,
@@ -4816,11 +4822,11 @@ pub(crate) fn node_contains_semantic_miss_with_dispatch(
 pub(crate) fn node_raised_shape_facts(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: SemanticNodeId,
-) -> Option<RaisedShapeFacts> {
+) -> Option<RaisedNodeShapeFacts> {
     node_raised_shape_facts_with_dispatch(&ProjectSemanticDispatch::new(ctx), node)
 }
 
-/// Combined [`RaisedShapeFacts`] + node-vs-`TypeExpr` equality of `node` in ONE
+/// Combined `RaisedShapeFacts` + node-vs-`TypeExpr` equality of `node` in ONE
 /// fold: the route-gate facts AND the no-op/changed decision (`eq_to_expr`) from
 /// a single key-bearing fold (the input `expr` is interned into the SAME
 /// interner). A site needing both reads this instead of folding the node twice.

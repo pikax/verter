@@ -36,17 +36,19 @@ use verter_span::Span;
 use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr};
 
 use super::super::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    IndexKey, OptionalityMod, QueryError, ReadonlyMod, SemanticNodeData, SemanticNodeId,
-    SurfaceView,
-};
+use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
 
-// Algebra impls split into child files for file-size (the fold + the algebra
-// trait + the interned term stay here, in the parent module).
+// Algebra impls + leaf conversions split into child files for file-size (the
+// fold + the algebra trait + the interned term stay here, in the parent module).
+mod conversions;
 mod materialize;
 mod node_domain;
 mod publication;
 
+use conversions::{
+    mapped_modifier_for_optionality, mapped_modifier_for_readonly,
+    semantic_primitive_to_primitive_name,
+};
 pub(in crate::project_semantic_dispatch) use materialize::fold_to_type_expr;
 use node_domain::{type_expr_to_key, RaisedFactsAlg, RaisedShapeAlg};
 pub(in crate::project_semantic_dispatch) use publication::{
@@ -312,13 +314,16 @@ pub(crate) struct PublicationScore {
 /// `pub(crate)` because it is re-exported from `raise` and read by the Kind-B
 /// callers; the FIELDS are PRIVATE (defining-module + descendants only).
 ///
-/// SEALED INPUT: a value with a passing fact can be produced ONLY by the
-/// node-domain fold's [`summary`](node_domain) constructor layer (the sole
-/// construction site lives in the `node_domain` child). No sibling can fabricate
-/// a `RaisedShapeFacts { materialized: true, expanded_surface: true, .. }` to
-/// feed a [`route_admission`](crate::resolver_core::component_meta_query_engine)
-/// `admit_*` gate — the gate's fact input is itself unforgeable. Cross-module
-/// readers go exclusively through the `pub(crate)` getters below.
+/// SEALED: a value with a passing fact can be produced ONLY by the node-domain
+/// fold's [`summary`](node_domain) constructor layer (the sole construction site
+/// lives in the `node_domain` child). No sibling can fabricate a
+/// `RaisedShapeFacts { materialized: true, expanded_surface: true, .. }` struct
+/// literal — the FIELDS are PRIVATE (`error[E0451]`). These facts are NOT
+/// themselves a [`route_admission`](crate::resolver_core::component_meta_query_engine)
+/// admission input: a mint helper takes the node-bound [`RaisedNodeShapeFacts`]
+/// witness (or [`NodeShapeEq`]), so a passing fact can only reach a gate PAIRED
+/// with the node it was computed for — a free `(facts, node)` mispair is
+/// unrepresentable. Cross-module readers go through the `pub(crate)` getters.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RaisedShapeFacts {
     /// `true` for every node the fold produces a value for — i.e.
@@ -352,6 +357,53 @@ impl RaisedShapeFacts {
     #[must_use]
     pub(crate) fn expanded_surface(&self) -> bool {
         self.expanded_surface
+    }
+}
+
+/// A NODE-BOUND raised-shape facts witness: the [`RaisedShapeFacts`] of a node
+/// PAIRED with the `SemanticNodeId` they were computed for, in ONE sealed value.
+/// This is the SOLE cross-module input to the
+/// [`route_admission`](crate::resolver_core::component_meta_query_engine) carrier
+/// mint helpers, REPLACING the former separate `(facts, node)` arguments.
+///
+/// SEALED + node-bound (the carrier-proof terminal): the FIELDS are PRIVATE and a
+/// value is constructed ONLY inside [`shape_engine`](self) (the node-domain fold's
+/// projection entry points bind the queried node to its own computed facts). There
+/// is no constructor accepting a free `SemanticNodeId`, and a sibling struct
+/// literal is `error[E0451]: field … is private` — so a caller cannot pair node
+/// A's facts with node B. The `admit_*` helpers mint the carrier from
+/// `witness.node()` ALONE, so the node a carrier holds is ALWAYS the node whose
+/// OWN gate the witness facts passed. Cross-module readers use the `pub(crate)`
+/// passthrough getters.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RaisedNodeShapeFacts {
+    node: SemanticNodeId,
+    facts: RaisedShapeFacts,
+}
+
+impl RaisedNodeShapeFacts {
+    /// The node these facts were computed for — the ONLY admission input a
+    /// `route_admission` mint helper reads to bind the carrier it mints.
+    #[must_use]
+    pub(crate) fn node(&self) -> SemanticNodeId {
+        self.node
+    }
+    /// `dispatch_route_expr_is_materialized(raise(node))` — passthrough to the
+    /// inner [`RaisedShapeFacts`].
+    #[must_use]
+    pub(crate) fn materialized(&self) -> bool {
+        self.facts.materialized()
+    }
+    /// `type_expr_is_expanded_surface(raise(node))` — passthrough to the inner
+    /// [`RaisedShapeFacts`].
+    #[must_use]
+    pub(crate) fn expanded_surface(&self) -> bool {
+        self.facts.expanded_surface()
+    }
+    /// `raise(node).is_some()` — passthrough to the inner [`RaisedShapeFacts`].
+    #[must_use]
+    pub(crate) fn can_shell_raise(&self) -> bool {
+        self.facts.can_shell_raise()
     }
 }
 
@@ -466,6 +518,35 @@ pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
     pub(in crate::project_semantic_dispatch) root_kind: RaisedRootKind,
 }
 
+/// The NARROW root-only projection result — the FOUR root fields the root-only
+/// classifier ([`node_domain::project_root_summary`]) genuinely computes, WITHOUT
+/// the whole-tree `facts` AND. The root-only projection feeds the shared
+/// [`summary`](node_domain) constructors PLACEHOLDER child facts (it never folds
+/// member values), so the `RaisedShapeFacts` such a summary carries would be a LIE;
+/// this type strips them and exposes ONLY the fields whose values MATCH THE FULL
+/// FOLD's by construction (`root_kind` / `tag` / the two root sentinel flags).
+#[derive(Debug, Clone, Copy)]
+pub(in crate::project_semantic_dispatch) struct RootOnlySummary {
+    pub(in crate::project_semantic_dispatch) root_kind: RaisedRootKind,
+    pub(in crate::project_semantic_dispatch) tag: FactShapeTag,
+    pub(in crate::project_semantic_dispatch) root_unmaterialized_sentinel: bool,
+    pub(in crate::project_semantic_dispatch) root_semantic_miss_sentinel: bool,
+}
+
+impl RootOnlySummary {
+    /// Narrow a shared [`summary`](node_domain)-layer [`RaisedShapeSummary`] to its
+    /// VALID root-only fields, DROPPING the placeholder-fed `facts` the root-only
+    /// projection never computes truthfully.
+    pub(in crate::project_semantic_dispatch) fn from_summary(s: RaisedShapeSummary) -> Self {
+        Self {
+            root_kind: s.root_kind,
+            tag: s.tag,
+            root_unmaterialized_sentinel: s.root_unmaterialized_sentinel,
+            root_semantic_miss_sentinel: s.root_semantic_miss_sentinel,
+        }
+    }
+}
+
 /// The bottom-up node-domain projection result: the interned structural key
 /// plus the shared [`RaisedShapeSummary`] (facts + tag). The key-bearing
 /// algebra wraps interning around the SAME summary the facts-only algebra
@@ -492,17 +573,27 @@ impl RaisedShapeResult {
 /// (consistent with [`RaisedShapeFacts`]) so the Kind-B sink adapters in
 /// `resolver_core` read it through the `raise` re-export.
 ///
-/// SEALED INPUT: like [`RaisedShapeFacts`], the FIELDS are PRIVATE — the sole
-/// construction is the key-bearing fold ([`project_node_shape_for_eq`]). A
-/// sibling cannot fabricate a `NodeShapeEq { eq_to_expr: false, .. }` to force a
-/// `route_admission` "changed" gate; cross-module readers use the getters.
+/// SEALED + node-bound: like [`RaisedNodeShapeFacts`], the FIELDS are PRIVATE and
+/// the sole construction is the key-bearing fold ([`project_node_shape_for_eq`]),
+/// which binds the queried `node`. A sibling cannot fabricate a
+/// `NodeShapeEq { eq_to_expr: false, .. }` to force a `route_admission` "changed"
+/// gate, and the gated `admit_expanded_surface_changed` mints from `shape.node()`
+/// ALONE — so the carrier is bound to the SAME node whose shape produced the
+/// equality decision. Cross-module readers use the getters.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NodeShapeEq {
+    node: SemanticNodeId,
     facts: RaisedShapeFacts,
     eq_to_expr: bool,
 }
 
 impl NodeShapeEq {
+    /// The node this shape/equality was computed for — the ONLY admission input
+    /// `admit_expanded_surface_changed` reads to bind the carrier it mints.
+    #[must_use]
+    pub(crate) fn node(&self) -> SemanticNodeId {
+        self.node
+    }
     /// The route-gate [`RaisedShapeFacts`] of the folded node.
     #[must_use]
     pub(crate) fn facts(&self) -> RaisedShapeFacts {
@@ -1159,76 +1250,48 @@ fn fold_surface_view<A: RaisedShapeAlgebra>(
     Some(alg.object_from_members(members))
 }
 
-fn semantic_primitive_to_primitive_name(
-    kind: crate::semantic_query::PrimitiveKind,
-) -> PrimitiveName {
-    use crate::semantic_query::PrimitiveKind as K;
-    match kind {
-        K::String => PrimitiveName::String,
-        K::Number => PrimitiveName::Number,
-        K::Boolean => PrimitiveName::Boolean,
-        K::Symbol => PrimitiveName::Symbol,
-        K::BigInt => PrimitiveName::BigInt,
-        K::Any => PrimitiveName::Any,
-        K::Unknown => PrimitiveName::Unknown,
-        K::Void => PrimitiveName::Void,
-        K::Never => PrimitiveName::Never,
-        K::Null => PrimitiveName::Null,
-        K::Undefined => PrimitiveName::Undefined,
-        K::Object => PrimitiveName::Object,
-    }
-}
-
-fn mapped_modifier_for_optionality(opt: OptionalityMod) -> MappedModifier {
-    match opt {
-        OptionalityMod::Add => MappedModifier::Add,
-        OptionalityMod::Remove => MappedModifier::Remove,
-        OptionalityMod::Keep => MappedModifier::None,
-    }
-}
-
-fn mapped_modifier_for_readonly(readonly: ReadonlyMod) -> MappedModifier {
-    match readonly {
-        ReadonlyMod::Add => MappedModifier::Add,
-        ReadonlyMod::Remove => MappedModifier::Remove,
-        ReadonlyMod::Keep => MappedModifier::None,
-    }
-}
-
 // ===========================================================================
 // Public entry points (pub(in crate::project_semantic_dispatch)) — the
 // node-domain decision surface consumed by the `raise.rs` classifiers /
 // equality primitives and the Kind-B callers.
 // ===========================================================================
 
-/// The [`RaisedShapeFacts`] of `node`, or `None` when the whole raise is `None`.
+/// The node-bound [`RaisedNodeShapeFacts`] witness of `node` (its
+/// [`RaisedShapeFacts`] PAIRED with `node`), or `None` when the whole raise is
+/// `None`.
 ///
 /// Folds through the FACTS-ONLY [`RaisedFactsAlg`] — it computes the SAME facts
 /// as the key-bearing algebra (through the shared `node_domain::summary` layer)
 /// WITHOUT interning a structural key, so a route gate that only reads
 /// `materialized` / `expanded_surface` / `can_shell_raise` pays no key-DAG
-/// construction.
+/// construction. The witness binds the queried `node` to its own facts so a
+/// `route_admission` mint helper can never pair them with a different node.
 pub(in crate::project_semantic_dispatch) fn project_node_facts(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
-) -> Option<RaisedShapeFacts> {
+) -> Option<RaisedNodeShapeFacts> {
     let mut alg = RaisedFactsAlg;
     let mut active = FxHashSet::default();
-    Some(fold_node(&mut alg, dispatch, node, &mut active)?.facts)
+    let facts = fold_node(&mut alg, dispatch, node, &mut active)?.facts;
+    Some(RaisedNodeShapeFacts { node, facts })
 }
 
 /// Whether `node`'s OWN raised root term is an unmaterialised sentinel — the
 /// node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel(raise(node))`.
-/// Reads the ROOT node's [`RaisedShapeSummary::root_unmaterialized_sentinel`]
-/// from the facts-only fold (no key interned, no `TypeExpr` materialised).
-/// `None` when the whole raise is `None`.
+/// Reads `root_unmaterialized_sentinel` off the ROOT-ONLY projection
+/// ([`node_domain::project_root_summary`]) — a ROOT-term-only fact, so the
+/// short-circuit projection is sufficient and matches the full fold's root term by
+/// construction (no member-value walk, no `TypeExpr` materialised). `None` when the
+/// whole raise is `None`.
 pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> Option<bool> {
-    let mut alg = RaisedFactsAlg;
     let mut active = FxHashSet::default();
-    Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_unmaterialized_sentinel)
+    Some(
+        node_domain::project_root_summary(dispatch, node, &mut active)?
+            .root_unmaterialized_sentinel,
+    )
 }
 
 /// The NORMALIZED raised-ROOT class of `node` — [`RaisedShapeSummary::root_kind`]
@@ -1236,9 +1299,10 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
 /// classifies the post-normalized root WITHOUT folding member values (an O(1)
 /// shallow check for a large object surface, not the O(tree) whole-subtree walk
 /// the full fold pays to also compute the here-unused `materialized` AND). Its
-/// `root_kind` is pinned byte-identical to the full fold's by the parity test.
-/// `None` when the whole raise is `None`. The per-fact classifiers below read
-/// this; a caller never matches on the enum outside this module.
+/// `root_kind` is pinned EQUAL to the full fold's by the parity test (the root
+/// fields match the full fold; the placeholder-fed `facts` are stripped). `None`
+/// when the whole raise is `None`. The per-fact classifiers below read this; a
+/// caller never matches on the enum outside this module.
 fn project_node_root_kind(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -1251,11 +1315,11 @@ fn project_node_root_kind(
 /// whether `node`'s NORMALIZED raised root is a published surface operator — a
 /// `Ref` / `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf`, OR a `Mapped`
 /// whose value root is NOT the `semanticMiss` sentinel. Reads the post-normalized
-/// [`RaisedRootKind`] off the facts-only fold (no key interned, no `TypeExpr`
-/// materialised), so it answers IDENTICALLY to the `TypeExpr` predicate on
+/// [`RaisedRootKind`] off the ROOT-ONLY projection (no `TypeExpr` materialised),
+/// so it answers IDENTICALLY to the `TypeExpr` predicate on
 /// `raise(node)` even for shapes the raw-node mirror would mis-classify (e.g.
-/// `Intersection([{}, IndexedAccess])`, which the fold collapses to its operator
-/// root). `None` when the whole raise is `None`.
+/// `Intersection([{}, IndexedAccess])`, which the root-only projection collapses
+/// to its operator arm). `None` when the whole raise is `None`.
 pub(in crate::project_semantic_dispatch) fn project_node_root_is_published_operator(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -1292,9 +1356,9 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_is_typeof(
 /// object / `MergedDecl` — a `Union` / `Intersection` root, or a
 /// `VueMacroElements` placeholder, is NOT). Reads the post-normalized
 /// [`RaisedRootKind`] (no `TypeExpr`
-/// materialised), so e.g. `Intersection([{}, Object])` — which the fold collapses
-/// to its `Object` arm — answers `true`, matching the `TypeExpr` predicate on the
-/// raised value. `None` when the whole raise is `None`.
+/// materialised), so e.g. `Intersection([{}, Object])` — which the root-only
+/// projection collapses to its `Object` arm — answers `true`, matching the
+/// `TypeExpr` predicate on the raised value. `None` when the whole raise is `None`.
 pub(in crate::project_semantic_dispatch) fn project_node_root_is_object_surface(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -1339,7 +1403,7 @@ pub(in crate::project_semantic_dispatch) fn project_node_contains_semantic_miss(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> Option<bool> {
-    project_node_facts(dispatch, node).map(|facts| !facts.materialized)
+    project_node_facts(dispatch, node).map(|facts| !facts.materialized())
 }
 
 /// Combined facts + node-vs-`TypeExpr` equality of `node` in ONE fold: returns
@@ -1363,6 +1427,7 @@ pub(in crate::project_semantic_dispatch) fn project_node_shape_for_eq(
     };
     let expr_key = type_expr_to_key(&mut interner, expr);
     Some(NodeShapeEq {
+        node,
         facts: result.facts(),
         eq_to_expr: result.key == expr_key,
     })

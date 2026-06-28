@@ -536,16 +536,19 @@ fn admitted_carrier_mint_count(src: &str) -> usize {
 /// SCOPE (narrowed — NOT the primary defense, NOT every-site/structural): this
 /// scans for the LITERAL mint spellings in `node_materialize.rs` only. The
 /// STRUCTURAL CONFINEMENT is primary and lives in `route_admission`, now a
-/// COMPLETE two-layer seal: (1) `AdmittedRouteProjectionNode::new` is PRIVATE to
+/// COMPLETE three-layer seal: (1) `AdmittedRouteProjectionNode::new` is PRIVATE to
 /// that module, so a `node_materialize.rs` `AdmittedRouteProjectionNode::new(node)`
 /// — directly OR alias-laundered (`use … as Forge; Forge::new(node)`) — is a
 /// COMPILE error (`E0624: associated function `new` is private`); (2) the gate
-/// inputs `RaisedShapeFacts` / `NodeShapeEq` carry PRIVATE fields, so a sibling
-/// cannot fabricate a passing fact struct literal to drive a gated helper either
-/// (`E0451: field … is private`). The only mints are the gated
-/// `route_admission::admit_*` helpers; this tripwire is a cheap literal backstop
-/// for THAT spelling, which the compiler permits (the helpers are subtree-visible)
-/// but which `node_materialize` must never use.
+/// inputs are the node-bound `RaisedNodeShapeFacts` / `NodeShapeEq` witness with
+/// PRIVATE fields, so a sibling cannot fabricate a passing witness struct literal
+/// to drive a gated helper (`E0451: field … is private`); (3) every `admit_*`
+/// takes ONLY the witness (no free `SemanticNodeId` param) and mints from
+/// `witness.node()`, so a "node A's facts, node B's carrier" mispair is
+/// UNREPRESENTABLE. The only mints are the gated `route_admission::admit_*`
+/// helpers; this tripwire is a cheap literal backstop for THAT spelling, which the
+/// compiler permits (the helpers are subtree-visible) but which `node_materialize`
+/// must never use.
 ///
 /// GUARD-LOCAL SC-FIRST RECORD:
 /// - scanner_invariant: `node_materialize.rs` contains zero route-admitted-carrier
@@ -553,11 +556,15 @@ fn admitted_carrier_mint_count(src: &str) -> usize {
 ///   `route_admission::admit`).
 /// - scanner_justification: residual literal backstop for the gated-helper spelling
 ///   the compiler cannot reject (the helpers are subtree-visible); the private
-///   constructor is the primary, compiler-enforced seal.
-/// - mechanism_ruling: r3-scfirst-ruling (structural-confinement-first).
+///   constructor PLUS the sealed node-bound `RaisedNodeShapeFacts` / `NodeShapeEq`
+///   witness (admit_* take only the witness, no free node param) are the primary,
+///   compiler-enforced seal.
+/// - mechanism_ruling: r3-scfirst-ruling (structural-confinement-first), extended
+///   by the r5-disposition-ruling node-bound-witness hardening.
 /// - hardening_rounds: SUPERSEDED — the prior broadened whole-module name-scanner
-///   was REPLACED by structural confinement (a private constructor); this is the
-///   narrowed residual remnant, not a further scanner-hardening round.
+///   was REPLACED by structural confinement (a private constructor, since hardened
+///   to a node-bound witness input); this is the narrowed residual remnant, not a
+///   further scanner-hardening round.
 /// - escape_stop: the alias-laundering forge `use super::AdmittedRouteProjectionNode
 ///   as Forge; Forge::new(node)` — which the OLD name-scanner missed (it scanned for
 ///   the literal `AdmittedRouteProjectionNode::new`, not the alias) — is now STOPPED
@@ -609,8 +616,8 @@ fn admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path() {
     );
     // Gated-helper forge — the residual the compiler permits (helpers are subtree-visible).
     let forged_helper =
-        "        let facts = node_raised_shape_facts_with_dispatch(&dispatch, node)?;\n\
-                  \x20       let admitted = route_admission::admit_materialized(&facts, node)?;\n";
+        "        let witness = node_raised_shape_facts_with_dispatch(&dispatch, node)?;\n\
+                  \x20       let admitted = route_admission::admit_materialized(&witness)?;\n";
     assert_eq!(
         admitted_carrier_mint_count(forged_helper),
         1,
@@ -632,6 +639,89 @@ fn admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path() {
         admitted_carrier_mint_count(comment),
         0,
         "a comment naming a mint must NOT be counted as a forge",
+    );
+}
+
+/// Extract each `fn admit_<…>(…) -> … {` signature in `src` — the text from
+/// `fn admit_` up to the body-opening `{`. Used to assert the gated mint helpers
+/// take ONLY a node-bound witness and no free `SemanticNodeId` parameter. Scoped
+/// to the helper SIGNATURES (NOT the whole module, which legitimately names
+/// `SemanticNodeId` in the carrier struct + its `new` / `node` accessor).
+fn admit_fn_signatures(src: &str) -> Vec<String> {
+    let mut sigs = Vec::new();
+    let mut rest = src;
+    while let Some(pos) = rest.find("fn admit_") {
+        let after = &rest[pos..];
+        let brace = after.find('{').unwrap_or(after.len());
+        sigs.push(after[..brace].to_string());
+        rest = &after[brace..];
+    }
+    sigs
+}
+
+/// NODE-BOUND admission signature guard: every `route_admission::admit_*` gated
+/// mint helper takes ONLY the node-bound witness (`RaisedNodeShapeFacts` /
+/// `NodeShapeEq`) and NO free `SemanticNodeId` parameter — so the carrier it mints
+/// is bound to `witness.node()` / `shape.node()` and a "node A's facts, node B's
+/// carrier" mispair is unrepresentable through the safe API.
+///
+/// GUARD-LOCAL SC-FIRST RECORD:
+/// - scanner_invariant: no `route_admission::admit_*` signature names
+///   `SemanticNodeId` (it takes only the node-bound witness).
+/// - scanner_justification: regression tripwire; the STRUCTURAL PRIMARY is the
+///   node-bound witness type itself — `admit_*` take only the witness, so a
+///   raw-node mispair is unrepresentable, and this scan only prevents a future
+///   re-introduction of a separate `node: SemanticNodeId` parameter.
+/// - mechanism_ruling: r5-disposition-ruling (node-bound witness as the sole
+///   cross-module admission input).
+/// - hardening_rounds: terminal seal — not a further-hardening pass; the
+///   node-bound witness type is the proof, and this scan is the literal backstop.
+#[test]
+fn route_admission_admit_helpers_take_no_node_param() {
+    const SRC: &str = include_str!("route_admission.rs");
+    let sigs = admit_fn_signatures(SRC);
+    assert!(
+        sigs.len() >= 4,
+        "anti-vacuity: expected the four gated admit_* mint helpers, found {}",
+        sigs.len()
+    );
+    for sig in &sigs {
+        assert!(
+            !sig.contains("SemanticNodeId"),
+            "route_admission::admit_* must take ONLY a node-bound witness \
+             (RaisedNodeShapeFacts / NodeShapeEq) and mint from witness.node() — a raw \
+             `SemanticNodeId` parameter re-opens the node-mispair forge vector. Offending \
+             signature: {sig}"
+        );
+    }
+}
+
+/// Self-test for [`admit_fn_signatures`] + the node-param invariant: a re-added
+/// `node: SemanticNodeId` parameter is SEEN (the guard would FAIL), and the
+/// witness-only signature is clean (the guard PASSES) — so the guard discriminates
+/// the regression from the sealed shape.
+#[test]
+fn admit_signature_node_param_detector_discriminates() {
+    let with_node = "pub(in x) fn admit_materialized(witness: &RaisedNodeShapeFacts, \
+                     node: SemanticNodeId) -> Option<AdmittedRouteProjectionNode> { body }";
+    let with = admit_fn_signatures(with_node);
+    assert_eq!(
+        with.len(),
+        1,
+        "exactly one admit_* signature in the fixture"
+    );
+    assert!(
+        with[0].contains("SemanticNodeId"),
+        "the detector MUST see a re-added `node: SemanticNodeId` parameter (guard would FAIL)",
+    );
+
+    let witness_only = "pub(in x) fn admit_materialized(witness: &RaisedNodeShapeFacts) \
+                        -> Option<AdmittedRouteProjectionNode> { body }";
+    let clean = admit_fn_signatures(witness_only);
+    assert_eq!(clean.len(), 1);
+    assert!(
+        !clean[0].contains("SemanticNodeId"),
+        "the witness-only signature is clean (guard PASSES)",
     );
 }
 

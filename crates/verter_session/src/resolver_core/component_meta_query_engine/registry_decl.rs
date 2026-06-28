@@ -1141,7 +1141,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // gated mint is `route_admission::admit_materialized`,
                         // which admits the node WITHOUT materialising it.
                         node_raised_shape_facts_with_dispatch(&dispatch, node)
-                            .and_then(|facts| route_admission::admit_materialized(&facts, node))
+                            .and_then(|witness| route_admission::admit_materialized(&witness))
                     }
                     _ => None,
                 }
@@ -1398,7 +1398,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // node WITHOUT materialising it — the publication wrapper
                 // materialises once at the registry sink.
                 node_raised_shape_facts_with_dispatch(&dispatch, node)
-                    .and_then(|facts| route_admission::admit_materialized(&facts, node))
+                    .and_then(|witness| route_admission::admit_materialized(&witness))
             }
             _ => None,
         }

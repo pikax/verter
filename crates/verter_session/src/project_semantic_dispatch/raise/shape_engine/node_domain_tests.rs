@@ -295,3 +295,371 @@ fn root_only_projection_root_kind_matches_full_fold() {
     assert_eq!(root_kind(call_sig_obj), Some(RaisedRootKind::Other));
     assert_eq!(root_kind(int_callsig), Some(RaisedRootKind::Other));
 }
+
+/// ARM-COVERAGE PARITY: the root-only projection ([`super::project_root_summary`])
+/// yields the IDENTICAL `root_kind` the full fold ([`fold_node`](super::super::fold_node)
+/// under [`RaisedFactsAlg`](super::RaisedFactsAlg)) does for the carrier / operator
+/// / leaf arms the earlier collapsed-intersection test does not enumerate —
+/// Reference, Conditional, both Mapped sub-cases, ConstructorType, Array, Alias,
+/// MergedDecl, RawFallback, Opaque, ImportType — on top of the object case.
+///
+/// DISCRIMINATING: each parity `assert_eq!` compares the root-only verdict to the
+/// full-fold authority, so a mis-wired arm (a wrong `root_kind`, a Mapped sub-case
+/// that flips `value_is_semantic_miss`, a constant-collapse) FAILS; the trailing
+/// concrete anchors fail if the projection lost a distinct class.
+#[test]
+fn root_only_projection_matches_full_fold_across_all_arms() {
+    use std::sync::Arc as StdArc;
+
+    use rustc_hash::FxHashSet;
+
+    use super::super::RaisedRootKind;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        HashValue, MapperKey, MapperKind, OptionalityMod, PrimitiveKind, QueryError, ReadonlyMod,
+        SemanticNodeData, SurfaceView,
+    };
+    use crate::VerterHost;
+
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = host.project_type_store().semantic_graph();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let empty_surface = || SurfaceView {
+        members: StdArc::from(Vec::new().into_boxed_slice()),
+        call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let dummy = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let open_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        has_index_signature: true,
+        ..empty_surface()
+    }));
+    let func = graph.intern_node(SemanticNodeData::Function {
+        params: StdArc::from(Vec::new().into_boxed_slice()),
+        return_type: string,
+        type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
+
+    let reference = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+        canonical_id: StdArc::from("/p.ts"),
+        name: StdArc::from("Foo"),
+        whole_hash: HashValue::default(),
+    }));
+    let import = graph.intern_node(SemanticNodeData::new_import_type(
+        StdArc::from("./m"),
+        StdArc::from(Vec::new().into_boxed_slice()),
+        StdArc::from(Vec::new().into_boxed_slice()),
+        false,
+    ));
+    let raw_fallback = graph.intern_node(SemanticNodeData::RawFallback {
+        raw: StdArc::from("SomeRawText"),
+    });
+    let opaque_other = graph.intern_node(SemanticNodeData::Opaque(QueryError::RaiseMiss));
+    let array = graph.intern_node(SemanticNodeData::Array {
+        element: string,
+        readonly: false,
+    });
+    let conditional = graph.intern_node(SemanticNodeData::Conditional {
+        check: dummy,
+        extends: dummy,
+        true_branch_ref: dummy,
+        false_branch_ref: dummy,
+        distributive: false,
+    });
+    let ctor = graph.intern_node(SemanticNodeData::ConstructorType { signature: func });
+    let alias = graph.intern_node(SemanticNodeData::Alias(open_obj));
+    let merged = graph.intern_node(SemanticNodeData::MergedDecl {
+        contributors: StdArc::from(vec![open_obj].into_boxed_slice()),
+    });
+
+    let mapped_with = |value_expr| {
+        graph.intern_node(SemanticNodeData::Mapped {
+            source: dummy,
+            mapper: MapperKey {
+                parameter_node: dummy,
+                key_space: dummy,
+                value_expr,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: None,
+                kind: MapperKind::Identity,
+            },
+        })
+    };
+    // The mapped VALUE raises to `semanticMiss` (Opaque(Miss)) vs a concrete
+    // non-miss leaf — the two Mapped sub-cases that flip `value_is_semantic_miss`.
+    let mapped_miss = mapped_with(graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)));
+    let mapped_nonmiss = mapped_with(string);
+
+    let assert_parity = |label: &str, node| {
+        let full = {
+            let mut alg = super::RaisedFactsAlg;
+            let mut active = FxHashSet::default();
+            super::super::fold_node(&mut alg, &dispatch, node, &mut active).map(|s| s.root_kind)
+        };
+        let root_only = {
+            let mut active = FxHashSet::default();
+            super::project_root_summary(&dispatch, node, &mut active).map(|s| s.root_kind)
+        };
+        assert_eq!(
+            root_only, full,
+            "[{label}] root-only projection root_kind must equal the full-fold root_kind"
+        );
+        assert!(
+            full.is_some(),
+            "[{label}] a well-formed node must fold to Some"
+        );
+    };
+
+    for (label, node) in [
+        ("reference", reference),
+        ("import", import),
+        ("raw_fallback", raw_fallback),
+        ("opaque_other", opaque_other),
+        ("array", array),
+        ("conditional", conditional),
+        ("ctor", ctor),
+        ("alias", alias),
+        ("merged", merged),
+        ("mapped_miss", mapped_miss),
+        ("mapped_nonmiss", mapped_nonmiss),
+        ("open_obj", open_obj),
+    ] {
+        assert_parity(label, node);
+    }
+
+    // Concrete-class anchors: each new arm produces its DISTINCT root class (not a
+    // constant), and the two Mapped sub-cases differ in `value_is_semantic_miss`.
+    let root_kind = |node| {
+        let mut active = FxHashSet::default();
+        super::project_root_summary(&dispatch, node, &mut active).map(|s| s.root_kind)
+    };
+    assert_eq!(root_kind(reference), Some(RaisedRootKind::Reference));
+    assert_eq!(root_kind(conditional), Some(RaisedRootKind::Conditional));
+    assert_eq!(
+        root_kind(mapped_miss),
+        Some(RaisedRootKind::Mapped {
+            value_is_semantic_miss: true
+        })
+    );
+    assert_eq!(
+        root_kind(mapped_nonmiss),
+        Some(RaisedRootKind::Mapped {
+            value_is_semantic_miss: false
+        })
+    );
+    assert_eq!(root_kind(alias), Some(RaisedRootKind::Object));
+    assert_eq!(root_kind(merged), Some(RaisedRootKind::Object));
+    assert_eq!(root_kind(array), Some(RaisedRootKind::Other));
+    assert_eq!(root_kind(import), Some(RaisedRootKind::Other));
+}
+
+/// MALFORMED-CHILD `None` PARITY: a node with a DANGLING required child (a child
+/// id with no arena entry — production-unreachable today) folds to `None` under
+/// BOTH the full fold and the root-only projection, because the root-only
+/// projection propagates the SAME required-edge `?` aborts `fold_node` does.
+/// Object MEMBER values are deliberately NOT a required edge: the full fold wraps a
+/// missing member as a sentinel, so a dangling member value stays `Some` on both
+/// sides — pinning that root-only must NOT deep-walk member values.
+///
+/// DISCRIMINATING: a mutation that drops the required-edge `?` from a root-only arm
+/// (e.g. KeyOf/Array/IndexedAccess/Conditional/Mapped/ConstructorType) makes that
+/// arm return `Some` while `fold_node` still returns `None`, failing the
+/// `root_only.is_none()` assertion; a mutation that ADDED a member deep-walk would
+/// flip the object-member case to `None` and fail its `Some` assertion.
+#[test]
+fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold() {
+    use std::sync::Arc as StdArc;
+
+    use rustc_hash::FxHashSet;
+
+    use super::super::RaisedRootKind;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        IndexKey, MapperKey, MapperKind, MemberMergeRole, OptionalityMod, PrimitiveKind,
+        ReadonlyMod, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
+    };
+    use crate::VerterHost;
+    use verter_type_expr::MemberVisibility;
+
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = host.project_type_store().semantic_graph();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // A node id with no arena entry — a dangling required child.
+    let dangling = SemanticNodeId(u64::MAX);
+    let present = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let mapper_with = |key_space, value_expr| MapperKey {
+        parameter_node: present,
+        key_space,
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: MapperKind::Identity,
+    };
+
+    let malformed = [
+        (
+            "keyof.base",
+            graph.intern_node(SemanticNodeData::KeyOf { base: dangling }),
+        ),
+        (
+            "array.element",
+            graph.intern_node(SemanticNodeData::Array {
+                element: dangling,
+                readonly: false,
+            }),
+        ),
+        (
+            "indexed.object",
+            graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: dangling,
+                index: IndexKey::String(StdArc::from("x")),
+            }),
+        ),
+        (
+            "indexed.index_typenode",
+            graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: present,
+                index: IndexKey::TypeNode(dangling),
+            }),
+        ),
+        (
+            "conditional.check",
+            graph.intern_node(SemanticNodeData::Conditional {
+                check: dangling,
+                extends: present,
+                true_branch_ref: present,
+                false_branch_ref: present,
+                distributive: false,
+            }),
+        ),
+        (
+            "mapped.value",
+            graph.intern_node(SemanticNodeData::Mapped {
+                source: present,
+                mapper: mapper_with(present, dangling),
+            }),
+        ),
+        (
+            "mapped.source",
+            graph.intern_node(SemanticNodeData::Mapped {
+                source: present,
+                mapper: mapper_with(dangling, present),
+            }),
+        ),
+        (
+            "ctor.signature",
+            graph.intern_node(SemanticNodeData::ConstructorType {
+                signature: dangling,
+            }),
+        ),
+    ];
+
+    for (label, node) in malformed {
+        let full = {
+            let mut alg = super::RaisedFactsAlg;
+            let mut active = FxHashSet::default();
+            super::super::fold_node(&mut alg, &dispatch, node, &mut active)
+        };
+        let root_only = {
+            let mut active = FxHashSet::default();
+            super::project_root_summary(&dispatch, node, &mut active)
+        };
+        assert!(
+            full.is_none(),
+            "[{label}] full fold returns None for a dangling required child"
+        );
+        assert!(
+            root_only.is_none(),
+            "[{label}] root-only projection MUST also return None for a dangling required child \
+             (a mutation removing the required-edge `?` makes this Some and FAILS)"
+        );
+    }
+
+    // Object-member short-circuit POSITIVE pin: an Object whose MEMBER VALUE is
+    // dangling is NOT a required-edge `None` — the full fold wraps the missing value
+    // as a sentinel (member present), so BOTH sides return Some with an Object root.
+    // A root-only member deep-walk would FALSELY propagate None here.
+    let dangling_member_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+        members: StdArc::from(
+            vec![SurfaceMember {
+                visibility: MemberVisibility::Public,
+                name: StdArc::from("a"),
+                value: dangling,
+                optional: false,
+                readonly: false,
+                is_method: false,
+                declared_in_macro_type_arg: false,
+                merge_role: MemberMergeRole::Authored,
+                spans: Default::default(),
+                declaration_origin: None,
+            }]
+            .into_boxed_slice(),
+        ),
+        call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
+    let full_obj = {
+        let mut alg = super::RaisedFactsAlg;
+        let mut active = FxHashSet::default();
+        super::super::fold_node(&mut alg, &dispatch, dangling_member_obj, &mut active)
+            .map(|s| s.root_kind)
+    };
+    let root_only_obj = {
+        let mut active = FxHashSet::default();
+        super::project_root_summary(&dispatch, dangling_member_obj, &mut active)
+            .map(|s| s.root_kind)
+    };
+    assert_eq!(
+        full_obj,
+        Some(RaisedRootKind::Object),
+        "an Object with a dangling member value still folds (member -> sentinel), root Object"
+    );
+    assert_eq!(
+        root_only_obj, full_obj,
+        "root-only must NOT deep-walk member values: a dangling member value stays Some(Object), \
+         matching the full fold (a member deep-walk would FALSELY return None)"
+    );
+}
+
+/// DELEGATION GUARD: `project_node_root_kind` (the source the root-kind classifiers
+/// read) delegates to the ROOT-ONLY projection (`node_domain::project_root_summary`),
+/// NOT the full `fold_node` — so the short-circuit perf win is real, not silently
+/// reverted to a whole-tree walk.
+///
+/// DISCRIMINATING: reverting the body to `fold_node(...).root_kind` makes it
+/// reference `fold_node` and drop `project_root_summary`, failing BOTH asserts.
+#[test]
+fn project_node_root_kind_delegates_to_root_only_projection_not_full_fold() {
+    const SRC: &str = include_str!("mod.rs");
+    let start = SRC
+        .find("fn project_node_root_kind")
+        .expect("project_node_root_kind is defined in mod.rs");
+    let after = &SRC[start..];
+    let end = after.find("\n}").map(|e| e + 2).unwrap_or(after.len());
+    let body = &after[..end];
+    assert!(
+        body.contains("project_root_summary"),
+        "project_node_root_kind must delegate to the root-only projection \
+         node_domain::project_root_summary; body:\n{body}"
+    );
+    assert!(
+        !body.contains("fold_node"),
+        "project_node_root_kind must NOT use the full fold_node (the root-only projection is the \
+         short-circuit authority); body:\n{body}"
+    );
+}

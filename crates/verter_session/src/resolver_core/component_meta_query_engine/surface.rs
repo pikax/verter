@@ -215,8 +215,8 @@ pub(crate) fn project_admitted_node_to_expanded_node(
         QueryResult::Value(node) => node,
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
-    let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
-    admit_expanded_surface(&facts, result_node)
+    let witness = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
+    admit_expanded_surface(&witness)
 }
 
 /// Node-domain "no-op/changed" convergence test for the route fixpoint's FIRST
@@ -350,7 +350,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
     // where `changed = !shape.eq_to_expr` is the node-domain shape inequality
     // against `expr`) is encoded in `admit_expanded_surface_changed`.
     let shape = node_raised_shape_for_eq_with_dispatch(&dispatch, result_node, expr)?;
-    admit_expanded_surface_changed(&shape, result_node)
+    admit_expanded_surface_changed(&shape)
 }
 
 /// Thin publication wrapper over [`lower_and_project_to_expanded_node`]:
@@ -415,8 +415,8 @@ pub(crate) fn project_expr_surface_expr_node(
     // `expanded_surface`; Shallow / Identity / Navigate / Skeleton admit the
     // carrier shape) is encoded in `admit_mode_aware`, which also refuses a
     // `semanticMiss`-bearing result (node-domain `!materialized`).
-    let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
-    admit_mode_aware(&facts, terminal_mode, result_node)
+    let witness = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
+    admit_mode_aware(&witness, terminal_mode)
 }
 
 /// Demand-bound NODE adapter for the Class-A path-precise projection (former
@@ -470,8 +470,8 @@ pub(crate) fn project_class_a_terminal_node(
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
     // Facts-only gate — reuses the dispatch above; no structural key interned.
-    let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
-    admit_expanded_surface(&facts, result_node)
+    let witness = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
+    admit_expanded_surface(&witness)
 }
 
 /// Thin publication wrapper over [`project_class_a_terminal_node`]: resolve the
