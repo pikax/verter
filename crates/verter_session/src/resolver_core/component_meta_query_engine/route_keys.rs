@@ -607,28 +607,34 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 }
 
 // ===========================================================================
-// TEST-ONLY faithful reconstruction of the retired pre-node-domain route-key
-// walker — the differential ORACLE the node-domain `enumerate_route_literal_keys`
+// TEST-ONLY differential ORACLE for the node-domain route-key / member-key
+// ENUMERATION ALGEBRA — the path the node-domain `enumerate_route_literal_keys`
 // is proved against.
 //
-// Recovered branch-for-branch from `git show 0810933b9` (the pre-conversion
-// tree): the retired `enumerate_route_literal_keys_inner` recursive `TypeExpr`
-// key-algebra (depth limit 4, the whole-`KeyOf` step-2, union all-or-nothing,
-// intersection/union arm accumulation) and the retired
-// `enumerate_member_surface_keys_via_route` `keyof X['m']['n']` hand-distributor
-// (depth limit 8, object member lookup, conditional / typeof / intersection /
-// union / nested-indexed-access distribution).
+// Scope of the reconstruction: this oracle reconstructs ONLY the deleted
+// KEY/MEMBER-ENUMERATION algebra, branch-for-branch, recovered from
+// `git show 0810933b9` (the pre-conversion tree): the retired
+// `enumerate_route_literal_keys_inner` recursive `TypeExpr` key-algebra (depth
+// limit 4, the whole-`KeyOf` step-2, union all-or-nothing, intersection/union
+// arm accumulation) and the retired `enumerate_member_surface_keys_via_route`
+// `keyof X['m']['n']` hand-distributor (depth limit 8, object member lookup,
+// conditional / typeof / intersection / union / nested-indexed-access
+// distribution). The conversion changed the KEY-ALGEBRA, not the leaf stabiliser.
 //
-// The retired materialised leaf stabiliser `solve_or_project_prepared_member_leaf_expr`
-// is reconstructed as the SURVIVING node fixpoint
-// (`solve_or_project_leaf_node_until_stable`) + the surface-sink materialise —
-// the EXACT computation the retired stabiliser performed (the conversion only
-// moved the single materialise to the sink). It deliberately NEVER routes through
-// the node-domain key/member enumerators the differential is proving
-// (`key_names_from_keyspace_node` /
+// The materialised leaf stabiliser is deliberately NOT re-reconstructed: the
+// oracle SHARES the trusted, unconverted production leaf fixpoint —
+// `legacy_materialised_leaf` routes through the SURVIVING
+// `solve_or_project_leaf_node_until_stable` + the surface-sink materialise
+// (byte-identical at 0810933b9; the conversion only moved the single materialise
+// to the sink). So this differential is a clean KEY/MEMBER-ENUMERATION parity
+// check, NOT a leaf-stabilisation check — leaf stabilisation is held fixed
+// (shared by both sides) and is not the property the differential exercises.
+//
+// The oracle deliberately NEVER routes through the node-domain key/member
+// enumerators the differential IS proving (`key_names_from_keyspace_node` /
 // `enumerate_public_surface_member_names_from_admitted_node`), so a regression in
-// either of those production paths changes the node-domain result WITHOUT moving
-// this oracle — the differential fails and discriminates.
+// either of those production enumeration paths changes the node-domain result
+// WITHOUT moving this oracle — the differential fails and discriminates.
 // ===========================================================================
 
 /// TEST-ONLY faithful copy of the retired
@@ -673,12 +679,15 @@ pub(super) fn legacy_projected_surface_member_names(expr: &TypeExpr) -> Option<V
 
 #[cfg(test)]
 impl ComponentMetaQueryEngine<'_> {
-    /// TEST-ONLY reconstruction of the retired materialised leaf stabiliser
-    /// `solve_or_project_prepared_member_leaf_expr` for the differential's
-    /// same-scope input class: the SURVIVING node fixpoint
+    /// TEST-ONLY leaf stabiliser for the differential's same-scope input class.
+    /// This is NOT an independent reconstruction of the retired
+    /// `solve_or_project_prepared_member_leaf_expr`: the oracle SHARES the trusted,
+    /// unconverted production leaf fixpoint
     /// ([`Self::solve_or_project_leaf_node_until_stable`]) + the one surface-sink
-    /// materialise. The node-domain conversion only relocated the materialise to
-    /// the sink, so this returns the EXACT `TypeExpr` the retired stabiliser did.
+    /// materialise. The conversion only relocated the materialise to the sink, so
+    /// this returns the EXACT `TypeExpr` the retired stabiliser did. Leaf
+    /// stabilisation is therefore held fixed across both sides of the differential
+    /// — it is the KEY/MEMBER ENUMERATION above it that the differential proves.
     fn legacy_materialised_leaf(&mut self, scope: &str, expr: &TypeExpr) -> Option<TypeExpr> {
         let node = self.solve_or_project_leaf_node_until_stable(scope, expr)?;
         super::surface::materialize_route_projection_node(self.ctx(), &node)
@@ -793,8 +802,12 @@ impl ComponentMetaQueryEngine<'_> {
     /// deviation is the `IndexedAccess`-of-`Ref` arm: the retired
     /// `instantiate_local_generic_ref_via_dispatch` helper it called was deleted
     /// in the conversion, so the generic-ref body is re-expanded through the
-    /// surviving shared-dispatch leaf stabiliser (net-equivalent: expand the body,
-    /// re-apply the index) — an arm the differential fixture does not reach.
+    /// surviving shared-dispatch leaf stabiliser (expand the body, re-apply the
+    /// index). That substitution is UNVERIFIED-BUT-UNREACHED: no current
+    /// differential fixture reaches the arm (every fixtured `keyof X['m']['n']`
+    /// reduces the indexed-access object to a concrete `Object` first), so the
+    /// equivalence of the substitution to the deleted helper is not exercised or
+    /// proven by the differential.
     fn legacy_enumerate_member_surface_keys_via_route(
         &mut self,
         scope: &str,
@@ -1007,9 +1020,12 @@ impl ComponentMetaQueryEngine<'_> {
                     // since-removed `instantiate_local_generic_ref_via_dispatch`)
                     // and re-applied the index. The shared dispatch now lowers a
                     // generic `Ref` directly, so stabilise the indexed-access
-                    // OBJECT to its materialised body and re-apply the index — the
-                    // net-equivalent reconstruction. Unreached by the differential
-                    // fixture.
+                    // OBJECT to its materialised body and re-apply the index. This
+                    // substitution is UNVERIFIED-BUT-UNREACHED: no current
+                    // differential fixture reaches this arm (the fixtured
+                    // `keyof Variants['variants']['color']` reduces the IA object to
+                    // a concrete `Object` before reaching here), so its equivalence
+                    // to the deleted helper is not exercised by the differential.
                     let expanded = self
                         .legacy_materialised_leaf(scope, object)
                         .filter(|expanded| expanded != object.as_ref())?;

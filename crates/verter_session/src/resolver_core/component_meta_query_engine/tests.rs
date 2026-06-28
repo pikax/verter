@@ -2286,12 +2286,20 @@ import type { Outer } from './cfg'
 
 // =========================================================================
 // Differential-equivalence oracle for the node-domain route-key / member-key
-// enumeration. The NEW node path (`enumerate_route_literal_keys` lowering +
-// keyspace enumerator + the narrow admitted-surface member-name reader) must
-// equal the OLD recursive materialise-then-walk path, field-for-field, on every
-// input class that reaches the route.
+// ENUMERATION ALGEBRA. The NEW node path (`enumerate_route_literal_keys` lowering
+// + keyspace enumerator + the narrow admitted-surface member-name reader) must
+// equal the OLD recursive enumeration path, field-for-field, on every input class
+// that reaches the route.
 //
-// The faithful legacy walker lives in `route_keys.rs` under `#[cfg(test)]`
+// This differential is a clean KEY/MEMBER-ENUMERATION parity check, NOT a
+// leaf-stabilisation check: the oracle reconstructs ONLY the deleted
+// key/member-enumeration algebra branch-for-branch and SHARES the trusted,
+// unconverted production leaf stabiliser with the node path, so leaf
+// stabilisation is held fixed across both sides and is not the property under
+// test — what the differential exercises is the enumeration algebra layered on
+// top of it.
+//
+// The legacy enumeration walker lives in `route_keys.rs` under `#[cfg(test)]`
 // (`ComponentMetaQueryEngine::legacy_enumerate_route_literal_keys` +
 // `legacy_projected_surface_member_names`), reconstructed branch-for-branch from
 // `git show 0810933b9`: the retired `enumerate_route_literal_keys_inner` +
@@ -2449,10 +2457,12 @@ fn enumerate_route_literal_keys_node_path_matches_legacy_materialise_oracle() {
         );
     }
 
-    // Anti-vacuity: the keyspace and member-surface routes actually enumerate
-    // (a tautological `None == None` differential would prove nothing). Each
-    // probe pins the exact NEW node-path result so the differential cannot pass
-    // by both sides collapsing to `None` on a class.
+    // Anti-vacuity: EVERY fixture case pins its exact NEW node-path result, so the
+    // `new == old` differential loop above cannot pass by both sides collapsing to
+    // the same value (`None == None`, or two equal-but-wrong sets) on any class.
+    // With every case pinned, the loop is a genuine KEY-ENUMERATION-algebra parity
+    // check — a regression that turned a real key set into `None` (or vice versa)
+    // on a case fails its pin here even if the oracle drifted the same way.
     let new_keys = |engine: &mut ComponentMetaQueryEngine<'_>, index: usize| {
         engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &cases[index].1)
     };
@@ -2463,16 +2473,59 @@ fn enumerate_route_literal_keys_node_path_matches_legacy_materialise_oracle() {
         owned(&["alpha", "beta"]),
         "the literal-union case must enumerate its keys",
     );
+    // An alias to a literal-key union resolves through to the same key set.
+    assert_eq!(
+        new_keys(&mut engine, 1),
+        owned(&["alpha", "beta"]),
+        "an alias to a literal-key union enumerates the aliased keys",
+    );
+    // An alias-to-alias chain resolves through both hops to the same key set.
+    assert_eq!(
+        new_keys(&mut engine, 2),
+        owned(&["alpha", "beta"]),
+        "an alias-to-alias chain enumerates the underlying keys",
+    );
+    // `keyof Surface` enumerates the object surface's named members.
+    assert_eq!(
+        new_keys(&mut engine, 3),
+        owned(&["one", "two"]),
+        "keyof an object surface enumerates its named members",
+    );
     assert_eq!(
         new_keys(&mut engine, 4),
         owned(&["primary", "secondary"]),
         "the keyof X['variants']['color'] member-surface route must enumerate its keys",
+    );
+    // `keyof (Left & Right)` is the UNION of both arms' keys (`l1`, `r1`, `shared`)
+    // — the intersection-arm accumulation, distinct from the union case below.
+    assert_eq!(
+        new_keys(&mut engine, 5),
+        owned(&["l1", "r1", "shared"]),
+        "keyof an intersection enumerates the union of every arm's keys",
     );
     // The class case enumerates ONLY the public member (private/protected excluded).
     assert_eq!(
         new_keys(&mut engine, 6),
         owned(&["publicProp"]),
         "keyof a class enumerates the PUBLIC keyspace only",
+    );
+    // `keyof IndexOnly` over `{ [key: string]: number }` projects a surface with
+    // no NAMED public members, so the enumeration is the empty set `Some([])` —
+    // a justified empty positive, distinct from the unresolvable `None` below.
+    // Pinning it (not skipping a vacuous `Some([]) == Some([])`) catches a
+    // regression that turned the empty enumeration into `None` (or invented keys).
+    assert_eq!(
+        new_keys(&mut engine, 7),
+        owned(&[]),
+        "keyof an index-signature-only surface enumerates no named keys (empty set, not None)",
+    );
+    // `keyof DoesNotExist` has no resolvable source, so the route carrier-stops to
+    // `None` — a justified negative pinned so a regression that began fabricating
+    // keys for an unresolvable source is caught (not a silent `None == None`).
+    assert_eq!(
+        new_keys(&mut engine, 8),
+        None,
+        "keyof an unresolvable source enumerates nothing (carrier-stop None)",
     );
     // `keyof (Left | Right)` is the COMMON keys (`"shared"`), NOT the union of
     // arm keys — the regression the whole-`KeyOf` step-2 oracle fix locks down.
@@ -2512,32 +2565,44 @@ fn enumerate_public_surface_member_names_matches_legacy_projected_surface_oracle
     let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut engine = ComponentMetaQueryEngine::new(&host);
 
-    let surfaces: Vec<(&str, TypeExpr)> = vec![
-        ("object", TypeExpr::named("Surface")),
+    // (label, surface, expected public member names). Every fixture surface
+    // projects to a node, so each pins a concrete `Some(<members>)`: the
+    // differential then proves the node-domain reader equals the legacy
+    // projected-surface oracle ON that pinned surface — never a vacuous `continue`
+    // skip or a `None == None` that would prove nothing.
+    let surfaces: Vec<(&str, TypeExpr, &[&str])> = vec![
+        ("object", TypeExpr::named("Surface"), &["one", "two"]),
         (
             "intersection",
             TypeExpr::Intersection(Arc::from(vec![
                 TypeExpr::named("Left"),
                 TypeExpr::named("Right"),
             ])),
+            &["l1", "r1", "shared"],
         ),
-        ("class with private", TypeExpr::named("WithPrivate")),
-        ("index-only", TypeExpr::named("IndexOnly")),
+        (
+            "class with private",
+            TypeExpr::named("WithPrivate"),
+            &["publicProp"],
+        ),
+        // An index-signature-only surface DOES project, but contributes no NAMED
+        // public members, so the enumerated set is the empty `Some([])` — a
+        // justified empty positive, pinned so a regression that dropped the
+        // projection (silently skipping the case via the old `continue`) or
+        // invented keys is caught.
+        ("index-only", TypeExpr::named("IndexOnly"), &[]),
     ];
 
-    for (label, surface) in &surfaces {
-        let Some(node) = crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
+    for (label, surface, expected) in &surfaces {
+        let node = crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
             &mut engine,
             "/src/App.vue",
             surface,
             crate::semantic_query::ProjectionMode::Expanded,
             crate::semantic_query::ProjectionMode::Expanded,
             crate::semantic_query::ReductionDemand::Published,
-        ) else {
-            // A surface that does not project (e.g. a bare index-signature
-            // surface with no named members) is a `None` on both sides.
-            continue;
-        };
+        )
+        .unwrap_or_else(|| panic!("the `{label}` differential surface must project to a node"));
         let new_names = super::surface::enumerate_public_surface_member_names_from_admitted_node(
             engine.ctx(),
             &node,
@@ -2546,6 +2611,11 @@ fn enumerate_public_surface_member_names_matches_legacy_projected_surface_oracle
         let old_names = materialised
             .as_ref()
             .and_then(super::route_keys::legacy_projected_surface_member_names);
+        let expected_names = Some(expected.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            new_names, expected_names,
+            "the `{label}` admitted surface must enumerate its pinned public member set",
+        );
         assert_eq!(
             new_names, old_names,
             "admitted-surface member-name reader must equal the legacy projected-surface oracle for `{label}`",
