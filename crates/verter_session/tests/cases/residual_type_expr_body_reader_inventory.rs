@@ -1621,21 +1621,6 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
     },
     // ── GraphBackedPending — graph-backed, no graph-native arm for its shape ──
     ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/route_keys.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "enumerate_member_surface_keys_via_route",
-        class: ReaderClass::GraphBackedPending,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body via prepared_type_decl(..).map(|p| p.body.clone()) inside the \
-                 try_body route-key expansion closure (and the prepared-value .type_annotation route \
-                 read) because no graph-native member-surface-ROUTE key enumerator exists. The \
-                 structural arm that would retire this reader is a graph-native SemanticNodeData \
-                 member-surface-route key enumerator (an IndexedAccess/Conditional-distributing \
-                 variant over union/intersection/conditional/object surfaces). BARE \
-                 .body/.type_annotation field reads, anchored by the enumeration",
-    },
-    ReaderRow {
         file: "src/resolver_core/component_meta_query_engine/helpers.rs",
         impl_path: "",
         fn_name: "resolve_imported_registry_symbol_with_budget",
@@ -2714,9 +2699,9 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
     let real_inv = build_fn_inventory(&files);
     let class_witness: [(&str, &str, &str, ReaderClass); 4] = [
         (
-            "src/resolver_core/component_meta_query_engine/route_keys.rs",
-            "impl ComponentMetaQueryEngine",
-            "enumerate_member_surface_keys_via_route",
+            "src/resolver_core/component_meta_query_engine/helpers.rs",
+            "",
+            "resolve_imported_registry_symbol_with_budget",
             ReaderClass::GraphBackedPending,
         ),
         (
@@ -2756,25 +2741,25 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
         );
     }
 
-    // (3) PRESENCE discriminates: the exact route_keys anchor IS present; a
+    // (3) PRESENCE discriminates: the exact helpers anchor IS present; a
     // mutated variant is NOT.
     assert!(
         anchored_definition_present(
             &real_inv,
-            "src/resolver_core/component_meta_query_engine/route_keys.rs",
-            "impl ComponentMetaQueryEngine",
-            "enumerate_member_surface_keys_via_route"
+            "src/resolver_core/component_meta_query_engine/helpers.rs",
+            "",
+            "resolve_imported_registry_symbol_with_budget"
         ),
-        "self-test: the route_keys bare-field reader IS present at its anchor"
+        "self-test: the helpers bare-field reader IS present at its anchor"
     );
     assert!(
         !anchored_definition_present(
             &real_inv,
-            "src/resolver_core/component_meta_query_engine/route_keys.rs",
-            "impl ComponentMetaQueryEngine",
-            "enumerate_member_surface_keys_via_route_MUTATED_zzz"
+            "src/resolver_core/component_meta_query_engine/helpers.rs",
+            "",
+            "resolve_imported_registry_symbol_with_budget_MUTATED_zzz"
         ),
-        "self-test (presence discrimination): a mutated route_keys anchor must NOT be present"
+        "self-test (presence discrimination): a mutated helpers anchor must NOT be present"
     );
 }
 
@@ -3074,13 +3059,13 @@ fn real_tree_inventory_is_non_vacuous() {
     );
 
     // Total residual + compat surface sizes — pinned so the curated surface
-    // cannot drift silently. The residual surface is 40 readers, partitioned by
+    // cannot drift silently. The residual surface is 39 readers, partitioned by
     // ReaderClass; the migrated anchor `lower_decl_body_to_node` is the
     // GraphBackedMigrated row. The COMPAT surface is 5 rows.
     assert_eq!(
         RESIDUAL_BODY_READERS.len(),
-        40,
-        "self-test (count pin): RESIDUAL_BODY_READERS must have exactly 40 rows"
+        39,
+        "self-test (count pin): RESIDUAL_BODY_READERS must have exactly 39 rows"
     );
     assert_eq!(
         COMPAT_BODY_READERS.len(),
@@ -3089,7 +3074,7 @@ fn real_tree_inventory_is_non_vacuous() {
     );
 
     // Per-class partition pins. 1 GraphBackedMigrated + 3 ProducerLowering + 17
-    // AuthoredShape + 12 GraphFreeDto + 7 GraphBackedPending = 40.
+    // AuthoredShape + 12 GraphFreeDto + 6 GraphBackedPending = 39.
     let class_count = |c: ReaderClass| {
         RESIDUAL_BODY_READERS
             .iter()
@@ -3120,8 +3105,8 @@ fn real_tree_inventory_is_non_vacuous() {
     );
     assert_eq!(
         class_count(ReaderClass::GraphBackedPending),
-        7,
-        "self-test (partition pin): exactly seven GraphBackedPending rows. GraphBackedPending is a \
+        6,
+        "self-test (partition pin): exactly six GraphBackedPending rows. GraphBackedPending is a \
          non-growth bounded set (bound 0 is the empty set once every structural arm lands), NOT a \
          settled stay-class — the non-growth bound is \
          `graph_backed_pending_is_a_non_growth_bounded_class`; this exact pin coexists with the cap \
@@ -3190,7 +3175,7 @@ fn real_tree_inventory_is_non_vacuous() {
 /// structural arm lands. The cap REDDENS on growth (a new pending row), and is
 /// LOWERED toward [`GRAPH_BACKED_PENDING_TARGET`] as a row leaves. It is NOT a
 /// settled final allowlist size.
-const GRAPH_BACKED_PENDING_CAP: usize = 7;
+const GRAPH_BACKED_PENDING_CAP: usize = 6;
 
 /// The bound of the empty `GraphBackedPending` set: ZERO. Each row leaves the
 /// class the moment its structural arm lands; when the count reaches 0 the class
@@ -3213,7 +3198,7 @@ fn count_pending_in(rows: &[ReaderRow]) -> usize {
 /// instead of routed through a structural arm) pushes the count over
 /// [`GRAPH_BACKED_PENDING_CAP`] and REDDENS this guard; when a pending row's named
 /// structural arm lands and it leaves the class, the cap is LOWERED toward 0. This
-/// is the non-growth rail; the exact `== 7` pin in
+/// is the non-growth rail; the exact `== 6` pin in
 /// `real_tree_inventory_is_non_vacuous` coexists with it.
 #[test]
 fn graph_backed_pending_is_a_non_growth_bounded_class() {
@@ -3244,8 +3229,8 @@ fn graph_backed_pending_is_a_non_growth_bounded_class() {
 }
 
 /// DISCRIMINATING self-test for the non-growth cap: the cap predicate REDDENS on a
-/// synthetic inventory carrying an 8th `GraphBackedPending` row (growth past the
-/// cap of 7) and is GREEN at exactly 7. Proves the non-growth bound fires on a NEW
+/// synthetic inventory carrying a 7th `GraphBackedPending` row (growth past the
+/// cap of 6) and is GREEN at exactly 6. Proves the non-growth bound fires on a NEW
 /// pending row rather than silently absorbing it.
 #[test]
 fn graph_backed_pending_cap_reddens_on_growth() {
@@ -3263,20 +3248,19 @@ fn graph_backed_pending_cap_reddens_on_growth() {
         }
     }
 
-    // GREEN at exactly the cap (7 synthetic pending rows).
-    let at_cap: [ReaderRow; 7] = [
+    // GREEN at exactly the cap (6 synthetic pending rows).
+    let at_cap: [ReaderRow; 6] = [
         synthetic_pending("p0"),
         synthetic_pending("p1"),
         synthetic_pending("p2"),
         synthetic_pending("p3"),
         synthetic_pending("p4"),
         synthetic_pending("p5"),
-        synthetic_pending("p6"),
     ];
     assert_eq!(
         count_pending_in(&at_cap),
         GRAPH_BACKED_PENDING_CAP,
-        "self-test: a synthetic 7-row pending inventory sits exactly AT the cap"
+        "self-test: a synthetic 6-row pending inventory sits exactly AT the cap"
     );
     assert!(
         count_pending_in(&at_cap) <= GRAPH_BACKED_PENDING_CAP,
@@ -3284,40 +3268,38 @@ fn graph_backed_pending_cap_reddens_on_growth() {
          pending rows"
     );
 
-    // RED at cap + 1 (a synthetic 8th pending row — a NEW pending reader).
-    let over_cap: [ReaderRow; 8] = [
+    // RED at cap + 1 (a synthetic 7th pending row — a NEW pending reader).
+    let over_cap: [ReaderRow; 7] = [
         synthetic_pending("p0"),
         synthetic_pending("p1"),
         synthetic_pending("p2"),
         synthetic_pending("p3"),
         synthetic_pending("p4"),
         synthetic_pending("p5"),
-        synthetic_pending("p6"),
-        // The planted 8th row — growth the non-growth bound must reject.
-        synthetic_pending("p7_new_pending_reader"),
+        // The planted 7th row — growth the non-growth bound must reject.
+        synthetic_pending("p6_new_pending_reader"),
     ];
     assert_eq!(
         count_pending_in(&over_cap),
         GRAPH_BACKED_PENDING_CAP + 1,
-        "self-test: a synthetic 8-row pending inventory grows the class by one"
+        "self-test: a synthetic 7-row pending inventory grows the class by one"
     );
     assert!(
         count_pending_in(&over_cap) > GRAPH_BACKED_PENDING_CAP,
-        "self-test (cap RED): the cap predicate FAILS the moment an 8th pending row is added — the \
+        "self-test (cap RED): the cap predicate FAILS the moment a 7th pending row is added — the \
          non-growth bound reddens on a NEW graph-backed pending reader rather than absorbing it. \
          (Rows of OTHER classes do NOT count: only GraphBackedPending growth trips the bound.)"
     );
 
     // Discrimination: a synthetic row of a DIFFERENT class does NOT count toward
     // the pending cap (the bound is scoped to GraphBackedPending only).
-    let mixed: [ReaderRow; 8] = [
+    let mixed: [ReaderRow; 7] = [
         synthetic_pending("p0"),
         synthetic_pending("p1"),
         synthetic_pending("p2"),
         synthetic_pending("p3"),
         synthetic_pending("p4"),
         synthetic_pending("p5"),
-        synthetic_pending("p6"),
         ReaderRow {
             file: "src/synthetic/over_cap_module.rs",
             impl_path: "impl Synthetic",
@@ -3332,12 +3314,12 @@ fn graph_backed_pending_cap_reddens_on_growth() {
     assert_eq!(
         count_pending_in(&mixed),
         GRAPH_BACKED_PENDING_CAP,
-        "self-test (cap scope): an 8th row of a NON-pending class does NOT grow the pending count — \
+        "self-test (cap scope): a 7th row of a NON-pending class does NOT grow the pending count — \
          the bound counts ONLY GraphBackedPending rows"
     );
     assert!(
         count_pending_in(&mixed) <= GRAPH_BACKED_PENDING_CAP,
-        "self-test (cap scope GREEN): a non-pending 8th row keeps the cap predicate GREEN"
+        "self-test (cap scope GREEN): a non-pending 7th row keeps the cap predicate GREEN"
     );
 }
 

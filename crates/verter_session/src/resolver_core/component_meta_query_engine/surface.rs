@@ -191,6 +191,108 @@ pub(crate) fn route_projection_nodes_eq(
         == Some(true)
 }
 
+/// Route-key keyspace enumeration over a stabilised route node: read the
+/// node's literal key NAMES through the SINGLE shared dispatch keyspace
+/// enumerator ([`crate::project_semantic_dispatch::ProjectSemanticDispatch::key_names_from_keyspace_node`]
+/// — the same enumerator the `Pick` / `Omit` dispatch reducers consume). This
+/// is the narrow query-engine wrapper: the route-key enumerator hands its
+/// admitted node here instead of forking a second `TypeExpr`-domain key walker.
+/// `None` when the node is not a keyspace type (a member SURFACE — the caller
+/// falls back to [`enumerate_public_surface_member_names_from_admitted_node`]).
+/// Names sorted + deduped so the derived route-key set is order-stable.
+pub(in crate::resolver_core::component_meta_query_engine) fn enumerate_keyspace_names_from_admitted_node(
+    ctx: &dyn ResolverContext,
+    node: &AdmittedRouteProjectionNode,
+) -> Option<Vec<String>> {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let names = dispatch.key_names_from_keyspace_node(node.node())?;
+    let mut keys: Vec<String> = names
+        .into_iter()
+        .map(|name| name.as_ref().to_string())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    Some(keys)
+}
+
+/// Enumerate the PUBLIC member NAMES of a stabilised route node's one-level
+/// member SURFACE — the node-domain successor of the retired
+/// `helpers::projected_surface_member_names` `TypeExpr` walker. Reads the
+/// node's [`SurfaceView`] through the shared empty-path `Shallow` synthesiser
+/// ([`crate::project_semantic_dispatch::ProjectSemanticDispatch::resolve_typeinfo_surface_view`])
+/// and returns the public `members` names — INDEX SIGNATURES are ignored (they
+/// live on a separate `SurfaceView` field, never in `members`) and NO member
+/// leaf is materialised. `keyof <surface>` over a class is the public keyspace
+/// only (TS semantics), so non-public members are excluded.
+///
+/// Gate correctness: a MISSING / NON-OBJECT root surface returns `None`
+/// (`resolve_typeinfo_surface_view` returns `None` for a non-`Object`
+/// terminal); a surface merely carrying a nested semantic miss in some member
+/// VALUE is NOT rejected — reading `members` is the right gate here, where
+/// `RaisedShapeFacts.materialized` would be too broad.
+pub(in crate::resolver_core::component_meta_query_engine) fn enumerate_public_surface_member_names_from_admitted_node(
+    ctx: &dyn ResolverContext,
+    node: &AdmittedRouteProjectionNode,
+) -> Option<Vec<String>> {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let view = dispatch.resolve_typeinfo_surface_view(
+        node.node(),
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        ),
+    )?;
+    let mut names: Vec<String> = view
+        .members
+        .iter()
+        .filter(|member| member.visibility.is_public())
+        .map(|member| member.name.as_ref().to_string())
+        .collect();
+    names.sort();
+    names.dedup();
+    Some(names)
+}
+
+/// Split-scope generic-`Ref` instantiation for the route-key leaf stabiliser:
+/// dispatch `Instantiate { base: type_slot(owner, name), args, ctx }` with the
+/// caller's pre-lowered NODE args (the ref NAME resolved in `decl_scope`, the
+/// type arguments lowered in `arg_scope` / chain scopes by the caller), gate on
+/// the node-domain route facts (`materialized && expanded_surface`), and mint
+/// the admitted node — NO `TypeExpr` materialise. The owner canonical roots the
+/// `Instantiate` resolve env. `None` on dispatch error / recursive or
+/// gate-reject. This is the node-domain replacement for the former split-scope
+/// arm that pre-resolved `typeof` args by reconstructing a new `TypeExpr::Ref`.
+pub(in crate::resolver_core::component_meta_query_engine) fn instantiate_split_scope_route_node(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    resolved_name: &str,
+    args: &[SemanticNodeId],
+) -> Option<AdmittedRouteProjectionNode> {
+    use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
+
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let slot = dispatch.type_slot_for(
+        std::sync::Arc::from(owner_canonical),
+        std::sync::Arc::from(resolved_name),
+    );
+    let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+        base: slot,
+        args: std::sync::Arc::from(args.to_vec().into_boxed_slice()),
+        context: dispatch.instantiate_context_for(
+            owner_canonical,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ),
+    });
+    let result_node = match read.value {
+        QueryResult::Value(node) => node,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
+    (facts.materialized && facts.expanded_surface)
+        .then(|| AdmittedRouteProjectionNode::new(result_node))
+}
+
 /// Demand-bound adapter for the empty-terminal Expanded publication path
 /// (former `lower_and_project_to_expanded_via_host_threaded` materialisation
 /// tail). Lower `expr` at `Expanded`, dispatch `ProjectPath { base, [],
@@ -376,48 +478,6 @@ pub(crate) fn project_class_a_terminal_published(
 ) -> Option<TypeExpr> {
     let node = project_class_a_terminal_node(ctx, scope_canonical_id, expr)?;
     materialize_route_projection_node(ctx, &node)
-}
-
-/// Demand-bound adapter for local generic-`Ref` instantiation (former
-/// `instantiate_local_generic_ref_via_dispatch`). Bails on a non-generic `Ref`
-/// (non-`Ref` / empty type-arguments). Lowers `expr` to a node at `Expanded`,
-/// then decides the no-op NODE-DOMAIN via `raised_shape_eq_node_type_expr`
-/// (distinct nodes raise to equal shapes, so bare node-id identity is wrong);
-/// on a real change materialises the instantiated node ONCE at this sink. `None`
-/// for non-ref / empty-args / lower-miss / shape-miss / raised-shape no-op.
-pub(crate) fn instantiate_local_generic_ref_published(
-    ctx: &dyn ResolverContext,
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-) -> Option<TypeExpr> {
-    use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::ProjectionMode;
-
-    let TypeExpr::Ref { type_arguments, .. } = expr else {
-        return None;
-    };
-    if type_arguments.is_empty() {
-        return None;
-    }
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Lower at Expanded so the body materialises in one step (the caller reads
-    // the published body directly, no path-walking follow-up).
-    let lowered = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        expr,
-        ProjectionMode::Expanded,
-    )?;
-    // A no-op (the lowered body raises to the SAME shape as `expr`) surfaces as
-    // `None` so the caller's own fallback path runs; a miss-shaped raise likewise
-    // (`None` from the projection). Decided WITHOUT materialising — node-domain
-    // shape equality, folded ONCE through the reused dispatch. The `Some(false)`
-    // gate (a genuine change) is `eq_to_expr == false`.
-    if node_raised_shape_for_eq_with_dispatch(&dispatch, lowered, expr).is_none_or(|s| s.eq_to_expr)
-    {
-        return None;
-    }
-    materialize_published_node(&dispatch, lowered)
 }
 
 pub(crate) fn projected_surface_from_semantic_node(

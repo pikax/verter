@@ -718,44 +718,13 @@ pub(crate) fn decompose_indexed_access_chain_node(
 // barrel-routed declarations, so the shared walker (the merge / heritage
 // / Omit composition) is the place to fix any compound-root gap.
 
-/// Class D — generic-Ref instantiation via dispatch.
-///
-/// Matches a `TypeExpr::Ref { name, type_arguments }` with non-empty
-/// type_arguments, resolves the declaration through dispatch, gates
-/// against package-backed targets, and applies the prepared-decl's
-/// type-parameter substitutions to produce the instantiated body.
-///
-/// The dispatch path goes through `lower_type_expr_in_scope` which
-/// routes a generic `Ref` through
-/// `SemanticQueryKey::Instantiate { base, args, context: InstantiateContext {
-/// projection_reduction, resolve_env_hash } }` (with
-/// `context.projection_reduction.mode = Expanded`)
-/// internally — the dispatcher's `build_instantiate` binds the explicit
-/// / default type arguments into the lowering env and substitutes them
-/// while lowering the prepared-decl body. This is the sole generic-Ref
-/// instantiation path for component-meta type resolution.
-///
-/// Returns `Some(reduced)` only when:
-/// - `expr` is a generic `Ref` (else returns `None`: bail on non-Ref /
-///   empty type-arguments),
-/// - the dispatch lowering produced a node distinct from the carrier
-///   `Opaque(Miss)` shell (the dispatcher's miss sentinel for
-///   unresolved decl / package-backed / substitution-failure cases),
-/// - the raised body differs from the input expression (so a no-op lets
-///   the caller fall back).
-pub(crate) fn instantiate_local_generic_ref_via_dispatch(
-    ctx: &dyn ResolverContext,
-    scope_canonical_id: &str,
-    expr: &verter_type_expr::TypeExpr,
-) -> Option<verter_type_expr::TypeExpr> {
-    // The non-generic-`Ref` bail, the `Expanded` lower, the NODE-DOMAIN no-op
-    // decision (`raised_shape_eq_node_type_expr` — distinct nodes raise to equal
-    // shapes, so bare node-id identity is wrong), and the single publication
-    // materialisation of the changed instantiation are confined to the
-    // registered surface sink (M4 demand-bound adapter) — no mid-flight raise
-    // happens here.
-    crate::resolver_core::instantiate_local_generic_ref_published(ctx, scope_canonical_id, expr)
-}
+// Generic-`Ref` instantiation for component-meta type resolution goes through
+// the shared dispatch lowering (`lower_type_expr_in_scope*` → `Instantiate`).
+// The route-key leaf stabiliser's split-scope arm
+// (`route_keys::instantiate_split_scope_ref` →
+// `surface::instantiate_split_scope_route_node`) dispatches `Instantiate` with
+// NODE args directly; there is no engine-side single-scope generic-`Ref`
+// materialise helper.
 
 // =============================================================================
 // Class B surface bridge helpers — these thread `query_engine.ctx` through dispatch.

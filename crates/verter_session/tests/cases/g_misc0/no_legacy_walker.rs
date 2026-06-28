@@ -402,14 +402,15 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Prepared-structural-substitution slow-lane removal. The engine-side
     // generic-Ref instantiation helper + the 6 whole-body substitution
     // rewriters are DELETED: generic-Ref instantiation now goes through
-    // the dispatch `build_instantiate` path
-    // (`instantiate_local_generic_ref_via_dispatch`), which binds args
-    // into the lowering env and substitutes while lowering. Re-introducing
-    // any of these names would resurrect the structural whole-substitution
-    // slow lane that is eliminated. (`type_expr_references_names` —
-    // the surviving general-purpose name predicate — is NOT retired; only
-    // its substitution-keyed wrapper `type_expr_references_substitutions`
-    // is.)
+    // the shared dispatch lowering `build_instantiate` path
+    // (`lower_type_expr_in_scope*` → `SemanticQueryKey::Instantiate`), which
+    // binds args into the lowering env and substitutes while lowering. The
+    // route-key leaf stabiliser's split-scope arm dispatches `Instantiate`
+    // with NODE args directly. Re-introducing any of these names would
+    // resurrect the structural whole-substitution slow lane that is
+    // eliminated. (`type_expr_references_names` — the surviving
+    // general-purpose name predicate — is NOT retired; only its
+    // substitution-keyed wrapper `type_expr_references_substitutions` is.)
     "instantiate_local_generic_ref_via_engine",
     "apply_type_param_substitutions",
     "substitute_type_expr",

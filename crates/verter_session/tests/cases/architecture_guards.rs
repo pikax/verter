@@ -2044,31 +2044,13 @@ mod resolver_core_recursion {
         // -----------------------------------------------------------------
         (
             "helpers",
-            "projected_surface_member_names",
-            "bounded by TypeExpr AST depth.",
-        ),
-        (
-            "helpers",
             "strip_parens_expr",
             "Phase 5l-supplement: bounded by TypeExpr Parenthesized chain depth.",
         ),
         // -----------------------------------------------------------------
-        // component_meta_query_engine/route_keys.rs — TypeExpr walkers
-        // for Pick/Omit literal-key enumeration (reachable from the live
-        // `project_direct_utility_surface_shape`) + the dispatch-backed
-        // leaf-stabiliser scope predicate moved here from the deleted
-        // routed walker. All bounded by TypeExpr AST depth.
+        // component_meta_query_engine/route_keys.rs — the dispatch-backed
+        // leaf-stabiliser scope predicate. Bounded by TypeExpr AST depth.
         // -----------------------------------------------------------------
-        (
-            "route_keys",
-            "enumerate_member_surface_keys_via_route",
-            "bounded by TypeExpr AST depth.",
-        ),
-        (
-            "route_keys",
-            "enumerate_route_literal_keys_inner",
-            "bounded by TypeExpr AST depth.",
-        ),
         (
             "route_keys",
             "expr_references_prepared_scope_symbol",

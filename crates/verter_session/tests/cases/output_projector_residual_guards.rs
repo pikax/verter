@@ -12240,10 +12240,6 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ),
     (
         "component_meta_query_engine/surface.rs",
-        "instantiate_local_generic_ref_published",
-    ),
-    (
-        "component_meta_query_engine/surface.rs",
         "surface_view_to_projected_surface",
     ),
     (

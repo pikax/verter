@@ -129,12 +129,11 @@ mod surface;
 // adapters and the route fixpoint reach the node→`TypeExpr` materialisation
 // (via `super::surface::`), compiler-enforcing the sink confinement.
 pub(crate) use surface::{
-    instantiate_local_generic_ref_published, lower_and_project_to_expanded_node,
-    lower_and_project_to_expanded_published, project_admitted_node_to_expanded_node,
-    project_class_a_terminal_published, project_expr_surface_expr_node,
-    route_projection_node_eq_to_expr, route_projection_nodes_eq, semantic_query_error_raw,
-    type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
-    AdmittedRouteProjectionNode,
+    lower_and_project_to_expanded_node, lower_and_project_to_expanded_published,
+    project_admitted_node_to_expanded_node, project_class_a_terminal_published,
+    project_expr_surface_expr_node, route_projection_node_eq_to_expr, route_projection_nodes_eq,
+    semantic_query_error_raw, type_expr_contains_semantic_miss,
+    type_expr_is_budget_exceeded_sentinel, AdmittedRouteProjectionNode,
 };
 // `type_expr_is_expanded_surface` and `type_expr_root_is_unmaterialized_sentinel`
 // survive only as `#[cfg(test)]` parity ORACLES the raised-shape suite compares
@@ -448,10 +447,10 @@ use std::cell::Cell;
 ///   type arguments passed at the call site resolve in this scope.
 ///
 /// Built and consumed by the route-key leaf stabilisers in
-/// `route_keys.rs`: `solve_or_project_prepared_member_leaf_expr`
-/// constructs it from the engine's live scope state and
-/// [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
-/// reads its three scopes for the per-TypeExpr dispatch rules.
+/// `route_keys.rs`: `enumerate_route_literal_keys` constructs it from the
+/// engine's live scope state and
+/// [`ComponentMetaQueryEngine::solve_or_project_leaf_node_with_context`]
+/// reads its three scopes for the per-`TypeExpr` node-domain dispatch rules.
 #[derive(Debug, Clone)]
 struct PreparedProjectionContext {
     decl_scope: String,
@@ -585,7 +584,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Ambient declaration-scope chain accumulated during
     /// prepared-member-path projection recursion. Innermost entry at
     /// index 0; outermost (originating call's `decl_scope`) at the
-    /// end. Used by `solve_or_project_leaf_expr_with_context` to find
+    /// end. Used by `solve_or_project_leaf_node_with_context` to find
     /// the scope where a `TypeOf(value)` reference is visible when
     /// neither `decl_scope` (the current declaration owner) nor
     /// `arg_scope` (the

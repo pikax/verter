@@ -354,7 +354,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `Omit` key-set readers). Duplicate names collapse: the numeric
     /// key `1` and the string key `"1"` address the SAME property, so a
     /// `1 | "1"` keyspace yields ONE name.
-    pub(super) fn key_names_from_keyspace_node(
+    ///
+    /// `pub(crate)` (not `pub(super)`) so the component-meta query-engine's
+    /// route-key enumerator reaches this SINGLE shared keyspace enumerator
+    /// through its narrow `surface::enumerate_keyspace_names_from_admitted_node`
+    /// wrapper rather than forking a second `TypeExpr`-domain key walker.
+    pub(crate) fn key_names_from_keyspace_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<Vec<Arc<str>>> {
