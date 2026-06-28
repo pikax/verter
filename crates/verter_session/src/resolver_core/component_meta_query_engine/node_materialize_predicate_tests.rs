@@ -695,18 +695,29 @@ fn admit_fn_param_types(src: &str) -> Vec<(String, Vec<String>)> {
 /// - scanner_invariant: each `route_admission::admit_*` has EXACTLY its expected
 ///   parameter-TYPE list (the node-bound witness, plus `ProjectionMode` for the
 ///   mode-aware arm) and no extra parameter.
-/// - scanner_justification: regression tripwire over the exact param lists. The
+/// - scanner_justification: a `syn`-parsed regression tripwire over the exact
+///   parameter-TYPE list (`admit_fn_param_types` via `syn::parse_file`). The
 ///   STRUCTURAL PRIMARY is the witness TYPE itself + `E0451` (its private fields):
 ///   `admit_*` take only the sealed node-bound witness, so a raw-node mispair is
-///   unrepresentable; this exact-list scan only prevents a future re-introduction
-///   of an extra parameter — and, unlike a textual `SemanticNodeId` substring
-///   scan, it also catches an ALIAS-typed extra param (`extra: NodeIdAlias`).
+///   unrepresentable and the mispair vector is COMPLETELY compiler-sealed. This scan
+///   covers only the residual shape the COMPILER CANNOT EXPRESS — "this signature
+///   carries no additional parameter": no Rust type rule can forbid an extra param,
+///   so a scanner is the sole available check for the no-extra-param shape. Unlike a
+///   textual `SemanticNodeId` substring scan, the exact-list form also catches an
+///   ALIAS-typed extra param (`extra: NodeIdAlias`).
 /// - mechanism_ruling: r5-disposition-ruling (node-bound witness as the sole
-///   cross-module admission input).
-/// - hardening_rounds: exact-param-list hardening of the prior textual
-///   `SemanticNodeId` substring scan (which an alias-typed param evaded); the
-///   witness TYPE + `E0451` stay the primary structural seal, this exact-list scan
-///   is the backstop.
+///   cross-module admission input) — the structural witness seal is the COMPLETE
+///   primary; this signature-shape supplement covers only the compiler-inexpressible
+///   no-extra-param remnant.
+/// - hardening_rounds: SUPERSEDES the prior literal textual `SemanticNodeId`
+///   substring scan (which an alias-typed param evaded) with the `syn`
+///   exact-param-list form.
+/// - hardening_history: textual `SemanticNodeId` substring scan → `syn`
+///   exact-param-list. The rebuild closed an alias-typed-param evasion the textual
+///   form missed, surfaced in adversarial re-review and settled by the
+///   r5-disposition-ruling that fixed node-binding as the terminal admission input;
+///   the witness TYPE + `E0451` remain the primary structural seal, this exact-list
+///   scan is the backstop.
 #[test]
 fn route_admission_admit_helpers_take_no_node_param() {
     const SRC: &str = include_str!("route_admission.rs");
