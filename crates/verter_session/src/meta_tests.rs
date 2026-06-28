@@ -10448,6 +10448,124 @@ defineSlots<ButtonSlots>()
 }
 
 #[test]
+fn resolve_component_meta_publishes_compound_heritage_surface_as_merged_object() {
+    // §compound-root: a registry alias whose body is a heritage interface
+    // (`interface Derived extends Base { own }`) must publish the COMPOSED
+    // merged one-level surface (base ∪ own), not the carrier-intact declaration
+    // anchor (which would keep the heritage arm symbolic). Exercises the
+    // candidate's explicit-object-surface fact + the compound-root composition
+    // route through the shared shallow walker.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export interface RegistryHeritageBase { base: string }
+export interface RegistryHeritageDerived extends RegistryHeritageBase { own: number }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { RegistryHeritageDerived } from './types'
+defineProps<RegistryHeritageDerived>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let _resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let mut prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    prop_names.sort_unstable();
+    // Anti-vacuity: the EXACT merged key set — heritage `base` merges with the
+    // own `own` member. A carrier-intact anchor would drop `base`.
+    assert_eq!(
+        prop_names,
+        vec!["base", "own"],
+        "heritage interface must publish the merged base ∪ own surface, got {prop_names:?}",
+    );
+}
+
+#[test]
+fn resolve_component_meta_pick_over_class_keeps_keyspace_public_semantics() {
+    // §class-Pick-visibility: a `Pick<Class, 'alpha'>` registry alias must route
+    // through the SHARED Pick keyspace engine. A naive `SurfaceView.members`
+    // filter would leak the non-public / non-requested class members. Only the
+    // requested public key may surface.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export class RegistryVisibilityClass {
+  public alpha = 1
+  protected beta = 2
+  private gamma = 3
+}
+export type PickedRegistryVisibility = Pick<RegistryVisibilityClass, 'alpha'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { PickedRegistryVisibility } from './types'
+defineProps<PickedRegistryVisibility>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let _resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    // Anti-vacuity: ONLY the requested public key surfaces. The protected /
+    // private members must never leak through the Pick keyspace.
+    assert!(
+        prop_names.contains(&"alpha"),
+        "the requested public key `alpha` must surface, got {prop_names:?}",
+    );
+    assert!(
+        !prop_names.contains(&"beta"),
+        "the non-requested protected member `beta` must NOT leak, got {prop_names:?}",
+    );
+    assert!(
+        !prop_names.contains(&"gamma"),
+        "the private member `gamma` must NEVER leak, got {prop_names:?}",
+    );
+}
+
+#[test]
 fn resolve_component_meta_materializes_bound_registry_members_despite_opaque_sibling_args() {
     let project = make_project();
     project
