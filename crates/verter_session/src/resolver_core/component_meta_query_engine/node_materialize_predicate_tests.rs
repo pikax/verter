@@ -1,9 +1,9 @@
 //! Node-domain registry predicate / reduction-context parity + carrier-contract
-//! tests for `registry_decl` — the `#[path]`-attached `node_predicate_parity_tests`
-//! submodule (extracted to keep `registry_decl.rs` under the file-size budget). It
-//! pins the node-domain object-surface / published-operator predicates against the
-//! `TypeExpr` predicates, the Mapped-sentinel boundary, the registry-publication
-//! carrier contract, and the member-path None-branch raw-route facts.
+//! tests for `node_materialize` — the `#[path]`-attached `node_predicate_parity_tests`
+//! submodule. It pins the node-domain object-surface / published-operator predicates
+//! against the `TypeExpr` predicates, the Mapped-sentinel boundary, the
+//! registry-publication carrier contract, and the member-path None-branch raw-route
+//! facts.
 
 use super::{
     component_meta_registry_node_has_explicit_object_surface,
@@ -376,7 +376,7 @@ fn node_published_operator_mapped_suppresses_only_semantic_miss_value() {
 /// the file are not in scope.
 #[test]
 fn registry_publication_path_does_not_forge_route_admitted_carrier() {
-    const SRC: &str = include_str!("registry_decl.rs");
+    const SRC: &str = include_str!("node_materialize.rs");
 
     fn extract_fn_body(src: &str, fn_sig: &str) -> Option<String> {
         let start = src.find(fn_sig)?;

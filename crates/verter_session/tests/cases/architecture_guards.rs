@@ -26075,13 +26075,22 @@ mod component_meta_scope_shadowing_memo {
                             .last()
                             .cloned()
                             .unwrap_or_else(|| "<file-scope>".to_string());
-                        // The SOLE allowlisted direct construction: the FIRST
-                        // engine-less `None`-arm `from_host_scope` fallback
-                        // inside `project_expr_class_a_via_dispatch_threaded`.
-                        // The allowance covers AT MOST ONE build per sanctioned
-                        // fn — a second fires.
+                        // The allowlisted direct construction: the FIRST
+                        // engine-less `None`-arm `from_host_scope` fallback inside
+                        // either class-A dispatch-threaded sibling — the `TypeExpr`
+                        // form (`project_expr_class_a_via_dispatch_threaded`) and the
+                        // node form
+                        // (`project_expr_class_a_node_via_dispatch_threaded`), which
+                        // share the identical `match engine.as_deref_mut()` shadow
+                        // gate (memo on `Some`, direct build only on the engine-less
+                        // `None`). The allowance covers AT MOST ONE build per
+                        // sanctioned fn — a second fires.
                         let in_sanctioned_context = self.is_dispatch_helpers
-                            && fn_name == "project_expr_class_a_via_dispatch_threaded"
+                            && matches!(
+                                fn_name.as_str(),
+                                "project_expr_class_a_via_dispatch_threaded"
+                                    | "project_expr_class_a_node_via_dispatch_threaded"
+                            )
                             && method == "from_host_scope"
                             && self.in_engine_none_arm;
                         let allowlisted = in_sanctioned_context && !self.sanctioned_build_consumed;
@@ -26168,11 +26177,15 @@ mod component_meta_scope_shadowing_memo {
 /// and `crates/verter_session/src/meta_resolve/**/*.rs` (NOT
 /// `project_semantic_dispatch/**`, NOT `resolver_core/**`, NOT tests).
 ///
-/// ALLOWLIST: EXACTLY ONE direct construction — the FIRST engine-less
-/// `None`-arm `ScopeShadowing::from_host_scope(ctx, scope)` fallback inside
-/// `project_expr_class_a_via_dispatch_threaded` (dispatch_helpers.rs). That arm
-/// runs ONLY when no `ComponentMetaQueryEngine` is threaded in, so there is no
-/// memo to consult and a direct build is correct. The allowance is PRECISE: the
+/// ALLOWLIST: the FIRST engine-less `None`-arm
+/// `ScopeShadowing::from_host_scope(ctx, scope)` fallback inside EITHER class-A
+/// dispatch-threaded sibling — the `TypeExpr` form
+/// (`project_expr_class_a_via_dispatch_threaded`) and the node form
+/// (`project_expr_class_a_node_via_dispatch_threaded`), which share the identical
+/// `match engine.as_deref_mut()` shadow gate (memo on `Some`, direct build only on
+/// the engine-less `None`) — dispatch_helpers.rs. One sanctioned build per sibling.
+/// That arm runs ONLY when no `ComponentMetaQueryEngine` is threaded in, so there
+/// is no memo to consult and a direct build is correct. The allowance is PRECISE: the
 /// `None` arm must belong to a TOP-LEVEL match whose scrutinee is EXACTLY
 /// `engine.as_deref_mut()` (enclosing parens / groups around it are fine). Any
 /// other `engine`-rooted scrutinee — `engine.filter(..)`, `engine.and_then(..)`,
@@ -26296,7 +26309,9 @@ fn component_meta_hot_paths_obtain_scope_shadowing_from_the_per_scope_memo() {
          (`ComponentMetaQueryEngine::scope_shadowing_for_scope`), not build it \
          directly per field. The ONLY sanctioned direct construction is the \
          engine-less `None`-arm `ScopeShadowing::from_host_scope(ctx, scope)` \
-         fallback inside `project_expr_class_a_via_dispatch_threaded`. \
+         fallback inside either class-A dispatch-threaded sibling \
+         (`project_expr_class_a_via_dispatch_threaded` / \
+         `project_expr_class_a_node_via_dispatch_threaded`). \
          Non-allowlisted direct construction(s):\n{}",
         messages.join("\n")
     );

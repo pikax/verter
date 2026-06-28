@@ -1485,14 +1485,16 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
                  IndexedAccess.object, Ref head) — authored-syntax-intrinsic",
     },
     ReaderRow {
-        file: "src/host_manage/component_meta_methods.rs",
-        impl_path: "impl VerterHost",
-        fn_name: "owner_local_generic_alias_substituted_body_via_dispatch",
+        file: "src/resolver_core/component_meta_query_engine/node_materialize.rs",
+        impl_path: "impl ComponentMetaQueryEngine",
+        fn_name: "owner_local_generic_alias_candidate",
         class: ReaderClass::AuthoredShape,
         method_chain: false,
         required_hot_route: &[],
-        reason: "the instantiation fast-lane gate reads prepared.body for the authored generic-alias \
-                 substitution shape",
+        reason: "the owner-local generic-alias registry candidate reads prepared.body to gate on the \
+                 authored closed-object substitution shape (matches!(prepared.body, \
+                 TypeExpr::Object(_))) before instantiating — authored-shape closedness over the \
+                 TypeExpr, a bare .body field read anchored by the enumeration",
     },
     // ── GraphFreeDto — below the session graph ──────────────────────────
     ReaderRow {

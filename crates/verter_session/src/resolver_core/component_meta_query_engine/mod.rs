@@ -110,6 +110,7 @@ use crate::semantic_query::SemanticNodeId;
 // paths remain stable.
 mod engine_accessors;
 mod helpers;
+mod node_materialize;
 mod registry_decl;
 mod route_keys;
 mod shallow_preserve;
